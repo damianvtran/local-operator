@@ -11,9 +11,15 @@ from local_operator.prompts_api import (
     CHANNEL_ASK,
     CHANNEL_HUB,
     CHANNEL_NONE,
+    TOOL_INVENTORY_HEADING,
+    assemble_system_block_sections,
     build_system_blocks,
     render_string,
     render_template,
+    render_tool_inventory_block,
+    split_inventory_sections,
+    split_system_block_sections,
+    split_tail_sections,
 )
 from local_operator.tools import builtin
 
@@ -1373,3 +1379,135 @@ def test_the_goal_block_is_withheld_once_the_goal_is_done() -> None:
     done = build_system_blocks(TOOLS, SKILLS, ENV, DATE, goal="ship it", goal_status="done")
     assert "ship it" not in done[3], "a settled goal is not an objective to pursue"
     assert "<goal>" not in done[3]
+
+
+# ---------------------------------------------------------------------------
+# Section-granular state deltas
+# ---------------------------------------------------------------------------
+
+
+def test_tail_splits_into_sections_built_by_the_real_renderer() -> None:
+    """The fold's invariant — ``assemble(split(text)) == text`` — over the real
+    composition, exhaustive over which pieces are present.
+
+    A missing piece moves where the NEXT piece's join separator sits, which is
+    the boundary arithmetic a split can get wrong, and the texts come from
+    :func:`build_system_blocks` itself so a marker that drifts from the
+    renderer fails here rather than in a resumed session.
+    """
+    cases: list[tuple[dict[str, Any], set[str]]] = [
+        ({}, {"knowledge"}),
+        ({"goal": "ship it"}, {"knowledge", "goal"}),
+        ({"team_brief": "brief"}, {"knowledge", "team"}),
+        ({"agent_brief": "role"}, {"knowledge", "agent"}),
+        ({"interactive": True, "channel": CHANNEL_NONE}, {"knowledge", "interactivity"}),
+        ({"credentials": ["FOO"]}, {"knowledge", "credentials"}),
+        ({"goal": "ship it", "team_brief": "brief"}, {"knowledge", "goal", "team"}),
+        (
+            {"team_brief": "brief", "interactive": True, "channel": CHANNEL_NONE},
+            {"knowledge", "team", "interactivity"},
+        ),
+        (
+            {"interactive": True, "channel": CHANNEL_NONE, "credentials": ["FOO"]},
+            {"knowledge", "interactivity", "credentials"},
+        ),
+        (
+            {
+                "goal": "ship it",
+                "team_brief": "brief",
+                "agent_brief": "role",
+                "interactive": True,
+                "channel": CHANNEL_NONE,
+                "credentials": ["FOO"],
+            },
+            {"knowledge", "goal", "team", "agent", "interactivity", "credentials"},
+        ),
+    ]
+    for kwargs, expected in cases:
+        tail = build_system_blocks(TOOLS, SKILLS, ENV, DATE, **kwargs)[3]
+        sections = split_tail_sections(tail)
+        assert set(sections) == expected, kwargs
+        assert sections["knowledge"] == SKILLS, kwargs
+        if "team_brief" in kwargs:
+            assert sections["team"] == f"<team>\n{kwargs['team_brief']}\n</team>", kwargs
+        assert assemble_system_block_sections(3, sections) == tail, kwargs
+
+
+def test_inventory_splits_the_capability_notes_off_the_name_list() -> None:
+    """``tools`` is the heading and name list; the notes are their own section,
+    so a change to the list does not re-ship ~918 chars of absence notes."""
+    alone = [_tool("bash", "run commands")]
+    with_notes = render_tool_inventory_block(alone, host_has_browser=False, host_has_console=False)
+    sections = split_inventory_sections(with_notes)
+    assert list(sections) == ["tools", "notes"]
+    assert sections["tools"] == f"{TOOL_INVENTORY_HEADING}\n\n- bash"
+    assert assemble_system_block_sections(1, sections) == with_notes
+
+    covered = [_tool("bash", "run"), _tool("browser", "browse"), _tool("console", "shell")]
+    without_notes = render_tool_inventory_block(
+        covered, host_has_browser=True, host_has_console=True
+    )
+    assert split_inventory_sections(without_notes) == {"tools": without_notes}
+
+
+def test_the_knowledge_argument_splits_into_its_own_pieces() -> None:
+    """``knowledge`` keeps the selected listing; the MCP catalogue and the
+    recommendation blocks are their own sections — the fleet replay measures the
+    residual re-sends exactly there: a late classification answer re-renders the
+    block and only the recommendations move, but fusing them re-shipped the
+    whole listing."""
+    listing = (
+        "Guides are procedures for this harness. If one matches your task, you "
+        "MUST read `guide://<name>` before acting.\n<guides>\n- g: d\n</guides>\n\n"
+        "Skills provide domain-specific instructions and workflows. Read these "
+        "selected skills: `skill://x`.\n<skills>\n- s: d\n</skills>"
+    )
+    catalogue = "<mcps>Find MCP tools: `mcp://?search=terms`; list: `mcp://`.</mcps>"
+    recs = "<resource_recommendations>\nRecommend `skill://a`.\n</resource_recommendations>"
+    tail = build_system_blocks(
+        TOOLS, "\n\n".join([listing, catalogue, recs]), ENV, DATE, team_brief="brief"
+    )[3]
+    sections = split_tail_sections(tail)
+    assert set(sections) == {"knowledge", "mcps", "recs", "team"}
+    assert sections["knowledge"] == listing
+    assert sections["mcps"] == catalogue
+    assert sections["recs"] == recs
+    assert assemble_system_block_sections(3, sections) == tail
+
+    # Only the recommendations moved: the diff the delta computes must name
+    # exactly that section, not the listing it used to be fused to.
+    updated = recs.replace("Recommend `skill://a`.", "Recommend `skill://b`.")
+    changed = {
+        name: text
+        for name, text in split_tail_sections(tail.replace(recs, updated)).items()
+        if sections.get(name) != text
+    }
+    assert changed == {"recs": updated}
+
+
+def test_an_unrecognised_or_empty_block_stays_addressable() -> None:
+    """Every block index carries a section map, even when nothing splits: a
+    fallback is CORRECT, just not granular, and ``""`` states an empty block
+    (``"(empty)"`` on the wire), which a delta must be able to say."""
+    assert split_tail_sections("old goal") == {"knowledge": "old goal"}
+    assert split_inventory_sections("my tools") == {"tools": "my tools"}
+    assert split_system_block_sections(2, "Today is 2026-08-04.") == {
+        "environment": "Today is 2026-08-04."
+    }
+    assert split_system_block_sections(9, "custom") == {"session": "custom"}
+    for index, name in ((1, "tools"), (2, "environment"), (3, "knowledge")):
+        assert split_system_block_sections(index, "") == {name: ""}
+        assert assemble_system_block_sections(index, {name: ""}) == ""
+
+
+def test_marker_shaped_content_degrades_granularity_but_never_bytes() -> None:
+    """Content that looks like a section boundary must not break the join, or
+    the resume fold would rewrite history when it replays these maps."""
+    texts = [
+        "<skills/>\n\n<team>\nbrief quoting\n\n<goal>\nmarkup\n</goal>\n</team>",
+        "<skills/>\n\n<team>\na brief with no closing tag",
+        "\n\n<team>\nleading marker, no knowledge piece",
+    ]
+    for text in texts:
+        sections = split_tail_sections(text)
+        assert assemble_system_block_sections(3, sections) == text, text

@@ -27,7 +27,7 @@ well-defined.
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from importlib.resources import files
 from typing import Any, Literal, TypeAlias
 
@@ -1042,3 +1042,232 @@ def build_system_blocks(
         )
 
     return [instructions, inventory, env_block, tail]
+
+
+# ---------------------------------------------------------------------------
+# Section-granular state deltas
+# ---------------------------------------------------------------------------
+#
+# A ``[session-state]`` delta re-ships a changed block as only its changed
+# sections (``Session._system_state_delta``), so a change inside one section
+# does not pay for the whole block. The sections are exactly the pieces the two
+# builders above APPEND: the tail block is the pieces of
+# :func:`build_system_blocks` joined with ``"\n\n"``, and the inventory block
+# is :func:`render_tool_inventory_block` plus the capability notes it appends.
+# The split functions below are the inverse of those compositions, and the
+# assemble function is the one join both halves use.
+#
+# Every split MUST satisfy ``assemble(split(text)) == text`` byte for byte: the
+# resume fold (``Session.__init__``) replays these maps out of the transcript,
+# and a split that did not round-trip would silently rewrite the state the
+# next delta compares against — and the bytes a resumed session re-sends.
+# The join is therefore verified before a split is returned, and a text that
+# is not a composition produced here (a host's custom block, a truncated child
+# copy, marker-shaped content) falls back to ONE whole-block section: correct,
+# merely not granular.
+#
+# A consequence worth stating because it outlives this file: a record is
+# REPLAYED by re-splitting with the CURRENT code, so the markers and the cut
+# choices below are a versioned format, not a private implementation detail.
+# Changing one changes what historical records mean; extend the marker set only
+# alongside a translation for records that predate it.
+#
+# Section names travel in the record's ``details.blocks`` (machine side) and
+# pick a heading for the model via :data:`STATE_SECTION_HEADINGS`; both tables
+# and the order below are part of the contract with the builders above.
+
+#: Tail-block pieces, in the order they are joined with ``"\n\n"``: the
+#: pieces ``build_system_blocks`` appends, PLUS the two pieces the knowledge
+#: ARGUMENT itself is built from (``_select_knowledge_block`` joins the
+#: selected guides/skills listing, the MCP catalogue and the trailing
+#: recommendation blocks with the same separator). Those two are split out
+#: because the fleet replay (300 transcripts, 934 state records) measures the
+#: residual re-sends there: 11.55M chars were re-sent whole-block, 2.88M if
+#: these two stay fused with ``knowledge``, and 1.66M with them split out —
+#: most of the distance to a fully split listing, without depending on prose
+#: sentence markers inside it. The leading ``knowledge`` piece has no marker
+#: of its own — it is everything before the first recognised one.
+_TAIL_SECTION_MARKERS: tuple[tuple[str, str], ...] = (
+    ("mcps", "<mcps>"),
+    ("recs", "<resource_recommendations>"),
+    ("goal", "<goal>"),
+    ("team", "<team>"),
+    ("agent", "<agent>"),
+    ("interactivity", "<interactivity>"),
+    ("credentials", "<session-credentials>"),
+)
+
+#: The order a block's sections are APPENDED in — the order ``assemble``
+#: restores and the order a delta lists changed sections in.
+_BLOCK_SECTION_ORDER: dict[int, tuple[str, ...]] = {
+    1: ("tools", "notes"),
+    3: ("knowledge", *(name for name, _ in _TAIL_SECTION_MARKERS)),
+}
+
+#: The section a block's text is filed under when the index's splitter does not
+#: recognise it (the whole text rides as this one section), and the heading it
+#: renders under.
+_BLOCK_DEFAULT_SECTION: dict[int, str] = {1: "tools", 2: "environment", 3: "knowledge"}
+
+#: Section name -> the heading a ``[session-state]`` record renders for it
+#: (``Session._system_state_message``). ``tools`` deliberately maps to the same
+#: words as ``TOOL_INVENTORY_HEADING`` so the renderer's already-heading guard
+#: round-trips it — the inventory text carries its own heading — instead of
+#: doubling it.
+STATE_SECTION_HEADINGS: dict[str, str] = {
+    "tools": TOOL_INVENTORY_HEADING.removeprefix("## "),
+    "notes": "Tool notes",
+    "environment": "Environment",
+    "knowledge": "Knowledge and session state",
+    "mcps": "MCP catalogue",
+    "recs": "Recommendations",
+    "goal": "Goal",
+    "team": "Team",
+    "agent": "Agent",
+    "interactivity": "Interactivity",
+    "credentials": "Session credentials",
+    "session": "Session state",
+}
+
+#: The inventory notes, in REVERSE append order (the console note follows the
+#: browser one; see :func:`render_tool_inventory_block`), each note's variants
+#: grouped so the strip can try both spellings of the note it is looking for.
+#: They are package constants, so they are matched by identity — exact suffix —
+#: rather than by scanning for prose.
+_INVENTORY_NOTES_REVERSED: tuple[tuple[str, ...], ...] = (
+    (_NO_CONSOLE_NOTE, _ROLE_HAS_NO_CONSOLE_NOTE),
+    (_NO_BROWSER_NOTE, _ROLE_HAS_NO_BROWSER_NOTE),
+)
+
+
+def _join_sections(parts: Sequence[str]) -> str:
+    """The one join the section protocol uses, so split and assemble agree."""
+    return "\n\n".join(parts)
+
+
+def _piece_start(text: str, marker: str, search_from: int) -> int:
+    """First position of ``marker`` that BEGINS a join-separated piece.
+
+    A piece starts at the start of the text or right after a ``"\n\n"`` join
+    separator; anything else is the marker appearing INSIDE content, which
+    must not become a cut — it would still round-trip (see the splitter), but
+    it would cut a section in two for no gain, and the enclosing section is
+    the safer account of where the text belongs.
+    """
+    at = search_from
+    while True:
+        found = text.find(marker, at)
+        if found < 0:
+            return -1
+        if found == 0 or text[found - 2 : found] == "\n\n":
+            return found
+        at = found + 1
+
+
+def split_tail_sections(text: str) -> dict[str, str]:
+    """Recover a tail block's replaceable sections from its rendered text.
+
+    The inverse of the tail half of :func:`build_system_blocks` down to the
+    pieces its knowledge argument is built from: ``knowledge`` is everything
+    before the first recognised marker (the selected guides/skills listing,
+    or the ``<skills/>`` fallback), then ``mcps`` and ``recs`` — the MCP
+    catalogue and the trailing recommendation blocks — then the tail proper
+    (goal/team/agent/interactivity/credentials).
+
+    Markers are searched in composition order, each from just past the
+    previous cut, so an out-of-order occurrence (marker-shaped content inside
+    a brief, a text no builder here produced) is left inside its enclosing
+    section rather than cut out — a granularity loss at worst, never a
+    round-trip break, which the join check below enforces anyway.
+
+    ``{}`` for empty text; otherwise a map that reassembles to ``text``
+    exactly (falling back to one whole ``knowledge`` section when it would
+    not).
+    """
+    if not text:
+        return {}
+    names: list[str] = ["knowledge"]
+    parts: list[str] = []
+    start = 0
+    search_from = 0
+    for name, marker in _TAIL_SECTION_MARKERS:
+        found = _piece_start(text, marker, search_from)
+        if found < 0:
+            continue
+        parts.append(text[start : found - 2] if found >= 2 else text[start:found])
+        names.append(name)
+        start = found
+        search_from = found + len(marker)
+    parts.append(text[start:])
+    kept = [(name, part) for name, part in zip(names, parts) if part]
+    if not kept or _join_sections([part for _, part in kept]) != text:
+        return {"knowledge": text}
+    return dict(kept)
+
+
+def split_inventory_sections(text: str) -> dict[str, str]:
+    """Recover an inventory block's replaceable sections from its text.
+
+    The inverse of :func:`render_tool_inventory_block`: ``tools`` is the
+    heading and name list, ``notes`` is the capability notes the block
+    appended at its end. ``{}`` for empty text; otherwise a map that
+    reassembles to ``text`` exactly (falling back to one whole ``tools``
+    section when it would not).
+    """
+    if not text:
+        return {}
+    rest = text
+    notes: list[str] = []
+    for variants in _INVENTORY_NOTES_REVERSED:
+        for note in variants:
+            if note.startswith("\n\n") and rest.endswith(note):
+                rest = rest[: -len(note)]
+                notes.insert(0, note[2:])
+                break
+    sections: dict[str, str] = {}
+    if rest:
+        sections["tools"] = rest
+    if notes:
+        sections["notes"] = _join_sections(notes)
+    ordered = [sections[name] for name in ("tools", "notes") if name in sections]
+    if not sections or _join_sections(ordered) != text:
+        return {"tools": text}
+    return sections
+
+
+def split_system_block_sections(index: int, text: str) -> dict[str, str]:
+    """The section map for one block of the system array.
+
+    ``index`` selects the composition: 1 is the tool inventory, 3 the tail,
+    anything else a single-section block (2 is the environment). A text the
+    index's splitter does not recognise returns one whole-block section under
+    the index's default name, so every block index is section-addressable and
+    no caller special-cases "sections unavailable". An empty text is filed as
+    an EMPTY default section rather than ``{}`` — a delta must be able to say
+    a block is empty (``"(empty)"`` on the wire), and "" is that statement.
+    """
+    if index == 1:
+        sections = split_inventory_sections(text)
+    elif index == 3:
+        sections = split_tail_sections(text)
+    else:
+        sections = {}
+    if sections:
+        return sections
+    return {_BLOCK_DEFAULT_SECTION.get(index, "session"): text}
+
+
+def assemble_system_block_sections(index: int, sections: Mapping[str, str]) -> str:
+    """Rejoin a section map into its block text (the inverse of the split).
+
+    Sections are placed in the composition order for ``index``; a name the
+    order does not know (a record written by another version) keeps its
+    relative position at the end rather than being dropped. Empty values are
+    omitted: the record protocol uses ``""`` to say a section is gone.
+    """
+    order = _BLOCK_SECTION_ORDER.get(index)
+    if order is None:
+        order = tuple(sections)
+    ordered = [name for name in order if sections.get(name)]
+    extra = [name for name in sections if name not in order and sections.get(name)]
+    return _join_sections([str(sections[name]) for name in (*ordered, *extra)])
