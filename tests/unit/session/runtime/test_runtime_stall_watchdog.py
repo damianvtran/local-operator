@@ -3238,6 +3238,17 @@ from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.runtime.serving import ServingSessionHandle
 from tests.unit.session.test_session import make_session
 
+#: Strong references for the child's parked work. An asyncio task awaiting an
+#: UNTIMED wait is collectable once nothing references it, and asyncio's own
+#: guidance is to keep the reference; under 3.13 the collection finalizes the
+#: parked ``_record_stream`` chain, whose ``finally`` runs
+#: ``_descendant_request_counter.end()`` -- the in-flight counter this arm
+#: measures clears while the provider call is still parked, the progress leg
+#: fires on "no work in flight", and the arm reds (CI runs 36594568040..
+#: 36603912360: every 3.13 leg). A task awaiting a TIMED wait is rooted by the
+#: loop's timer handle and needs no entry here; the beat below is that shape.
+_LIVE_TASKS: set = set()
+
 MODE = sys.argv[3]
 
 
@@ -3332,7 +3343,7 @@ async def main() -> None:
         # double can present (agent review round 1, MINOR 3).
         comms._records["job-lane"].child = SimpleNamespace(_compacting=False)
     elif MODE == "parked_call":
-        asyncio.create_task(_park_a_provider_call(stream))
+        _LIVE_TASKS.add(asyncio.create_task(_park_a_provider_call(stream)))
         await asyncio.sleep(0.5)
         assert stream.child_model_requests_in_flight, "the fork never entered its provider call"
     else:
