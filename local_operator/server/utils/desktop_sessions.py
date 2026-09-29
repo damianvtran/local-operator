@@ -3044,13 +3044,16 @@ class DesktopSessionBridge:
         #
         # AND IT IS NO LONGER WAITED ON PAST A GLANCE (B-F6). The store is the
         # most contended file on the machine (~25 sessions publish into it with
-        # ``BEGIN IMMEDIATE`` in a rollback journal, so a writer blocks readers)
-        # and the read rides out up to 10.8 s of that. An uncontended read
-        # answers in ~1 ms, well inside the wait below, so the ordinary open
-        # still carries fresh receipts; a contended one serves the last known
-        # state now and the refresh publishes the ``attention`` frame the
-        # renderer already consumes when it lands. Shielded so the refresh
-        # survives the snapshot giving up on it.
+        # ``BEGIN IMMEDIATE``), and since the WAL adoption a writer no longer
+        # blocks its readers: a reader takes a snapshot and proceeds even while
+        # the write lock is held. Writer-against-writer serialization remains,
+        # which is what the store's own bounded retry budget (two 5 s windows,
+        # ~10.2 s worst case) is sized for -- and the wait below stays
+        # deliberately shorter than even that: an uncontended read answers in
+        # ~1 ms, so the ordinary open still carries fresh receipts; a contended
+        # one serves the last known state now and the refresh publishes the
+        # ``attention`` frame the renderer already consumes when it lands.
+        # Shielded so the refresh survives the snapshot giving up on it.
         refresh = self._shared_attention_refresh()
         try:
             await asyncio.wait_for(asyncio.shield(refresh), timeout=ATTENTION_SNAPSHOT_WAIT_S)

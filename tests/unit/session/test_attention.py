@@ -1910,7 +1910,17 @@ def test_a_failed_bulk_batch_writes_nothing_at_all(
     been written in the transaction -- which is precisely the state a per-item
     transaction would have committed. The whole batch must roll back and the
     store must be left exactly as it was.
+
+    THE CALL COUNT CHANGED WITH THE RETRY WRAP, and this is the shape that
+    replaced the old one: a mid-batch "database is locked" IS contention, so
+    the batch is re-run on a second attempt -- from the FIRST item, because a
+    retried write is re-run as a fresh transaction, never resumed -- which dies
+    the same way and exhausts the budget as the classified deferral. The
+    transaction boundary, which is this test's subject, is unchanged: nothing
+    from either attempt is visible afterwards.
     """
+    from local_operator.session import attention as attention_module
+
     store = AttentionStore(tmp_path / "attention.db")
     tokens = {}
     for name in ("a", "b", "c"):
@@ -1927,11 +1937,14 @@ def test_a_failed_bulk_batch_writes_nothing_at_all(
         return original(conn, conversation)
 
     monkeypatch.setattr(AttentionStore, "_state", staticmethod(exploding_state))
-    with pytest.raises(sqlite3.Error):
+    with pytest.raises(attention_module.AttentionWriteDeferred):
         store.acknowledge_many([(f"session/{name}", tokens[name]) for name in ("a", "b", "c")])
     monkeypatch.setattr(AttentionStore, "_state", original)
 
-    assert len(calls) == 2, "the failure did not land inside the batch"
+    assert calls == ["session/a", "session/b", "session/a"], (
+        "attempt 1 fails INSIDE its batch (item b raised), and the retry re-enters "
+        "at the batch's first item -- receipt a is written in neither attempt"
+    )
     assert store.revision() == before
     for name in ("a", "b", "c"):
         assert store.state(f"session/{name}")["unseen"] is True, name

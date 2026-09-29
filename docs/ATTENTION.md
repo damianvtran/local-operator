@@ -63,11 +63,22 @@ empty, not-yet-initialized database see no published completion. Corrupt bytes o
 missing tables in an established schema remain errors, never a false read state.
 
 **A publication that lost to a busy store is retried IN THIS PROCESS, not only at
-the next boot.** This store keeps SQLite's default rollback journal, so a reader
-holds a lock that blocks a writer's `COMMIT`, and under the machine-wide
-contention of many concurrent sessions a `publish` can exhaust its bounded retry
-budget and be DEFERRED — the outcome is durable in the transcript journal from
-before the publish, which is what makes deferring honest. What used to follow was
+the next boot.** The store ADOPTS WAL on its write path (opportunistic and per
+file -- see `AttentionStore._adopt_wal`): on a converted store a reader takes a
+snapshot and is never blocked by a writer, and a writer's `COMMIT` stops waiting
+on readers at all, which removes the machine-wide read/write interlock the
+2026-09 incident lived in. Writer-against-writer serialization remains, and
+under that contention a `publish` can still exhaust its bounded retry budget and
+be DEFERRED -- the outcome is durable in the transcript journal from before the
+publish, which is what makes deferring honest. (A store that has not converted
+yet -- an older build's first write, or a filesystem that refused WAL -- keeps
+the rollback journal's older behavior, and the budget is sized for it.) The
+user-facing writes that used to have NO retry -- clearing a conversation
+(`acknowledge`), the sidebar clear-all (`acknowledge_many`) and the
+notification claim/release -- now ride the same bounded retry, so a contended
+clear waits the store out instead of answering "Read state is busy"; when the
+budget is exhausted those writes refuse with the classified busy answer and
+nothing was written, which is why the marks stay unread in that case. What used to follow was
 nothing: the next boot's `bootstrap_transcript` re-imports the journal, and a
 session that finishes a turn and then sits idle — which is what a finished
 session is — never boots again. The completion therefore never reached the store,
