@@ -6603,8 +6603,16 @@ class Session:
         producer_command_id: str | None = None,
         admitted: asyncio.Future[None] | None = None,
         harness_injected: bool = False,
+        input_mode: str | None = None,
+        input_path: str | None = None,
     ) -> None:
         """Run one user turn to completion (awaitable) or raise.
+
+        ``input_mode``/``input_path`` are the silent input-metadata carriage
+        (see ``Message.input_mode``): set by the desktop composer for a
+        dictation send and carried straight onto the durable user row. Both
+        default to ``None``, and a ``None`` adds no key to the row at all, so
+        every pre-existing caller writes byte-identical rows.
 
         ``producer_command_id`` and ``admitted`` form the continuation
         admission seam: the caller receives a receipt only after the explicitly
@@ -6754,7 +6762,18 @@ class Session:
                         "continue with the user's request that follows" if fresh else None
                     ),
                 )
-            user = Message.user(text, images, **({"id": message_id} if message_id else {}))
+            extra: dict[str, Any] = {}
+            if message_id:
+                extra["id"] = message_id
+            # Silent input metadata, set only when a producer actually supplied
+            # it: an absent value must leave the row byte-identical to one
+            # written before the carriage existed (the same reason the fields
+            # default to None on ``Message``).
+            if input_mode is not None:
+                extra["input_mode"] = input_mode
+            if input_path is not None:
+                extra["input_path"] = input_path
+            user = Message.user(text, images, **extra)
             if harness_injected:
                 # The stamp goes on the row THIS call mints, at the one place
                 # the row is born, so no caller can mint a chrome row without
@@ -6810,16 +6829,27 @@ class Session:
         *,
         message_id: str | None = None,
         producer_command_id: str | None = None,
+        input_mode: str | None = None,
+        input_path: str | None = None,
     ) -> None:
         """Inject an identified steering message into the running turn.
 
         Attachments ride along for the same reason they do on ``prompt``. The
         optional producer identity is persisted when the queue drains, letting
         reconnecting followers deduplicate the correction like an ordinary turn.
+
+        ``input_mode``/``input_path`` ride it for the same reason (a mid-turn
+        dictation keeps its provenance when the queue drains), default to
+        ``None``, and add no key to the row when absent.
         """
-        message = (
-            Message.user(text, images, id=message_id) if message_id else Message.user(text, images)
-        )
+        extra: dict[str, Any] = {}
+        if message_id:
+            extra["id"] = message_id
+        if input_mode is not None:
+            extra["input_mode"] = input_mode
+        if input_path is not None:
+            extra["input_path"] = input_path
+        message = Message.user(text, images, **extra)
         self._steering_queue.put_nowait(message)
         if producer_command_id is not None:
             self._steering_producers[id(message)] = producer_command_id

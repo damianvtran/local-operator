@@ -100,6 +100,7 @@ from local_operator.session.runtime.types import (
     EVENT_MUTE_DROP_TYPES,
     EXCLUSIVE_MOVE_CAPABILITY,
     HEARTBEAT_INTERVAL_S,
+    INPUT_MODE_CAPABILITY,
     OPERATOR_SIGNATURE_CAPABILITY,
     RUNTIME_RECORD_KIND,
     ClientKind,
@@ -1049,6 +1050,32 @@ def _accepts_kw(fn: Any, name: str) -> bool:
 _KEYWORD_SUPPORT: "weakref.WeakKeyDictionary[Any, dict[str, bool]]" = weakref.WeakKeyDictionary()
 
 
+def _takes_input_mode(handle: Any) -> bool:
+    """Whether ``handle``'s ``prompt`` AND ``steer`` take the ``input_mode`` keyword.
+
+    The answer must match what the DISPATCH will DO, because the string it
+    gates makes a claim about the row: the dispatch passes the keyword only
+    when the literal parameter name is present
+    (``inspect.signature(h.prompt).parameters`` in ``_dispatch``), so a
+    ``**kwargs``-only method would silently DROP the metadata and must not be
+    advertised. Deliberately not ``_accepts_kw`` for exactly that reason:
+    VAR_KEYWORD counts as accepting there, which is right for its
+    slash-keyword callers and wrong for this claim. Both methods are asked
+    because one token gates both fields and both send modes; an unreadable or
+    missing method answers no, which is the conservative side.
+    """
+    for name in ("prompt", "steer"):
+        method = getattr(handle, name, None)
+        if method is None:
+            return False
+        try:
+            if "input_mode" not in inspect.signature(method).parameters:
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
 @dataclass(frozen=True)
 class _ConnectionAuthority:
     """The two connection FACTS a dispatch may need, without the connection.
@@ -1700,6 +1727,14 @@ class RuntimeServer:
                 # breaks the attach outright. See
                 # ``DISPLAY_HISTORY_AUDIT_CAPABILITY``.
                 + (["display-history-audit-v1"] if hasattr(handle, "history_page") else [])
+                # INPUT-MODE CARRIAGE, gated on the handle that would HONOUR it
+                # rather than advertised unconditionally: the reader of this
+                # string (the mobile stream) must never send the fields to an
+                # owner whose ``prompt``/``steer`` would silently drop them.
+                # One token gates both fields AND both send modes, so the probe
+                # asks both methods — see ``_takes_input_mode``, which mirrors
+                # the dispatch's own check exactly.
+                + ([INPUT_MODE_CAPABILITY] if _takes_input_mode(handle) else [])
                 # ADVERTISED UNCONDITIONALLY (revision 2, §2.3). The runtime can
                 # always VERIFY an operator or device signature: the anchor is a
                 # file it reads, and the public half is all verification needs.
@@ -6142,13 +6177,32 @@ class RuntimeServer:
         if op == "prompt":
             images = frame.get("images")
             fields: dict[str, Any] = {"images": images}
-            if "command_id" in inspect.signature(h.prompt).parameters:
+            parameters = inspect.signature(h.prompt).parameters
+            if "command_id" in parameters:
                 fields["command_id"] = frame.get("command_id")
+            # Silent input metadata (see ``Message.input_mode``), probed exactly
+            # like ``command_id`` above: a handle from before the carriage — the
+            # TUI's, a reduced test host — never receives a keyword it would
+            # drop, and an older CLIENT that omits the keys leaves its frames
+            # byte-identical (``frame.get`` answers ``None``, which
+            # ``Session.prompt`` turns back into an absent row field).
+            if "input_mode" in parameters:
+                fields["input_mode"] = frame.get("input_mode")
+            if "input_path" in parameters:
+                fields["input_path"] = frame.get("input_path")
             return await h.prompt(frame["text"], **fields)
         if op == "steer":
             fields = {"images": frame.get("images")}
-            if "command_id" in inspect.signature(h.steer).parameters:
+            parameters = inspect.signature(h.steer).parameters
+            if "command_id" in parameters:
                 fields["command_id"] = frame.get("command_id")
+            # Same probe and same reasoning as the prompt op: a mid-turn
+            # dictation rides the steer with its provenance, and a handle that
+            # predates the carriage keeps its exact old call shape.
+            if "input_mode" in parameters:
+                fields["input_mode"] = frame.get("input_mode")
+            if "input_path" in parameters:
+                fields["input_path"] = frame.get("input_path")
             return await h.steer(frame["text"], **fields)
         if op == "abort":
             return await h.abort()

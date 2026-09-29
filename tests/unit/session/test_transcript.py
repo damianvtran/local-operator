@@ -58,6 +58,36 @@ async def test_append_message_writes_jsonl(transcript):
 
 
 @pytest.mark.asyncio
+async def test_input_metadata_round_trips_and_absence_stays_absent(transcript):
+    """The silent input carriage is durable; an absent value writes NO key.
+
+    ``input_mode``/``input_path`` are written only when a producer supplied
+    them — ``Message`` defaults both to ``None`` and ``exclude_defaults``
+    drops the omitted value — so a legacy row carries no key at all, which is
+    the byte-identical property the whole carriage is shaped around. A row
+    that DOES carry them rehydrates through replay.
+    """
+    dictated = Message.user("dictated", input_mode="dictated", input_path="sidecar_transcription")
+    legacy = Message.user("typed")
+    await transcript.append_message(dictated)
+    await transcript.append_message(legacy)
+
+    raw_rows = [json.loads(line) for line in transcript.path.read_text().splitlines()]
+    assert raw_rows[0]["payload"]["input_mode"] == "dictated"
+    assert raw_rows[0]["payload"]["input_path"] == "sidecar_transcription"
+    assert "input_mode" not in raw_rows[1]["payload"]
+    assert "input_path" not in raw_rows[1]["payload"]
+
+    replayed = Transcript(transcript.directory).build_llm_history()
+    assert isinstance(replayed[0], Message)
+    assert isinstance(replayed[1], Message)
+    assert replayed[0].input_mode == "dictated"
+    assert replayed[0].input_path == "sidecar_transcription"
+    assert replayed[1].input_mode is None
+    assert replayed[1].input_path is None
+
+
+@pytest.mark.asyncio
 async def test_usage_cost_round_trips_and_old_rows_default_to_unreported(transcript):
     """Provider receipts are durable, while pre-receipt transcripts still load.
 
