@@ -676,11 +676,33 @@ class SessionStoreUnavailable(OSError):
         super().__init__("The session store could not be read" + (f": {detail}" if detail else "."))
 
 
+def _wire_text(value: object, *, limit: int) -> str:
+    """A bounded, control-character-free string off the attach wire, or "".
+
+    The sanitizer for the ONE refusal whose two facts (a model label and a
+    reason clause) are strings rather than closed-set tokens: the far side is
+    untrusted input, so anything that is not a plain ``str`` degrades to "",
+    non-printable characters are dropped rather than rendered, and the length
+    is capped so no peer can turn a refusal sentence into a wall of text. The
+    bounds match the sender's own caps in ``session/runtime/server.py``; an
+    over-long value is TRUNCATED here rather than rejected, because a sentence
+    with a clipped tail still names the model and the remedy while a dropped
+    field silently downgrades to the bare form.
+    """
+    if not isinstance(value, str):
+        return ""
+    text = "".join(ch for ch in value if ch.isprintable()).strip()
+    return text[:limit]
+
+
 def admission_error(
     code: str,
     count: int | None = None,
     trigger: str | None = None,
     leaving: str | None = None,
+    model: str | None = None,
+    report: str | None = None,
+    format_unsupported: bool | None = None,
 ) -> ValueError | None:
     """Decode only an enumerated category, never owner-supplied message text.
 
@@ -714,13 +736,29 @@ def admission_error(
     phrases rather than rendered — the frame's phrase is still a peer's words,
     and a table key is all this boundary admits of those (MINOR-1/U14/D11,
     round 5). It never reaches an error object; the trigger it resolves to does.
+
+    ``model``/``report``/``format_unsupported`` are the ONE category whose
+    facts cross as STRINGS rather than closed-set tokens (agent review round 1,
+    m2): the refusal must name the model and the reason on every surface, and
+    the daemon-side sentence is composed around them locally, after
+    ``_wire_text`` strips control characters and caps the length. Everything
+    else about the discipline is unchanged: the values only ever land inside
+    sentences this module builds, and a frame missing any of them rebuilds the
+    bare form exactly as an older peer's frame always did.
     """
     if code == AudioInputUnsupported.code:
-        # No payload: the detailed sentence names a model and a resolver
-        # report, and neither may cross this boundary as text. The rebuilt
-        # sentence says the same category with its remedy (see the class),
-        # which is what a far-side renderer needs to get the user unstuck.
-        return AudioInputUnsupported()
+        # The two facts ride their own BOUNDED fields (``error_model``,
+        # ``error_report``) plus one bool (``error_format``) — the same
+        # closed-shape carriage ``error_count``/``error_trigger`` established,
+        # not the ``message`` prose: each is sanitised and capped by
+        # ``_wire_text`` here, and the sentence is still rebuilt locally around
+        # them. A frame WITHOUT the facts (an older runtime, which never raised
+        # the format shape) degrades to the bare form, exactly as before.
+        return AudioInputUnsupported(
+            model=_wire_text(model, limit=200),
+            report=_wire_text(report, limit=300),
+            format_unsupported=format_unsupported is True,
+        )
     if code == AttachmentUnavailable.code:
         return AttachmentUnavailable()
     if code == RuntimeRetiring.code:
