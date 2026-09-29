@@ -27,7 +27,7 @@ class Hub:
     def client(self) -> Any:
         return self
 
-    def get_team(self, team_id: str) -> dict[str, Any]:
+    def get_team(self, team_id: str, **_kw: Any) -> dict[str, Any]:
         if team_id not in self.teams:
             err = RuntimeError("404 Not Found")
             err.status_code = 404  # type: ignore[attr-defined]
@@ -289,8 +289,10 @@ def test_an_unedited_legacy_pull_adopts_a_baseline_exactly(env) -> None:
     prov.delete_baseline(root, "agent", row.id)  # pulled before this feature: tag only
     hub.agents["h1"] = (BASE + "\n\n## New\nUp.", "d")
     (c,) = svc.check_items(ctx, kinds=("agent",))
-    assert c.classification.state == "remote-only" and c.base is not None
-    assert prov.read_baseline(root, "agent", row.id).recorded_by == "adopt"
+    assert c.classification is not None and c.classification.state == "remote-only"
+    assert c.base is not None
+    adopted = prov.read_baseline(root, "agent", row.id)
+    assert adopted is not None and adopted.recorded_by == "adopt"
 
 
 # -- teams -------------------------------------------------------------------------------
@@ -443,3 +445,95 @@ def test_the_status_snapshot_is_a_pure_store_read_with_the_documented_shape(env)
     assert (
         svc.status_snapshot(ctx)["items"][0]["auto_will_apply"] is False
     )  # manual mode still shows the update
+
+
+def test_a_quota_error_stops_update_all_like_any_other_systemic_class(env) -> None:
+    """R2: ``error_class`` already carries the subclass; it must not gain a second one."""
+
+    ctx, hub, agents, _t, root = env
+    for i, name in enumerate(("aa", "bb")):
+        hub.agents[f"h{i}"] = ("## R\nBe brief.", "d")
+        row = agents.create_agent(_fields(name=name, description="d", tags=["role"]))
+        agents.set_agent_system_prompt(row.id, "## R\nBe brief and cite.")
+        agents._stamp_hub_provenance(agents.get_agent(row.id), f"h{i}")
+        prov.write_baseline(
+            root,
+            prov.make_record(
+                "agent",
+                row.id,
+                f"h{i}",
+                None,
+                {"instructions": "## R\nBe brief.", "description": "d"},
+                "pull",
+            ),
+        )
+        hub.agents[f"h{i}"] = ("## R\nBe brief and use plain words.", "d")
+    resolver = Scripted(error=ResolverError("provider-error", "slow down", subclass="quota"))
+    ctx.resolver = resolver
+
+    report = svc.apply_items(ctx, all_available=True)
+
+    outcomes = [(r.name, r.outcome) for r in report.reports]
+    assert outcomes[0][1] == "needs-review" and outcomes[1] == ("bb", "skipped")
+    assert report.reports[0].error_class == "provider-error/quota"
+    assert resolver.calls == 1  # the second agent never reached the model
+    item = ctx.store().load()["items"][f"agent:{report.reports[0].local_id}"]
+    assert (item["error_class"], item["error_subclass"]) == ("provider-error", "quota")
+
+
+def test_replace_takes_the_hub_copy_even_when_only_the_local_copy_changed(env) -> None:
+    """R3: "discard my edits, take the hub's" with an UNCHANGED hub (classification local-only)."""
+
+    ctx, hub, agents, _t, root = env
+    row = _pull_agent(agents, hub, root)
+    agents.set_agent_system_prompt(row.id, BASE + "\n\n## Mine\nLocal-only edit.")
+
+    plain = svc.apply_items(ctx, kind="agent", allow_llm=False)
+    assert plain.reports[0].outcome == "up-to-date"  # a plain pull has nothing to fetch
+    assert "Local-only edit" in _text(agents, row.id)
+
+    forced = svc.apply_items(ctx, kind="agent", replace="remote", allow_llm=False)
+
+    (r,) = forced.reports
+    assert r.applied and _text(agents, row.id) == BASE.strip()
+    assert "Local-only edit" in str(
+        r.replaced["instructions"]
+    )  # the echo that keeps it recoverable
+
+
+def test_replace_on_identical_texts_has_nothing_to_replace(env) -> None:
+    ctx, hub, agents, _t, root = env
+    row = _pull_agent(agents, hub, root)
+    forced = svc.apply_items(ctx, kind="agent", replace="remote", allow_llm=False)
+    assert forced.reports[0].outcome == "up-to-date" and _text(agents, row.id) == BASE.strip()
+
+
+def test_applied_reverts_to_up_to_date_after_exactly_one_clean_check(env) -> None:
+    """R6: ``applied`` is a one-cycle "Updated just now", not a permanent state."""
+
+    ctx, hub, agents, _t, root = env
+    row = _pull_agent(agents, hub, root)
+    hub.agents["h1"] = (BASE + "\n\n## New\nUp.", "d")
+    svc.apply_items(ctx, kind="agent", allow_llm=False)
+    key = f"agent:{row.id}"
+    assert ctx.store().load()["items"][key]["state"] == "applied"
+
+    svc.check_items(ctx, kinds=("agent",))
+    assert ctx.store().load()["items"][key]["state"] == "applied"  # kept one cycle
+    svc.check_items(ctx, kinds=("agent",))
+    assert ctx.store().load()["items"][key]["state"] == "up-to-date"
+    assert svc.status_snapshot(ctx)["counts"]["applied"] == 0
+
+
+def test_a_team_check_racing_a_save_never_prunes_its_baseline(env, monkeypatch) -> None:
+    """R7: a short listing (a row mid-swap) is not proof the team is gone."""
+
+    ctx, hub, _a, teams, root = env
+    team = _pull_team(teams, hub, root)
+    monkeypatch.setattr(teams, "list_teams", lambda: [])  # the transiently short listing
+    svc.check_items(ctx, kinds=("team",))
+    assert prov.read_baseline(root, "team", team.id) is not None  # dir still on disk
+
+    teams.delete_team(team.id)
+    svc.check_items(ctx, kinds=("team",))
+    assert prov.read_baseline(root, "team", team.id) is None  # genuinely gone: swept

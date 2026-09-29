@@ -417,7 +417,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     yield
     try:
         if hub_sync_task is not None:
-            app.state.hub_sync.stop()
+            if app.state.hub_sync is not None:
+                app.state.hub_sync.stop()
             hub_sync_task.cancel()
             await asyncio.gather(hub_sync_task, return_exceptions=True)
         app.state.hub_sync = None

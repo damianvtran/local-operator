@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+from typing import Any
 
 import pytest
 
@@ -106,6 +107,7 @@ def test_roster_and_scalar_rules() -> None:
             [slot("coder"), slot("qa", 2), slot("ux")],
         )
     )
+    assert isinstance(r.merged, list)
     assert [s["role"] for s in r.merged] == ["coder", "ux"] and r.outcome == "merged"
     # Roles compare case-insensitively.
     same = merge_field(
@@ -131,7 +133,7 @@ def test_replace_echoes_the_discarded_text_and_never_merges() -> None:
 
 
 def _req(**kw) -> ConflictRequest:
-    base = dict(
+    base: dict[str, Any] = dict(
         field="instructions",
         heading="A",
         base="Be brief.",

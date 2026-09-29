@@ -1495,6 +1495,12 @@ async def test_sync_refuses_an_edited_starter_and_the_model_has_no_force(
     await call(context, op="sync", name="reviewer", resolve="local")
     assert registry.get_agent_system_prompt(row.id) == "MY EDITED PROMPT"
 
+    # ``resolve`` is a plain string in the schema (an empty-string enum member is
+    # rejected by Gemini-family providers), so its values are checked HERE.
+    bad = await call(context, op="sync", name="reviewer", resolve="replace")
+    assert "resolve must be 'local' or 'remote'" in bad
+    assert registry.get_agent_system_prompt(row.id) == "MY EDITED PROMPT"
+
 
 @pytest.mark.asyncio
 async def test_sync_by_name_answers_every_requested_name(context, registry) -> None:

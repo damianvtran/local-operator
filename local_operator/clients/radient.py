@@ -646,7 +646,12 @@ class RadientClient:
             files["file"][1].close()
 
     def download_agent_from_marketplace(
-        self, agent_id: str, dest_path: Path, *, with_credential: bool = False
+        self,
+        agent_id: str,
+        dest_path: Path,
+        *,
+        with_credential: bool = False,
+        timeout: Optional[float] = None,
     ) -> None:
         """
         Download an agent from the Radient Agent Hub.
@@ -670,7 +675,12 @@ class RadientClient:
         url = f"{self.base_url}/agents/{agent_id}/download"
         headers = self._get_headers(content_type=None, require_api_key=with_credential)
         try:
-            response = requests.get(url, headers=headers, stream=True)
+            # ``timeout`` is forwarded only when a caller sets one: the interactive
+            # pulls keep their historical unbounded request, the background update
+            # runner bounds every hub request (a stalled socket would otherwise
+            # hold its tick, lock and lease, and a thread cannot be cancelled).
+            extra: Dict[str, Any] = {} if timeout is None else {"timeout": timeout}
+            response = requests.get(url, headers=headers, stream=True, **extra)
             response.raise_for_status()
             with open(dest_path, "wb") as f:
                 for chunk in response.iter_content(chunk_size=8192):
@@ -1046,7 +1056,7 @@ class RadientClient:
         teams = result.get("teams")
         return list(teams) if isinstance(teams, list) else []
 
-    def get_team(self, team_id: str) -> Dict[str, Any]:
+    def get_team(self, team_id: str, *, timeout: Optional[float] = None) -> Dict[str, Any]:
         """Pull one organization team by id (``GET /teams/:teamid``).
 
         The pull path (§8.2): no tenant in the URL so a client can pull by the
@@ -1067,7 +1077,8 @@ class RadientClient:
         url = f"{self.base_url}/teams/{team_id}"
         headers = self._get_headers(content_type="application/json")
         try:
-            response = requests.get(url, headers=headers, allow_redirects=False)
+            extra: Dict[str, Any] = {} if timeout is None else {"timeout": timeout}
+            response = requests.get(url, headers=headers, allow_redirects=False, **extra)
             response.raise_for_status()
             self._refuse_redirect(response)
         except requests.exceptions.RequestException as e:

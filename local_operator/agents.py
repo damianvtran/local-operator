@@ -3066,7 +3066,7 @@ def _read_hub_profile_from_zip(zip_path: Path) -> Tuple[str, str]:
 
 
 def _fetch_hub_profile(
-    radient_client: Any, hub_id: str, *, with_credential: bool = False
+    radient_client: Any, hub_id: str, *, with_credential: bool = False, timeout: float | None = None
 ) -> Tuple[str, str]:
     """Download a marketplace listing into a temp file and read its text.
 
@@ -3076,14 +3076,19 @@ def _fetch_hub_profile(
     credential is present at all (see :func:`sync_hub_agents`).
     """
 
+    # Only forwarded when set: the background runner bounds each request (B3.3),
+    # every other caller keeps the client's historical behaviour.
+    extra: dict[str, Any] = {} if timeout is None else {"timeout": timeout}
     with tempfile.TemporaryDirectory() as temp_dir:
         zip_path = Path(temp_dir) / f"{hub_id}.zip"
         if with_credential:
             # An organization row answers 404 to anyone who cannot prove
             # membership (design B0.6): its check must carry the person's bearer.
-            radient_client.download_agent_from_marketplace(hub_id, zip_path, with_credential=True)
+            radient_client.download_agent_from_marketplace(
+                hub_id, zip_path, with_credential=True, **extra
+            )
         else:
-            radient_client.download_agent_from_marketplace(hub_id, zip_path)
+            radient_client.download_agent_from_marketplace(hub_id, zip_path, **extra)
         return _read_hub_profile_from_zip(zip_path)
 
 

@@ -26,7 +26,7 @@ class FakeClient:
         self.teams = teams or {}
         self.calls: list[str] = []
 
-    def get_team(self, team_id: str) -> dict[str, Any]:
+    def get_team(self, team_id: str, **_kw: Any) -> dict[str, Any]:
         self.calls.append(team_id)
         if team_id not in self.teams:
             error = RuntimeError("404 Not Found")

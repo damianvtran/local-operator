@@ -1,9 +1,12 @@
-"""A10 vectors: the shared contract fixture, run in BOTH directions with no model.
+"""A10 vectors: the shared contract fixture, run with no model.
 
-``direction`` only flips which side the result is written to, so the ``expected``
-block must be identical for pull and push; the parametrisation makes a
-direction-dependent core fail here rather than in production. The push half
-consumes the same file unchanged (a vector edit needs both sides' sign-off).
+The merge core is direction-agnostic BY CONSTRUCTION: :func:`merge_field` takes
+three texts and returns a result, and never learns which side the result will be
+written to. So there is exactly one run per vector here, not a pull/push pair (a
+parametrisation over a value the code under test cannot see would run identical
+code twice and claim a check it does not make). The push half proves the OTHER
+direction by consuming this same file unchanged (a vector edit needs both sides'
+sign-off).
 """
 
 from __future__ import annotations
@@ -102,10 +105,8 @@ def _check(result: MergeResult, expected: dict[str, Any]) -> None:
         assert any(expected["dropped_contains"] in str(r.dropped) for r in result.regions)
 
 
-@pytest.mark.parametrize("direction", ["pull", "push"])
 @pytest.mark.parametrize("vector", VECTORS, ids=[v["id"].split(" ")[0] for v in VECTORS])
-def test_vector(vector: dict[str, Any], direction: str) -> None:
-    assert direction in ("pull", "push")  # the core is direction-agnostic by construction
+def test_vector(vector: dict[str, Any]) -> None:
     use_model = bool(vector["model_stub"])
     _check(
         _run(

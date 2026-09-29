@@ -523,7 +523,10 @@ async def test_sync_route_reports_seed_and_hub_verdicts(api, monkeypatch) -> Non
 async def test_sync_route_refuses_force_without_confirm_replace(api) -> None:
     """`force` on the hub arm is `replace`: it discards the user's copy, so it is confirmed."""
 
-    client, _root = api
+    client, root = api
+    AgentRegistry(root).create_agent(
+        _profile_row(name="hunter", description="d", tags=["role", "hub:abc-123"])
+    )
 
     refused = await client.post("/v1/desktop/profiles/sync", json=mutation(all=True, force=True))
     assert refused.status_code == 422
@@ -533,6 +536,18 @@ async def test_sync_route_refuses_force_without_confirm_replace(api) -> None:
         "/v1/desktop/profiles/sync", json=mutation(all=True, force=True, confirm_replace=True)
     )
     assert confirmed.status_code == 200
+
+
+async def test_sync_route_keeps_an_old_seed_only_force_client_working(api) -> None:
+    """R13: `force` used to mean only "overwrite an edited starter". With no hub-pulled
+    agent for the hub arm to act on, an unconfirmed `force` must not turn into a 422."""
+
+    client, _root = api
+
+    result = await client.post("/v1/desktop/profiles/sync", json=mutation(all=True, force=True))
+
+    assert result.status_code == 200
+    assert result.json()["result"]["hub"]["reports"] == []
 
 
 async def test_sync_route_refuses_name_and_all_together(api) -> None:

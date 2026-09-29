@@ -177,10 +177,6 @@ async def sync_profiles(
 
     if body.name and body.all:
         raise HTTPException(422, "Pass either name or all, not both")
-    if body.force and not body.confirm_replace:
-        # `force` on the hub arm now means `replace`, which throws away the user's
-        # copy. A bare boolean from an old client must not be able to do that.
-        raise HTTPException(422, "--force replaces your copy; use replace with confirm_replace")
     names = [body.name] if body.name else None
 
     # Imported per call, not at module scope: this pulls the sync machinery's
@@ -207,15 +203,25 @@ async def sync_profiles(
         )
 
         def run() -> dict[str, Any]:
+            # `force` on the hub arm now means `replace`, which throws away the
+            # user's copy, so a bare boolean from an old client must not reach it
+            # unconfirmed. Decided BEFORE any work (the seed arm below also honours
+            # `force`, and a refused request must have changed nothing), and only
+            # when the hub arm would actually be reached: an old seed-arm-only
+            # client that sends `force` for the starters keeps working and simply
+            # gets the hub arm as a plain merge.
+            replace = "remote" if body.force and body.confirm_replace else None
+            if body.force and not body.confirm_replace and _has_hub_rows(agents, names):
+                raise HTTPException(
+                    422, "--force replaces your copy; use replace with confirm_replace"
+                )
             seeds = SyncReport(
                 entries=tuple(sync_installed_seeds(agents, names=names, force=body.force))
             )
-            hub = svc.apply_items(
-                ctx,
-                kind="agent",
-                names=names,
-                replace="remote" if body.force else None,
-            )
+            try:
+                hub = svc.apply_items(ctx, kind="agent", names=names, replace=replace)
+            except svc.HubBusy as busy:
+                raise HTTPException(409, str(busy)) from None
             payload = sync_payload(seeds)
             payload["hub"] = hub.to_json()
             return payload
@@ -231,6 +237,22 @@ async def sync_profiles(
                 retry_safe=True,
             )
         )
+
+
+def _has_hub_rows(agents: Any, names: list[str] | None) -> bool:
+    """Whether the hub arm has any linked agent to act on for this request.
+
+    Decides whether an unconfirmed ``force`` is a seed-only call (harmless, kept
+    working for old clients) or one that would reach a hub-pulled row.
+    """
+
+    from local_operator.agents import hub_origin
+
+    wanted = {n.strip().casefold() for n in names} if names else None
+    return any(
+        hub_origin(a) is not None and (wanted is None or str(a.name).strip().casefold() in wanted)
+        for a in agents.list_agents()
+    )
 
 
 async def save_profile(
