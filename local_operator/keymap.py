@@ -114,7 +114,7 @@ class KeyAction:
     #: ``OperatorApp.BINDINGS``, ``"desktop"`` for a global shortcut owned by
     #: the desktop app. A desktop action declares no ``action_*`` method, no
     #: ``Binding`` and no splash tip — the key's MEANING lives entirely in the
-    #: consumer (toggle for ``quick_send``, press-and-hold for a future
+    #: consumer (toggle for ``quick_send``, press-and-hold for
     #: ``push_to_talk``), and this registry is semantics-agnostic by design;
     #: it owns only the stored value's grammar (see the desktop-grammar block
     #: below), because ``lop config edit`` and the desktop's settings page must
@@ -169,6 +169,24 @@ KEY_ACTIONS: tuple[KeyAction, ...] = (
         label="Quick send",
         default="primary+alt+space",
         help="Opens a small composer over other apps; messages the chief of staff.",
+        tip="",
+        scope="desktop",
+    ),
+    # The second DESKTOP-scoped action and the first with its OWN value
+    # grammar: a bare-modifier HOLD is not expressible as an Electron
+    # accelerator, so `alt-right-hold` is validated by the hold grammar
+    # registered in `_DESKTOP_GRAMMARS` below. Semantics stay consumer-side
+    # (the STT stream's press-and-hold dictation); the registry stores the
+    # combination and the scope only. `tip=""` like every desktop row — no
+    # terminal can press it, and the splash must not advertise it. Help is
+    # verbatim from the STT freeze; renaming it is a config migration because
+    # the id is persisted user data.
+    KeyAction(
+        id="keymap.push_to_talk",
+        action="",
+        label="Push to talk",
+        default="alt-right-hold",
+        help="Hold to dictate (desktop); release to stop.",
         tip="",
         scope="desktop",
     ),
@@ -599,6 +617,68 @@ def _validate_accelerator(value: Any) -> str | None:
     return None
 
 
+#: The accepted tokens of the bare-modifier HOLD grammar (v1, frozen with the
+#: STT stream): one bare modifier, a side, and the ``-hold`` suffix — no key
+#: token, no space or letter chords, and no modifiers stacked together. Hold
+#: semantics live entirely in the consumer (press-and-hold to dictate); the
+#: registry stores the combination and the scope only, which is why this is a
+#: second value GRAMMAR rather than a second meaning for the accelerator
+#: tokens. The two grammars refuse each other's values by construction.
+_HOLD_TOKENS: tuple[str, ...] = (
+    "alt-right-hold",
+    "alt-left-hold",
+    "meta-right-hold",
+    "meta-left-hold",
+    "ctrl-right-hold",
+    "ctrl-left-hold",
+)
+
+#: Display labels for the hold family, per platform class. macOS gets the mac
+#: key names; on the other platforms ``alt`` reads "Command" because the STT
+#: freeze pins the default's non-mac string as "Right-Command (hold)" —
+#: display-only, one line to amend if that freeze was a placeholder — and
+#: ``meta`` follows :func:`display_key`'s own meta convention (``win`` /
+#: ``super``).
+_HOLD_DISPLAY_LABELS: dict[str, dict[str, str]] = {
+    "darwin": {"alt": "Option", "meta": "Command", "ctrl": "Control"},
+    "win32": {"alt": "Command", "meta": "Win", "ctrl": "Control"},
+    "other": {"alt": "Command", "meta": "Super", "ctrl": "Control"},
+}
+
+
+def _normalize_hold(text: str) -> str:
+    """Canonical stored form of a hold value: trimmed and lowercased.
+
+    Nothing else to canonicalize — a hold is ONE token with no separators, so
+    case is the only spelling a hand-editor can vary."""
+    return text.strip().lower()
+
+
+def _validate_hold(value: Any) -> str | None:
+    """The hold-family rules. No structural parse: membership IS the rule, and
+    the refusal names the whole family so a missed spelling is one glance away.
+    """
+    if not isinstance(value, str):
+        return "expected a hold key, like alt-right-hold"
+    if _normalize_hold(value) in _HOLD_TOKENS:
+        return None
+    return (
+        "not a hold key — use a bare modifier hold: alt-right-hold, "
+        "alt-left-hold, meta-right-hold, meta-left-hold, ctrl-right-hold, "
+        "or ctrl-left-hold"
+    )
+
+
+def _display_hold(value: str, plat: str) -> str:
+    """``alt-right-hold`` -> ``Right-Option (hold)`` on macOS.
+
+    Presentation only: the stored token is the platform-independent one and
+    the consumer maps it to a physical key."""
+    modifier, side = value.removesuffix("-hold").split("-", 1)
+    klass = "darwin" if plat == "darwin" else ("win32" if plat == "win32" else "other")
+    return f"{side.title()}-{_HOLD_DISPLAY_LABELS[klass][modifier]} (hold)"
+
+
 @dataclasses.dataclass(frozen=True)
 class _DesktopGrammar:
     """One value grammar for desktop-scoped rows: canonicalize + refuse.
@@ -611,24 +691,50 @@ class _DesktopGrammar:
 
     normalize: Callable[[str], str]
     validate: Callable[[Any], str | None]
+    #: Whether the /settings capture gesture can produce a value in this
+    #: grammar at all. App rows always can; the hold grammar cannot — terminal
+    #: input reports a KEY, never "the bare modifier is down", so its row is
+    #: app-configured only and must refuse to ARM rather than paint a
+    #: listening frame whose every completion the validator refuses.
+    capturable_in_terminal: bool = True
 
 
 _ACCELERATOR_GRAMMAR = _DesktopGrammar(
     normalize=_normalize_accelerator, validate=_validate_accelerator
 )
 
-#: action id -> the grammar its desktop value is written in. EMPTY today on
-#: purpose — ``keymap.quick_send`` uses the accelerator default — and that is
-#: the seam the STT stream's ``keymap.push_to_talk`` needs: its planned
-#: bare-modifier HOLD (e.g. ``alt-right-hold``, no key token) is not
-#: expressible as an Electron accelerator, so that row registers its own
-#: grammar here when its value freezes. Keep this a plain dict; a plugin
-#: system is out of scope.
-_DESKTOP_GRAMMARS: dict[str, _DesktopGrammar] = {}
+_HOLD_GRAMMAR = _DesktopGrammar(
+    normalize=_normalize_hold, validate=_validate_hold, capturable_in_terminal=False
+)
+
+#: action id -> the grammar its desktop value is written in. ``quick_send``
+#: uses the accelerator default (``primary+alt+space``); ``push_to_talk``
+#: registered the bare-modifier HOLD grammar when the STT stream froze its
+#: value space — a hold (``alt-right-hold``) is not expressible as an Electron
+#: accelerator, which is exactly why this seam exists. Keep this a plain dict;
+#: a plugin system is out of scope.
+_DESKTOP_GRAMMARS: dict[str, _DesktopGrammar] = {
+    "keymap.push_to_talk": _HOLD_GRAMMAR,
+}
 
 
 def _grammar_for(action_id: str | None) -> _DesktopGrammar:
     return _DESKTOP_GRAMMARS.get(action_id or "", _ACCELERATOR_GRAMMAR)
+
+
+def capturable_in_terminal(action_id: str) -> bool:
+    """Whether the /settings capture gesture can produce a value for this row.
+
+    App rows always can. For a desktop row the answer comes from its grammar:
+    the accelerator family is captured as a chord, while a bare modifier HOLD
+    has no terminal representation at all — so the hold row is app-configured
+    only and its capture affordance must not arm (design: the refusal is the
+    row's desktop-scope detail, not a listening frame the validator would
+    reject on every completion).
+    """
+    if scope_of(action_id) != "desktop":
+        return True
+    return _grammar_for(action_id).capturable_in_terminal
 
 
 def normalize_desktop_key(text: str, *, action_id: str | None = None) -> str:
@@ -861,11 +967,16 @@ def display_key(value: str, *, scope: str = "app", platform: str | None = None) 
     Desktop scope maps the platform tokens for DISPLAY — ``primary`` reads
     ``cmd`` on macOS and ``ctrl`` on Windows/Linux, ``meta`` reads
     ``cmd``/``win``/``super`` — because neither token is a key any terminal can
-    press or show. Presentation only: the stored value is untouched.
+    press or show. A hold token reads ``<Side>-<ModifierLabel> (hold)``
+    (``alt-right-hold`` -> ``Right-Option (hold)`` on macOS). Presentation
+    only: the stored value is untouched.
     """
     if scope != "desktop":
         return format_key_display(value)
     plat = platform or sys.platform
+    hold = value.strip().lower()
+    if hold in _HOLD_TOKENS:
+        return _display_hold(hold, plat)
     shown: list[str] = []
     for part in value.split("+"):
         token = _DESKTOP_MODIFIER_ALIASES.get(part.strip().lower(), part.strip().lower())
@@ -889,6 +1000,7 @@ __all__ = [
     "SCOPE_BY_ID",
     "KeyAction",
     "RESERVED_KEYS",
+    "capturable_in_terminal",
     "conflict_note",
     "display_key",
     "effective_key",

@@ -2574,6 +2574,54 @@ def test_a_desktop_hotkey_write_canonicalizes_through_the_facade(
     assert settings_io.coerce(settings_io.BY_KEY["keymap.new_session"], "CTRL+G") == "ctrl+g"
 
 
+def test_a_hold_hotkey_row_validates_with_its_own_grammar() -> None:
+    """The SECOND desktop grammar, through the same facade: the hold row is
+    judged by the hold family's rules — not the accelerator's, which could
+    never accept one of the six and would admit chords no consumer can hold.
+    """
+    setting = settings_io.BY_KEY["keymap.push_to_talk"]
+
+    assert settings_io.validate(setting, setting.default) is None
+    assert settings_io.validate(setting, "ctrl-left-hold") is None
+    for bad in ("primary+alt+space", "ctrl+n", "alt-right", "space"):
+        problem = settings_io.validate(setting, bad)
+        assert problem, f"the hold row accepted {bad!r}"
+    # The accelerator row beside it refuses the hold family right back.
+    assert settings_io.validate(settings_io.BY_KEY["keymap.quick_send"], "alt-right-hold")
+
+
+def test_a_hold_hotkey_write_canonicalizes_through_the_facade(
+    manager: ConfigManager,
+) -> None:
+    """Case-insensitive input stores the lowercase canonical token — the
+    stored value is what the desktop consumer parses."""
+    setting = settings_io.BY_KEY["keymap.push_to_talk"]
+
+    assert settings_io.coerce(setting, "ALT-RIGHT-HOLD") == "alt-right-hold"
+    settings_io.write_setting(manager, setting, "ALT-RIGHT-HOLD")
+    assert settings_io.read_setting(manager, setting) == "alt-right-hold"
+
+
+def test_the_grammar_speaks_before_the_sibling_check() -> None:
+    """`primary+alt+space` is both an accelerator and quick_send's default.
+
+    Before this ordering the sibling check answered first and the hold row was
+    told "pick another" — advice that is wrong there, because no accelerator
+    can be stored on a hold row at all. The row's own grammar must speak
+    first; a grammar-VALID value that collides still gets the sibling message
+    (proved on the app rows below).
+    """
+    setting = settings_io.BY_KEY["keymap.push_to_talk"]
+    problem = settings_io.validate(
+        setting, "primary+alt+space", {"keymap.quick_send": "primary+alt+space"}
+    )
+    assert problem is not None and "hold" in problem, problem
+
+    # A grammar-valid value that collides keeps the sibling sentence.
+    problem = settings_io.validate(settings_io.BY_KEY["keymap.resume"], "ctrl+n", {})
+    assert problem is not None and "already uses ctrl+n" in problem, problem
+
+
 def test_a_hotkey_row_without_a_derived_scope_falls_back_to_the_app_rules() -> None:
     """An empty/unknown ``hotkey_scope`` means the APP grammar — the behaviour
     every row had before the scope axis existed — never a crash and never a

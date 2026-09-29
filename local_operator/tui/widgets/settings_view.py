@@ -140,6 +140,22 @@ _DESKTOP_HOTKEY_DETAIL = (
     "or set it in the app."
 )
 
+#: The detail sentence for a desktop row whose grammar has NO terminal capture
+#: path (the hold family, `keymap.push_to_talk`): the same family as
+#: `_DESKTOP_HOTKEY_DETAIL` with the false clause dropped — "press keys the
+#: terminal can send" cannot be said about a value no terminal can express, so
+#: the row states only where it IS set. What remains is the instruction the
+#: enter refusal elaborates.
+_HOLD_HOTKEY_DETAIL = "Global shortcut for the desktop app — set it in the app."
+
+#: The `enter` refusal on such a row. The affordance must not ARM — a
+#: listening frame whose every completion the validator refuses reads as a
+#: broken capture — so the press states the constraint instead. Same family as
+#: the sentences above: the editor for this row is the desktop app.
+_HOLD_HOTKEY_REFUSAL = (
+    "hold keys are set in the desktop app — a terminal cannot capture a held modifier"
+)
+
 
 class _Capture(NamedTuple):
     """A hotkey row that is listening, or holding a key awaiting confirmation.
@@ -1703,6 +1719,14 @@ class SettingsView(Vertical):
                 # IDLE -> CAPTURING. `enter` opens, exactly as it does for
                 # every other kind; what "open" means here is "start
                 # listening" rather than "show a list" or "open a buffer".
+                if not keymap_mod.capturable_in_terminal(setting.key):
+                    # A hold key has no capture path AT ALL: arming would
+                    # paint a listening frame whose every completion the
+                    # validator refuses. Refuse the gesture up front, with the
+                    # reason, on the surface a refused write uses.
+                    self._error = _HOLD_HOTKEY_REFUSAL
+                    self._repaint()
+                    return
                 self._begin_capture(setting)
             elif capture.key:
                 # PENDING -> committed. This is the SECOND `enter`, on a key
@@ -2139,8 +2163,10 @@ class SettingsView(Vertical):
         # remapping a global shortcut, so a bare `n` is refused with the
         # modifier sentence rather than the composer one. The action id rides
         # along because the grammar is registered per ACTION (`keymap.
-        # _DESKTOP_GRAMMARS`), not per scope — a future desktop action with a
-        # different value space must not be judged by the accelerator rules.
+        # _DESKTOP_GRAMMARS`), not per scope — the hold family
+        # (`keymap.push_to_talk`) must not be judged by the accelerator rules.
+        # (Capture never reaches a hold row at all: `capturable_in_terminal`
+        # refuses the arming, so this path only sees capturable grammars.)
         scope = keymap_mod.scope_of(capture.setting_key)
         reason = keymap_mod.validate_key(key, scope=scope, action_id=capture.setting_key)
         if reason is None:
@@ -4418,7 +4444,13 @@ class SettingsView(Vertical):
                 # for the reason `_DESKTOP_HOTKEY_DETAIL` states. The registry
                 # help still reaches both surfaces; it is this line's budget it
                 # cannot share with a constraint a terminal user must read.
-                help_text = _DESKTOP_HOTKEY_DETAIL
+                # A NON-capturable desktop row (the hold family) drops the
+                # press clause instead: no terminal key can set it at all.
+                help_text = (
+                    _DESKTOP_HOTKEY_DETAIL
+                    if keymap_mod.capturable_in_terminal(row.setting.key)
+                    else _HOLD_HOTKEY_DETAIL
+                )
             # THE SHED LADDER, one rule for every row (design round 3, D12):
             # the key path sheds first; the state clause is never shed while
             # anything else remains; help sheds after the key. Walked top to
