@@ -18,6 +18,36 @@ def _root_with_session(root: Path) -> None:
     state.update_state(root, session_id=SESSION_ID)
 
 
+def test_the_greeting_addresses_her_by_the_configured_name(isolated_root: Path) -> None:
+    """The first-run instruction must name the operator's name for her.
+
+    The greeting's wake line is user-visible in the transcript, so a hard-coded
+    "Introduce yourself as Aida" after a rename is exactly the stale reference
+    the renameable-chief-of-staff work removes.
+    """
+    assert "as Aida," in onboarding.greeting_message(isolated_root)
+    write_config(isolated_root, {"aida": {"name": "Sovereign"}})
+    renamed = onboarding.greeting_message(isolated_root)
+    assert "as Sovereign," in renamed
+    assert "as Aida" not in renamed
+
+
+@pytest.mark.asyncio
+async def test_greet_arms_with_the_configured_name(
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _root_with_session(isolated_root)
+    monkeypatch.setattr(onboarding, "provider_configured", lambda root: True)
+    write_config(isolated_root, {"aida": {"name": "Sovereign"}})
+
+    assert await onboarding.greet(isolated_root, SESSION_ID) == "greeted"
+    entry = wake_store.read_entry(isolated_root, SESSION_ID) or {}
+    row = next(
+        row for row in entry.get("schedules") or [] if row["id"] == onboarding.GREETING_WAKE_ID
+    )
+    assert "as Sovereign," in row["message"]
+
+
 @pytest.mark.asyncio
 async def test_greet_refuses_without_a_provider_and_stamps_nothing(isolated_root: Path) -> None:
     _root_with_session(isolated_root)

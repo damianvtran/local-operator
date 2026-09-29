@@ -423,3 +423,406 @@ async def test_a_reserved_word_counts_only_as_the_whole_argument(tmp_path, monke
         await send("/aida =pause", wait_for_prompt=True)
         assert paused() is True, "the escape must not run the control"
         assert built[-1].prompts == ["pause and think", "pause"], built[-1].prompts
+
+
+@pytest.mark.asyncio
+async def test_the_rename_verb_updates_both_stores(tmp_path, monkeypatch) -> None:
+    """``/aida rename <name>``: config, her stored title, and a receipt.
+
+    The entry point the operator asked for, through the real handler: the
+    config key (what every surface reads) and her session's stored title
+    (what the picker, the sidebar and a resume read) must move TOGETHER, the
+    receipt must name the stored value, and the escape must still reach her
+    as a message without renaming anything. The rename made while HER
+    CONVERSATION IS OPEN (the ``=rename nope`` send opened it) must NOT call
+    the session setter: on the attached lane its rename RPC is refused
+    ("/rename is terminal-only here") and leaves an unretrieved task
+    exception per rename (UX round 1, U2) — the live re-title rides the
+    config watcher, pinned at session level in ``test_aida_session_hooks``.
+    """
+    from local_operator import aida as aida_pkg
+    from local_operator.config import ConfigManager
+    from local_operator.resume import stored_session_title
+
+    her_id = await aida_pkg.ensure_session(tmp_path)
+    assert her_id is not None
+
+    built: list[FakeSession] = []
+    setter_calls: list[str] = []
+
+    class HerSession(FakeSession):
+        def __init__(self, sid: str) -> None:
+            super().__init__()
+            self._sid = sid
+
+        @property
+        def session_id(self) -> str:  # type: ignore[override]
+            return self._sid
+
+    async def resume_factory(session_id):
+        session = HerSession(session_id or "")
+        built.append(session)
+        return session
+
+    # The real config-dir resolution, like ``_boot`` sets up: the rename
+    # worker and the receipts resolve THROUGH ``paths.config_dir()``, so the
+    # env must point at this test's root or the write lands elsewhere.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    from local_operator.tui.app import OperatorApp
+
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=resume_factory)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+
+        async def send(command: str) -> str:
+            await _await_session(app, pilot)
+            editor.focus()
+            editor.text = command
+            editor.move_cursor(editor._end_of_buffer())
+            await pilot.pause()
+            # Enter on an open list completes the highlighted row instead of
+            # submitting (the ``test_approvals_ux`` rule): these sends are
+            # about the RECEIPTS, so an exact word that matches a row (bare
+            # ``rename``, ``status``) is submitted deliberately with the list
+            # dismissed first. The list itself is pinned by
+            # ``test_the_space_after_aida_offers_the_reserved_words``.
+            if editor.picker.is_open():
+                await pilot.press("escape")
+                await pilot.pause()
+            before = _transcript_text(app)
+            await pilot.press("enter")
+            # Progress-based settlement (review round 1, N2 / QA Q2): a fixed
+            # turn count lost the cold-boot race.
+            for _ in range(400):
+                await pilot.pause()
+                if _transcript_text(app) != before:
+                    break
+            for _ in range(40):
+                await pilot.pause()
+            return _transcript_text(app)
+
+        # Bare `rename` reports; the word WITH a name renames.
+        body = await send("/aida rename")
+        assert "Aida: /aida rename <name> renames her everywhere." in body, body
+        body = await send("/aida rename Sovereign")
+        assert "renamed: Sovereign" in body, body
+
+        # A receipt minted AFTER the rename speaks the new name...
+        body = await send("/aida status")
+        assert "\u21c8 Sovereign: active" in body, body
+
+        # ...and the escape still sends her the literal words, unparsed —
+        # which also OPENS her conversation, the lane U2 is about.
+        await send("/aida =rename nope")
+        assert built and built[-1].prompts and "rename nope" in built[-1].prompts[-1]
+        assert app._conversation_id() == her_id
+
+        # Rename while her conversation is OPEN here: the stores move and the
+        # session setter must NOT be called (U2). The recorder mirrors the
+        # real signature so a stray call cannot pass unnoticed.
+        session = built[-1]
+        original = session.set_conversation_name
+
+        def record(text: str, *, user_set: bool = True) -> str:
+            setter_calls.append(text)
+            return original(text, user_set=user_set)
+
+        session.set_conversation_name = record  # type: ignore[method-assign]
+        body = await send("/aida rename Vega")
+        assert "renamed: Vega" in body, body
+        body = await send("/aida rename")
+        assert "Vega: /aida rename <name> renames her everywhere." in body, body
+
+    # BOTH stores moved: the config key every surface reads, and the stored
+    # title the picker/sidebar/resume read.
+    assert ConfigManager(config_dir=tmp_path).get_nested_value(("aida", "name")) == "Vega"
+    assert stored_session_title(tmp_path / "sessions" / her_id) == "Vega"
+    assert setter_calls == [], setter_calls
+
+
+@pytest.mark.asyncio
+async def test_the_rename_verb_refuses_a_bad_name(tmp_path, monkeypatch) -> None:
+    """An invalid name is refused with the registry's own sentence, and
+    nothing is written — neither the config nor her title."""
+    from local_operator import aida as aida_pkg
+    from local_operator.config import ConfigManager
+    from local_operator.resume import stored_session_title
+
+    her_id = await aida_pkg.ensure_session(tmp_path)
+    assert her_id is not None
+
+    app = _boot(tmp_path, monkeypatch)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        # Wait out the cold-boot race before dispatching (N2 / QA Q2): a
+        # refusal read off a dropped command must still be the RENAME's refusal.
+        await _await_session(app, pilot)
+        editor = app.query_one(Editor)
+        editor.focus()
+        editor.text = "/aida rename " + "x" * 81
+        editor.move_cursor(editor._end_of_buffer())
+        await pilot.pause()
+        before = _transcript_text(app)
+        await pilot.press("enter")
+        # Progress-based settlement, like ``_send`` (N2 / QA Q2).
+        for _ in range(400):
+            await pilot.pause()
+            if _transcript_text(app) != before:
+                break
+        for _ in range(40):
+            await pilot.pause()
+        body = _transcript_text(app)
+        assert "not renamed: at most 80 characters" in body, body
+
+    assert ConfigManager(config_dir=tmp_path).get_nested_value(("aida", "name"), None) is None
+    assert stored_session_title(tmp_path / "sessions" / her_id) == "Aida"
+
+
+async def _await_session(app, pilot, *, cap: int = 900) -> None:
+    """Wait out the cold-boot race before sending ``/aida …`` (N2 / QA Q2).
+
+    ``OperatorApp`` refuses slash commands while its first session is still
+    starting (the ``_cmd_aida`` head guard), and on a loaded host that window
+    is longer than any fixed pause count — the command is dropped and the
+    test reads ``! session is still starting…``. Wait on the STATE.
+    """
+    for _ in range(cap):
+        if app._session is not None:
+            break
+        await pilot.pause()
+    assert app._session is not None, "the boot session never arrived"
+
+
+async def _send(app, pilot, command: str, *, until=None) -> str:
+    """Type ``command`` into the composer and return the transcript after.
+
+    Dismisses an open argument list first — Enter on an open list completes
+    the highlighted row instead of submitting (the ``test_approvals_ux``
+    rule), which bare words like ``status`` now match. The list's own
+    behaviour is pinned separately.
+
+    Settlement is PROGRESS-based, not clock-based (review round 1, N2 / QA
+    Q2): on a loaded host a fixed turn count races the session boot, so the
+    helper waits for the transcript to move (or ``until`` to go true), then
+    gives the follow-up paint a few turns.
+    """
+    editor = app.query_one(Editor)
+    await _await_session(app, pilot)
+    editor.focus()
+    editor.text = command
+    editor.move_cursor(editor._end_of_buffer())
+    await pilot.pause()
+    if editor.picker.is_open():
+        await pilot.press("escape")
+        await pilot.pause()
+    before = _transcript_text(app)
+    await pilot.press("enter")
+    for _ in range(400):
+        await pilot.pause()
+        if until() if until is not None else _transcript_text(app) != before:
+            break
+    for _ in range(40):
+        await pilot.pause()
+    return _transcript_text(app)
+
+
+@pytest.mark.asyncio
+async def test_the_space_after_aida_offers_the_reserved_words(tmp_path, monkeypatch) -> None:
+    """UX round 1, U1: ``/aida<space>`` opens HER words, not the provider list.
+
+    The provider fall-through is wrong for every ``/aida`` argument — the
+    free-form half is prose for her — and it also hid the ``rename`` verb
+    from anyone who never learned to type it. The rows are sourced from
+    ``AIDA_SUBCOMMANDS`` plus ``rename``, the words the handler itself
+    parses, so the picker cannot drift from the grammar.
+    """
+    from local_operator.slash_commands import AIDA_SUBCOMMANDS
+    from local_operator.tui.widgets.command_picker import PickerMode
+
+    app = _boot(tmp_path, monkeypatch)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        editor.text = "/aida "
+        editor.move_cursor(editor._end_of_buffer())
+        editor._sync_picker()
+        await pilot.pause()
+        picker = editor.picker
+        assert picker.mode is PickerMode.ARGUMENT, "the argument list did not open"
+        names = [name for name, _ in picker.suggestions()]
+        assert names == [*AIDA_SUBCOMMANDS, "rename"], names
+
+
+@pytest.mark.asyncio
+async def test_renaming_her_conversation_says_she_is_renamed_too(tmp_path, monkeypatch) -> None:
+    """UX round 1, U3: ``/title`` on HER conversation names the side effect.
+
+    The config row (``applied: aida.name``) is the audit trail; the rename's
+    own receipt is where the expectation forms, so it says the product-wide
+    half out loud — the sentence that stops "renamed the thread" from
+    reading as "renamed only this thread". ``_aida_duty`` is the same gate
+    the config sync reads, so the clause cannot claim a rename that did not
+    sync.
+    """
+    from local_operator import aida as aida_pkg
+
+    her_id = await aida_pkg.ensure_session(tmp_path)
+    assert her_id is not None
+
+    built: list[FakeSession] = []
+
+    class HerSession(FakeSession):
+        def __init__(self, sid: str) -> None:
+            super().__init__()
+            self._sid = sid
+            self._aida_duty = True
+
+        @property
+        def session_id(self) -> str:  # type: ignore[override]
+            return self._sid
+
+    async def resume_factory(session_id):
+        session = HerSession(session_id or "")
+        built.append(session)
+        return session
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from local_operator.tui.app import OperatorApp
+
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=resume_factory)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _send(app, pilot, "/aida hello")
+        for _ in range(200):
+            await pilot.pause()
+            if built:
+                break
+        assert built and app._conversation_id() == her_id
+        body = await _send(app, pilot, "/title Vega")
+        assert "renamed: Vega — she is now called Vega everywhere" in body, body
+
+
+@pytest.mark.asyncio
+async def test_the_launcher_receipt_names_the_configured_name(tmp_path, monkeypatch) -> None:
+    """Review R1-M1 / UX U4: the launcher-less receipt read the packaged name.
+
+    Only reachable when ``OperatorApp`` is built without ``resume_factory``
+    (test/embedding construct — the shipped CLI always provides one), which
+    is exactly why it survived the first sweep.
+    """
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+    from local_operator.tui.app import OperatorApp
+
+    settings_io.write_setting(
+        ConfigManager(config_dir=tmp_path), settings_io.BY_KEY["aida.name"], "Nova"
+    )
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        body = await _send(
+            app,
+            pilot,
+            "/aida",
+            until=lambda: "requires a session-capable" in _transcript_text(app),
+        )
+        assert "opening Nova requires a session-capable launcher" in body, body
+
+
+@pytest.mark.asyncio
+async def test_a_settings_rename_reconciles_her_stored_title(tmp_path, monkeypatch) -> None:
+    """Review R1-M3: a non-``/aida`` rename must not leave the pinned row stale.
+
+    The reported gap: with her session CLOSED and a TUI running, a rename
+    written outside ``/aida rename`` (the /settings page, ``lop config
+    edit``, the desktop PATCH) reached the config and nothing else — the
+    sidebar row and the picker, which render the STORED title, kept the old
+    name until the next ``ensure_session``. The app's config-change listener
+    now reconciles the stored title on the same delivery.
+
+    The boot ensure is awaited BEFORE the write, so the only actor left when
+    the write lands is the watcher seam under test (nothing else reconciles
+    spontaneously; the title is asserted un-moved first).
+    """
+    from local_operator import aida as aida_pkg
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+    from local_operator.resume import stored_session_title
+
+    her_id = await aida_pkg.ensure_session(tmp_path)
+    assert her_id is not None
+    assert stored_session_title(tmp_path / "sessions" / her_id) == "Aida"
+
+    app = _boot(tmp_path, monkeypatch)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        if app._aida_boot_task is not None:
+            await app._aida_boot_task
+        for _ in range(20):
+            await pilot.pause()
+        assert stored_session_title(tmp_path / "sessions" / her_id) == "Aida"
+
+        # The /settings page's own writer; ``notify_local`` hands it to this
+        # process's watcher exactly as the page does in production.
+        settings_io.write_setting(
+            ConfigManager(config_dir=tmp_path), settings_io.BY_KEY["aida.name"], "Vega"
+        )
+        # Give the delivery turns to arrive, then drain the listener's worker
+        # rather than racing its timing.
+        for _ in range(60):
+            await pilot.pause()
+        await app.workers.wait_for_complete()
+        assert stored_session_title(tmp_path / "sessions" / her_id) == "Vega"
+
+
+@pytest.mark.asyncio
+async def test_opening_her_conversation_with_a_framework_toast_up_survives(
+    tmp_path, monkeypatch
+) -> None:
+    """QA round 1, Q1: the framework's notification toast shares the TYPE NAME
+    ``Toast`` — and Textual resolves a class selector by type name, so
+    ``_reset_band_for_swap``'s ``self.query(Toast)`` used to hand it the
+    framework's widget, which has no ``withdraw``, and opening her
+    conversation while one was up killed the app. The command palette's
+    Screenshot notice is the production source; the toast is mounted directly
+    because ``App.notify`` does not paint one in headless runs.
+
+    Both halves are driven: the real ``/aida`` flow that crashed, and the
+    swap helper itself with the foreign toast still on screen.
+    """
+    from textual.notifications import Notification
+    from textual.widgets._toast import Toast as FrameworkToast
+
+    from local_operator import aida as aida_pkg
+
+    her_id = await aida_pkg.ensure_session(tmp_path)
+    assert her_id is not None
+
+    boots: list[str | None] = []
+    app = _boot(tmp_path, monkeypatch, resume_boots=boots)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        foreign = FrameworkToast(Notification(message="Saved screenshot", timeout=100))
+        await app.screen.mount(foreign)
+        await pilot.pause()
+
+        await _send(app, pilot, "/aida")
+        for _ in range(200):
+            await pilot.pause()
+            if boots:
+                break
+        assert app.is_running, "the app died during the session transition"
+        # The swap ran: the app asked for HER id (the fake's own id is canned).
+        assert boots and boots[-1] == her_id, boots
+
+        # The exact helper the swap runs, with the foreign toast still up.
+        app._reset_band_for_swap()
+        assert app.is_running
+        assert list(app.query(FrameworkToast)), "the foreign toast was not touched"
