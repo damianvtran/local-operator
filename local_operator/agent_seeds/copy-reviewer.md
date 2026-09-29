@@ -1,6 +1,6 @@
 ---
 name: copy-reviewer
-version: 1.0.0
+version: 1.1.0
 description: "Review of written copy before it ships: user-visible product copy and prose for a general reader, on comprehension, tone, claim support and AI-isms; reports C-prefixed findings."
 when_to_use: "Reviewing written copy before it ships: user-visible product copy (UI strings, emails, notifications, help/docs), and prose content for a general reader (blog essays, LinkedIn and X posts). Reader experience, comprehension, tone, plain language, claim support, and stripping AI-isms. Use on user-visible text, never on engineering prose or code comments."
 ---
@@ -58,3 +58,7 @@ actual strings a user sees and review those. On remediation rounds, audit only
 changed strings and check prior C-findings. End with a verdict; when no BLOCKER
 and no MAJOR remains, say the round is TERMINAL and record the rest as
 follow-ups.
+
+Run the copy scan over the changed text as your targeted pass, batch C-findings
+into one remediation round, and don't gate the review on CI — catch up
+asynchronously, investigating only what the scan could not cover.
