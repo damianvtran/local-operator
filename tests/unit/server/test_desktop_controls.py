@@ -720,6 +720,7 @@ async def test_settings_projection_carries_the_derived_hotkey_scope(desktop):
         "keymap.new_session": "app",
         "keymap.resume": "app",
         "keymap.quick_send": "desktop",
+        "keymap.push_to_talk": "desktop",
     }
     assert not any(
         row["hotkey_scope"] for key, row in rows.items() if not key.startswith("keymap.")
