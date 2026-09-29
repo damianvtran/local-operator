@@ -90,10 +90,13 @@ sees the legible one when it does not.
 
 One predicate, `is_input_refusal`, recognizes the class on a `kind="request"`
 `ProviderError` (or its rendered form): Alibaba's `data_inspection_failed` /
-`DataInspectionFailed` code, or “inappropriate content” wording that names the
-**input** (so the output-side wording below is excluded). It is deliberately
-narrower than the contract of `is_image_rejection` — a malformed 400 is still
-a terminal request defect and keeps today's behaviour.
+`DataInspectionFailed` code — input-side unless the sentence is the output-side
+one — or one of the input phrases the provider publishes (“Input [text|image]
+data may contain inappropriate content”, “Input or output data …”). The
+OUTPUT-side sentence never classifies, even beside the code: its failures keep
+the ordinary retry ladder. The predicate is deliberately narrower than the
+contract of `is_image_rejection` — a malformed 400 is still a terminal request
+defect and keeps today's behaviour.
 
 A refusal then earns up to **two degraded re-asks**, on the SAME target,
 credential and model, tried in this order:
@@ -115,6 +118,16 @@ for isolated/retry-disabled calls (`retry.enabled` gate — decorative errands
 keep their one-attempt contract). Nothing re-sends identical bytes: with no
 rung applicable, no retry is attempted at all.
 
+An exhausted or unavailable refusal is **terminal for the walk**: it raises
+here instead of falling through to the next target. A hop would hand another
+provider this request's bytes — the exact ones a content screen refused — and,
+if the new target answered, stamp a recovery on a request that never carried
+it; the substitution red line and the call-scoped bound both point the same
+way. Conversely, once a rung has been applied the narrowing *follows* the
+request for the rest of the call: if the walk moves on for an unrelated
+failure, later targets receive the narrowed request, and the end-event stamp
+describes exactly what answered.
+
 ### What the terminal refusal says
 
 When the budget is spent (or nothing was degradable), the raised error keeps
@@ -127,7 +140,10 @@ missing:
 > re-sent unchanged.
 
 With no rung applicable the sentence instead states that a degraded retry was
-unavailable. `stop_reason` stays `"error"` (the exception path, unchanged) —
+unavailable; where the ladder existed but the call's retry policy declined it
+(isolated errands, retries disabled), it says the policy declined a degraded
+retry — not that none was available. `stop_reason` stays `"error"` (the
+exception path, unchanged) —
 "refusal" is the model-refusal vocabulary and its copy would misattribute a
 provider request refusal to the model; the message now carries the diagnosis.
 

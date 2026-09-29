@@ -1238,9 +1238,11 @@ def _input_refusal_recovery_notice(recovery: Mapping[str, Any]) -> str:
     )
     parts = [_INPUT_REFUSAL_DEGRADE_COPY.get(name, name.replace("_", " ")) for name in names]
     detail = ", then ".join(parts) if parts else "the content it could not send"
+    # The parenthetical keeps the rung list from running the sentence together
+    # when both rungs fired (review N1).
     return (
         "the provider refused the request as inappropriate input content — "
-        f"the turn was re-sent with {detail} and continued"
+        f"the turn was re-sent with a narrowed request ({detail}) and continued"
     )
 
 

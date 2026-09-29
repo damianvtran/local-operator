@@ -5266,8 +5266,7 @@ async def test_an_input_refusal_recovery_is_narrated_and_rides_the_transcript():
     notices = [e for e in events if isinstance(e, NoticeEvent)]
     assert any(
         "inappropriate input content" in n.text
-        and "screenshots omitted" in n.text
-        and "older observations removed" in n.text
+        and "(screenshots omitted, then older observations removed)" in n.text
         for n in notices
     )
     # The durable record reaches the transcript message, not just the wire.
