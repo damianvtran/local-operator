@@ -336,20 +336,22 @@ describe("ask card reachability", () => {
 			expect(header.parentElement?.className).not.toContain("min-h-0");
 		}
 
-		/* The subagents hint stands down below the measured fit width so the
-		   danger count's tail is never painted over (320x568: the hint, a later
-		   sibling, covered ~28px of `· 1 failed`). The tasks row is one short
-		   phrase and keeps its hint at every width. */
-		expect(
-			within(screen.getByRole("button", { name: /subagents/ }))
-				.getByText(/answer first/)
-				.className,
-		).toContain("max-[352px]:hidden");
-		expect(
-			within(screen.getByRole("button", { name: /tasks/ }))
-				.getByText(/answer first/)
-				.className,
-		).not.toContain("max-[352px]:hidden");
+		/* ONE STAND-DOWN RULE FOR THE PAIR (design round 1, D6 + agent-review
+		   NIT 2): the hint is hidden strictly below 385px of viewport — the width
+		   at which the SUBAGENTS row keeps its 30px label with the hint shown
+		   (measured: 6px at 360 under the old 352px threshold; with this class,
+		   30px at 385 hint on, 63px at 384 hint hidden, 41px at 320). Both rows
+		   carry the same class so the adjacent held-shut rows cannot disagree
+		   again (they did at 320: tasks showed the hint, the roster hid it), and
+		   the class encodes exactly what the comments say: hidden *below* 385,
+		   shown at it. */
+		for (const name of [/subagents/, /tasks/]) {
+			expect(
+				within(screen.getByRole("button", { name }))
+					.getByText(/answer first/)
+					.className,
+			).toContain("max-[385px]:hidden");
+		}
 	});
 
 	it("pins the card's meta row above the scroller so it keeps its identity", () => {

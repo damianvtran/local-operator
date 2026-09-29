@@ -28,6 +28,21 @@
  * resolved by moving the token rather than exempting the pair, so this file
  * carries no exceptions list — every assertion is a measurement.
  *
+ * ## Why the tones are asserted on `elevated` too (D1, mobile UX batch 2 round 1)
+ *
+ * The pin-refusal and resume-refusal strips paint `text-danger` on
+ * `bg-elevated`, and this file asserted the tones only on canvas, surface and
+ * their own wash — so the pair the batch's own strips introduced was exactly
+ * the one the gate could not see. Measured dark: monokai 3.76:1, dracula
+ * 4.11:1, neon 4.43:1 — three of 31 palettes under the text floor, with
+ * monokai's pink-on-olive legible-but-wrong. The pair is now asserted for ALL
+ * four tones (a gate that lists one tone is one palette change away from the
+ * same hole); the three failing palettes were nudged along their own danger
+ * lightness — the same "smallest lift that clears" move the batch made for
+ * dracula's elevated — until danger-on-elevated clears 4.5 with margin
+ * (monokai 3.76 -> 4.63, dracula 4.11 -> 4.62, neon 4.43 -> 4.60; the
+ * remaining 28 palettes measured >= 4.5 already and are unchanged).
+ *
  * ## What this can and cannot see
  *
  * It parses the palette SOURCE (via `palette-source.mjs`, the same reader the
@@ -149,6 +164,7 @@ for (const { id, palette } of palettes) {
 	for (const tone of TONES) {
 		assertPair(id, palette, tone, "canvas", FLOOR.text, "text");
 		assertPair(id, palette, tone, "surface", FLOOR.text, "text");
+		assertPair(id, palette, tone, "elevated", FLOOR.text, "text");
 		assertPair(id, palette, tone, `${tone}Wash`, FLOOR.text, "text");
 	}
 	for (const [fg, bg] of WASH_PAIRS) {

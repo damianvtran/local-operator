@@ -95,6 +95,14 @@ export function TodosPanel({
 			   the list. */
 			defaultOpen={false}
 			forceClosed={forceCollapsed}
+			/* ONE STAND-DOWN RULE FOR THE PAIR (design round 1, D6). This row's own
+			   phrase fits at every width, but it sits directly above the subagents
+			   row while both are held shut, and at 320 the two disagreed — this
+			   one showing `· answer first`, the neighbour hiding it. The same
+			   threshold the roster needs to keep its label readable (385; see
+			   `subagents-panel.tsx`) therefore applies here too, so the adjacent
+			   rows state the held-shut rule as one thing. */
+			hintClassName="max-[385px]:hidden"
 			className={cn(
 				"border-t border-hairline",
 				/* `min-h-11`, not `min-h-0`: the collapsed header is this panel's

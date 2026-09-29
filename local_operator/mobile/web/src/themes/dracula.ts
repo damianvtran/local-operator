@@ -65,8 +65,11 @@ export const dracula: ThemeDefinition = {
 		warningBorder: "#9E7854",
 
 		// Dracula's red is FF5555, which measures 4.05:1 on surface. This is the
-		// smallest lift that clears 4.5:1 on surface and on its own wash.
-		danger: "#FF7171",
+		// smallest lift that clears 4.5:1 on surface, on its own wash, and (D1,
+		// mobile UX batch 2 round 1) on `elevated`, where the refusal strips paint
+		// it as text: FF7171 measured 4.11:1 on elevated, and ONE step further
+		// along the same red lands at 4.62:1 with every other ground improved.
+		danger: "#FF8383",
 		dangerWash: "#422F3A",
 		dangerBorder: "#BE6368",
 

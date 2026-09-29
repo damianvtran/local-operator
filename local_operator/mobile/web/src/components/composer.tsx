@@ -317,6 +317,16 @@ function EffortSheet({
 
 const MAX_TEXTAREA_PX = 6 * 22; /* six lines at body line-height */
 const CONTINUATION_ERROR = "Couldn’t continue this conversation. Try again.";
+/* U15's other half (UX round 1, U20): on an ENDED session the generic line's
+   `Try again.` is not true advice — the runtime is gone and no retry of this
+   control can land — and it sat directly under a strip naming the one path that
+   does work. The honest sentence names it instead. (The composer is NOT
+   disabled for an ended session by this batch: a disabled composer would
+   change the draft, attachment and retained-envelope flows for a state whose
+   refusal the daemon already words, and the gate above removes the affordance
+   that motivated the finding.) */
+const ENDED_CONTINUATION_ERROR =
+	"This session has ended — tap resume to continue.";
 const STEER_ERROR = "Couldn’t send this instruction. Try again.";
 /* U5: one vocabulary for the retained instruction across the alert, the retry
    button, and the delivered acknowledgement — "earlier" throughout, matching
@@ -469,8 +479,17 @@ export function Composer({
 
 	/* The resume affordance is driven by the WIRE fact (stop_reason), not an
 	   inference from the streaming flag: a turn that completes also flips
-	   streaming off, and only an aborted turn should offer "resume". */
-	const showResume = projection.stop_reason === "aborted";
+	   streaming off, and only an aborted turn should offer "resume".
+
+	   AN ENDED SESSION YIELDS TO THE STRIP'S RESUME (UX round 1, U15). `ended`
+	   and `stop_reason="aborted"` coexist on the shape the daemon serves after
+	   a mid-turn death (the terminal repaint fills the end from the durable
+	   record), and this button was the SECOND resume path — the prominent one,
+	   in the thumb zone — sending `continue` to a runtime that is gone, over
+	   and over. On an ended session the strip's `resume` is the one action: it
+	   is the path that respawns the session, and one act must not read as two
+	   different controls. */
+	const showResume = projection.stop_reason === "aborted" && !projection.ended;
 
 	/* WHICH word, when it does, follows the verdict the notice above it states.
 	   `aborted` covers a deliberate stop and a harness cut-off alike, and the
@@ -892,7 +911,13 @@ export function Composer({
 				setText(submitted.echo.text);
 			}
 			setRetryEnvelope(getPendingContinuation(pid));
-			setError(projection.streaming ? STEER_ERROR : CONTINUATION_ERROR);
+			setError(
+				projection.ended
+					? ENDED_CONTINUATION_ERROR
+					: projection.streaming
+						? STEER_ERROR
+						: CONTINUATION_ERROR,
+			);
 		} finally {
 			setSending(false);
 		}
