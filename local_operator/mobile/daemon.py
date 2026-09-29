@@ -72,6 +72,16 @@ from local_operator.procstate import detached_popen_kwargs
 from local_operator.session.creation import session_created_at
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.types import ENGAGED_ENV, reported_subagent_count
+
+try:
+    # The carriage capability token (mobile STT). cf9f's PR adds this beside the
+    # other record-capability tokens; until that branch lands the name is absent,
+    # and the two gates that ask it (the relay strip in ``MobileDaemon.request``
+    # and the attach client's support flag) must fail CLOSED — strip the
+    # annotation — rather than break this module's import.
+    from local_operator.session.runtime.types import INPUT_MODE_CAPABILITY
+except ImportError:  # pragma: no cover — only on a pre-carriage tree
+    INPUT_MODE_CAPABILITY = ""
 from local_operator.tui.sidebar_pins import PINS_FILE, read_pins, set_pin
 
 logger = logging.getLogger(__name__)
@@ -134,6 +144,38 @@ SUMMARIES_CACHE_TTL_S = 1.0
 #: this names a failure of the read the rows THEMSELVES came from. A renderer
 #: that treated the two as one vocabulary would under-report this one.
 DEGRADED_DURABLE_LISTING = "sessions"
+
+#: The mobile transcription upload: byte cap and format allowlist.
+#:
+#: Duration is bounded CLIENT-side (the recorder's 120 s cap) because the server
+#: cannot decode duration cheaply; the byte cap is the server's own bound, and 20
+#: MB covers two minutes of every codec a phone records with, with headroom.
+#: The allowlist is compared on the BARE media type (lowercased): the recorder's
+#: ``Blob.type`` carries codec parameters ("audio/webm;codecs=opus"), and the
+#: list is the set of containers those parameters decorate.
+STT_MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+STT_MIME_ALLOWLIST = frozenset(
+    {
+        "audio/mp4",
+        "audio/webm",
+        "audio/ogg",
+        "audio/mpeg",
+        "audio/wav",
+        "audio/x-m4a",
+        "audio/aac",
+    }
+)
+#: The 413 sentence, derived from the cap so the copy can never claim a limit
+#: the constant does not enforce.
+STT_TOO_LARGE_ERROR = (
+    f"Recording is too large — the limit is {STT_MAX_UPLOAD_BYTES // (1024 * 1024)} MB. "
+    "Try a shorter clip."
+)
+
+#: Memo for the lifted feature-flag dict (``capabilities.features``). The dict is
+#: a build-static server fact; the lazy import keeps starlette-time cost off
+#: daemon startup, and the memo keeps it off the list repaint path.
+_FEATURE_FLAGS_MEMO: dict[str, Any] | None = None
 
 
 def _durable_fold_cache():
@@ -1418,6 +1460,51 @@ def _operator_handshake(entry: SessionEntry, op: str) -> str | None:
     )
 
 
+def _feature_flags() -> dict[str, Any]:
+    """The lifted feature-flag dict for the mobile capabilities payload.
+
+    The reader is cf9f's ``server/features.py::feature_flags()``, imported
+    lazily (the module is server-tier; the daemon must stay importable without
+    it) and memoised for the reason every repaint would otherwise re-read it. An
+    absent module or symbol reads as an EMPTY dict — deliberately, because the
+    wire's contract for a missing feature is "this build does not have it", and
+    a mobile-side literal restating a server key (`input_mode: 1`) would be a
+    second spelling of a fact one hand owns. QA asserts equality against the
+    symbol, never a number.
+    """
+    global _FEATURE_FLAGS_MEMO
+    if _FEATURE_FLAGS_MEMO is None:
+        flags: dict[str, Any] = {}
+        try:
+            from local_operator.server.features import feature_flags as reader
+
+            flags = dict(reader())
+        except Exception:  # noqa: BLE001 — an absent/unreadable reader is "no features"
+            flags = {}
+        _FEATURE_FLAGS_MEMO = flags
+    return dict(_FEATURE_FLAGS_MEMO)
+
+
+def _strip_unsupported_annotation(record: SessionRecord, frame: dict[str, Any]) -> None:
+    """Drop the input-mode annotation for an owner that cannot store it.
+
+    THE RELAY'S HALF OF THE CARRIAGE GATE (mobile STT): the web always sends its
+    provenance; the RELAY forwards it only if the owner's record advertised
+    ``input-mode-v1``, and the attach client enforces the same rule on its own
+    connections — the phone never gates, because it cannot see the record and
+    gating on the HTTP ``features`` key is deliberately not the contract.
+
+    Absence is the legacy reading: a stripped field lands exactly as today's
+    messages always did, which is why the carriage needs no PROTOCOL_VERSION
+    bump. An UNKNOWN capability fails closed (strip): an older runtime cannot
+    honour the annotation, and neither can a tree that predates the constant.
+    """
+    if INPUT_MODE_CAPABILITY and INPUT_MODE_CAPABILITY in record.capabilities:
+        return
+    frame.pop("input_mode", None)
+    frame.pop("input_path", None)
+
+
 async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
     """Open (or re-open) the control socket to one registrant and pump its
     frames until the connection dies. One task per session."""
@@ -2523,6 +2610,14 @@ class MobileDaemon:
         from local_operator.mobile.attach_client import fit_request_frame
 
         frame: dict[str, Any] = {"op": op, "req": req, **fields}
+        if op in ("prompt", "steer"):
+            # THE STRIP-GATE (mobile STT — see _strip_unsupported_annotation): the
+            # phone sends its provenance, the relay forwards it only to an owner
+            # that advertised the capability. Placed here, in the relay's own
+            # hand-written writer, beside where the operator signature is attached
+            # — the same seam, because this is the one place a phone-shaped frame
+            # becomes a control frame.
+            _strip_unsupported_annotation(entry.record, frame)
         proof = _operator_request_proof(entry, op, fields)
         if proof is not None:
             frame["operator_cap"] = proof
@@ -3144,10 +3239,27 @@ def build_app(daemon: MobileDaemon):
         read: the same additive shape the desktop listing uses, so a client can
         tell "nothing to report" from "this server is too old to know" (see
         ``DEGRADED_DURABLE_LISTING``).
+
+        ``capabilities`` rides HERE for the same single-source reason: the phone
+        shows the voice mic iff ``stt.available`` is true, so both transports
+        must carry the same answer. ``features`` is the lifted feature-flag dict
+        (:func:`_feature_flags` — lazy, memoised, empty when the server module is
+        absent; a missing key means "this build does not have it", never an
+        error). ``stt`` is ``mobile.stt.stt_availability()``, TTL-cached inside
+        that module so this payload's repaint cadence never becomes a
+        credential-store read cadence. An OLD daemon omits the key entirely, and
+        the web's rule for absence is the same as for ``available: false``:
+        hide the mic.
         """
+        from local_operator.mobile.stt import stt_availability
+
         return {
             "sessions": await daemon.table.summaries(),
             "degraded": daemon.table.listing_degraded(),
+            "capabilities": {
+                "features": _feature_flags(),
+                "stt": await stt_availability(),
+            },
         }
 
     async def api_sessions(request: Request) -> Response:
@@ -4011,6 +4123,130 @@ def build_app(daemon: MobileDaemon):
             return JSONResponse({"error": str(exc)[:200]}, status_code=502)
         return _maybe_gzip(request, JSONResponse({"models": models}))
 
+    async def api_transcribe(request: Request) -> Response:
+        """Record-then-upload speech-to-text for the phone's voice mic.
+
+        The web records a clip and POSTs it here (multipart, the login POST's
+        parse idiom); the daemon reads availability, dispatches to the path it
+        names, and answers ``{text, provider, model, path}``. ``path`` is the
+        token that ACTUALLY ran — the web stores it as the send envelope's
+        ``input_path`` and must not re-derive it from the cached availability
+        (a TTL race would then record a path that did not run).
+
+        Refusals, and why each:
+        * 401/403 — the standard gate (``gate()``): auth and cross-origin.
+        * 413 — the byte cap. Checked against ``Content-Length`` first (the
+          honest-client fast path, with multipart-framing slack) and then
+          against the read bytes (the real bound; the header can be absent).
+        * 422 — missing/empty part, unsupported media type, or a refusal from
+          the client's own validator (prompt length, language shape).
+        * 402 — quota: Radient's own refused balance or a provider credit
+          marker, in the same sentences the desktop route uses.
+        * 502 — upstream: rejection, edge refusal, transport failure; a
+          transport failure passes the client's own text through verbatim.
+        * 503 ``stt_unavailable`` — nothing executable (defence in depth: the
+          mic is hidden in this state, so this is the race-answer).
+        * 500 — genuine internal faults only.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        declared = request.headers.get("content-length")
+        if declared is not None and declared.isdigit():
+            # Multipart framing costs a few hundred bytes; the 1 MB of slack
+            # keeps a 20 MB clip from being refused on the header while never
+            # admitting a sizeably larger one (the post-read check is the real
+            # bound).
+            if int(declared) > STT_MAX_UPLOAD_BYTES + (1 << 20):
+                return JSONResponse({"error": STT_TOO_LARGE_ERROR}, status_code=413)
+        try:
+            form = await request.form()
+        except Exception:  # noqa: BLE001 — a malformed multipart body is a 422, not a 500
+            return JSONResponse({"error": "invalid multipart body"}, status_code=422)
+        from starlette.datastructures import UploadFile as StarletteUploadFile
+
+        audio = form.get("audio")
+        if not isinstance(audio, StarletteUploadFile):
+            return JSONResponse({"error": "audio file is required"}, status_code=422)
+        try:
+            payload = await audio.read()
+        finally:
+            await audio.close()
+        if not payload:
+            return JSONResponse({"error": "audio file is empty"}, status_code=422)
+        if len(payload) > STT_MAX_UPLOAD_BYTES:
+            return JSONResponse({"error": STT_TOO_LARGE_ERROR}, status_code=413)
+        media_type = str(audio.content_type or "").split(";", 1)[0].strip().lower()
+        if media_type not in STT_MIME_ALLOWLIST:
+            return JSONResponse(
+                {"error": f"Unsupported audio format: {media_type or 'unknown'}."},
+                status_code=422,
+            )
+
+        def _optional_field(name: str) -> str | None:
+            """A form text field, or None when absent/blank (forward-compat)."""
+            value = form.get(name)
+            return value if isinstance(value, str) and value.strip() else None
+
+        from local_operator.clients._http import APIError
+        from local_operator.clients.stt import SttBackendUnavailable
+        from local_operator.mobile.stt import (
+            describe_stt_failure,
+            path_provider_label,
+            stt_availability,
+            transcribe_audio,
+        )
+
+        # Read availability HERE and hand it to the dispatch, so the answer the
+        # provider label and the dispatch both use is the SAME read (the module
+        # caches anyway; passing it makes the route's view internally coherent).
+        answer = await stt_availability()
+        try:
+            outcome = await transcribe_audio(
+                payload,
+                media_type,
+                language=_optional_field("language"),
+                prompt=_optional_field("prompt"),
+                model=_optional_field("model"),
+                availability=answer,
+            )
+        except SttBackendUnavailable:
+            # Defence in depth: availability said available a moment ago (or the
+            # caller raced a cache expiry); the fixed sentence keeps the phone's
+            # copy stable whatever the rung-level reason was.
+            return JSONResponse(
+                {
+                    "error": "Voice input isn't available on this machine.",
+                    "code": "stt_unavailable",
+                },
+                status_code=503,
+            )
+        except APIError as exc:
+            status, body = describe_stt_failure(
+                exc, provider=path_provider_label(answer.get("path"))
+            )
+            return JSONResponse(body, status_code=status)
+        except ValueError as exc:
+            # A pre-admission refusal from the client's own validators (prompt
+            # length, language shape): 422, the daemon's shape-refusal status.
+            return JSONResponse({"error": str(exc)}, status_code=422)
+        except RuntimeError as exc:
+            # A plain RuntimeError is OURS: the clients raise one only for a
+            # server-side configuration fault (no Radient key) or an unforeseen
+            # internal error; every upstream failure arrives typed (above).
+            return JSONResponse({"error": str(exc)}, status_code=500)
+        except Exception:  # noqa: BLE001 — an unforeseen fault stays a 500
+            logger.exception("mobile transcription failed unexpectedly")
+            return JSONResponse({"error": "Voice input failed unexpectedly."}, status_code=500)
+        return JSONResponse(
+            {
+                "text": outcome.text,
+                "provider": outcome.provider,
+                "model": outcome.model,
+                "path": outcome.path,
+            }
+        )
+
     # --- projects ---------------------------------------------------------
     #
     # The phone's read-write surface over the project store
@@ -4207,6 +4443,7 @@ def build_app(daemon: MobileDaemon):
         Route("/api/pair/{device_id:str}", api_pair_status),
         Route("/api/commands", api_commands),
         Route("/api/models", api_models),
+        Route("/api/transcribe", api_transcribe, methods=["POST"]),
         Route("/api/projects", api_projects),
         Route("/api/projects", api_project_create, methods=["POST"]),
         Route("/api/projects/{key:str}", api_project),
