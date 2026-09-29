@@ -2166,6 +2166,7 @@ class ServingSessionHandle(SessionHandle):
         sender: dict[str, Any],
         source: str = SOURCE_PEER,
         command_id: str = "",
+        harness_injected: bool = False,
     ) -> str:
         """Spool one message for the successor runtime, and receipt it.
 
@@ -2209,6 +2210,17 @@ class ServingSessionHandle(SessionHandle):
         from the same vehicle — a peer's message is held for the next runtime, a
         user's own prompt is queued onto it, and only the second one is the same
         admission their composer was refused a moment ago.
+
+        ``harness_injected`` is the OWNER row's structural provenance and rides
+        the row for the same reason ``wake`` does: it is what the producer knew
+        and the successor cannot re-derive. The prompt this vehicle carries may
+        be harness chrome — the goal judge's continuation is the producer — and
+        the successor replays it through the ordinary admission
+        (``process._run_owner_prompt``), so a dropped stamp minted an UNSTAMPED
+        user row there: invisible to the marker-only surfaces and painted as
+        the operator's own words on the desktop (measured on a live session: 10
+        such rows). Defaults False so every peer caller and every row an older
+        build wrote reads exactly as before.
         """
         from local_operator.session.runtime.inbox import (
             SOURCE_USER,
@@ -2236,6 +2248,7 @@ class ServingSessionHandle(SessionHandle):
                     wake=wake,
                     source=source,
                     command_id=command_id,
+                    harness_injected=harness_injected,
                 ),
             )
         except Exception:  # noqa: BLE001 — a broken spool is a refusal, not a crash
@@ -2969,6 +2982,7 @@ class ServingSessionHandle(SessionHandle):
                     sender={},
                     source=SOURCE_USER,
                     command_id=command_id,
+                    harness_injected=harness_injected,
                 )
             finally:
                 # Rejected on both outcomes, for the reason the refusal below
@@ -3014,6 +3028,7 @@ class ServingSessionHandle(SessionHandle):
                         sender={},
                         source=SOURCE_USER,
                         command_id=command_id,
+                        harness_injected=harness_injected,
                     )
                 finally:
                     # Rejected on BOTH outcomes, and for the same reason the
@@ -3809,6 +3824,7 @@ class ServingSessionHandle(SessionHandle):
         input_mode: str | None = None,
         input_path: str | None = None,
         audio: list[dict[str, str]] | list["AudioContent"] | None = None,
+        harness_injected: bool = False,
     ) -> str:
         self._check_loop_thread()
         command_id = command_id or str(uuid.uuid4())
@@ -3861,6 +3877,7 @@ class ServingSessionHandle(SessionHandle):
                     sender={},
                     source=SOURCE_USER,
                     command_id=command_id,
+                    harness_injected=harness_injected,
                 )
             finally:
                 # A spooled steer is not in this session's transcript, so its
@@ -3889,6 +3906,14 @@ class ServingSessionHandle(SessionHandle):
         # keyword it would drop.
         if "audio" in parameters:
             fields["audio"] = audio_blocks_decoded
+        # The structural stamp rides the steer for the same reason it rides a
+        # prompt: a MID-TURN delivery is one of the two ways a spooled owner
+        # prompt replays (``process._run_owner_prompt``'s steer fallback), and
+        # without this hop the replayed continuation would mint an unstamped
+        # row the marker-only surfaces paint. Probed like the two above, so a
+        # session that predates the keyword never receives it.
+        if "harness_injected" in parameters:
+            fields["harness_injected"] = harness_injected
         try:
             self._session.steer(text, blocks, **fields)
         except Exception:

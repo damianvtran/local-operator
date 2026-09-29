@@ -49908,7 +49908,14 @@ class OperatorApp(App[None]):
             logger.debug("queued-elsewhere row was already gone", exc_info=True)
 
     def _foreign_queued_rows(self, source: SessionInteraction) -> list[Any]:
-        """Spooled owner rows this surface is NOT already showing as queued."""
+        """Spooled owner rows this surface is NOT already showing as queued.
+
+        A harness continuation is EXCLUDED (``harness_injected``): it is chrome
+        no surface paints, so counting it would announce — and hold up — the
+        queued-elsewhere notice for messages nobody is waiting on. The field is
+        read defensively because rows written before it existed default to
+        False, and an old BUILD reading a new row ignores the key entirely.
+        """
         directory = self._session_directory(source)
         if directory is None:
             return []
@@ -49916,7 +49923,10 @@ class OperatorApp(App[None]):
 
         try:
             rows = [
-                line for line in peek_inbox(directory) if getattr(line, "source", "") == SOURCE_USER
+                line
+                for line in peek_inbox(directory)
+                if getattr(line, "source", "") == SOURCE_USER
+                and not getattr(line, "harness_injected", False)
             ]
         except Exception:  # a read on the paint path must never take the app down
             logger.debug("could not read the spool", exc_info=True)

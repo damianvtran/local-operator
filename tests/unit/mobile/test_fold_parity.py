@@ -488,6 +488,43 @@ def test_a_harness_injected_row_is_never_painted_as_the_users_words() -> None:
     assert _attach_rows(quoted) == []
 
 
+def test_a_goal_continuation_row_is_never_painted_as_the_users_words() -> None:
+    """The continuation FAMILY on the phone, stamped and legacy rows alike.
+
+    Same rows as the TUI's cell beside it (``test_harness_injection_replay``):
+    the judge's stamped row, and the UNSTAMPED row the spool boundary wrote for
+    a fleet window. Both folds must drop them — the recogniser is the legacy
+    half of the shared decision — while the answers they bought still render
+    and the rows stay whole.
+    """
+    from local_operator.session.goal_judge import goal_continuation_prompt
+
+    continuation = goal_continuation_prompt("Ship it")
+    stamped = Message(
+        role="user",
+        content=[TextContent(text=continuation)],
+        provider_payload={RENDERED_INJECTION_KEY: True},
+    )
+    legacy = Message.user(continuation)
+    history = [
+        Message.user("keep going please"),
+        legacy,
+        Message(role="assistant", content=[TextContent(text="the deploy is green")]),
+        stamped,
+        Message(role="assistant", content=[TextContent(text="and the tests pass")]),
+    ]
+
+    for rows in (_page_rows(history), _attach_rows(history)):
+        assert [row.kind for row in rows].count("user") == 1, rows
+        painted = " ".join(row.text for row in rows)
+        assert "Continue working toward this goal" not in painted, rows
+        assert "the deploy is green" in painted, rows
+        assert "and the tests pass" in painted, rows
+
+    # Not lost anywhere else: both rows are still whole in the history.
+    assert legacy.text == continuation and stamped.text == continuation
+
+
 def test_a_stored_notice_row_is_hidden_in_the_audit_phase_too() -> None:
     """QA round 2 Q1: the heal must not open the mirror.
 

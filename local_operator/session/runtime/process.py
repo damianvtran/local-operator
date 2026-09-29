@@ -3850,9 +3850,20 @@ async def _run_owner_prompt(handle: object, line: Any, *, seen: set[str]) -> Non
     # listens — waiting here would keep the runtime unreachable for a whole
     # wake turn. Asking for the refusal keeps the steer below the answer to a
     # busy session. Probed, as every optional seam on this path is.
+    #
+    # ``harness_injected`` is the spooled row's structural provenance, carried
+    # back to the handle that will mint the durable row: the prompt this drain
+    # replays may be harness chrome (the goal judge's continuation is the
+    # producer), and a handle that never hears it mints an UNSTAMPED user row
+    # the marker-only surfaces paint as the operator's own words. Passed
+    # explicitly even when False — that is the legacy reading of an absent
+    # field, so a pre-stamp row replays exactly as it did.
+    parameters = inspect.signature(run).parameters
     fields: dict[str, Any] = {}
-    if "wait_for_turn" in inspect.signature(run).parameters:
+    if "wait_for_turn" in parameters:
         fields["wait_for_turn"] = False
+    if "harness_injected" in parameters:
+        fields["harness_injected"] = bool(getattr(line, "harness_injected", False))
     try:
         if command_id:
             await run(line.text, command_id=command_id, **fields)
@@ -3884,11 +3895,19 @@ async def _run_owner_prompt(handle: object, line: Any, *, seen: set[str]) -> Non
         steer = getattr(handle, "steer", None)
         if not callable(steer):
             raise
+        # The steer arm replays the SAME row, so it carries the same stamp the
+        # prompt arm above does — probed for the same reason: a handle one
+        # version behind has no such keyword and must not be handed one.
+        steer_fields: dict[str, Any] = {}
+        if "harness_injected" in inspect.signature(steer).parameters:
+            steer_fields["harness_injected"] = bool(getattr(line, "harness_injected", False))
         logger.info(
             "spooled prompt %s arrived mid-turn; joining the turn in flight",
             command_id or "<no id>",
         )
-        await cast(Callable[..., Awaitable[Any]], steer)(line.text, command_id=command_id or None)
+        await cast(Callable[..., Awaitable[Any]], steer)(
+            line.text, command_id=command_id or None, **steer_fields
+        )
         if command_id:
             seen.add(command_id)
 

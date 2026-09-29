@@ -5409,6 +5409,43 @@ def test_the_skill_query_is_a_row_the_operator_wrote() -> None:
     assert _latest_user_query(transcript) == "fix the login redirect loop"
 
 
+def test_an_unstamped_continuation_is_not_the_skill_query() -> None:
+    """The chrome leg: a continuation that lost its stamp is still not a query.
+
+    The goal judge's continuation is persisted as a ``role="user"`` row, and a
+    fleet window dropped its ``harness_injected`` stamp at the spool boundary —
+    so transcripts exist holding continuation rows the stamp test cannot see.
+    Selection must not search the skills index for "Continue working toward
+    this goal: …" (it would freeze the block's task id against the harness's
+    own prose); the shared chrome recogniser is the same decision every display
+    surface makes, and the scan walks past it to the newest row the operator
+    actually wrote.
+    """
+    from local_operator.session.goal_judge import goal_continuation_prompt
+
+    continuation = goal_continuation_prompt("Ship it")
+
+    def entry(entry_id: str, text: str, payload: dict[str, Any] | None = None) -> SimpleNamespace:
+        body: dict[str, Any] = {
+            "role": "user",
+            "content": [{"type": "text", "text": text}],
+        }
+        if payload:
+            body["provider_payload"] = payload
+        return SimpleNamespace(id=entry_id, type="message", payload=body)
+
+    transcript = SimpleNamespace(
+        latest_entry=lambda _type: None,
+        latest_user_entry=lambda: entry("spooled", continuation),
+        entries=lambda: [
+            entry("mine", "fix the login redirect loop"),
+            entry("spooled", continuation),
+        ],
+    )
+
+    assert _latest_user_query(transcript) == "fix the login redirect loop"
+
+
 async def _noop_execute(*args, **kwargs):
     """A never-called execute, for a tool that only needs to be PRESENT.
 
