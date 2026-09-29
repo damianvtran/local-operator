@@ -13,8 +13,12 @@
 // the scroller keeps native scroll anchoring OFF, so the follow effect is the
 // only hand on `scrollTop` and the platform cannot double-compensate the
 // reserve's insertion (measured then: a 53px slide per rung with anchoring on,
-// 0.4px with the opt-out). The rendered geometry itself is the headless
-// captures' lane, and the round-3 mid-history scene measures exactly that.
+// 0.4px with the opt-out). Round 4 is why that hand has to cover MORE than the
+// reserve: with anchoring off, the window's own row removal at the cap and the
+// older-page prepend are the same hand's job too — the follow tracks every row
+// and holds the reader's (its arithmetic is pinned in `lib/scroll-follow.test`,
+// the rendered geometry in the headless scenes). The rendered geometry itself
+// is the headless captures' lane, and the round-3 mid-history scene measures exactly that.
 import { cleanup, render } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Transcript } from "./components/transcript";
