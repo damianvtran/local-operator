@@ -224,7 +224,9 @@ _CUSTOM_SNAPSHOT_CACHE: Any = None
 
 
 class _StaleProjection(Exception):
-    """A fenced owner frame with no retained payload to republish."""
+    """A capture that must not be re-inserted: a fenced owner frame with no
+    retained payload to republish, or a fold that predates the display generation
+    the follower last cleared on (see ``capture_subagent_details``)."""
 
 
 @dataclass
@@ -1943,6 +1945,15 @@ class MobileDaemon:
         # The daemon's display-settings subscription (see
         # :meth:`watch_display_settings`); ``None`` until attached.
         self._display_watch_unsubscribe: Callable[[], None] | None = None
+        # The display-state generation: bumped by the follower's clear for
+        # every ``display.*`` change a running daemon sees (see
+        # ``watch_display_settings``). A fold site reads it BEFORE its fold
+        # hops off-loop and hands it to ``capture_subagent_details``; a capture
+        # stamped older than the current value is refused, because a fold that
+        # straddled the clear would otherwise re-insert the very pre-flip
+        # payload the clear just dropped (QA round 3, Q2). Loop-thread only,
+        # like every ``session_projections`` mutation.
+        self.display_generation = 0
 
     def watch_display_settings(self) -> None:
         """Make this daemon's folds follow ``display.*`` writes from other processes.
@@ -2006,6 +2017,12 @@ class MobileDaemon:
                 # they are ordering, not payload, and they are what keeps an
                 # open browser's observed epoch monotonic across the flip.
                 self.session_projections.clear()
+                # 3. Stamp the drop: a fold already in flight began before this
+                # clear (its worker hop left the loop free), so its capture must
+                # not land as the retained payload — it carries the pre-flip
+                # frame the clear just dropped (QA round 3, Q2; the stamp check
+                # is in ``capture_subagent_details``).
+                self.display_generation += 1
 
             self._display_watch_unsubscribe = follow_display_settings(
                 watcher, also=_drop_display_derived_state
@@ -2038,6 +2055,7 @@ class MobileDaemon:
         *,
         record: SessionRecord | None = None,
         terminal: bool = False,
+        display_generation: int | None = None,
     ) -> SessionProjection:
         """Cache full descendant state and return a lightweight aggregate copy.
 
@@ -2045,8 +2063,23 @@ class MobileDaemon:
         the process birth identity: PID alone can be reused, while the key is
         regenerated for every registrant. The birth timestamp orders replacements;
         a bounded retired set fences a late predecessor even on a clock collision.
+
+        ``display_generation`` is the stamp a fold site read BEFORE its fold
+        hopped off-loop (:meth:`_capture_durable_projection`). ``None`` means the
+        projection was computed on the loop (a live frame or a synchronous fold),
+        where no display clear can have interleaved.
         """
         session_id = projection.session_id
+        if display_generation is not None and display_generation != self.display_generation:
+            # The fold this capture was built from began before the follower's
+            # last clear: re-inserting it here — or letting the missing-payload
+            # branch below re-materialize it — would resurrect the pre-flip
+            # payload the clear just dropped, and a dead retained route would
+            # then re-serve it on every reconnect (QA round 3, Q2). The fold
+            # site recomputes for the current state where that is honest; a
+            # recompute that raced ANOTHER clear lands here too and serves no
+            # frame rather than retaining the stale payload.
+            raise _StaleProjection
         previous_projection = self.session_projections.get(session_id)
         state = self._projection_generations.get(session_id)
         retained_recapture = projection is previous_projection
@@ -2217,6 +2250,57 @@ class MobileDaemon:
             summary_row.todos = []
         return summary
 
+    async def _capture_durable_projection(
+        self,
+        session_id: str,
+        *,
+        record: SessionRecord | None = None,
+        terminal: bool = False,
+    ) -> SessionProjection | None:
+        """Fold ``session_id`` from disk, then capture it for a phone route.
+
+        THE STAMPED fold site for the hops that leave the loop. A fold runs in a
+        worker thread (``asyncio.to_thread``), so the loop is free while it runs
+        and the display follower's clear (``watch_display_settings``) can land
+        mid-fold. Without the stamp, the resumed fold is captured against the
+        cleared state and the missing-payload branch re-materializes exactly the
+        pre-flip payload the clear just dropped; a dead retained route then
+        re-served that frame on every reconnect (QA round 3, Q2). The generation
+        is read BEFORE the fold starts and handed to the capture; a fold that
+        straddled a clear is recomputed ONCE for the state the flip established.
+        A recompute that straddles another clear is refused by the capture's own
+        stamp check and this returns ``None`` — the caller serves no frame
+        rather than retaining a payload the follower has already dropped.
+
+        Extra folds are only paid by a fold that actually raced a display write;
+        no lock or new cache. Loop-thread only: every caller runs on the loop,
+        and the generation is bumped on the loop (``config_watch``'s listener
+        contract).
+        """
+        generation = self.display_generation
+        projection = await asyncio.to_thread(_durable_projection, session_id)
+        if projection is not None and self.display_generation != generation:
+            generation = self.display_generation
+            projection = await asyncio.to_thread(_durable_projection, session_id)
+        if projection is not None:
+            try:
+                projection = self.capture_subagent_details(
+                    projection,
+                    record=record,
+                    terminal=terminal,
+                    display_generation=generation,
+                )
+            except _StaleProjection:
+                if generation == self.display_generation:
+                    # An owner-fence refusal (a predecessor frame with no
+                    # retained payload): exactly the pre-change semantics.
+                    raise
+                # The recompute straddled another display clear: the capture
+                # refused it. Serve no frame; the next fold reads the state
+                # the latest clear left behind.
+                projection = None
+        return projection
+
     # -- scanning --------------------------------------------------------------
 
     async def scan_loop(self) -> None:
@@ -2248,16 +2332,16 @@ class MobileDaemon:
             )
             for session_id, queues in watched:
                 entry = _entry_for_session(self, session_id)
+                # A receipt changes no transcript generation. Reuse the relay's
+                # existing epoch/fencing before a cold repaint — through the
+                # stamped capture, so a display clear that raced the fold is
+                # recomputed (never re-inserted pre-flip; QA round 3, Q2).
                 projection = (
                     entry.projection
                     if entry is not None
-                    else await asyncio.to_thread(_durable_projection, session_id)
+                    else await self._capture_durable_projection(session_id)
                 )
                 if projection is not None:
-                    if entry is None:
-                        # A receipt changes no transcript generation. Reuse the
-                        # relay's existing epoch/fencing before a cold repaint.
-                        projection = self.capture_subagent_details(projection)
                     projection.attention = attention_states.get(
                         f"session/{session_id}", projection.attention
                     )
@@ -2342,11 +2426,10 @@ class MobileDaemon:
                         record.pid,
                     )
                 self.table.provisional_active.discard(record.session_id)
-                projection = await asyncio.to_thread(_durable_projection, record.session_id)
+                projection = await self._capture_durable_projection(
+                    record.session_id, record=record, terminal=True
+                )
                 if projection is not None:
-                    projection = self.capture_subagent_details(
-                        projection, record=record, terminal=True
-                    )
                     for queue in self.table.session_subscribers.get(record.session_id, set()):
                         # Serialize ONCE per repaint: the QueueFull retry below
                         # re-puts the same frame, and capping is a json.dumps.
@@ -2384,11 +2467,10 @@ class MobileDaemon:
                     changed = True
                     session_id = entry.record.session_id
                     self.table.provisional_active.discard(session_id)
-                    projection = await asyncio.to_thread(_durable_projection, session_id)
+                    projection = await self._capture_durable_projection(
+                        session_id, record=entry.record, terminal=True
+                    )
                     if projection is not None:
-                        projection = self.capture_subagent_details(
-                            projection, record=entry.record, terminal=True
-                        )
                         for queue in self.table.session_subscribers.get(session_id, set()):
                             frame = _projection_frame(projection)
                             try:
@@ -2507,9 +2589,8 @@ class MobileDaemon:
                 await self._scan_once()
                 if _entry_for_session(self, session_id) is None:
                     self.table.provisional_active.discard(session_id)
-                    projection = await asyncio.to_thread(_durable_projection, session_id)
+                    projection = await self._capture_durable_projection(session_id, terminal=True)
                     if projection is not None:
-                        projection = self.capture_subagent_details(projection, terminal=True)
                         for queue in self.table.session_subscribers.get(session_id, set()):
                             try:
                                 queue.put_nowait(_projection_frame(projection))
@@ -3253,16 +3334,13 @@ def build_app(daemon: MobileDaemon):
                     daemon.notify_watch_transition(live.record.pid, watching=True)
                 projection = live.projection if live is not None else None
                 if projection is None:
-                    projection = await asyncio.to_thread(_durable_projection, session_id)
-                    if projection is not None:
-                        try:
-                            projection = daemon.capture_subagent_details(projection)
-                        except _StaleProjection:
-                            # A subscribed but payload-less route whose owner is
-                            # mid-replacement: skip the seed frame rather than
-                            # tearing down the handshake. The next live repaint or
-                            # keepalive carries the view.
-                            projection = None
+                    # Stamped fold: a clear that lands while the fold is in
+                    # flight makes it stale, and the capture then recomputes
+                    # once (or refuses) rather than re-serving a pre-flip
+                    # payload on every reconnect. A refusal just skips the seed
+                    # frame — the next live repaint or keepalive carries the
+                    # view rather than tearing down the handshake.
+                    projection = await daemon._capture_durable_projection(session_id)
                 if projection is not None:
                     yield _sse("projection", _projection_frame(projection))
                 while True:
@@ -3460,15 +3538,11 @@ def build_app(daemon: MobileDaemon):
         job_id = str(request.path_params["job_id"])
         detail = daemon.subagent_details.get((session_id, job_id))
         if detail is None:
-            projection = await asyncio.to_thread(_durable_projection, session_id)
+            projection = await daemon._capture_durable_projection(session_id)
             if projection is not None:
-                try:
-                    daemon.capture_subagent_details(projection)
-                except _StaleProjection:
-                    # Reconstruction races a live owner replacement: the fence is
-                    # correct, but a still-durable route must not 500. The next
-                    # request rebuilds once the ledger settles.
-                    pass
+                # A refused capture (a display clear raced the fold) still must
+                # not 500: fall through to the durable 404; the next request
+                # rebuilds once the state settles.
                 detail = daemon.subagent_details.get((session_id, job_id))
         if detail is None:
             return JSONResponse({"error": "unknown subagent"}, status_code=404)
@@ -3488,14 +3562,10 @@ def build_app(daemon: MobileDaemon):
         job_id = str(request.path_params["job_id"])
         detail = daemon.subagent_details.get((session_id, job_id))
         if detail is None:
-            projection = await asyncio.to_thread(_durable_projection, session_id)
+            projection = await daemon._capture_durable_projection(session_id)
             if projection is not None:
-                try:
-                    daemon.capture_subagent_details(projection)
-                except _StaleProjection:
-                    # See api_subagent_detail: a fenced reconstruction is not an
-                    # error; fall through to the durable 404 rather than a 500.
-                    pass
+                # See api_subagent_detail: a refused capture is not an error;
+                # fall through to the durable 404 rather than a 500.
                 detail = daemon.subagent_details.get((session_id, job_id))
         child_session_id = detail.get("session_id") if detail else None
         if not isinstance(child_session_id, str) or not child_session_id:
