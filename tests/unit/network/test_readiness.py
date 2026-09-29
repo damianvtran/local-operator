@@ -357,6 +357,31 @@ def test_a_missing_store_is_read_without_creating_one(
     assert not (ambient / "auth.db").exists()
 
 
+def test_an_unopenable_store_answers_could_not_be_read(tmp_path: Path) -> None:
+    """An ``auth.db`` that exists but cannot be opened is "could not be read",
+    never a crash (convergence round 2, MAJOR class): every open keeps
+    ``_open_store``'s absence answer (definite False / no rows) for an ABSENT
+    store, and answers the tri-state ``None`` for one that fails to open — the
+    same answer a store that fails mid-read already gets.
+    """
+    (tmp_path / "mcp.json").write_text(
+        json.dumps(
+            {"mcpServers": {"notion": {"type": "http", "url": "https://mcp.notion.com/mcp"}}}
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "auth.db").write_bytes(b"not a database")
+    fact = readiness.mcp_servers_fact(tmp_path)
+    assert fact["servers"][0]["has_row"] is None
+    assert readiness.has_local_provider_credential(tmp_path, "openai") is None
+    viewer = readiness.ViewerFacts(tmp_path)
+    try:
+        assert viewer.holds_mcp_login("https://mcp.notion.com/mcp") is None
+        assert viewer.provider_rows("openai") is None
+    finally:
+        viewer.close()
+
+
 def test_mcp_servers_row_names_the_missing_file(tmp_path: Path) -> None:
     fact = readiness.mcp_servers_fact(tmp_path / "none")
     row = readiness.mcp_servers_row(_member(), _facts(mcp=fact), peer_label="cloud-node-1")

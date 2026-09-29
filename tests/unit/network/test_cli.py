@@ -1653,3 +1653,37 @@ def test_a_refused_share_does_not_create_a_store(
     # (3) The provider read both halves of the verb share.
     assert net_cli._provider_rows("openai", root) == []  # noqa: SLF001
     assert not (root / "auth.db").exists(), "the provider read wrote a store"
+
+
+def test_a_damaged_store_degrades_instead_of_raising(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A store that EXISTS but cannot be opened must not raise out of the share
+    path (convergence round 2, MAJOR): ``AuthStore`` connects eagerly, so the
+    open-first construction has to answer ``None`` for an unopenable database and
+    let every caller render its own degrade (default shape / refusal / no rows) —
+    ``network.cli.main`` re-raises non-MeshRefusals, so a leaked DatabaseError
+    lands ``credential share`` on the stack-trace panel where base degraded.
+    """
+    import os
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    database = root / "auth.db"
+    for kind in ("corrupt", "locked"):
+        if database.exists():
+            os.chmod(database, 0o600)
+        if kind == "corrupt":
+            database.write_bytes(b"not a database")
+        else:
+            database.write_bytes(b"")
+            os.chmod(database, 0o000)
+        try:
+            shape = net_cli._credential_shape(f"mcp:{NOTION_URL}")  # noqa: SLF001
+            assert shape == ("mcp-rotating", "mcp-oauth", ""), kind
+            with pytest.raises(types.MeshRefusal) as refusal:
+                net_cli._require_local_credential(f"mcp:{NOTION_URL}", "mcp-oauth")  # noqa: SLF001
+            assert "no MCP login" in refusal.value.sentence, kind
+            assert net_cli._provider_rows("openai", root) == [], kind  # noqa: SLF001
+        finally:
+            if database.exists():
+                os.chmod(database, 0o600)
