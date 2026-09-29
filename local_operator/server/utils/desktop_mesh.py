@@ -211,6 +211,14 @@ def peer_catalogue(root: Path | None = None) -> dict[str, Any]:
         seen = _as_float(entry.get("last_seen_at"))
         current = collapsed.get(device_id)
         if current is None:
+            # THE VERSION LINE IS FORWARDED VERBATIM, both keys present on every
+            # row (the both-values rule `reachable` follows, §2.6): `net_peer_ls`
+            # computed them from the link its own probe already made, and this
+            # route only forwards what it read. An empty `{}`/`[]` is "not known"
+            # — an older relay, or a peer that did not answer — and must survive
+            # as that, never be filled in with a default here.
+            build = entry.get("build")
+            capabilities = entry.get("capabilities")
             collapsed[device_id] = {
                 "device_id": device_id,
                 "name": str(entry.get("name") or ""),
@@ -224,6 +232,8 @@ def peer_catalogue(root: Path | None = None) -> dict[str, Any]:
                 "last_seen_at": seen,
                 "session_count": counts.get(device_id, 0),
                 "rtt_ms": RTT_MS,
+                "build": dict(build) if isinstance(build, dict) else {},
+                "capabilities": list(capabilities) if isinstance(capabilities, list) else [],
             }
             continue
         if reachable and not current["reachable"]:
@@ -236,6 +246,13 @@ def peer_catalogue(root: Path | None = None) -> dict[str, Any]:
             current["unreachable_reason"] = peer_reason_words(str(entry.get("reason") or ""))
         if not current["name"]:
             current["name"] = str(entry.get("name") or "")
+        # Same rule for the version line: the first row that KNOWS wins, so a
+        # device reachable in one network and dark in another still reports its
+        # stamp rather than whichever membership happened to be collapsed first.
+        if not current["build"] and isinstance(entry.get("build"), dict):
+            current["build"] = dict(entry["build"])
+        if not current["capabilities"] and isinstance(entry.get("capabilities"), list):
+            current["capabilities"] = list(entry["capabilities"])
         if seen is not None and (current["last_seen_at"] is None or seen > current["last_seen_at"]):
             current["last_seen_at"] = seen
 

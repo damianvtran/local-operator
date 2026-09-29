@@ -312,7 +312,14 @@ SLOW_REPLY_MARGIN_S = 5.0
 #: slice (§1.1: archive/delete run the owner's own implementation) even though
 #: the refusal it answers with today lives in this module.
 SLICE_PEER_OPS: frozenset[str] = frozenset(
-    {"net_session_move", "net_sync", "net_broker", "net_session_lifecycle", "net_definitions"}
+    {
+        "net_session_move",
+        "net_sync",
+        "net_broker",
+        "net_session_lifecycle",
+        "net_definitions",
+        "net_readiness",
+    }
 )
 
 #: The LOCAL control ops a slice module may register (see ``types.LOCAL_OPS``,
@@ -326,6 +333,7 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
         "credential_report",
         "credential_placement",
         "definitions_sync",
+        "peer_readiness",
     }
 )
 
@@ -338,6 +346,7 @@ SLICE_MODULES: tuple[str, ...] = (
     "local_operator.network.sync",
     "local_operator.network.credentials",
     "local_operator.network.definitions",
+    "local_operator.network.readiness",
 )
 
 #: Which link, if any, THIS thread is currently serving a request for.
@@ -2954,6 +2963,13 @@ class PeerLink:
         self.epoch = result.epoch
         self.phase: LinkPhase = result.phase
         self.capabilities = frozenset(result.peer_capabilities)
+        # The PEER'S build stamp, kept beside its capabilities because the two
+        # travel together in the handshake (hello/challenge, inside the
+        # transcript the auth MAC covers) and are read together by
+        # ``peer_status``: a stale build is how a peer comes to lack a
+        # capability this device expects. An old peer sends none and this is
+        # `{}` — "not known", never a default that would read as parity.
+        self.peer_build: dict[str, Any] = dict(result.peer_build or {})
         self.peer_addr = ""
         self.opened_at = time.time()
         self.last_frame_at = time.time()
@@ -9344,6 +9360,18 @@ class RelayServer:
                         "endpoints": list(member.endpoints),
                         "last_seen_at": member.last_seen_at,
                         "suspect": member.suspect,
+                        # THE UI'S VERSION LINE (mesh-ui; slice 1 of the mesh
+                        # remote-offload workstream). Both keys are present with
+                        # both values on EVERY row — an absent key is not a claim
+                        # the row store can carry, and an absent VALUE must read
+                        # as "not known" (an older peer, or no link this pass),
+                        # never as a default: `{}` / `[]` here, a real stamp and a
+                        # real list once a probe answered. Cheap by construction:
+                        # the link is the one the probe above already made, so
+                        # these two reads add no dial — the row's liveness is
+                        # unchanged.
+                        "build": dict(link.peer_build) if link is not None else {},
+                        "capabilities": sorted(link.capabilities) if link is not None else [],
                     }
                 )
         return peers
