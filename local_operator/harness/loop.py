@@ -3538,7 +3538,8 @@ class AgentLoop:
                         )
                     }
                 )
-            return await tool.execute(call.id, item.args, signal, on_update, execution_context)
+            result = await tool.execute(call.id, item.args, signal, on_update, execution_context)
+            return await self._apply_post_tool_hooks(config, tool.name, item.args, call.id, result)
         except asyncio.CancelledError:
             # A CANCELLED call's result never reaches ``_append_results``, so the
             # two records written just above would otherwise be retained for the
@@ -3587,6 +3588,50 @@ class AgentLoop:
                 is_error=True,
                 content=[TextContent(text=f"Tool raised: {exc}")],
             )
+
+    @staticmethod
+    async def _apply_post_tool_hooks(
+        config: LoopConfig,
+        tool_name: str,
+        args: Mapping[str, Any],
+        call_id: str,
+        result: ToolResult,
+    ) -> ToolResult:
+        """Append forwarded ``PostToolUse`` hook context to a real tool result.
+
+        Only results a tool actually returned reach here: synthetic results
+        (denied, aborted, skipped, unknown tool) never ran, and Claude Code
+        does not fire the event for them either.
+        """
+        hook = config.post_tool_hooks
+        if hook is None:
+            return result
+        try:
+            notes = await hook(tool_name, args, call_id, result)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a hook must never break a turn
+            logger.warning("post-tool hooks raised for %s", tool_name, exc_info=True)
+            return result
+        if not notes:
+            return result
+        # The notes may come from either event; the caller knows which one, so
+        # the tag reports it rather than labelling a failure note PostToolUse.
+        from local_operator.hook_forwarding import (
+            POST_TOOL_USE,
+            POST_TOOL_USE_FAILURE,
+            format_notes,
+        )
+
+        event = POST_TOOL_USE_FAILURE if result.is_error else POST_TOOL_USE
+        return result.model_copy(
+            update={
+                "content": [
+                    *result.content,
+                    TextContent(text="\n\n" + format_notes(notes, event)),
+                ]
+            }
+        )
 
     async def _execute_batch(
         self,

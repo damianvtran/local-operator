@@ -45,6 +45,10 @@ def _consumer_defaults() -> dict[str, object]:
     from local_operator.compaction.thresholds import CompactionSettings
     from local_operator.harness.jobs import DEFAULT_MAX_RUNNING_JOBS
     from local_operator.harness.subagent import DEFAULT_MODEL_CHOICE
+    from local_operator.hook_forwarding import (
+        FORWARD_CLAUDE_DEFAULT,
+        FORWARD_CODEX_DEFAULT,
+    )
     from local_operator.memory_guard import (
         BASH_MEMORY_ENABLED_DEFAULT,
         BASH_MEMORY_LIMIT_MB_DEFAULT,
@@ -147,6 +151,8 @@ def _consumer_defaults() -> dict[str, object]:
         # Empty means "auto-resolve" (bash on PATH, else /bin/sh) rather than
         # an interpreter, so the consumer's constant is the empty string too.
         "bash.shell": BASH_SHELL_DEFAULT,
+        "hooks.forward_claude": FORWARD_CLAUDE_DEFAULT,
+        "hooks.forward_codex": FORWARD_CODEX_DEFAULT,
         # The four memory_guard keys. The consumer constants live next to the
         # reader in memory_guard.py, so this mapping is what stops the registry
         # default and the code default drifting.
