@@ -1045,30 +1045,37 @@ def _pair_settled(
     finished in 70 ms.
 
     THE PREDICATE IS THE PAIRING LINK'S WHOLE LIFECYCLE, because a shorter one was
-    measured to miss a variant. Waiting for the link to merely be ABSENT passes when
-    the accepting thread has not registered it yet (the joiner returns on its
-    confirmation frame, before ``register_link`` runs), and the link then arrives
-    and dies under the cell's first op anyway. The ``link_closed`` row cannot be
-    early: ``close()`` records it AFTER ``_closed`` is set, after the table entry
-    is popped and after the identity claim is released — the link's end, whatever
-    lagged. ``tail`` flushes first, so the row is visible the moment it is written.
+    measured to miss two variants. Waiting for the link to merely be ABSENT passes
+    when the accepting thread has not registered it yet (the joiner returns on its
+    confirmation frame, before ``register_link`` runs), and the link then arrives and
+    dies under the cell's first op anyway. Waiting for ANY ``link_closed`` row passes
+    on a SHORTER-LIVED link's row (pairing leaves the member pull and the definitions
+    cadence behind, and their rows arrive first). And a row is not enough on its own
+    even when it names the joiner: the BYE path records one BEFORE the close
+    (``PeerLink._handle`` calls ``audit_link(self, \"link_closed\")`` and only then
+    ``close()``), so matching it would return while the link was still fully alive.
+
+    So the row has to be the one ``close()``'s own ``link_closed`` writes: the
+    ``actor`` names the joiner, the ``seq`` is past a baseline taken before the
+    pairing (which is what keeps a second pairing in the same cell honest), and the
+    detail carries the close's ``frames_in``/``frames_out`` — the bye-path row is
+    ``{"cause": ...}`` and no more, which is what separates the two one-line apart.
     """
-    record = _pair(devices, monkeypatch, role=role, ttl_s=ttl_s, admit=admit, settings=settings)
     server_a, server_b = devices[0], devices[1]
     joiner = server_b.identity.device_id
+    already = server_a.audit.recorded_through
+    record = _pair(devices, monkeypatch, role=role, ttl_s=ttl_s, admit=admit, settings=settings)
 
     def _join_link_has_closed() -> bool:
-        # THE ROW MUST BE THE JOIN LINK'S, not merely "a link closed": pairing leaves
-        # other short-lived links behind (the member pull, the definitions cadence), and
-        # their ``link_closed`` rows arrive FIRST. A predicate that accepted any of them
-        # returned while the join link was still unregistered — measured as the one
-        # residual failure of the first cut of this helper. ``link_closed`` carries the
-        # PEER as its ``actor`` (relay.link_closed records ``actor=link.device_id``), so
-        # naming the joiner is what makes the wait about the right link.
-        return any(
-            str(row.get("event")) == "link_closed" and str(row.get("actor")) == joiner
-            for row in server_a.audit.tail()
-        )
+        for row in server_a.audit.tail():
+            if str(row.get("event")) != "link_closed" or str(row.get("actor")) != joiner:
+                continue
+            if int(row.get("seq") or 0) <= already:
+                continue
+            detail = row.get("detail")
+            if isinstance(detail, dict) and "frames_in" in detail:
+                return True
+        return False
 
     assert net_fixtures.wait_for(
         _join_link_has_closed
