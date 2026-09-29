@@ -5525,6 +5525,16 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
                         f"  server {refused.get('name')!r}: "
                         f"{refused.get('reason') or 'refused'}"
                     )
+            # THE SENDER'S OWN HONESTY: a row the shape table kept OFF the wire is
+            # named here, so "my GitLab server is not on the pod" has an answer on
+            # the side that can act on it (`shape` is the shape table's label, not
+            # a value — the whole point is that the value never left).
+            for withheld in item.get("withheld") or []:
+                if isinstance(withheld, dict):
+                    lines.append(
+                        f"  withheld server {withheld.get('name')!r}: "
+                        f"looks like a {withheld.get('shape') or 'credential'}"
+                    )
         return _emit(
             args,
             {"ok": bool(detail.get("ok")), "peers": rows},
