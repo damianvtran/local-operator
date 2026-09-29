@@ -48,7 +48,7 @@ from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
-from local_operator.resume import UNNAMED_DEVICE, peer_reason_words
+from local_operator.resume import UNNAMED_DEVICE, doctor_detail_words, peer_reason_words
 from local_operator.tui.network_cli import LISTING_TIMEOUT_S, NetworkRun, run_network
 from local_operator.tui.widgets.aside_panel import ASIDE_COPY_KEY
 
@@ -257,7 +257,7 @@ def _cut_to_cells(text: str, budget: int) -> str:
     return text
 
 
-def _hanging_row(lead: str, value: str, width: int) -> str:
+def _hanging_row(lead: str, value: str, width: int, cont: str | None = None) -> str:
     """A prose row whose WRAP keeps the row's own indent (UX round 1, U5).
 
     The body is ONE ``Text`` and the wrap happens in Rich at the widget's edge,
@@ -284,7 +284,15 @@ def _hanging_row(lead: str, value: str, width: int) -> str:
     body 38 at 50x18, measured). A row that stops exactly at ``width`` is then
     re-wrapped by Rich at the edge — the defect this helper exists to remove, at
     the one size where it would come back.
+
+    ``cont`` IS THE CONTINUATION'S LEAD, defaulting to ``lead``. It exists for
+    LABELLED rows: ``lead`` is usually an indent (``"  "``), and repeating it IS
+    the indent — but a label lead like ``"  repair: "`` repeated turns one wrapped
+    notice into two rows of the same kind, a sentence fragment behind a second
+    label (design round 1, D1). Pass the label's own cell count of spaces; the
+    wrap width stays ``lead``'s, so keep the two equal.
     """
+    indent = lead if cont is None else cont
     available = max(1, width - cell_len(lead) - _SCROLLBAR_RESERVE_CELLS)
     lines: list[str] = []
     current = ""
@@ -296,7 +304,7 @@ def _hanging_row(lead: str, value: str, width: int) -> str:
         lines.append(current)
         current = word
     lines.append(current)
-    return "\n".join(lead + line for line in lines)
+    return "\n".join((lead if index == 0 else indent) + line for index, line in enumerate(lines))
 
 
 def _indented_value(prefix: str, value: str, width: int) -> str:
@@ -420,6 +428,11 @@ class NetworkScreen(ModalScreen[None]):
         self.relay: NetworkRun | None = None
         self.peers_run: NetworkRun | None = None
         self.status_run: NetworkRun | None = None
+        #: The ``doctor`` receipt the same worker fetches, for the owner-side repair
+        #: notice it may carry (``credentials/repair.py``): a separate slot because
+        #: the body reads exactly one thing from it, and a refusal here must leave
+        #: the other three answers untouched.
+        self.doctor_run: NetworkRun | None = None
         #: The selected network's member table, filled by a second worker after
         #: ``enter``. Keyed by network id so a late answer for a network the user
         #: has moved off cannot be painted under the wrong header.
@@ -481,11 +494,25 @@ class NetworkScreen(ModalScreen[None]):
         if self.presentation_cancelled and self.is_mounted and self.app.screen is self:
             self.dismiss(None)
 
-    def set_relay(self, run: NetworkRun, peers: NetworkRun, status: NetworkRun) -> None:
-        """Publish the worker's answer, while this presentation is still owned."""
+    def set_relay(
+        self,
+        run: NetworkRun,
+        peers: NetworkRun,
+        status: NetworkRun,
+        *,
+        doctor: NetworkRun | None = None,
+    ) -> None:
+        """Publish the worker's answer, while this presentation is still owned.
+
+        ``doctor`` is optional so a manual republish (a test, or a caller holding
+        only the three) leaves any earlier doctor receipt in place rather than
+        clearing it — a state with no new answer must not erase the notice it was.
+        """
         if self.presentation_cancelled:
             return
         self.relay, self.peers_run, self.status_run = run, peers, status
+        if doctor is not None:
+            self.doctor_run = doctor
         self._repaint()
 
     def set_detail(self, network_id: str, payload: dict[str, Any] | None) -> None:
@@ -498,13 +525,16 @@ class NetworkScreen(ModalScreen[None]):
     # -- workers ------------------------------------------------------------
 
     async def _fill(self) -> None:
-        """Ask the relay for its own view: three calls, each in its own thread.
+        """Ask the relay for its own view: four calls, each in its own thread.
 
         Sequential rather than gathered: the relay serialises its own control
-        socket, and three concurrent listings would each pay the peer probe
+        socket, and four concurrent listings would each pay the peer probe
         budget while queueing behind one another. The timeout is the CLI's own
         listing budget plus slack, stated in ``network_cli`` rather than invented
-        here.
+        here. ``doctor`` rides that same listing budget rather than the quick
+        one: like the other three it dials every endpoint, and it is what carries
+        the owner-side ``credential_repair`` rows this panel paints — answered
+        from this device's own records even when no relay does.
         """
         # Explicit keywords rather than a ``dict(**listing)`` splat: the splat
         # widened every value to one union and pyright caught the timeout being
@@ -519,7 +549,10 @@ class NetworkScreen(ModalScreen[None]):
         status = await asyncio.to_thread(
             run_network, ["status"], timeout=LISTING_TIMEOUT_S, json_output=True
         )
-        self.set_relay(run, peers, status)
+        doctor = await asyncio.to_thread(
+            run_network, ["doctor"], timeout=LISTING_TIMEOUT_S, json_output=True
+        )
+        self.set_relay(run, peers, status, doctor=doctor)
 
     async def _fill_detail(self, network_id: str) -> None:
         run = await asyncio.to_thread(
@@ -536,6 +569,7 @@ class NetworkScreen(ModalScreen[None]):
         if self.presentation_cancelled or self not in self.app.screen_stack:
             return
         self.relay = self.peers_run = self.status_run = None
+        self.doctor_run = None
         self._repaint()
         self.run_worker(self._fill(), thread=False, group="network", exit_on_error=False)
 
@@ -973,6 +1007,14 @@ class NetworkScreen(ModalScreen[None]):
             if self.local.device_id:
                 body.append(f"  {short_id(self.local.device_id)}", style="dim")
             body.append("\n")
+        # THE OWNER-SIDE REPAIR NOTICE (decision memo item D), and ONLY when one is
+        # open: this row is the difference between "a peer's session silently fails
+        # to borrow" and "run /mcp login here", and the frame without it is
+        # byte-identical to the one before this change — a state with no news does
+        # not pay a row for it (the rule the audit row's move to the title block was
+        # built around, design round 4 D46).
+        for repair in self._repair_lines(width):
+            body.append(repair + "\n", style="yellow")
         # THE RELAY'S STANDING HAS ONE VOICE, and once the worker has answered it
         # is the Relay section's: that half read the live process, this half read
         # a record on disk, and printing both put "relay: not running" five lines
@@ -990,6 +1032,37 @@ class NetworkScreen(ModalScreen[None]):
         # So the pending sentence here is the SAME pending sentence there, and the
         # verdict is said once, by the section that measured it.
         body.append("  relay: checking…\n", style="dim")
+
+    def _repair_lines(self, width: int) -> list[str]:
+        """The open credential-repair notices, in the doctor's own words.
+
+        Read from the ``doctor`` receipt the worker fetched — its
+        ``credential_repair`` checks — and rendered through
+        :func:`doctor_detail_words`, the SAME gloss the CLI's doctor rows and the
+        agent digest pass that field through: prose comes back unchanged, a machine
+        token would render as words rather than leak raw, and the panel cannot
+        drift from the CLI. The sentence wraps through ``_hanging_row`` with an
+        indent-only continuation (``cont`` = the lead's own cell count): repeating
+        ``repair: `` on the wrap made one notice read as two rows (design round 1,
+        D1). An absent receipt, or one carrying no such check, paints nothing.
+        """
+        payload = self.doctor_run.payload() if self.doctor_run is not None else None
+        if not isinstance(payload, dict):
+            return []
+        rows: list[str] = []
+        for check in payload.get("checks") or []:
+            if isinstance(check, dict) and check.get("check") == "credential_repair":
+                detail = doctor_detail_words(str(check.get("detail") or "")).rstrip()
+                if detail:
+                    rows.append(
+                        _hanging_row(
+                            "  repair: ",
+                            detail,
+                            width,
+                            cont=" " * cell_len("  repair: "),
+                        )
+                    )
+        return rows
 
     @staticmethod
     def _short(network_id: str) -> str:

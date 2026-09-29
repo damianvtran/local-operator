@@ -472,6 +472,12 @@ broken login, and re-authenticating does not change either.
 `lop network doctor --json` on the borrower is what names the endpoint and why it
 did not answer.
 
+An MCP login that has died on the owner is refused `interactive_required`, and
+the fix is an interactive sign-in THERE — the one repair a borrower cannot run
+for the owner. The owner's own surfaces carry the notice: `lop network doctor
+--json` (and the `/network` panel) shows a `credential_repair` row naming the
+login to run; it clears by itself once the next borrow succeeds.
+
 Revocation is not instant, and an incident response must not assume it is.
 `credential revoke` refuses new borrows at once; a grant already lent is dropped
 by the borrower within `network.credentials.grant_ttl_s` (900 s by default); and

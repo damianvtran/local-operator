@@ -1,6 +1,7 @@
 """Capture the ``/network`` panel in BOTH of its phases, from one boot.
 
-Usage: python scripts/network_shot.py OUTDIR [100x30] [steady|lag|degraded|unanswered|unpaired]
+Usage: python scripts/network_shot.py OUTDIR [100x30]
+       [steady|lag|degraded|unanswered|unpaired|repair]
 
 Writes ``network-loading.svg`` (+ ``.geometry.json``) and ``network-loaded.svg``
 (+ ``.geometry.json``) into ``OUTDIR``; a non-steady ``AUDIT`` state appends its
@@ -10,6 +11,12 @@ row at all (the Relay block has no room for one that carries no news), and ``lag
 ``degraded`` and ``unanswered`` are the three the panel must render — the last of them
 being the ``SIGSTOP`` case, where the payload carries no audit key at all and silence
 would be indistinguishable from a healthy writer.
+
+The sixth, ``repair``, is the credential broker's owner-side notice (decision memo
+item D): the ``steady`` audit state plus one ``credential_repair`` check in the
+``doctor`` receipt the panel's worker also fetches — so the loaded frame shows the
+repair row ARRIVING with that answer, and the loading frame shows it is not there
+yet, which is the pair's whole claim about where the row comes from.
 
 WHY BOTH, AND WHY ONE PROCESS. The panel is two-phase by design: its first frame
 is this device's own records (a disk read, useful with the relay stopped) and the
@@ -254,7 +261,7 @@ def _status_payload(audit: str = "steady") -> str:
         # what is missing in this state (Q-R4-2). `wedged` is `scan_own_relay`'s word
         # for a RUNNING process that is not reporting, so a record is what produced it.
         payload["record"] = {"pid": 4711}
-    elif audit == "steady":
+    elif audit in ("steady", "repair"):
         relay.update(
             audit_recorded_through=13,
             audit_published_through=13,
@@ -276,8 +283,40 @@ def _status_payload(audit: str = "steady") -> str:
             audit_degraded_reason="[Errno 28] No space left on device",
         )
     else:
-        raise SystemExit(f"unknown audit state {audit!r}: steady|lag|degraded|unanswered")
+        raise SystemExit(f"unknown audit state {audit!r}: steady|lag|degraded|unanswered|repair")
     return json.dumps(payload, indent=2, sort_keys=True)
+
+
+def _doctor_payload(*, repair: bool) -> str:
+    """``lop network doctor --json`` as the panel's worker reads it.
+
+    THE REPAIR STATE is the owner-side notice from the credential broker (decision
+    memo item D): an open ``credential_repair`` check — a peer's borrow refused
+    ``interactive_required``, no later grant — which the panel paints in the device
+    block from this receipt and ONLY from it, so this stub is the whole input the
+    row's pixels can depend on. The names are the fixture peers; the key is a
+    fixture MCP url, redacted like every other value here.
+    """
+    checks: list[dict[str, Any]] = []
+    if repair:
+        checks.append(
+            {
+                "check": "credential_repair",
+                "network_id": "n_3985570272c803eeb85a3e23",
+                "ok": False,
+                "credential_name": "mcp:https://mcp.datadoghq.com",
+                "device_id": "d_77aa88bb99cc00dd11ee22ff33445566",
+                "device_name": "pixel-8",
+                "detail": (
+                    "pixel-8 needs '/mcp login https://mcp.datadoghq.com' here — "
+                    "its borrowed credential cannot be refreshed"
+                ),
+                "remedies": ["run `/mcp login https://mcp.datadoghq.com` on this device"],
+            }
+        )
+    return json.dumps(
+        {"ok": not repair, "identity_present": True, "checks": checks}, indent=2, sort_keys=True
+    )
 
 
 async def main() -> None:
@@ -312,6 +351,11 @@ async def main() -> None:
         verb = args[0] if args else "ls"
         if verb == "status":
             return NetworkRun(tuple(args), 0, stdout=_status_payload(audit))
+        if verb == "doctor":
+            # The repair row is emitted ONLY in the repair state, so the steady pair's
+            # frame stays the frame every comparison in the design round is made
+            # against — the panel's own "a state with no news pays no row" rule.
+            return NetworkRun(tuple(args), 0, stdout=_doctor_payload(repair=audit == "repair"))
         body = {"ls": _ls_payload, "peers": _peers_payload}.get(verb)
         return NetworkRun(tuple(args), 0, stdout=body() if body else "")
 
