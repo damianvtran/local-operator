@@ -83,6 +83,7 @@ from local_operator.evaluation.runner.public_reply import (
     normalise_public_reply,
     public_reply_contract,
     public_reply_schema,
+    tolerated_fields_note,
 )
 from local_operator.harness.reply_channel import (
     REPLY_CHANNEL_TOOL_NAME,
@@ -1634,9 +1635,7 @@ def parse_decision(
     decoded, trailing, leading_framing_bytes = _decode_leading_json(payload)
     if not isinstance(decoded, Mapping):
         raise DecisionParseError("decision must be a JSON object")
-    actions, note, tolerated_action_fields = normalise_public_reply(
-        decoded, action_binding=action_binding
-    )
+    actions, note, tolerated_fields = normalise_public_reply(decoded, action_binding=action_binding)
     if action_binding == COMPACT_ACTION_BINDING:
         try:
             actions = bind_compact_actions(decoded, actions, observation.observation_id)
@@ -1738,8 +1737,12 @@ def parse_decision(
         # they are facts about the REPLY's bytes -- how much framing preceded
         # the decision, how many action fields the kind mismatch cost -- while
         # the provenance ``decide`` attaches (``stripped_reply_markers``) is
-        # about how the reply was assembled before this function saw it.
-        tolerated_action_fields=tolerated_action_fields,
+        # about how the reply was assembled before this function saw it. The
+        # dropped names ride beside the count so a later turn can be TOLD what
+        # was ignored (``tolerated_fields_note``); the count alone is what the
+        # sealed event records.
+        tolerated_action_fields=len(tolerated_fields),
+        tolerated_field_names=tolerated_fields,
         leading_framing_bytes=leading_framing_bytes,
     )
 
@@ -2049,6 +2052,20 @@ class _ContextBuilder:
             # part of the observation that followed it -- "the state after
             # that answer was delivered", as the system prompt promises.
             lines.append(f"Answer from the user: {previous.ask_answer}")
+        if previous is not None and previous.tolerated_field_names:
+            # The correction for a sibling field the reply tolerance dropped
+            # rides the turn AFTER the one it was dropped from, the same place
+            # an ask answer does and for the same reason: the drop was
+            # tolerated, but it must never be SILENT -- an accepted reply
+            # leaves no rejection artifact, so without this line the model
+            # has nothing to learn the contract from and re-sends the same
+            # field on the next reply (measured: three, then two, then one
+            # ``wait.frame_id`` across a live episode). ``None`` here means
+            # the roster could not be rendered, in which case the log line is
+            # the only record -- the drop itself already happened either way.
+            note = tolerated_fields_note(previous.tolerated_field_names)
+            if note is not None:
+                lines.append(note)
         lines.append(f"Frames: {_frames_line(observation)}")
         if previous is not None and _frames_identical(previous.observation, observation):
             # Stated on the observation itself rather than left for the model

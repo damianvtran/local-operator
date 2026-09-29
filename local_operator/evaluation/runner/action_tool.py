@@ -66,6 +66,7 @@ from local_operator.evaluation.runner.provider_client import (
 from local_operator.evaluation.runner.public_reply import (
     _inlined_action_schema,
     drop_sibling_action_fields,
+    tolerated_fields_note,
 )
 from local_operator.harness.types import (
     FAULT_INVALID_ARGUMENTS,
@@ -369,7 +370,7 @@ def build_action_tool(
         # validator checks top-level names and scalar types only, and every
         # nested malformation reaches a tool body intact.
         try:
-            batch = _build_batch(arguments, pending)
+            batch, tolerated_fields = _build_batch(arguments, pending)
         except ValidationError as error:
             # The CLASS comes from the error's structured entries and the TEXT
             # from a rendering that keeps no value the model supplied. Deriving
@@ -419,10 +420,18 @@ def build_action_tool(
 
         result = await execute(batch)
         token.record_in_flight(result.observation)
+        content = render(result.observation)
+        note = tolerated_fields_note(tolerated_fields)
+        if note is not None:
+            # The dropped field rides the result the model reads, ahead of the
+            # observation: the call was accepted and ran, so this is the one
+            # place the model can learn the field was ignored rather than
+            # silently mangled -- the same note the session arm's bridge sends.
+            content = [TextContent(text=note), *content]
         return ToolResult(
             tool_call_id=tool_call_id,
             tool_name=ACTION_TOOL_NAME,
-            content=render(result.observation),
+            content=content,
             details={"receipt": result.receipt.model_dump(mode="json")},
         )
 
@@ -445,7 +454,9 @@ def build_action_tool(
     )
 
 
-def _build_batch(arguments: Mapping[str, Any], observation: Observation) -> ActionBatch:
+def _build_batch(
+    arguments: Mapping[str, Any], observation: Observation
+) -> tuple[ActionBatch, tuple[str, ...]]:
     """Compile the model's offer into the protocol's own batch model.
 
     Assembled FIELD BY FIELD from the keys the schema offers, never copied
@@ -462,6 +473,11 @@ def _build_batch(arguments: Mapping[str, Any], observation: Observation) -> Acti
     path drops it for the same reason and with the same report. Applied here too
     because the two channels converge on this one validated structure, and a
     drop that ran on only one of them would refuse a decision the other accepts.
+    The dropped names are RETURNED beside the batch rather than only logged,
+    because the caller delivers them to the model as one line
+    (``tolerated_fields_note``): the result of this call is the next thing the
+    model reads, and a field that vanished without a word is exactly the defect
+    the note exists to remove.
 
     Scoped to the drop: this function reads an action ARRAY, because that is
     what the offered call's parameters declare (``public_reply_schema``). The
@@ -472,20 +488,21 @@ def _build_batch(arguments: Mapping[str, Any], observation: Observation) -> Acti
     are read. Widening this channel's accepted spellings is a contract decision
     of its own rather than part of reading a batch's actions.
 
-    Known gap, recorded rather than papered over: the drop count returned by
-    ``drop_sibling_action_fields`` is DISCARDED here. This channel builds no
-    ``ModelDecision`` and writes no sealed record of its own, so there is no
-    place to put a count -- an accepted batch from this path is counted only in
-    the log line the shared renderer emits. That is not a defect today, because
-    ``build_action_tool`` has no caller outside this module: no episode reaches
-    this path, so no bundle can read 0 for a reply that used the tolerance. It
-    becomes one the moment this channel is wired, and the fix is not to invent a
-    field here but to hand the count to the ``reply_tolerance`` event the runner
-    already seals (``ReplyTolerancePayload``), which is the one carrier that
-    does not re-baseline sealed bytes.
+    Known gap, recorded rather than papered over: the drop COUNT still never
+    reaches a sealed bundle from this channel. This function builds no
+    ``ModelDecision`` and writes no sealed record of its own, so an accepted
+    batch here is counted only in the log line the shared renderer emits;
+    ``build_action_tool`` has no production caller, and the session arm records
+    its runs as the pilot record, deliberately not the sealed format. When this
+    channel is wired to a bundle, the count goes to the ``reply_tolerance``
+    event the runner already seals (``ReplyTolerancePayload``) -- not to a field
+    invented here, which would re-baseline sealed bytes. What the MODEL is told
+    does not carry that caveat any more: the names ride out and into the call's
+    result.
     """
     raw_actions = arguments.get("actions")
     actions: Any = raw_actions
+    tolerated_fields: tuple[str, ...] = ()
     if isinstance(raw_actions, list):
         actions = [
             (
@@ -495,20 +512,21 @@ def _build_batch(arguments: Mapping[str, Any], observation: Observation) -> Acti
             )
             for action in raw_actions
         ]
-        # ``_tolerated_fields`` is intentionally not carried out of this frame:
-        # this path has no ``ModelDecision`` and no sealed record to put it in,
-        # and the docstring above states where it must go when the channel is
-        # wired (the runner's ``reply_tolerance`` event).
-        actions, _tolerated_fields = drop_sibling_action_fields(actions)
-    return ActionBatch.model_validate(
-        {
-            "protocol_version": PROTOCOL_VERSION,
-            "task_id": observation.task_id,
-            "episode_id": observation.episode_id,
-            "observation_id": observation.observation_id,
-            "actions": actions,
-        },
-        strict=True,
+        # The dropped names leave this frame to the caller, which delivers
+        # them to the model beside the result; see the docstring.
+        actions, tolerated_fields = drop_sibling_action_fields(actions)
+    return (
+        ActionBatch.model_validate(
+            {
+                "protocol_version": PROTOCOL_VERSION,
+                "task_id": observation.task_id,
+                "episode_id": observation.episode_id,
+                "observation_id": observation.observation_id,
+                "actions": actions,
+            },
+            strict=True,
+        ),
+        tolerated_fields,
     )
 
 
