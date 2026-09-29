@@ -90,6 +90,16 @@ LEASE_PENDING = "authorization_lease_pending"
 LOGIN_REQUIRED = "login_required"
 LOCAL_PREREQUISITE = "local_prerequisite"
 REENROLMENT_REQUIRED = "reenrolment_required"
+#: The tunnel's OWNING login is gone from this device: `tunnel/config.json` names
+#: a credential row that is no longer in the store (or one that is not a Radient
+#: oauth row at all). NOT `LOGIN_REQUIRED`, and the difference is the whole point:
+#: `LOGIN_REQUIRED` is a grant the identity provider refused, which signing in
+#: again clears — while signing in HERE produces a NEW row and nothing re-points
+#: the configuration at it, so `lop login radient` can never clear this state.
+#: Its producer today is the login verdict (`report.login_verdict`), and it is
+#: declared here, beside the reason codes, so its remedy below is keyed by the
+#: same word the verdict reports and the two cannot drift (issue #1711).
+OWNER_MISSING = "owner_missing"
 
 # What a phone is shown: self-contained, and carrying any link it needs, because
 # there is nothing to type on that surface.
@@ -237,6 +247,13 @@ TERMINAL_REMEDY = {
     NOT_AUTHORIZED: "lop tunnel connect",
     LEASE_PENDING: "lop tunnel status",
     LOGIN_REQUIRED: "lop login radient",
+    # The command that RE-POINTS, not a sign-in: the login this tunnel was
+    # enrolled with is no longer on this device, so a fresh sign-in alone cannot
+    # clear the state (it is a new row under the same, stale configuration).
+    # `lop tunnel configure` does — bare, it falls back from the dead pinned id
+    # to the current login (see `tunnels/cli.py`), and it says which account owns
+    # the tunnel when the current login is not that account.
+    OWNER_MISSING: "lop tunnel configure",
     # Names the CHECK rather than a fix, by the rule above: this state clears itself,
     # and handing the operator `lop login radient` for it would be the misdirection
     # this code exists to remove.
@@ -261,6 +278,7 @@ REASON_LABEL = {
     NOT_AUTHORIZED: "not authorized",
     LEASE_PENDING: "waiting for authorization",
     LOGIN_REQUIRED: "login required",
+    OWNER_MISSING: "tunnel login missing",
     LOCAL_PREREQUISITE: "prerequisite missing",
     REENROLMENT_REQUIRED: "needs re-enrolment",
 }

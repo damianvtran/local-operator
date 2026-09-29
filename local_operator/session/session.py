@@ -2140,6 +2140,7 @@ class Session:
         #: whole of its display identity. Reaches tools via
         #: ``_build_tool_context``; display-only, never an authorization input.
         job_label: str = "",
+        agent_type: str = "",
         #: The parent's own :meth:`_display_session_name`, on a subagent only.
         #: A RESOLVER rather than the parent's title holder, for two reasons
         #: that are really one: it re-reads on every call, so a parent named or
@@ -2308,6 +2309,31 @@ class Session:
         #: tell "this run already said how it ended" from "it never got to" —
         #: the distinction that decides whether dispose has to publish one.
         self._attention_run_settled: bool = True
+        #: Per-RUN evidence for a cut-off verdict; both cleared at every turn's
+        #: head beside the run token, and both consumed by
+        #: :meth:`_attention_run_has_evidence` (see :meth:`Session.dispose`).
+        #: ``_attention_run_request_dispatched`` counts only a provider stream
+        #: the loop actually CONSUMED — the loop evaluates its stream-function
+        #: argument even for an already-aborted signal, and ``_abortable_stream``'s
+        #: pre-aborted fast path then cancels the pump before it runs a single
+        #: statement. That shape (a request built, zero statements run, no spend,
+        #: inside 244 ms of admission) is exactly session 664a234ec561's delivery
+        #: run, and branding it with a cut-off is the false verdict this evidence
+        #: gate exists to refuse.
+        self._attention_run_request_dispatched: bool = False
+        #: True when a PERSON'S (or a peer session's) words opened this run —
+        #: ``prompt()`` or ``receive_peer_message`` — rather than a harness
+        #: delivery (job result, wake, monitor, resume catch-up). The ask is
+        #: itself evidence for a cut-off verdict, even before the first
+        #: round-trip is spent.
+        self._attention_run_carried_prompt: bool = False
+        #: Armed by :meth:`Session.dispose` when it meets a live run with no
+        #: evidence behind it: the exit has decided that run settles with NO
+        #: verdict, and an end arriving afterwards — the abort's own tail, or a
+        #: task still unwinding past the disposal's bounded wait — must not
+        #: overprint that decision (``_publish_attention_outcome`` refuses a
+        #: non-``complete`` verdict while this is set).
+        self._attention_run_settle_intent: bool = False
         self._attention_restored = False
         #: SERIALISES THIS SESSION'S OWN PUBLICATION CRITICAL SECTIONS. Held by both
         #: :meth:`_publish_attention_outcome` (journal append + store insert) and
@@ -2384,6 +2410,10 @@ class Session:
         #: which keeps serving the same runtime.
         self._leaving_deliveries = False
         self._job_label = job_label
+        #: The role a subagent was launched as (``task(agent=...)``), for the
+        #: ``agent_type`` field forwarded hooks receive. Empty on a top-level
+        #: session and on a role-less child (reported as ``task``).
+        self._agent_type = agent_type
         self._parent_display_name = parent_display_name
         self._subagent_comms = subagent_comms
         self.agent_registry = agent_registry
@@ -6152,6 +6182,14 @@ class Session:
             # (``_store_title``, ``_cmd_rename``), which cannot await, and tab
             # chrome must never delay or fail a rename.
             self._push_browser_title()
+            # HER NAME IS CONFIG. A user-set rename of HER conversation is a
+            # rename of her (``aida.name``; see local_operator.aida.naming),
+            # and this method is the ONE writer every rename gesture funnels
+            # through — the TUI's /title, the runtime's /rename, the desktop,
+            # the phone — so the sync lives here rather than in four callers.
+            # Generated titles (``user_set=False``) never sync: the auto-namer
+            # is not the operator naming her.
+            self._sync_aida_display_name(stored, user_set=user_set)
         self.refresh_frontend_state()
         return stored
 
@@ -6614,8 +6652,16 @@ class Session:
         producer_command_id: str | None = None,
         admitted: asyncio.Future[None] | None = None,
         harness_injected: bool = False,
+        input_mode: str | None = None,
+        input_path: str | None = None,
     ) -> None:
         """Run one user turn to completion (awaitable) or raise.
+
+        ``input_mode``/``input_path`` are the silent input-metadata carriage
+        (see ``Message.input_mode``): set by the desktop composer for a
+        dictation send and carried straight onto the durable user row. Both
+        default to ``None``, and a ``None`` adds no key to the row at all, so
+        every pre-existing caller writes byte-identical rows.
 
         ``producer_command_id`` and ``admitted`` form the continuation
         admission seam: the caller receives a receipt only after the explicitly
@@ -6765,7 +6811,18 @@ class Session:
                         "continue with the user's request that follows" if fresh else None
                     ),
                 )
-            user = Message.user(text, images, **({"id": message_id} if message_id else {}))
+            extra: dict[str, Any] = {}
+            if message_id:
+                extra["id"] = message_id
+            # Silent input metadata, set only when a producer actually supplied
+            # it: an absent value must leave the row byte-identical to one
+            # written before the carriage existed (the same reason the fields
+            # default to None on ``Message``).
+            if input_mode is not None:
+                extra["input_mode"] = input_mode
+            if input_path is not None:
+                extra["input_path"] = input_path
+            user = Message.user(text, images, **extra)
             if harness_injected:
                 # The stamp goes on the row THIS call mints, at the one place
                 # the row is born, so no caller can mint a chrome row without
@@ -6787,6 +6844,10 @@ class Session:
                 # and the turn's own gate must produce a VISIBLE interrupt,
                 # not a success return for work that never ran.
                 may_drop=False,
+                # A person (or a subagent relaying one) asked. The ask itself
+                # is evidence for a cut-off verdict even before any provider
+                # round-trip is spent — see ``_attention_run_has_evidence``.
+                carried_prompt=True,
             )
         finally:
             self._turn_lock.release()
@@ -6821,16 +6882,27 @@ class Session:
         *,
         message_id: str | None = None,
         producer_command_id: str | None = None,
+        input_mode: str | None = None,
+        input_path: str | None = None,
     ) -> None:
         """Inject an identified steering message into the running turn.
 
         Attachments ride along for the same reason they do on ``prompt``. The
         optional producer identity is persisted when the queue drains, letting
         reconnecting followers deduplicate the correction like an ordinary turn.
+
+        ``input_mode``/``input_path`` ride it for the same reason (a mid-turn
+        dictation keeps its provenance when the queue drains), default to
+        ``None``, and add no key to the row when absent.
         """
-        message = (
-            Message.user(text, images, id=message_id) if message_id else Message.user(text, images)
-        )
+        extra: dict[str, Any] = {}
+        if message_id:
+            extra["id"] = message_id
+        if input_mode is not None:
+            extra["input_mode"] = input_mode
+        if input_path is not None:
+            extra["input_path"] = input_path
+        message = Message.user(text, images, **extra)
         self._steering_queue.put_nowait(message)
         if producer_command_id is not None:
             self._steering_producers[id(message)] = producer_command_id
@@ -7302,7 +7374,10 @@ class Session:
             # still delivered and read. _prompt_messages persists the row once.
             await self._emit_peer_receipt(message, sender)
             self._peer_arrival.mark()
-            self._spawn_background(self._prompt_messages([message]))
+            # A peer is a person at the other end of `lop send`: the run keeps
+            # prompt provenance, so a cut-off of it is an error even before a
+            # provider round-trip (see ``_attention_run_has_evidence``).
+            self._spawn_background(self._prompt_messages([message], carried_prompt=True))
             return "delivered (opened a turn)"
         # mode == "mailbox"
         if wake and not busy:
@@ -7310,7 +7385,8 @@ class Session:
             # separate transcript/context append here would double-write.
             await self._emit_peer_receipt(message, sender)
             self._peer_arrival.mark()
-            self._spawn_background(self._prompt_messages([message]))
+            # Same provenance as the idle-steer arm above: a person's words.
+            self._spawn_background(self._prompt_messages([message], carried_prompt=True))
             return "delivered and woke the session"
         # Record-only (idle without wake, or busy): persist durably NOW so the
         # human sees it and a crash cannot lose it, and make it visible to the
@@ -9091,6 +9167,31 @@ class Session:
         self._attention_outcome = None
         if outcome is None:
             return
+        if self._attention_run_settle_intent and (
+            outcome.error or outcome.cut_off_cause or outcome.aborted
+        ):
+            # SETTLED WITHOUT A VERDICT, AND THIS END IS NOT ONE. The disposal
+            # decided this run has no evidence behind a cut-off and settles it
+            # silently (see ``Session.dispose`` and
+            # ``_settle_run_without_an_outcome``); an end that arrives
+            # afterwards — the abort's own tail, or a task still unwinding
+            # past the disposal's bounded wait — would otherwise republish the
+            # exact claim the settlement refused: an ``interrupted``/user-stop
+            # row for a turn nobody stopped, or the ``error|disposed`` row for
+            # a run that spent no provider statement (session 664a234ec561,
+            # 2026-09-28). A genuine ``complete`` still publishes — a run that
+            # finishes inside that window is a fact, the opposite of the abort
+            # artifact this intent suppresses.
+            #
+            # Returned BEFORE ``_attention_run_settled`` is flipped: the run is
+            # still OWED its settlement (the ``eligible:False`` marker), which
+            # ``Session.dispose`` writes once this aborted tail unwinds.
+            logger.debug(
+                "attention: dropping an unsupported end for run %s, which the "
+                "exit settled silently",
+                self._attention_run_token,
+            )
+            return
         self._attention_run_settled = True
         # A NEWER OUTCOME SUPERSEDES A PENDING REPUBLISH (ordering guard). The
         # ladder's job is to publish the journal's LATEST marker, so an outcome
@@ -9251,6 +9352,18 @@ class Session:
         last turn row preceded its ``error`` row by hours and the conversation
         then continued normally.
 
+        THE SECOND ARRIVAL IS THE DISPOSAL'S OWN ZERO-EVIDENCE CUT (session
+        664a234ec561, 2026-09-28): when :meth:`dispose` finds a live run with
+        no provider round-trip dispatched and no person's/peer's prompt behind
+        it (see ``_attention_run_has_evidence``), it arms
+        ``_attention_run_settle_intent`` BEFORE aborting and routes the run
+        here, so the turn its abort ends publishes nothing. The disposal is the
+        party that knows nothing was spent, and it must not let the abort's
+        tail brand an unasked, zero-work turn with "Stopped with an error".
+        The intent is what refuses that late publish
+        (``_publish_attention_outcome``); this method closes the token under
+        the same lock the publish uses.
+
         WHY NOTHING IS PUBLISHED, rather than one of the three kinds:
 
         * ``error`` is what the disposal used to write (``runtime-retired`` from
@@ -9292,24 +9405,31 @@ class Session:
         token = self._attention_run_token
         if token is None:
             return
-        self._attention_run_settled = True
-        # Logged because the settlement is deliberately silent everywhere else:
-        # no attention row, no card, no notice. An investigation asking "what
-        # happened to that run" gets its answer here rather than nowhere.
-        logger.info(
-            "session %s: run %s left no outcome and this exit cut no turn; "
-            "settled with no verdict",
-            getattr(self, "session_id", "?"),
-            token,
-        )
-        await self._transcript.append_custom(
-            ATTENTION_CUSTOM_TYPE,
-            {
-                "conversation_id": conversation_identity(self._transcript.directory),
-                "token": token,
-                "eligible": False,
-            },
-        )
+        # ONE CRITICAL SECTION with ``_publish_attention_outcome``'s own
+        # (same lock): the settle is the run's remaining writer, and a publish
+        # that started before the exit's decision must not interleave with
+        # this marker — ``sequence`` is insert order, so a verdict landing
+        # after the marker would flip a newest-wins reader back to a claim the
+        # exit refused to make.
+        async with self._attention_publish_lock:
+            self._attention_run_settled = True
+            # Logged because the settlement is deliberately silent everywhere
+            # else: no attention row, no card, no notice. An investigation
+            # asking "what happened to that run" gets its answer here rather
+            # than nowhere.
+            logger.info(
+                "session %s: run %s has no evidence for a verdict; settled with no outcome",
+                getattr(self, "session_id", "?"),
+                token,
+            )
+            await self._transcript.append_custom(
+                ATTENTION_CUSTOM_TYPE,
+                {
+                    "conversation_id": conversation_identity(self._transcript.directory),
+                    "token": token,
+                    "eligible": False,
+                },
+            )
 
     @property
     def frontend_state(self):  # type: ignore[no-untyped-def]
@@ -9830,9 +9950,17 @@ class Session:
             for message in initial
         )
 
-    async def _prompt_messages(self, initial: list[AgentMessage]) -> None:
+    async def _prompt_messages(
+        self, initial: list[AgentMessage], *, carried_prompt: bool = False
+    ) -> None:
         """Shared turn runner for wake deliveries (prompt() owns its own lock
-        handling so it can REJECT reentrants instead of queueing)."""
+        handling so it can REJECT reentrants instead of queueing).
+
+        ``carried_prompt`` is True only for the peer callers — a peer message
+        is a person's words at the other end of `lop send`, so a run it opens
+        keeps the cut-off verdict a harness delivery does not get (see
+        ``_attention_run_has_evidence``).
+        """
         if self._disposed:
             raise RuntimeError("session is disposed")
         # Sampled BEFORE the lock wait, so it dates this work's ARRIVAL rather
@@ -9841,6 +9969,21 @@ class Session:
         # exactly how the honoured-vs-stale test below can tell the two apart.
         arrived_at_epoch = self._abort_epoch
         async with self._turn_lock:
+            if self._leaving_deliveries:
+                # THE LATCH, RE-CHECKED AT ADMISSION (session 664a234ec561,
+                # 2026-09-28). The spawn-time check (``_deliver_job_results``)
+                # races the commit it tests: a delivery task spawned
+                # microseconds before ``retire_job_deliveries_to_transcript``
+                # can sit on this lock while the latch arms behind it, and the
+                # turn it then opened could only ever end as the following
+                # disposal's abort — the false ``error|disposed`` row on a
+                # conversation whose own turn had completed. Holding HERE —
+                # the point after which only the exit itself can intervene —
+                # makes "no new work after the commit" true of the spawn race
+                # too: the arrivals are made durable and parked for the next
+                # real turn, and no run opens.
+                await self._hold_deliveries_at_admission(initial)
+                return
             # A newly ARRIVING unit of work is a fresh intent, exactly like a
             # typed prompt, so it clears the sticky abort the same way
             # ``prompt()`` does — see that method for the flag's contract.
@@ -9909,7 +10052,14 @@ class Session:
             # Same flush as prompt(): a wake-delivery turn is still a prompt
             # path, and the catch-up must not be stranded behind it.
             self._handle_missed_wakes()
-            await self._run_turn_pipeline(initial)
+            # THE PROVENANCE THE CALLER PASSED RIDES THIS RUN (review round 1,
+            # MAJOR-2): the peer arms spawn with ``carried_prompt=True``, and
+            # while this call stayed bare the per-run flag was always False —
+            # so a peer's ask cut before its first round-trip settled silently
+            # instead of publishing the ``error|disposed`` its own rationale
+            # promises (repro: peer_carried_prompt.py; the cell is
+            # ``test_a_peer_prompt_cut_with_zero_round_trips_still_errors``).
+            await self._run_turn_pipeline(initial, carried_prompt=carried_prompt)
 
     async def _run_turn_pipeline(
         self,
@@ -9919,8 +10069,17 @@ class Session:
         admitted_id: str | None = None,
         producer_command_id: str | None = None,
         may_drop: bool = True,
+        carried_prompt: bool = False,
     ) -> None:
         """One turn + its auto-continuations. Caller holds ``_turn_lock``.
+
+        ``carried_prompt`` rides to the per-run evidence flags (see
+        ``_attention_run_has_evidence``): True when a person's or a peer
+        session's words opened this run (``prompt`` / ``receive_peer_message``),
+        False for a harness delivery (job result, wake, monitor, resume
+        catch-up). It is a parameter rather than a session flag because two
+        arrivals can race for ``_turn_lock``, and the run that WINS must carry
+        its own provenance rather than the last writer's.
 
         A post-compaction continuation is a CONTINUATION of the same logical
         run, not a new one: compaction happens after the loop has already
@@ -9984,6 +10143,14 @@ class Session:
         # This run has not yet said how it ended; a teardown that finds it so
         # must publish the outcome itself (see ``Session.dispose``).
         self._attention_run_settled = False
+        # The per-run evidence flags, cleared beside the token so a settled
+        # run's evidence cannot license the NEXT run's verdict. The provider
+        # mark arms itself from ``_run_turn``'s stream wrapper; ``carried_prompt``
+        # says a person's or peer's words opened THIS run (see
+        # ``_attention_run_has_evidence`` for the consumer).
+        self._attention_run_request_dispatched = False
+        self._attention_run_carried_prompt = carried_prompt
+        self._attention_run_settle_intent = False
         # Cleared at the head of EVERY turn, alongside the outcome, so a cause
         # noted for a previous turn cannot label this one: the end event that
         # consumes it is emitted from THIS turn's finally, and a stale cause
@@ -10284,6 +10451,29 @@ class Session:
             self._context.system_blocks = list(blocks)
             self._context.tool_context = self._build_tool_context()
 
+            # EVIDENCE FOR ANY CUT-OFF VERDICT THE EXIT MIGHT OWE THIS RUN
+            # (see ``_attention_run_has_evidence``): mark the run when the
+            # provider stream is CONSUMED — the pump's first iteration — not
+            # when the stream function is merely called. ``_abortable_stream``
+            # evaluates its argument eagerly, so the call happens even for an
+            # already-aborted signal and its pre-aborted fast path then cancels
+            # the pump before it executes a single statement; a wrapper makes
+            # "the stream was iterated" the observable, so the pre-aborted path
+            # leaves the flag False while every dispatched round-trip sets it.
+            base_stream_fn = self._stream_fn
+
+            def marking_stream_fn(
+                request: ChatRequest, stream_signal: AbortSignal | None = None
+            ) -> AsyncIterator[StreamEvent]:
+                inner = base_stream_fn(request, stream_signal)
+
+                async def witness() -> AsyncIterator[StreamEvent]:
+                    self._attention_run_request_dispatched = True
+                    async for event in inner:
+                        yield event
+
+                return witness()
+
             config = LoopConfig(
                 model=self._model,
                 # Re-read per provider call, so a ``set_model`` landing while
@@ -10309,7 +10499,7 @@ class Session:
                 # see ``LoopConfig.get_context_tokens_hint``.
                 get_context_tokens_hint=lambda: self._context_tokens_hint,
                 convert_to_llm=self._render_history,
-                stream_fn=self._stream_fn,
+                stream_fn=marking_stream_fn,
                 get_steering_messages=self._drain_steering,
                 has_steering_messages=lambda: not self._steering_queue.empty(),
                 graceful_cancel_requested=lambda: self._graceful_cancel_requested,
@@ -10344,6 +10534,10 @@ class Session:
                 # is put_nowait-only and swallows its own errors, so this stays
                 # off the turn's critical path.
                 record_tool_call=self._record_tool_call,
+                # The operator's Claude Code / Codex PostToolUse hooks, forwarded
+                # (``hook_forwarding``). Always wired: the forwarder reads its
+                # on/off keys per call, so ``/settings`` reaches the next tool.
+                post_tool_hooks=self._forward_post_tool_hooks,
                 interrupt_mode="immediate",
                 on_turn_end=self._on_turn_end,
             )
@@ -10837,6 +11031,40 @@ class Session:
         """
         scratchpad = self._scratchpad_dir()
         return None if scratchpad is None else str(Path(scratchpad).parent)
+
+    async def _forward_post_tool_hooks(
+        self, tool_name: str, args: Mapping[str, Any], call_id: str, result: ToolResult
+    ) -> list[str]:
+        """Run forwarded ``PostToolUse`` hooks for one finished tool call.
+
+        A child reports ``agent_id``/``agent_type`` exactly as a Claude Code
+        subagent does, so a hook that skips subagents keeps doing so here.
+        """
+        from local_operator.hook_forwarding import HookIdentity, forward_post_tool
+
+        is_child = self._job_id is not None
+        transcript_path: str | None = None
+        with contextlib.suppress(Exception):
+            directory = self._transcript.directory
+            if directory is not None:
+                candidate = Path(directory) / "transcript.jsonl"
+                transcript_path = str(candidate) if candidate.exists() else None
+        identity = HookIdentity(
+            session_id=self._session_id,
+            cwd=self._cwd,
+            transcript_path=transcript_path,
+            agent_id=self._job_id if is_child else None,
+            agent_type=(self._agent_type or "task") if is_child else None,
+        )
+        return await forward_post_tool(
+            identity,
+            tool_name=tool_name,
+            args=args,
+            tool_use_id=call_id,
+            output=result.text,
+            is_error=result.is_error,
+            duration_s=result.duration_s,
+        )
 
     def _build_tool_context(self) -> ToolContext:
         # This context is REBUILT on every turn, so anything that must outlive
@@ -12051,6 +12279,40 @@ class Session:
             self._append_or_park_journal(message)
         if failed:
             await self._journal_held_delivery_failure(failed, reason)
+
+    async def _hold_deliveries_at_admission(self, initial: list[AgentMessage]) -> None:
+        """Make arriving deliveries DURABLE and open NO turn — the admission arm.
+
+        The counterpart of ``_hold_job_results_for_next_turn`` for a spawn
+        that passed its latch check before the latch existed (see
+        ``_prompt_messages``): same contract, both halves — the transcript
+        append (what survives this process) and the parked live-context
+        append (what a still-unwinding boundary in THIS process can read) —
+        applied per message, because an admission carries whatever the caller
+        had (a job batch, a wake, a peer row), not a job tuple.
+
+        A row already on the transcript — the settle-time write job results
+        carry — is NOT re-appended: dedup is by entry id, and a second append
+        would file a twin under the same id. A failure is logged rather than
+        raising: a hold that raises inside a spawned task would strand the
+        arrival without the durability this arm exists to give it.
+        """
+        for message in initial:
+            try:
+                if not self._transcript.has_entry(getattr(message, "id", "")):
+                    await self._transcript.append_message(message)
+            except Exception:  # noqa: BLE001 — a hold must not strand the arrival
+                logger.warning(
+                    "could not hold a delivery durably (the runtime is leaving); "
+                    "the row may be lost with this process",
+                    exc_info=True,
+                )
+                continue
+            # Every ``_prompt_messages`` caller passes a ``CustomMessage`` (a
+            # peer row, a job batch, a wake, a monitor, a catch-up); the guard
+            # keeps the journal's contract literal if a future caller does not.
+            if isinstance(message, CustomMessage):
+                self._append_or_park_journal(message)
 
     async def _journal_held_delivery_failure(
         self, jobs: list[tuple[str, str]], reason: str
@@ -15538,6 +15800,28 @@ class Session:
             logger.debug("aida: could not resolve her session identity", exc_info=True)
             return False
 
+    def _sync_aida_display_name(self, title: str, *, user_set: bool) -> None:
+        """Keep ``aida.name`` in step when HER conversation is renamed.
+
+        Only a USER-SET rename counts: the auto-namer's generated titles
+        (``user_set=False``) are not the operator naming her, and adopting one
+        would let a fresh install's first turn silently rewrite a configured
+        name. Best-effort by contract, like every other side effect its caller
+        runs: a config write must never cost the rename. The write is
+        synchronous on purpose (the ``_set_paused_config`` precedent) — the
+        receipt the user sees must be true, and the write is a few
+        milliseconds against a file the same gesture is already journalling.
+        """
+        if not user_set or not self._aida_duty:
+            return
+        try:
+            from local_operator.aida import naming as aida_naming
+            from local_operator.paths import config_dir
+
+            aida_naming.sync_config_name_from_title(config_dir(), title)
+        except Exception:  # noqa: BLE001 — a decoration never fails a rename
+            logger.debug("aida: could not sync the display name to config", exc_info=True)
+
     def _aida_filter_rows(self, schedules: list[WakeSchedule]) -> list[WakeSchedule]:
         """Drop her ``aida-*`` rows when she is paused or disabled."""
         try:
@@ -15581,6 +15865,22 @@ class Session:
                 await self.set_wake_schedules(updated)
         except Exception:  # noqa: BLE001 — best-effort by contract
             logger.warning("aida: live reconcile failed", exc_info=True)
+        # HER DISPLAY NAME rides the same live-config seam: ``aida.name`` is
+        # canonical (see local_operator.aida.naming), so a rename issued
+        # anywhere — a /settings edit, /aida rename in another terminal, the
+        # desktop — re-titles THIS session in place. The band, the picker and
+        # the sidebar all read what this writes. Equal values do nothing,
+        # which is what keeps :meth:`_sync_aida_display_name` (which a rename
+        # rings) from ringing the watcher straight back.
+        try:
+            from local_operator.aida import naming as aida_naming
+            from local_operator.paths import config_dir
+
+            wanted = aida_naming.display_name(config_dir())
+            if wanted and wanted != self._conversation_name.text:
+                self.set_conversation_name(wanted, user_set=True)
+        except Exception:  # noqa: BLE001 — an instrument never fails a turn
+            logger.warning("aida: could not apply the configured name", exc_info=True)
 
     async def _aida_after_turn(self) -> None:
         """Turn-end drain of her escalation tray. One stat when idle.
@@ -17563,6 +17863,33 @@ class Session:
         """
         return self._disposal_turn() is not None
 
+    def _attention_run_has_evidence(self) -> bool:
+        """Whether the CURRENT run's death can support a cut-off verdict.
+
+        Two kinds of evidence, either alone sufficient (both are per-run state,
+        cleared at the pipeline head beside the run token):
+
+        * ``_attention_run_request_dispatched`` — the run actually consumed a
+          provider stream. ``_run_turn``'s stream wrapper sets it at the
+          pump's first iteration, never at the mere call of the stream
+          function: ``_abortable_stream``'s pre-aborted fast path cancels the
+          pump before it runs a statement, which is the zero-work shape this
+          gate must not read as evidence.
+        * ``_attention_run_carried_prompt`` — a person's or a peer session's
+          words opened the run (``prompt`` / ``receive_peer_message``). The
+          ask is owed a verdict even before the first round-trip.
+
+        A harness delivery (job result, wake, monitor, resume catch-up) that
+        never dispatched anything has NEITHER: there is no work to have been
+        cut, and the disposal that meets it settles it with no verdict —
+        ``Session.dispose``'s rule since session 664a234ec561 (2026-09-28),
+        where an admitted delivery run died 244 ms after admission having run
+        zero provider statements, and the ``error | cause=disposed`` row it
+        was branded with superseded the completed turn's own marker for every
+        latest-wins reader.
+        """
+        return self._attention_run_request_dispatched or self._attention_run_carried_prompt
+
     async def dispose(self) -> None:
         """Abort any in-flight turn, close the browser surface, cancel
         background work, dispose jobs and the wake scheduler, flush the
@@ -17576,26 +17903,6 @@ class Session:
         if self._disposed:
             return
         self._disposed = True
-        # In-process disposal is a cut-off for whatever turn is RUNNING: this
-        # path is reached by a host tearing a session down directly (the
-        # runtime's own handle disposes through ``ServingSessionHandle``, which
-        # notes its more specific cause FIRST, and first-wins keeps that one),
-        # and suppressed outright after a deliberate stop, so a user's own
-        # cancel is never relabelled.
-        #
-        # A TURN MUST ACTUALLY BE RUNNING, and the evidence is the same one the
-        # abort below keys on (``disposal_cuts_a_turn``). The note used to be
-        # written unconditionally on the grounds that it is "consumed only by the
-        # running turn's end event" and therefore harmless when nothing is in
-        # flight — which is exactly what stops being true when a run is left
-        # UNSETTLED: the synthesis further down used to fabricate an end for it,
-        # so an unconditional note branded a run whose turn had already ended.
-        # Measured on the reporting host as durable ``error`` rows against runs
-        # whose last turn row preceded them by minutes (six with the retirement
-        # label, more with this one), each rendered as a cut-off of work that had
-        # finished (2026-09-17).
-        if self.disposal_cuts_a_turn():
-            self.note_cut_off("disposed")
         unsubscribe_state = getattr(self, "_unsubscribe_subagent_state", None)
         if unsubscribe_state is not None:
             unsubscribe_state()
@@ -17624,6 +17931,51 @@ class Session:
             # before flushing — its persistence must land on a live transcript.
             turn = self._disposal_turn()
             if turn is not None:
+                # WHICH VERDICT THIS EXIT OWES, decided HERE — in the same
+                # synchronous step as the abort, after the last await above
+                # (review round 1, MINOR-1: the snapshot this replaced was
+                # taken before the steering drain's awaits, so a run that
+                # began dispatching inside that window had its real cut
+                # suppressed by the armed intent and was then settled as
+                # zero-work). A disposal that catches a live run publishes a
+                # cut-off only when the run has evidence behind one (see
+                # ``_attention_run_has_evidence``); without evidence it settles
+                # silently. The decision must still come before the abort for
+                # two reasons: ``note_cut_off`` is first-writer-wins, so a
+                # note written for a settled run would brand a cause nobody
+                # may publish; and the settle intent must be armed before the
+                # abort so the aborted turn's own ``finally`` cannot publish
+                # the unsupported verdict (``_publish_attention_outcome``
+                # refuses it) — that late ``interrupted``/``disposed`` claim is
+                # what put "Stopped with an error" on session 664a234ec561's
+                # conversation whose last real turn had completed (2026-09-28).
+                #
+                # In-process disposal is a cut-off for whatever turn is
+                # RUNNING: this path is reached by a host tearing a session
+                # down directly (the runtime's own handle disposes through
+                # ``ServingSessionHandle``, which notes its more specific
+                # cause FIRST, and first-wins keeps that one), and suppressed
+                # outright after a deliberate stop, so a user's own cancel is
+                # never relabelled. The note used to be written unconditionally
+                # on the grounds that it is "consumed only by the running
+                # turn's end event" and therefore harmless when nothing is in
+                # flight — which is exactly what stops being true when a run
+                # is left UNSETTLED: the synthesis further down used to
+                # fabricate an end for it, so an unconditional note branded a
+                # run whose turn had already ended. Measured on the reporting
+                # host as durable ``error`` rows against runs whose last turn
+                # row preceded them by minutes (six with the retirement label,
+                # more with this one), each rendered as a cut-off of work that
+                # had finished (2026-09-17).
+                settles_silently = (
+                    self._attention_run_token is not None
+                    and not self._attention_run_settled
+                    and not self._attention_run_has_evidence()
+                )
+                if settles_silently:
+                    self._attention_run_settle_intent = True
+                else:
+                    self.note_cut_off("disposed")
                 self.abort("session disposed")
                 try:
                     await asyncio.wait_for(asyncio.shield(turn), timeout=5.0)
@@ -17660,8 +18012,23 @@ class Session:
                     # why and WITHOUT this exit cutting it — see
                     # ``_settle_run_without_an_outcome`` for why the honest
                     # disposition there is to publish nothing at all.
-                    if self._attention_outcome is None and not (
-                        self._cut_off_cause or self._deliberate_stop_noted
+                    #
+                    # AN ARMED SETTLE INTENT OVERRIDES A NOTED CAUSE (review
+                    # round 1, MAJOR-1): the serving rung notes its more
+                    # specific cause before handing over
+                    # (``ServingSessionHandle._note_retirement_cut_off``,
+                    # gated on the same ``disposal_cuts_a_turn()`` the decision
+                    # above used), so the synthesis arrives holding a cause AND
+                    # an armed intent — and without this clause it took the
+                    # publish branch, which the intent then suppressed, leaving
+                    # the run settled by NOBODY: no verdict and no
+                    # ``eligible:False`` marker, which the successor
+                    # reclassifies as "the cause could not be determined"
+                    # (reproduced: serving_cause_hole.py). The same clause
+                    # covers the ``_deliberate_stop_noted`` variant.
+                    if self._attention_outcome is None and (
+                        self._attention_run_settle_intent
+                        or not (self._cut_off_cause or self._deliberate_stop_noted)
                     ):
                         await self._settle_run_without_an_outcome()
                     else:

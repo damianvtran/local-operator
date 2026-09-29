@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -105,21 +106,43 @@ def _session(
 
 
 def _counting(names: tuple[str, ...] = ("stat", "lstat", "scandir")) -> Any:
-    """Count ``os`` filesystem calls made inside the context."""
+    """Count ``os`` filesystem calls made inside the context, on THIS thread.
+
+    Thread-scoped rather than process-scoped, and that is a MEASUREMENT fix
+    rather than a loosening: the scan is synchronous, so every call the
+    algorithm makes is made on the thread that runs the measurement, while a
+    CI worker process also hosts other subsystems' daemon threads. Counting
+    those too made the equality assertions bet on what every other thread
+    happened to be doing for the two milliseconds of a window. Measured: the
+    scan's own inventory here is fixed -- [32, 32, 32] on the flat shape over
+    12 fresh processes -- yet runs 36378779545 / 36388525606 / 36389917865
+    landed [32, 32, 36], [32, 34, 32] and [332, 632, 934]: +2/+4 on single
+    measurements, moving between batches, which is noise landing inside the
+    window and not a slope in the algorithm.
+
+    Every call the scan makes is still counted, including the ones made from
+    helpers it calls (``session_activity_path``, ``archived_ids``), and the
+    cells assert a ``scandir`` canary so a counter that attributed nothing --
+    how this instrument would fail silently, turning an equality of counts
+    into an equality of zeros -- cannot pass vacuously.
+    """
 
     class Counter:
         def __init__(self) -> None:
             self.counts: dict[str, int] = {name: 0 for name in names}
             self._originals: dict[str, Callable[..., Any]] = {}
+            self._thread: int = -1
 
         def __enter__(self) -> "Counter":
+            self._thread = threading.get_ident()
             for name in names:
                 real = getattr(os, name)
                 self._originals[name] = real
 
                 def wrap(real: Callable[..., Any] = real, name: str = name) -> Any:
                     def counting(*args: Any, **kwargs: Any) -> Any:
-                        self.counts[name] += 1
+                        if threading.get_ident() == self._thread:
+                            self.counts[name] += 1
                         return real(*args, **kwargs)
 
                     return counting
@@ -505,6 +528,11 @@ class TestThePollsPerDirectoryCostIsBounded:
             _recent_sessions_with_origin(tmp_path)
             with _counting() as counter:
                 rows = _recent_sessions_with_origin(tmp_path)
+            # Canary for the INSTRUMENT, not another bound on the scan: a
+            # counter that attributed nothing would satisfy the equality above
+            # with zeros. The scan always reads the store directory once per
+            # poll, so this must be seen on every measurement.
+            assert counter.counts["scandir"] == 1, counter.counts
             measurements.append(counter.total)
             assert len(rows) == 10, "the listing must not move while cost is measured"
 
@@ -551,6 +579,7 @@ class TestThePollsPerDirectoryCostIsBounded:
             _recent_sessions_with_origin(tmp_path)
             with _counting() as counter:
                 rows = _recent_sessions_with_origin(tmp_path)
+            assert counter.counts["scandir"] == 1, counter.counts
             measurements.append(counter.total)
             assert len(rows) == 10, "a never-active directory is never listable"
 

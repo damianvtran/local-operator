@@ -384,6 +384,26 @@ class Message(BaseModel):
     is_error: bool = False
     stop_reason: str | None = None  # stop | length | toolUse | refusal | error | aborted
     usage: "Usage | None" = None
+    # HOW THE USER PRODUCED THIS ROW'S TEXT, user rows only: "typed", "dictated"
+    # or "mixed" (history-based per send — a keystroke AND a dictation both fed
+    # the draft since the composer's last accepted send — NOT per-span
+    # attribution, which no producer can claim today; do not "fix" this into
+    # range tracking). SILENT carriage by design: never rendered, never in
+    # copy/export, never read by a provider (every serializer builds its wire
+    # row from role/content/tool_calls rather than dumping this model). It is
+    # stored on the durable user row so provenance survives a resume, and
+    # ``None`` = legacy or unknown — it MUST stay the default, because
+    # ``model_dump(exclude_defaults=True)`` is what keeps every pre-existing
+    # row byte-identical (``transcript.encode_message_payload``).
+    input_mode: Literal["typed", "dictated", "mixed"] | None = None
+    # WHICH ROUTE PRODUCED A DICTATION — the extension slot beside
+    # ``input_mode``, reserved for the STT cascade: absent/None = the classic
+    # path (the server-side transcription hop the desktop has today). An OPEN
+    # string on purpose — the resolver that produces the value owns its
+    # vocabulary, and the carriage must never fork that behind an enum. Same
+    # silence and same byte-identical defaulting rule as ``input_mode``; the
+    # two travel as ONE contract revision (``input-mode-v1``).
+    input_path: str | None = None
     # Provider-native replay payload (opaque to the harness). NOTE: the loop
     # stores harness bookkeeping under ``provider_payload["details"]`` (tool
     # result metadata for compaction) — wire clients MUST NOT replay that key
@@ -2304,6 +2324,18 @@ class LoopConfig(BaseModel):
     record_tool_call: Callable[[str, str, str, float], None] | None = Field(
         default=None, exclude=True
     )
+
+    #: Run the operator's forwarded Claude Code / Codex ``PostToolUse`` hooks
+    #: for one finished call, as ``(tool_name, args, tool_call_id, result)``,
+    #: and return the context notes the hooks produced (empty for none). The
+    #: loop appends the notes to the tool result, which is where Claude Code
+    #: puts ``additionalContext`` for this event. A callback for the reason
+    #: ``record_tool_call`` is one: the harness keeps no config dependency.
+    #: Must not raise for a hook's own failure (``hook_forwarding`` swallows
+    #: those); the loop still guards it.
+    post_tool_hooks: (
+        Callable[[str, Mapping[str, Any], str, ToolResult], Awaitable[list[str]]] | None
+    ) = Field(default=None, exclude=True)
 
     # Steering (CONSUMING) interrupts tool batches; peek (non-consuming) is
     # polled between calls. Asides never interrupt.
