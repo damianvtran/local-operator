@@ -933,6 +933,51 @@ def test_main_exec_dispatch(
     assert exec_args.agent_id == "a1"
     assert exec_args.yolo is True
     assert exec_args.background is False
+
+
+def test_main_exec_output_flags_land_in_exec_args(
+    tmp_home: Path, quiet_env: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The exec parser hands the three output-contract flags to ExecArgs, with the
+    schema path made ABSOLUTE here — the ``--background`` worker re-derives its
+    own cwd, so a relative path would resolve against the wrong tree on the
+    other side of the spawn boundary (same rule as the spec's §3.1 note)."""
+    captured: dict[str, Any] = {}
+
+    def fake_run_exec(command: str, exec_args) -> int:
+        captured["args"] = exec_args
+        return 0
+
+    monkeypatch.setattr("local_operator.exec_mode.run_exec", fake_run_exec)
+    monkeypatch.setattr(
+        "local_operator.exec_mode.resolve_hosting_model_dry", lambda args: ("test", "m")
+    )
+    schema = tmp_path / "output-schema.json"
+    schema.write_text("{}")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "program",
+            "--yolo",
+            "--hosting",
+            "test",
+            "--model",
+            "m",
+            "exec",
+            "do the thing",
+            "--output-format",
+            "json",
+            "--output-schema",
+            str(schema),
+            "--output-retries",
+            "1",
+        ],
+    )
+    assert main() == 0
+    exec_args = captured["args"]
+    assert exec_args.output_format == "json"
+    assert exec_args.output_schema == str(schema.resolve())
+    assert exec_args.output_retries == 1
     assert exec_args.agent_name is None
     assert exec_args.train is False
 
