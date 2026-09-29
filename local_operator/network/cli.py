@@ -1365,6 +1365,22 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                 "credentials": keys,
             }
         )
+    # THE RESTART REMEDY, ON THE SURFACE WHERE THE SHARE LANDS (audit Q5 #5). The
+    # pull just made these keys borrowable — keys this device could NOT reach before
+    # it. A session that was already running cannot use them yet, and cannot say why:
+    # ``build_auth_store`` wires the brokering rung at session CONSTRUCTION, so a
+    # session built while nothing was borrowable runs local-only for its whole life.
+    # Only this command knows both halves, so only it can name the one remedy.
+    newly = [key for key in (pulled or {}).get("newly_borrowable") or [] if isinstance(key, str)]
+    if newly:
+        names = ", ".join(f"'{key}'" for key in newly)
+        plural = len(newly) > 1
+        lines.append(
+            f"note: {names} {'are' if plural else 'is'} now available to borrow on this "
+            "device. Start a new session if a session that was already running cannot "
+            f"use {'them' if plural else 'it'} — borrowing is wired in when a session "
+            "starts."
+        )
     # THE PREFLIGHT THE OFFLOAD TEST FOUND MISSING (design §2). A login held here but
     # shared nowhere had no row on any surface until `credential share` refused, so
     # the operator learned what was shareable only at share time.
@@ -1379,6 +1395,7 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
         "networks": networks,
         "shareable": shareable,
         "refreshed": bool(pulled),
+        "newly_borrowable": newly,
     }
     # A MEMBER WHOSE DOCUMENT COULD NOT BE MERGED IS SAID OUT LOUD (review round 5,
     # NIT 2). ``pull_placement`` refuses one unreadable document BY NAME and merges the
