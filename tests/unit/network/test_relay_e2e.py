@@ -1021,6 +1021,68 @@ def _pair(
     return store.load(record.network_id, server_a.root), host, port
 
 
+def _pair_settled(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    role: str = "drive",
+    ttl_s: float = 600.0,
+    admit: bool = True,
+    settings: relay.NetworkSettings | None = None,
+) -> tuple[types.NetworkRecord, str, int]:
+    """``_pair``, then wait for the PAIRING'S OWN LINK to finish closing.
+
+    WHY THE WAIT (CI mesh-link flakes, 2026-09-28). The joiner's CLI socket closes
+    the moment its ceremony ends, and the inviter's relay keeps that link in its
+    table for the whole of ``PeerLink.close``'s flush window — ``alive`` is not yet
+    cleared and ``send`` still accepts, so ``_ensure_link`` hands the dying link to
+    the very next op instead of DIALING the reachable peer. A first move driven
+    inside that window sends its invite into the closed socket, waits the slow op's
+    whole timeout (95 s) and answers ``that device is unreachable (no answer on its
+    link); nothing was changed``. Measured on this host 2026-09-28 with an
+    instrumented repro: the invite went out over the closing link at +2.708 s and
+    its refusal came at +97.7 s, while an immediate retry dialled fresh and
+    finished in 70 ms.
+
+    THE PREDICATE IS THE PAIRING LINK'S WHOLE LIFECYCLE, because a shorter one was
+    measured to miss two variants. Waiting for the link to merely be ABSENT passes
+    when the accepting thread has not registered it yet (the joiner returns on its
+    confirmation frame, before ``register_link`` runs), and the link then arrives and
+    dies under the cell's first op anyway. Waiting for ANY ``link_closed`` row passes
+    on a SHORTER-LIVED link's row (pairing leaves the member pull and the definitions
+    cadence behind, and their rows arrive first). And a row is not enough on its own
+    even when it names the joiner: the BYE path records one BEFORE the close
+    (``PeerLink._handle`` calls ``audit_link(self, \"link_closed\")`` and only then
+    ``close()``), so matching it would return while the link was still fully alive.
+
+    So the row has to be the one ``close()``'s own ``link_closed`` writes: the
+    ``actor`` names the joiner, the ``seq`` is past a baseline taken before the
+    pairing (which is what keeps a second pairing in the same cell honest), and the
+    detail carries the close's ``frames_in``/``frames_out`` — the bye-path row is
+    ``{"cause": ...}`` and no more, which is what separates the two one-line apart.
+    """
+    server_a, server_b = devices[0], devices[1]
+    joiner = server_b.identity.device_id
+    already = server_a.audit.recorded_through
+    record = _pair(devices, monkeypatch, role=role, ttl_s=ttl_s, admit=admit, settings=settings)
+
+    def _join_link_has_closed() -> bool:
+        for row in server_a.audit.tail():
+            if str(row.get("event")) != "link_closed" or str(row.get("actor")) != joiner:
+                continue
+            if int(row.get("seq") or 0) <= already:
+                continue
+            detail = row.get("detail")
+            if isinstance(detail, dict) and "frames_in" in detail:
+                return True
+        return False
+
+    assert net_fixtures.wait_for(
+        _join_link_has_closed
+    ), "the pairing's own link never closed (see _pair_settled)"
+    return record
+
+
 def test_a_member_dials_and_gets_a_catalogue_reply(
     devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
     monkeypatch: pytest.MonkeyPatch,

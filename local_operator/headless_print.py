@@ -570,6 +570,38 @@ async def run_print_mode(
     finally:
         if callable(unsubscribe):
             unsubscribe()
+        # THE ONE-SHOT EXIT CLOSES THE DOOR BEFORE ITS DISPOSE (664a234ec561,
+        # 2026-09-28): run_print_mode is how exec ends, and no departure rung
+        # covers that path — ``begin_drain``/``begin_retire`` install these
+        # latches and nothing on the exec side ever arms one — so a batch a
+        # last turn deferred was spawned into a delivery run that the
+        # following dispose aborted as a zero-work turn: an
+        # ``error|cause=disposed`` row that superseded the completed turn's
+        # own marker for every latest-wins reader and made the successor
+        # journal a ``[session incident]`` about work that had finished.
+        #
+        # Armed HERE — before ``before_dispose`` (exec's close() owns that
+        # await window on a real run) and before the dispose — so a spawn
+        # that slipped past the spawn-time check is held at admission by
+        # ``_prompt_messages`` instead of opening a turn whose only possible
+        # end is the disposal's abort.
+        #
+        # NOT armed when ``continuation`` is set: a --loop/goal run is exec's
+        # continuation mechanism, its turns are the run's own work, and the
+        # latches belong to the one-shot contract this function disposes on.
+        # The disposal's own evidence gate (``Session.dispose``) is the net
+        # for anything that slips there.
+        #
+        # getattr-guarded: the departure pair lives on the one-shot hosts
+        # (the real ``Session``, ``ServingSessionHandle``) rather than on
+        # ``SessionProtocol``, which test doubles implement to the letter.
+        if continuation is None:
+            retire_jobs = getattr(session, "retire_job_deliveries_to_transcript", None)
+            retire_wakes = getattr(session, "retire_wakes_to_inbox", None)
+            if callable(retire_jobs):
+                retire_jobs()
+            if callable(retire_wakes):
+                retire_wakes()
         if before_dispose is not None:
             # Handed the run's own verdict so a teardown that must publish a
             # terminal outcome (exec's browser scope) uses THIS value rather

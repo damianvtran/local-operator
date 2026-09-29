@@ -133,6 +133,22 @@ EVENT_MUTE_CAPABILITY = "event-mute-v1"
 #: not conditioned on the anchor's presence.
 OPERATOR_SIGNATURE_CAPABILITY = "operator-signature-v1"
 
+#: Additive attach capability: this owner's ``prompt``/``steer`` carry the
+#: silent input metadata (``input_mode``/``input_path``; see
+#: ``harness.types.Message``) from the attach frame onto the durable user row.
+#:
+#: WHY A CAPABILITY AND NOT JUST AN OPTIONAL FIELD. Nothing on the wire
+#: REQUIRES the fields, and the owner-side dispatch probes signatures, so an
+#: older handle never raises on them — it silently DROPS them, and silent loss
+#: is the one outcome the producer can neither see nor recover from (the
+#: provenance the phone stream or the desktop composer meant to record simply
+#: is not on the row). The client therefore gates the send on this string,
+#: which the runtime advertises only when the handle itself accepts the
+#: keyword. ONE string for BOTH fields, deliberately: they landed as one
+#: contract revision (the mode axis plus its reserved route slot), so a client
+#: that may send one may send the other.
+INPUT_MODE_CAPABILITY = "input-mode-v1"
+
 #: Event types a MUTED attach connection stops receiving: the wire half of
 #: ``EVENT_MUTE_CAPABILITY``, and deliberately THE SAME SET the parked
 #: ``EventController`` discards app-side (``tui/events.py`` assigns its

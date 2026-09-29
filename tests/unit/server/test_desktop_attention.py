@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import os
 import sqlite3
+import time
 import uuid
 from types import SimpleNamespace
 
@@ -20,7 +21,10 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from local_operator.server.routes import capabilities, desktop_sessions
-from local_operator.server.utils.desktop_sessions import DesktopSessions
+from local_operator.server.utils.desktop_sessions import (
+    DesktopSessionBridge,
+    DesktopSessions,
+)
 from local_operator.session.attention import AttentionStore
 
 # A 12-character id in exactly the shape a session id has, but uppercase.
@@ -36,11 +40,36 @@ from local_operator.session.attention import AttentionStore
 # the arm under test.
 UPPERCASE_SESSION_ID = "ABCDEF012345"
 
+#: Upper bound on an awaited event, never a budget to sleep through (the same
+#: guard ``test_desktop_read_without_owner`` uses).
+DEADLOCK_GUARD_S = 20.0
+
 
 def _publish(root, session_id: str, anchor: str, kind: str = "complete") -> str:
     token = str(uuid.uuid4())
     AttentionStore(root / "attention.db").publish(f"session/{session_id}", token, anchor, kind)
     return token
+
+
+async def _attention_settled(bridge: DesktopSessionBridge) -> None:
+    """Wait for the bridge's attention read to land, on the event, not the clock.
+
+    ``snapshot`` does not pace its attention read past ``ATTENTION_SNAPSHOT_WAIT_S``
+    (B-F6): the read that produces the receipt state is the shared refresh task
+    (``bridge.attention_refresh``), so a test that asserts that state waits for
+    the task rather than sleeping through its own guess.
+    """
+    deadline = time.monotonic() + DEADLOCK_GUARD_S
+    while time.monotonic() < deadline:
+        task = bridge.attention_refresh
+        if task is None:
+            return
+        if task.done():
+            if not task.cancelled() and task.exception() is not None:
+                raise AssertionError("the attention read failed") from task.exception()
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("the attention read never settled")
 
 
 @pytest.mark.asyncio
@@ -441,6 +470,12 @@ async def test_a_degraded_store_never_breaks_opening_or_listing(tmp_path):
     sid = await pool.create(str(tmp_path))
     _publish(tmp_path, sid, "result-1")
     async with pool.session(sid) as bridge:
+        # The first frame may serve the last known state -- the empty one on a
+        # fresh bridge -- when the store read outlasts the snapshot's glance
+        # (B-F6; CI run 36478233980 read exactly that frame). It starts the
+        # read; the frame that CARRIES the receipt is the one after it lands.
+        await bridge.snapshot()
+        await _attention_settled(bridge)
         healthy = await bridge.snapshot()
         assert healthy["payload"]["frontend"]["snapshot"]["attention"]["unseen"] is True
         assert (await pool.list(50)).rows[0]["attention"]["unseen"] is True
