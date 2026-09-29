@@ -22,6 +22,7 @@ from typing import Any
 
 from local_operator.network import audit as audit_mod
 from local_operator.network import definitions, identity, relay, store, types, wire
+from tests.unit.network import conftest as net_fixtures
 
 NETWORK_NAME = "audit-io"
 
@@ -136,6 +137,18 @@ def _pair(root: Path) -> tuple[relay.RelayServer, relay.RelayServer, types.Netwo
     store.save_secrets(types.SecretState(network_id=network_id, epoch=1, secret=secret), root_b)
     link, reason = server_b.dial(network_id, host=f"{host_a}:{port_a}", epoch=1)
     assert link is not None, f"the audit-io pair could not link: {reason}"
+    # THE PAIRING IS NOT SETTLED WHEN THE DIALER RETURNS. ``server_b.dial`` returns
+    # once the DIALER's half of the handshake is done, and the LISTENER records its
+    # own ``link_opened`` on the accepting thread afterwards — measured under load
+    # landing after a caller's baseline flush, so the pairing's own row was counted
+    # as something the caller did next (the 2026-09-28 CI failure: an idle hour
+    # "wrote" one row, the listener's own ``link_opened``). Both cells below
+    # baseline A's log, so both need the row in before they count. ``tail`` flushes
+    # first, so the predicate sees it the moment ``register_link`` records it.
+    settled = net_fixtures.wait_for(
+        lambda: any(str(row.get("event")) == "link_opened" for row in server_a.audit.tail())
+    )
+    assert settled, "the listener never recorded the pairing's link_opened"
     return server_a, server_b, store.load(network_id, root_a)
 
 
