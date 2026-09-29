@@ -4,7 +4,7 @@ import asyncio
 import base64
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from pydantic import BaseModel, ConfigDict
@@ -29,6 +29,7 @@ from local_operator.session.history_window import (
     display_window,
     wire_payload,
 )
+from local_operator.session.placement import PlacementMode, SessionPlacement
 from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.session.transcript import (
@@ -997,6 +998,124 @@ async def test_an_empty_kept_suffix_pages_the_audit_tail_and_terminates(tmp_path
     assert pages[-1].before_token is None, "the chain did not terminate"
     delivered = {row.id for row in walked}
     assert delivered >= {row.id for row in rows}, "audit tail paging lost rows"
+
+
+# ---------------------------------------------------------------------------
+# The escalation arm is placement-blind: a remote reader must not replay here
+# ---------------------------------------------------------------------------
+
+
+class _EscalationOnlyClient:
+    """The transport, and the ONLY stub: every serve returns the escalation page.
+
+    ``_fetch_history_page`` is the single seam every page read crosses, and a
+    ``full_required`` answer is the OWNER's own (the real wire reached it in
+    QA's pilot: the owner answers the escalation for a page whose next group is
+    oversized). So the wire half is not what this cell tests — the READER's
+    half is, which is the half MAJOR-1 (PR #1756, agent review round 1) proved
+    was placement-blind.
+    """
+
+    def __init__(self, page: DisplayHistoryWindow) -> None:
+        self._page = page
+
+    async def history_page(self, before: str, anchor: str = "") -> Any:  # noqa: ARG002
+        return self._page
+
+
+class _PlacedOwner:
+    """The one thing ``runtime_locality`` reads: a placement, on a device."""
+
+    def __init__(self, mode: PlacementMode) -> None:
+        self.placement = SessionPlacement(mode=mode, network_id="n_test", home_device="dev_b")
+
+
+def _reader_facade(
+    root: Path,
+    session_id: str,
+    *,
+    held: DisplayHistoryWindow,
+    served: DisplayHistoryWindow,
+    owner: Any,
+) -> AttachedSession:
+    """A reader mid-escalation, assembled by position rather than convenience.
+
+    The state mirrors the real caller (``load_older_display_page`` →
+    ``materialize_history``) at the moment the escalation arrives: the HELD
+    window is the ordinary page the reader was paging from (its
+    ``snapshot_token`` is what a full replay would walk), the SERVED page is
+    the owner's escalation, the model replay is NOT hydrated, and ``owner``
+    decides placement alone — ``None`` is this machine, which is the state
+    ``__new__`` facades carry (``runtime_locality``'s own no-owner arm).
+    ``session_id`` must equal the windows' ``conversation_id``: every serve
+    validates the two against each other.
+    """
+    reader = AttachedSession.__new__(AttachedSession)
+    reader._config_dir = root
+    reader._session_id = session_id
+    reader._display_history = held
+    reader._history_hydrated = False
+    reader._audit_exhausted = False
+    reader._history_ids = set()
+    reader._live_history = {}
+    reader._client = cast(Any, _EscalationOnlyClient(served))
+    if owner is not None:
+        reader._owner = owner
+    return reader
+
+
+@pytest.mark.asyncio
+async def test_a_remote_reader_refuses_the_full_replay_escalation_without_a_corpse(
+    tmp_path: Path,
+) -> None:
+    """MAJOR-1 (PR #1756 round 1): the arm is placement-keyed, and a refusal.
+
+    ``full_required`` means "replay the model's history LOCALLY" — for a
+    session on another device that is the one read §3.4 refuses. The arm ran
+    anyway: it constructed a non-deferred ``Transcript`` at
+    ``config/sessions/<id>/`` (materialising the bare ``created_at.json``
+    corpse on a device that owns nothing) and then failed the fetch with
+    ``ValueError: history cursor is no longer retained`` from the replay over
+    bytes that never held the cursor. This cell drives the reader's own call
+    path (``load_older_display_page``) for both placements: the remote reader
+    refuses BEFORE any construction, and the local reader still replays — if
+    the guard keyed on anything but placement, the escalation would break
+    where it was designed to be.
+    """
+    session_id = "window-test"  # the helper's conversation_id, validated per serve
+    owner_root = tmp_path / "owner"
+    viewer_root = tmp_path / "viewer"
+    directory = owner_root / "sessions" / session_id
+    transcript = Transcript(directory)
+    # The group that forces the escalation: one user row whose JSON frame
+    # alone exceeds the wire budget (QA seeded the same shape live).
+    await transcript.append_message(Message.user("oversized required prose " * 40_000))
+    await transcript.append_messages([Message.user("small one"), Message.assistant("small reply")])
+    held = window(transcript)
+    assert held.status == "ok", held.status
+    assert held.snapshot_token, "the held window is the state a full replay walks"
+    served = window(transcript, before=held.before_token)
+    assert served.status == "full_required", served.status
+
+    remote = _reader_facade(
+        viewer_root, session_id, held=held, served=served, owner=_PlacedOwner("peer")
+    )
+    with pytest.raises(RuntimeError) as refusal:
+        await remote.load_older_display_page()
+    assert "too large to serve over" in str(refusal.value), refusal.value
+    assert not (
+        viewer_root / "sessions" / session_id
+    ).exists(), "the refusal path materialised a session directory — the corpse class"
+    assert not viewer_root.exists(), "a read that refuses wrote on the viewing device"
+    assert not remote._history_hydrated
+
+    # THE ARM STILL WORKS WHERE IT WAS DESIGNED TO BE: a local placement replays
+    # from the transcript on this device and hydrates.
+    local = _reader_facade(owner_root, session_id, held=held, served=served, owner=None)
+    rows = await local.load_older_display_page()
+    assert rows, "the local escalation returned no rows"
+    assert local._history_hydrated
+    assert (directory / "transcript.jsonl").exists()
 
 
 @pytest.mark.asyncio

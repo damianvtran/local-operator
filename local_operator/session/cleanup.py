@@ -404,6 +404,15 @@ EXPLICIT_DELETE_POLICY = "explicit-delete"
 #: one distinction an operator recovering a lost session needs from that file.
 MESH_MOVE_POLICY = "mesh-move"
 
+#: The record ``policy`` string for a directory the mesh cleared so a VERIFIED
+#: copy could land (``network/mobility.py``'s ``_promote``): a BARE REMNANT — no
+#: transcript, no stamp, only a reader's leftover birth sidecar — that the
+#: recall would otherwise strand on. Its own value for the same reason
+#: ``MESH_MOVE_POLICY`` has one: the record must say what was actually removed,
+#: and a remnant is neither a move (no session moved) nor a delete (no
+#: conversation was destroyed — there was never a conversation in it).
+MESH_REMNANT_POLICY = "mesh-remnant"
+
 #: The user-facing sentence for each hard guard an explicit delete can be
 #: refused by, keyed by the reason :func:`_guard` returns.
 #:
