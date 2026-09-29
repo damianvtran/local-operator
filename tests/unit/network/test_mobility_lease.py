@@ -38,7 +38,7 @@ from tests.unit.network.test_mobility import (  # noqa: F401 — fixtures
     devices,
     pair,
 )
-from tests.unit.network.test_relay_e2e import _pair
+from tests.unit.network.test_relay_e2e import _pair_settled
 
 _HOLDER = """
 import sys, time
@@ -90,7 +90,7 @@ def test_a_move_of_a_session_a_recordless_process_holds_is_refused_then_succeeds
 ) -> None:
     """Refused with nothing mutated while held; moves once the lease is released."""
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     source = _owned_session(server_a)
     before = _transcript(server_a.root, SESSION)
 
@@ -143,7 +143,7 @@ def test_a_lease_taken_between_prepare_and_ready_refuses_the_commit(
     changes.
     """
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     source = _owned_session(server_a)
     before = _transcript(server_a.root, SESSION)
     real = mobility.LinkTransport.ask
@@ -189,7 +189,7 @@ def test_the_tui_runner_drives_the_real_cli_and_parses_the_contract(
     from local_operator.tui.session_move import run_session_move
 
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     _owned_session(server_a)
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_b.root))
 
