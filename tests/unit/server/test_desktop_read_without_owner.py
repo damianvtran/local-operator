@@ -272,6 +272,10 @@ async def test_a_healthy_owner_is_still_a_live_read(
         await asyncio.sleep(0.2)
         (directory / ".session.pid").write_text(str(registry.scan(tmp_path)[0][0].pid))
         url = f"/v1/desktop/sessions/{harness.session_id}"
+        # The ``{}`` is a type-shaped initialiser, not a fallback: the loop
+        # runs at least once (its deadline starts in the future), so every
+        # assert below reads a real response.
+        payload: dict[str, Any] = {}
         try:
             # HOLD THE BRIDGE WHILE THE ATTACH LANDS, then read on it. An
             # unheld read is served cold whenever the dial outlasts
