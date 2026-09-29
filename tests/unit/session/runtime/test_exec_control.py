@@ -214,6 +214,40 @@ async def test_start_publishes_an_exec_record(isolated_config: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_exec_run_follows_a_display_write_from_another_process(
+    isolated_config: Path,
+) -> None:
+    """Every run publishes a record, so every run's fold follows display.*.
+
+    Discovery is no longer a supervised-only surface (``ExecControl``), so an
+    UNSUPERVISED run can be dialled by a phone too — and its fold must not
+    keep flags frozen at this process's boot (design review round 1 on #1746,
+    D1). Driven through ``start_exec_control`` itself so the wiring under test
+    is the production one.
+    """
+    from local_operator import settings_io
+    from local_operator.config_watch import process_watcher
+    from local_operator.cross_session import cross_session_hidden
+    from local_operator.tui.settings import settings_reload
+
+    settings_reload()
+    control = await start_exec_control(FakeSession(), cwd="/tmp", supervised=False)
+    try:
+        assert cross_session_hidden() is False
+
+        setting = settings_io.resolve_key("display.hide_cross_session")
+        assert setting is not None
+        settings_io._store(ConfigManager(isolated_config), setting.path, True)
+        change = process_watcher(isolated_config).poll_now()
+        assert change is not None and "display.hide_cross_session" in change.changed_keys
+
+        assert cross_session_hidden() is True
+    finally:
+        await control.aclose()
+        settings_reload()
+
+
+@pytest.mark.asyncio
 async def test_the_gate_is_seeded_from_the_saved_mode(isolated_config: Path) -> None:
     """A saved ``tool_approval_mode: auto`` is in force at t0 — the seed case.
 

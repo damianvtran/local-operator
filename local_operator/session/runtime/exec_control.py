@@ -227,6 +227,7 @@ async def start_exec_control(
     from local_operator.session.runtime.server import RuntimeServer
     from local_operator.session.runtime.serving import (
         ServingSessionHandle,
+        attach_display_config_watch,
         attach_gate_config_watch,
     )
 
@@ -288,6 +289,11 @@ async def start_exec_control(
     )
     if supervised:
         attach_gate_config_watch(handle, config_directory)
+    # EVERY run publishes a record and folds for any viewer that dials it
+    # (discovery is no longer a supervised-only surface), so every run follows
+    # ``display.*`` writes: a viewer must not fold with flags frozen at this
+    # process's boot (design review round 1 on #1746, D1).
+    attach_display_config_watch(config_directory)
     # The ``stop`` control op (and therefore `lop stop`, which can now see this
     # run because it publishes a record) reaches ``request_stop`` -> this hook.
     # Without one the handle falls back to disposing in place, UNDER the prompt

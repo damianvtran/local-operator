@@ -256,6 +256,14 @@ _ANNOUNCE_SETTLED = "settled"
 _ANNOUNCE_DEFERRED = "deferred"
 _ANNOUNCE_FAILED = "failed"
 
+#: Config directories this process already subscribed to ``display.*`` changes
+#: for its phone folds (:func:`attach_display_config_watch`). One subscription
+#: per directory is all a process needs — the settings cache it invalidates is
+#: process-global — so runs and sessions that pass through the same process do
+#: not stack listeners. Keyed by directory like ``config_watch``'s own registry,
+#: so a test or worker that moves ``LOCAL_OPERATOR_CONFIG_DIR`` gets its own.
+_display_watch_attached: set[str] = set()
+
 
 def _session_may_announce(session: Any) -> bool:
     """Whether ``session`` is one the operator's OWN listings would show.
@@ -8094,6 +8102,7 @@ async def spawn_owned_session(
         mcp_publication_gate=mcp_publication_gate,
     )
     attach_gate_config_watch(handle, config_directory)
+    attach_display_config_watch(config_directory)
     return handle
 
 
@@ -8113,3 +8122,38 @@ def attach_gate_config_watch(handle: ServingSessionHandle, config_directory: Pat
         handle.follow_config(watcher)
     except Exception:  # noqa: BLE001 — the gate keeps its boot value
         logger.warning("config watcher could not be attached to the runtime gate", exc_info=True)
+
+
+def attach_display_config_watch(config_directory: Path) -> None:
+    """Make this process's phone folds follow ``display.*`` writes, or degrade.
+
+    The runtime folds live projections for the phone (design §3.2), and the
+    flags those folds read are process-cached (``tui.settings``): without this
+    subscription a ``display.*`` edit by another process never reaches a
+    running runtime, so e.g. a suppressed ``send`` row kept folding and
+    needed a runtime restart (design review round 1 on #1746, D1). Subscribed
+    at the same spawn seams as the gate watcher — every ``exec`` run publishes
+    a record (``exec_control``), so ALL of them attach, not only the
+    supervised ones with gates.
+
+    Idempotent per config directory: the settings cache is process-global, so
+    one subscription per directory is all a process needs, however many runs
+    and sessions pass through it. Imported/started defensively for the same
+    reason as the gate's attach — a fold that cannot follow config is a fold
+    built the way every fold was before this seam.
+    """
+    key = str(config_directory)
+    if key in _display_watch_attached:
+        return
+    try:
+        from local_operator.config_watch import process_watcher
+        from local_operator.tui.settings import follow_display_settings
+
+        watcher = process_watcher(config_directory)
+        watcher.start(asyncio.get_running_loop())
+        follow_display_settings(watcher)
+        _display_watch_attached.add(key)
+    except Exception:  # noqa: BLE001 — the folds keep the boot value
+        logger.warning(
+            "config watcher could not be attached to the runtime display folds", exc_info=True
+        )

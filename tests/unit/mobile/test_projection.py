@@ -1586,9 +1586,12 @@ def test_history_fold_drops_cross_session_rows_when_hidden(hide_cross_session) -
         for e in off
         if not (e.kind == "peer_message" or (e.kind == "tool" and e.tool_name == "send"))
     ]
-    assert [(e.kind, e.tool_call_id, e.tool_name) for e in on] == [
-        (e.kind, e.tool_call_id, e.tool_name) for e in keepers
-    ]
+    # FULL dataclass equality, not a triple of fields: the contract is that
+    # NOTHING else on a keeper may move — a hidden-path change to a keeper's
+    # text, details or state would slip past a partial comparison (review
+    # round 1, N1). ``TranscriptEntry`` is a plain dataclass, so this is
+    # field-for-field by construction.
+    assert on == keepers
 
 
 def test_the_attach_seed_drops_hidden_rows_and_their_correlation_maps(
