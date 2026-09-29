@@ -442,6 +442,17 @@ requested from the device that owns the credential, which lends a short-lived
 access token and never its refresh token (`lop network credential share|revoke`,
 `lop network credentials`).
 
+Provider logins are shareable by name (except device-bound ones such as kimi),
+and the ledger lists them beside the MCP servers: `lop network credentials`
+shows a row per provider login this device holds — e.g.
+`radient  oauth-rotating  login held`, with the share command right beside it —
+and a peer that borrows one runs the call as that account — including
+publishing and deleting agents and teams — without any login of its own. The
+Radient organization login is person-scoped: share it only to your own paired
+devices. If the borrowing device points at a local or staging hub, set
+`RADIENT_ORG_ALLOW_NONCANONICAL_BASE=1` on that device: the check runs where
+the request is sent, so setting it on the owner does nothing.
+
 A granted share is learned by PULLING, never pushed. The owner's document changes
 when `lop network credential share` runs there; this device reads it on its next
 `lop network credentials`, and a key it has not read yet is a key it has never
@@ -471,6 +482,12 @@ seen …`, and without it, the unconfigured-provider sentence above. Neither is 
 broken login, and re-authenticating does not change either.
 `lop network doctor --json` on the borrower is what names the endpoint and why it
 did not answer.
+
+An MCP login that has died on the owner is refused `interactive_required`, and
+the fix is an interactive sign-in THERE — the one repair a borrower cannot run
+for the owner. The owner's own surfaces carry the notice: `lop network doctor
+--json` (and the `/network` panel) shows a `credential_repair` row naming the
+login to run; it clears by itself once the next borrow succeeds.
 
 Revocation is not instant, and an incident response must not assume it is.
 `credential revoke` refuses new borrows at once; a grant already lent is dropped

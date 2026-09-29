@@ -230,6 +230,42 @@ class Agent(BaseModel):
     )
 
 
+class ModelSuggestionRequested(BaseModel):
+    """The ``{hosting, model}`` pair a hub model suggestion asked for.
+
+    Echoed inside :class:`ModelSuggestionNotice` so a caller can render what
+    was declined without re-deriving it from the listing.
+    """
+
+    hosting: str = Field("", description="The suggested provider id.")
+    model: str = Field("", description="The suggested model id.")
+
+
+class ModelSuggestionNotice(BaseModel):
+    """Why a hub model suggestion was not applied on THIS machine.
+
+    Non-blocking by construction: the import this rides on already succeeded.
+    The key is always present on an importing result -- ``None`` when nothing
+    was suggested, or when the suggestion was available and consumed into the
+    row's own ``hosting``/``model`` -- so a client can tell "nothing to say"
+    from "this backend never reports suggestions", exactly like
+    ``renamed_from`` (cross-repo contract §3.6). ``requested`` names the pair
+    the hub carried; ``reason`` is the machine-side verdict (see
+    ``local_operator.model.suggestion``).
+    """
+
+    reason: str = Field(
+        ...,
+        description=(
+            "Why the suggestion was skipped: unknown_provider, provider_unavailable, "
+            "local_not_configured, unknown_model, or invalid."
+        ),
+    )
+    requested: ModelSuggestionRequested = Field(
+        ..., description="The suggested pair this machine declined to apply."
+    )
+
+
 class ImportedAgent(Agent):
     """An agent this backend just WROTE from an archive or a hub pull.
 
@@ -251,6 +287,11 @@ class ImportedAgent(Agent):
         None,
         description="The published name the import was renamed FROM because the local "
         "registry already held it. None when the published name was free.",
+    )
+    model_notice: Optional[ModelSuggestionNotice] = Field(
+        None,
+        description="Non-blocking report for a hub model suggestion this machine could "
+        "not honour; always present, null when nothing was suggested or it applied.",
     )
 
 

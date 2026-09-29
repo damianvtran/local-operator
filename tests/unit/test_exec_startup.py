@@ -21,7 +21,12 @@ from local_operator.exec_startup import (
 )
 from local_operator.output_contract import OutputContract
 from local_operator.session.goal_loop import GoalLoop
-from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
+from local_operator.teams import (
+    ModelSuggestion,
+    TeamEditFields,
+    TeamMember,
+    TeamRegistry,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -43,11 +48,19 @@ def test_real_team_preflight_and_attachment(tmp_path):
             members=[TeamMember(role="coder")],
             instructions="review first",
             project="headless work",
+            model_suggestion=ModelSuggestion(hosting="openrouter", model="vendor/model"),
         )
     )
     args = ExecArgs(team="release", profile="reviewer", goal="clear", name="Audit")
     resolved = resolve_startup(args)
     assert resolved.id == team.id
+    # The stored suggestion survives the registry round trip, so the value the
+    # exec factory hands the session args is the one the team was saved with
+    # (the S4 half of the chain; the factory's own carrying is pinned in
+    # ``test_exec_mode.py``).
+    assert resolved.model_suggestion is not None
+    assert resolved.model_suggestion.hosting == "openrouter"
+    assert resolved.model_suggestion.model == "vendor/model"
     session = Mock()
     apply_startup(session, args, resolved)
     session.attach_team.assert_called_once_with(resolved)

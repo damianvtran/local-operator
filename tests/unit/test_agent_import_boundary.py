@@ -11,6 +11,7 @@ specified by the cross-repo contract §3.6 and lives in
 import uuid
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -52,7 +53,8 @@ def test_archive_identity_is_never_a_destination(tmp_path, identifier):
     sentinel.write_text("keep")
     if identifier == "/outside":
         identifier = str(outside)
-    imported, _ = registry.import_agent(_archive(tmp_path, _metadata(identifier)))
+    outcome = registry.import_agent(_archive(tmp_path, _metadata(identifier)))
+    imported = outcome.agent
     assert str(uuid.UUID(imported.id)) == imported.id
     assert imported.id != identifier
     assert imported.name == "../Display name is not a path"
@@ -68,12 +70,15 @@ def test_archive_identity_is_never_a_destination(tmp_path, identifier):
 def test_repeated_import_preserves_existing_profile_and_private_files(tmp_path):
     registry = AgentRegistry(tmp_path / "config")
     archive = _archive(tmp_path, _metadata("original"))
-    first, _ = registry.import_agent(archive)
+    outcome = registry.import_agent(archive)
+    first = outcome.agent
     original_dir = registry.agents_dir / first.id
     sentinel = original_dir / "conversation.jsonl"
     sentinel.write_text("private local history")
     archive = _archive(tmp_path, _metadata(first.id))
-    second, renamed_from = registry.import_agent(archive)
+    outcome = registry.import_agent(archive)
+    second = outcome.agent
+    renamed_from = outcome.renamed_from
     assert second.id != first.id
     assert sentinel.read_text() == "private local history"
     assert registry.get_agent(first.id) == first
@@ -95,7 +100,9 @@ def _named_archive(directory: Path, name: str) -> Path:
 
 def test_import_keeps_the_published_name_when_the_registry_does_not_hold_it(tmp_path):
     registry = AgentRegistry(tmp_path / "config")
-    imported, renamed_from = registry.import_agent(_named_archive(tmp_path / "a", "Coder"))
+    outcome = registry.import_agent(_named_archive(tmp_path / "a", "Coder"))
+    imported = outcome.agent
+    renamed_from = outcome.renamed_from
     assert imported.name == "Coder"
     assert renamed_from is None
 
@@ -112,8 +119,11 @@ def test_import_suffixes_a_name_already_held_in_ANY_case(tmp_path):
     """
 
     registry = AgentRegistry(tmp_path / "config")
-    first, _ = registry.import_agent(_named_archive(tmp_path / "a", "coder"))
-    second, renamed_from = registry.import_agent(_named_archive(tmp_path / "b", "Coder"))
+    outcome = registry.import_agent(_named_archive(tmp_path / "a", "coder"))
+    first = outcome.agent
+    outcome = registry.import_agent(_named_archive(tmp_path / "b", "Coder"))
+    second = outcome.agent
+    renamed_from = outcome.renamed_from
     assert first.name == "coder"
     assert second.name == "Coder-2"
     assert renamed_from == "Coder"
@@ -180,7 +190,8 @@ def test_import_takes_the_first_free_suffix(tmp_path):
         ("c", "Scout-2"),
         ("d", "Scout"),
     ):
-        imported, _ = registry.import_agent(_named_archive(tmp_path / index, incoming))
+        outcome = registry.import_agent(_named_archive(tmp_path / index, incoming))
+        imported = outcome.agent
         names.append(imported.name)
     assert names == ["Scout", "Scout-2", "Scout-2-2", "Scout-3"]
     for name in names:
@@ -199,7 +210,9 @@ def test_the_suffix_is_a_hyphen_so_the_row_can_still_be_published(tmp_path):
 
     registry = AgentRegistry(tmp_path / "config")
     registry.import_agent(_named_archive(tmp_path / "a", "Coder"))
-    imported, renamed_from = registry.import_agent(_named_archive(tmp_path / "b", "Coder"))
+    outcome = registry.import_agent(_named_archive(tmp_path / "b", "Coder"))
+    imported = outcome.agent
+    renamed_from = outcome.renamed_from
     assert imported.name == "Coder-2"
     assert renamed_from == "Coder"
     assert " " not in imported.name
@@ -218,10 +231,13 @@ def test_a_name_at_the_cap_truncates_the_BASE_so_the_suffix_survives(tmp_path):
     registry = AgentRegistry(tmp_path / "config")
     base = "c" * MAX_AGENT_NAME_CHARS
     assert len(base) == MAX_AGENT_NAME_CHARS
-    first, _ = registry.import_agent(_named_archive(tmp_path / "a", base))
+    outcome = registry.import_agent(_named_archive(tmp_path / "a", base))
+    first = outcome.agent
     assert first.name == base
 
-    second, renamed_from = registry.import_agent(_named_archive(tmp_path / "b", base))
+    outcome = registry.import_agent(_named_archive(tmp_path / "b", base))
+    second = outcome.agent
+    renamed_from = outcome.renamed_from
     assert renamed_from == base
     assert len(second.name) == MAX_AGENT_NAME_CHARS
     assert second.name == base[: MAX_AGENT_NAME_CHARS - 2] + "-2"
@@ -230,7 +246,8 @@ def test_a_name_at_the_cap_truncates_the_BASE_so_the_suffix_survives(tmp_path):
     assert second.name[:-2] == base[:-2]
     _assert_publishable(second.name)
 
-    third, _ = registry.import_agent(_named_archive(tmp_path / "c", base))
+    outcome = registry.import_agent(_named_archive(tmp_path / "c", base))
+    third = outcome.agent
     assert len(third.name) == MAX_AGENT_NAME_CHARS
     assert third.name == base[: MAX_AGENT_NAME_CHARS - 2] + "-3"
     _assert_publishable(third.name)
@@ -346,3 +363,107 @@ def test_archive_symlink_is_rejected_before_registry_mutation(tmp_path):
     with pytest.raises(ValueError, match="unsupported symlink entry"):
         registry.import_agent(archive)
     assert not list(registry.agents_dir.iterdir())
+
+
+# --- hub model suggestions (§4.2, S3) ---------------------------------------------
+
+
+class _FakeStore:
+    """The store surface ``ProviderController.is_usable`` reads."""
+
+    def __init__(self, *providers: str) -> None:
+        self._providers = providers
+
+    def list_credentials(self, provider=None):
+        return [SimpleNamespace(provider=name) for name in self._providers]
+
+
+def _suggestion_archive(tmp_path: Path, suggestion: object) -> Path:
+    """An importable archive whose ``agent.yml`` carries ``model_suggestion``."""
+
+    metadata = _metadata("suggestion carrier")
+    metadata["model_suggestion"] = suggestion
+    return _archive(tmp_path, metadata)
+
+
+def test_an_available_suggestion_is_promoted_into_the_row(tmp_path, monkeypatch):
+    """Available ⇒ the pair lands in hosting/model, exactly like a user choice.
+
+    The catalogue is pinned to ``None`` ("cannot be enumerated offline") so the
+    test states the uncertainty rule's accept arm rather than depending on the
+    shipped static rows for one provider — the same determinism the resolver's
+    own unit tests keep.
+    """
+
+    monkeypatch.setattr(
+        "local_operator.model.discovery.offered_model_ids",
+        lambda provider_id, *, cache_dir=None: None,
+    )
+    registry = AgentRegistry(tmp_path / "config")
+    outcome = registry.import_agent(
+        _suggestion_archive(
+            tmp_path, {"hosting": "openrouter", "model": "anthropic/claude-opus-5.5"}
+        ),
+        auth_store=_FakeStore("openrouter"),
+    )
+
+    assert outcome.model_notice is None
+    assert outcome.agent.hosting == "openrouter"
+    assert outcome.agent.model == "anthropic/claude-opus-5.5"
+    # And the stored row agrees: the pair is the row's own state now.
+    assert registry.get_agent(outcome.agent.id).hosting == "openrouter"
+
+
+def test_an_unavailable_suggestion_fails_over_and_stays_non_blocking(tmp_path):
+    """Unavailable ⇒ empty fields (the user's default at launch) + a notice.
+
+    The import still succeeds — asserted by the row existing and the outcome
+    carrying the notice as DATA, not an exception.
+    """
+
+    registry = AgentRegistry(tmp_path / "config")
+    outcome = registry.import_agent(
+        _suggestion_archive(tmp_path, {"hosting": "no-such-provider", "model": "m"}),
+        auth_store=_FakeStore(),
+    )
+
+    assert outcome.agent.hosting == ""
+    assert outcome.agent.model == ""
+    notice = outcome.model_notice
+    assert notice is not None
+    assert notice.reason == "unknown_provider"
+    assert notice.requested_hosting == "no-such-provider"
+    # The row exists and behaves like every other orphan import.
+    assert registry.get_agent(outcome.agent.id).name == outcome.agent.name
+
+
+def test_a_not_logged_in_suggestion_names_the_provider(tmp_path):
+    registry = AgentRegistry(tmp_path / "config")
+
+    outcome = registry.import_agent(
+        _suggestion_archive(tmp_path, {"hosting": "openrouter", "model": "m"}),
+        auth_store=_FakeStore(),
+    )
+
+    assert outcome.model_notice is not None
+    assert outcome.model_notice.reason == "provider_unavailable"
+    assert outcome.agent.hosting == ""
+
+
+def test_no_suggestion_is_the_byte_for_byte_path(tmp_path):
+    """Case 3: no key ⇒ nothing carried, nothing changed, no new I/O.
+
+    The archive's own hosting/model are still DELETED as before (the seed
+    rule), and the returned notice is None.
+    """
+
+    registry = AgentRegistry(tmp_path / "config")
+    metadata = _metadata("plain")
+    metadata["hosting"] = "openrouter"
+    metadata["model"] = "anthropic/claude-opus-5.5"
+
+    outcome = registry.import_agent(_archive(tmp_path, metadata))
+
+    assert outcome.model_notice is None
+    assert outcome.agent.hosting == ""
+    assert outcome.agent.model == ""

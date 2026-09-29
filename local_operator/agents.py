@@ -42,6 +42,7 @@ from local_operator.agent_profiles import (
     profile_from_agent,
 )
 from local_operator.jsonl import read_jsonl, write_jsonl
+from local_operator.model.suggestion import ModelNotice, resolve_model_suggestion
 from local_operator.optional import missing_extra_error
 from local_operator.paths import default_agent_cwd
 from local_operator.types import Schedule  # Keep existing Schedule import
@@ -654,9 +655,38 @@ def instruction_set_fields(
     if profile.effort:
         fields["effort"] = profile.effort
     fields["delegate"] = profile.may_delegate
+    # The model suggestion is DERIVED from the row, never stored as its own field
+    # (design §3.1, OQ4): what this profile runs on HERE is exactly the pair
+    # launch resolution already prefers, so a pull that honoured a suggestion
+    # re-echoes it from `hosting`/`model` on the next push. Only a WHOLE pair is
+    # emitted -- "hosting with no model" would resolve to a different model per
+    # reader, which is not a recommendation.
+    hosting = str(agent.hosting or "").strip()
+    model = str(agent.model or "").strip()
+    if hosting and model:
+        fields["model_suggestion"] = {"hosting": hosting, "model": model}
 
     fields.update(overrides)
     return fields
+
+
+@dataclass(frozen=True)
+class AgentImport:
+    """What an archive import stored, and what it could not apply.
+
+    ``agent`` is the stored row. ``renamed_from`` is the published name
+    whenever the registry already held it (cross-repo contract §3.6).
+    ``model_notice`` is the carried, NON-BLOCKING report for a hub
+    ``model_suggestion`` this machine could not honour -- ``None`` when nothing
+    was suggested, or when the suggestion applied and was consumed into the
+    row's own ``hosting``/``model``. Every consumer renders the notice its own
+    way, and an absent notice while everything else succeeded is the ordinary
+    case, not a failure.
+    """
+
+    agent: AgentData
+    renamed_from: Optional[str] = None
+    model_notice: Optional[ModelNotice] = None
 
 
 class AgentRegistry:
@@ -2182,7 +2212,7 @@ class AgentRegistry:
             with zip_ref.open(member, "r") as source, target_path.open("wb") as target:
                 shutil.copyfileobj(source, target)
 
-    def import_agent(self, zip_path: Path) -> Tuple[AgentData, Optional[str]]:
+    def import_agent(self, zip_path: Path, *, auth_store: Any | None = None) -> "AgentImport":
         """
         Import an agent from a ZIP file.
 
@@ -2198,14 +2228,19 @@ class AgentRegistry:
 
         Args:
             zip_path (Path): Path to the ZIP file containing agent state files
+            auth_store: The credential store the model-suggestion availability
+                check reads. ``None`` (every existing caller) lets
+                ``model.suggestion`` open and close a short-lived store; the
+                desktop routes pass their injected one, and tests inject fakes.
 
         Returns:
-            Tuple[AgentData, Optional[str]]: the imported agent's metadata, and
-                the name it was renamed FROM when a local agent already held
-                the published name. The caller reports that; it is what lets
-                the UI say "Imported as \"Coder-2\" — you already have an
-                agent called \"Coder\"" instead of appearing to have imported
-                something the user cannot find under the name they asked for.
+            AgentImport: the imported agent's metadata; the name it was renamed
+                FROM when a local agent already held the published name (the
+                caller reports that; it is what lets the UI say "Imported as
+                \"Coder-2\" -- you already have an agent called \"Coder\""
+                instead of appearing to have imported something the user cannot
+                find under the name they asked for); and the non-blocking
+                ``model_notice`` for a hub suggestion this machine could not run.
 
         Raises:
             ValueError: If the ZIP file is invalid or missing required files
@@ -2264,6 +2299,24 @@ class AgentRegistry:
                     del agent_data["hosting"]
                 if "model" in agent_data:
                     del agent_data["model"]
+
+                # A hub model suggestion is CONSUMED here, never stored as its
+                # own field (design §4.2): an available pair is promoted into
+                # the row's own hosting/model -- so the row behaves like any
+                # user-set choice on every surface -- and an unavailable one
+                # leaves both fields empty exactly as before (launch resolution
+                # then yields the user's default) while the CALLER carries the
+                # non-blocking notice. No suggestion means no new I/O at all:
+                # the byte-for-byte path this import always had.
+                suggestion = agent_data.pop("model_suggestion", None)
+                model_notice: ModelNotice | None = None
+                if suggestion is not None:
+                    verdict = resolve_model_suggestion(suggestion, auth_store=auth_store)
+                    if verdict.available:
+                        agent_data["hosting"] = verdict.hosting
+                        agent_data["model"] = verdict.model
+                    else:
+                        model_notice = verdict.notice()
 
                 # Validate before allocating anything in the registry. Malformed
                 # profiles must not leave partially imported metadata behind.
@@ -2335,7 +2388,11 @@ class AgentRegistry:
                         shutil.rmtree(agent_dir)
                     raise
 
-                return imported_agent, renamed_from
+                return AgentImport(
+                    agent=imported_agent,
+                    renamed_from=renamed_from,
+                    model_notice=model_notice,
+                )
 
             except zipfile.BadZipFile:
                 raise ValueError("Invalid ZIP file")
@@ -2398,8 +2455,9 @@ class AgentRegistry:
         agent_id: str,
         *,
         with_credential: bool = False,
+        auth_store: Any | None = None,
         tenant_id: str | None = None,
-    ) -> Tuple[AgentData, Optional[str]]:
+    ) -> "AgentImport":
         """
         Download an agent from the Radient Agent Hub and import it.
 
@@ -2418,9 +2476,10 @@ class AgentRegistry:
                 an org row 404 to anyone else (§8.2/§8.3).
 
         Returns:
-            Tuple[AgentData, Optional[str]]: the imported agent's metadata, and
-                the name it was renamed FROM when a local agent already held the
-                published name (see :meth:`import_agent`).
+            AgentImport: the imported agent's metadata (with the hub provenance
+                stamped on it), the name it was renamed FROM when a local agent
+                already held the published name (see :meth:`import_agent`), and
+                any carried ``model_notice``.
 
         Raises:
             RuntimeError: If the download or import fails.
@@ -2441,10 +2500,14 @@ class AgentRegistry:
             radient_client.download_agent_from_marketplace(
                 agent_id, zip_path, with_credential=with_credential
             )
-            imported, renamed_from = self.import_agent(zip_path)
-        stamped = self._stamp_hub_provenance(imported, agent_id)
+            outcome = self.import_agent(zip_path, auth_store=auth_store)
+        stamped = self._stamp_hub_provenance(outcome.agent, agent_id)
         self._record_hub_baseline(stamped, agent_id, tenant_id)
-        return stamped, renamed_from
+        return AgentImport(
+            agent=stamped,
+            renamed_from=outcome.renamed_from,
+            model_notice=outcome.model_notice,
+        )
 
     def _record_hub_baseline(self, agent: AgentData, hub_id: str, tenant_id: str | None) -> None:
         """Write the TEXT baseline a later three-way merge diffs against.

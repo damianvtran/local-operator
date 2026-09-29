@@ -260,7 +260,7 @@ def test_aida_stewards_stalled_sessions_stale_projects_and_pending_asks() -> Non
     assert "what is going stale" in flat
     assert "pending asks" in flat
     assert "answer status, delegation and routing questions directly" in flat
-    assert "not answered for them" in flat
+    assert "is surfaced, not answered" in flat
 
 
 def test_aida_learns_at_the_narrowest_scope_and_says_so() -> None:
@@ -602,7 +602,7 @@ def test_an_untouched_copy_updates_in_place_when_the_starter_moves(scratch_seeds
 
     assert verdict.verdict == "outdated-clean"
     assert verdict.applied is True
-    assert verdict.installed_version == "1.0.0"
+    assert verdict.installed_version == "1.1.0"
     assert verdict.packaged_version == "2.0.0"
     assert verdict.diverged_fields == ("instructions",)
     # The echo: recoverable by copy-paste, the same guarantee reset gives.
@@ -735,7 +735,7 @@ def test_an_unbumped_body_change_is_still_an_update(scratch_seeds, tmp_path) -> 
 
     assert verdict.verdict == "outdated-clean"
     assert verdict.applied is True
-    assert verdict.installed_version == verdict.packaged_version == "1.0.0"
+    assert verdict.installed_version == verdict.packaged_version == "1.1.0"
     assert verdict.replaced_instructions == before_prompt
     assert registry.get_agent_system_prompt(row.id).strip() == "REVIEWER, SAME VERSION, NEW TEXT"
 

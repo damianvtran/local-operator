@@ -3884,9 +3884,12 @@ def build_app(daemon: MobileDaemon):
                 # Structural: the session moves to the active section.
                 daemon.table.invalidate_summaries_cache()
                 daemon.table.notify_list_changed()
-                projection = daemon.session_projections.get(session_id) or _durable_projection(
-                    session_id
-                )
+                projection = daemon.session_projections.get(session_id)
+                if projection is None:
+                    # Off the loop: `_durable_projection` folds disk state and
+                    # reads the attention store, whose wait can run to seconds
+                    # under contention -- the hop every other call site takes.
+                    projection = await asyncio.to_thread(_durable_projection, session_id)
                 if projection is not None:
                     projection.ended = False
                     projection.degraded = False

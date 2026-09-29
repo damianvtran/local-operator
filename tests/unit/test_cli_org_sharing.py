@@ -423,7 +423,8 @@ def test_agents_pull_org_downloads_through_the_person_client(
         seen["client"] = radient_client
         seen["agent_id"] = agent_id
         seen["with_credential"] = with_credential
-        return types.SimpleNamespace(name="Pulled", id="local-1"), None
+        pulled = types.SimpleNamespace(name="Pulled", id="local-1")
+        return types.SimpleNamespace(agent=pulled, renamed_from=None, model_notice=None)
 
     monkeypatch.setattr(AgentRegistry, "download_agent_from_radient", fake_download)
     monkeypatch.setattr(
@@ -655,6 +656,47 @@ def test_org_commands_need_a_signed_in_account(
     from local_operator.providers.radient_credentials import ORG_LOGIN_REMEDY
 
     assert ORG_LOGIN_REMEDY in out
+    # A device in no network keeps the single sentence: the ask-the-holder clause
+    # needs a mesh to ask (design review round 1, D3).
+    assert "lop network credential share radient --with <this device>" not in out
+
+
+def test_the_org_remedy_names_the_holder_share_on_a_mesh_member(
+    tmp_home: Path, quiet_env: None, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """A member device's missing-login remedy gains the ask-the-holder clause (D3).
+
+    The GUIDE says never to run a login on a peer, so where a paired device could
+    hold the org login the remedy must name the share path a peer can act on; the
+    cell above pins the no-network shape unchanged.
+    """
+    from local_operator.network import identity as identity_mod
+    from local_operator.network import store as network_store
+    from local_operator.network.types import MemberRecord, NetworkRecord
+    from local_operator.providers import radient_credentials
+    from local_operator.providers.radient_credentials import ORG_LOGIN_REMEDY
+
+    identity = identity_mod.load_or_mint()
+    record = NetworkRecord(
+        network_id="net_org_remedy", name="home", self_device_id=identity.device_id
+    )
+    record.members.append(MemberRecord(device_id=identity.device_id, name="this-device"))
+    record.members.append(MemberRecord(device_id="d_" + "b" * 32, name="cloud-node-1"))
+    network_store.save(record)
+
+    monkeypatch.setattr(
+        radient_credentials, "resolve_radient_oauth_access_sync", lambda *a, **k: None
+    )
+    monkeypatch.setattr("sys.argv", ["program", "teams", "push", "--org", "org-a", "crew"])
+
+    assert main() == 1
+
+    out = capsys.readouterr().out
+    assert ORG_LOGIN_REMEDY in out
+    assert (
+        "Or ask the device that holds it to run "
+        "`lop network credential share radient --with <this device>`." in out
+    ), out
 
 
 def test_the_local_server_does_not_restate_the_remedy_sentences() -> None:
@@ -733,3 +775,183 @@ def test_teams_push_with_an_empty_org_names_the_empty_value(
     assert "the value was empty" in out
     assert "tenant_id: org-a" in out
     assert org_hub.published_teams == []
+
+
+# --- hub model suggestions (§3.2 push, §4.3 notices) -----------------------------
+
+
+def test_teams_push_derives_from_the_manager_when_an_agents_store_exists(
+    org_hub: _FakeOrgHub,
+    tmp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The manager row's pair is the derived suggestion, with zero new UI (§3.2)."""
+
+    from local_operator.agents import AgentEditFields, AgentRegistry
+    from local_operator.paths import config_dir
+
+    agents = AgentRegistry(config_dir())
+    manager_agent = agents.create_agent(
+        AgentEditFields.model_validate({"name": "manager", "description": "Runs it."})
+    )
+    # Every field spelled out (the tree's convention for ``AgentEditFields`` —
+    # pyright requires them, no defaults): ``update_agent`` skips ``None``
+    # values, so the pair is all this sets.
+    agents.update_agent(
+        manager_agent.id,
+        AgentEditFields(
+            name=None,
+            security_prompt=None,
+            hosting="openrouter",
+            model="vendor/model",
+            description=None,
+            tags=None,
+            categories=None,
+            last_message=None,
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            max_tokens=None,
+            stop=None,
+            frequency_penalty=None,
+            presence_penalty=None,
+            seed=None,
+            current_working_directory=None,
+        ),
+    )
+    _make_team()
+    monkeypatch.setattr("sys.argv", ["program", "teams", "push", "--org", "org-a", "release-crew"])
+
+    assert main() == 0
+
+    document, tenant = org_hub.published_teams[0]
+    assert tenant == "org-a"
+    assert document["model_suggestion"] == {"hosting": "openrouter", "model": "vendor/model"}
+    assert "Successfully pushed" in capsys.readouterr().out
+
+
+def test_teams_push_without_an_agents_store_derives_nothing(
+    org_hub: _FakeOrgHub,
+    tmp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The ``agents_store_present`` guard: a storeless machine must not create
+    one just to derive — and pushes succeed, just with no suggestion."""
+
+    from local_operator.paths import config_dir
+
+    _make_team()
+    monkeypatch.setattr("sys.argv", ["program", "teams", "push", "--org", "org-a", "release-crew"])
+
+    assert main() == 0
+
+    document, _tenant = org_hub.published_teams[0]
+    assert "model_suggestion" not in document
+    # The guard held: no agents store was created by the push.
+    assert not (config_dir() / "agents").exists()
+
+
+def test_agents_pull_org_prints_the_model_suggestion_notice(
+    org_hub: _FakeOrgHub,
+    tmp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A skipped suggestion is a yellow line, never an error (§4.3)."""
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.model.suggestion import ModelNotice
+
+    notice = ModelNotice(reason="unknown_provider", requested_hosting="nope", requested_model="m")
+
+    def fake_download(self, radient_client, agent_id, *, with_credential=False, auth_store=None):
+        pulled = types.SimpleNamespace(name="Carrier", id="local-9")
+        return types.SimpleNamespace(agent=pulled, renamed_from=None, model_notice=notice)
+
+    monkeypatch.setattr(AgentRegistry, "download_agent_from_radient", fake_download)
+    monkeypatch.setattr(
+        "sys.argv", ["program", "agents", "pull", "--id", "hub-agent-1", "--org", "org-a"]
+    )
+
+    assert main() == 0
+
+    out = capsys.readouterr().out
+    assert "Successfully pulled agent 'Carrier'" in out
+    assert "Model suggestion 'm' (hosting 'nope') was not applied" in out
+    assert "Using your default model instead." in out
+
+
+def test_teams_pull_prints_where_a_stored_suggestion_applies(
+    org_hub: _FakeOrgHub,
+    tmp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Stored ⇒ a line saying where it applies, not a silence (§4.3)."""
+
+    monkeypatch.setattr(
+        "local_operator.model.discovery.offered_model_ids",
+        lambda provider_id, *, cache_dir=None: None,
+    )
+    org_hub.team_documents["hub-team-2"] = {
+        "id": "hub-team-2",
+        "tenant_id": "org-a",
+        "name": "carrier-crew",
+        "members": [],
+        "instructions": "You ship.",
+        "version": "1.0.0",
+        # The mock provider needs no credential, so the CLI's own short-lived
+        # store resolves it as usable with no seeding -- this is the plain
+        # "the suggestion runs here" arm.
+        "model_suggestion": {"hosting": "test", "model": "mock-1"},
+    }
+    monkeypatch.setattr("sys.argv", ["program", "teams", "pull", "hub-team-2", "--org", "org-a"])
+
+    assert main() == 0
+
+    out = capsys.readouterr().out
+    assert "Model suggestion stored" in out
+    assert "lop exec --team carrier-crew" in out
+
+    from local_operator.paths import config_dir
+    from local_operator.teams import TeamRegistry
+
+    stored = TeamRegistry(config_dir()).get_team_by_name("carrier-crew")
+    assert stored is not None
+    assert stored.model_suggestion is not None
+    assert stored.model_suggestion.model == "mock-1"
+
+
+def test_teams_pull_prints_the_notice_when_the_suggestion_cannot_run(
+    org_hub: _FakeOrgHub,
+    tmp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Unavailable ⇒ the row omits it and the notice line names the reason."""
+
+    org_hub.team_documents["hub-team-3"] = {
+        "id": "hub-team-3",
+        "tenant_id": "org-a",
+        "name": "skipping-crew",
+        "members": [],
+        "instructions": "You ship.",
+        "version": "1.0.0",
+        "model_suggestion": {"hosting": "no-such-provider", "model": "m"},
+    }
+    monkeypatch.setattr("sys.argv", ["program", "teams", "pull", "hub-team-3", "--org", "org-a"])
+
+    assert main() == 0
+
+    out = capsys.readouterr().out
+    assert "was not applied" in out
+    assert "no-such-provider" in out
+
+    from local_operator.paths import config_dir
+    from local_operator.teams import TeamRegistry
+
+    stored = TeamRegistry(config_dir()).get_team_by_name("skipping-crew")
+    assert stored is not None
+    assert stored.model_suggestion is None

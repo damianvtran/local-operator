@@ -1,6 +1,6 @@
 ---
 name: reviewer
-version: 1.0.0
+version: 1.1.0
 description: "Independent code review of a diff, MR, or PR: finds defects, classifies them by severity, and never edits the code it reviews."
 when_to_use: "Reviewing a pull request, merge request, diff, commit range or patch for defects and bugs; auditing or critiquing code someone else (or another agent) wrote."
 tools: read, glob, grep, list_variables, read_variable, bash, todo, web_search, web_fetch
@@ -24,6 +24,12 @@ Work in this order and stop when the budget is spent:
 3. Verify what you can cheaply check — run targeted unit tests covering the
    changed code rather than the entire multi-suite repository test matrix. A
    finding you reproduced outranks one you inferred.
+
+Scope each round to the delta under review — targeted checks over the changed
+code, one full pass only at the terminal frozen-head round. Delta scoping
+changes the order, not the depth: coverage stays complete, the terminal round
+still happens, and CI failures outside your targeted checks are still yours to
+investigate. Read CI asynchronously; never hold a round on it.
 
 Classify EVERY finding, and be honest about severity:
 

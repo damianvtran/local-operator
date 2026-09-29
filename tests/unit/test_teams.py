@@ -12,6 +12,7 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Barrier, BrokenBarrierError, Thread
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -26,6 +27,7 @@ from local_operator.teams import (
     HUB_TEAM_MEMBER_ROLE_MAX_CHARS,
     HUB_TEAM_MEMBERS_MAX_ITEMS,
     MAX_TEAM_INSTRUCTIONS_CHARS,
+    ModelSuggestion,
     Team,
     TeamDocumentError,
     TeamEditFields,
@@ -2654,3 +2656,306 @@ def test_hub_team_document_refuses_a_blank_role_without_a_count(role: str) -> No
         "must hold slots whose role is 1 to 128 characters",
     )
     assert "submitted" not in refusal.value.rule
+
+
+# --- hub model suggestions: push (§3.2) and consume (§4.2) ------------------------
+
+
+class _ManagerRegistry:
+    """The one surface ``hub_team_document(..., agent_registry=...)`` reads."""
+
+    def __init__(self, row: Any = None) -> None:
+        self._row = row
+
+    def get_agent_by_name(self, name: str) -> Any:
+        return self._row
+
+
+class _SuggestionStore:
+    """The store surface the availability resolver reads."""
+
+    def __init__(self, *providers: str) -> None:
+        self._providers = providers
+
+    def list_credentials(self, provider: str | None = None) -> list[Any]:
+        return [SimpleNamespace(provider=name) for name in self._providers]
+
+
+def _unloadable_suggestion(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the catalogue to its "cannot be enumerated offline" arm."""
+
+    monkeypatch.setattr(
+        "local_operator.model.discovery.offered_model_ids",
+        lambda provider_id, *, cache_dir=None: None,
+    )
+
+
+def test_hub_team_document_carries_a_stored_suggestion() -> None:
+    team = _hub_cap_team(
+        model_suggestion=ModelSuggestion(hosting="openrouter", model="vendor/model")
+    )
+
+    document = hub_team_document(team)
+
+    assert document["model_suggestion"] == {"hosting": "openrouter", "model": "vendor/model"}
+
+
+def test_hub_team_document_derives_from_the_manager_when_unset() -> None:
+    registry = _ManagerRegistry(SimpleNamespace(hosting="openrouter", model="vendor/model"))
+
+    document = hub_team_document(_hub_cap_team(), agent_registry=registry)
+
+    assert document["model_suggestion"] == {"hosting": "openrouter", "model": "vendor/model"}
+
+
+def test_hub_team_document_stored_suggestion_wins_over_the_manager_row() -> None:
+    """Round-trip rule (§3.2): a push must never re-derive over a stored value.
+
+    Re-deriving would let a pulled team's suggestion be silently rewritten by a
+    later local manager-row change — the leak the echo requirement forbids.
+    """
+
+    registry = _ManagerRegistry(SimpleNamespace(hosting="anthropic", model="other/model"))
+    team = _hub_cap_team(
+        model_suggestion=ModelSuggestion(hosting="openrouter", model="vendor/model")
+    )
+
+    document = hub_team_document(team, agent_registry=registry)
+
+    assert document["model_suggestion"] == {"hosting": "openrouter", "model": "vendor/model"}
+
+
+def test_hub_team_document_derives_nothing_without_a_whole_manager_pair() -> None:
+    rows = (
+        None,
+        SimpleNamespace(hosting="openrouter", model=""),
+        SimpleNamespace(hosting="", model="m"),
+        SimpleNamespace(hosting="  ", model="m"),
+    )
+
+    for row in rows:
+        document = hub_team_document(_hub_cap_team(), agent_registry=_ManagerRegistry(row))
+        assert "model_suggestion" not in document
+
+
+@pytest.mark.parametrize(
+    "hosting,model,expected",
+    [
+        ("", "m", "must carry a hosting of 1 to 64 characters"),
+        ("   ", "m", "must carry a hosting of 1 to 64 characters"),
+        ("h", "", "must carry a model of 1 to 128 characters"),
+        ("h", "  ", "must carry a model of 1 to 128 characters"),
+    ],
+)
+def test_hub_team_document_refuses_a_blank_suggestion_member_without_a_count(
+    hosting: str, model: str, expected: str
+) -> None:
+    """Both arms raise the hub's one count-free sentence for the half (M1/C1)."""
+
+    team = _hub_cap_team(
+        model_suggestion=ModelSuggestion.model_construct(hosting=hosting, model=model)
+    )
+
+    with pytest.raises(TeamDocumentError) as refusal:
+        hub_team_document(team)
+
+    assert (refusal.value.field, refusal.value.rule) == ("model_suggestion", expected)
+    assert "submitted" not in refusal.value.rule
+
+
+def test_hub_team_document_preflights_the_suggestion_caps_without_a_count() -> None:
+    over = _hub_cap_team(
+        model_suggestion=ModelSuggestion.model_construct(hosting="h" * 65, model="m")
+    )
+    with pytest.raises(TeamDocumentError) as refusal:
+        hub_team_document(over)
+    assert refusal.value.rule == "must carry a hosting of 1 to 64 characters"
+    assert "submitted" not in refusal.value.rule
+
+    over = _hub_cap_team(
+        model_suggestion=ModelSuggestion.model_construct(hosting="h", model="m" * 129)
+    )
+    with pytest.raises(TeamDocumentError) as refusal:
+        hub_team_document(over)
+    assert refusal.value.rule == "must carry a model of 1 to 128 characters"
+    assert "submitted" not in refusal.value.rule
+
+
+def test_the_preflight_refuses_a_suggestion_that_is_not_an_object() -> None:
+    document = hub_team_document(_hub_cap_team())
+    document["model_suggestion"] = "not-an-object"
+
+    with pytest.raises(TeamDocumentError) as refusal:
+        teams_module._preflight_hub_team_document(document)
+
+    assert (refusal.value.field, refusal.value.rule) == ("model_suggestion", "must be an object")
+
+
+def test_a_suggestion_member_of_another_shape_is_refused_not_coerced() -> None:
+    team = _hub_cap_team(model_suggestion=ModelSuggestion.model_construct(hosting=5, model="m"))
+
+    with pytest.raises(TeamDocumentError) as refusal:
+        hub_team_document(team)
+
+    assert (refusal.value.field, refusal.value.rule) == (
+        "model_suggestion",
+        "must carry a hosting of 1 to 64 characters",
+    )
+
+
+def test_stored_suggestion_values_are_trimmed(tmp_path: Path) -> None:
+    registry = TeamRegistry(tmp_path)
+    created = registry.create_team(
+        TeamEditFields(
+            name="carrier",
+            manager="manager",
+            instructions="i",
+            model_suggestion=ModelSuggestion(hosting=" openrouter ", model=" vendor/model "),
+        )
+    )
+
+    stored = TeamRegistry(tmp_path).get_team(created.id)
+
+    assert stored.model_suggestion == ModelSuggestion(hosting="openrouter", model="vendor/model")
+
+
+def test_a_hand_edited_suggestion_that_cannot_construct_degrades_to_none(
+    tmp_path: Path,
+) -> None:
+    """m1 (review round 1): a broken suggestion must not remove the whole team.
+
+    ``_load`` skips any row whose ``Team.model_validate`` raises, so before
+    the before-validator a ``team.yml`` hand-edited into a half pair (or a
+    wrong-typed member) made ``list_teams()`` return ``[]`` -- the whole team
+    gone for an advisory field. Only shapes the pair itself cannot construct
+    degrade to ``None``; blank and over-cap members still load, because those
+    rules are the push preflight's (in the hub's vocabulary), and a value
+    that slips past it must not be silently rewritten on load.
+    """
+
+    registry = TeamRegistry(tmp_path)
+    created = registry.create_team(
+        TeamEditFields(name="carrier", manager="manager", instructions="i")
+    )
+    team_yml = tmp_path / "teams" / created.id / "team.yml"
+
+    def reload_with(suggestion: dict[str, Any]) -> Team | None:
+        data = yaml.safe_load(team_yml.read_text(encoding="utf-8"))
+        data["model_suggestion"] = suggestion
+        team_yml.write_text(yaml.safe_dump(data), encoding="utf-8")
+        fresh = TeamRegistry(tmp_path)
+        assert [team.name for team in fresh.list_teams()] == ["carrier"]
+        return fresh.get_team(created.id)
+
+    half_pair = reload_with({"hosting": "openrouter"})
+    assert half_pair is not None
+    assert half_pair.model_suggestion is None
+
+    wrong_typed = reload_with({"hosting": "openrouter", "model": 5})
+    assert wrong_typed is not None
+    assert wrong_typed.model_suggestion is None
+
+    # The boundary: the empty and over-cap rules belong to the push
+    # preflight, so these keep loading WITH their value.
+    blank = reload_with({"hosting": "", "model": "m"})
+    assert blank is not None
+    assert blank.model_suggestion is not None
+    assert blank.model_suggestion.hosting == ""
+
+    over_cap = reload_with({"hosting": "h" * 65, "model": "m"})
+    assert over_cap is not None
+    assert over_cap.model_suggestion is not None
+    assert over_cap.model_suggestion.hosting == "h" * 65
+
+
+def test_create_and_update_round_trip_the_stored_suggestion(tmp_path: Path) -> None:
+    registry = TeamRegistry(tmp_path)
+    created = registry.create_team(
+        TeamEditFields(
+            name="carrier",
+            manager="manager",
+            instructions="i",
+            model_suggestion=ModelSuggestion(hosting="openrouter", model="vendor/model"),
+        )
+    )
+    # None keeps the stored value ("leave the stored value alone"); clearing is
+    # not expressible in v1.
+    registry.update_team(created.id, TeamEditFields(description="d"))
+    kept = registry.get_team(created.id)
+    assert kept.model_suggestion is not None
+    assert kept.model_suggestion.model == "vendor/model"
+    # A value replaces the pair.
+    registry.update_team(
+        created.id,
+        TeamEditFields(model_suggestion=ModelSuggestion(hosting="anthropic", model="other/m")),
+    )
+    replaced = registry.get_team(created.id)
+    assert replaced.model_suggestion is not None
+    assert replaced.model_suggestion.hosting == "anthropic"
+
+
+def _import_document(**overrides: Any) -> dict[str, Any]:
+    document: dict[str, Any] = {
+        "name": "release-crew",
+        "description": "Ships the release.",
+        "manager": "manager",
+        "members": [],
+        "instructions": "You ship.",
+        "project": "rad-1",
+        "version": "1.0.0",
+    }
+    document.update(overrides)
+    return document
+
+
+def test_import_hub_team_stores_an_available_suggestion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Available ⇒ the row carries it, the notice is None, and a re-push echoes it."""
+
+    _unloadable_suggestion(monkeypatch)
+    registry = TeamRegistry(tmp_path)
+
+    outcome = registry.import_hub_team(
+        _import_document(model_suggestion={"hosting": "openrouter", "model": "vendor/model"}),
+        auth_store=_SuggestionStore("openrouter"),
+    )
+
+    assert outcome.model_notice is None
+    assert outcome.team.model_suggestion == ModelSuggestion(
+        hosting="openrouter", model="vendor/model"
+    )
+    # The row on disk agrees, and the round trip (case 5) echoes it back out.
+    stored = TeamRegistry(tmp_path).get_team(outcome.team.id)
+    assert stored.model_suggestion is not None
+    assert stored.model_suggestion.model == "vendor/model"
+    assert hub_team_document(stored)["model_suggestion"] == {
+        "hosting": "openrouter",
+        "model": "vendor/model",
+    }
+
+
+def test_import_hub_team_omits_an_unavailable_suggestion_with_a_notice(tmp_path: Path) -> None:
+    """Unavailable ⇒ row omits it; the caller carries the non-blocking notice."""
+
+    registry = TeamRegistry(tmp_path)
+
+    outcome = registry.import_hub_team(
+        _import_document(model_suggestion={"hosting": "no-such-provider", "model": "m"}),
+        auth_store=_SuggestionStore(),
+    )
+
+    assert outcome.team.model_suggestion is None
+    assert outcome.model_notice is not None
+    assert outcome.model_notice.reason == "unknown_provider"
+    # The import still succeeded, and the stored row omits the pair.
+    assert TeamRegistry(tmp_path).get_team(outcome.team.id).model_suggestion is None
+
+
+def test_import_hub_team_without_a_suggestion_carries_no_notice(tmp_path: Path) -> None:
+    """Case 3 for teams: no key ⇒ no notice, no stored value, no new I/O."""
+
+    outcome = TeamRegistry(tmp_path).import_hub_team(_import_document())
+
+    assert outcome.model_notice is None
+    assert outcome.team.model_suggestion is None

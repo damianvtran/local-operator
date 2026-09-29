@@ -406,6 +406,88 @@ def test_build_auth_store_returns_the_plain_store_with_nothing_borrowable(
     plain.close()
 
 
+def test_build_auth_store_passes_the_db_path_through_and_keeps_the_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ``db_path`` passthrough, pinned on the 0-peer path (Radient org projection).
+
+    ``db_path=None`` must keep every pre-existing caller byte-identical — the store
+    resolves the AMBIENT default exactly as before — while an explicit ``db_path``
+    must be the file the returned store reads. Both on the plain branch, which is
+    what a 0-peer device receives.
+    """
+    from local_operator.providers.auth_store import AuthStore
+
+    root = tmp_path / "bare"
+    root.mkdir()
+    _point_config_at(monkeypatch, root)
+    default = mesh_store.build_auth_store(root)
+    try:
+        assert type(default) is AuthStore
+        assert default.db_path == root / "auth.db"
+    finally:
+        default.close()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    explicit = mesh_store.build_auth_store(root, db_path=elsewhere / "auth.db")
+    try:
+        assert type(explicit) is AuthStore
+        assert explicit.db_path == elsewhere / "auth.db"
+    finally:
+        explicit.close()
+
+
+def test_the_resolver_reads_the_explicit_root_and_leaves_the_ambient_one_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P5: the db-path SPELLING is part of the seam (Radient org projection).
+
+    The Radient resolvers pass their own ``<config_dir>/auth.db`` because the database
+    follows ``paths.config_dir()``, not the argument. A caller whose root is not the
+    ambient one — an embedded root, a test — must keep getting ITS store: two roots
+    with DIFFERENT answers, and the explicit one wins with the ambient file untouched.
+
+    Passes on base (which also spelled the path explicitly) and is red against a naive
+    swap to ``build_auth_store(config_dir)`` without ``db_path``; it exists to KEEP the
+    spelling, which is why it is a pin and not a red-on-base cell.
+    """
+    ambient = tmp_path / "ambient"
+    explicit = tmp_path / "explicit"
+    ambient.mkdir()
+    explicit.mkdir()
+    _point_config_at(monkeypatch, ambient)
+    from local_operator.env import DEFAULT_RADIENT_API_BASE_URL
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.providers.radient_credentials import (
+        resolve_radient_oauth_access,
+    )
+
+    for pointed, token in ((ambient, "ambient-token"), (explicit, "explicit-token")):
+        auth = AuthStore(db_path=pointed / "auth.db", config_dir=pointed)
+        try:
+            auth.upsert_credential(
+                "radient",
+                {
+                    "type": "oauth",
+                    "access": token,
+                    "refresh": "refresh-fixture",
+                    "expires": int(time.time() * 1000) + 3600_000,
+                    "email": f"{pointed.name}@example.test",
+                },
+            )
+        finally:
+            auth.close()
+    before = sorted(str(path.relative_to(ambient)) for path in ambient.rglob("*"))
+
+    access = asyncio.run(resolve_radient_oauth_access(explicit, DEFAULT_RADIENT_API_BASE_URL))
+    assert access is not None, "the explicit root resolved nothing"
+    assert access.access_token == "explicit-token"
+    assert access.email == "explicit@example.test"
+
+    after = sorted(str(path.relative_to(ambient)) for path in ambient.rglob("*"))
+    assert after == before, f"the ambient root changed: {sorted(set(after) - set(before))}"
+
+
 def test_build_auth_store_returns_the_mesh_store_when_borrowing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

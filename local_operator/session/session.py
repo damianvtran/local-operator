@@ -1729,8 +1729,10 @@ def _history_captured_browser_views(messages: Sequence[Message]) -> bool:
     return False
 
 
-def _shed_frames_to_budget(messages: list[Message], *, budget: int) -> tuple[list[Message], int]:
-    """Drop the oldest frames from the RENDERED history until it fits ``budget``.
+def _fit_frames_to_budget(
+    messages: list[Message], *, budget: int
+) -> tuple[list[Message], int, int, int | None]:
+    """Fit the rendered history under ``budget`` — downscale first, shed last.
 
     The transport backstop, and the piece that rescues a session already
     wedged on disk. A 34 MB history is replayed verbatim on every resume, so a
@@ -1741,25 +1743,36 @@ def _shed_frames_to_budget(messages: list[Message], *, budget: int) -> tuple[lis
     :func:`_rebound_history_images`, cannot fix the sessions already on disk.
     This is the sibling repair for the sessions that are.
 
+    The ladder itself lives in ``compaction.pruning.fit_frames_to_wire_budget``:
+    context frames are DOWNSCALED first (kept present at a smaller
+    re-rendering; the newest frame stays full fidelity), and the oldest are
+    replaced with notices only when no rung fits. The shed's steady state
+    without that step was one more frame dropped per turn with every request
+    still pinned at the ceiling; the downscale is what lets a long screenshot
+    history fit whole.
+
     Applied to the RENDERED history and NEVER to the transcript: the stored
     frames survive untouched, so ``/export``, forks, and a later session on a
     provider with a larger cap all still see all of them.
 
     Ordered LAST in :meth:`Session._render_history`, after the rebound pass,
     so it measures the bytes that will actually be sent — a rebound frame is
-    smaller, and shedding one that would have fit is content lost for nothing.
+    smaller, and resizing or shedding one that would have fit is content lost
+    for nothing.
 
     Degrades to a no-op rather than raising: an unavailable compaction package
     already means no compaction, and a session that cannot import it must
-    still render. Returns ``(messages, frames_dropped)``.
+    still render. Returns ``(messages, frames_downscaled, frames_dropped,
+    rung)`` — ``rung`` is the long-edge rung the ladder settled at, which the
+    once-per-session diagnostic logs (``None`` when nothing was downscaled).
     """
     if budget <= 0:
-        return messages, 0
+        return messages, 0, 0, None
     try:
-        from local_operator.compaction.api import shed_frames_to_wire_budget
+        from local_operator.compaction.api import fit_frames_to_wire_budget
     except ImportError:
-        return messages, 0
-    return shed_frames_to_wire_budget(messages, budget=budget)
+        return messages, 0, 0, None
+    return fit_frames_to_wire_budget(messages, budget=budget)
 
 
 def _without_unresolvable_frames(messages: list[Message]) -> tuple[list[Message], int]:
@@ -2786,6 +2799,13 @@ class Session:
         #: Latch for the render seam's byte shed notice (see
         #: ``_announce_frames_shed_once``). Per session, not per render.
         self._frames_shed_announced = False
+        #: Latch for the render seam's context-downscale log line (see
+        #: ``_announce_frames_downscaled_once``) — the shed's own sibling, kept
+        #: separate because the two are different events: a session can
+        #: downscale without ever dropping a frame, and the log owes one line
+        #: per event class so the next episode's log answers "downscaled vs
+        #: dropped" without a code read. Per session, not per render.
+        self._frames_downscaled_announced = False
         #: Latch for ``_announce_missing_media_once`` (a block whose payload the
         #: attachment store no longer holds). Per session, not per render, for the
         #: same reason as its two siblings — the render runs on every provider
@@ -3609,7 +3629,9 @@ class Session:
         A FOURTH degrade runs LAST, and it is not about images being
         unacceptable either: the aggregate request can outgrow the provider's
         size cap even when every block in it is individually fine
-        (``_shed_frames_to_budget``). It belongs here for the same reason the
+        (``_fit_frames_to_budget``). It downscales older frames first —
+        keeping every one of them in context — and replaces any with notices
+        only when no rung fits. It belongs here for the same reason the
         acceptability strips do — a 34 MB history makes ``/compact`` fail too,
         so the escape hatch has to be covered — and it is ordered after the
         rebound so it measures the real bytes.
@@ -3683,11 +3705,17 @@ class Session:
             return _without_images(rendered, model_incapable=True)
         rendered = _rebound_history_images(rendered)
         # LAST, so it measures what will actually be sent: the rebound pass
-        # above can shrink a block, and shedding a frame that would have fit
-        # is content lost for nothing. This is the transport guard — see
-        # ``_shed_frames_to_budget`` for why it belongs at the render rather
-        # than in a client, and why it never touches the transcript.
-        rendered, shed = _shed_frames_to_budget(rendered, budget=self._wire_bytes_budget())
+        # above can shrink a block, and resizing or shedding a frame that
+        # would have fit is content lost for nothing. This is the transport
+        # guard — see ``_fit_frames_to_budget`` for why it belongs at the
+        # render rather than in a client, and why it never touches the
+        # transcript. Older frames are downscaled and KEPT; only a rung walk
+        # that cannot fit drops any.
+        rendered, downscaled, shed, rung = _fit_frames_to_budget(
+            rendered, budget=self._wire_bytes_budget()
+        )
+        if downscaled:
+            self._announce_frames_downscaled_once(downscaled, rung)
         if shed:
             self._announce_frames_shed_once(shed)
         return rendered
@@ -3723,6 +3751,10 @@ class Session:
     def _announce_frames_shed_once(self, dropped: int) -> None:
         """Say, once per session, that old screenshots left the context.
 
+        Fires only when frames were actually DROPPED — a downscale that kept
+        every frame logs instead (``_announce_frames_downscaled_once``) and
+        leaves this notice unposted, because nothing left the context.
+
         Once per session rather than per render for the reason the text-only
         announcement is: ``_render_history`` runs on every turn, on compaction,
         and on the boot context measurement, so a per-render notice would
@@ -3750,6 +3782,46 @@ class Session:
             self._image_drop_diagnostic(),
         )
         self._spawn_background(self._emit(NoticeEvent(text=FRAMES_SHED_NOTICE, kind="warning")))
+
+    def _announce_frames_downscaled_once(self, downscaled: int, rung: int | None) -> None:
+        """Log, once per session, that older screenshots were downscaled.
+
+        The shed's sibling, and deliberately a LOG LINE rather than a notice:
+        downscaling keeps every frame in the conversation at a smaller size,
+        so nothing the user attached has been lost and the model can still
+        consult it — whereas ``FRAMES_SHED_NOTICE`` exists because frames
+        actually LEFT, which is news a user acts on. What this line owes is
+        the next reader of an episode log: it says the request was over the
+        size limit, how many older frames were re-rendered to fit it, and at
+        which rung — the ladder's long-edge size (1024/768/512), so a mild
+        re-render is distinguishable from a floor-rung one — plus (via
+        :meth:`_image_drop_diagnostic`) the shape of the image payload at
+        that moment, so "what did the harness do to my screenshots" is
+        answerable without a code read.
+
+        Once per session, from a latch, for the reason its siblings carry:
+        the render runs on every turn and every compaction, and the policy's
+        first engagement is the observable fact — later renders of the same
+        history would repeat the same sentence. Silent when there is no
+        running loop, with the latch left unset so a later render on the loop
+        can still announce; the downscale itself has already been applied
+        either way, and the announcement is never what makes the request
+        legal.
+        """
+        if self._frames_downscaled_announced:
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._frames_downscaled_announced = True
+        logger.warning(
+            "downscaled %d older screenshot(s) from the rendered context at the %s px rung "
+            "to stay under the provider request size limit (%s)",
+            downscaled,
+            rung,
+            self._image_drop_diagnostic(),
+        )
 
     def _announce_missing_media_once(self, dropped: int) -> None:
         """Say, once per session, that a screenshot left the context for good.
@@ -4113,14 +4185,16 @@ class Session:
 
         The ladder, in order of how much the user loses:
 
-        1. The render seam already sheds to ``wire_bytes_budget`` on every
-           request. Reaching HERE therefore proves the budget was too loose
+        1. The render seam already fits the rendered history to
+           ``wire_bytes_budget`` on every render — downscaling older
+           screenshots before it ever drops one (``_fit_frames_to_budget``).
+           Reaching HERE therefore proves the budget was too loose
            for this provider — a proxy in front of the API can refuse below
            the documented cap — so the budget is RATCHETED DOWN for this
            session to below what was just rejected. That is a measurement we
            only get by being refused, which is why it is reactive rather than
            a per-provider cap table (a constant that rots).
-        2. The next render sheds to the tightened budget, and the byte
+        2. The next render fits to the tightened budget, and the byte
            trigger fires a real compaction pass — snapcompact archives
            LOCALLY with no provider call, so it works while every request is
            still being refused.
@@ -5233,8 +5307,10 @@ class Session:
             self._images_rejected = False
             self._images_rejected_for_size = False
             # The next render is image-bearing again, so the shed notice is
-            # owed afresh if the new provider also turns out to be too small.
+            # owed afresh if the new provider also turns out to be too small —
+            # and so is its downscale sibling.
             self._frames_shed_announced = False
+            self._frames_downscaled_announced = False
         # An explicit switch withdraws the fallback pin's premise: the pin
         # rescued the PREVIOUS selection, and the stream fn's preflight will
         # clear its own route state the moment it sees the new selector. The
@@ -9480,6 +9556,57 @@ class Session:
                 return True
             self._attention_republish_due = False
             return True
+
+    async def _flush_pending_attention_republish(self) -> None:
+        """The teardown-side half of the republish ladder: ONE guarded attempt.
+
+        WHY IT EXISTS: `dispose` cancels every tracked background task, and the
+        ladder is one of them. For an interactive quit that is a fair trade --
+        the process lives on and a viewer can fire the parked rung -- but for a
+        ONE-SHOT exec (and any exit) the cancellation is final: `17ea09afe588`
+        (2026-09-29) armed the ladder seconds before its process exited, died
+        with its first rung still parked, and its `complete` marker only ever
+        reached the transcript journal -- five hours later the store still had
+        no row, because the next importer (the mobile daemon's boot) met the
+        same lock and skipped. Nothing retries a dead process's rung, so the
+        one attempt the first rung would have made is made HERE, before the
+        cancel block can drop it.
+
+        WHAT MAKES IT SAFE: exactly the same call the rungs make
+        (:meth:`_republish_journalled_outcome`) -- it re-reads the journal's
+        LATEST marker, takes the publish lock, and the store's insert is
+        idempotent by token, so racing a live rung or the turn's own publish
+        cannot double-insert or revive an older completion. Bounded: one
+        attempt, and the store's own retry inside it (ms typical on the WAL
+        store; the contended worst case is the same budget that was being
+        deferred against, which is the point). Guarded: the latch
+        short-circuits a process with nothing owed, and no failure escapes --
+        teardown outranks this receipt.
+
+        WHEN IT CANNOT LAND IT SAYS SO, ONCE: the cancellation that follows
+        used to be silent, and a stranded completion needs a line that names
+        it (the ladder's own exhaustion message is for a process that lives
+        on).
+        """
+        if not self._attention_republish_due:
+            return
+        from local_operator.session.attention import conversation_identity
+
+        try:
+            landed = await self._republish_journalled_outcome()
+        except Exception:  # noqa: BLE001 -- teardown must not raise
+            logger.warning(
+                "attention: dispose could not attempt the owed republish for %s",
+                conversation_identity(self._transcript.directory),
+                exc_info=True,
+            )
+            return
+        if not landed:
+            logger.warning(
+                "attention: the store never took the republish owed for %s; the "
+                "durable marker waits for the next boot's import",
+                conversation_identity(self._transcript.directory),
+            )
 
     def _schedule_attention_republish(self, attempt: int = 0) -> None:
         """Arm the latch and put the republish ladder in flight.
@@ -18775,6 +18902,16 @@ class Session:
             # in-memory list consistent with what was persisted rather than
             # leaving a notice stranded in the FIFO at teardown.
             self._flush_context_journal()
+            # AND THE ONE WRITE THAT WAS BEING CANCELLED INSTEAD OF SENT: a
+            # republish the ladder still owes. The cancel block below takes the
+            # ladder down with it, and for a one-shot process that exit is
+            # seconds after the deferral that armed it -- the completion then
+            # waited for a boot import that could (and did -- session
+            # 17ea09afe588, 2026-09-29) meet the same lock and be skipped. The
+            # flush is ONE guarded attempt on the same path the ladder's first
+            # rung uses: bounded by the store's own retry, idempotent by token,
+            # under the publish lock, and it never raises into teardown.
+            await self._flush_pending_attention_republish()
             # HC-11: cancel tracked background tasks (wake deliveries, aside
             # persistence), then close the session task group.
             for task in list(self._background_tasks):

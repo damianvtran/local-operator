@@ -673,12 +673,20 @@ class DesktopFeed:
 
     # -- subscribers -------------------------------------------------------
 
-    def subscribe(self) -> FeedSubscription:
+    def subscribe(self, *, baseline_completion_sequence: int | None = None) -> FeedSubscription:
         """Register a subscriber and start the poller if it is not running.
 
         Raising when the table is full is deliberate and matches the session
         stream: a client that cannot be served must be told, not quietly given a
         stream that will never carry anything.
+
+        ``baseline_completion_sequence`` is the CONNECT FLOOR (see the ordering
+        note below). A caller on the event loop must pass one it read in a
+        worker -- ``AttentionStore.revision`` can spend the store's whole
+        contention budget and ``GET /v1/desktop/events`` is what a client
+        connects on; :meth:`subscribe_off_loop` is that caller. The fallback
+        exists for SYNC callers (tests, scripts), where there is no loop to
+        block.
         """
         if len(self.subscribers) >= SUBSCRIBER_COUNT:
             raise RuntimeError("too many desktop feed subscribers")
@@ -691,12 +699,27 @@ class DesktopFeed:
         # window is the harmless direction — a completion landing mid-handshake
         # is both announced and present in the ``open`` snapshot, and the
         # desktop's own claim map collapses the pair into one banner.
+        if baseline_completion_sequence is None:
+            baseline_completion_sequence = self.store.revision()[0]
         subscription = FeedSubscription(
-            id=secrets.token_hex(8), baseline_completion_sequence=self.store.revision()[0]
+            id=secrets.token_hex(8),
+            baseline_completion_sequence=baseline_completion_sequence,
         )
         self.subscribers[subscription.id] = subscription
         self._ensure_poller()
         return subscription
+
+    async def subscribe_off_loop(self) -> FeedSubscription:
+        """``subscribe`` for an event-loop caller: the floor read in a worker.
+
+        ``AttentionStore.revision`` waits out the store's bounded contention
+        budget (up to ~10.8 s on this store's constants) before it gives up, and
+        this subscription is what a connecting client waits on -- so the read is
+        hoisted off the loop and handed to :meth:`subscribe` as a VALUE, which
+        keeps the floor-read-before-publish ordering identical to the sync path.
+        """
+        baseline = await asyncio.to_thread(self.store.revision)
+        return self.subscribe(baseline_completion_sequence=baseline[0])
 
     def unsubscribe(self, subscription: FeedSubscription) -> None:
         """Drop a subscriber, its presence claim, and the poller if it was last."""

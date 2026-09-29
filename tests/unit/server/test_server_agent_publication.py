@@ -219,10 +219,23 @@ async def test_publish_body_carries_the_instruction_set_and_nothing_else(
         assert key not in body, f"{key} rode along in the publish body"
 
     # And the private CONTENT is absent, not merely its key: a renamed field that
-    # still carried the bytes would pass the check above.
+    # still carried the bytes would pass the check above. The ONE sanctioned
+    # echo is the row's hosting/model pair: it IS the published model_suggestion
+    # by design (§3.1 -- "what this agent runs on here" is exactly what a
+    # recommendation names), so those two markers are asserted on that field
+    # alone, nested and counted, instead of being absent from the body.
     serialized = json.dumps(body)
+    suggestion_markers = (PRIVATE_MARKERS[8], PRIVATE_MARKERS[9])
+    assert body["model_suggestion"] == {
+        "hosting": PRIVATE_MARKERS[9],
+        "model": PRIVATE_MARKERS[8],
+    }
     for marker in PRIVATE_MARKERS:
+        if marker in suggestion_markers:
+            continue
         assert marker not in serialized, f"{marker} rode along in the publish body"
+    for marker in suggestion_markers:
+        assert serialized.count(marker) == 1, f"{marker} appeared outside its one field"
 
     # The instruction set itself is what the body is for.
     assert body["instructions"] == "You have an instruction set."

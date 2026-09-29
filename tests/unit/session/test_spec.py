@@ -93,15 +93,39 @@ def _exec_namespace(monkeypatch: pytest.MonkeyPatch, exec_args: object) -> dict[
     return seen
 
 
+#: exec's one INTERNAL session-args field the published SDK namespace does not
+#: carry: only ``lop exec --team`` has a launch-time team to suggest a model,
+#: and the SDK spec deliberately has no team surface (adding a permanently-None
+#: ninth field to a published adapter shape is the silent surface change the
+#: eight-field pin exists to stop). Pinned by NAME here so a second silent
+#: exec-only field still fails this file.
+_EXEC_ONLY_ARG = "team_model_suggestion"
+
+
+def _exec_only_fields(seen: dict[str, object]) -> dict[str, object]:
+    """``seen`` without exec's internal field, asserting that field is present and inert.
+
+    The fixture builds runs without a ``--team``, so the value must be ``None``;
+    anything else means an exec default changed under the tests that trust it.
+    """
+    shared = dict(seen)
+    assert _EXEC_ONLY_ARG in seen, "exec stopped carrying its internal field at all"
+    assert shared.pop(_EXEC_ONLY_ARG, None) is None
+    return shared
+
+
 def test_to_namespace_matches_the_exec_factory_field_for_field(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The SDK and ``lop exec`` must hand ``create_session`` the same namespace.
 
-    Field-for-field equality for the same inputs, both for a fully-populated
-    run and for the all-defaults run — the second catches a drift in DEFAULTS
-    (a field exec later defaults differently) that a populated-only comparison
-    would miss.
+    Field-for-field equality for the same inputs on every PINNED field, both
+    for a fully-populated run and for the all-defaults run — the second catches
+    a drift in DEFAULTS (a field exec later defaults differently) that a
+    populated-only comparison would miss. The one deliberate exception is
+    exec's internal ``team_model_suggestion`` (``_EXEC_ONLY_ARG``): a team
+    launch's model suggestion, which the SDK cannot produce. The exception is
+    pinned by name and by value, so it cannot widen unnoticed.
     """
     from local_operator import exec_mode
 
@@ -116,10 +140,10 @@ def test_to_namespace_matches_the_exec_factory_field_for_field(
     )
     exec_seen = _exec_namespace(monkeypatch, exec_mode.ExecArgs(**populated))
     ours = vars(SessionSpec(**populated).to_namespace())
-    assert ours == exec_seen
+    assert ours == _exec_only_fields(exec_seen)
 
     defaults = _exec_namespace(monkeypatch, exec_mode.ExecArgs())
-    assert vars(SessionSpec().to_namespace()) == defaults
+    assert vars(SessionSpec().to_namespace()) == _exec_only_fields(defaults)
 
 
 def test_to_namespace_has_exactly_the_eight_pinned_fields() -> None:

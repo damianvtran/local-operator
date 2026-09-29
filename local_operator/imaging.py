@@ -238,6 +238,25 @@ IMAGE_JPEG_QUALITY = 85
 #: repaired before it is sent, not after.
 IMAGE_REFUSAL_MAX_B64_BYTES = 4 * 1024 * 1024
 
+#: Long-edge rungs a CONTEXT downscale walks, tightest last. See
+#: :func:`downscale_context_frame` and
+#: :func:`~local_operator.compaction.pruning.fit_frames_to_wire_budget` for why
+#: a context downscale exists at all and why it prefers fewer pixels per frame
+#: before it gives frames up entirely.
+#:
+#: The first rung is :data:`IMAGE_INGEST_MAX_EDGE`, the bound this product
+#: already treats as "legible enough to enter the context": it is what the
+#: composer and the ``read`` tool bound a NEW screenshot to, and its measured
+#: legibility floor (see that constant) is the right target for a frame whose
+#: role is now reference rather than target. The tighter rungs exist for the
+#: case the first cannot fix — a session so large that even 1024px context
+#: frames do not fit — and they matter because the alternative there is DROPPING
+#: the oldest frames: a frame present at 512px still answers "what was on
+#: screen", where a frame replaced by a notice answers nothing. 512 is the
+#: floor: below it a frame stops carrying readable UI text, and its bytes are
+#: small enough that the shed would have to go after whole frames anyway.
+IMAGE_CONTEXT_EDGES: tuple[int, ...] = (IMAGE_INGEST_MAX_EDGE, 768, 512)
+
 #: Long-edge rungs a wire refit walks, tightest last. See
 #: :func:`refit_image_to_budget` for why a refit exists at all and why it
 #: prefers a JPEG re-encode at full resolution before it gives up pixels.
@@ -1030,4 +1049,116 @@ def rebound_oversize_image(data_b64: str) -> tuple[str, str] | None:
         _, (evicted, _mime) = _REBOUND_CACHE.popitem(last=False)
         retained -= len(evicted)
     _REBOUND_CACHE[key] = result
+    return result
+
+
+#: Memo for :func:`downscale_context_frame`, keyed by
+#: ``(sha256 of the decoded bytes, long-edge rung)``. Same shape and the same
+#: reasons as :data:`_REBOUND_CACHE`: the walk runs on the RENDERED history,
+#: which is rebuilt from the transcript on every turn (and again for every
+#: token count), so without a memo every render would re-decode and re-encode
+#: every context frame in the session. The digest covers the decoded bytes
+#: alone — identical bytes cannot decode two ways — and the rung is part of
+#: the key because the same frame is re-rendered from the original bytes when
+#: the ladder steps down (never from a previous rung's result, so no
+#: generation loss).
+#:
+#: A ``None`` value is a cached NEGATIVE — a frame this rung cannot shrink
+#: (already at or below the rung with no codec win) or cannot decode at all.
+#: Caching it keeps a no-op frame from paying a sniff and an encode attempt on
+#: every render, which is the cost the cache exists to bound; the entry itself
+#: is a hash and a couple of strings.
+#:
+#: Evicted OLDEST-FIRST under a byte ceiling on the positive results, exactly
+#: like the rebound memo and for the same measured reason (a clear-on-overflow
+#: cache is emptied part-way through every walk once the working set exceeds
+#: the cap, so it never warms at all; dropping the oldest keeps the majority
+#: of the walk hot). The cap counts payload bytes, not entries, because the
+#: values are full base64 frames whose sizes differ by orders of magnitude.
+_CONTEXT_FRAME_CACHE: OrderedDict[tuple[str, int], tuple[str, str] | None] = OrderedDict()
+_CONTEXT_FRAME_CACHE_MAX_BYTES = 32 * 1024 * 1024
+
+
+def downscale_context_frame(
+    data_b64: str, mime_type: str, *, max_edge: int
+) -> tuple[str, str] | None:
+    """Re-render ONE already-encoded frame smaller, for its life as context.
+
+    ``None`` means "leave the block exactly as it is": the frame does not
+    decode as an image, or this rung cannot make it smaller. It never raises
+    for caller input — the caller is a history walk that must not fail a
+    render over one bad block, the same contract
+    :func:`rebound_oversize_image` keeps.
+
+    The caller (``compaction.pruning.downscale_stale_frames``) has already
+    decided WHICH frames are context; this function owns only the byte-level
+    transform, so the render seam has ONE definition of what a downscaled
+    context frame is. The evaluation runner's prefix fit is deliberately NOT a
+    caller: that path is drop-only because its frames are bound to a published
+    ``model_visible`` geometry (a frame's decoded pixels must equal it, and the
+    supervisor refuses any runner-side rewrite), so it may blank a stale frame
+    but never re-encode one. It adopts this transform only once that geometry
+    contract admits a rewrite — the same bound ``compaction.pass_`` states in
+    place.
+
+    WHY PIXELS AND NOT ONLY A RECOMPRESS. The wire refit
+    (:func:`refit_image_to_budget`) spends the codec before the pixels because
+    its budget is one frame on one line, and a quality-85 JPEG usually clears
+    it at full size. This path exists for the AGGREGATE: a long session's
+    request is over budget because it carries many frames, and the durable fix
+    is fewer bytes per frame for the frames that are reference rather than
+    target. Measured on this machine: a real 1280x720 code-UI capture cut from
+    304 KB to 106 KB of PNG->JPEG at the first rung, and the noisy synthetic
+    frames in the wire-bytes tests (a deliberately JPEG-hostile worst case)
+    roughly halved — either way, one rung buys back enough headroom to keep
+    tens of frames where the budget allowed a handful. The codec is still
+    spent on every rung (``_jpeg_or_original``), so the ladder never hands back
+    something larger than it had: a result that does not come out smaller is
+    reported as ``None`` and the original block stays verbatim.
+
+    Line art is exempt from the JPEG step, exactly as in the refit: its
+    one-pixel strokes do not survive the codec (see :func:`_is_line_art_bytes`).
+
+    Deterministic and memoized: the same (bytes, rung) always yields the same
+    result for the life of the process, which is what lets a caller treat the
+    downscaled form as STABLE across turns — a frame's bytes change at most
+    once per rung it renders at (the turn it stops being the newest frame, and
+    again only if a growing session steps down a rung, re-rendering every
+    older frame): at most three changes across the ladder. The prompt-cache
+    prefix is rewritten at most once per rung transition, never churned every
+    render.
+    """
+    try:
+        raw = base64.b64decode(data_b64, validate=True)
+    except Exception:  # noqa: BLE001 — a malformed block is the degrade's problem, not ours
+        return None
+    key = (hashlib.sha256(raw).hexdigest(), max_edge)
+    if key in _CONTEXT_FRAME_CACHE:
+        return _CONTEXT_FRAME_CACHE[key]
+    result: tuple[str, str] | None = None
+    info = sniff_image(raw)
+    if info is not None:
+        line_art = _is_line_art_bytes(raw, info)
+        payload: bytes | None = None
+        wire_mime = mime_type
+        try:
+            payload, wire_mime, _summary = bound_image_for_model(raw, info, max_edge=max_edge)
+        except ValueError:
+            # Undecodable or a bomb. Leaving the block alone is strictly
+            # better than dropping it (see rebound_oversize_image's note).
+            payload = None
+        if payload is not None:
+            if not line_art:
+                payload, wire_mime = _jpeg_or_original(payload, wire_mime)
+            encoded = base64.b64encode(payload).decode("ascii")
+            if len(encoded) < len(data_b64):
+                result = (encoded, wire_mime)
+    retained = sum(len(value[0]) for value in _CONTEXT_FRAME_CACHE.values() if value is not None)
+    if result is not None:
+        retained += len(result[0])
+        while retained > _CONTEXT_FRAME_CACHE_MAX_BYTES and _CONTEXT_FRAME_CACHE:
+            _, evicted = _CONTEXT_FRAME_CACHE.popitem(last=False)
+            if evicted is not None:
+                retained -= len(evicted[0])
+    _CONTEXT_FRAME_CACHE[key] = result
     return result

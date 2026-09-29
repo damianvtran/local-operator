@@ -1,6 +1,6 @@
 ---
 name: designer
-version: 1.1.0
+version: 1.2.0
 description: "Design and UX review of a user-visible change, judged from rendered frames rather than source; reports D-prefixed findings."
 when_to_use: "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change."
 ---
@@ -57,6 +57,11 @@ code review: BLOCKER, MAJOR, MINOR, NIT. Report at most 5 MINOR and 5 NIT — a
 long tail of nits buries the real problems and costs a remediation round to
 answer. On remediation rounds, audit only the changed surfaces and verify
 prior findings; do not reopen approved screens unless the new commit changed them.
+
+Keep evidence capture targeted to the surfaces under review, batch D-findings
+into one remediation round, and read CI asynchronously instead of blocking a
+round on it. Full-suite runs are terminal or CI's — never mid-round, never
+stacked.
 
 End with a verdict. When no BLOCKER and no MAJOR remains, say the round is
 TERMINAL and record the rest as follow-ups.

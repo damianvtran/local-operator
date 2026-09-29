@@ -131,8 +131,34 @@ _CONNECT_TIMEOUT_S = 5.0
 #: republishes it in-process on a bounded ladder (see
 #: ``Session._schedule_attention_republish``), with the next boot's import as the
 #: fallback rather than the only remedy.
+#:
+#: POST-WAL (this change): the second acquisition point above -- the COMMIT
+#: waiting on a SHARED reader -- belongs to the rollback journal and disappears
+#: on a converted store, so the 12.09 s write figure is now the BOUND a
+#: writer-vs-writer race can still reach rather than the routine shape the
+#: incident lived in. The budget stays as measured: it is still the number this
+#: ladder must answer within, and stores that have not converted (an older
+#: build's first write, or a refused conversion) still pay the old shape in
+#: full.
 _CONTENTION_ATTEMPTS = 2
 _CONTENTION_BACKOFF_S = 0.2
+
+#: The WAL adoption's OWN retry budget and window, separate from the contention
+#: budget above because the journal-mode change is not covered by
+#: `busy_timeout`: SQLite needs an EXCLUSIVE lock for it and, against a RESERVED
+#: holder, fails the acquisition WITHOUT invoking the busy handler (0.0-0.1 ms
+#: measured in this change's audit). Same shape as
+#: ``analytics/store.py::_set_wal`` -- the sibling store that measured it:
+#: 25/320 supervised opens failed without the loop, reordering alone only moved
+#: that to 15/320, and the bounded retry took it to 0/320. Sized for a caller a
+#: user is waiting on (an ack rides one of these connects), so the statement's
+#: own window is CLAMPED to ``_WAL_BUSY_TIMEOUT_MS`` for the attempt and
+#: restored afterwards: without the clamp a sibling holding SHARED would make a
+#: connect pay the full house window before declining (5.2 s measured). See
+#: :meth:`AttentionStore._adopt_wal`.
+_WAL_ATTEMPTS = 6
+_WAL_BACKOFF_S = 0.05
+_WAL_BUSY_TIMEOUT_MS = 250
 
 #: The contended-verdict codes, from the ONE place that classifies them.
 #: ``SQLITE_BUSY`` is the busy-timeout expiry ("database is locked") and
@@ -1200,8 +1226,13 @@ class AttentionStore:
 
     def _connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        # A new placeholder must be private before SQLite writes any contents.
-        self.path.touch(mode=0o600, exist_ok=True)
+        if not self.path.exists():
+            # A new placeholder must be private before SQLite writes any
+            # contents -- and the touch happens ONLY on creation: touching an
+            # existing file would move its mtime on every write connect, which
+            # the desktop feed's fingerprint watches (doorbell noise), and it
+            # cannot fix an existing file's mode anyway.
+            self.path.touch(mode=0o600)
         conn = sqlite3.connect(self.path, timeout=_CONNECT_TIMEOUT_S)
         conn.row_factory = sqlite3.Row
         try:
@@ -1218,153 +1249,317 @@ class AttentionStore:
             # failure between its creation and its return, not only on the ones
             # somebody could demonstrate.
             conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
-            # Publish the complete schema in one transaction. Concurrent readers
-            # can see the positively identified empty database or both tables,
-            # never an intermediate schema with a missing receipt table.
-            with conn:
-                conn.execute("BEGIN IMMEDIATE")
-                if self._uninitialized(conn):
-                    conn.execute(
-                        "CREATE TABLE completions ("
-                        "sequence INTEGER PRIMARY KEY AUTOINCREMENT, "
-                        "conversation TEXT NOT NULL, token TEXT NOT NULL UNIQUE, "
-                        "anchor TEXT NOT NULL, kind TEXT NOT NULL, "
-                        "reason TEXT NOT NULL DEFAULT '', cause TEXT NOT NULL DEFAULT '', "
-                        "notify INTEGER NOT NULL DEFAULT 1)"
-                    )
-                    conn.execute(
-                        "CREATE INDEX completion_conversation "
-                        "ON completions(conversation, sequence)"
-                    )
-                    conn.execute(
-                        "CREATE TABLE receipts ("
-                        "conversation TEXT PRIMARY KEY, acknowledged INTEGER NOT NULL)"
-                    )
-                    # A store being created here has no completions yet, so
-                    # there is no backlog to baseline against — an empty
-                    # delivery watermark IS the correct starting point.
-                    conn.execute(_CREATE_DELIVERIES)
-                    conn.execute(_CREATE_MUTATIONS)
-                else:
-                    # Missing tables/columns in an established database are
-                    # corruption, not permission to rebuild an empty watermark.
-                    #
-                    # `deliveries` IS DELIBERATELY ABSENT FROM THIS PROBE, and
-                    # adding it is the one "tidy-up" that would brick every
-                    # existing machine: a database written by any release
-                    # before the background-completion notifier legitimately
-                    # lacks the table, so probing for it would read every one
-                    # of them as corrupt. The probe stays byte-identical to
-                    # what shipped, which is what keeps the meaning of an
-                    # established database unchanged.
-                    conn.execute(
-                        "SELECT sequence,conversation,token,anchor,kind FROM completions LIMIT 0"
-                    )
-                    conn.execute("SELECT conversation,acknowledged FROM receipts LIMIT 0")
-                    # Additive migration, and the baseline rides the SAME
-                    # transaction as the CREATE so no concurrent reader can
-                    # ever observe an unbaselined table. `unseen` is a LEVEL,
-                    # not an edge: without this, the first observer to upgrade
-                    # would claim every historical completion still unread and
-                    # fire a banner for each one (measured on the maintainer's
-                    # live store: 171 unseen conversations out of 332
-                    # completions; the "8" an earlier draft of this comment
-                    # cited was the test fixture's count, not a live
-                    # measurement — review round 1, n1). Baselining at creation
-                    # also means the
-                    # eleventh observer to start INHERITS the baseline rather
-                    # than re-deriving one of its own — the watermark is a
-                    # property of the database, not of a process.
-                    if not conn.execute(
-                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='deliveries'"
-                    ).fetchone():
-                        conn.execute(_CREATE_DELIVERIES)
-                        conn.execute(_BASELINE_DELIVERIES, (time.time(),))
-                    # `mutations` is additive for the SAME reason and stays out
-                    # of the probe above for the same reason: every database
-                    # written before this fix legitimately lacks it, and
-                    # probing for it would read all of them as corrupt.
-                    #
-                    # NO BASELINE, unlike `deliveries`. That table baselines
-                    # because `unseen` is a LEVEL and an unbaselined watermark
-                    # would re-announce history. A change detector is an EDGE:
-                    # it only has to move when something changes AFTER this
-                    # point, so seeding at 0 is correct and a historical
-                    # supersede count would be meaningless anyway.
-                    if not conn.execute(
-                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='mutations'"
-                    ).fetchone():
-                        conn.execute(_CREATE_MUTATIONS)
-                    # `supersede_log` is additive for the same reason and stays
-                    # out of the probe above for the same reason: a database
-                    # written before this fix legitimately lacks it. NO BASELINE,
-                    # again because it is an EDGE not a LEVEL — readers start
-                    # from "nothing was healed before I connected", and seeding a
-                    # historical set would replay corrections nobody is stale for
-                    # (a reconnect takes a fresh snapshot that already carries the
-                    # healed state).
-                    if not conn.execute(
-                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='supersede_log'"
-                    ).fetchone():
-                        conn.execute(_CREATE_SUPERSEDE_LOG)
-                    # ``reason``/``cause`` are ADDITIVE and stay out of the probe
-                    # above for the reason the two tables do: every database
-                    # written before the cut-off taxonomy legitimately lacks
-                    # them, and naming them in the probe would read all of them
-                    # as corrupt. ``DEFAULT ''`` rather than a nullable column
-                    # keeps the readers one shape: an old row's reason is the
-                    # empty string, i.e. "no reason was recorded", which is
-                    # exactly what it is — never a claim that there was none to
-                    # record.
-                    columns = {
-                        str(row[1]) for row in conn.execute("PRAGMA table_info(completions)")
-                    }
-                    if "reason" not in columns:
-                        conn.execute(
-                            "ALTER TABLE completions ADD COLUMN reason TEXT NOT NULL DEFAULT ''"
-                        )
-                    if "cause" not in columns:
-                        conn.execute(
-                            "ALTER TABLE completions ADD COLUMN cause TEXT NOT NULL DEFAULT ''"
-                        )
-                    # ``notify`` (§14's origin-aware notification flag) is
-                    # ADDITIVE for the same reason the two columns above are,
-                    # and stays out of the probe above for the same reason:
-                    # every database written before the field legitimately
-                    # lacks it, and naming it in the probe would read all of
-                    # them as corrupt. ``DEFAULT 1`` rather than a nullable
-                    # column keeps the readers one shape — an old row notifies
-                    # exactly as it always did, and ``0`` is always a row some
-                    # build explicitly decided to keep quiet.
-                    if "notify" not in columns:
-                        conn.execute(
-                            "ALTER TABLE completions ADD COLUMN notify INTEGER NOT NULL DEFAULT 1"
-                        )
+            # SCHEMA PUBLICATION AND VALIDATION, split by what each actually
+            # needs. CREATION and ADDITIVE MIGRATION are writes and still run
+            # inside ONE `BEGIN IMMEDIATE` with every probe RE-CHECKED under it
+            # (that is what makes a concurrent first-create safe, and what keeps
+            # an upgrade atomic for every reader). CHECKING an established,
+            # current database -- the overwhelmingly common case on a live
+            # machine -- is a READ, and it no longer buys the write lock.
+            #
+            # WHY THE SPLIT IS LOAD-BEARING (the operator's 2026-09-29 toast):
+            # this method used to open BEGIN IMMEDIATE, probe, migrate and
+            # COMMIT on EVERY write op -- a second write-lock acquisition ahead
+            # of the op's own, whose COMMIT also waited on SHARED readers in the
+            # rollback journal, and it was the innermost frame of the incident's
+            # traceback. Measured on an established store, that skeleton spent
+            # 771.5 ms blocked behind a sibling's write lock while doing
+            # nothing. Now an established store validates with lock-free reads,
+            # and only a create or an upgrade opens the transaction.
+            if self._uninitialized(conn):
+                with conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    # DOUBLE-CHECKED INSIDE THE TRANSACTION: two processes
+                    # racing a fresh file both read it empty out here, and only
+                    # the one that wins the lock may take the create arm. The
+                    # loser re-checks, finds the schema, and still validates and
+                    # migrates -- because the winner may be an OLDER build whose
+                    # schema predates this one.
+                    if self._uninitialized(conn):
+                        self._create_schema(conn)
+                    else:
+                        self._probe_existing_schema(conn)
+                        self._apply_additive_migrations(conn)
+            else:
+                # Missing tables/columns in an established database are
+                # corruption, not permission to rebuild an empty watermark; the
+                # probe's statement set is the shipped one, and `deliveries`
+                # stays out of it for the compatibility reason stated there.
+                self._probe_existing_schema(conn)
+                if self._additive_migrations_pending(conn):
+                    with conn:
+                        conn.execute("BEGIN IMMEDIATE")
+                        # Re-checked per statement under the lock (see
+                        # :meth:`_apply_additive_migrations`) so a race with
+                        # another upgrading process applies each migration
+                        # exactly once and never raises "duplicate column".
+                        self._apply_additive_migrations(conn)
+            # WAL ADOPTION LAST, and ONLY for a store that VALIDATED: a probe
+            # that raises must leave a damaged file BYTE-IDENTICAL (the damage
+            # pin `test_existing_database_damage_is_not_an_empty_read_state`
+            # asserts exactly that), so the conversion runs after the checks
+            # rather than ahead of them. It is still outside any transaction
+            # (SQLite refuses the mode change inside one), still ONLY on this
+            # path -- the read path must stay write-free, and the statement over
+            # ``mode=ro`` raises "disk I/O error" -- and a store that cannot
+            # convert keeps working exactly as it did. The measurements, the
+            # mechanism and the one disclosure this carries are in
+            # :meth:`_adopt_wal`.
+            self._adopt_wal(conn)
             return conn
         except BaseException:
             conn.close()
             raise
 
+    def _adopt_wal(self, conn: sqlite3.Connection) -> None:
+        """Move the store to WAL, opportunistically, and never at a caller's cost.
+
+        WHY WAL IS THE LOAD-BEARING HALF OF THIS FIX. In the rollback journal
+        readers and writers exclude each other, and BOTH directions are in the
+        operator's logs: a writer's COMMIT waits for every SHARED reader (the
+        innermost frame of the 2026-09 incident traceback -- ``_connect``'s
+        ``with conn:``), and a reader's BEGIN waits for a writer's RESERVED or
+        EXCLUSIVE (the daemon's own scan, 36 records). In WAL neither blocks the
+        other: readers take a snapshot and proceed even against a held write
+        lock, and a commit stops paying for readers at all (both measured in
+        this change's audit). What remains is writer-vs-writer serialization,
+        which is what the bounded retry budget is sized for. The sibling stores
+        that already carry fleet traffic all run WAL here (secrets 10000 ms,
+        auth and usage_cache 5000 ms, analytics via its own ``_set_wal``), so
+        this is house alignment rather than a new mechanism.
+
+        THE MECHANICS OF THE ATTEMPT, each constraint measured (audit labs):
+        * OUTSIDE any transaction: inside one, SQLite silently returns the
+          current mode without changing it. The call site guarantees this.
+        * ONLY the write path calls this: over ``mode=ro`` the statement raises
+          "disk I/O error", and reads must stay write-free.
+        * The statement gets a SHORT WINDOW of its own
+          (``_WAL_BUSY_TIMEOUT_MS``) because ``busy_timeout`` does NOT cover the
+          mode change: a sibling holding SHARED would otherwise make this wait
+          the full house window (5.2 s measured), while a sibling holding
+          RESERVED fails it instantly (0.0-0.1 ms). The window is restored on
+          every path.
+        * The retry loop mirrors ``analytics/store.py::_set_wal`` (6 attempts,
+          50 ms linear backoff), the shape this fleet already runs.
+        * NO FAILURE SHAPE IS EVER RAISED: a contended ``OperationalError``, ANY
+          other ``sqlite3.Error`` (a file SQLite cannot read at all refuses the
+          mode change with ``DatabaseError``, not ``OperationalError``), and a
+          non-"wal" answer all leave the store in the mode it had, working
+          exactly as it did, and the next write op tries again. Conversion is
+          persistent per FILE, so a process that wins makes every later attempt
+          a no-op (~0.5 ms p50; there is deliberately no memory of failure, only
+          that measured cost of re-asking).
+
+        THE ONE DISCLOSURE (sqlite 3.50.4, tracked, not fixed here): 3.50.4
+        predates the upstream WAL-reset fix (3.51.3 / backport 3.50.7), a
+        multi-process race between a commit and a checkpoint that upstream rates
+        at near-cosmic-ray frequency. Every build on this host links 3.50.4
+        (3.12-3.14 interpreters, the installed fleet), and this change does not
+        open a new class of exposure -- secrets/auth/usage/analytics already
+        run WAL here -- but it adds one more file to it. If the race ever bites,
+        the recovery is a store rebuild: completions regenerate from the
+        transcript journals (what the journal import exists for) and read
+        receipts regress to unread. Never delete a leftover ``-wal`` as
+        "cleanup": it can be holding committed rows.
+        """
+        conn.execute(f"PRAGMA busy_timeout={_WAL_BUSY_TIMEOUT_MS}")
+        try:
+            for attempt in range(_WAL_ATTEMPTS):
+                try:
+                    answer = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+                except sqlite3.OperationalError as error:
+                    if not _is_contention(error) or attempt + 1 >= _WAL_ATTEMPTS:
+                        logger.debug(
+                            "attention: WAL conversion deferred (attempt %d/%d): %s",
+                            attempt + 1,
+                            _WAL_ATTEMPTS,
+                            error,
+                        )
+                        return
+                    time.sleep(_WAL_BACKOFF_S * (attempt + 1))
+                    continue
+                except sqlite3.Error as error:
+                    # A file SQLite cannot read (NOTADB) refuses the mode change
+                    # with ``DatabaseError``. The adoption is optional in every
+                    # case, and the caller's own probe is what names corruption
+                    # properly -- it runs next and raises the real verdict.
+                    logger.debug("attention: WAL not attempted (%s)", error)
+                    return
+                mode = str(answer[0]).lower() if answer is not None else ""
+                if mode != "wal":
+                    # "SQLite declined": a filesystem that cannot host WAL
+                    # answers with the mode it stayed in. Quiet, and the store
+                    # keeps working exactly as it did.
+                    logger.debug("attention: SQLite declined WAL (answered %r)", mode)
+                return
+        finally:
+            # Restored on EVERY path: the shipped window is the store's, and a
+            # leaked 250 ms here would silently disarm the busy handler for
+            # every statement the caller runs on this connection afterwards.
+            conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+
+    @staticmethod
+    def _create_schema(conn: sqlite3.Connection) -> None:
+        """Publish the complete schema, inside one transaction, exactly as shipped.
+
+        The create half of :meth:`_connect`, moved here verbatim: the statement
+        set and its order are unchanged, and the caller still runs it inside a
+        single ``BEGIN IMMEDIATE``. Concurrent readers can see the positively
+        identified empty database or both tables, never an intermediate schema
+        with a missing receipt table.
+        """
+        conn.execute(
+            "CREATE TABLE completions ("
+            "sequence INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "conversation TEXT NOT NULL, token TEXT NOT NULL UNIQUE, "
+            "anchor TEXT NOT NULL, kind TEXT NOT NULL, "
+            "reason TEXT NOT NULL DEFAULT '', cause TEXT NOT NULL DEFAULT '', "
+            "notify INTEGER NOT NULL DEFAULT 1)"
+        )
+        conn.execute("CREATE INDEX completion_conversation ON completions(conversation, sequence)")
+        conn.execute(
+            "CREATE TABLE receipts ("
+            "conversation TEXT PRIMARY KEY, acknowledged INTEGER NOT NULL)"
+        )
+        # A store being created here has no completions yet, so there is no
+        # backlog to baseline against -- an empty delivery watermark IS the
+        # correct starting point.
+        conn.execute(_CREATE_DELIVERIES)
+        conn.execute(_CREATE_MUTATIONS)
+
+    @staticmethod
+    def _probe_existing_schema(conn: sqlite3.Connection) -> None:
+        """The corruption probe; missing core tables or columns RAISE.
+
+        Unchanged from the shipped transaction's first statements, because the
+        meaning of an established database's probe is part of the contract:
+        missing ``completions``/``receipts`` (or their named columns) is
+        CORRUPTION, not permission to rebuild an empty watermark.
+
+        ``deliveries`` IS DELIBERATELY ABSENT FROM THIS PROBE, and adding it is
+        the one "tidy-up" that would brick every existing machine: a database
+        written by any release before the background-completion notifier
+        legitimately lacks the table. The additive migrations below are the only
+        thing a pre-table database owes, and they run under the write lock.
+        """
+        conn.execute("SELECT sequence,conversation,token,anchor,kind FROM completions LIMIT 0")
+        conn.execute("SELECT conversation,acknowledged FROM receipts LIMIT 0")
+
+    @staticmethod
+    def _additive_migrations_pending(conn: sqlite3.Connection) -> bool:
+        """Cheap READ: would :meth:`_apply_additive_migrations` do anything?
+
+        The fast path's price is a handful of schema reads; the apply itself is
+        re-checked per statement inside the write transaction, because between
+        this read and that transaction another process may have run the very
+        migration. ``deliveries``/``mutations``/``supersede_log`` and the three
+        columns are all ADDITIVE: a database that already has them is CURRENT,
+        and one that lacks any of them gets the atomic upgrade.
+        """
+        for name in ("deliveries", "mutations", "supersede_log"):
+            if not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+            ).fetchone():
+                return True
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(completions)")}
+        return not {"reason", "cause", "notify"} <= columns
+
+    @staticmethod
+    def _apply_additive_migrations(conn: sqlite3.Connection) -> None:
+        """Every ADDITIVE upgrade, each re-checked against the CURRENT schema.
+
+        Runs with the write transaction already open, from either arm of
+        :meth:`_connect`, and every probe inside is re-evaluated against the
+        schema as it is NOW -- two processes racing an upgrade must both reach
+        this point, and only the first may CREATE/ALTER; the second skips on
+        its re-check rather than failing with "already exists"/"duplicate
+        column". Each migration carries the shipped comment for why it is
+        additive rather than part of the corruption probe.
+        """
+        # Additive migration, and the baseline rides the SAME transaction as
+        # the CREATE so no concurrent reader can ever observe an unbaselined
+        # table. `unseen` is a LEVEL, not an edge: without this, the first
+        # observer to upgrade would claim every historical completion still
+        # unread and fire a banner for each one (measured on the maintainer's
+        # live store: 171 unseen conversations out of 332 completions).
+        # Baselining at creation also means the eleventh observer to start
+        # INHERITS the baseline rather than re-deriving one of its own -- the
+        # watermark is a property of the database, not of a process.
+        if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='deliveries'"
+        ).fetchone():
+            conn.execute(_CREATE_DELIVERIES)
+            conn.execute(_BASELINE_DELIVERIES, (time.time(),))
+        # `mutations` is additive for the SAME reason and stays out of the
+        # probe above for the same reason: every database written before this
+        # fix legitimately lacks it, and probing for it would read all of them
+        # as corrupt.
+        #
+        # NO BASELINE, unlike `deliveries`. That table baselines because
+        # `unseen` is a LEVEL and an unbaselined watermark would re-announce
+        # history. A change detector is an EDGE: it only has to move when
+        # something changes AFTER this point, so seeding at 0 is correct and a
+        # historical supersede count would be meaningless anyway.
+        if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='mutations'"
+        ).fetchone():
+            conn.execute(_CREATE_MUTATIONS)
+        # `supersede_log` is additive for the same reason and stays out of the
+        # probe above for the same reason: a database written before this fix
+        # legitimately lacks it. NO BASELINE, again because it is an EDGE not a
+        # LEVEL -- readers start from "nothing was healed before I connected",
+        # and seeding a historical set would replay corrections nobody is stale
+        # for (a reconnect takes a fresh snapshot that already carries the
+        # healed state).
+        if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='supersede_log'"
+        ).fetchone():
+            conn.execute(_CREATE_SUPERSEDE_LOG)
+        # ``reason``/``cause`` are ADDITIVE and stay out of the probe above for
+        # the reason the two tables do: every database written before the
+        # cut-off taxonomy legitimately lacks them, and naming them in the
+        # probe would read all of them as corrupt. ``DEFAULT ''`` rather than a
+        # nullable column keeps the readers one shape: an old row's reason is
+        # the empty string, i.e. "no reason was recorded", which is exactly
+        # what it is -- never a claim that there was none to record.
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(completions)")}
+        if "reason" not in columns:
+            conn.execute("ALTER TABLE completions ADD COLUMN reason TEXT NOT NULL DEFAULT ''")
+        if "cause" not in columns:
+            conn.execute("ALTER TABLE completions ADD COLUMN cause TEXT NOT NULL DEFAULT ''")
+        # ``notify`` (§14's origin-aware notification flag) is ADDITIVE for the
+        # same reason the two columns above are, and stays out of the probe
+        # above for the same reason: every database written before the field
+        # legitimately lacks it, and naming it in the probe would read all of
+        # them as corrupt. ``DEFAULT 1`` rather than a nullable column keeps
+        # the readers one shape -- an old row notifies exactly as it always
+        # did, and ``0`` is always a row some build explicitly decided to keep
+        # quiet.
+        if "notify" not in columns:
+            conn.execute("ALTER TABLE completions ADD COLUMN notify INTEGER NOT NULL DEFAULT 1")
+
     def _connect_read_only(self) -> sqlite3.Connection:
         """A ``mode=ro`` connection that waits as long as the write path does.
 
-        READS CONTEND FOR THE SAME LOCK, and this store's reads are on the hot
-        paths: the mobile daemon's scan (``revision``), every frontend list
-        (``state_many``), and the sidebar's deltas. This store keeps SQLite's
-        default rollback journal, so a writer holding the lock blocks a reader
-        at ``BEGIN`` exactly as it blocks another writer -- and the operator's
-        log shows the daemon's own scan losing that race 36 times
-        (`AttentionStore().revision` raising `database is locked` out of
-        `_uninitialized`). A read that raises costs the caller its whole tick or
-        its whole response, so it gets the same 5 s window rather than 2 -- and
-        the same bounded retry (:meth:`_retry_read`), which is the other half of
-        that answer: widening the window alone only buys a longer wait before the
-        same failure.
+        READS ARE ON THE HOT PATHS -- the mobile daemon's scan (``revision``),
+        every frontend list (``state_many``), the sidebar's deltas -- and the
+        window and the bounded retry (:meth:`_retry_read`) below stay as sized,
+        but what those reads MEET changed with the WAL adoption: on a converted
+        store (the normal case once any write op has run) a reader takes a
+        snapshot and proceeds even against a held write lock, and a writer's
+        commit stops waiting on readers at all (both measured). The
+        rollback-journal race class the operator's log recorded 36 times
+        (`revision` raising `database is locked` out of `_uninitialized`) is
+        therefore gone from the normal path -- it survives for a store that has
+        not converted (older builds still running, or a filesystem where SQLite
+        declined WAL) and for the recovery verdicts SQLite still reports BUSY.
 
-        Deliberately NOT ``_connect``: the read paths must stay unable to create
-        the file or migrate the schema (``mode=ro`` is the mechanism, and
-        ``test_reads_do_not_create_or_mutate_storage`` pins it). Only the wait
-        is shared.
+        Deliberately NOT ``_connect``: the read paths must stay unable to
+        create the file, migrate the schema, or change the journal mode
+        (``mode=ro`` is the mechanism, and
+        ``test_reads_do_not_create_or_mutate_storage`` pins the storage side;
+        the WAL attempt over ``mode=ro`` raises "disk I/O error", measured, so
+        it stays on the write path alone). Only the wait is shared.
         """
         conn = sqlite3.connect(
             f"{self.path.as_uri()}?mode=ro", uri=True, timeout=_CONNECT_TIMEOUT_S
@@ -1641,17 +1836,19 @@ class AttentionStore:
         would only delay the report, and the surface ladders have different,
         better sentences for each.
 
-        THE WAIT HAPPENS ON THE CALLER'S THREAD, and most callers here give it a
-        worker: `asyncio.to_thread` from the session's publish path and from the
-        mobile daemon, the desktop feed's own thread, the TUI's `collect` worker.
-        NOT ALL OF THEM, and this is named rather than assumed:
-        `SessionReader.list` (`server/utils/desktop_sessions.py`) reads
-        `state_many` straight out of an `async def` with no `to_thread`, so a lock
-        that outlasts the window blocks that route's event loop for the attempt
-        -- 2 s on `main`, up to ~10.8 s on this budget. The blocking read is the
-        call site's, not the store's (it predates this change), and it is listed
-        under the PR's "Deliberately not done"; moving those reads off-loop is
-        its own change.
+        THE WAIT HAPPENS ON THE CALLER'S THREAD, and every production caller
+        hands that thread a worker: `asyncio.to_thread` from the session's
+        publish path, the desktop ack/claim routes, the mobile daemon and the
+        desktop feed's connect floor; the TUI's `collect` worker; the feed's
+        baseline/snapshot worker threads. This paragraph used to name
+        `SessionReader.list` as a blocking read ("`state_many` straight out of
+        an `async def`") and list it as deliberately undone -- that was already
+        stale: the read has run inside ``await asyncio.to_thread(rows)`` for
+        some time. The one call site that really did read the store out of an
+        async path -- ``DesktopFeed.subscribe``'s baseline revision -- is moved
+        in this change (the route reads the floor in a worker; ``subscribe``
+        takes it as a value), which is what makes "every call site checked"
+        true as written.
         """
         last: sqlite3.OperationalError | None = None
         for attempt in range(_CONTENTION_ATTEMPTS):
@@ -1714,9 +1911,9 @@ class AttentionStore:
     def _retry_read(self, operation: Callable[[], _T]) -> _T:
         """Run one read, riding out a contended lock before giving it a name.
 
-        WHY THE READ CLASS NEEDED THIS TOO. Reads contend for the same lock as
-        writes in this store's default rollback journal, and they are the
-        MAJORITY of the incident: 36 RECORDS of the daemon's own scan dying
+        WHY THE READ CLASS NEEDED THIS TOO. Reads contended for the same lock
+        as writes in the rollback journal this store shipped with, and they are
+        the MAJORITY of the incident: 36 RECORDS of the daemon's own scan dying
         inside `revision -> _uninitialized`, against 12 records on the publish
         path, over the 60 `database is locked` text OCCURRENCES in the
         operator's log -- two units, not one. Each scan record carries the
@@ -1733,6 +1930,14 @@ class AttentionStore:
         window could not outlast (review round 1, Q-2). A read that raises costs
         the caller its whole tick or its whole response, so it is ridden out like
         a write, not just widened.
+
+        Under the WAL adoption the dominant half of that class disappears --
+        readers take snapshots and are never blocked by a writer, and commits
+        stop waiting on readers (both measured) -- but the retry STAYS, sized as
+        it is: a store that has not converted, a read meeting SQLite's recovery
+        verdicts, and upgrade verdicts like ``SQLITE_BUSY_SNAPSHOT`` still route
+        through here, and deleting the loop would re-open the class on exactly
+        the machines the adoption cannot reach.
 
         WHY A RETRY IS SAFE HERE, where `publish` needs an idempotency argument.
         The operation runs on a ``mode=ro`` connection: it holds SHARED, writes
@@ -1996,9 +2201,23 @@ class AttentionStore:
         IMMEDIATE`` serialises it against a concurrent :meth:`publish`, so the
         current sequence this compares against cannot be advanced under it, and
         the state returned was computed from the same snapshot.
+
+        CONTENTION IS RIDDEN OUT HERE, exactly as it is for :meth:`publish`
+        (and this is the path the operator's 2026-09-29 toast named: the desktop
+        ``/seen`` clear answered 503 "Read state is busy" because this method
+        had NO retry at all). Re-running is safe by construction: the attempt
+        below leaves nothing half-applied (its transaction rolls back on the way
+        out), and the supersession decision is RE-MADE inside each retry's own
+        transaction from its own snapshot -- a retry can therefore only surface
+        the already-shipped :class:`SupersededCompletionToken` verdict, never a
+        wrong write.
         """
         if not isinstance(token, str) or len(token) != 36 or not self.path.exists():
             raise ValueError("unknown completion token")
+        return self._retry_write(lambda: self._acknowledge_once(conversation, token))
+
+    def _acknowledge_once(self, conversation: str, token: str) -> dict[str, Any]:
+        """One attempt at :meth:`acknowledge`'s transaction, on its own connection."""
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
@@ -2081,6 +2300,36 @@ class AttentionStore:
         caller that sends a pair twice gets the same answer the single-item walk
         would give it.
         """
+        if not items:
+            return []
+        # The missing-store case answers before `_connect()`, which creates the
+        # file and its schema: an arbitration read that found nothing must not
+        # leave a database behind.
+        if not self.path.exists():
+            return [
+                {
+                    "conversation_id": conversation,
+                    "completion_token": token,
+                    "status": "unknown",
+                    "state": None,
+                }
+                for conversation, token in items
+            ]
+        # CONTENTION IS RIDDEN OUT HERE, like its single-item sibling: the whole
+        # batch is ONE transaction, so a retry re-runs it from scratch on a
+        # fresh connection and a fresh snapshot -- verdicts are recomputed per
+        # item, and a failed attempt left nothing behind (whole-batch rollback).
+        # This is the OTHER route the operator's toast came from
+        # (``POST /v1/desktop/attention/seen``, the sidebar clear-all).
+        return self._retry_write(lambda: self._acknowledge_many_once(items))
+
+    def _acknowledge_many_once(self, items: Sequence[tuple[str, str]]) -> list[dict[str, Any]]:
+        """One attempt at :meth:`acknowledge_many`'s batch, on its own connection.
+
+        Builds its own verdict list rather than sharing one across attempts: a
+        retry must evaluate every item against ITS snapshot, and a verdict left
+        over from a rolled-back attempt must not survive into the answer.
+        """
         results = [
             {
                 "conversation_id": conversation,
@@ -2090,13 +2339,6 @@ class AttentionStore:
             }
             for conversation, token in items
         ]
-        if not results:
-            return results
-        # The missing-store case answers before `_connect()`, which creates the
-        # file and its schema: an arbitration read that found nothing must not
-        # leave a database behind.
-        if not self.path.exists():
-            return results
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             for result in results:
@@ -2170,9 +2412,20 @@ class AttentionStore:
         A store that does not exist yet holds no completion to claim, so this
         never creates one: an arbitration read must not be the thing that
         materialises the database.
+
+        CONTENTION IS RIDDEN OUT HERE (a banner that cannot be claimed is a
+        banner that never fires; the claim runs on the desktop route's worker
+        thread). Re-running is safe: a failed attempt rolled back, and a retry
+        re-decides from its own snapshot -- worst case it reports the loser's
+        ``False``, which is the shipped answer for a completion somebody else
+        already claimed.
         """
         if not self.path.exists():
             return False
+        return self._retry_write(lambda: self._claim_delivery_once(conversation, token, backend))
+
+    def _claim_delivery_once(self, conversation: str, token: str, backend: str) -> bool:
+        """One attempt at :meth:`claim_delivery`'s arbitration, on its own connection."""
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
@@ -2216,9 +2469,18 @@ class AttentionStore:
         Rolling back to ``sequence - 1`` rather than deleting the row keeps
         every OLDER completion of this conversation delivered (their sequences
         are lower still), so a released claim re-opens exactly one event.
+
+        CONTENTION IS RIDDEN OUT HERE for the same reason the claim takes the
+        retry: the compare-and-swap is re-evaluated inside each retry's own
+        transaction, so a retry either re-opens the one event or reports that
+        somebody else's newer claim owns it -- never a wrong write.
         """
         if not self.path.exists():
             return False
+        return self._retry_write(lambda: self._release_delivery_once(conversation, token))
+
+    def _release_delivery_once(self, conversation: str, token: str) -> bool:
+        """One attempt at :meth:`release_delivery`'s compare-and-swap."""
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(

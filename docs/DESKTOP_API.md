@@ -724,6 +724,12 @@ the sentence says what the route was doing, condition by condition:
 | volume full | `507` `store_out_of_space` | `This computer is out of disk space, so nothing was written. Free some space on the volume holding <root>, then try again.` |
 | unreadable store | `500` `store_unavailable` | `The read state could not be written. Retrying will not help; check <root> and the disk it is on.` |
 
+A `store_busy` answer is never an instant refusal -- it arrives only after the
+store's own bounded retries are spent (`AttentionStore` attempts twice against a
+5 s lock window each, `_CONTENTION_ATTEMPTS = 2`, `_BUSY_TIMEOUT_MS = 5000`,
+plus a 0.2 s pause between attempts, so up to ~10 s and ~12 s worst case), and
+client timeouts and loading states should be sized for that window.
+
 `422` covers the malformed bodies: empty, more
 than 500 items, a session id that is not 12 lowercase hex characters, a
 token that is not a UUID, and any unknown field (`extra="forbid"`, like every
