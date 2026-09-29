@@ -6327,9 +6327,7 @@ def test_approval_mode_is_auto_reads_the_key_and_degrades_to_ask() -> None:
 
 
 @pytest.mark.asyncio
-async def test_config_auto_reaches_the_headless_gate(
-    tmp_config_dir: Path, monkeypatch
-) -> None:
+async def test_config_auto_reaches_the_headless_gate(tmp_config_dir: Path, monkeypatch) -> None:
     """``tool_approval_mode: auto`` must build the APPROVING gate.
 
     The 2026-09-28 incident's addendum: an operator whose config said auto had
@@ -6339,10 +6337,9 @@ async def test_config_auto_reaches_the_headless_gate(
     handler; this pins that it reads the key — with ``yolo=False`` on the args,
     exactly the failing launch's shape.
     """
+    import local_operator.session_factory as sf
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
-
-    import local_operator.session_factory as sf
 
     (tmp_config_dir / "config.yml").write_text(
         "version: 0.0.0\n"
@@ -6352,7 +6349,7 @@ async def test_config_auto_reaches_the_headless_gate(
         "  tool_approval_mode: auto\n"
     )
     seen: list[bool] = []
-    gates: list = []
+    gates: list[Callable[[str, str], Awaitable[bool]]] = []
     real = sf._make_request_approval
 
     def spy(auto: bool):
@@ -6385,19 +6382,15 @@ async def test_without_the_key_the_headless_gate_still_asks(
     notice and the typed refusal — the semantics every existing headless user
     has, and the reason the fix above is an OR rather than a new default.
     """
+    import local_operator.session_factory as sf
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
 
-    import local_operator.session_factory as sf
-
     (tmp_config_dir / "config.yml").write_text(
-        "version: 0.0.0\n"
-        "values:\n"
-        "  hosting: test\n"
-        "  model_name: test\n"
+        "version: 0.0.0\n" "values:\n" "  hosting: test\n" "  model_name: test\n"
     )
     seen: list[bool] = []
-    gates: list = []
+    gates: list[Callable[[str, str], Awaitable[bool]]] = []
     real = sf._make_request_approval
 
     def spy(auto: bool):
