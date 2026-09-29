@@ -608,9 +608,11 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #:
 #:   baseline (origin/main 28b46dcb5)      96,044 chars = ~34,548 billed
 #:   head (this branch)                    96,247 chars = ~34,621 billed
-#:     = +203 chars = +73 billed: four field descriptions and one listing
-#:       sentence on ONE tool. The schema is the only text an agent reads
-#:       before its first create, and the alternative was a refusal (an
+#:     = +203 chars = +73 billed: the four field descriptions on ONE tool.
+#:       The empty-listing receipt that teaches the same create default is
+#:       runtime text — it never enters the measured start context and costs
+#:       nothing until a listing is read. The schema is the only text an agent
+#:       reads before its first create, and the alternative was a refusal (an
 #:       over-long description) or a misread of "one line on the workstream"
 #:       that the guide then has to undo; the rationale stays in the guide and
 #:       the seeds, which cost nothing until read.
