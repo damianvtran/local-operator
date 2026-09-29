@@ -4540,6 +4540,27 @@ async def test_wake_create_list_cancel(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_wake_create_carries_notify_and_the_schema_advertises_it(tmp_path) -> None:
+    # §14.4: both halves — the field is on the schema the model reads, and it
+    # plumbs through to the schedule the delivery later reads. Either half
+    # alone would rot silently.
+    scheduler = _FakeScheduler()
+    context = ToolContext(cwd=str(tmp_path), session_id="s", wake_scheduler=scheduler)
+    tools = {t.name: t for t in create_tools(context)}
+    assert "notify" in builtin.WakeParams.model_json_schema()["properties"]
+
+    await tools["wake"].execute(
+        "c", {"op": "create", "message": "loud", "in": "30m", "notify": True}, None, None, context
+    )
+    await tools["wake"].execute(
+        "c", {"op": "create", "message": "quiet", "in": "30m"}, None, None, context
+    )
+    by_message = {s.message: s for s in scheduler.schedules}
+    assert by_message["loud"].notify is True
+    assert by_message["quiet"].notify is False
+
+
+@pytest.mark.asyncio
 async def test_wake_list_shows_duration_grammar(tmp_path) -> None:
     # RT-26: repeat intervals render in duration grammar (1h), not seconds.
     scheduler = _FakeScheduler()

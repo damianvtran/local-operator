@@ -19,7 +19,12 @@ import httpx
 from local_operator import launchd
 from local_operator.providers.auth_store import self_clearing_window
 from local_operator.tunnels import config, gateway, report, state
-from local_operator.tunnels.api import RadientTunnels, credential_id
+from local_operator.tunnels.api import (
+    RadientTunnels,
+    credential_id,
+    usable_credential_id,
+)
+from local_operator.tunnels.errors import RecordNotFound
 from local_operator.tunnels.service import (
     authorization_failure_reason,
     cloudflared_binary,
@@ -175,6 +180,29 @@ def _status_text(
         else:
             command = gateway.TERMINAL_REMEDY[gateway.LOGIN_REQUIRED]
             lines.append(f"Login: sign-in expired — run {command}")
+    elif login["state"] == gateway.OWNER_MISSING:
+        # The configuration names a login this device does not have, so this is
+        # NOT the sign-in line above: a fresh sign-in makes a NEW row and nothing
+        # re-points the configuration at it, which is why that remedy looped
+        # forever (issue #1711). The line names the re-point instead, and the
+        # command comes from the same table every other one does.
+        if stopped:
+            lines.append(
+                "Login: this tunnel's saved login is gone from this device "
+                "(not in use — tunnel stopped)"
+            )
+        else:
+            command = gateway.TERMINAL_REMEDY[gateway.OWNER_MISSING]
+            # 156 cells → two 80-column rows (review round 1, D1): the previous
+            # spelling ran to three rows and framed a sign-in as an alternative
+            # fix, which it never is — only the re-point clears the state; a
+            # sign-in is a precondition when the owning account is not on this
+            # device, hence the conditional clause.
+            lines.append(
+                "Login: this tunnel's saved login is gone from this device — "
+                f"run {command} to re-point it (sign in to the account that owns "
+                "the tunnel if needed)."
+            )
     elif login["state"] == "deferred":
         # A state the store is WAITING OUT — the refresh token's last exchange is
         # unsettled — not a fault and not an expired login, so it names no command
@@ -298,6 +326,59 @@ async def _ensure_billing(
     return result
 
 
+async def _missing_record_message(api: RadientTunnels, old: dict[str, Any]) -> str:
+    """The sentence for a 404 on this tunnel's record under the selected login.
+
+    A 404 under an OWNER-PINNED request has two common causes — the enrolled
+    owner account is not the selected login, or the tunnel was revoked — and the
+    status code alone cannot tell them apart (issue #1711). So the sentence is
+    composed from what this device CAN check: the selected login's own account
+    (``GET /v1/me``, read live by `api.account_id`) against the owner the stored
+    record names (``record.owner_account_id``, written when this device last
+    accepted the cloud's record). Three outcomes, one branch each:
+
+    * a MISMATCH names the different account and the re-point command;
+    * a MATCH says only what is left — the tunnel may have been revoked — and
+      asks nothing (the account that owns it is exactly the one selected);
+    * no comparison possible (no stored owner, the account read fails, or the
+      record describes a DIFFERENT tunnel than the one being read — callers pass
+      a record-less dict for that last case) names both possibilities.
+
+    Provider bodies are never echoed (see `api.request`'s redaction rule); the
+    only thing taken from the refusal is that it was a 404, and everything else
+    here is local. ``old`` must therefore be evidence about the tunnel actually
+    read — the stored configuration when it is, an empty dict when it is not
+    (review round 1, F1: `connect --tunnel-id B` while the config holds A must
+    not blame A's owner for B's 404).
+    """
+    record = old.get("record")
+    owner = record.get("owner_account_id") if isinstance(record, dict) else None
+    account = await api.account_id() if isinstance(owner, str) and owner else None
+    if account is not None and account != owner:
+        return (
+            "This tunnel belongs to a different Radient account than the selected login. "
+            "Sign in to the account that owns the tunnel, then re-point this device: "
+            "lop tunnel configure --credential-id <that login's id> (lop login-status "
+            "lists ids)."
+        )
+    if account is not None and account == owner:
+        # The comparison IS made and MATCHES (review round 1, F2/D2): the other
+        # sentence's first possibility — a different account — is excluded by
+        # this login's own account, so only the revoked possibility is left,
+        # and nothing is asked.
+        return (
+            "Radient has no record of this tunnel for the selected login; it may "
+            f"have been revoked. Check it in the Radient console ({gateway.CONSOLE_URL})."
+        )
+    return (
+        "Radient has no record of this tunnel for the selected login: it may belong to "
+        "a different Radient account, or it may have been revoked. Check it in the "
+        f"Radient console ({gateway.CONSOLE_URL}); if the selected login is not the "
+        "account that owns the tunnel, sign in to that account and re-point this "
+        "device with lop tunnel configure --credential-id <that login's id>."
+    )
+
+
 def _prepare_mobile(value: dict[str, Any]) -> None:
     from local_operator.mobile import install as mobile_install
 
@@ -370,7 +451,17 @@ async def dispatch(args: argparse.Namespace) -> str:
             raise ValueError(
                 "A tunnel is already configured. Use configure or revoke before creating another."
             )
-        selected = credential_id(getattr(args, "credential_id", None) or old.get("credential_id"))
+        # Only the DEFAULT selection falls back from a stale pin; an explicit
+        # `--credential-id` still goes through `credential_id` and fails loudly
+        # when it names nothing. A pin whose row is gone (or is not a Radient
+        # oauth row) must not be re-proposed: `credential_id(pin)` would then
+        # answer "log in first" while a current login sits right there, which is
+        # half of the loop issue #1711 describes (the other half: nothing ever
+        # re-pointed the configuration at the new row).
+        requested = getattr(args, "credential_id", None)
+        if requested is None:
+            requested = usable_credential_id(old.get("credential_id"))
+        selected = credential_id(requested)
         gateway_port = config.port(
             getattr(args, "gateway_port", None)
             or old.get("gateway_port", config.DEFAULT_GATEWAY_PORT)
@@ -428,12 +519,24 @@ async def dispatch(args: argparse.Namespace) -> str:
                 identifier = args.tunnel_id or old.get("tunnel_id")
                 if not identifier:
                     raise ValueError("Supply the tunnel ID shown in the Radient console.")
-                record = await api.request("GET", tunnel_path({"tunnel_id": identifier}))
+                try:
+                    record = await api.request("GET", tunnel_path({"tunnel_id": identifier}))
+                except RecordNotFound as failure:
+                    # The stored record is evidence about the tunnel BEING READ
+                    # only when it is the same one: `connect --tunnel-id B` while
+                    # the config holds A must not blame A's owner for B's 404
+                    # (review round 1, F1). A record-less dict composes the
+                    # both-possibilities sentence instead.
+                    stored = old if identifier == old.get("tunnel_id") else {}
+                    raise ValueError(await _missing_record_message(api, stored)) from failure
                 gateway_port = config.port(record["gateway_port"])
             else:
                 if not old.get("tunnel_id"):
                     raise ValueError("Create or connect a tunnel first.")
-                current = await api.request("GET", tunnel_path(old))
+                try:
+                    current = await api.request("GET", tunnel_path(old))
+                except RecordNotFound as failure:
+                    raise ValueError(await _missing_record_message(api, old)) from failure
                 if gateway_port != current["gateway_port"]:
                     # A remote ingress update reaches the existing cloudflared
                     # immediately, before a proof gateway can own the new port.
@@ -448,7 +551,10 @@ async def dispatch(args: argparse.Namespace) -> str:
                     if args.remote_enabled:
                         await _ensure_billing(api, args.accept_monthly_price)
                     payload["enabled"] = args.remote_enabled
-                record = await api.request("PATCH", tunnel_path(old), body=payload)
+                try:
+                    record = await api.request("PATCH", tunnel_path(old), body=payload)
+                except RecordNotFound as failure:
+                    raise ValueError(await _missing_record_message(api, old)) from failure
         value = {
             "tunnel_id": record["id"],
             "credential_id": selected,

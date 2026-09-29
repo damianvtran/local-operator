@@ -62,10 +62,11 @@ def _publish(
     kind: str = "complete",
     *,
     baseline_seen: bool | None = None,
+    notify: bool = True,
 ) -> str:
     token = str(uuid.uuid4())
     AttentionStore(root / "attention.db").publish(
-        f"session/{session_id}", token, anchor, kind, baseline_seen=baseline_seen
+        f"session/{session_id}", token, anchor, kind, baseline_seen=baseline_seen, notify=notify
     )
     return token
 
@@ -227,6 +228,38 @@ async def test_a_published_completion_emits_one_notification_after_the_attention
     # prefix is the frame's own kind, never a hardcoded row-class label.
     assert payload["dedupe_key"] == f"complete:{sid}:{payload['completion_token']}"
     assert payload["completion_token"] == bridge.attention["completion_token"]
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_completion_raises_no_banner(tmp_path: Path) -> None:
+    """§14: the row's own `notify` is the gate, not its kind.
+
+    Both arms in one cell over one bridge: a quiet completion — a wake or
+    monitor delivery that did not ask to be announced — publishes its
+    `attention` frame (a reading user is still owed the sidebar mark) and no
+    `notification`, while the loud control right after it does. Asserting only
+    the quiet half would pass on a bridge that never notifies anything.
+    """
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    _session_dir(tmp_path, sid, assistant="Nothing to announce.", title="Quiet work")
+    bridge = await _baselined(tmp_path, sid)
+
+    quiet = _publish(tmp_path, sid, "quiet-result", notify=False)
+    await bridge.refresh_attention()
+
+    assert bridge.kinds == ["attention"], "the state frame still lands; the banner does not"
+    assert bridge.attention["unseen"] is True, "quiet is not the same as read"
+    assert all(
+        frame["payload"].get("completion_token") != quiet for frame in bridge.of("notification")
+    )
+
+    loud = _publish(tmp_path, sid, "loud-result")
+    await bridge.refresh_attention()
+
+    announced = bridge.of("notification")
+    assert len(announced) == 1, "one completion, one banner — and only the loud one"
+    assert announced[0]["payload"]["completion_token"] == loud
 
 
 @pytest.mark.asyncio

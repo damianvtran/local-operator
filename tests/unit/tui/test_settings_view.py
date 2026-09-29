@@ -3084,7 +3084,10 @@ async def test_paging_lands_on_the_true_end_of_the_list() -> None:
 
             await pilot.press("home")
             await pilot.pause()
-            for _ in range(25):
+            # A cushion, not a count: the settings list grows with every section
+            # (26 presses on the fdf52ada4 merge; main alone sits at 25) and
+            # paging clamps, so extra presses are no-ops.
+            for _ in range(40):
                 await pilot.press("pagedown")
             await pilot.pause()
 
@@ -3098,7 +3101,7 @@ async def test_paging_lands_on_the_true_end_of_the_list() -> None:
             ), "paging reached the last row without reaching the bottom of the view"
 
             # And back: `pageup` reaches the first row the same way.
-            for _ in range(25):
+            for _ in range(40):
                 await pilot.press("pageup")
             await pilot.pause()
             assert view._selected == view._selectable()[0]

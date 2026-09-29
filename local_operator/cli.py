@@ -1275,6 +1275,14 @@ def build_cli_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="stop repeating after N fires",
     )
+    wake_create.add_argument(
+        "--notify",
+        action="store_true",
+        help=(
+            "notify on completion of the wake's turn (default quiet: scripted "
+            "arms match the contract; errored turns notify regardless)"
+        ),
+    )
     wake_create.add_argument("--json", action="store_true", help="machine-readable output")
     wake_serve = wake_sub.add_parser(
         "serve",
@@ -5345,6 +5353,11 @@ def _wake_create(args: argparse.Namespace) -> int:
         request["every"] = every_raw
     if limit is not None:
         request["limit"] = limit
+    # §14.4's CLI note: opt-in, so the default stays quiet and a scripted arm
+    # matches the contract an agent gets from the tool (whose field defaults
+    # false too).
+    if getattr(args, "notify", False):
+        request["notify"] = True
 
     # ONE writer. ``arm_wake`` appends the transcript entry first (the source of
     # truth) and then rewrites the derived index CARRYING the keys it does not

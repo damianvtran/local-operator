@@ -13,6 +13,8 @@ pause her, and how to switch her off entirely.
 - `/aida pause` — stop her proactive output for now (see Pausing below).
 - `/aida resume` — allow it again; the cadence re-arms at the next cadence time.
 - `/aida status` — what state she is in (enabled / paused / next cadence / budget).
+- `/aida rename <name>` — rename HER everywhere (see Renaming her below);
+  bare `rename` reports the current name.
 - `/aida =pause ...` — the `=` prefix is the escape hatch for messages that
   start with a reserved word (same grammar as `/team =chart`).
 
@@ -20,9 +22,21 @@ She is an ordinary session otherwise: `/resume`, the sidebar and the phone all
 list her like any conversation, and every runtime feature (tools, teams,
 projects, subagents, wakes) works normally.
 
+## Renaming her
+
+She is yours to name. `/aida rename <name>` — or renaming her conversation
+(the `/title` command, the picker's rename, the desktop) — stores `aida.name`,
+and every surface reads that key LIVE: the `/aida` receipts, her sidebar and
+picker rows (her conversation's title is rewritten to match), the desktop
+payload's `name` field, and the first-run greeting. `aida.name` defaults to
+`Aida`; an invalid value (empty after trimming, more than 80 characters,
+control characters) is refused with the same validator `/settings` uses. The
+config key is canonical: if it and her conversation's title ever disagree, the
+title is rewritten to match it.
+
 ## The proactive cadence
 
-Once a day, at `aida.cadence.at` (default `09:00`, your local time), a wake
+Once a day, at `aida.cadence.at` (default `08:30`, your local time), a wake
 fires in her conversation: she reviews sessions, projects, scheduled wakes and
 usage signals, and reports only what you must act on. If there is nothing
 actionable she stays quiet in substance (her instructions say so explicitly).
@@ -101,7 +115,7 @@ plus the standard session directory:
 | `aida/onboarding.json` | the one-time greeting ledger (`greeted_at`) |
 | `aida/escalate.json` | her escalation in-tray (written by her, consumed by the engine) |
 | `aida/ensure.lock` | the cross-process lock serialising all of the above |
-| `sessions/<id>/` | her conversation — a normal session directory (transcript, attachment sidecar naming the `aida` role, the "Aida" title) |
+| `sessions/<id>/` | her conversation — a normal session directory (transcript, attachment sidecar naming the `aida` role, its current title — `aida.name`) |
 | `wakes/<id>.json` | the standard wake index entry for her session |
 
 None of these is a config key: they are runtime-managed bookkeeping, not
@@ -112,10 +126,13 @@ settings a user authors.
 | key | default | meaning |
 |---|---|---|
 | `aida.enabled` | `true` | master switch (read at boot and by `/aida`) |
-| `aida.cadence.at` | `"09:00"` | daily cadence time, `HH:MM` local |
+| `aida.name` | `"Aida"` | her display name on every surface (see Renaming her) |
+| `aida.cadence.at` | `"08:30"` | daily cadence time, `HH:MM` local |
 | `aida.cadence.paused` | `false` | the pause flag (written by `/aida pause|resume`) |
 | `aida.cadence.max_extra_per_day` | `2` | escalation budget (`0` disables escalation) |
 | `aida.cadence.min_gap_minutes` | `90` | minimum spacing between Aida wakes |
 | `aida.onboarding.nudge_days` | `14` | integration-nudge bound (used by the onboarding slice) |
 
-All six are editable from `/settings` (section "Aida") and `lop config`.
+All seven are editable from `/settings` (section "Aida") and `lop config`.
+Renames made through `/aida rename` or a conversation rename also write
+`aida.name`, so the two gestures and the settings page cannot drift apart.

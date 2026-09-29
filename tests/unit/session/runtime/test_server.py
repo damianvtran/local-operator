@@ -5670,10 +5670,17 @@ async def test_a_parked_owner_binds_off_loop_and_its_late_bind_never_double_rela
     writer = None
     try:
         record = await _wait_record()
-        reader, writer = await _dial_frontend(record)
-        assert await asyncio.to_thread(handle.bind_entered.wait, 5), "the bind never started"
-
+        # THE CAPTURE WINDOW OPENS BEFORE THE DIAL, because the dial is what
+        # starts the bind this cell measures. The record asserted below is
+        # emitted when the 100 ms grace expires, and that grace is measured
+        # from the bind task's own start — before ``bind_entered`` is even
+        # observable — so a window opened after that observation races the
+        # record it measures: under load the entry can precede the window and
+        # ``caplog.text`` comes back empty while every behavioural assertion
+        # passes. Opened here, no timing can lose the record.
         with caplog.at_level(logging.INFO, logger="local_operator.session.runtime.server"):
+            reader, writer = await _dial_frontend(record)
+            assert await asyncio.to_thread(handle.bind_entered.wait, 5), "the bind never started"
             sync = await _until(reader, "frontend_sync")
         assert handle.off_loop_binds == 1, (
             "the sync arrived off-loop, but the recorded fallback count says the "

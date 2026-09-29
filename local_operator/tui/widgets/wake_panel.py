@@ -6,7 +6,7 @@ equality guard so the 1 Hz poll repaints only on change, and a row budget read
 from the screen so the band stays inside short terminals. The point of the
 panel is that a session's autonomy is otherwise invisible: a wake fires with
 no keystroke, and without a standing list the only way to know the session
-will wake at 09:00 is to catch the delivery line as it scrolls past.
+will wake at 08:30 is to catch the delivery line as it scrolls past.
 
 **It also reports a wake that is NOT being delivered.** A schedule whose
 supervisor engagement keeps failing used to paint exactly like a healthy one,

@@ -2140,6 +2140,7 @@ class Session:
         #: whole of its display identity. Reaches tools via
         #: ``_build_tool_context``; display-only, never an authorization input.
         job_label: str = "",
+        agent_type: str = "",
         #: The parent's own :meth:`_display_session_name`, on a subagent only.
         #: A RESOLVER rather than the parent's title holder, for two reasons
         #: that are really one: it re-reads on every call, so a parent named or
@@ -2302,6 +2303,13 @@ class Session:
         self._attention: dict[str, Any] = {}
         self._attention_outcome: AgentEndEvent | None = None
         self._attention_run_token: str | None = None
+        #: §14's per-run trigger record: which origins this run's inputs had
+        #: ("user" / "wake_prompt" / "monitor_prompt" / "internal") and
+        #: whether any wake/monitor delivery asked to notify. Reset at the
+        #: pipeline head, populated at admission and by ``_drain_steering``,
+        #: consumed exactly once by ``_finalize_attention_notify``.
+        self._run_triggers: set[str] = set()
+        self._run_notify_requested: bool = False
         #: Whether the CURRENT run's end has been CONSUMED for publication.
         #: Set False at every turn start and True the moment
         #: ``_publish_attention_outcome`` takes the end event, so a teardown can
@@ -2409,6 +2417,10 @@ class Session:
         #: which keeps serving the same runtime.
         self._leaving_deliveries = False
         self._job_label = job_label
+        #: The role a subagent was launched as (``task(agent=...)``), for the
+        #: ``agent_type`` field forwarded hooks receive. Empty on a top-level
+        #: session and on a role-less child (reported as ``task``).
+        self._agent_type = agent_type
         self._parent_display_name = parent_display_name
         self._subagent_comms = subagent_comms
         self.agent_registry = agent_registry
@@ -3219,6 +3231,9 @@ class Session:
         self._resume_grace_ends_ms: float = float("inf")
         self._resume_catchup_text: str | None = None
         self._resume_catchup_sent = False
+        #: §14.4: the OR of the folded schedules' notify bits, carried on the
+        #: aggregated catch-up delivery. False until a catch-up is prepared.
+        self._resume_catchup_notify = False
         #: Ids of the overdue schedules the catch-up text folds. The shim
         #: swallows only these (see _deliver_wake_catchup); empty when there
         #: is no catch-up pending, so the shim is then a pure passthrough.
@@ -6177,6 +6192,14 @@ class Session:
             # (``_store_title``, ``_cmd_rename``), which cannot await, and tab
             # chrome must never delay or fail a rename.
             self._push_browser_title()
+            # HER NAME IS CONFIG. A user-set rename of HER conversation is a
+            # rename of her (``aida.name``; see local_operator.aida.naming),
+            # and this method is the ONE writer every rename gesture funnels
+            # through — the TUI's /title, the runtime's /rename, the desktop,
+            # the phone — so the sync lives here rather than in four callers.
+            # Generated titles (``user_set=False``) never sync: the auto-namer
+            # is not the operator naming her.
+            self._sync_aida_display_name(stored, user_set=user_set)
         self.refresh_frontend_state()
         return stored
 
@@ -8961,6 +8984,10 @@ class Session:
                     saved["kind"],
                     reason=str(saved.get("reason") or ""),
                     cause=str(saved.get("cause") or ""),
+                    # §14.3: the marker carries the run's computed value; a
+                    # pre-notify marker (key absent) means notify=1 — its
+                    # behaviour, verbatim.
+                    notify=bool(saved.get("notify", True)),
                 )
             except AttentionWriteDeferred:
                 # CONTENTION: the ladder's own case, and the latch stays armed for
@@ -9141,6 +9168,81 @@ class Session:
         self.refresh_frontend_state()
         return state
 
+    def _note_run_input(self, message: AgentMessage) -> None:
+        """Record one of the run's inputs for §14.2's trigger set.
+
+        THE DISCRIMINATOR IS ``custom_type``, never ``attribution``: wake and
+        monitor deliveries ride ``attribution="user"`` by design, so only the
+        custom type separates a delivery from a person. The trigger domain is
+        exactly three classes — "user" for a plain user message,
+        "wake_prompt"/"monitor_prompt" for the two deliveries (whose own
+        ``notify`` is OR'd into the run from their ``details``), and one
+        "internal" class for ANY other custom/system input (peer message, job
+        result, resume catch-up, incident notice, harness chrome). Called from
+        the pipeline head for the opening messages and from ``_drain_steering``
+        for messages that folded in mid-turn — both are the run's inputs.
+        """
+        custom_type = getattr(message, "custom_type", None)
+        if custom_type in (WAKE_PROMPT_MESSAGE_TYPE, MONITOR_PROMPT_MESSAGE_TYPE):
+            self._run_triggers.add(str(custom_type))
+            details = getattr(message, "details", None)
+            if isinstance(details, Mapping) and details.get("notify"):
+                self._run_notify_requested = True
+        elif custom_type is not None or getattr(message, "role", None) != "user":
+            self._run_triggers.add("internal")
+        else:
+            self._run_triggers.add("user")
+
+    def _has_awaiting_user(self) -> bool:
+        """§14.2's ``awaiting_user``: a plain user message queued, unconsumed.
+
+        Read off the steering queue's non-destructive snapshot, which is where
+        a typed message goes while a turn is already streaming. A wake/monitor
+        delivery is a ``CustomMessage`` and never counts here.
+        """
+        return any(
+            getattr(message, "custom_type", None) is None
+            and getattr(message, "role", None) == "user"
+            for message in self.queued_steering()
+        )
+
+    def _finalize_attention_notify(self, event: AgentEndEvent) -> bool:
+        """Finalize §14.2's notify rule for the run this end closes.
+
+        COMPUTED EXACTLY ONCE, at the moment the end is emitted (``_emit``),
+        from the run's recorded triggers; the value is then stamped on the end
+        and read back by ``_publish_attention_outcome`` — no consumer, and no
+        later code path, re-derives it. The rule (R15/R15a):
+
+        * user semantics win: a consumed user message, or a queued-but-
+          unconsumed one (``awaiting_user``), notifies, and a mixed run keeps
+          that behaviour with EXACTLY one publication (one row per turn);
+        * any non-user trigger that is not exclusively wake/monitor deliveries
+          (a peer message, a job result, an incident notice, a wake+peer mix)
+          notifies exactly as today — a quiet delivery never suppresses it;
+        * wake/monitor-only runs notify iff one of their deliveries asked to
+          (``notify_requested``, the OR of their ``notify`` parameters);
+        * ``kind == "error"`` — a provider/tool failure or a classified cut-off
+          — always notifies, whatever the origins were. A deliberate stop
+          (``interrupted``) stays suppressed by the consumers' kind filters
+          whatever this value says.
+        """
+        kind = (
+            "error"
+            if (event.error or event.cut_off_cause)
+            else "interrupted" if event.aborted else "complete"
+        )
+        triggers = set(self._run_triggers)
+        non_user = triggers - {"user"}
+        return (
+            self._has_awaiting_user()
+            or "user" in triggers
+            or not (
+                non_user and non_user <= {WAKE_PROMPT_MESSAGE_TYPE, MONITOR_PROMPT_MESSAGE_TYPE}
+            )
+            or self._run_notify_requested
+        ) or kind == "error"
+
     async def _publish_attention_outcome(self) -> None:
         from local_operator.session.attention import (
             ATTENTION_CUSTOM_TYPE,
@@ -9219,6 +9321,13 @@ class Session:
             if (outcome.error or cut_off)
             else "interrupted" if outcome.aborted else "complete"
         )
+        # §14.3: the run's ONE notify value, read off the end event the session
+        # already stamped (``_emit``) — never re-derived here. A synthesised end
+        # (the disposal rung) never passed ``_emit``, and its kinds are
+        # error/interrupted: its model default (True) is the correct answer —
+        # errors notify, and interrupted stays suppressed by the readers' kind
+        # filters whatever this says.
+        notify = bool(getattr(outcome, "notify", True))
         token = self._attention_run_token or str(uuid.uuid4())
         # The DURABLE reason. For a cut-off it is the harness-authored cause
         # sentence, never the live notice's longer framing: this string is what
@@ -9271,6 +9380,10 @@ class Session:
                     "kind": kind,
                     "cause": cause,
                     "reason": reason,
+                    # §14.3: the durable copy of the value, so a rebuilt store
+                    # (bootstrap/republish, both of which replay this marker)
+                    # re-lands the same row instead of a defaulted one.
+                    "notify": notify,
                 },
             )
             try:
@@ -9282,6 +9395,7 @@ class Session:
                     kind,
                     reason=reason,
                     cause=cause,
+                    notify=notify,
                 )
             except AttentionWriteDeferred as deferred:
                 # CONTENTION OUTLASTED THE STORE'S BOUNDED RETRY, and the completion
@@ -9759,6 +9873,14 @@ class Session:
             # publish) does the right thing without being taught a new field. A
             # deliberate stop is left exactly as it was.
             event = self._classify_cut_off(event)
+            # §14.2's ONE notify computation for the run this end closes,
+            # stamped here so it rides the EMITTED end on both exit paths —
+            # the immediate error/abort emission and the held end flushed from
+            # the pipeline finally both pass through this choke point — and
+            # set on the outcome the fold below captures, where
+            # ``_publish_attention_outcome`` reads it back rather than
+            # re-deriving it. One value, four readers, decided by nobody else.
+            event = event.model_copy(update={"notify": self._finalize_attention_notify(event)})
             self._attention_outcome = event
             # The emitted end is the logical turn's outcome (held ends flush
             # here from the pipeline finally; abort/error skip the hold and
@@ -10138,6 +10260,14 @@ class Session:
         self._attention_run_request_dispatched = False
         self._attention_run_carried_prompt = carried_prompt
         self._attention_run_settle_intent = False
+        # §14.3: the trigger record, reset per run beside the outcome and the
+        # token. Populated from the opening messages here ("at admission") and
+        # by ``_drain_steering`` as delivery/steer messages fold in; consumed
+        # exactly once, at turn end, by ``_finalize_attention_notify``.
+        self._run_triggers = set()
+        self._run_notify_requested = False
+        for message in initial:
+            self._note_run_input(message)
         # Cleared at the head of EVERY turn, alongside the outcome, so a cause
         # noted for a previous turn cannot label this one: the end event that
         # consumes it is emitted from THIS turn's finally, and a stale cause
@@ -10521,6 +10651,10 @@ class Session:
                 # is put_nowait-only and swallows its own errors, so this stays
                 # off the turn's critical path.
                 record_tool_call=self._record_tool_call,
+                # The operator's Claude Code / Codex PostToolUse hooks, forwarded
+                # (``hook_forwarding``). Always wired: the forwarder reads its
+                # on/off keys per call, so ``/settings`` reaches the next tool.
+                post_tool_hooks=self._forward_post_tool_hooks,
                 interrupt_mode="immediate",
                 on_turn_end=self._on_turn_end,
             )
@@ -11014,6 +11148,40 @@ class Session:
         """
         scratchpad = self._scratchpad_dir()
         return None if scratchpad is None else str(Path(scratchpad).parent)
+
+    async def _forward_post_tool_hooks(
+        self, tool_name: str, args: Mapping[str, Any], call_id: str, result: ToolResult
+    ) -> list[str]:
+        """Run forwarded ``PostToolUse`` hooks for one finished tool call.
+
+        A child reports ``agent_id``/``agent_type`` exactly as a Claude Code
+        subagent does, so a hook that skips subagents keeps doing so here.
+        """
+        from local_operator.hook_forwarding import HookIdentity, forward_post_tool
+
+        is_child = self._job_id is not None
+        transcript_path: str | None = None
+        with contextlib.suppress(Exception):
+            directory = self._transcript.directory
+            if directory is not None:
+                candidate = Path(directory) / "transcript.jsonl"
+                transcript_path = str(candidate) if candidate.exists() else None
+        identity = HookIdentity(
+            session_id=self._session_id,
+            cwd=self._cwd,
+            transcript_path=transcript_path,
+            agent_id=self._job_id if is_child else None,
+            agent_type=(self._agent_type or "task") if is_child else None,
+        )
+        return await forward_post_tool(
+            identity,
+            tool_name=tool_name,
+            args=args,
+            tool_use_id=call_id,
+            output=result.text,
+            is_error=result.is_error,
+            duration_s=result.duration_s,
+        )
 
     def _build_tool_context(self) -> ToolContext:
         # This context is REBUILT on every turn, so anything that must outlive
@@ -12555,6 +12723,12 @@ class Session:
                 if isinstance(message, Message) and message.role == "user":
                     await self._emit(MessageStartEvent(message=message))
             self.refresh_frontend_state()
+        # §14.3: a drained message became part of THIS run's inputs the moment
+        # the loop folds it in, so its origin joins the trigger record here —
+        # and only here, for messages actually consumed (one still QUEUED is
+        # covered by ``awaiting_user`` instead).
+        for message in messages:
+            self._note_run_input(message)
         return messages
 
     def _has_urgent_steering(self) -> bool:
@@ -14563,7 +14737,32 @@ class Session:
                 return summary or " ", {"snapcompact": _archive_to_json(archive)}
             except Exception:
                 logger.warning("snapcompact failed; falling back to context-full", exc_info=True)
-        summary = await compaction_api.summarize_messages(to_summarize, self._one_shot_complete)
+        # A pass after the first plans over ``[marker, *kept]``: the previous
+        # summary is folded through the template's ``<previous-summary>``
+        # slot, never re-exposed inside ``<conversation>`` as an ordinary user
+        # turn — left there, a chained pass re-derives the whole summary from
+        # a conversation that already CONTAINS it (lift XOR keep; see
+        # ``compaction.marker.split_leading_marker``). The snapcompact branch
+        # above folds its own way (``_previous_archive_text``, the archive's
+        # accumulated text re-rendered into the new archive); this is the TEXT
+        # summarizer's half of the same rule.
+        #
+        # Both halves degrade with ``getattr``, the way the other optional
+        # members of ``compaction_api`` do: a partial test double that predates
+        # the fold keeps its pre-fold call shape (marker in the span, no
+        # ``previous_summary``) rather than breaking the pass.
+        splitter: Any = getattr(compaction_api, "split_leading_marker", None)
+        previous_summary: str | None = None
+        span: list[Message] = list(to_summarize)
+        if callable(splitter):
+            split_result: Any = splitter(to_summarize)
+            previous_summary, span = split_result
+        if previous_summary is None:
+            summary = await compaction_api.summarize_messages(span, self._one_shot_complete)
+        else:
+            summary = await compaction_api.summarize_messages(
+                span, self._one_shot_complete, previous_summary=previous_summary
+            )
         return summary, None
 
     def _previous_archive_text(self) -> str | None:
@@ -15749,6 +15948,28 @@ class Session:
             logger.debug("aida: could not resolve her session identity", exc_info=True)
             return False
 
+    def _sync_aida_display_name(self, title: str, *, user_set: bool) -> None:
+        """Keep ``aida.name`` in step when HER conversation is renamed.
+
+        Only a USER-SET rename counts: the auto-namer's generated titles
+        (``user_set=False``) are not the operator naming her, and adopting one
+        would let a fresh install's first turn silently rewrite a configured
+        name. Best-effort by contract, like every other side effect its caller
+        runs: a config write must never cost the rename. The write is
+        synchronous on purpose (the ``_set_paused_config`` precedent) — the
+        receipt the user sees must be true, and the write is a few
+        milliseconds against a file the same gesture is already journalling.
+        """
+        if not user_set or not self._aida_duty:
+            return
+        try:
+            from local_operator.aida import naming as aida_naming
+            from local_operator.paths import config_dir
+
+            aida_naming.sync_config_name_from_title(config_dir(), title)
+        except Exception:  # noqa: BLE001 — a decoration never fails a rename
+            logger.debug("aida: could not sync the display name to config", exc_info=True)
+
     def _aida_filter_rows(self, schedules: list[WakeSchedule]) -> list[WakeSchedule]:
         """Drop her ``aida-*`` rows when she is paused or disabled."""
         try:
@@ -15792,6 +16013,22 @@ class Session:
                 await self.set_wake_schedules(updated)
         except Exception:  # noqa: BLE001 — best-effort by contract
             logger.warning("aida: live reconcile failed", exc_info=True)
+        # HER DISPLAY NAME rides the same live-config seam: ``aida.name`` is
+        # canonical (see local_operator.aida.naming), so a rename issued
+        # anywhere — a /settings edit, /aida rename in another terminal, the
+        # desktop — re-titles THIS session in place. The band, the picker and
+        # the sidebar all read what this writes. Equal values do nothing,
+        # which is what keeps :meth:`_sync_aida_display_name` (which a rename
+        # rings) from ringing the watcher straight back.
+        try:
+            from local_operator.aida import naming as aida_naming
+            from local_operator.paths import config_dir
+
+            wanted = aida_naming.display_name(config_dir())
+            if wanted and wanted != self._conversation_name.text:
+                self.set_conversation_name(wanted, user_set=True)
+        except Exception:  # noqa: BLE001 — an instrument never fails a turn
+            logger.warning("aida: could not apply the configured name", exc_info=True)
 
     async def _aida_after_turn(self) -> None:
         """Turn-end drain of her escalation tray. One stat when idle.
@@ -16016,6 +16253,10 @@ class Session:
         # the folded text, so swallowing it would lose its message entirely
         # (review round 3, M1).
         self._resume_catchup_ids = {m["schedule"].id for m in missed}
+        # §14.4: the folded delivery carries the OR of the aggregated
+        # schedules' notify bits, so a catch-up of reminders the user asked to
+        # be told about keeps notifying while an all-quiet set stays quiet.
+        self._resume_catchup_notify = any(bool(m["schedule"].notify) for m in missed)
         self._resume_catchup_text = self._format_missed_wake_catchup(missed, now)
         # Install the suppression shim NOW, not at first trigger: installing it
         # late is what let the scheduler's own tick swallow a per-schedule
@@ -16073,7 +16314,11 @@ class Session:
         return CustomMessage(
             custom_type=WAKE_PROMPT_MESSAGE_TYPE,
             attribution="user",
-            details={"wake_catchup": True, "text": text},
+            details={
+                "wake_catchup": True,
+                "text": text,
+                "notify": self._resume_catchup_notify,
+            },
         )
 
     def _deliver_resume_catchup(self, catchup: CustomMessage) -> None:
@@ -17008,7 +17253,14 @@ class Session:
         wake_message = CustomMessage(
             custom_type=WAKE_PROMPT_MESSAGE_TYPE,
             attribution="user",
-            details={"wake_id": due.schedule.id, "occurrence": due.occurrence, "text": text},
+            details={
+                "wake_id": due.schedule.id,
+                "occurrence": due.occurrence,
+                "text": text,
+                # §14.4: the delivery's control parameter, read by the trigger
+                # record at fold-in; never re-derived later.
+                "notify": bool(due.schedule.notify),
+            },
         )
         # The receipt event rides BEFORE the turn spawn so a front end can
         # paint the expandable wake line ahead of the work it triggered —
@@ -17133,6 +17385,8 @@ class Session:
                 "checks": delivery.checks,
                 "skipped": delivery.skipped,
                 "text": text,
+                # §14.4: the delivery's control parameter (see _deliver_wake).
+                "notify": bool(delivery.notify),
             },
         )
         await self._emit(

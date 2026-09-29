@@ -129,6 +129,33 @@ _SUGGEST_KEYS = frozenset({_HOSTING_KEY, _MODEL_KEY})
 #: section under the edited row reachable without scrolling.
 _SUGGEST_ROWS = 8
 
+#: The static detail line on a DESKTOP-scope hotkey row (§H.1). It REPLACES the
+#: registry help on this page: what a terminal user needs there is the one
+#: constraint the registry help cannot know — capture can only hear keys the
+#: terminal sends, and the full-power editor is the desktop app. The sentence is
+#: one line at the 100x30 detail budget; the rung ladder below keeps it first
+#: for these rows, with the state clause and key path as riders.
+_DESKTOP_HOTKEY_DETAIL = (
+    "Global shortcut for the desktop app — press keys the terminal can send, "
+    "or set it in the app."
+)
+
+#: The detail sentence for a desktop row whose grammar has NO terminal capture
+#: path (the hold family, `keymap.push_to_talk`): the same family as
+#: `_DESKTOP_HOTKEY_DETAIL` with the false clause dropped — "press keys the
+#: terminal can send" cannot be said about a value no terminal can express, so
+#: the row states only where it IS set. What remains is the instruction the
+#: enter refusal elaborates.
+_HOLD_HOTKEY_DETAIL = "Global shortcut for the desktop app — set it in the app."
+
+#: The `enter` refusal on such a row. The affordance must not ARM — a
+#: listening frame whose every completion the validator refuses reads as a
+#: broken capture — so the press states the constraint instead. Same family as
+#: the sentences above: the editor for this row is the desktop app.
+_HOLD_HOTKEY_REFUSAL = (
+    "hold keys are set in the desktop app — a terminal cannot capture a held modifier"
+)
+
 
 class _Capture(NamedTuple):
     """A hotkey row that is listening, or holding a key awaiting confirmation.
@@ -1692,6 +1719,14 @@ class SettingsView(Vertical):
                 # IDLE -> CAPTURING. `enter` opens, exactly as it does for
                 # every other kind; what "open" means here is "start
                 # listening" rather than "show a list" or "open a buffer".
+                if not keymap_mod.capturable_in_terminal(setting.key):
+                    # A hold key has no capture path AT ALL: arming would
+                    # paint a listening frame whose every completion the
+                    # validator refuses. Refuse the gesture up front, with the
+                    # reason, on the surface a refused write uses.
+                    self._error = _HOLD_HOTKEY_REFUSAL
+                    self._repaint()
+                    return
                 self._begin_capture(setting)
             elif capture.key:
                 # PENDING -> committed. This is the SECOND `enter`, on a key
@@ -2124,7 +2159,16 @@ class SettingsView(Vertical):
         capture = self._capture
         if capture is None:
             return
-        reason = keymap_mod.validate_key(key)
+        # The ROW's scope picks the value grammar: a desktop-scope row is
+        # remapping a global shortcut, so a bare `n` is refused with the
+        # modifier sentence rather than the composer one. The action id rides
+        # along because the grammar is registered per ACTION (`keymap.
+        # _DESKTOP_GRAMMARS`), not per scope — the hold family
+        # (`keymap.push_to_talk`) must not be judged by the accelerator rules.
+        # (Capture never reaches a hold row at all: `capturable_in_terminal`
+        # refuses the arming, so this path only sees capturable grammars.)
+        scope = keymap_mod.scope_of(capture.setting_key)
+        reason = keymap_mod.validate_key(key, scope=scope, action_id=capture.setting_key)
         if reason is None:
             # A key another hotkey already holds is refused HERE rather than at
             # commit, even though `write_setting` would also refuse it. The
@@ -2139,7 +2183,12 @@ class SettingsView(Vertical):
             self._capture = capture._replace(refused=reason)
             self._repaint()
             return
-        self._capture = capture._replace(key=keymap_mod.normalize_key(key), refused="")
+        normalized = (
+            keymap_mod.normalize_desktop_key(key, action_id=capture.setting_key)
+            if scope == "desktop"
+            else keymap_mod.normalize_key(key)
+        )
+        self._capture = capture._replace(key=normalized, refused="")
         self._repaint()
 
     def _commit_capture(self) -> None:
@@ -2165,7 +2214,10 @@ class SettingsView(Vertical):
         # The written key is now simply the stored value, so the row's own
         # rendering carries it; the notice states the one thing the row cannot,
         # which is that other panes will follow within a second or two.
-        self._notice = f"{keymap_mod.format_key_display(capture.key)} saved"
+        display = keymap_mod.display_key(
+            capture.key, scope=keymap_mod.scope_of(capture.setting_key)
+        )
+        self._notice = f"{display} saved"
 
     def _capture_conflict(self) -> str:
         """What the pending key would cost, or ``""``.
@@ -3727,12 +3779,21 @@ class SettingsView(Vertical):
                     # a second glyph because it asks the question the state
                     # actually poses, and the detail line answers it with
                     # `enter confirms`.
-                    line.append(keymap_mod.format_key_display(capture.key), style=accent)
+                    shown = keymap_mod.display_key(
+                        capture.key, scope=keymap_mod.scope_of(capture.setting_key)
+                    )
+                    line.append(shown, style=accent)
                     line.append(" ?", style=accent)
                 else:
                     line.append("press a key\u2026", style=accent)
                 return line
-            line.append(keymap_mod.format_key_display(str(value)), style=value_style)
+            # `display_key`, not `format_key_display`: a desktop value maps its
+            # platform tokens for display in its OWN scope (primary reads
+            # cmd/ctrl), where the app vocabulary would show it verbatim.
+            line.append(
+                keymap_mod.display_key(str(value), scope=setting.hotkey_scope or "app"),
+                style=value_style,
+            )
             if selected:
                 # The same cursor-row-only affordance glyph the bool/enum rows
                 # carry, answering "what does `enter` do here?" before the
@@ -4222,7 +4283,9 @@ class SettingsView(Vertical):
                 lead, lead_style, reason = capture.refused, error, "press another key"
                 contract_text = "esc cancels"
             elif capture.key:
-                lead = keymap_mod.format_key_display(capture.key)
+                lead = keymap_mod.display_key(
+                    capture.key, scope=keymap_mod.scope_of(capture.setting_key)
+                )
                 lead_style = dim + Style(bold=True)
                 # The cost of the choice, at the moment of the choice.
                 # Warn-and-ALLOW: the reserved set is enormous and mostly
@@ -4376,6 +4439,18 @@ class SettingsView(Vertical):
             )
             width = self._detail_width()
             help_text = row.setting.help
+            if row.setting.hotkey_scope == "desktop":
+                # The desktop sentence REPLACES the registry help on this page,
+                # for the reason `_DESKTOP_HOTKEY_DETAIL` states. The registry
+                # help still reaches both surfaces; it is this line's budget it
+                # cannot share with a constraint a terminal user must read.
+                # A NON-capturable desktop row (the hold family) drops the
+                # press clause instead: no terminal key can set it at all.
+                help_text = (
+                    _DESKTOP_HOTKEY_DETAIL
+                    if keymap_mod.capturable_in_terminal(row.setting.key)
+                    else _HOLD_HOTKEY_DETAIL
+                )
             # THE SHED LADDER, one rule for every row (design round 3, D12):
             # the key path sheds first; the state clause is never shed while
             # anything else remains; help sheds after the key. Walked top to
@@ -4419,8 +4494,26 @@ class SettingsView(Vertical):
             help_alone_part = (help_text, Style(color=theme_mod.semantic_color("dim")), False)
             clause_part = (clause, clause_style, False)
             key_part = (key_suffix.strip(), key_style, True)
-            base_rungs: list[list[tuple[str, Style, bool]]] = (
-                [
+            base_rungs: list[list[tuple[str, Style, bool]]] = []
+            if row.setting.hotkey_scope == "desktop":
+                # SENTENCE FIRST on desktop rows. Same shed mechanics, same
+                # floor and same warning pinning below — only the rung ORDER
+                # differs, because the sentence `_DESKTOP_HOTKEY_DETAIL` carries
+                # is this row's required statement (§H.1) and cannot be inferred
+                # from anything else on screen, while for an app row the state
+                # clause and the key path are the payload and the registry help
+                # is generic copy that already lives in the registry.
+                if clause:
+                    base_rungs = [
+                        [help_part, clause_part, key_part],
+                        [help_part, clause_part],
+                        [help_part, key_part],
+                        [help_alone_part],
+                    ]
+                else:
+                    base_rungs = [[help_part, key_part], [help_alone_part]]
+            elif clause:
+                base_rungs = [
                     [help_part, clause_part, key_part],
                     [help_part, clause_part],
                     [clause_part, key_part],
@@ -4428,9 +4521,8 @@ class SettingsView(Vertical):
                     [help_part, key_part],
                     [help_alone_part],
                 ]
-                if clause
-                else [[help_part, key_part], [help_alone_part]]
-            )
+            else:
+                base_rungs = [[help_part, key_part], [help_alone_part]]
             warning = row.setting.warning
             if warning:
                 # Pinned first at every rung, with `[warning]` alone as the
