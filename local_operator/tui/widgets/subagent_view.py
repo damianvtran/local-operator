@@ -65,6 +65,7 @@ from textual.message import Message
 from textual.widgets import Static
 
 from local_operator.ansi import strip_control_sequences
+from local_operator.cross_session import SEND_TOOL_NAME, cross_session_hidden
 from local_operator.harness.comms import (
     HUB_COMMUNICATION_CUSTOM_TYPE,
     extract_parent_message,
@@ -2675,7 +2676,7 @@ class SubagentView(Vertical):
             history[index] = SubagentEntry(candidate.key, "prompt", text=concise)
             if candidate.key == self._launch_message_id:
                 current_matched = True
-        return [
+        entries = [
             *([prompt_entry] if prompt_entry is not None and not current_matched else []),
             *history,
             *(
@@ -2683,6 +2684,46 @@ class SubagentView(Vertical):
                 for entry in live
                 if entry.key != "__prompt__" and entry.key not in durable_keys
             ),
+        ]
+        return self._without_new_cross_session_rows(entries)
+
+    def _without_new_cross_session_rows(self, entries: list[SubagentEntry]) -> list[SubagentEntry]:
+        """Drop cross-session `send` rows this page has not mounted yet.
+
+        `display.hide_cross_session` on the drill-in: a child CAN send
+        (``send`` is in ``DEFAULT_TOOL_NAMES`` and ``harness/subagent.py``
+        filters that list by the profile's allowed names), and the hidden set
+        is the same everywhere — peer receipts (which this page never folds)
+        and tool rows named ``send``. The page builds one ``ToolCard`` per
+        tool entry through :func:`entry_block`, so dropping the ENTRY here is
+        what keeps that construction from happening at all.
+
+        CREATION ONLY, forward-only — and that is why the filter reads
+        ``self._entries``: the entry list is compared POSITIONALLY against the
+        mounted blocks (``self._entries`` and ``self._blocks`` are parallel and
+        ``_sync_body``'s walk indexes both), so dropping an entry that already
+        has a block would desync the page, and tearing that row down would
+        apply a mid-session flip BACKWARDS — which every gate for this flag
+        refuses (see ``tui/settings.py``'s ``_DEFAULT_NOTES``). Only rows with
+        no block yet are dropped; a mounted one keeps settling through
+        ``update_entry_block``, and the next fresh projection (reopening the
+        page resets ``self._entries``) re-reads under the current value.
+        """
+        if not cross_session_hidden():
+            return entries
+        mounted = {
+            entry.key
+            for entry in self._entries
+            if entry.kind == "tool" and entry.tool_name == SEND_TOOL_NAME
+        }
+        return [
+            entry
+            for entry in entries
+            if not (
+                entry.kind == "tool"
+                and entry.tool_name == SEND_TOOL_NAME
+                and entry.key not in mounted
+            )
         ]
 
     def _reconcile_current_body(
