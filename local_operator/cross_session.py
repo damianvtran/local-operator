@@ -14,6 +14,11 @@ messages and the receiver-side peer model-switch audit card stay visible, the
 model still receives peer messages (this is a view filter for the human
 reader, not a privacy boundary or a data-plane change), and raw-journal
 surfaces (``jobs``, ``hub`` peek, the picker's verbose preview) keep the rows.
+It is NOT an activity filter either: an attention signal derived from the
+transcript's mere presence or mtime — the phone list's unseen dot is
+mtime-based — still reads hidden traffic as activity. That is accepted rather
+than a leak: no content, count or preview of a hidden row travels (QA round 1
+on #1746, O2), and silencing it would make the flag a data-plane change.
 
 The reader is the TUI's EXISTING process cache (``tui/settings.py``), whose
 invalidators already exist: ``settings_reload`` runs after every write and the
@@ -42,7 +47,10 @@ def cross_session_hidden() -> bool:
     The import is function-local and not incidental: this module is imported
     from the mobile daemon's import path and from the TUI's paint-heavy
     modules, and neither should pay for the display-flag reader at import
-    time. Callers read this once per handler or pass, never per row.
+    time. Most callers read once per handler or pass; the phone fold's
+    ``ProjectionFold._tool_row`` deliberately reads per minted call, which is
+    fine because this is the process-cached reader — not a config parse — and
+    the fold's rate is per decision, not per frame (review round 1, N2).
     """
     from local_operator.tui.settings import settings_get
 

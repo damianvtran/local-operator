@@ -1940,6 +1940,53 @@ class MobileDaemon:
         self._phone_attach_tasks: dict[str, asyncio.Task[None]] = {}
         self._phone_handoffs: dict[str, asyncio.TimerHandle] = {}
         self._session_starts: dict[str, asyncio.Task[int]] = {}
+        # The daemon's display-settings subscription (see
+        # :meth:`watch_display_settings`); ``None`` until attached.
+        self._display_watch_unsubscribe: Callable[[], None] | None = None
+
+    def watch_display_settings(self) -> None:
+        """Make this daemon's folds follow ``display.*`` writes from other processes.
+
+        THE cross-process invalidator for the daemon half of the phone
+        (design review round 1 on #1746, D1/D2). The daemon reads display
+        flags through the process-cached reader (``tui.settings``), whose
+        invalidators are a same-process write and a config-watch subscription
+        — and nothing in ``mobile/`` started one, so a running daemon kept
+        the value from its first read, and ``/history`` kept a pre-flip render
+        in the durable fold cache (which re-derives its render only when the
+        transcript GROWS, never on a flag change), until a restart.
+
+        Called once at boot from ``service.amain``, on the daemon's own loop.
+        Idempotent; degrades to the old behaviour (restart to apply) when
+        there is no running loop or the watcher cannot start — serving
+        history must not depend on a watcher.
+        """
+        if self._display_watch_unsubscribe is not None:
+            return
+        try:
+            from local_operator.config_watch import process_watcher
+            from local_operator.paths import config_dir
+            from local_operator.tui.settings import follow_display_settings
+
+            watcher = process_watcher(config_dir())
+            watcher.start(asyncio.get_running_loop())
+
+            def _drop_durable_folds() -> None:
+                # The settings reload alone is not enough: a cached fold's
+                # ``render`` is re-derived only on transcript growth, so the
+                # phone's scroll-back pages would serve the pre-flip rows
+                # until an unrelated append (D2). ``invalidate_all`` costs one
+                # full fold per session on its next open — rare, and the fold
+                # is the thing that must be RIGHT.
+                cache = _DURABLE_FOLD_CACHE
+                if cache is not None:
+                    cache.invalidate_all()
+
+            self._display_watch_unsubscribe = follow_display_settings(
+                watcher, also=_drop_durable_folds
+            )
+        except Exception:  # noqa: BLE001 — a missing invalidator costs a restart, not the boot
+            logger.warning("display settings follower could not be attached", exc_info=True)
 
     def _projection_route_owned(self, session_id: str) -> bool:
         """Whether an epoch can still be observed by a process or browser."""

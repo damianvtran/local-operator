@@ -76,6 +76,11 @@ async def amain(port: int = DEFAULT_PORT) -> int:
     # — the mode benchmark and diagnostic daemons use.
     dial = os.environ.get("LO_MOBILE_NO_DIAL", "").strip().lower() not in ("1", "true", "yes")
     daemon = MobileDaemon(port=port, password=password, dial_registrants=dial)
+    # Follow ``display.*`` writes made by other processes (design review round 1
+    # on #1746, D1/D2): the daemon's durable folds read the process-cached
+    # display flags, and without this subscriber a running daemon keeps the
+    # value from its first read until a restart.
+    daemon.watch_display_settings()
     if not dial:
         logger.warning("mobile daemon running in no-dial observer mode")
     app = build_app(daemon)

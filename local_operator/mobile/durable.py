@@ -182,6 +182,20 @@ class DurableFoldCache:
         with self._lock:
             self._states.pop(str(directory), None)
 
+    def invalidate_all(self) -> None:
+        """Drop every cached fold — the invalidation a flag change needs.
+
+        ``load`` re-derives ``render`` only when the transcript GROWS (or the
+        file's inode moves); the display flags are not part of that
+        fingerprint, so a cross-process ``display.*`` write must drop the
+        states outright or the phone's scroll-back pages keep serving the
+        pre-flip rows until an unrelated append (design review round 1 on
+        #1746, D2). The next open of each session pays one full fold — the
+        accepted cost of a config change, which is rare.
+        """
+        with self._lock:
+            self._states.clear()
+
     def load(self, directory: Path) -> DurableFoldState:
         """Fold state brought current with the file on disk.
 
