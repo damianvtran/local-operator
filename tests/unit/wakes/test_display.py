@@ -135,7 +135,10 @@ async def test_settings_choice_persists_and_refreshes_panel(tmp_path: Path, colu
         assert not app.screen.show_vertical_scrollbar
         await pilot.resize_terminal(40, 30)
         async with asyncio.timeout(5):
-            while app._wake_panel._shown[2] != app.screen.size.width - 2:
+            # ``_shown`` is (wakes, monitors, budget, cells) — the monitors
+            # element (slice 4, §12) was added ahead of the cells element, so
+            # the resize probe reads the CELLS one at index 3.
+            while app._wake_panel._shown[3] != app.screen.size.width - 2:
                 await pilot.pause()
         await pilot.pause()
         assert app._wake_panel.size.width <= app.screen.size.width

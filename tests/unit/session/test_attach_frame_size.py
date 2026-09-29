@@ -178,7 +178,19 @@ _RELEASED_ARM_SETTLED_AT = 1_700_000_000.0
 #: session (``true``/``false`` differ by one byte; nothing else rides the
 #: field). Its size-policy review is the comment on the key-set assertion
 #: above.
-_RELEASED_ARM_PRE_EXISTING_EXCESS_BYTES = 2_161
+#:
+#: RAISED BY 16 B for slice 4's monitors snapshot key (design §12), from 2,161
+#: to 2,177, and that is the whole of that slice's spend on this arm. MEASURED
+#: on this head by the arm's own arithmetic rather than restated: the released
+#: frame serialized at 1,050,753 B — 1,048,576 + 2,177 exactly, 16 B over the
+#: reading this comment's 2,161 stood for (1,050,737). The 16 B is the
+#: serialized key in full — ``"monitors": []`` and the separator that leaves
+#: with it — a fixed-width EMPTY list: the charged-list treatment is the
+#: ``populated`` entry's, and nothing about it grows with the session. It is
+#: ADDITIVE here for the same reason as ``notify``: the released arm's
+#: catalogue is already pinned at ``MODEL_CATALOGUE_FLOOR_ROWS``, so nothing
+#: else can absorb the bytes.
+_RELEASED_ARM_PRE_EXISTING_EXCESS_BYTES = 2_177
 
 #: No comms node: these released children have no lineage, which is the smaller
 #: of the two shapes `_with_lineage` can produce and the only one this arm needs
@@ -551,6 +563,11 @@ _BOUNDED_COLLECTION_FIELDS = {
     # call ids, so even a whole turn's worth is a few hundred bytes.
     "live_tool_started_at": "one float per call executing now; popped on end, cleared per turn",
     "wakes": "the user's own schedules",
+    # The monitor twin: armed by hand, and the scheduler refuses the ninth arm
+    # (``monitors.settings.max_monitors``, 8 by default) — so the list cannot
+    # grow with conversation length or child count, which is the property this
+    # side of the line is for.
+    "monitors": "the user's own watches; per-session cap refuses past max_monitors (8)",
     "mcp_servers": "one row per configured server",
     "slash_capabilities": "one row per SLASH_COMMANDS entry",
     # Was described here as "bounded by the provider", which was not a bound at
@@ -1029,6 +1046,18 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
             for index in range(200)
         ],
         "wakes": [],
+        # The monitor twin, charged exactly as ``wakes`` is (design §12's
+        # parity standard): the KEY is present so the coverage check above can
+        # see the field at all, and it holds nothing. A charged list does not
+        # fit this arm — eight rows at their realistic cap weight (name at
+        # ``MAX_MONITOR_NAME_CHARS``, a 300-char read-only command in
+        # ``arguments``) serialized 6,812 B, and charged the member arm read
+        # 1,054,139 B: over the line by 5,563 even after the catalogue yielded
+        # the whole 1,208 B it held above ``MODEL_CATALOGUE_FLOOR_ROWS``.
+        # Spending the difference is a ceiling decision about which shipped
+        # field gives way, reported on the slice's PR rather than taken here.
+        # The field's own bound (≤ 8/session) is the classifier's claim above.
+        "monitors": [],
         # AT the bound rather than past it, unlike the fields above, because
         # this one's bound is a real ceiling for the DEFAULT configuration
         # rather than a clip: the map holds one entry per call executing AT

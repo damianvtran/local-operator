@@ -383,9 +383,9 @@ ToolCard, WakeBlock, PeerMessageBlock {
 
 /* Expanded is the ONE case that is content-sized: the summary row plus one
  * row per line of revealed output (each already truncated to width, so
- * nothing reflows). The class beats the type selector above. WakeBlock and
- * PeerMessageBlock use their own class names because they are different
- * widgets; the height contract is the same. */
+ * nothing reflows). The class beats the type selector above. WakeBlock,
+ * PeerMessageBlock and MonitorDeltaBlock use their own class names because
+ * they are different widgets; the height contract is the same. */
 ToolCard.tool-expanded, WakeBlock.wake-expanded, PeerMessageBlock.peer-expanded,
 MonitorDeltaBlock.monitor-expanded {
     height: auto;
