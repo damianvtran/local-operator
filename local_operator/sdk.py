@@ -77,7 +77,7 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from local_operator.paths import AGENT_HOME_ENV, CONFIG_DIR_ENV
 from local_operator.session.spec import (
@@ -645,11 +645,19 @@ async def _build_session(spec: SessionSpec, roots: SessionRoots, *, mode: str) -
         # ``OutputContract``'s (the one validator both paths share); a refused
         # contract surfaces as ``SessionSpecError``, the spec surface's own
         # error type, so callers catch one class.
-        from local_operator.output_contract import OutputContract, OutputContractError
+        from local_operator.output_contract import (
+            OutputContract,
+            OutputContractError,
+            OutputFormat,
+        )
 
         try:
             contract = OutputContract(
-                format=spec.output_format,
+                # ``SessionSpec.__post_init__`` has already refused any value
+                # outside its ``_OUTPUT_FORMATS`` mirror of this vocabulary, so
+                # the cast is the annotation catching up with a CHECKED value —
+                # ``OutputContract.__post_init__`` re-checks it regardless.
+                format=cast(OutputFormat, spec.output_format),
                 schema=spec.output_schema,
                 retries=2 if spec.output_retries is None else spec.output_retries,
             )
