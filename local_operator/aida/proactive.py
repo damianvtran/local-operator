@@ -292,7 +292,6 @@ def session_class_reactive(config_dir: Path | str, session_id: str) -> bool:
 def cadence_schedule(
     now_ms: int, at: str = DEFAULT_CADENCE_AT, *, config_dir: Path | str
 ) -> WakeSchedule:
-
     """The cadence row: one-shot, due at the next ``at``.
 
     ``created_at`` carries ``now`` so the scheduler's stable ordering keeps it
