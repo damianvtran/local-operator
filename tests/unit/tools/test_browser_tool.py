@@ -246,6 +246,9 @@ def test_open_runs_new_surface_and_records_id(monkeypatch) -> None:
         "false",
     ]
     assert "surface:73" in result.text
+    # The host that served the open is named (§16.1): a cmux open used to read
+    # identically to one served by the app or the extension.
+    assert "on a cmux browser panel" in result.text
     assert builtin._BROWSER_OPEN_CLEANUP_REMINDER in result.text
     assert ctx.browser is not None
     assert ctx.browser.surface_id == "surface:73"
