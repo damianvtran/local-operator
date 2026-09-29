@@ -2,6 +2,10 @@
 Tests for the models endpoints.
 """
 
+import json
+import time
+from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -14,8 +18,9 @@ from local_operator.clients.openrouter import (
     OpenRouterModelPricing,
 )
 from local_operator.env import get_env_config
+from local_operator.model import discovery
 from local_operator.model.discovery import DiscoveredModel, merge_models
-from local_operator.model.registry import deepseek_models
+from local_operator.model.registry import anthropic_models, deepseek_models
 from local_operator.server.app import app
 
 
@@ -49,10 +54,17 @@ def client(monkeypatch):
     # duration of its own test.
     # Local runtime integration has its own owned-HTTP tests. Enumeration
     # tests must not inspect whichever server a developer has running today.
+    # Anthropic joins deepseek here because its branch now reads the same
+    # discovery seam: answering it with the registry rows is what a real
+    # answer looks like with no cache and no credential.
     monkeypatch.setattr(
         "local_operator.server.routes.models.available_models",
         lambda provider, **kw: (
-            merge_models(deepseek_models, None) if provider == "deepseek" else [],
+            (
+                merge_models(deepseek_models if provider == "deepseek" else anthropic_models, None)
+                if provider in {"deepseek", "anthropic"}
+                else []
+            ),
             "static",
         ),
     )
@@ -465,3 +477,203 @@ def test_list_models_with_sort_and_direction(client, mock_credential_manager):
         if models[i - 1]["name"] is None:
             continue
         assert models[i - 1]["name"] <= models[i]["name"]
+
+
+# -- Anthropic: the live listing over the registry ---------------------------
+#
+# `/v1/models?provider=anthropic` listed `anthropic_models` alone, so a model
+# Anthropic's `GET /v1/models` already served stayed invisible on this surface
+# until a release edited the registry by hand. It now reads that listing
+# through the shared discovery cache, merged over the registry. These tests
+# drive the REAL route -- no `available_models` patch, unlike the fixture
+# above -- on an isolated HOME: the cache root derives from the home
+# directory, not the config dir, so a run that sets only
+# `LOCAL_OPERATOR_CONFIG_DIR` plants its document where the route never looks
+# (AGENTS.md, "Isolating a run").
+
+#: An id the shipped registry does not carry, in the shape Anthropic's listing
+#: hands it over. Tests that rely on it assert it is still unshipped first, so
+#: a future registry edit fails that guard rather than letting the test pass
+#: for the registry's reason.
+NOVEL_ANTHROPIC_ID = "claude-sonnet-6-0"
+
+#: A bundled id the planted documents below deliberately do NOT list.
+BUNDLED_ANTHROPIC_ID = "claude-sonnet-5-5"
+
+
+def _plant_anthropic_listing(root: Path, entries: list[dict[str, Any]]) -> None:
+    """Write the cached discovery document the route reads, fresh, under root.
+
+    The capture-2 shape the reader expects, in the HOME-derived cache root
+    (see the section comment). Aged "now" on purpose: a document old enough to
+    trigger a refetch would measure the fetch stub instead of what the route
+    serves from the cache.
+    """
+    cache_dir = root / ".local-operator" / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    (cache_dir / "anthropic.listing.json").write_text(
+        json.dumps(
+            {
+                "fetched_at": time.time(),
+                "payload": {
+                    "capture": discovery.listing_capture_version("anthropic"),
+                    "models": entries,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+class _Fetches:
+    """Stands in for ``discovery.fetch_models``: records calls, serves the wire.
+
+    Answered with a wire failure unless a test sets ``answer``: the planted
+    documents here are fresh, so a recorded call means something in the route
+    decided to fetch, and it must never reach the real network.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.answer: list[DiscoveredModel] | None = None
+
+    def __call__(self, provider_id: str, **kwargs: object) -> list[DiscoveredModel] | None:
+        self.calls.append(provider_id)
+        return self.answer
+
+
+@pytest.fixture
+def discovery_client(tmp_path, monkeypatch):
+    """The real route on an isolated HOME/config/cache, plus a fetch stub.
+
+    The file's ``client`` fixture patches ``available_models``; these tests
+    must NOT use it, because the seam under test is exactly what that patch
+    replaces. Everything else follows its conventions (bare ``TestClient``
+    with ``app.state`` seeded by hand, because the lifespan does not run).
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    # An ambient credential would make the key the route resolves depend on
+    # the developer's shell; arm exactly the one Anthropic API key it should
+    # fetch with, on the environment rung of the credential cascade.
+    for name in ("ANTHROPIC_OAUTH_TOKEN", "OPENAI_API_KEY", "DEEPSEEK_API_KEY", "XAI_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-not-real")
+
+    fetched = _Fetches()
+    monkeypatch.setattr(discovery, "fetch_models", fetched)
+
+    had_env_config = hasattr(app.state, "env_config")
+    previous_env_config = getattr(app.state, "env_config", None)
+    if not had_env_config or previous_env_config is None:
+        app.state.env_config = get_env_config()
+    # The provider store is cached on app state and resolves its root through
+    # `paths.config_dir()`; force it to build under THIS test's root so the
+    # credential read and the cache the route reads share one isolated tree.
+    previous_desktop_auth = getattr(app.state, "desktop_auth", None)
+    app.state.desktop_auth = None
+    try:
+        yield TestClient(app), tmp_path, fetched
+    finally:
+        created = getattr(app.state, "desktop_auth", None)
+        if created is not None:
+            created.store.close()
+        app.state.desktop_auth = previous_desktop_auth
+        if had_env_config:
+            app.state.env_config = previous_env_config
+        elif hasattr(app.state, "env_config"):
+            delattr(app.state, "env_config")
+
+
+def test_anthropic_lists_a_model_only_the_live_listing_carries(
+    discovery_client, mock_credential_manager
+):
+    """The pin this branch exists for: a model Anthropic released appears.
+
+    The planted document is fresh, so the shared cache answers with no fetch;
+    the id must reach the response over the registry alone, which has never
+    heard of it.
+    """
+    client, root, fetched = discovery_client
+    assert (
+        NOVEL_ANTHROPIC_ID not in anthropic_models
+    ), "the id this test treats as unshipped now ships"
+    _plant_anthropic_listing(
+        root,
+        [{"id": NOVEL_ANTHROPIC_ID, "name": "Claude Sonnet 6", "context_window": 1_000_000}],
+    )
+
+    response = client.get("/v1/models?provider=anthropic")
+
+    assert response.status_code == 200, response.text
+    rows = response.json()["result"]["models"]
+    by_id = {row["id"]: row for row in rows}
+    assert NOVEL_ANTHROPIC_ID in by_id, sorted(by_id)
+    assert by_id[NOVEL_ANTHROPIC_ID]["info"]["context_window"] == 1_000_000
+    # The union half: the document never mentions this bundled row, so its
+    # presence is the registry fallback and nothing else.
+    assert BUNDLED_ANTHROPIC_ID in by_id
+    # A fresh document must be SERVED, not fetched: this id is the test's own
+    # planting, and a fetch here would mean the route went to the wire.
+    assert fetched.calls == []
+
+
+def test_a_bundled_anthropic_id_keeps_its_registry_prices_and_limits(
+    discovery_client, mock_credential_manager
+):
+    """The merge is holes-only, per the catalogue design's field precedence.
+
+    Anthropic's listing quotes no prices, so prices can only come from the
+    registry, and the limits join them when the listing is silent. A merge
+    that let the raw row win would zero the prices ("$—" in every picker
+    that renders it) for rows this surface already priced correctly. The
+    listed display name DOES win -- `_merge_name`'s existing rule, "that is
+    how a renamed model gets its new label" -- which is also the proof the
+    live row flowed at all.
+    """
+    client, root, _fetched = discovery_client
+    _plant_anthropic_listing(
+        root, [{"id": BUNDLED_ANTHROPIC_ID, "name": "Sonnet 5.5 (live label)"}]
+    )
+
+    response = client.get("/v1/models?provider=anthropic")
+
+    assert response.status_code == 200, response.text
+    rows = response.json()["result"]["models"]
+    row = next(row for row in rows if row["id"] == BUNDLED_ANTHROPIC_ID)
+    registry_row = anthropic_models[BUNDLED_ANTHROPIC_ID]
+    info = row["info"]
+    # Both directions, so a future edit to the fixture cannot silently weaken
+    # the first half: the served numbers equal the registry's, and the
+    # registry still carries the values this test was written against.
+    assert info["input_price"] == registry_row.input_price == 2.0
+    assert info["output_price"] == registry_row.output_price == 10.0
+    assert info["cache_reads_price"] == registry_row.cache_reads_price == 0.20
+    assert info["cache_writes_price"] == registry_row.cache_writes_price == 2.50
+    assert info["context_window"] == registry_row.context_window == 1_000_000
+    assert info["max_tokens"] == registry_row.max_tokens == 128_000
+    assert info["supports_images"] is True
+    assert info["name"] == "Sonnet 5.5 (live label)"
+
+
+def test_anthropic_without_a_cached_document_still_lists_the_registry(
+    discovery_client, mock_credential_manager
+):
+    """No cache: the route asks the endpoint, the attempt fails, the registry
+    still answers. A flaky cache or an outage must never turn this surface
+    into an empty model list.
+
+    The fetch attempt is asserted on purpose -- it is what makes this the
+    FALLBACK path rather than the unauthenticated one. Without it the test
+    would pass even if the branch never consulted discovery at all.
+    """
+    client, _root, fetched = discovery_client
+
+    response = client.get("/v1/models?provider=anthropic")
+
+    assert response.status_code == 200, response.text
+    rows = response.json()["result"]["models"]
+    by_id = {row["id"]: row for row in rows}
+    assert BUNDLED_ANTHROPIC_ID in by_id, sorted(by_id)
+    assert by_id[BUNDLED_ANTHROPIC_ID]["info"]["input_price"] == 2.0
+    assert fetched.calls == ["anthropic"], "a cold cache must consult the live endpoint"
