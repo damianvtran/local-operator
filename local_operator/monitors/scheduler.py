@@ -769,6 +769,7 @@ class MonitorScheduler:
             held_by_cap=held,
             final=self._is_final(change.spec, change.at_ms),
             description=change.spec.description,
+            notify=change.spec.notify,
         )
 
     def _apply_failure(self, entry: _Entry, error: str, now: int) -> None:

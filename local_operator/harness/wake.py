@@ -327,8 +327,8 @@ def build_wake_schedule(
     the fault class, so a new error branch must set it deliberately.
 
     Recognized request keys: ``message`` (required), ``in`` or ``at`` (one
-    required), plus optional ``every``, ``until``, ``limit``. Ids ``w1``..``w16``
-    are assigned automatically to the first free slot.
+    required), plus optional ``every``, ``until``, ``limit``, ``notify``. Ids
+    ``w1``..``w16`` are assigned automatically to the first free slot.
 
     ``pinned_due_ms`` is the EDIT case, and it is the only caller that is not
     a create: it supplies the row's existing instant so a request that changes
@@ -419,6 +419,11 @@ def build_wake_schedule(
         if limit < 1:
             return {"error": "'limit' must be a positive integer.", "malformed": True}
 
+    # §14.4: the delivery's control parameter, copied onto the schedule so the
+    # session can read it off the delivery's ``details``. A wake is quiet unless
+    # its arm asked to be told; an errored turn notifies regardless of this.
+    notify = bool(request.get("notify"))
+
     # A one-shot already fires exactly once, so `until`/`limit` promise a
     # behaviour the schedule does not have. REFUSED HERE rather than in each
     # caller: the CLI had this rule to itself (``cli.py``), which meant the
@@ -448,6 +453,7 @@ def build_wake_schedule(
         every_ms=every_ms,
         until_at=until_at,
         limit=limit,
+        notify=notify,
         fired_count=0,
         created_at=now_ms,
     )
@@ -458,7 +464,7 @@ def build_wake_schedule(
 #: deliberate clear (``limit: null`` drops the bound); an absent key keeps the
 #: row's current value. That distinction is why the callers pass
 #: ``model_dump(exclude_unset=True)`` rather than a plain dump.
-_EDIT_KEYS = ("message", "in", "at", "every", "until", "limit")
+_EDIT_KEYS = ("message", "in", "at", "every", "until", "limit", "notify")
 
 
 def build_wake_edit(
@@ -505,6 +511,10 @@ def build_wake_edit(
         merged["until"] = datetime.fromtimestamp(target.until_at / 1000.0).astimezone().isoformat()
     if target.limit is not None:
         merged["limit"] = target.limit
+    if target.notify:
+        # Like the bounds above: an edit keeps the row's value unless the
+        # request moves it (``notify: false`` is a PRESENT key and lands).
+        merged["notify"] = True
     for key in _EDIT_KEYS:
         if key in request:
             merged[key] = request[key]
