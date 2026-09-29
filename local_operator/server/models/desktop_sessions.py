@@ -670,6 +670,21 @@ class CheckpointManifest(BaseModel):
     checkpoints: list[CheckpointEntry]
 
 
+class CheckpointWarmReceipt(BaseModel):
+    """``POST /v1/desktop/sessions/{session_id}/checkpoints/warm`` (D9).
+
+    ``accepted`` are the ids the call took ownership of — the request's ids
+    echoed back, or the ids the rail-open default selection chose — so a
+    caller that sent none learns which ticks to watch. ``pending`` are the
+    subset still waiting for a name (queued, in flight, or named-but-stale
+    and regenerating); an id already named, or one inside its failure
+    cooldown, is accepted but NOT pending, and the rail's poll stops on it.
+    """
+
+    accepted: list[str]
+    pending: list[str]
+
+
 #: What one find hit matched (D3/D9): a casefolded literal substring of what
 #: was said (``exact``), or the bounded soft tier (``soft`` — prefix,
 #: token-AND, or edit distance <= 2 on 4+ character tokens).

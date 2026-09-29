@@ -24,6 +24,7 @@ import asyncio
 import contextlib
 import functools
 import inspect
+import json
 import logging
 import secrets
 import time
@@ -5729,6 +5730,51 @@ class ServingSessionHandle(SessionHandle):
                 # refusal, which left the desktop unable to say why.
                 return SlashResult(kind="error", data={"code": refusal_code(exc)})
             return SlashResult(kind="block", data=data)
+        if command == "checkpoints_warm":
+            # An INTERNAL word on this ladder, like ``desktop_mcp``: the
+            # desktop route's ``sessions.checkpoints.warm`` (design D2/D9),
+            # carried here because generation must run where the session's
+            # provider and errand tier live — a viewer facade refuses errands
+            # outright ("provider errands run on the session owner").
+            # ``args`` is a JSON object with optional ``ids``/``limit``; the
+            # answer is the receipt the route forwards verbatim, so the
+            # payload parsing stays tolerant (a malformed extra is ignored,
+            # never an exception the caller has to read for decoration).
+            from local_operator.paths import config_dir
+            from local_operator.session import checkpoint_naming
+
+            # ``errand``, not ``complete``: this function's fork branch below
+            # defines a nested ``complete(fork_id, error)`` callback in the SAME
+            # scope, and a second binding of that name is both a type error and
+            # a shadowing hazard.
+            errand = getattr(session, "complete_once", None)
+            if not callable(errand):
+                return SlashResult(kind="error", data={"code": "naming_unavailable"})
+            complete_fn = cast("Callable[[str, str], Awaitable[str]]", errand)
+            try:
+                payload = json.loads(args or "{}")
+            except ValueError:
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            raw_ids = payload.get("ids")
+            ids = [str(item) for item in raw_ids] if isinstance(raw_ids, list) else None
+            raw_limit = payload.get("limit")
+            limit = (
+                raw_limit
+                if isinstance(raw_limit, int) and not isinstance(raw_limit, bool)
+                else None
+            )
+            return SlashResult(
+                kind="block",
+                data=await checkpoint_naming.warm_checkpoints(
+                    config_dir(),
+                    session.session_id,
+                    ids=ids,
+                    limit=limit,
+                    complete_fn=complete_fn,
+                ),
+            )
         if command == "fork":
             from local_operator.fork import fork_session
             from local_operator.paths import config_dir
