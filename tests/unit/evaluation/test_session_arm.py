@@ -61,11 +61,15 @@ from local_operator.evaluation.session_arm import (
     assert_declaration_resolved,
     declare_action_server,
     open_episode_session,
+    prose_claims_completion,
     session_tool_names,
 )
 from local_operator.harness.types import (
     ImageContent,
+    Message,
+    MessageEndEvent,
     TextContent,
+    ToolCall,
     ToolContext,
     TurnEndEvent,
 )
@@ -503,6 +507,316 @@ class TestCompletionGate:
         # a turn per render; a second render would duplicate the frame).
         assert len(reply["content"]) == 2
         assert reply["content"][1].text == "seen 0"
+
+
+#: The prose-claim predicate's calibration table: every positive is a message
+#: the SEALED session-arm corpus actually shows asserting completion (post-
+#: finish summaries included -- the predicate scores the TEXT, not the ending),
+#: and every negative is a real terminal or near-terminal message that must
+#: NOT read as a claim: the mid-work narration that ended arm 1716's 005/006
+#: (its last texts, and the empty terminal messages that followed them) and
+#: the step-budget notices. A new corpus shape lands HERE first, then in the
+#: pattern list in ``session_arm.py``. The whole-task positives ('I've finished
+#: everything.', 'The task has been completed.') pin the object bindings and the
+#: 've contraction; the two review-round tables below pin the veto set.
+PROSE_CLAIM_SAMPLES = (
+    "Done. Summary of what I determined and did:",
+    "Done. Here's what I did: found the schedule",
+    'Done. The FormCraft form is filled and submitted (confirmation: "Thanks").',
+    "**Done.** the composites were applied",
+    "All done.",
+    "The task is complete. **Result:** `/home/user/Desktop/Checklist.docx`",
+    "The Google Maps walking route is complete and displayed: 8 stops, walking mode.",
+    "I have completed the task and verified the file opens.",
+    "I've finished everything.",
+    "The task has been completed.",
+    "All deliverables have been completed.",
+)
+
+PROSE_NON_CLAIM_SAMPLES = (
+    "",
+    "Filenames corrected. Opening all 12 numbered document scans as an eog collection in "
+    "fullscreen.",
+    "Downloads mostly succeeded. Now fix #20 (Drive confirm page), inspect #15, extract PDF "
+    "text with pdftotext, and find CV links in the homepages.",
+    "Testing whether a dismissible overlay blocks clicks: Escape then click a profile link.",
+    "The view jumped to the status fields. Filling Publishing status first.",
+    "The home page bundle should reveal the API endpoints. Opening it in view-source.",
+    "The viewer window stole focus; clicking back to the terminal.",
+    "Impress is focused (still holding the pre-edit copy). Reloading it from disk.",
+    "**task_017 — run closed early: episode step budget reached; task not completed.** The "
+    "episode's action surface hit its step budget at step 3, while I was reading the "
+    "registration guide.",
+    "**Episode closed on the step budget while I was still surveying the registration guide "
+    "— the Google Maps deliverable was never set.**",
+)
+
+#: The eight adversarial narration shapes PR #1768's round-1 review measured
+#: firing on the first predicate (8 of 8) -- the regression table for the veto
+#: set in ``session_arm.py``. Each is a TERMINAL-shaped mid-work message: a
+#: progress report, a sub-task note, or a claim qualified into a sub-scope.
+#: Per-shape mechanisms: whole-task object binding (1, 6, 7), ordinal sub-step
+#: (2), partial scope (3), the "Done with/for" qualifier (4), the continuation
+#: tail after the completion phrase (5, 8), with the next-work phrases as the
+#: belt-and-braces veto several of them also carry.
+PROSE_REVIEW_ROUND_1_PROBES = (
+    "I have finished the first two files and will continue with the rest.",
+    "The first chart is complete; the second still needs data.",
+    "The work is done for this step; moving to the next one.",
+    "Done with the first document \u2014 starting the second now.",
+    "The download is done, unpacking it now.",
+    "The first file has been completed; continuing with the next.",
+    "I have completed the initial setup.",
+    "The installation is finished; launching the app.",
+)
+
+#: The DOCUMENTED residual over-fire class (see ``prose_claims_completion``'s
+#: docstring): a subject-agnostic "X is done/complete" about a non-ordinal
+#: sub-object whose message carries no continuation clause. Kept deliberately:
+#: every narrowing tried against the corpus's real samples cost a genuine
+#: claim shape ("the route is complete and displayed"), and the cost of the
+#: residual is the one bounded challenge cycle. Pinned so the boundary is
+#: explicit, not assumed -- a future tightening that kills these updates the
+#: docstring rather than silently drifting.
+PROSE_RESIDUAL_OVERFIRE_SAMPLES = (
+    "The download is done.",
+    "The installation is finished.",
+)
+
+
+def _fold_assistant_message(
+    bridge: ActionBridge, text: str, tool_calls: list[ToolCall] | None = None
+) -> None:
+    """Deliver one assistant message the way the live stream does (``message_end``)."""
+
+    bridge.fold(
+        MessageEndEvent(
+            message=Message(
+                role="assistant",
+                content=[TextContent(text=text)] if text else [],
+                tool_calls=tool_calls or [],
+            )
+        )
+    )
+
+
+class TestProseClaimDetector:
+    """The predicate alone, against real corpus samples (see the tables above)."""
+
+    @pytest.mark.parametrize("text", PROSE_CLAIM_SAMPLES, ids=lambda text: text[:36])
+    def test_assertions_of_completion_are_claims(self, text: str) -> None:
+        assert prose_claims_completion(text) is True
+
+    @pytest.mark.parametrize("text", PROSE_NON_CLAIM_SAMPLES, ids=lambda text: repr(text[:36]))
+    def test_narration_progress_reports_and_notices_are_not_claims(self, text: str) -> None:
+        assert prose_claims_completion(text) is False
+
+    @pytest.mark.parametrize("text", PROSE_REVIEW_ROUND_1_PROBES, ids=lambda text: repr(text[:36]))
+    def test_round_one_review_probe_shapes_are_not_claims(self, text: str) -> None:
+        """The eight adversarial narration shapes from PR #1768's round-1 review.
+
+        They fired 8/8 on the first predicate (the review's own table); the
+        veto set in ``session_arm.py`` keeps them out -- see the table's header
+        for the per-shape mechanism.
+        """
+
+        assert prose_claims_completion(text) is False
+
+    @pytest.mark.parametrize(
+        "text", PROSE_RESIDUAL_OVERFIRE_SAMPLES, ids=lambda text: repr(text[:36])
+    )
+    def test_the_documented_residual_overfire_is_pinned(self, text: str) -> None:
+        """The residual class is DELIBERATE and disclosed, not accidental.
+
+        The detector's docstring names it; this test makes the boundary
+        executable so a future narrowing cannot silently diverge from the
+        documented behaviour without failing here first.
+        """
+
+        assert prose_claims_completion(text) is True
+
+
+class TestProseCompletionGate:
+    """The gate's answer-side arm: a terminal PROSE claim earns the one challenge.
+
+    WHY THIS EXISTS. The gate landed in #1696 fires inside ``ActionBridge.call``,
+    so it only sees TOOL-mediated claims. The first field run of arm 1748
+    (task_003) ended its final answer as prose -- "Done. Summary of what I
+    determined and did: ..." with NO tool call -- and the turn simply ended:
+    the gate never fired and the run reads as an unverified finish, exactly the
+    case the gate exists to prevent. These tests pin both sides of the fix:
+
+    * a terminal message that CLAIMS completion earns the SAME one challenge a
+      finish call earns -- the same shared budget, the same challenge text,
+      delivered against the state the model last saw;
+    * everything else -- the mid-work narration classes (including the eight
+      adversarial shapes the round-1 review found; the predicate's tables
+      above pin them), empty terminal messages (the silent-provider ending
+      class 005/006 exhibit), messages that carry a tool call, and any episode
+      that already ended -- does not fire.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_terminal_prose_claim_is_challenged_and_recorded(self, tmp_path: Path) -> None:
+        from local_operator.evaluation.session_arm import CHALLENGE_REPLY_GUIDANCE
+
+        events: list[tuple[str, dict[str, Any]]] = []
+        obs = _observation()
+        bridge = _bridge(
+            tmp_path,
+            observation=obs,
+            record=lambda kind, payload: events.append((kind, payload)),
+            reply_guidance=CHALLENGE_REPLY_GUIDANCE.format(tool_name="apply_actions"),
+        )
+        claim = "Done. Summary of what I determined and did: both composites were applied"
+        _fold_assistant_message(bridge, claim)
+        challenge = bridge.prose_completion_challenge()
+        assert challenge is not None
+        text = challenge[0].text
+        assert "That declaration is a CLAIM" in text
+        assert claim in text
+        assert "the task as stated" in text
+        assert "Reply with a single `apply_actions` call" in text
+        # The state the model was last shown rides WITH the challenge: the same
+        # rendered blocks, attached -- never re-rendered.
+        assert len(challenge) == 2
+        assert challenge[1].text == "seen 0"
+        assert bridge.end_requested is None
+        assert bridge.terminal is False
+        assert bridge.steps == 0
+        # The record names WHICH arm of the gate fired; the finish-call arm's
+        # row keeps its own historical shape.
+        assert [kind for kind, _ in events] == ["completion_challenged"]
+        assert events[0][1]["trigger"] == "terminal-message"
+        assert events[0][1]["reason"] == claim
+        assert events[0][1]["observation_id"] == obs.observation_id
+
+    @pytest.mark.asyncio
+    async def test_the_prose_challenge_re_attaches_the_last_executed_screen(
+        self, tmp_path: Path
+    ) -> None:
+        bridge = _bridge(tmp_path)
+        executed = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+        assert executed["is_error"] is False
+        # The turn boundary re-arms the token, exactly as the live loop delivers
+        # it; the prose arm reads the state from the same seam.
+        bridge.fold(TurnEndEvent())
+        _fold_assistant_message(bridge, "Done. Summary of what I determined and did: X")
+        challenge = bridge.prose_completion_challenge()
+        assert challenge is not None
+        assert challenge[1].text == "seen 1"
+
+    @pytest.mark.asyncio
+    async def test_the_prose_challenge_is_byte_identical_to_the_finish_call_challenge(
+        self, tmp_path: Path
+    ) -> None:
+        """The two arms quote the SAME challenge for the same claim and screen.
+
+        The widening must not change the challenge's kind: for a claim stated
+        in the same words against the same observation, the prose arm's user
+        turn is byte-identical to the finish-call arm's tool result -- same
+        builder, same channel sentence.
+        """
+        from local_operator.evaluation.session_arm import CHALLENGE_REPLY_GUIDANCE
+
+        guidance = CHALLENGE_REPLY_GUIDANCE.format(tool_name="apply_actions")
+        claim_text = "Done. everything was applied"
+        via_call = _bridge(tmp_path, reply_guidance=guidance)
+        call_reply = await via_call.call(
+            {"actions": [{"kind": "finish", "status": "done", "reason": claim_text}]}
+        )
+        via_prose = _bridge(tmp_path, reply_guidance=guidance)
+        _fold_assistant_message(via_prose, claim_text)
+        prose = via_prose.prose_completion_challenge()
+        assert prose is not None
+        assert prose[0].text == call_reply["content"][0].text
+        assert prose[1].text == call_reply["content"][1].text
+
+    @pytest.mark.asyncio
+    async def test_a_finish_after_the_prose_challenge_is_accepted(self, tmp_path: Path) -> None:
+        bridge = _bridge(tmp_path)
+        _fold_assistant_message(bridge, "Done. Summary of what I determined and did: X")
+        assert bridge.prose_completion_challenge() is not None
+        # ONE budget for both arms: the re-declaration is the episode's second
+        # declaration, so it is accepted rather than challenged again -- the
+        # gate cannot loop across the two paths.
+        reply = await bridge.call(
+            {"actions": [{"kind": "finish", "status": "done", "reason": "re-checked"}]}
+        )
+        assert reply["details"]["terminal"] == "finish"
+        assert bridge.end_requested == "finish"
+
+    @pytest.mark.asyncio
+    async def test_a_spent_finish_budget_blocks_the_prose_arm(self, tmp_path: Path) -> None:
+        bridge = _bridge(tmp_path)
+        await bridge.call({"actions": [{"kind": "finish", "status": "done", "reason": "claimed"}]})
+        _fold_assistant_message(bridge, "Done. Summary of what I determined and did: X")
+        assert bridge.prose_completion_challenge() is None
+
+    @pytest.mark.asyncio
+    async def test_the_prose_arm_does_not_fire_once_the_episode_ended(self, tmp_path: Path) -> None:
+        bridge = _bridge(tmp_path)
+        claim = {"actions": [{"kind": "finish", "status": "done", "reason": "done"}]}
+        await bridge.call(claim)
+        accepted = await bridge.call(claim)  # the second declaration always stands
+        assert accepted["details"]["terminal"] == "finish"
+        # Every completed run in the corpus ends with exactly this shape: a
+        # summary prose message AFTER the accepted finish. It must not earn a
+        # second exchange.
+        _fold_assistant_message(bridge, "Done. Summary of what I determined and did: X")
+        assert bridge.prose_completion_challenge() is None
+
+    @pytest.mark.parametrize(
+        ("gate", "challenges"),
+        [(False, 1), (True, 0)],
+        ids=["gate-disabled", "zero-budget"],
+    )
+    @pytest.mark.asyncio
+    async def test_the_prose_arm_obeys_the_gate_controls(
+        self, tmp_path: Path, gate: bool, challenges: int
+    ) -> None:
+        bridge = _bridge(tmp_path, completion_gate=gate, completion_challenges=challenges)
+        _fold_assistant_message(bridge, "Done. Summary of what I determined and did: X")
+        assert bridge.prose_completion_challenge() is None
+
+    @pytest.mark.asyncio
+    async def test_an_empty_terminal_message_is_never_a_claim(self, tmp_path: Path) -> None:
+        # The silent-provider ending class (005/006): the model's next response
+        # came back EMPTY and the loop ended. There is no claim to answer.
+        bridge = _bridge(tmp_path)
+        _fold_assistant_message(bridge, "")
+        assert bridge.prose_completion_challenge() is None
+
+    @pytest.mark.asyncio
+    async def test_mid_work_narration_is_never_a_claim(self, tmp_path: Path) -> None:
+        # Arm 1716's 005/006 ended after exactly these texts: a mid-work report
+        # plus what was about to be done. They are the discriminating case for
+        # the predicate -- a wider rule would trip on them.
+        bridge = _bridge(tmp_path)
+        _fold_assistant_message(
+            bridge,
+            "Filenames corrected. Opening all 12 numbered document scans as an eog collection "
+            "in fullscreen.",
+        )
+        assert bridge.prose_completion_challenge() is None
+        _fold_assistant_message(
+            bridge,
+            "Downloads mostly succeeded. Now fix #20 (Drive confirm page), inspect #15, "
+            "extract PDF text with pdftotext, and find CV links in the homepages.",
+        )
+        assert bridge.prose_completion_challenge() is None
+
+    @pytest.mark.asyncio
+    async def test_a_message_that_carries_a_tool_call_is_not_this_arms_business(
+        self, tmp_path: Path
+    ) -> None:
+        bridge = _bridge(tmp_path)
+        _fold_assistant_message(
+            bridge,
+            "Done. Summary of what I determined and did: X",
+            tool_calls=[ToolCall(id="call-1", name="apply_actions", arguments={})],
+        )
+        assert bridge.prose_completion_challenge() is None
 
 
 def _confinement_fake_opener(installed: list[Any]) -> Any:

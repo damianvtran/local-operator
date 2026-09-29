@@ -58,6 +58,7 @@ def _run_rig(
     *,
     child_acts: str | None = None,
     challenge_reply: str | None = None,
+    ending: str = "finish",
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
     selector_dir = root / "adapter"
     selector = spawn_helpers.build_spawnable_adapter(
@@ -107,19 +108,27 @@ def _run_rig(
         args += ["--child-acts", child_acts]
     if challenge_reply is not None:
         args += ["--challenge-reply", challenge_reply]
+    args += ["--ending", ending]
     completed = subprocess.run(
         args, capture_output=True, text=True, env=env, cwd=str(REPO), check=False
     )
     return completed, run_root, log
 
 
-def _outcome(completed: subprocess.CompletedProcess[str]) -> dict[str, Any]:
-    assert completed.returncode == 0, completed.stderr[-4000:]
+def _outcome(
+    completed: subprocess.CompletedProcess[str], expect_status: str = "completed"
+) -> dict[str, Any]:
+    # ``run_episode`` exits ``EXIT_EPISODE`` (1) for any non-``completed``
+    # ending -- ``agent_stop`` included -- and still prints the outcome JSON,
+    # so the status is read from the payload and the code is checked against
+    # it (not against 0).
+    expected_rc = 0 if expect_status == "completed" else 1
+    assert completed.returncode == expected_rc, completed.stderr[-4000:]
     text = completed.stdout.strip()
     start = text.find("{")
     assert start != -1, text[-2000:]
     outcome: dict[str, Any] = json.loads(text[start:])
-    assert outcome["status"] == "completed", outcome
+    assert outcome["status"] == expect_status, outcome
     return outcome
 
 
@@ -241,6 +250,117 @@ def test_a_challenged_claim_is_rescued_by_a_corrective_action(
     assert kinds.count("action_finish") == 1
     finished = _record_payloads(run_root, "action_finish")
     assert finished[0]["completion_challenged"] is True
+
+
+def test_a_prose_done_claim_is_challenged_and_the_re_declaration_ends_it(
+    durable_path: Path,  # noqa: F811
+    adapter_wheel: Path,
+    spawn_interpreter: spawn_helpers.SpawnInterpreter,
+) -> None:
+    """Arm 1748's task_003, end to end: a terminal PROSE "Done" earns the challenge.
+
+    THE BYPASS THIS PINS. The gate fires inside ``ActionBridge.call``, so it
+    only ever saw tool-mediated claims; the first field run of arm 1748 ended
+    its final answer as prose -- "Done. Summary of what I determined and
+    did: ..." with NO tool call -- and the turn simply ended: ``agent_stop``,
+    the gate never fired, an unverified finish by any reading. This case runs
+    the identical offline episode BEFORE the fix (the same rig against the
+    pre-fix worktree: ``agent_stop``, steps 1, ZERO challenges, two model
+    calls) and AFTER it: exactly one challenge -- delivered to the model over
+    the real session wire as a harness-injected user row -- and the scripted
+    re-declaration ends the episode ``completed`` with the step count intact
+    (the claim is a decision about the screen, not a step).
+    """
+
+    from tests.unit.evaluation.adapters.osworld import session_arm_rig
+
+    root = durable_path / f"s-{uuid.uuid4().hex[:8]}"
+    completed, run_root, log = _run_rig(
+        root, adapter_wheel, spawn_interpreter, ending="prose-claim"
+    )
+
+    outcome = _outcome(completed)
+    assert outcome["steps"] == 1
+    assert outcome["terminal_reason"] == "finish"
+    assert outcome["score"]["status"] == "scored" and outcome["score"]["binary"] == 1
+
+    kinds = _record_kinds(run_root)
+    assert kinds.count("action_completion_challenged") == 1
+    assert kinds.count("action_finish") == 1
+    challenged = _record_payloads(run_root, "action_completion_challenged")
+    assert challenged[0]["trigger"] == "terminal-message"
+    assert challenged[0]["reason"] == session_arm_rig.PROSE_CLAIM_TEXT
+    assert "That declaration is a CLAIM" in challenged[0]["challenge"]
+    assert session_arm_rig.PROSE_CLAIM_TEXT in challenged[0]["challenge"]
+    finished = _record_payloads(run_root, "action_finish")
+    assert finished[0]["completion_challenged"] is True
+
+    # The challenge reached the MODEL, not just the record: the request after
+    # the prose "Done" carried it as its last USER row (the reply channel's
+    # re-prompt, on this channel), and the model answered it with the
+    # re-declaration.
+    events = _log_events(log)
+    assert any(
+        "That declaration is a CLAIM" in (event.get("last_user_text") or "") for event in events
+    ), [event.get("last_user_text") for event in events]
+
+
+def test_a_prose_done_that_is_not_re_declared_is_challenged_exactly_once(
+    durable_path: Path,  # noqa: F811
+    adapter_wheel: Path,
+    spawn_interpreter: spawn_helpers.SpawnInterpreter,
+) -> None:
+    """The bound holds on the prose arm too: one challenge, then the claim stands.
+
+    The script claims completion in prose, is challenged, and claims AGAIN in
+    prose -- the second declaration must be the final word (no loop, no second
+    exchange), exactly as a second finish call is accepted on the tool arm.
+    """
+
+    root = durable_path / f"s-{uuid.uuid4().hex[:8]}"
+    completed, run_root, log = _run_rig(
+        root, adapter_wheel, spawn_interpreter, ending="prose-claim", challenge_reply="prose"
+    )
+
+    outcome = _outcome(completed, expect_status="agent_stop")
+    assert outcome["steps"] == 1
+    kinds = _record_kinds(run_root)
+    assert kinds.count("action_completion_challenged") == 1
+    assert "action_finish" not in kinds
+    # Three model calls: the opening wait, the prose claim, and the one answer
+    # to the challenge. A fourth would mean the gate looped over the spent
+    # budget; the pre-fix tree shows two (no challenge, no answer at all).
+    events = _log_events(log)
+    assert len([event for event in events if event.get("episode")]) == 3, events
+
+
+def test_a_mid_work_narration_ending_is_not_challenged(
+    durable_path: Path,  # noqa: F811
+    adapter_wheel: Path,
+    spawn_interpreter: spawn_helpers.SpawnInterpreter,
+) -> None:
+    """The discriminating negative: narration must NOT trip the prose arm.
+
+    Arm 1716's 005 left exactly this text as its last one -- a mid-work report
+    plus what was about to be done -- and its episode ended without the model
+    ever claiming completion. The prose arm must leave that shape alone: the
+    episode ends ``agent_stop`` with ZERO challenges and exactly the two model
+    calls the un-gated script always made.
+    """
+
+    root = durable_path / f"s-{uuid.uuid4().hex[:8]}"
+    completed, run_root, log = _run_rig(root, adapter_wheel, spawn_interpreter, ending="narration")
+
+    outcome = _outcome(completed, expect_status="agent_stop")
+    assert outcome["steps"] == 1
+    kinds = _record_kinds(run_root)
+    assert "action_completion_challenged" not in kinds
+    assert "action_finish" not in kinds
+    events = _log_events(log)
+    assert len([event for event in events if event.get("episode")]) == 2, events
+    assert not any(
+        "That declaration is a CLAIM" in (event.get("last_user_text") or "") for event in events
+    )
 
 
 @pytest.mark.parametrize("child_acts", ["finish", "wait"])

@@ -17,6 +17,22 @@ batch -- before answering PONG (the Q-1 probe): a delegated child must not be
 able to drive or end the episode, so its call is refused and the run's steps
 and terminal stay the parent's.
 
+``--ending`` selects how the episode ENDS, which is what the completion
+gate's two arms are measured by:
+
+* ``finish`` (default): the tool-mediated ``done`` claim above; the gate's
+tool arm challenges it and ``--challenge-reply`` answers.
+* ``prose-claim``: the arm-1748 task_003 shape -- the final answer IS the
+turn's last message, written as PROSE ("Done. Summary of what I determined
+and did: ...") with NO tool call. Before the prose arm of the gate this
+ended ``agent_stop`` with the gate never firing; after it, the claim earns
+the same one challenge, delivered as the challenge user row, and
+``--challenge-reply`` answers (``refinish``/``act`` re-declare; ``prose``
+claims again, which the spent budget accepts as the final word).
+* ``narration``: a mid-work narration message (the text arm 1716's 005 ended
+on) as the terminal message -- the DISCRIMINATING negative: the gate must
+not fire, so the episode ends ``agent_stop`` with zero challenges.
+
 Runnable by hand for an evidence pass (see the module's own ``--help``); it
 writes only under ``--run-root``, ``--log`` and the scratch roots handed in the
 environment, and never edits the repo.
@@ -40,6 +56,27 @@ SENTINEL = "Act on this computer by calling"
 
 ACTION_TOOL = "mcp__episode_actions_apply_actions"
 
+#: The shared challenge text's opening (``build_completion_challenge``) -- how
+#: the scripted client recognises that the gate has answered it, whichever
+#: channel carried the challenge (a tool row on the finish-call arm, a user
+#: row on the prose arm).
+CHALLENGE_MARKER = "That declaration is a CLAIM"
+
+#: The terminal PROSE "Done" of ``--ending prose-claim``: a faithful slice of
+#: the message arm 1748's task_003 actually ended on (its final answer, written
+#: with no tool call -- the bypass this rig's case exists to pin).
+PROSE_CLAIM_TEXT = (
+    "Done. Summary of what I determined and did: both composites were applied to the "
+    "corresponding slides and the deck was re-rendered and verified."
+)
+
+#: The mid-work narration of ``--ending narration``: the last TEXT arm 1716's
+#: task_005 left, verbatim. It must never be read as a completion claim.
+NARRATION_TEXT = (
+    "Filenames corrected. Opening all 12 numbered document scans as an eog collection "
+    "in fullscreen."
+)
+
 _JOB_RE = re.compile(r"job ([0-9a-f]{6,})")
 
 
@@ -59,16 +96,23 @@ class ScriptedClient:
     """Deterministic wire client for the session arm (see module docstring)."""
 
     def __init__(
-        self, *, log_path: Path, child_acts: str | None, challenge_reply: str = "refinish"
+        self,
+        *,
+        log_path: Path,
+        child_acts: str | None,
+        challenge_reply: str = "refinish",
+        ending: str = "finish",
     ) -> None:
         self.log_path = Path(log_path)
         self.calls = 0
         self.child_acts = child_acts
+        self.ending = ending
         #: How the script answers the completion challenge that the first
         #: ``done`` claim earns (the session-path gate): ``refinish`` re-sends
         #: the SAME finish declaration (one of the two replies the challenge
         #: names), ``act`` models the task_013 rescue -- one corrective action
-        #: first, then the re-declaration.
+        #: first, then the re-declaration, ``prose`` claims completion AGAIN in
+        #: prose (the duplicate declaration the spent budget accepts).
         self.challenge_reply = challenge_reply
 
     # -- logging -----------------------------------------------------------
@@ -89,6 +133,7 @@ class ScriptedClient:
         self.calls += 1
         messages = list(getattr(request, "messages", None) or [])
         tool_rows = [m for m in messages if getattr(m, "role", None) == "tool"]
+        user_rows = [m for m in messages if getattr(m, "role", None) == "user"]
         tool_names = _tool_names(request)
         episode = any(
             SENTINEL in (getattr(m, "text", "") or "")
@@ -103,9 +148,15 @@ class ScriptedClient:
                 "last_tool_text": (
                     (getattr(tool_rows[-1], "text", "") or "")[:300] if tool_rows else None
                 ),
+                # The prose arm of the gate answers as a USER row (the reply
+                # channel's re-prompt); the log carries it so a test can prove
+                # the challenge reached the model over the real session wire.
+                "last_user_text": (
+                    (getattr(user_rows[-1], "text", "") or "")[:300] if user_rows else None
+                ),
             }
         )
-        events = self._episode_call(tool_rows) if episode else self._child_call(tool_rows)
+        events = self._episode_call(messages, tool_rows) if episode else self._child_call(tool_rows)
         for event in events:
             yield event
 
@@ -149,7 +200,9 @@ class ScriptedClient:
 
     # -- the two scripts ---------------------------------------------------
 
-    def _episode_call(self, tool_rows: list[Any]) -> list[Any]:
+    def _episode_call(self, messages: list[Any], tool_rows: list[Any]) -> list[Any]:
+        if self.ending != "finish":
+            return self._terminal_prose_call(messages, tool_rows)
         stage = len(tool_rows)
         if stage == 0:
             if self.child_acts:
@@ -218,6 +271,54 @@ class ScriptedClient:
             )
         return self._text_stop("Episode complete.")
 
+    def _terminal_prose_call(self, messages: list[Any], tool_rows: list[Any]) -> list[Any]:
+        """The prose endings: a claim to end on, or the narration negative.
+
+        Stage 0 is the shared opening ``wait`` (a step whose rendered frame
+        comes back through the MCP tool result, same as the finish script).
+        After it the script ends the turn with TEXT, no tool call: the prose
+        claim (``prose-claim``) or the mid-work narration (``narration``).
+        Once the gate has challenged (detected by the shared challenge text in
+        ANY row -- a user row on this channel), the script answers per
+        ``--challenge-reply``: ``refinish``/``act`` re-declare through the
+        action tool, ``prose`` claims again in prose (the duplicate the spent
+        budget accepts as final).
+        """
+
+        text = PROSE_CLAIM_TEXT if self.ending == "prose-claim" else NARRATION_TEXT
+        stage = len(tool_rows)
+        challenged = any(CHALLENGE_MARKER in ((getattr(m, "text", "") or "")) for m in messages)
+        if not challenged:
+            if stage == 0:
+                return self._tool_call(
+                    0, ACTION_TOOL, {"actions": [{"kind": "wait", "duration_ms": 50}]}
+                )
+            return self._text_stop(text)
+        finished_ack = any(
+            "Episode finished" in ((getattr(row, "text", "") or "")) for row in tool_rows
+        )
+        if finished_ack:
+            return self._text_stop("Episode complete.")
+        if self.challenge_reply == "prose":
+            return self._text_stop(text)
+        if self.challenge_reply == "act" and stage == 1:
+            return self._tool_call(
+                stage, ACTION_TOOL, {"actions": [{"kind": "wait", "duration_ms": 50}]}
+            )
+        return self._tool_call(
+            stage,
+            ACTION_TOOL,
+            {
+                "actions": [
+                    {
+                        "kind": "finish",
+                        "status": "done",
+                        "reason": "session-arm rig: episode complete, re-checked",
+                    }
+                ]
+            },
+        )
+
     def _child_call(self, tool_rows: list[Any]) -> list[Any]:
         # Stateless on purpose: a fresh client instance can serve each child
         # request, so the script reads only what the tool rows show -- the
@@ -257,7 +358,10 @@ def _bootstrap(worktree: Path) -> None:
 
 
 def patch_clients(
-    log_path: Path, child_acts: str | None, challenge_reply: str = "refinish"
+    log_path: Path,
+    child_acts: str | None,
+    challenge_reply: str = "refinish",
+    ending: str = "finish",
 ) -> None:
     import local_operator.providers.clients as clients_mod
 
@@ -267,7 +371,10 @@ def patch_clients(
         client = original(spec, **kwargs)
         if getattr(spec, "provider", None) == "test":
             return ScriptedClient(
-                log_path=log_path, child_acts=child_acts, challenge_reply=challenge_reply
+                log_path=log_path,
+                child_acts=child_acts,
+                challenge_reply=challenge_reply,
+                ending=ending,
             )
         return client
 
@@ -282,12 +389,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--log", required=True, type=Path)
     parser.add_argument("--episode-id", required=True)
     parser.add_argument("--child-acts", choices=("finish", "wait"), default=None)
-    parser.add_argument("--challenge-reply", choices=("refinish", "act"), default="refinish")
+    parser.add_argument(
+        "--challenge-reply", choices=("refinish", "act", "prose"), default="refinish"
+    )
+    parser.add_argument(
+        "--ending",
+        choices=("finish", "prose-claim", "narration"),
+        default="finish",
+        help=(
+            "how the episode ends: the tool-mediated finish (default), a terminal PROSE "
+            "'Done' with no tool call (the gate's prose-arm case), or a mid-work "
+            "narration message (the discriminating negative)"
+        ),
+    )
     args = parser.parse_args(argv)
 
     worktree = args.worktree.resolve()
     _bootstrap(worktree)
-    patch_clients(args.log, args.child_acts, args.challenge_reply)
+    patch_clients(args.log, args.child_acts, args.challenge_reply, args.ending)
 
     import scripts.run_episode as run_episode
 
