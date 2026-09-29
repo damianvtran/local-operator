@@ -736,6 +736,11 @@ async def test_a_patch_of_a_desktop_hotkey_dispatches_to_the_desktop_rules(deskt
     bad_combo = await client.patch("/v1/settings/keymap.quick_send", json={"value": "meta+space"})
     assert bad_combo.status_code == 422
     assert "Spotlight" in bad_combo.text
+    old_default = await client.patch(
+        "/v1/settings/keymap.quick_send", json={"value": "primary+alt+space"}
+    )
+    assert old_default.status_code == 422
+    assert "Finder" in old_default.text
     bad_alternates = await client.patch(
         "/v1/settings/keymap.quick_send", json={"value": "ctrl+n,f5"}
     )

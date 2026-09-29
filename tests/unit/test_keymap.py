@@ -385,6 +385,28 @@ def test_desktop_validation_refuses_os_reserved_chords_with_their_jobs() -> None
         keymap.validate_desktop_key("ctrl+meta+space")
         == keymap.DESKTOP_RESERVED_COMBOS["meta+ctrl+space"]
     )
+    # The Finder search window (⌘⌥Space): both stored spellings refuse with
+    # the same sentence, and the alias spelling collapses onto them.
+    finder = "Spotlight uses ⌘⌥Space in Finder — pick a chord with another modifier"
+    assert keymap.validate_desktop_key("primary+alt+space") == finder
+    assert keymap.validate_desktop_key("meta+alt+space") == finder
+    assert keymap.validate_desktop_key("CMD+OPTION+SPACE") == finder
+
+
+def test_quick_send_default_is_the_resurveyed_chord_and_the_old_one_is_refused() -> None:
+    """The default moved off ⌘⌥Space, and this test keeps it moved.
+
+    Until September 2026 the shipped default was `primary+alt+space`
+    (⌘⌥Space), measured opening macOS's Finder/Spotlight search window (Apple
+    KB 102650) beside this app's mini composer. The pin matters because the
+    move was a SURVEY decision, not a code accident: a revert to the old chord
+    would otherwise pass every other test in this file (the old chord is still
+    syntactically valid) and only be caught in review.
+    """
+    action = keymap.BY_ID["keymap.quick_send"]
+    assert action.default == "primary+alt+shift+space"
+    assert keymap.validate_desktop_key(action.default, action_id=action.id) is None
+    assert keymap.validate_desktop_key("primary+alt+space", action_id=action.id) is not None
 
 
 def test_desktop_validation_refuses_comma_alternates() -> None:
@@ -432,14 +454,18 @@ def test_desktop_validation_refuses_shape_errors() -> None:
 def test_validate_key_dispatches_by_scope() -> None:
     """The SAME string is acceptable or refused depending on the row's scope.
 
-    `primary+alt+space` is the shipped desktop default and is not a key any
-    terminal can send; it must be refused by the app rules and accepted by the
-    desktop ones. Scope dispatch is what makes the write boundary, the capture
-    widget and `lop config edit` agree.
+    `primary+alt+shift+space` is the shipped desktop default and is not a key
+    any terminal can send; it must be refused by the app rules and accepted by
+    the desktop ones. Scope dispatch is what makes the write boundary, the
+    capture widget and `lop config edit` agree. (The desktop rules additionally
+    refuse the chord the default USED to ship — ⌘⌥Space, reserved below — which
+    is why dispatch alone is not the whole story for this row.)
     """
-    assert keymap.validate_key("primary+alt+space") is not None
+    assert keymap.validate_key("primary+alt+shift+space") is not None
     assert (
-        keymap.validate_key("primary+alt+space", scope="desktop", action_id="keymap.quick_send")
+        keymap.validate_key(
+            "primary+alt+shift+space", scope="desktop", action_id="keymap.quick_send"
+        )
         is None
     )
     assert keymap.validate_key("n", scope="desktop") is not None
@@ -477,7 +503,10 @@ def test_the_desktop_grammar_mapping_is_what_dispatches(monkeypatch: pytest.Monk
         == "the fake grammar refuses everything"
     )
     # No registered grammar still means the accelerator rules for a desktop row.
-    assert keymap.validate_desktop_key("primary+alt+space", action_id="keymap.quick_send") is None
+    assert (
+        keymap.validate_desktop_key("primary+alt+shift+space", action_id="keymap.quick_send")
+        is None
+    )
 
 
 def test_push_to_talk_ships_the_frozen_hold_row() -> None:
@@ -525,7 +554,7 @@ def test_the_hold_grammar_accepts_exactly_the_six_family_tokens() -> None:
     )
 
     for bad in (
-        "primary+alt+space",  # an accelerator, not a hold
+        "primary+alt+shift+space",  # an accelerator, not a hold
         "ctrl+n",  # a chord
         "alt-right",  # missing the -hold suffix
         "alt-right-hold-extra",  # extra tokens
@@ -551,7 +580,7 @@ def test_the_accelerator_and_hold_grammars_mutually_refuse() -> None:
     for token in ("alt-right-hold", "ctrl-left-hold"):
         assert keymap.validate_desktop_key(token) is not None, token
         assert keymap.validate_desktop_key(token, action_id="keymap.quick_send") is not None, token
-    for accelerator in ("primary+alt+space", "ctrl+g", "n"):
+    for accelerator in ("primary+alt+shift+space", "ctrl+g", "n"):
         assert (
             keymap.validate_desktop_key(accelerator, action_id="keymap.push_to_talk") is not None
         ), accelerator
@@ -622,7 +651,7 @@ def test_group_conflict_compares_desktop_values_canonically() -> None:
     desktop row's own default does not collide with anything."""
     problem = keymap.group_conflict("keymap.quick_send", "ctrl+n", {})
     assert problem is not None and "ctrl+n" in problem
-    assert keymap.group_conflict("keymap.quick_send", "primary+alt+space", {}) is None
+    assert keymap.group_conflict("keymap.quick_send", "primary+alt+shift+space", {}) is None
 
 
 def test_display_key_maps_platform_tokens_only_for_desktop_scope() -> None:
@@ -630,12 +659,12 @@ def test_display_key_maps_platform_tokens_only_for_desktop_scope() -> None:
     `primary`/`meta` become readable, per platform."""
     assert keymap.display_key("escape") == "esc"
     assert (
-        keymap.display_key("primary+alt+space", scope="desktop", platform="darwin")
-        == "cmd+alt+space"
+        keymap.display_key("primary+alt+shift+space", scope="desktop", platform="darwin")
+        == "cmd+alt+shift+space"
     )
     assert (
-        keymap.display_key("primary+alt+space", scope="desktop", platform="win32")
-        == "ctrl+alt+space"
+        keymap.display_key("primary+alt+shift+space", scope="desktop", platform="win32")
+        == "ctrl+alt+shift+space"
     )
     assert keymap.display_key("meta+shift+n", scope="desktop", platform="linux") == (
         "super+shift+n"
