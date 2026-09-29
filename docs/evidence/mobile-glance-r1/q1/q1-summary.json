@@ -1,0 +1,70 @@
+{
+  "what": "Q1 proof: a real isolated daemon resume, before/after the serving-host fix.",
+  "harness": "adapted QA round-1 runner (q1-proof): real mobile daemon on a free port, real OperatorApp hosts, /api/sessions/resume for the child, sandbox HOME/config, never port 4098.",
+  "before": {
+    "verdict": "FAIL",
+    "fails": 3,
+    "scenarios": {
+      "exact": {
+        "sid": "37b545d0583e",
+        "live_wire_usage": {
+          "input_tokens": 12400,
+          "output_tokens": 320
+        },
+        "resume_wire_money": 0.0021,
+        "resume_wire_knowledge": "exact",
+        "resume_wire_usage": {},
+        "ui_live": "390x844: spend='$0.0021' context='6.2%/200k' status_row=yes | 360x780: spend='$0.0021' context='6.2%/200k' status_row=yes",
+        "ui_resume": "390x844: spend='$0.0021' context='6.2%/200k' status_row=yes | 360x780: spend='$0.0021' context='6.2%/200k' status_row=yes"
+      },
+      "unknown": {
+        "sid": "0af8c1616ef3",
+        "live_wire_usage": {
+          "input_tokens": 9000,
+          "output_tokens": 100
+        },
+        "resume_wire_money": null,
+        "resume_wire_knowledge": "unknown",
+        "resume_wire_usage": {},
+        "ui_live": "390x844: spend='$\u2014' context='12.4k/\u2014' status_row=yes | 360x780: spend='$\u2014' context='12.4k/\u2014' status_row=yes",
+        "ui_resume": "390x844: spend=None context='12.4k/\u2014' status_row=yes | 360x780: spend=None context='12.4k/\u2014' status_row=yes"
+      }
+    }
+  },
+  "after": {
+    "verdict": "PASS",
+    "fails": 0,
+    "scenarios": {
+      "exact": {
+        "sid": "018f8857b82c",
+        "live_wire_usage": {
+          "input_tokens": 12400,
+          "output_tokens": 320
+        },
+        "resume_wire_money": 0.0021,
+        "resume_wire_knowledge": "exact",
+        "resume_wire_usage": {
+          "input_tokens": 12400,
+          "output_tokens": 320
+        },
+        "ui_live": "390x844: spend='$0.0021' context='6.2%/200k' status_row=yes | 360x780: spend='$0.0021' context='6.2%/200k' status_row=yes",
+        "ui_resume": "390x844: spend='$0.0021' context='6.2%/200k' status_row=yes | 360x780: spend='$0.0021' context='6.2%/200k' status_row=yes"
+      },
+      "unknown": {
+        "sid": "5879f8513af0",
+        "live_wire_usage": {
+          "input_tokens": 9000,
+          "output_tokens": 100
+        },
+        "resume_wire_money": null,
+        "resume_wire_knowledge": "unknown",
+        "resume_wire_usage": {
+          "input_tokens": 9000,
+          "output_tokens": 100
+        },
+        "ui_live": "390x844: spend='$\u2014' context='12.4k/\u2014' status_row=yes | 360x780: spend='$\u2014' context='12.4k/\u2014' status_row=yes",
+        "ui_resume": "390x844: spend='$\u2014' context='12.4k/\u2014' status_row=yes | 360x780: spend='$\u2014' context='12.4k/\u2014' status_row=yes"
+      }
+    }
+  }
+}
