@@ -36,6 +36,7 @@ from local_operator.harness.types import (
 )
 from local_operator.paths import config_dir
 from local_operator.tools.builtin import spill_truncate, validation_error_result
+from local_operator.tools.confinement import confinement_of
 from local_operator.tools.spill import get_store
 from local_operator.web_fetch.failure import (
     attempt_summary,
@@ -419,6 +420,17 @@ async def run_fetch(
     ``read <url>`` sugar call this so they return the identical shape; the caller
     only decides the ``tool_name`` recorded on the result and the card.
     """
+    # A confined session refuses BEFORE the setting checks, the cache lookup
+    # and any service construction: the fetch is made from this process (no
+    # child for the kernel to hold), so it is refused outright -- and the
+    # refusal is deliberately not skippable via a warm cache entry, because a
+    # cache hit would still deliver host-fetched content into the episode, a
+    # reach of the same kind with less of the trace. ONE check here covers
+    # both spellings (``web_fetch`` and the ``read <url>`` sugar), which is
+    # why it lives in the shared engine rather than at either edge.
+    confinement = confinement_of(context)
+    if confinement is not None:
+        return confinement.network_refusal(tool_name), {}, True
     manager = ConfigManager(config_dir())
     settings = load_fetch_settings(manager)
     # The master switch is re-checked PER CALL, not only at inventory build.

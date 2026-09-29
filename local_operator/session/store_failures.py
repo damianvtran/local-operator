@@ -195,7 +195,13 @@ _AMBIENT_ERRONAME_PREFIXES = (
 #: ``OSError`` errnos that mean this machine has nowhere left to put the bytes.
 #: ``EDQUOT`` is a quota where ``ENOSPC`` is the volume; both are the disk's
 #: answer rather than the code's.
-_SPACE_ERRNOS = frozenset({errno.ENOSPC, errno.EDQUOT})
+#:
+#: PUBLIC BECAUSE A SECOND SYSTEM ASKS THE SAME QUESTION: the evaluation record
+#: sink (``evaluation/record_sink.py``) classifies a full disk from the same
+#: set, and the lesson already recorded one object up -- two copies of one
+#: retry/classifier set drifted and produced an answer neither intended -- is
+#: that this fact gets exactly one definition.
+SPACE_ERRNOS = frozenset({errno.ENOSPC, errno.EDQUOT})
 
 
 @dataclass(frozen=True)
@@ -320,7 +326,7 @@ def store_failure(error: BaseException, root: str | Path | None = None) -> Store
     """
     if isinstance(error, sqlite3.Error):
         return sqlite_store_failure(error, root)
-    if isinstance(error, OSError) and error.errno in _SPACE_ERRNOS:
+    if isinstance(error, OSError) and error.errno in SPACE_ERRNOS:
         # The non-sqlite writes on the send path -- the transcript append, the
         # attachment store -- raise this rather than a sqlite error, and a
         # message that could not be persisted is the same condition to the user.
