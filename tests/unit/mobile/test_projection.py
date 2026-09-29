@@ -17,6 +17,7 @@ from local_operator.harness.types import (
     AgentEndEvent,
     AgentMessage,
     AgentStartEvent,
+    AgentToolUpdate,
     CustomMessage,
     ImageContent,
     Message,
@@ -34,6 +35,7 @@ from local_operator.harness.types import (
     ToolCallComposeEvent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
+    ToolExecutionUpdateEvent,
     ToolResult,
     TurnEndEvent,
 )
@@ -57,6 +59,32 @@ from local_operator.session.session import Session
 
 def make_fold() -> ProjectionFold:
     return ProjectionFold(SessionProjection(session_id="s1", pid=1))
+
+
+@pytest.fixture()
+def hide_cross_session(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    """The flag, through the real config file and reader.
+
+    Written through ``settings_io`` rather than by patching ``settings_get``,
+    so the flat-dotted key the reader actually looks up is the one exercised.
+    Absent means OFF: tests that need the default leave ``set_hidden``
+    uncalled.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    from local_operator.tui.settings import settings_reload
+
+    settings_reload()
+
+    def set_hidden(on: bool) -> None:
+        from local_operator import settings_io
+        from local_operator.config import ConfigManager
+
+        settings_io.write_setting(
+            ConfigManager(tmp_path), settings_io.BY_KEY["display.hide_cross_session"], on
+        )
+
+    yield set_hidden
+    settings_reload()
 
 
 def test_model_change_repaints_the_composer_chip() -> None:
@@ -1499,6 +1527,171 @@ def test_note_peer_message_appends_optimistic_row() -> None:
     assert row.kind == "peer_message"
     assert row.text == "live echo"
     assert row.details["sender"]["pid"] == 7
+
+
+def _cross_session_history() -> list[Any]:
+    """A history carrying one peer receipt and one `send` call, plus a keeper."""
+    from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
+
+    sender = {"pid": 42, "conversation_name": "peer", "model_label": "test/model"}
+    peer = CustomMessage(
+        custom_type=PEER_MESSAGE_MESSAGE_TYPE,
+        attribution="user",
+        details={"text": "<wrapped>hi</wrapped>", "body": "hi there", "sender": sender},
+    )
+    return [
+        Message.user("go"),
+        peer,
+        Message(
+            role="assistant",
+            content=[TextContent(text="")],
+            tool_calls=[ToolCall(id="cs1", name="send", arguments={"text": "hi"})],
+            stop_reason="toolUse",
+        ),
+        Message(
+            role="assistant",
+            content=[TextContent(text="")],
+            tool_calls=[ToolCall(id="r1", name="read", arguments={"path": "a.py"})],
+            stop_reason="toolUse",
+        ),
+    ]
+
+
+def test_history_fold_drops_cross_session_rows_when_hidden(hide_cross_session) -> None:
+    """The two hidden kinds vanish; everything else keeps its identity and order.
+
+    The flag-off fold is written out in full because that is the default-off
+    contract: byte-identical rows. The hidden fold must equal that list with
+    exactly the peer receipt and the `send` row removed — nothing else may
+    move.
+    """
+    from local_operator.mobile.projection import fold_messages_to_entries
+
+    history = _cross_session_history()
+    off = fold_messages_to_entries(history)
+    assert [(e.kind, e.tool_call_id, e.tool_name) for e in off] == [
+        ("user", "", ""),
+        ("peer_message", "", ""),
+        ("tool", "cs1", "send"),
+        ("tool", "r1", "read"),
+    ]
+    peer_row = next(e for e in off if e.kind == "peer_message")
+    assert peer_row.text == "hi there"
+    assert peer_row.details["sender"]["pid"] == 42
+
+    hide_cross_session(True)
+    on = fold_messages_to_entries(history)
+    keepers = [
+        e
+        for e in off
+        if not (e.kind == "peer_message" or (e.kind == "tool" and e.tool_name == "send"))
+    ]
+    assert [(e.kind, e.tool_call_id, e.tool_name) for e in on] == [
+        (e.kind, e.tool_call_id, e.tool_name) for e in keepers
+    ]
+
+
+def test_the_attach_seed_drops_hidden_rows_and_their_correlation_maps(
+    hide_cross_session,
+) -> None:
+    """`fold_history` rebuilds `_tool_rows` from the fold's OUTPUT, so a dropped
+    send must leave no correlation entry for a later live event to settle."""
+    hide_cross_session(True)
+    fold = make_fold()
+    fold.fold_history(_cross_session_history())
+    assert "cs1" not in fold._tool_rows
+    assert all(e.tool_name != "send" for e in fold.projection.transcript)
+    assert any(e.tool_name == "read" for e in fold.projection.transcript)
+
+    # A late end event for the dropped call is consumed, not resurrected.
+    fold.fold_event(
+        ToolExecutionEndEvent(
+            tool_call_id="cs1",
+            tool_name="send",
+            result=ToolResult(
+                tool_call_id="cs1", tool_name="send", content=[TextContent(text="delivered")]
+            ),
+        )
+    )
+    assert all(e.tool_name != "send" for e in fold.projection.transcript)
+
+
+def test_note_peer_message_is_a_noop_when_hidden(hide_cross_session) -> None:
+    hide_cross_session(True)
+    fold = make_fold()
+    before = fold.projection.version
+    fold.note_peer_message("live echo", sender={"pid": 7, "conversation_name": "peer"})
+    assert fold.projection.transcript == []
+    # No append and no `_bump`: nothing changed on screen, so no frame to push.
+    assert fold.projection.version == before
+
+
+def test_live_send_events_never_mint_a_row_when_hidden(hide_cross_session) -> None:
+    """All four live arms consume a hidden send; none may create or crash.
+
+    The update and end frames arrive even though their row was never minted —
+    the dropped-row tolerance is asserted here rather than assumed, because a
+    missing-row crash on a `send` end would be a regression the flag caused.
+    """
+    hide_cross_session(True)
+    fold = make_fold()
+    fold.fold_event(ToolCallComposeEvent(tool_call_id="cs1", tool_name="send", intent="messaging"))
+    fold.fold_event(
+        ToolExecutionStartEvent(tool_call_id="cs1", tool_name="send", args={"text": "hi"})
+    )
+    fold.fold_event(
+        ToolExecutionUpdateEvent(
+            tool_call_id="cs1", tool_name="send", partial_result=AgentToolUpdate()
+        )
+    )
+    fold.fold_event(
+        ToolExecutionEndEvent(
+            tool_call_id="cs1",
+            tool_name="send",
+            result=ToolResult(
+                tool_call_id="cs1", tool_name="send", content=[TextContent(text="delivered")]
+            ),
+        )
+    )
+    assert fold.projection.transcript == []
+    assert "cs1" not in fold._tool_rows
+    # The arms return before the fold's activity tail, so the phone's working
+    # line cannot name the hidden call either.
+    assert fold.projection.activity == ""
+
+
+def test_a_send_row_created_before_the_flip_still_settles(hide_cross_session) -> None:
+    """Forward-only: the flag suppresses CREATION, never a settle.
+
+    A row that exists (built while the flag was off) must keep updating —
+    tearing it down would apply a mid-session flip backwards.
+    """
+    fold = make_fold()
+    fold.fold_event(ToolCallComposeEvent(tool_call_id="cs1", tool_name="send", intent="messaging"))
+    fold.fold_event(
+        ToolExecutionStartEvent(tool_call_id="cs1", tool_name="send", args={"text": "hi"})
+    )
+    row = fold.projection.transcript[-1]
+    assert row.tool_state == "running"
+
+    hide_cross_session(True)  # a mid-flight flip, applied forward only
+
+    fold.fold_event(
+        ToolExecutionEndEvent(
+            tool_call_id="cs1",
+            tool_name="send",
+            duration_s=1.5,
+            result=ToolResult(
+                tool_call_id="cs1",
+                tool_name="send",
+                content=[TextContent(text="delivered")],
+                duration_s=1.5,
+            ),
+        )
+    )
+    assert fold.projection.transcript == [row]
+    assert row.tool_state == "done"
+    assert row.elapsed_s == 1.5
 
 
 def _steer_envelope(body: str) -> str:
