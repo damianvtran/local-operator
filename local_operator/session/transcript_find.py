@@ -18,6 +18,14 @@ is the same tiered search the store already uses, scoped to one conversation
    genuine ones"), and journal order (oldest -> newest) inside that — so Enter
    walks the conversation forward, the order the reader is moving in.
 
+HIDDEN CROSS-SESSION DOCS never enter ranking when ``display.hide_cross_session``
+is on (``cross_session.cross_session_hidden``): the UIs stop painting peer
+messages, and find must agree — the desktop overlay reveals a hit by jumping to
+its row, so a returned hidden hit would be a content leak AND a jump to a row
+that is no longer there (design §5.3). Only ``peer_message`` docs can arise
+here: tool rows are never docs in this index (``transcript_index``'s own rule),
+so the frozen set's send-tool half is structurally absent, not forgotten.
+
 Snippets and ranges are computed at query time from the stored text: the
 snippet is cut ± :data:`SNIPPET_CONTEXT` characters around the first match and
 carries at most :data:`SNIPPET_MAX_RANGES` match ranges, relative to the
@@ -72,6 +80,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from local_operator.cross_session import cross_session_hidden
+from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.session import transcript_index
 from local_operator.session.search_index import SoftSearchIndex
 from local_operator.session.session_search import PRECISE_HITS_ENOUGH
@@ -337,6 +347,31 @@ def _response(
     }
 
 
+def _visible_docs(docs: Sequence[MessageDoc]) -> Sequence[MessageDoc]:
+    """The docs find may return: hidden cross-session rows dropped when asked.
+
+    ``display.hide_cross_session`` is a view filter for the human reader:
+    with it on, no surface paints a peer message, so find must not return one
+    — the desktop overlay reveals a hit by jumping to the hit's id, and a
+    reveal aimed at a row that no longer renders is both a content leak and a
+    broken jump (design §5.3). The filter sits at the docs-selection seam of
+    :func:`find_view` — applied to BOTH of its paths (the fresh ``ready``
+    index and the ``building`` previous scan) so the two can never disagree
+    about what find may return.
+
+    The filtered set is exactly the frozen one, and only its ``peer_message``
+    half can arise here: tool rows are never docs in this index
+    (``transcript_index``'s own rule — indexing machine output would make path
+    queries match everything), so a ``send`` tool row cannot reach find and
+    needs no gate. When the flag is off the SAME sequence is returned — no
+    copy, today's pipeline exactly — mirroring the surfaces' default-off
+    contract (design §5.4).
+    """
+    if not cross_session_hidden():
+        return docs
+    return [doc for doc in docs if doc.custom_type != PEER_MESSAGE_MESSAGE_TYPE]
+
+
 async def find_view(
     config_dir: str | Path,
     session_id: str,
@@ -361,7 +396,7 @@ async def find_view(
 
     if state == "building":
         previous = await asyncio.to_thread(transcript_index.read_index, config_dir, session_id)
-        docs = previous.messages if previous is not None else []
+        docs = _visible_docs(previous.messages if previous is not None else [])
         hits, truncated = await asyncio.to_thread(
             _build_hits, config_dir, session_id, docs, query, limit
         )
@@ -376,7 +411,7 @@ async def find_view(
         # ``ready`` with no journal is the draft/never-written answer (empty),
         # and this fallback covers any race between the ladder and the read.
         index = await asyncio.to_thread(transcript_index.read_index, config_dir, session_id)
-    docs = index.messages if index is not None else []
+    docs = _visible_docs(index.messages if index is not None else [])
     hits, truncated = await asyncio.to_thread(
         _build_hits, config_dir, session_id, docs, query, limit
     )
