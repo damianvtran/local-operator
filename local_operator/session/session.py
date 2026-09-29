@@ -1745,8 +1745,11 @@ def _fit_frames_to_budget(
 
     The ladder itself lives in ``compaction.pruning.fit_frames_to_wire_budget``:
     context frames are DOWNSCALED first (kept present at a smaller
-    re-rendering; the newest frame stays full fidelity), and the oldest are
-    replaced with notices only when no rung fits. The shed's steady state
+    re-rendering), the newest frame keeping full fidelity while any rung fits
+    with it kept full and descending the same ladder — as the last thing
+    sacrificed, and only as far as the fit requires — when none does; the
+    oldest are replaced with notices only when even that cannot fit. The
+    shed's steady state
     without that step was one more frame dropped per turn with every request
     still pinned at the ceiling; the downscale is what lets a long screenshot
     history fit whole.
@@ -3709,8 +3712,10 @@ class Session:
         # would have fit is content lost for nothing. This is the transport
         # guard — see ``_fit_frames_to_budget`` for why it belongs at the
         # render rather than in a client, and why it never touches the
-        # transcript. Older frames are downscaled and KEPT; only a rung walk
-        # that cannot fit drops any.
+        # transcript. Older frames are downscaled and KEPT; the newest keeps
+        # full fidelity until no protected rung fits, then descends the same
+        # ladder as the last thing sacrificed; only a walk that cannot fit
+        # drops any.
         rendered, downscaled, shed, rung = _fit_frames_to_budget(
             rendered, budget=self._wire_bytes_budget()
         )
@@ -3784,7 +3789,7 @@ class Session:
         self._spawn_background(self._emit(NoticeEvent(text=FRAMES_SHED_NOTICE, kind="warning")))
 
     def _announce_frames_downscaled_once(self, downscaled: int, rung: int | None) -> None:
-        """Log, once per session, that older screenshots were downscaled.
+        """Log, once per session, that screenshots were downscaled.
 
         The shed's sibling, and deliberately a LOG LINE rather than a notice:
         downscaling keeps every frame in the conversation at a smaller size,
@@ -3792,9 +3797,10 @@ class Session:
         consult it — whereas ``FRAMES_SHED_NOTICE`` exists because frames
         actually LEFT, which is news a user acts on. What this line owes is
         the next reader of an episode log: it says the request was over the
-        size limit, how many older frames were re-rendered to fit it, and at
-        which rung — the ladder's long-edge size (1024/768/512), so a mild
-        re-render is distinguishable from a floor-rung one — plus (via
+        size limit, how many frames were re-rendered to fit it (the newest
+        included once it descends the ladder), and at which rung — the
+        ladder's long-edge size (1024/768/512), so a mild re-render is
+        distinguishable from a floor-rung one — plus (via
         :meth:`_image_drop_diagnostic`) the shape of the image payload at
         that moment, so "what did the harness do to my screenshots" is
         answerable without a code read.
@@ -3816,7 +3822,7 @@ class Session:
             return
         self._frames_downscaled_announced = True
         logger.warning(
-            "downscaled %d older screenshot(s) from the rendered context at the %s px rung "
+            "downscaled %d screenshot(s) from the rendered context at the %s px rung "
             "to stay under the provider request size limit (%s)",
             downscaled,
             rung,

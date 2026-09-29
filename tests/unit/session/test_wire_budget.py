@@ -309,9 +309,110 @@ async def test_older_screenshots_are_downscaled_at_the_seam_not_dropped(tmp_path
     assert blocks[-1].data == frame, "the newest frame lost fidelity"
     assert blocks[0].data != frame, "no older frame was re-rendered"
     assert FRAMES_SHED_NOTICE not in notices, "the user was told frames were dropped"
+    assert "downscaled 5 screenshot(s) from the rendered context at the 1024 px rung" in caplog.text
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_newest_frame_descends_before_any_drop_at_the_seam(tmp_path, caplog):
+    """The QA-round boundary, end to end: one frame too big to send full, with
+    a budget its own ≤768 rung fits.
+
+    Before the descent step the render seam dropped the frame and the model
+    received no image at all; the fix hands it the frame's degraded
+    re-rendering instead — and names it in the once-per-session log line.
+    """
+    from local_operator.compaction.api import estimate_wire_bytes
+    from local_operator.compaction.pruning import downscale_stale_frames
+    from local_operator.imaging import IMAGE_CONTEXT_EDGES, downscale_context_frame
+
+    stream = ScriptedOk()
+    frame = _real_frame_b64(seed=43)
+    rendered = downscale_context_frame(frame, "image/png", max_edge=IMAGE_CONTEXT_EDGES[1])
+    assert rendered is not None
+    messages = [
+        Message(role="user", content=[TextContent(text="shot 0"), ImageContent(data=frame)]),
+        Message.assistant("ok 0"),
+    ]
+    candidate, _ = downscale_stale_frames(
+        messages, keep_recent_frames=0, max_edge=IMAGE_CONTEXT_EDGES[1]
+    )
+    # Fits the ≤768 candidate but neither the full frame nor the ≤1024 rung,
+    # with a small allowance for the prompt text the request adds.
+    budget = estimate_wire_bytes(candidate) + 2_000
+    session = make_session(
+        tmp_path, stream, compaction_settings=CompactionSettings(wire_bytes_budget=budget)
+    )
+    await session.seed_history(messages)
+    caplog.set_level(logging.WARNING, logger="local_operator.session.session")
+
+    notices: list[str] = []
+    session.subscribe(lambda e: notices.append(e.text) if isinstance(e, NoticeEvent) else None)
+
+    await session.prompt("continue")
+
+    request = stream.requests[0]
+    blocks = [b for m in request.messages for b in m.content if isinstance(b, ImageContent)]
+    assert len(blocks) == 1, "the only frame was dropped instead of descended"
+    assert blocks[-1].data == rendered[0], "the model did not receive the frame's ≤768 render"
+    assert _request_bytes(request) <= budget
+    assert FRAMES_SHED_NOTICE not in notices
     assert (
-        "downscaled 5 older screenshot(s) from the rendered context at the 1024 px rung"
-        in caplog.text
+        "downscaled 1 screenshot(s) from the rendered context at the "
+        f"{IMAGE_CONTEXT_EDGES[1]} px rung" in caplog.text
+    )
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_newest_descent_keeps_the_older_frames_at_the_seam(tmp_path, caplog):
+    """Newest over budget AND older frames in context: the descent keeps them all.
+
+    QA round 1's case (b) end to end: six frames where the protected walk's
+    floor is still over budget. The seam must render all six at the floor —
+    five dropped frames is the failure this repairs — and report the descent
+    honestly (the log no longer claims only "older" frames were re-rendered).
+    """
+    from local_operator.compaction.api import estimate_wire_bytes
+    from local_operator.compaction.pruning import downscale_stale_frames
+    from local_operator.imaging import IMAGE_CONTEXT_EDGES
+
+    stream = ScriptedOk()
+    frame = _real_frame_b64(seed=44)
+    messages: list[Message] = []
+    for index in range(6):
+        messages.append(
+            Message(
+                role="user",
+                content=[TextContent(text=f"shot {index}"), ImageContent(data=frame)],
+            )
+        )
+        messages.append(Message.assistant(f"ok {index}"))
+    floor, _ = downscale_stale_frames(
+        messages, keep_recent_frames=0, max_edge=IMAGE_CONTEXT_EDGES[-1]
+    )
+    budget = estimate_wire_bytes(floor) + 2_000
+    session = make_session(
+        tmp_path, stream, compaction_settings=CompactionSettings(wire_bytes_budget=budget)
+    )
+    await session.seed_history(messages)
+    caplog.set_level(logging.WARNING, logger="local_operator.session.session")
+
+    notices: list[str] = []
+    session.subscribe(lambda e: notices.append(e.text) if isinstance(e, NoticeEvent) else None)
+
+    await session.prompt("continue")
+
+    request = stream.requests[0]
+    got = [b.data for m in request.messages for b in m.content if isinstance(b, ImageContent)]
+    expected = [b.data for m in floor for b in m.content if isinstance(b, ImageContent)]
+    assert len(got) == 6, "frames were dropped although rendering all six fits"
+    assert got == expected, "a frame did not receive its ≤512 re-rendering"
+    assert _request_bytes(request) <= budget
+    assert FRAMES_SHED_NOTICE not in notices
+    assert (
+        "downscaled 6 screenshot(s) from the rendered context at the "
+        f"{IMAGE_CONTEXT_EDGES[-1]} px rung" in caplog.text
     )
     await session.dispose()
 

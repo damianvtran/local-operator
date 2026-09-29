@@ -328,7 +328,22 @@ def fit_frames_to_wire_budget(
        browser-sweep's DROP rule, where a blanked frame cannot be consulted at
        all and the window therefore has to be wider; a downscale keeps every
        frame, so it protects exactly the one that is a live target.
-    2. Only when no rung fits, hand the tightest candidate to the existing
+    2. When no rung fits with the newest protected, walk the SAME ladder again
+       with nothing exempt (``keep_recent_frames=0``): the newest frame is
+       allowed to descend rather than being exempt from it, so the session
+       keeps a degraded view instead of losing the view entirely. It is the
+       LAST thing sacrificed — every older frame already sits at the tightest
+       rung step 1 reached before this step renders it — and it descends only
+       as far as the fit requires: first fit from the widest rung, rendered
+       from the original bytes exactly as step 1 does. Without this step the
+       protection was absolute at the boundary and the drop path engaged
+       first: one 670 KB frame against a 250 KB budget dropped every frame —
+       the model saw 0 image blocks — although the frame's own ≤768 rung is
+       165 KB and fits, and a six-frame context dropped five frames where
+       rendering all six at ≤512 fits in 344 KB. A screen-driving turn went
+       blind while a degraded view of the screen was one rung away.
+    3. Only when even the tightest unprotected rung is over budget, hand the
+       tightest candidate to the existing
        :func:`shed_frames_to_wire_budget`, whose minimal-drop loop stays the
        backstop.
 
@@ -343,9 +358,13 @@ def fit_frames_to_wire_budget(
     handful of full-size frames did. And because each frame's replacement is
     deterministic and memoized per ``(bytes, rung)``, a frame's bytes change
     at most once per rung it renders at — the turn it stops being the newest
-    frame, and again only on a step down a rung (at most three changes across
-    the ladder) — so the provider's prompt-cache prefix is rewritten at most
-    once per rung transition rather than churned on every render.
+    frame, again only on a step down a rung, and under step 2 the turn the
+    newest itself first has to descend (at most three changes across the
+    ladder) — so the provider's prompt-cache prefix is rewritten at most once
+    per rung transition rather than churned on every render. An episode whose
+    step 1 fits renders every frame's bytes exactly as it did before step 2
+    existed: step 2 only widens the set the same walk applies to, below that
+    boundary.
 
     Driven by the SAME ``budget`` the shed was driven by (the number
     ``resolve_wire_bytes_budget`` resolves; the render seam and the
@@ -366,7 +385,9 @@ def fit_frames_to_wire_budget(
     Returns ``(messages, frames_downscaled, frames_dropped, rung)``, where
     ``rung`` is the long-edge rung every re-rendered frame settled at —
     ``None`` when nothing was downscaled — so the render seam's diagnostic can
-    name how aggressive the re-render was.
+    name how aggressive the re-render was. ``frames_downscaled`` counts the
+    re-rendered blocks of whichever walk settled the request, so it includes
+    the newest frame when step 2 settled it.
     """
     # Imported HERE for the reason ``downscale_stale_frames`` documents: a
     # module-scope import would put ``local_operator.imaging`` on the import
@@ -382,6 +403,18 @@ def fit_frames_to_wire_budget(
     for edge in IMAGE_CONTEXT_EDGES:
         candidate, downscaled = downscale_stale_frames(
             messages, keep_recent_frames=keep_recent_frames, max_edge=edge
+        )
+        working, downscaled_total = candidate, downscaled
+        if estimate_wire_bytes(working) <= budget:
+            return working, downscaled_total, 0, edge
+    # Step 2 (see the docstring): the same ladder with the newest frame's
+    # exemption removed, reached only when no protected rung fits so the
+    # common path never pays for it. Run from the ORIGINAL ``messages`` — like
+    # every rung above — so a replacement stays the deterministic, memoized
+    # function of (bytes, rung) the prompt-cache argument rests on.
+    for edge in IMAGE_CONTEXT_EDGES:
+        candidate, downscaled = downscale_stale_frames(
+            messages, keep_recent_frames=0, max_edge=edge
         )
         working, downscaled_total = candidate, downscaled
         if estimate_wire_bytes(working) <= budget:
