@@ -15,6 +15,7 @@ for a session that is mid-handoff.
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -799,6 +800,64 @@ def test_an_unreadable_journal_fails_closed(pair: Devices, monkeypatch: pytest.M
 
     assert "could not tell whether" in sentence
     assert path.name in sentence
+
+
+def test_two_handoff_writers_in_one_process_never_share_a_staging_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The journal's staging file is unique per CALL, not per process.
+
+    The CI failure frame enters ``_write_journal`` from ``reconcile`` ->
+    ``clear_handoff_entry`` on the driving thread, colliding with another
+    writer in the same process — the reachable in-process shape
+    ``network/store.py``'s concurrent-writer cell documents. With a pid-scoped
+    staging name two such writers shared one file: the first ``os.replace``
+    took it away and the second died with ``FileNotFoundError``. The barrier
+    below holds both writers at their ``fsync`` — i.e. AFTER both have staged —
+    so the old name collides BY CONSTRUCTION rather than by racing. Both write
+    the SAME session and entry, so any ordering of the two replaces leaves the
+    same bytes: what is pinned here is the staging name's uniqueness, not
+    read-modify-write serialisation.
+    """
+    from local_operator.session import placement
+
+    root = tmp_path / "device"
+    both_staged = threading.Barrier(2, timeout=30)
+    real_fsync = placement.os.fsync
+
+    def fsync_when_both_have_staged(descriptor: int) -> None:
+        both_staged.wait()
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(placement.os, "fsync", fsync_when_both_have_staged)
+    entry = {"role": "source", "phase": HANDOFF_PHASE_PREPARED, "at": 1.0}
+    errors: list[BaseException] = []
+
+    def write_one() -> None:
+        try:
+            write_handoff_entry(root, SESSION, entry)
+        except BaseException as exc:  # noqa: BLE001 — the assertion is the report
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=write_one, name=f"journal-writer-{index}") for index in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert not any(thread.is_alive() for thread in threads), "a writer never returned"
+    assert errors == [], (
+        "both writers must land; a shared staging file kills the second at its "
+        f"os.replace: {len(errors)} raised "
+        f"{sorted({type(exc).__name__ for exc in errors})}"
+    )
+    assert read_handoff_journal(root) == {SESSION: entry}
+    leftover = sorted(
+        path.name for path in (root / "network").iterdir() if path.name.endswith(".tmp")
+    )
+    assert leftover == [], f"staging files left behind: {leftover}"
 
 
 # ---------------------------------------------------------------------------
