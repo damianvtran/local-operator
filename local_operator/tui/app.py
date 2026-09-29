@@ -10513,8 +10513,15 @@ class OperatorApp(App[None]):
                 await asyncio.to_thread(toggle_pin, root, target)
                 pins = await asyncio.to_thread(read_pins, root)
                 sidebar.set_pins(pins)
-            except Exception:
+            except Exception as error:  # noqa: BLE001 — reported, not swallowed
+                # A refused write used to vanish into a debug log, which read
+                # as a missed click once pinning became a pointer action: the
+                # row repaints unchanged and nothing says why (UX round 1,
+                # U1). The same notice lane the navigation refusals use; the
+                # sidebar's own `Refresh failed` line stays reserved for its
+                # catalogue loads.
                 logger.debug("sidebar pin toggle failed", exc_info=True)
+                self._system_notice(f"Could not save the pin: {error}", "warning")
 
         self.run_worker(pin(), group="sidebar-pin")
 
