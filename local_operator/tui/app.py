@@ -478,7 +478,7 @@ if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
     from local_operator.providers.controller import CatalogueEntry
     from local_operator.providers.oauth.callback_server import LoginCallbacks
     from local_operator.resume import SessionRow
-    from local_operator.session.peer_rows import RemotePark
+    from local_operator.session.peer_rows import RemotePark, UnansweredPeer
     from local_operator.session.store_failures import StoreFailure
     from local_operator.skills.discovery import Skill
     from local_operator.tui.widgets.info_panel import InfoScreen
@@ -1479,6 +1479,16 @@ JOB_POLL_INTERVAL_S = 1.0
 #: that a sign-in completed in another window withdraws the card while the user
 #: is still looking at the app.
 TUNNEL_PARK_POLL_S = 5.0
+
+#: How often the park watch looks while the SIDEBAR IS CLOSED (see
+#: `_watch_remote_parks`). Five seconds is the tunnel park's own cadence: the
+#: read behind it is a 20 s-cached listing with a no-relay fast path, so a tick
+#: costs a file read except once per TTL — and a park that lands between two
+#: cached reads is announced inside the same bound the open list gives it
+#: (agent review round 1, MAJOR-1). Slower than the sidebar's own 2 s tick on
+#: purpose: the list is not on screen, so nothing beside the notice is waiting
+#: on that freshness.
+REMOTE_PARK_POLL_S = 5.0
 
 #: Owner tag for the parked-connector notice.
 #:
@@ -4592,6 +4602,10 @@ class OperatorApp(App[None]):
         #: identity (`remote_park_notice_owner`): the object shown is the only
         #: one that can take the card back down.
         self._remote_park_owners: dict[tuple[str, str], object] = {}
+        #: Whether the closed-list park watch has a read in flight, so a slow
+        #: relay cannot stack workers on the 5 s tick (mirrors the sidebar
+        #: refresh's own pending flag).
+        self._remote_park_watch_pending = False
         #: Unsubscribes this app from the process config watcher (see
         #: :meth:`_watch_config`). ``None`` until the first session is adopted.
         self._unsubscribe_config_watch: Callable[[], None] | None = None
@@ -10578,6 +10592,7 @@ class OperatorApp(App[None]):
             int | None,
             list[tuple[str, str]],
             tuple[SessionRow, ...],
+            tuple[UnansweredPeer, ...],
         ]:
             from local_operator.paths import config_dir
             from local_operator.session.peer_rows import (
@@ -10611,6 +10626,7 @@ class OperatorApp(App[None]):
             # detector (`_note_remote_parks`) reads edges off these same rows,
             # which is what makes the notice cost no second read (design note §1).
             peer_rows = peer_session_rows(root)
+            unanswered = unanswered_peers(root)
             entries = [*entries, *(CatalogEntry(row) for row in peer_rows)]
             # AND THE PEERS THAT SAID NOTHING (UX round 3, U16). The relay names
             # them in the same answer the rows came from — `unanswered_peers`
@@ -10619,7 +10635,7 @@ class OperatorApp(App[None]):
             # mesh that moved between them. Without it a peer that stopped
             # answering lost its whole section silently: §8.3 drops its ROWS,
             # and a section built from rows dropped the fact with them.
-            silent = [(peer.name, peer.reason) for peer in unanswered_peers(root)]
+            silent = [(peer.name, peer.reason) for peer in unanswered]
             # Read on a SLOW cadence, never per poll: `subagent_population` is
             # a second whole-store scan (+2.36 ms, +21% measured with the layer
             # off) and the count it answers changes when a delegated run
@@ -10629,11 +10645,13 @@ class OperatorApp(App[None]):
             if self._subagent_population_poll % SUBAGENT_POLL_EVERY == 0:
                 total = subagent_population(root)
             self._subagent_population_poll += 1
-            return entries, pins, total, silent, peer_rows
+            return entries, pins, total, silent, peer_rows, unanswered
 
         async def refresh() -> None:
             try:
-                entries, pins, total, silent, peer_rows = await asyncio.to_thread(collect)
+                entries, pins, total, silent, peer_rows, unanswered = await asyncio.to_thread(
+                    collect
+                )
                 if (
                     generation != self._sidebar_refresh_generation
                     or not self._session_sidebar.display
@@ -10653,7 +10671,9 @@ class OperatorApp(App[None]):
                 # is never delayed by a notice about it, and never raising (see
                 # the method's own contract) because this runs in the sidebar's
                 # refresh worker where an exception reads as a failed catalog.
-                self._note_remote_parks(peer_rows)
+                # The silent peers ride along so a non-answer cannot be read as
+                # the park clearing (agent review round 1, MINOR-1).
+                self._note_remote_parks(peer_rows, unanswered)
             except Exception:
                 if generation == self._sidebar_refresh_generation and self._session_sidebar.display:
                     self._session_sidebar.show_error("Could not refresh conversations")
@@ -11042,6 +11062,14 @@ class OperatorApp(App[None]):
         # for this, and the notice and the band rung are the only places the
         # terminal admits it.
         self.set_interval(TUNNEL_PARK_POLL_S, self._poll_tunnel_park)
+        # ALWAYS ON, and deliberately NOT the sidebar's timer: that poll is
+        # registered paused and pauses whenever the list is closed, which is the
+        # app's DEFAULT state (`tui.sidebar_visible` = False) — hanging the park
+        # watch off it meant a default-config origin heard nothing about a peer
+        # park until the list was opened (agent review round 1, MAJOR-1). Same
+        # 20 s-cached read as the refresh, so the extra tick is a file read
+        # except once per TTL.
+        self.set_interval(REMOTE_PARK_POLL_S, self._watch_remote_parks)
         # ALWAYS ON, deliberately not on `_sidebar_timer`. That timer is
         # registered with `pause=True` and is paused whenever the sidebar is
         # closed, so hanging the reap off it would mean a user who closes the
@@ -30623,14 +30651,64 @@ class OperatorApp(App[None]):
         if status is not None:
             status.update(tunnel_parked=parked)
 
-    def _note_remote_parks(self, rows: Sequence[SessionRow]) -> None:
+    def _watch_remote_parks(self) -> None:
+        """Look for a peer park while the SIDEBAR IS CLOSED — the default state.
+
+        The sidebar's refresh is the fast path (2 s, and it paints the rows the
+        detector reads), but its timer is registered paused and pauses with the
+        list, so under the app's default (`tui.sidebar_visible` = False) a park
+        on a peer was announced only when the list was opened — unbounded, which
+        is the failure this slice exists to fix (agent review round 1, MAJOR-1).
+        This is the slow always-on companion: same cached read, no wire change,
+        one worker at a time, and skipped entirely while the list is OPEN so the
+        two paths never overlap.
+        """
+        if self._session_sidebar.display or self._remote_park_watch_pending:
+            return
+        self._remote_park_watch_pending = True
+        self.run_worker(self._read_remote_parks(), group="remote-parks")
+
+    async def _read_remote_parks(self) -> None:
+        """One closed-list read off the loop, then the same detector the refresh uses.
+
+        The read is a relay call, so it runs in a thread exactly as the
+        sidebar's refresh does; the roster of devices that did NOT answer rides
+        with the rows, because an empty answer from a silent peer is not the
+        park clearing (see `park_edges`).
+        """
+
+        def collect() -> tuple[tuple[SessionRow, ...], tuple[UnansweredPeer, ...]]:
+            from local_operator.paths import config_dir
+            from local_operator.session.peer_rows import (
+                peer_session_rows,
+                unanswered_peers,
+            )
+
+            root = config_dir()
+            return peer_session_rows(root), unanswered_peers(root)
+
+        try:
+            rows, unanswered = await asyncio.to_thread(collect)
+            self._note_remote_parks(rows, unanswered)
+        except Exception:  # pragma: no cover - a failed read is not a crash
+            logger.debug("remote park watch failed", exc_info=True)
+        finally:
+            self._remote_park_watch_pending = False
+
+    def _note_remote_parks(
+        self,
+        rows: Sequence[SessionRow],
+        unanswered: Sequence[UnansweredPeer] = (),
+    ) -> None:
         """Announce parks on PEER devices, once per episode (design note §1-§2).
 
-        Fired from the sidebar poll on the rows it already reads — no wire
-        change, no new timer — so a park reaches this origin within the poll's
-        own bounds (2 s tick plus the row cache's TTL) instead of waiting for a
-        listing somebody happens to ask for. `peer_rows.park_edges` owns the
-        episode rule; this method owns the surfaces:
+        Two callers feed this one detector: the sidebar's refresh (the fast
+        path, on rows it is painting anyway) and `_watch_remote_parks` (the slow
+        always-on watch while the list is CLOSED — the app's default, so the
+        notice must not depend on a panel being open; agent review round 1,
+        MAJOR-1). Neither adds wire surface: both read the same 20 s-cached
+        listing. `peer_rows.park_edges` owns the episode rule; this method owns
+        the surfaces:
 
         * a NEW episode raises one toast — the shared slot, `TOAST_FAILURE_MS`
           because this is the app's one marker for "the user has to act on
@@ -30646,6 +30724,15 @@ class OperatorApp(App[None]):
           itself. The episode is consumed anyway — the user is looking at the
           surface the notice would point them to.
 
+        SILENCE IS NOT A CLEAR: `unanswered` names the devices that did not
+        answer this read, and `park_edges` carries their episodes forward — a
+        refused or timed-out peer must not withdraw a card (the park may still
+        be live) and must not drop the episode (recovery would then re-announce
+        the same park as a second episode; agent review round 1, MINOR-1). A
+        whole-relay failure delivers neither rows nor names, so it stays
+        ambiguous; treating it as silence is the conservative direction for a
+        notice.
+
         The OS banner is deliberately NOT `self._notify(...)`: that funnel
         composes the body from THIS session's transcript, and the body here is
         about a session on another machine (the device-named copy is the whole
@@ -30653,16 +30740,17 @@ class OperatorApp(App[None]):
         applies them (`enabled` reads the kill switch live; a focused terminal
         suppresses the OS leg, where the toast is visible anyway).
 
-        Never raises: a notice is chrome, and this runs inside the sidebar's
-        refresh worker, where a raise would be reported as a failed catalog.
-        The poll itself is paused while the sidebar is CLOSED (its timer pauses
-        with it), so a park arriving with no list open is announced when the
-        list is opened — the first moment there is a list to see it beside.
+        Never raises: a notice is chrome, and both callers run where a raise
+        would be reported as a failed catalog or a failed poll.
         """
         try:
             from local_operator.session.peer_rows import park_edges
 
-            edges, state = park_edges(self._remote_park_episodes, rows)
+            edges, state = park_edges(
+                self._remote_park_episodes,
+                rows,
+                unanswered=[peer.device_id for peer in unanswered],
+            )
             cleared = [key for key in self._remote_park_episodes if key not in state]
             self._remote_park_episodes = state
             toast = self.query_one(Toast)
@@ -30702,13 +30790,19 @@ class OperatorApp(App[None]):
         suppressed banner is not re-queued — the toast is the delivery. Both
         name the DEVICE (`device_name`, falling back to its id exactly as the
         lifecycle router's label does), because a device id is not something a
-        user recognises their own laptop by.
+        user recognises their own laptop by — and the card opens with the
+        conversation's name when it has one, so two parks on the same device are
+        tellable apart on the card itself (UX round 1, U3); the placeholder name
+        a peer never chose is dropped rather than printed as a title.
         """
         label = park.device_name or park.device_id
         key = (park.device_id, park.session_id)
         owner = self._remote_park_owners.setdefault(key, remote_park_notice_owner(*key))
+        from local_operator.resume import UNTITLED_CONVERSATION
+
+        name = "" if park.name == UNTITLED_CONVERSATION else park.name
         toast.show(
-            remote_park_card(label, park.kind),
+            remote_park_card(label, park.kind, name=name),
             duration_ms=TOAST_FAILURE_MS,
             owner=owner,
         )

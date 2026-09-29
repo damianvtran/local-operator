@@ -516,6 +516,40 @@ def test_the_park_edge_matrix_appear_clear_repark_and_kind_change() -> None:
     assert [edge.session_id for edge in edges] == ["s_1"], "a re-park re-arms"
 
 
+def test_a_silent_device_carries_its_park_instead_of_clearing_it() -> None:
+    """Only a device that ANSWERED can clear its own park (review round 1, MINOR-1).
+
+    ``unanswered_peers`` names the devices the relay reported as unreachable, and
+    a refused or timed-out read returns no rows for them. Reading that as "the
+    park cleared" withdrew the card for a park that may still be live and then
+    re-announced it as a SECOND episode when the peer recovered; the keys of a
+    silent device are therefore carried, and the first answered read that does
+    not carry them performs the real clear.
+    """
+    parked = _parked_row("s_1")
+    edges, state = park_edges({}, [parked])
+    assert [edge.session_id for edge in edges] == ["s_1"]
+
+    # The peer goes silent: no rows for it, and the read says so by name.
+    edges, silent = park_edges(state, [], unanswered=["d_aa"])
+    assert edges == ()
+    assert silent == state, "a silent read must neither clear the park nor re-fire it"
+
+    # Silence for a DIFFERENT device carries nothing: that device's absence is
+    # an ordinary clear, or one dead peer would freeze every other peer's map.
+    edges, other = park_edges(state, [], unanswered=["d_zzz"])
+    assert edges == () and other == {}, "only the silent device's keys are carried"
+
+    # The peer answers again with the park gone: THAT is the clear.
+    edges, cleared = park_edges(silent, [], unanswered=())
+    assert edges == () and cleared == {}
+
+    # And an answered read that carries the SAME park is the same episode, not
+    # a re-announcement: the carried key compares equal and stays quiet.
+    edges, _ = park_edges(silent, [parked], unanswered=())
+    assert edges == (), "a carried episode re-announced itself on recovery"
+
+
 def test_a_kind_change_is_a_new_episode() -> None:
     """ask -> approval is a new remedy: the approval needs a presence gesture.
 

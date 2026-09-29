@@ -198,13 +198,15 @@ class RemotePark(NamedTuple):
 def park_edges(
     previous: Mapping[tuple[str, str], str],
     rows: Iterable[SessionRow],
+    *,
+    unanswered: Iterable[str] = (),
 ) -> tuple[tuple[RemotePark, ...], dict[tuple[str, str], str]]:
     """New park EPISODES among ``rows``, and the map to pass back next read.
 
     Pure: no writes, no dials, no cache. Edges are read off the SAME peer rows
     the sidebar already polls (``_TTL_S``-cached, one relay call per TTL), so a
     park announces itself on the origin with no wire change and no new timer —
-    the freshness budget is the 2 s sidebar poll plus that row cache.
+    the freshness budget is the caller's poll plus that row cache.
 
     ONE EPISODE PER (device, session, kind), and the key carries the DEVICE as
     well as the id because the two are not interchangeable: a session id is
@@ -222,6 +224,17 @@ def park_edges(
       answer that ended the park).
     * re-park after a clear — the key is absent from ``previous``, so it fires
       again: one notice per episode, and a second park IS a second episode.
+    * SILENCE — ``unanswered`` names the devices that did not answer this read
+      (``peer_rows.unanswered_peers``), and a key belonging to one of them is
+      CARRIED into the returned map rather than cleared: a refused or
+      timed-out read is not the answer landing, and treating it as one would
+      withdraw the card and then re-announce the same live park the moment the
+      peer recovered (agent review round 1, MINOR-1). When the device answers
+      again, an absent key is a real clear and a present one with the same kind
+      is no edge — so the episode survives the outage without a second notice.
+      A WHOLE-RELAY failure delivers neither rows nor names (``_read``'s empty
+      answer), so that one stays ambiguous and the caller must not read it as
+      an answer either.
 
     THE STORED-HALF CAVEAT, and it is the discriminator rather than a filter
     here: a park counts only when ``pending`` is present AND ``live_state`` is
@@ -248,8 +261,13 @@ def park_edges(
             kind=kind,
             name=str(row.name or ""),
         )
+    state = dict(current)
+    silent = {str(device_id) for device_id in unanswered}
+    for key, kind in previous.items():
+        if key not in state and key[0] in silent:
+            state[key] = kind
     edges = tuple(fresh[key] for key, kind in current.items() if previous.get(key) != kind)
-    return edges, current
+    return edges, state
 
 
 def _read_all(

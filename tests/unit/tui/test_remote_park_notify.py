@@ -8,6 +8,13 @@ and what a machine hears:
 
 * one card per EPISODE, withdrawn when the park clears — a card left standing
   after the answer lands contradicts the very thing that ended the park;
+* the watch is ALWAYS ON: the sidebar's refresh is the fast path, and a slow
+  always-on tick keeps looking while the list is CLOSED — the app's default
+  state, where hanging the notice off the sidebar's paused timer would mean a
+  park waits, unbounded, until somebody opens the list (agent review round 1,
+  MAJOR-1);
+* a device that does NOT answer is not a clear: its episode survives the
+  outage and is not re-announced on recovery (agent review round 1, MINOR-1);
 * the OS banner goes through the app's existing notifier, naming the DEVICE,
   and stays quiet while the user is looking at the terminal (the notifier's own
   focus gate, unchanged);
@@ -121,7 +128,12 @@ async def test_a_park_is_announced_once_and_withdrawn_when_it_clears() -> None:
         app._note_remote_parks(rows)
         await pilot.pause()
         assert toast.display, "a park on a peer must say so"
-        assert toast.message == remote_park_card("demo-laptop", "approval")
+        assert toast.message == remote_park_card(
+            "demo-laptop", "approval", name="Backfill the audit log"
+        )
+        assert (
+            toast.message.splitlines()[0] == "Backfill the audit log"
+        ), "the card must name the conversation so two parks on one device differ"
         assert "Waiting for approval on demo-laptop" in toast.message
         assert "lop network ready --peer demo-laptop" in toast.message
 
@@ -236,8 +248,9 @@ async def test_the_sidebar_poll_is_the_detector(
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 40)) as pilot:
         await _boot(pilot, app)
-        # The poll pauses while the sidebar is closed; opening it is what
-        # starts the watch (the same resume the user's keybinding does).
+        # The refresh still owns the OPEN case; opening the list is what starts
+        # it (the same resume the user's keybinding does). The CLOSED case is
+        # the always-on watch's, driven in its own cell below.
         app._session_sidebar.set_open(True)
         app._refresh_sidebar()
         for _ in range(60):
@@ -246,6 +259,94 @@ async def test_the_sidebar_poll_is_the_detector(
                 break
         assert _toast(app).display, "the poll never announced the park"
         assert "Waiting for approval on demo-laptop" in _toast(app).message
+
+
+@pytest.mark.asyncio
+async def test_a_park_while_the_list_is_closed_is_announced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The always-on watch: the DEFAULT configuration must still hear the park.
+
+    The sidebar's poll is registered paused and pauses with the list, so with
+    the app's default closed sidebar the notice used to wait for a keypress
+    that might never come (agent review round 1, MAJOR-1). This drives the
+    always-on tick's own method — the one the 5 s interval calls — with the
+    list CLOSED, and then proves the open-list refresh does not announce the
+    same episode a second time.
+    """
+    from local_operator.session import peer_rows as peer_rows_module
+
+    rows = (_parked(),)
+    monkeypatch.setattr(peer_rows_module, "peer_session_rows", lambda *a, **k: rows)
+    monkeypatch.setattr(peer_rows_module, "unanswered_peers", lambda *a, **k: ())
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        toast = _toast(app)
+        assert not app._session_sidebar.display, "this cell is about the closed list"
+
+        app._watch_remote_parks()
+        for _ in range(60):
+            await pilot.pause()
+            if toast.display:
+                break
+        assert toast.display, "a park reached a closed-list origin and nothing said so"
+        assert "Waiting for approval on demo-laptop" in toast.message
+        assert not app._remote_park_watch_pending, "the watch left its read flag set"
+
+        # Opening the list must not re-announce the episode the watch already
+        # delivered: one notice per episode however the rows arrive.
+        generation = toast.generation
+        app._session_sidebar.set_open(True)
+        app._refresh_sidebar()
+        for _ in range(40):
+            await pilot.pause()
+        assert toast.generation == generation, "the open list re-raised the watch's card"
+
+
+@pytest.mark.asyncio
+async def test_a_silent_device_does_not_withdraw_or_re_announce_its_park() -> None:
+    """A non-answer is not the answer landing (agent review round 1, MINOR-1).
+
+    ``peer_session_rows`` returns ``()`` for a refused or timed-out relay and
+    for a peer marked unreachable; treating that as "the park cleared" withdrew
+    the card and then re-announced the same live park as a SECOND episode when
+    the peer recovered. The roster of silent devices rides with the rows, and
+    the episode must survive the outage: card stays, no new card, and the
+    recovery with the park gone is the one real clear.
+    """
+    from local_operator.session.peer_rows import UnansweredPeer
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        toast = _toast(app)
+        rows = (_parked(),)
+
+        app._note_remote_parks(rows)
+        await pilot.pause()
+        assert toast.display
+        generation = toast.generation
+
+        silent = (UnansweredPeer(device_id="d_bb", name="demo-laptop", reason="no answer"),)
+        app._note_remote_parks((), silent)
+        await pilot.pause()
+        assert toast.display, "a refused read withdrew a card for a park that may still be live"
+        assert toast.generation == generation, "a refused read re-raised the card"
+        assert app._remote_park_episodes, "a refused read dropped the episode"
+
+        # The peer answers again and the park is gone: THAT is the clear.
+        app._note_remote_parks((), ())
+        await pilot.pause()
+        assert not toast.display, "the answered clear did not withdraw the card"
+
+        # A re-park after a REAL clear is a second episode — pinned here so the
+        # silence carry above cannot accidentally mute a genuine second park.
+        app._note_remote_parks(rows)
+        await pilot.pause()
+        assert toast.display
+        assert toast.generation > generation, "a re-park after a real clear re-arms"
 
 
 @pytest.mark.asyncio

@@ -947,10 +947,13 @@ def test_the_remote_park_copy_is_pinned() -> None:
     """
     assert remote_park_card("demo-laptop", "approval") == (
         "Waiting for approval on demo-laptop\n"
-        "Deny it from here. Allowing it happens on demo-laptop (Touch ID) or on a phone "
-        "paired with it. If nothing there can check a signature: lop operator install "
-        "on demo-laptop (one privileged step) — lop network ready --peer demo-laptop "
-        "shows the operator_authority row."
+        "Open the session here to deny it. Allowing it happens on demo-laptop (Touch ID) or "
+        "on a phone paired with it. If nothing there can check a signature: run "
+        "`lop operator install` on demo-laptop (one privileged step) — `lop network ready "
+        "--peer demo-laptop` shows the operator_authority row."
+    )
+    assert remote_park_card("demo-laptop", "approval", name="Backfill the audit log") == (
+        "Backfill the audit log\n" + remote_park_card("demo-laptop", "approval")
     )
     assert remote_park_card("demo-laptop", "ask") == (
         "Waiting for your answer on demo-laptop\nOpen the session here to answer it."
@@ -997,7 +1000,7 @@ def test_the_remote_park_hint_rungs_shed_whole_clauses() -> None:
     """
     approval = remote_park_hints("demo-laptop", "approval")
     assert approval[0] == (
-        "runs on demo-laptop — allow there (Touch ID) / its paired phone; deny works here"
+        "runs on demo-laptop — allow there (Touch ID) or its paired phone; deny works here"
     )
     assert approval[-1] == "runs on demo-laptop"
     widths = [len(rung) for rung in approval]

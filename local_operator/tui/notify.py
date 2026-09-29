@@ -271,10 +271,10 @@ BACKGROUND_FALLBACK_TITLE = "A session finished"
 # one up.
 REMOTE_PARK_APPROVAL_TITLE = "Waiting for approval on {device}"
 REMOTE_PARK_APPROVAL_BODY = (
-    "Deny it from here. Allowing it happens on {device} (Touch ID) or on a phone "
-    "paired with it. If nothing there can check a signature: lop operator install "
-    "on {device} (one privileged step) — lop network ready --peer {device} shows "
-    "the operator_authority row."
+    "Open the session here to deny it. Allowing it happens on {device} (Touch ID) or "
+    "on a phone paired with it. If nothing there can check a signature: run "
+    "`lop operator install` on {device} (one privileged step) — `lop network ready "
+    "--peer {device}` shows the operator_authority row."
 )
 REMOTE_PARK_ASK_TITLE = "Waiting for your answer on {device}"
 REMOTE_PARK_ASK_BODY = "Open the session here to answer it."
@@ -291,7 +291,7 @@ REMOTE_PARK_ASK_BANNER = "Waiting for your answer on {device} — open it to ans
 #: and the floor is the locality fact alone, which still implies nothing about
 #: an allow from here.
 REMOTE_PARK_APPROVAL_HINTS = (
-    "runs on {device} — allow there (Touch ID) / its paired phone; deny works here",
+    "runs on {device} — allow there (Touch ID) or its paired phone; deny works here",
     "runs on {device} — allow there (Touch ID); deny works here",
     "runs on {device} — allow there; deny works here",
     "runs on {device}",
@@ -305,13 +305,16 @@ REMOTE_PARK_ASK_HINTS = (
 )
 
 
-def remote_park_card(device: str, kind: str) -> str:
-    """The in-app card for a park on ``device``: title line, then the body.
+def remote_park_card(device: str, kind: str, *, name: str = "") -> str:
+    """The in-app card for a park on ``device``: title line(s), then the body.
 
-    TWO LINES because the title is the STATE the user reads in under a second
-    while the body is the one thing they need in order to act — the toast
-    wraps the body itself at its width, so a long remedy is not this string's
-    to pre-break.
+    THREE LINES WHEN THE CONVERSATION IS NAMED, two when it is not: the name
+    leads, then the state, then the remedy. Two parks on ONE device were
+    otherwise indistinguishable on the card itself (the rows already tell them
+    apart, and the OS banner's title carries the name) — UX round 1, U3 — so
+    the name rides the card the same way the notifier's label does. The caller
+    drops the placeholder name a peer never chose rather than titling a card
+    with it.
 
     ``kind`` other than ``"approval"`` takes the ask wording: the two are the
     only kinds the vocabulary mints today (``normalise_pending`` translates a
@@ -324,6 +327,8 @@ def remote_park_card(device: str, kind: str) -> str:
     else:
         title = REMOTE_PARK_ASK_TITLE.format(device=device)
         body = REMOTE_PARK_ASK_BODY.format(device=device)
+    if name:
+        return f"{name}\n{title}\n{body}"
     return f"{title}\n{body}"
 
 

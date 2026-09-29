@@ -1036,7 +1036,7 @@ async def test_a_remote_gate_card_names_the_device_and_a_local_one_does_not() ->
     half also pins the byte-identical claim the feature rests on: nothing about
     a local gate's frame changes.
     """
-    hinted = "runs on demo-laptop — allow there (Touch ID) / its paired phone; deny works here"
+    hinted = "runs on demo-laptop — allow there (Touch ID) or its paired phone; deny works here"
 
     session = RemoteGatedSession()
     app = OperatorApp(lambda: _factory(session))
