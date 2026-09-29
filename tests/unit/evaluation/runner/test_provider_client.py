@@ -1705,7 +1705,17 @@ async def _drive(
         current = _framed_observation(root, sequence, text=f"{text} {sequence}")
         history.append(EpisodeTurn(observation=current))
         decision = await client.decide(current, tuple(history))
-        history[-1] = history[-1].model_copy(update={"batch": decision.action_batch})
+        # Mirrors ``EpisodeRunner._step_loop``: the batch AND the sibling
+        # fields the tolerance dropped ride the turn, the latter because the
+        # next observation's message renders the correction from it.
+        history[-1] = history[-1].model_copy(
+            update={
+                "batch": decision.action_batch,
+                "tolerated_field_names": tuple(
+                    getattr(decision, "tolerated_field_names", ()) or ()
+                ),
+            }
+        )
     return history
 
 
@@ -4606,16 +4616,141 @@ def test_the_sibling_field_tolerance_is_shared_with_the_tool_channel(tmp_path: P
     """
 
     from local_operator.evaluation.runner.action_tool import _build_batch
+    from local_operator.evaluation.runner.public_reply import tolerated_fields_note
 
     current = _arm_observation(tmp_path, _SIBLING_FIELD_OBSERVATION)
     arguments = json.loads(_SIBLING_FIELD_REPLY)
 
-    batch = _build_batch(arguments, current)
+    batch, tolerated_fields = _build_batch(arguments, current)
 
     assert len(batch.actions) == 2
     assert isinstance(batch.actions[1], WaitAction)
     assert batch.actions[1].duration_ms == 800
+    # The names, not just a count: the caller delivers them to the model as
+    # the one-line correction, derived from the same vocabulary the drop read.
+    assert tolerated_fields == ("wait.frame_id",)
+    assert tolerated_fields_note(tolerated_fields) == (
+        'Note: "frame_id" was not accepted on a "wait" action and was ignored '
+        '(a "wait" action takes "duration_ms").'
+    )
     batch.validate_for(current)
+
+
+@pytest.mark.asyncio
+async def test_the_tolerated_field_note_reaches_the_next_request(tmp_path: Path) -> None:
+    """A dropped sibling field is corrected in the request that follows it.
+
+    The defect this pins: the drop was tolerated and logged, but the model was
+    never told, so a reply that put ``frame_id`` on a ``wait`` could only
+    discover the contract by trial and error -- measured on a live episode as
+    three, then two, then one such fields across consecutive replies. The
+    correction now rides the next observation's message, the same place an ask
+    answer reaches the model.
+    """
+
+    def reply(message: Any) -> str:
+        raw = json.loads(_wait_reply(message))
+        raw["actions"][0]["frame_id"] = "screen"
+        return json.dumps(raw)
+
+    stream = RecordingStream(reply)
+    client = _client(stream, tmp_path)
+
+    history = await _drive(client, tmp_path, 2)
+
+    # Nothing was dropped before the first request, so no note can exist yet.
+    assert "was not accepted" not in stream.requests[0].messages[-1].content[0].text
+    newest = stream.requests[1].messages[-1]
+    assert newest.role == "user"
+    assert (
+        'Note: "frame_id" was not accepted on a "wait" action and was ignored '
+        '(a "wait" action takes "duration_ms").' in newest.content[0].text
+    )
+    # The roster rides the turn it describes, as the runner attaches it.
+    assert history[0].tolerated_field_names == ("wait.frame_id",)
+    # The drop is still a DROP: the executed batch carries no frame binding,
+    # so nothing the executor cannot honour was forwarded to make the model happy.
+    batch = history[0].batch
+    assert batch is not None
+    assert b"frame_id" not in batch.to_canonical_json()
+
+
+def test_the_tolerated_field_note_is_one_line_naming_field_kind_and_shape() -> None:
+    """The correction the model reads: which field, which kind, what it takes.
+
+    Derived from the vocabulary table rather than transcribed, so the note
+    cannot tell the model to send a shape the validator would refuse: the
+    fields it names as accepted are read from the same table the drop measures
+    against. Deduplicated, too -- the model needs the contract once, not once
+    per repeated action.
+    """
+
+    from local_operator.evaluation.runner.public_reply import (
+        _ACTION_KIND_FIELDS,
+        tolerated_fields_note,
+    )
+
+    note = tolerated_fields_note(["wait.frame_id", "wait.frame_id"])
+    assert note == (
+        'Note: "frame_id" was not accepted on a "wait" action and was ignored '
+        '(a "wait" action takes "duration_ms").'
+    )
+    assert note.count("frame_id") == 1
+    for name in sorted(_ACTION_KIND_FIELDS["wait"] - {"kind", "observation_id"}):
+        assert f'"{name}"' in note
+
+
+def test_the_tolerated_field_note_bounds_its_roster_and_handles_empty() -> None:
+    """One line, bounded, and silent exactly when nothing was dropped."""
+
+    from local_operator.evaluation.runner.public_reply import (
+        _ACTION_FIELD_NAMES,
+        _ACTION_KIND_FIELDS,
+        tolerated_fields_note,
+    )
+
+    assert tolerated_fields_note([]) is None
+    pairs = [
+        (kind, field)
+        for kind in sorted(_ACTION_KIND_FIELDS)
+        for field in sorted(_ACTION_FIELD_NAMES)
+        if field not in _ACTION_KIND_FIELDS[kind]
+    ]
+    assert len(pairs) >= 7
+    note = tolerated_fields_note([f"{kind}.{field}" for kind, field in pairs[:7]])
+    assert note is not None
+    assert "\n" not in note
+    assert note.count("was not accepted") == 5
+    assert note.endswith("and 2 more.")
+
+
+def test_the_tolerated_field_note_re_checks_vocabulary_membership() -> None:
+    """The no-model-bytes property is local to the function that renders it.
+
+    ``tolerated_fields_note`` output is written into a request, so the one
+    place the line's contents are decided must not rely on its caller: a pair
+    renders only when ``kind`` is a declared kind, ``field`` is a vocabulary
+    field, and the field is not one the kind accepts. A name outside the
+    vocabulary -- on either side of the pair -- is not something the tolerance
+    can drop, so it can never reach the line, whatever a future caller passes.
+    """
+
+    from local_operator.evaluation.runner.public_reply import tolerated_fields_note
+
+    assert tolerated_fields_note(["wait.frame_id"]) is not None
+    assert tolerated_fields_note(["wait.<injected>"]) is None
+    assert tolerated_fields_note(["<injected>.frame_id"]) is None
+    # A lookalike (trailing space) is not a vocabulary name either.
+    assert tolerated_fields_note(["wait.frame_id "]) is None
+    # A field the kind DOES accept is not a dropped pair: naming it as "not
+    # accepted" would contradict the clause that follows it.
+    assert tolerated_fields_note(["wait.duration_ms"]) is None
+    # A well-formed pair beside an unrenderable one still renders: the guard
+    # drops the clause, never the whole note.
+    assert tolerated_fields_note(["wait.frame_id", "bogus.also_bogus"]) == (
+        'Note: "frame_id" was not accepted on a "wait" action and was ignored '
+        '(a "wait" action takes "duration_ms").'
+    )
 
 
 def test_the_action_field_table_is_derived_from_every_kind() -> None:

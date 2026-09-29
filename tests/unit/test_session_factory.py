@@ -269,6 +269,96 @@ def test_resolve_with_source_names_what_chose_the_run() -> None:
     )
 
 
+def test_a_team_suggestion_sits_below_deliberate_choices_and_above_config() -> None:
+    """The §4.4 ladder on the fresh path: agent > flag > team > config.
+
+    The suggestion arrives as an ordinary namespace attribute (the exec
+    factory's ``team_model_suggestion``) and reports source ``"team"`` -- a
+    value ``session._restore_selected_model`` deliberately does NOT treat as a
+    rescued identity, so a resumed session's journalled selection still wins.
+    A half pair is not expressible: one empty member degrades to "no team".
+    """
+    from local_operator.session_factory import resolve_hosting_model_with_source
+
+    suggestion = SimpleNamespace(hosting="openrouter", model="vendor/model")
+    config = cast(
+        "ConfigManager",
+        FakeConfigManager({"hosting": "kimi", "model_name": "moonshot-v1-8k"}),
+    )
+
+    # team > config
+    assert resolve_hosting_model_with_source(
+        None, _args(team_model_suggestion=suggestion), config
+    ) == ("openrouter", "vendor/model", "team")
+    # flag > team (naming EITHER field is choosing; the flag wins the run's
+    # source, and the untouched half still comes from the team).
+    assert resolve_hosting_model_with_source(
+        None, _args(model="other", team_model_suggestion=suggestion), config
+    ) == ("openrouter", "other", "flag")
+    assert resolve_hosting_model_with_source(
+        None,
+        _args(hosting="openai", model="gpt-4o", team_model_suggestion=suggestion),
+        config,
+    ) == ("openai", "gpt-4o", "flag")
+    # agent row > team
+    agent = cast("AgentData", SimpleNamespace(hosting="anthropic", model="claude"))
+    assert resolve_hosting_model_with_source(
+        agent, _args(team_model_suggestion=suggestion), config
+    ) == ("anthropic", "claude", "agent")
+    # A half pair is no suggestion at all: config still supplies the run.
+    assert resolve_hosting_model_with_source(
+        None, _args(team_model_suggestion=SimpleNamespace(hosting="", model="m")), config
+    ) == ("kimi", "moonshot-v1-8k", "config")
+    # No team: byte-for-byte the old ladder.
+    assert resolve_hosting_model_with_source(None, _args(), config) == (
+        "kimi",
+        "moonshot-v1-8k",
+        "config",
+    )
+
+
+def test_a_saved_selection_outranks_a_team_suggestion(monkeypatch, tmp_path) -> None:
+    """A resume keeps its journalled identity; the team never rewrites it."""
+    from local_operator import session_factory as session_factory_module
+
+    saved = SimpleNamespace(provider="savedhost", model_id="savedmodel")
+    monkeypatch.setattr(
+        session_factory_module, "resume_dir", lambda config_dir, resume_id: tmp_path
+    )
+    monkeypatch.setattr(
+        "local_operator.session.model_selection.read_model_selection", lambda directory: saved
+    )
+    config = cast(
+        "ConfigManager",
+        FakeConfigManager({"hosting": "kimi", "model_name": "moonshot-v1-8k"}),
+    )
+
+    suggestion = SimpleNamespace(hosting="openrouter", model="vendor/model")
+    assert session_factory_module.resolve_hosting_model_with_source(
+        None, _args(resume="abc123", team_model_suggestion=suggestion), config
+    ) == ("savedhost", "savedmodel", "resume")
+
+
+def test_a_team_suggestion_naming_an_unknown_hosting_names_the_team() -> None:
+    """The repair prompt's source map learned ``team`` (§4.4's new rung)."""
+    from local_operator.session_factory import (
+        HostingUnknownError,
+        resolve_hosting_model_with_source,
+    )
+
+    config = cast(
+        "ConfigManager",
+        FakeConfigManager({"hosting": "kimi", "model_name": "moonshot-v1-8k"}),
+    )
+    suggestion = SimpleNamespace(hosting="nosuchprovider", model="m")
+
+    with pytest.raises(HostingUnknownError) as caught:
+        resolve_hosting_model_with_source(None, _args(team_model_suggestion=suggestion), config)
+
+    assert caught.value.source == "team"
+    assert "on the team's model suggestion" in str(caught.value)
+
+
 def test_an_unknown_hosting_still_names_where_the_HOSTING_came_from() -> None:
     """The returned source widened for R3; the REPAIR PROMPT's did not.
 

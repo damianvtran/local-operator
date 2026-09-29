@@ -164,6 +164,13 @@ async def run_compaction_pass(
         # per-surface guess. Under budget this is one cheap scan that changes
         # nothing; over budget the alternative is a request the provider
         # refuses outright, taking every frame with it.
+        #
+        # Deliberately the DROP step, not ``fit_frames_to_wire_budget``'s
+        # downscale: this pass's only production caller is the evaluation
+        # runner, whose frames are bound to a published ``model_visible``
+        # geometry (a frame's decoded pixels must equal it — the supervisor
+        # refuses any runner-side rewrite), so it may blank an old frame but
+        # never re-encode one.
         working, frames_dropped = shed_frames_to_wire_budget(
             working, budget=resolve_wire_bytes_budget(settings)
         )

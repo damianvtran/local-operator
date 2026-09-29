@@ -16,11 +16,19 @@ sizes, not a 34 MB blob in the repo.
 
 from __future__ import annotations
 
+import base64
+import io
 import json
+from typing import Sequence
 
 import pytest
+from PIL import Image
 
-from local_operator.compaction.pruning import shed_frames_to_wire_budget
+from local_operator.compaction.pruning import (
+    downscale_stale_frames,
+    fit_frames_to_wire_budget,
+    shed_frames_to_wire_budget,
+)
 from local_operator.compaction.thresholds import (
     DEFAULT_WIRE_BYTES_BUDGET,
     DEFAULT_WIRE_BYTES_TRIGGER,
@@ -36,6 +44,7 @@ from local_operator.compaction.tokens import (
     estimate_wire_bytes,
 )
 from local_operator.harness.types import ImageContent, Message, TextContent, ToolCall
+from local_operator.imaging import _CONTEXT_FRAME_CACHE, IMAGE_CONTEXT_EDGES
 
 #: Median base64 length of the 42 frames in the wedged session (min 709,616 /
 #: median 803,888 / max 981,728). Using the median keeps the fixture's totals
@@ -275,6 +284,233 @@ def test_shed_is_monotone_down_to_zero_frames() -> None:
         assert dropped >= previous
         previous = dropped
     assert previous == MEASURED_FRAME_COUNT
+
+
+# ---------------------------------------------------------------------------
+# The context downscale: the fidelity step of the byte ladder
+# ---------------------------------------------------------------------------
+#
+# The shed tests above run on synthetic non-image bytes on purpose — the shed
+# itself never decodes anything. The downscale is a decode, a resize and a
+# re-encode, so these tests need REAL pixels; the frame fixture below is a
+# deterministic screenshot-shaped PNG (gradient + speckle, which is what keeps
+# its size in the hundreds of KB instead of the few KB a flat fill takes).
+
+_FRAME_PNG: dict[tuple[int, int, int], bytes] = {}
+
+
+def _frame_png(width: int = 1280, height: int = 800, seed: int = 11) -> bytes:
+    """A deterministic desktop-screenshot-shaped frame, ~0.5-1 MB as PNG."""
+    key = (width, height, seed)
+    cached = _FRAME_PNG.get(key)
+    if cached is not None:
+        return cached
+    import random
+
+    rng = random.Random(seed)
+    image = Image.new("RGB", (width, height))
+    pixels = image.load()
+    assert pixels is not None
+    for y in range(height):
+        base = (30 + y * 40 // height, 40 + y * 30 // height, 60 + y * 60 // height)
+        for x in range(0, width, 2):
+            pixels[x, y] = base
+    for _ in range(width * height // 20):
+        pixels[rng.randrange(width), rng.randrange(height)] = (
+            rng.randrange(256),
+            rng.randrange(256),
+            rng.randrange(256),
+        )
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    _FRAME_PNG[key] = buffer.getvalue()
+    return buffer.getvalue()
+
+
+def _real_frame_messages(count: int) -> list[Message]:
+    """``count`` user messages each carrying a real PNG frame."""
+    encoded = base64.b64encode(_frame_png()).decode("ascii")
+    return [
+        Message(
+            role="user",
+            content=[TextContent(text=f"shot {index}"), ImageContent(data=encoded)],
+        )
+        for index in range(count)
+    ]
+
+
+def _real_history(count: int = 6) -> tuple[list[Message], list[Message]]:
+    """``(history, frame messages)`` in the alternating shape the runner and a
+    screen-driving session both build."""
+    frames = _real_frame_messages(count)
+    history: list[Message] = []
+    for index, message in enumerate(frames):
+        history.append(message)
+        history.append(Message.assistant(f"ok {index}"))
+    return history, frames
+
+
+def _image_blocks_of(messages: Sequence[Message]) -> list[ImageContent]:
+    """The image blocks of ``messages``, in order.
+
+    A helper rather than an inline comprehension so every assertion below sees
+    ``ImageContent`` (typed), not the message content union.
+    """
+    return [
+        block
+        for message in messages
+        for block in message.content
+        if isinstance(block, ImageContent)
+    ]
+
+
+def test_downscale_stale_frames_keeps_the_newest_and_never_removes_a_message() -> None:
+    """The sibling contract to the prune's: the newest frame message is reused
+    BY IDENTITY, victims are copied with the smaller bytes, frame-free
+    messages are reused, and no message is ever removed."""
+    history, frames = _real_history(3)
+    _CONTEXT_FRAME_CACHE.clear()
+
+    out, downscaled = downscale_stale_frames(history, keep_recent_frames=1, max_edge=1024)
+
+    assert downscaled == 2
+    assert len(out) == len(history)
+    assert [m.id for m in out] == [m.id for m in history]
+    assert out[4] is frames[2], "the newest frame message was copied or changed"
+    assert out[2] is not frames[1]
+    blocks = _image_blocks_of(out)
+    originals = _image_blocks_of(frames)
+    assert blocks[0].data != originals[0].data
+    assert blocks[0].mime_type in {"image/png", "image/jpeg"}
+    assert out[1] is history[1], "a frame-free message was not reused by identity"
+
+
+def test_downscale_stale_frames_zero_downscales_everything_and_rejects_negative() -> None:
+    history, frames = _real_history(2)
+    _CONTEXT_FRAME_CACHE.clear()
+
+    out, downscaled = downscale_stale_frames(history, keep_recent_frames=0, max_edge=1024)
+
+    assert downscaled == 2
+    blocks = _image_blocks_of(out)
+    originals = _image_blocks_of(frames)
+    assert blocks[0].data != originals[0].data
+    assert blocks[1].data != originals[1].data
+    with pytest.raises(ValueError):
+        downscale_stale_frames(history, keep_recent_frames=-1, max_edge=1024)
+
+
+def test_downscale_stale_frames_leaves_non_images_untouched() -> None:
+    """The synthetic 'A' frames the shed tests use are valid base64 that is not
+    an image: the downscale must degrade to a no-op rather than raise, so the
+    shed below it can still act on exactly the history it always saw."""
+    history = [_frame(0), Message.assistant("ok")]
+    _CONTEXT_FRAME_CACHE.clear()
+
+    out, downscaled = downscale_stale_frames(history, keep_recent_frames=0, max_edge=1024)
+
+    assert downscaled == 0
+    assert all(a is b for a, b in zip(out, history))
+
+
+def test_fit_downscales_and_keeps_every_frame_when_a_rung_fits() -> None:
+    """THE policy change, as one assertion set: over budget, the request comes
+    back under it with EVERY frame still present — the newest at full
+    fidelity — and ZERO frames dropped."""
+    history, frames = _real_history(6)
+    original = _image_blocks_of(frames)[-1].data
+    total = estimate_wire_bytes(history)
+    budget = int(total * 0.75)
+    _CONTEXT_FRAME_CACHE.clear()
+
+    out, downscaled, dropped, _rung = fit_frames_to_wire_budget(history, budget=budget)
+
+    assert dropped == 0, "a frame was dropped although a rung fit"
+    assert downscaled == 5
+    assert estimate_wire_bytes(out) <= budget
+    assert len(out) == len(history)
+    assert [m.id for m in out] == [m.id for m in history]
+    blocks = _image_blocks_of(out)
+    assert len(blocks) == 6, "a frame became a notice"
+    assert blocks[-1].data == original, "the newest frame lost fidelity"
+    assert blocks[0].data != original, "no old frame was re-rendered"
+
+
+def test_fit_stops_at_the_first_rung_that_fits() -> None:
+    """The walk is ordered and stops as soon as the request fits: a budget one
+    byte below the widest rung's total lands on the NEXT rung — not on a shed,
+    and not on a deeper rung."""
+    history, _frames = _real_history(6)
+    _CONTEXT_FRAME_CACHE.clear()
+    widest, _ = downscale_stale_frames(
+        history, keep_recent_frames=1, max_edge=IMAGE_CONTEXT_EDGES[0]
+    )
+    next_rung, _ = downscale_stale_frames(
+        history, keep_recent_frames=1, max_edge=IMAGE_CONTEXT_EDGES[1]
+    )
+    widest_bytes = estimate_wire_bytes(widest)
+    assert estimate_wire_bytes(next_rung) < widest_bytes
+
+    out, downscaled, dropped, rung = fit_frames_to_wire_budget(history, budget=widest_bytes - 1)
+
+    assert dropped == 0
+    assert downscaled == 5
+    assert rung == IMAGE_CONTEXT_EDGES[1], "the reported rung must match the walk"
+    assert estimate_wire_bytes(out) <= widest_bytes - 1
+    assert estimate_wire_bytes(out) == estimate_wire_bytes(
+        next_rung
+    ), "the walk did not stop at the first rung that fits"
+
+
+def test_fit_sheds_from_the_tightest_rung_when_no_rung_fits() -> None:
+    """The last resort is unchanged: when even the tightest rung is over
+    budget, the shed replaces the oldest frames with notices and no message is
+    removed."""
+    history, _frames = _real_history(6)
+    _CONTEXT_FRAME_CACHE.clear()
+
+    out, downscaled, dropped, rung = fit_frames_to_wire_budget(history, budget=40_000)
+
+    assert dropped > 0
+    assert downscaled == 5, "the rungs were not applied before the shed"
+    assert rung == IMAGE_CONTEXT_EDGES[-1], "the shed reports the tightest rung"
+    assert estimate_wire_bytes(out) <= 40_000
+    assert len(out) == len(history)
+    assert [m.id for m in out] == [m.id for m in history]
+
+
+def test_fit_is_a_no_op_under_budget_and_when_disabled() -> None:
+    """The guarantee that every session under budget is byte-identical: the
+    input elements come back by identity and both counts are zero."""
+    history, _frames = _real_history(2)
+    total = estimate_wire_bytes(history)
+
+    out, downscaled, dropped, rung = fit_frames_to_wire_budget(history, budget=total + 1)
+    assert (downscaled, dropped) == (0, 0)
+    assert rung is None, "nothing was walked, so no rung"
+    assert all(a is b for a, b in zip(out, history)), "under budget must not copy"
+
+    out, downscaled, dropped, rung = fit_frames_to_wire_budget(history, budget=0)
+    assert (downscaled, dropped) == (0, 0)
+    assert rung is None
+    assert all(a is b for a, b in zip(out, history))
+
+
+def test_fit_is_deterministic_across_calls() -> None:
+    """A frame's downscaled bytes are STABLE across fits — the prompt-cache
+    property the policy rests on: the same history re-fitted (as every render
+    does) produces identical block bytes for the same frames."""
+    history, _frames = _real_history(4)
+    total = estimate_wire_bytes(history)
+    budget = int(total * 0.8)
+
+    first, _d1, _r1, g1 = fit_frames_to_wire_budget(history, budget=budget)
+    second, _d2, _r2, g2 = fit_frames_to_wire_budget(history, budget=budget)
+
+    assert [block.data for block in _image_blocks_of(first)] == [
+        block.data for block in _image_blocks_of(second)
+    ]
+    assert g1 == g2, "the walk lands on the same rung across fits"
 
 
 # ---------------------------------------------------------------------------

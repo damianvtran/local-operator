@@ -597,6 +597,34 @@ anthropic_models: Dict[str, ModelInfo] = {
         ),
         recommended=True,
     ),
+    # Claude Sonnet 5.5 -- the balanced tier of the 5 generation, superseding
+    # Sonnet 5 as that tier (Sonnet 5 remains served and stays listed below).
+    # Id, name, 1M window and 128k output from the models overview table at
+    # https://platform.claude.com/docs/en/about-claude/models/overview (read
+    # 2026-09-29; also served by the live `/v1/models` listing under a Claude
+    # Pro/Max OAuth grant the same day). Prices from the pricing page above,
+    # read the same day: $2 in / $2.50 5m write / $0.20 cache hit / $10 out.
+    # The cache hit is the standard 0.1x base input; the 0.025x/0.05x footnotes
+    # belong to Fable 5.1/Mythos 5.1 and Opus 5.5, not here.
+    "claude-sonnet-5-5": ModelInfo(
+        id="claude-sonnet-5-5",
+        name="Claude Sonnet 5.5",
+        max_tokens=128_000,
+        context_window=1_000_000,
+        supports_images=True,
+        supports_prompt_cache=True,
+        limits_from_listing=True,
+        input_price=2.0,  # $2 / MTok
+        output_price=10.0,  # $10 / MTok
+        cache_writes_price=2.50,  # $2.50 / MTok (5m write)
+        cache_reads_price=0.20,  # $0.20 / MTok
+        description=(
+            "Claude Sonnet 5.5: the balanced tier of the 5.5 generation and "
+            "Anthropic's best combination of speed and intelligence, with a "
+            "1M-token context window and 128k of output."
+        ),
+        recommended=False,
+    ),
     "claude-opus-5": ModelInfo(
         id="claude-opus-5",
         name="Claude Opus 5",

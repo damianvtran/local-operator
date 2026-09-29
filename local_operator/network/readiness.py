@@ -376,20 +376,45 @@ def shareable_lines(rows: Iterable[Mapping[str, Any]]) -> list[str]:
     already follow). An already-shared server nests its holders the way the network
     blocks do. Empty input renders NOTHING — the block is additive, and a device that
     declares no HTTP/SSE servers has no ledger to print.
+
+    TWO ROW KINDS share the block: an MCP-server row (``server``/``transport``/
+    ``login_here``, the original shape) and a PROVIDER-LOGIN row (``provider``/
+    ``kind``/``identity_label``; Radient org projection, 2026-09-29). The provider
+    row exists only when this device HOLDS the login — there is no server list to
+    say "no login here yet" about — so it renders the held sentence, and, when the
+    classifier read one, the identity the operator signed in as. The Radient row
+    adds one caution line naming its person scope (design review round 1, D1).
     """
     materialized = [row for row in rows if isinstance(row, Mapping)]
     if not materialized:
         return []
     lines = ["shareable here:"]
     for row in materialized:
-        login = row.get("login_here")
-        if login is True:
-            summary = f"login held — share: {row.get('remedy') or ''}"
-        elif login is False:
-            summary = f"no login here yet — {row.get('remedy') or ''}"
+        if "provider" in row:
+            lines.append(
+                f"  {row.get('provider')}  {row.get('kind')}  "
+                f"login held — share: {row.get('remedy') or ''}"
+            )
+            # ONE CAUTION LINE, RADIENT ONLY (design review round 1, D1): the org
+            # login is the family's person-scoped account — it can publish and
+            # delete teams and agents — and its row was otherwise word-for-word the
+            # openai row, so the caution lived only in the GUIDE. Other provider
+            # logins are lent under the same one-device rule; only this one reads
+            # as an org-scoped grant without the cue.
+            if row.get("provider") == "radient":
+                lines.append("      organization account — share only to your own devices")
+            label = str(row.get("identity_label") or "")
+            if label:
+                lines.append(f"      signed in as {label}")
         else:
-            summary = "login state not known — this device's credential store could not be read"
-        lines.append(f"  {row.get('server')}  {row.get('transport')}  {summary}")
+            login = row.get("login_here")
+            if login is True:
+                summary = f"login held — share: {row.get('remedy') or ''}"
+            elif login is False:
+                summary = f"no login here yet — {row.get('remedy') or ''}"
+            else:
+                summary = "login state not known — this device's credential store could not be read"
+            lines.append(f"  {row.get('server')}  {row.get('transport')}  {summary}")
         for holder in row.get("shared_with") or []:
             if not isinstance(holder, Mapping):
                 continue

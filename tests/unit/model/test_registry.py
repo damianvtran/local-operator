@@ -435,6 +435,17 @@ def test_the_five_series_ships_the_window_the_provider_reports() -> None:
     assert anthropic_models["claude-opus-4-5-20251101"].context_window == 200_000
 
 
+def test_sonnet_5_5_ships_the_window_the_overview_table_reports() -> None:
+    """Read from the models overview table on 2026-09-29, whose entry the live
+    `/v1/models` listing agreed with the same day. The offline path is the
+    whole reason these rows exist, so a drift here is a silently wrong
+    compaction threshold rather than a cosmetic one."""
+    row = anthropic_models["claude-sonnet-5-5"]
+    assert (row.context_window, row.max_tokens) == (1_000_000, 128_000)
+    assert row.supports_images is True
+    assert row.supports_prompt_cache is True
+
+
 @pytest.mark.parametrize(
     "model_id, expected",
     [

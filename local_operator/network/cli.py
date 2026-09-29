@@ -1383,10 +1383,13 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
         )
     # THE PREFLIGHT THE OFFLOAD TEST FOUND MISSING (design §2). A login held here but
     # shared nowhere had no row on any surface until `credential share` refused, so
-    # the operator learned what was shareable only at share time.
+    # the operator learned what was shareable only at share time. Provider logins are
+    # rows here too (see ``_shareable_providers``): the same discovery gap applied to
+    # every provider key, the Radient org account among them.
     from local_operator.network import readiness as readiness_mod
 
     shareable = _shareable_servers(self_device)
+    shareable.extend(_shareable_providers(self_device))
     lines.extend(readiness_mod.shareable_lines(shareable))
     payload = {
         "ok": True,
@@ -1479,6 +1482,80 @@ def _shareable_servers(self_device: str) -> list[dict[str, Any]]:
                 "login_here": login_here,
                 "shared_with": shared_with,
                 "remedy": remedy,
+            }
+        )
+    return rows
+
+
+def _shareable_providers(self_device: str) -> list[dict[str, Any]]:
+    """The provider-login rows of the ``shareable here`` ledger, beside the MCP rows.
+
+    WHY IT EXISTS (Radient org projection, 2026-09-29): the ledger enumerated MCP
+    servers only, so a provider login held here but shared nowhere — the operator's
+    own Radient org account among them — had no row on any surface until
+    ``credential share`` refused. One row per ENABLED provider login in this device's
+    store, read through the same open-first guard the share verb's refusal uses
+    (``_open_local_store``: never constructs a store, never creates one), joined with
+    any placement entry this device holds so an already-shared login says where.
+    ``kind``/``identity_label`` come from ``_shape_from_rows``, the same classifier
+    the share records with, so the two cannot disagree.
+
+    EXCLUDED, deliberately: the MCP rows (``mcp-oauth`` — the server rows above are
+    their ledger) and device-bound logins (``DEVICE_BOUND_PROVIDERS``, i.e. kimi): a
+    row the broker refuses BY NAME would promise every reader something that cannot
+    be served. READ-ONLY: no declare, no placement write, no store construction; the
+    remedy is the command the operator would run next, with ``<device>`` standing
+    where a target device goes (the ledger cannot know which one).
+    """
+    from local_operator.network.credentials import placement as placement_mod
+    from local_operator.network.credentials.types import DEVICE_BOUND_PROVIDERS
+
+    store = _open_local_store(_config_dir())
+    if store is None:
+        # No store at all: nothing to enumerate, and creating one to say so would
+        # make the ledger a writer (the read-only promise above).
+        return []
+    try:
+        credentials = list(store.list_credentials(None))
+    except Exception:  # noqa: BLE001 — an unreadable store has no provider logins to show
+        return []
+    finally:
+        _close_quietly(store)
+
+    by_provider: dict[str, list[Any]] = {}
+    for credential in credentials:
+        provider = str(getattr(credential, "provider", "") or "")
+        if not provider or provider == "mcp-oauth" or provider in DEVICE_BOUND_PROVIDERS:
+            continue
+        by_provider.setdefault(provider, []).append(credential)
+
+    rows: list[dict[str, Any]] = []
+    for provider in sorted(by_provider):
+        kind, _name, label = _shape_from_rows(provider, by_provider[provider])
+        shared_with: list[dict[str, str]] = []
+        found = placement_mod.placement_entries_for(provider=provider, root=_config_dir())
+        if found is not None:
+            network_id, entry = found
+            record = _record_for(network_id)
+            for holder in entry.holders:
+                if holder.device in (self_device, entry.owner_device):
+                    # The owner's own row and this device's are not "shares" — the
+                    # same rule the MCP rows above and the network blocks render with.
+                    continue
+                shared_with.append(
+                    {
+                        "device": holder.device,
+                        "name": _member_name(record, holder.device) if record is not None else "",
+                        "scope": holder.scope,
+                    }
+                )
+        rows.append(
+            {
+                "provider": provider,
+                "kind": kind,
+                "identity_label": label,
+                "shared_with": shared_with,
+                "remedy": f"lop network credential share {provider} --with <device>",
             }
         )
     return rows
@@ -1630,6 +1707,15 @@ def _credential_shape(key: str) -> tuple[str, str, str]:
     Read from the OWNER's own store, so the document records what is actually signed
     in rather than what the operator typed: a ``kind`` that disagreed with the row
     would make the broker's narrowing rule and the operator's expectation diverge.
+
+    THE OAUTH ROW WINS over an older pasted key (Radient org projection): a provider
+    can hold BOTH a ``radient-key`` login and the org OAuth login under one provider
+    (``radient-key`` aliases into ``"radient"``), and org calls are served from the
+    OAuth row. Reading the oldest row — ``list_credentials`` is ``ORDER BY id`` —
+    recorded ``api-key-static``/``""`` for a store whose org calls are OAuth, so a
+    share looked narrower than the login actually is. The aliased MIXED buckets
+    today are ``radient``, ``xai`` and ``zai``; the OAuth row wins in all of
+    them.
     """
     from local_operator.network.credentials.types import is_mcp_key, mcp_url_from_key
 
@@ -1652,10 +1738,20 @@ def _credential_shape(key: str) -> tuple[str, str, str]:
             finally:
                 _close_quietly(store)
         return "mcp-rotating", "mcp-oauth", ""
-    rows = _provider_rows(key, config)
+    return _shape_from_rows(key, _provider_rows(key, config))
+
+
+def _shape_from_rows(key: str, rows: list[Any]) -> tuple[str, str, str]:
+    """``(kind, key, identity label)`` from a provider's enabled store rows.
+
+    One spelling for the share verb (``_credential_shape``) and the ledger
+    (``_shareable_providers``), so the kind a share records and the kind the ledger
+    shows cannot drift. An OAuth row is preferred over an older static row (see
+    ``_credential_shape``); ``key`` is what the no-rows case names.
+    """
     if not rows:
         return "oauth-rotating", key, ""
-    row = rows[0]
+    row = next((candidate for candidate in rows if candidate.credential_type == "oauth"), rows[0])
     label = str(row.data.get("email") or row.data.get("account_id") or "")
     kind = "oauth-rotating" if row.credential_type == "oauth" else "api-key-static"
     return kind, key, label
@@ -5183,11 +5279,17 @@ def _doctor_locally(args: argparse.Namespace) -> dict[str, Any]:
     a mesh it had not looked at (Q-R2-6).
     """
     from local_operator.network import store
+    from local_operator.network.audit import AuditLog
+    from local_operator.network.credentials.repair import repair_checks
     from local_operator.network.identity import identity_path
     from local_operator.network.relay import membership_state
 
     relay_line, relay_up = _relay_state()
     checks: list[dict[str, Any]] = []
+    # One reader for every network's derivation below: a reader instance holds no
+    # buffer, and ``tail`` flushes first so even a same-process writer's last second
+    # is visible.
+    repair_log = AuditLog()
     identity_file = identity_path()
     checks.append(
         {
@@ -5220,6 +5322,11 @@ def _doctor_locally(args: argparse.Namespace) -> dict[str, Any]:
                     "remedies": standing["remedies"],
                 }
             )
+        # THE SAME REPAIR ROWS THE RELAY'S OWN DOCTOR EMITS, for the membership
+        # row's own reason: with the relay down the audit file is still here, and
+        # the owner of a dead login is exactly the device that needs the notice when
+        # nothing else answers it (``credentials/repair.py`` owns the derivation).
+        checks.extend(repair_checks(record, log=repair_log))
         for member in record.active_members():
             if member.device_id == record.self_device_id:
                 continue

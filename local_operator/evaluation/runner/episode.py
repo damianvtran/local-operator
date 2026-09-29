@@ -954,13 +954,23 @@ class EpisodeRunner:
                 return
             decision = await self._decide(current)
             batch = decision.action_batch
+            # The tolerated sibling fields ride the turn, and the update always
+            # states the roster of the LAST accepted reply -- empty included.
+            # A re-decide for this same turn (a challenged completion) then
+            # cannot leave an earlier attempt's correction standing: the
+            # client renders whatever the current turn carries, so last-wins is
+            # the rule that keeps the note true of the reply it describes. Read
+            # with a default for the scripted clients, which have no reply
+            # assembly and state no roster at all.
+            turn_update: dict[str, Any] = {
+                "tolerated_field_names": tuple(getattr(decision, "tolerated_field_names", ()) or ())
+            }
             if decision.public_reply is not None:
                 # _decide_once has already redacted and published this reply.
                 # Keep it on the current observation through _close_turn so
                 # accepted replay cannot silently collapse back to actions.
-                self._turns[-1] = self._turns[-1].model_copy(
-                    update={"public_reply": decision.public_reply}
-                )
+                turn_update["public_reply"] = decision.public_reply
+            self._turns[-1] = self._turns[-1].model_copy(update=turn_update)
             terminal = _terminal_kind(batch)
             if terminal == "finish":
                 # A ``done`` declaration is refused-as-a-claim ONCE (see

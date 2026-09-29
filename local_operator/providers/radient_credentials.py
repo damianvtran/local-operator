@@ -19,6 +19,7 @@ from local_operator.providers.registry import get_provider_definition
 
 if TYPE_CHECKING:
     from local_operator.config import ConfigManager
+    from local_operator.network.credentials.store import MeshAwareAuthStore
 
 
 def configured_radient_base_url(config_manager: "ConfigManager") -> str:
@@ -144,8 +145,43 @@ def org_oauth_destination_allowed(base_url: str) -> bool:
     return bool(value) and value.strip().lower() in _TRUTHY_ENV_VALUES
 
 
+def _radient_auth_store(config_dir: Path | None) -> AuthStore | MeshAwareAuthStore:
+    """The store both resolvers read through: one spelling of the plain-vs-mesh predicate.
+
+    THE MESH RUNG (Radient org projection, 2026-09-29): ``build_auth_store`` is the
+    session path's own predicate for "plain, or mesh-aware when this device borrows",
+    and routing both resolvers through it is what lets a PAIRED device without the
+    signed-in account borrow the owner's bearer instead of returning ``None`` —
+    ``lop teams pull`` on that device then runs as the account the owner lent.
+
+    THE DB PATH IS SPELLED EXPLICITLY, preserving what both resolvers always passed:
+    ``config_dir`` alone does not set ``AuthStore``'s DATABASE (it feeds the
+    env-override tier only), so a caller whose ``config_dir`` is not the ambient root
+    — tests, embedded roots — would silently read the AMBIENT ``auth.db`` after a
+    naive swap. ``build_auth_store``'s ``db_path`` default keeps every other caller
+    byte-identical.
+
+    Side effect, accepted and bounded: an ATTEMPTED borrow that is refused parks this
+    device's observation (``PlacementState`` — key name, refusal code, retry-after;
+    no credential material, 0600, bounded TTLs) beside the placement document. A
+    resolve that never attempts a borrow (no entry, or not a holder) writes nothing.
+
+    The return type names the two implementations ``build_auth_store`` can return
+    (the plain store, or the mesh-aware wrapper); ``build_auth_store`` itself is
+    typed ``Any``, and naming them here keeps the CALLERS checked instead of blind.
+    """
+    from local_operator.network.credentials import build_auth_store
+
+    return build_auth_store(
+        config_dir, db_path=(config_dir / "auth.db") if config_dir is not None else None
+    )
+
+
 async def resolve_radient_credential(
-    config_dir: Path | None, base_url: str, *, store: AuthStore | None = None
+    config_dir: Path | None,
+    base_url: str,
+    *,
+    store: AuthStore | MeshAwareAuthStore | None = None,
 ) -> SecretStr:
     if not canonical_radient_destination(base_url):
         # An explicit legacy gateway must not receive a centrally signed-in
@@ -154,9 +190,10 @@ async def resolve_radient_credential(
         # this route resolves.
         return _radient_api_key(config_dir)
     owns_store = store is None
-    store = store or AuthStore(
-        (config_dir / "auth.db") if config_dir is not None else None, config_dir=config_dir
-    )
+    # THE MESH RUNG: a device without the login borrows the owner's bearer (see
+    # ``_radient_auth_store``); local rows still win, and a borrow that is refused
+    # or absent falls through to the extension seam exactly as before.
+    store = store or _radient_auth_store(config_dir)
     try:
         # Read-only avoids moving inference account stickiness for catalogue,
         # upload and speech helpers; a required refresh still persists centrally.
@@ -181,7 +218,10 @@ def resolve_radient_credential_sync(config_dir: Path | None, base_url: str) -> S
 
 
 async def resolve_radient_oauth_access(
-    config_dir: Path | None, base_url: str, *, store: AuthStore | None = None
+    config_dir: Path | None,
+    base_url: str,
+    *,
+    store: AuthStore | MeshAwareAuthStore | None = None,
 ) -> OAuthAccess | None:
     """The signed-in Radient account behind an ORGANIZATION (person-scoped) call.
 
@@ -208,13 +248,20 @@ async def resolve_radient_oauth_access(
     persists centrally. A grant the IdP has declared dead comes back as
     ``None`` (the cascade rotates away from unusable rows), which is exactly the
     "expired login" case the caller renders as the re-login remedy.
+
+    ONE RUNG BELOW THE LOCAL READ, the mesh may serve this device a bearer the
+    operator lent from a paired device (``build_auth_store``): the borrow is
+    attempted only when this device is a named holder, the destination guard
+    above still runs FIRST (a refused destination never asks an owner for a
+    bearer), and the kind rule below still decides — a borrowed API key refuses
+    exactly as a local one would, so person-scope is preserved over the mesh.
     """
     if not org_oauth_destination_allowed(base_url):
         return None
     owns_store = store is None
-    store = store or AuthStore(
-        (config_dir / "auth.db") if config_dir is not None else None, config_dir=config_dir
-    )
+    # THE MESH RUNG: with a borrowable share, the read below borrows the owner's
+    # bearer instead of returning ``None`` (see ``_radient_auth_store``).
+    store = store or _radient_auth_store(config_dir)
     try:
         access = await store.get_oauth_access("radient", read_only=True)
     finally:

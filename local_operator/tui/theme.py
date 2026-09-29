@@ -93,7 +93,12 @@ BRAND_TOKENS: dict[str, dict[str, str]] = {
         "accent": "#177b45",
         "string": "#1e7b4e",
         "success": "#1e7b4e",
-        "warning": "#8a5800",
+        # Solved for the modal card ground too (design round 1 of the mesh repair
+        # notice, D2): on `overlay` the previous #8a5800 measured 3.97:1, under the
+        # 4.5:1 AA floor for normal text. This value is 4.78:1 there and clears
+        # every other light ground (paper 6.62, surface 6.06, raised 5.42,
+        # sunken 5.52); pinned in tests/unit/tui/test_palette_contrast.py.
+        "warning": "#7a4d00",
         "danger": "#b23a31",
         "signal": "#2b6ea8",
         "label": "#7c5a9e",

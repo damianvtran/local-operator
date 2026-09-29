@@ -287,6 +287,12 @@ def test_list_models_with_provider(client, mock_credential_manager):
     # Check that all models are from the specified provider
     for model in models:
         assert model["provider"] == "anthropic"
+    # The Anthropic rows on this surface come from the registry itself, so a
+    # row added to `anthropic_models` must be visible here — this is the list
+    # an offline or first-run picker reads.
+    sonnet_55 = next((m for m in models if m["id"] == "claude-sonnet-5-5"), None)
+    assert sonnet_55 is not None, sorted(m["id"] for m in models)
+    assert sonnet_55["name"] == "Claude Sonnet 5.5"
 
 
 def test_list_models_invalid_provider(client, mock_credential_manager):
