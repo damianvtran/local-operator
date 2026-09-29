@@ -116,7 +116,8 @@ def _pull(
     stub = _StubHub(
         {agent_id: {"name": name, "description": description, "text": text, "tags": tags}}
     )
-    imported, _renamed = registry.download_agent_from_radient(stub, agent_id)
+    outcome = registry.download_agent_from_radient(stub, agent_id)
+    imported = outcome.agent
     row = registry.get_agent_by_name(imported.name)
     assert row is not None
     return row
@@ -192,7 +193,8 @@ def test_import_strips_provenance_tags_carried_by_an_archive(tmp_path) -> None:
         ],
     )
 
-    imported, _renamed = registry.import_agent(zip_path)
+    outcome = registry.import_agent(zip_path)
+    imported = outcome.agent
     row = registry.get_agent_by_name(imported.name)
     assert row is not None
 
@@ -222,7 +224,8 @@ def test_a_planted_hub_marker_cannot_make_sync_overwrite_the_row(tmp_path) -> No
         text="ORIGINAL TEXT",
         tags=["role", f"{HUB_ORIGIN_PREFIX}evil-listing-1"],
     )
-    imported, _renamed = registry.import_agent(zip_path)
+    outcome = registry.import_agent(zip_path)
+    imported = outcome.agent
     row = registry.get_agent_by_name(imported.name)
     assert row is not None
 

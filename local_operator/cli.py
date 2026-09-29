@@ -8384,22 +8384,35 @@ def agents_pull_org_command(args: argparse.Namespace, agent_registry: Any, base_
             )
         return 1
     try:
-        imported_agent, renamed_from = agent_registry.download_agent_from_radient(
-            client, args.id, with_credential=True
-        )
+        outcome = agent_registry.download_agent_from_radient(client, args.id, with_credential=True)
+        imported_agent = outcome.agent
         print(
             f"\n\033[1;32mSuccessfully pulled agent '{imported_agent.name}' "
             f"(ID: {imported_agent.id}) from organization '{tenant}'\033[0m"
         )
-        if renamed_from is not None:
+        if outcome.renamed_from is not None:
             print(
-                f"\033[1;33m  Renamed from '{renamed_from}': you already have an "
-                f"agent with that name.\033[0m"
+                f"\033[1;33m  Renamed from '{outcome.renamed_from}': you already "
+                f"have an agent with that name.\033[0m"
             )
+        _print_model_notice(outcome.model_notice)
         return 0
     except Exception as e:  # noqa: BLE001 — the hub's refusal is the report
         print(f"\n\033[1;31mError pulling agent from the organization: {_hub_cause(e)}\033[0m")
         return 1
+
+
+def _print_model_notice(notice: Any) -> None:
+    """Render a carried model-suggestion notice as the yellow CLI line (§4.3).
+
+    Data on an import result, never an error: the import already succeeded, and
+    this only says which suggestion was skipped and why. ONE renderer for every
+    pull command, so the copy round has one target, and the wording itself
+    lives on the notice (:meth:`local_operator.model.suggestion.ModelNotice.describe`).
+    """
+    if notice is None:
+        return
+    print(f"\033[1;33m  {notice.describe()}\033[0m")
 
 
 def teams_push_command(args: argparse.Namespace, team_registry: Any, base_dir: Path) -> int:
@@ -8412,6 +8425,10 @@ def teams_push_command(args: argparse.Namespace, team_registry: Any, base_dir: P
     prompt, no guessed target. The document is preflighted by the builder, so
     a team the hub would refuse reports here, before any upload is spent.
     """
+    from local_operator.agents import (  # lazy: heavy module
+        AgentRegistry,
+        agents_store_present,
+    )
     from local_operator.teams import (  # lazy: pydantic models
         TeamDocumentError,
         hub_team_document,
@@ -8425,8 +8442,15 @@ def teams_push_command(args: argparse.Namespace, team_registry: Any, base_dir: P
     if team is None:
         print(f"\n\033[1;31mError: No team found with name: {args.name}\033[0m")
         return 1
+    # The derive-from-manager fallback needs the agent registry, GUARDED like
+    # every other launch-path reader (``agents_store_present``): constructing an
+    # ``AgentRegistry`` creates its store root, so a push on a machine that has
+    # never registered an agent must derive nothing rather than have the push
+    # create a store it then reads one row out of. The same guard
+    # ``exec_startup`` uses for the same reason.
+    agent_registry = AgentRegistry(base_dir) if agents_store_present(base_dir) else None
     try:
-        document = hub_team_document(team)
+        document = hub_team_document(team, agent_registry=agent_registry)
     except TeamDocumentError as exc:
         # A local preflight refusal: the hub would refuse the same document,
         # so render it like this command's other refusals and spend no upload.
@@ -8492,6 +8516,18 @@ def teams_pull_command(args: argparse.Namespace, team_registry: Any, base_dir: P
                 f"\033[1;33m  Renamed from '{outcome.renamed_from}': you already "
                 f"have a team with that name.\033[0m"
             )
+    if outcome.model_notice is not None:
+        _print_model_notice(outcome.model_notice)
+    elif team.model_suggestion is not None:
+        # Stored -- applied at LAUNCH, not now. Saying where it applies keeps a
+        # pull with an unavailable-then-unavailable suggestion from reading as
+        # "the pull did nothing about it" (§4.3).
+        print(
+            f"\033[1;33m  Model suggestion stored: 'lop exec --team {team.name}' "
+            f"will launch on '{team.model_suggestion.model}' (hosting "
+            f"'{team.model_suggestion.hosting}') unless a launch flag or a resumed "
+            f"session's own selection overrides it.\033[0m"
+        )
     return 0
 
 
@@ -10366,14 +10402,13 @@ def main() -> int:
                 base_url = _radient_hub_base_url(config_manager)
                 radient_client = RadientClient(api_key=None, base_url=base_url)
                 try:
-                    imported_agent, renamed_from = agent_registry.download_agent_from_radient(
-                        radient_client, agent_id
-                    )
+                    outcome = agent_registry.download_agent_from_radient(radient_client, agent_id)
+                    imported_agent = outcome.agent
                     print(
                         f"\n\033[1;32mSuccessfully pulled agent '{imported_agent.name}' "
                         f"(ID: {imported_agent.id}) from Radient\033[0m"
                     )
-                    if renamed_from is not None:
+                    if outcome.renamed_from is not None:
                         # The user asked for a name they already hold locally, so
                         # the row landed under a suffix (contract §3.6). Saying so
                         # is what stops the pull reading as "it did nothing", and
@@ -10384,9 +10419,10 @@ def main() -> int:
                         # a local ``coder``), and naming the wrong one sends them
                         # looking for a row that is not there.
                         print(
-                            f"\033[1;33m  Renamed from '{renamed_from}': you already have an "
-                            f"agent with that name.\033[0m"
+                            f"\033[1;33m  Renamed from '{outcome.renamed_from}': you already "
+                            f"have an agent with that name.\033[0m"
                         )
+                    _print_model_notice(outcome.model_notice)
                     return 0
                 except Exception as e:
                     print(f"\n\033[1;31mError pulling agent from Radient: {e}\033[0m")

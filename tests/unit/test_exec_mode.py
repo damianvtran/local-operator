@@ -17,6 +17,7 @@ import os
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -2067,6 +2068,37 @@ def test_the_foreground_factory_carries_workstream_to_the_stamp(
     monkeypatch.setattr("local_operator.session_factory.create_session", fake_create_session)
     exec_mode._make_default_session_factory(ExecArgs(workstream=True))()
     assert seen["workstream"] is True
+
+
+def test_the_foreground_factory_carries_the_team_suggestion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The team's stored suggestion reaches the session args (§4.4).
+
+    Carried as its OWN attribute -- never synthesized --hosting/--model flags,
+    which resume would read as deliberate overrides -- and ``None`` for every
+    run without a team, which is what keeps the parity with the SDK's published
+    namespace keyed on the one exec-only field.
+    """
+    from local_operator.teams import ModelSuggestion
+
+    seen: dict[str, Any] = {}
+
+    def fake_create_session(session_args, *managers, **kwargs):
+        seen["suggestion"] = getattr(session_args, "team_model_suggestion", "<field missing>")
+        return None
+
+    monkeypatch.setattr("local_operator.config.ConfigManager", lambda *a: object())
+    monkeypatch.setattr("local_operator.agents.AgentRegistry", lambda *a: object())
+    monkeypatch.setattr("local_operator.session_factory.create_session", fake_create_session)
+    suggestion = ModelSuggestion(hosting="openrouter", model="vendor/model")
+    team = SimpleNamespace(model_suggestion=suggestion)
+
+    exec_mode._make_default_session_factory(ExecArgs(), team)()
+    assert seen["suggestion"] is suggestion
+
+    exec_mode._make_default_session_factory(ExecArgs())()
+    assert seen["suggestion"] is None
 
 
 def test_the_auto_probe_writes_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

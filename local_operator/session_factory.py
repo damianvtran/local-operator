@@ -476,6 +476,11 @@ _HOSTING_SOURCE_REMEDY = {
         "It came from the agent's own record, which overrides config, so update "
         "the agent's hosting; `local-operator provider` lists the supported ids."
     ),
+    "team": (
+        "It came from the team's stored model suggestion, so update the team (or "
+        "pass --hosting/--model for this run); `local-operator provider` lists "
+        "the supported ids."
+    ),
 }
 
 #: How a user leaves a DECISION-ONLY hosting, per source. The mirror of
@@ -495,6 +500,10 @@ _HOSTING_NOT_CHAT_REMEDY = {
     "agent": (
         "It came from the agent's own record, which overrides config, so update "
         "the agent's hosting instead."
+    ),
+    "team": (
+        "It came from the team's stored model suggestion, so update the team (or "
+        "pass a chat --hosting/--model for this run)."
     ),
 }
 
@@ -568,6 +577,7 @@ def _unknown_hosting_message(hosting: str, source: str = "config") -> str:
         "config": "in your configuration",
         "flag": "passed with --hosting",
         "agent": "on the agent record",
+        "team": "on the team's model suggestion",
     }.get(source, "in your configuration")
     remedy = _HOSTING_SOURCE_REMEDY.get(source, _HOSTING_SOURCE_REMEDY["config"])
     return f"Hosting '{hosting}' {where} is not a known provider. {remedy}"
@@ -604,14 +614,37 @@ def resolve_hosting_model(
     return hosting, model_name
 
 
+def _team_suggestion_pair(args: argparse.Namespace) -> tuple[str | None, str | None]:
+    """The team-launch model suggestion as a whole pair, or ``(None, None)``.
+
+    ``_make_default_session_factory`` carries the resolved team's stored
+    suggestion on the session args as its own attribute; this is that
+    attribute's ONE reader. A WHOLE pair or nothing: a half pair is not
+    expressible anywhere in this feature, and a hand-edited ``team.yml`` must
+    degrade to "no suggestion" rather than let one empty member steer hosting
+    while the other steers nothing.
+    """
+
+    suggestion = getattr(args, "team_model_suggestion", None)
+    if suggestion is None:
+        return None, None
+    hosting = str(getattr(suggestion, "hosting", "") or "").strip()
+    model = str(getattr(suggestion, "model", "") or "").strip()
+    if not hosting or not model:
+        return None, None
+    return hosting, model
+
+
 def resolve_hosting_model_with_source(
     agent: AgentData | None, args: argparse.Namespace, config_manager: ConfigManager
 ) -> tuple[str, str, str]:
     """Resolve conversation identity, retaining the provenance of real overrides.
 
-    New: agent > CLI > defaults. Resume: deliberate CLI override > durable
-    selection > birth precedence for legacy histories with no usable evidence.
-    Agent/profile edits and synthesized bootstrap arguments are not overrides.
+    New: agent > CLI > team suggestion > defaults. Resume: deliberate CLI
+    override > durable selection > birth precedence for legacy histories with
+    no usable evidence. Agent/profile edits and synthesized bootstrap
+    arguments are not overrides; a team's stored model suggestion sits below
+    all of those and above the config default (design §4.4).
     """
     # Resolve durable identity BEFORE validating global defaults or building a
     # provider client. A removed/invalid default cannot make a valid saved
@@ -687,22 +720,43 @@ def resolve_hosting_model_with_source(
 
     agent_hosting: str | None = getattr(agent, "hosting", None) if agent is not None else None
     flag_hosting: str | None = getattr(args, "hosting", None)
-    hosting = agent_hosting or flag_hosting or config_manager.get_config_value("hosting")
+    # THE TEAM LAUNCH'S SUGGESTION, below every deliberate choice (design
+    # §4.4): an `--agent` row, an explicit --hosting/--model flag and a
+    # resumed session's durable selection all still win; the team pair fills
+    # in only where the config default would have. Read as a WHOLE pair off
+    # the session args attribute ``_make_default_session_factory`` fills --
+    # never as synthesized flags, because resume treats a typed flag as a
+    # deliberate override and this is a stored suggestion (and "team" is
+    # deliberately absent from ``session.session._restore_selected_model``'s
+    # skip-set, so a journalled selection still wins on resume).
+    team_hosting, team_model = _team_suggestion_pair(args)
+    hosting = (
+        agent_hosting or flag_hosting or team_hosting or config_manager.get_config_value("hosting")
+    )
     agent_model: str | None = getattr(agent, "model", None) if agent is not None else None
     flag_model: str | None = getattr(args, "model", None)
     # WHERE THE HOSTING VALUE CAME FROM — the repair prompt's subject, so it
     # stays keyed on the hosting fields alone.
-    hosting_source = "agent" if agent_hosting else "flag" if flag_hosting else "config"
+    hosting_source = (
+        "agent"
+        if agent_hosting
+        else "flag" if flag_hosting else "team" if team_hosting else "config"
+    )
     # WHAT CHOSE THE RUN — the returned source, and the one the live-config
-    # rule reads. An agent profile outranks a flag outranks the file, exactly
-    # as for the values: naming EITHER field is choosing.
+    # rule reads. An agent profile outranks a flag outranks the team's stored
+    # suggestion outranks the file, exactly as for the values: naming EITHER
+    # field is choosing.
     model_source = (
         "agent"
         if (agent_hosting or agent_model)
-        else "flag" if explicit and (flag_hosting or flag_model) else "config"
+        else (
+            "flag"
+            if explicit and (flag_hosting or flag_model)
+            else "team" if (team_hosting or team_model) else "config"
+        )
     )
     model_name: str | None = (
-        agent_model or flag_model or config_manager.get_config_value("model_name")
+        agent_model or flag_model or team_model or config_manager.get_config_value("model_name")
     )
     if not hosting:
         raise HostingNotConfiguredError("Hosting platform is not configured.")

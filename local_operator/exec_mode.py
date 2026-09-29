@@ -659,13 +659,22 @@ def _worker_failure(log_path: Path) -> str:
     return ""
 
 
-def _make_default_session_factory(exec_args: ExecArgs) -> SessionFactory:
+def _make_default_session_factory(exec_args: ExecArgs, team: Any | None = None) -> SessionFactory:
     """Bind the shared composition root to this exec invocation.
 
     Builds the legacy managers from the app config dir and an argparse
     namespace carrying the effective selectors. All engine imports stay
     inside :mod:`local_operator.session_factory`; ``create_session`` is
     async, so this factory returns an awaitable the runner awaits.
+
+    ``team`` is the resolved ``--team`` team, when the run has one. Its stored
+    model suggestion travels into the session args as its OWN attribute --
+    never synthesized ``--hosting``/``--model`` flags: a synthesized flag is
+    indistinguishable from one the user typed, and resume treats a typed flag
+    as a deliberate override (``session.session._restore_selected_model``'s
+    skip-set), which a stored suggestion must never become. The session
+    factory reads the attribute on the FRESH path only, below agent row and
+    flag and above the config default (design §4.4).
     """
 
     def factory() -> Any:
@@ -700,6 +709,11 @@ def _make_default_session_factory(exec_args: ExecArgs) -> SessionFactory:
             # narrow namespaces (here and the detached worker's) because the
             # factory receives this namespace and nothing wider.
             workstream=exec_args.workstream,
+            # The team-launch model suggestion (§4.4), or None for every run
+            # without a team. ``session_factory.resolve_hosting_model_with_source``
+            # reads it on the fresh path, below agent/flag and above config;
+            # an ordinary attribute, so it can never masquerade as a user flag.
+            team_model_suggestion=team.model_suggestion if team is not None else None,
         )
         return create_session(session_args, config_manager, agent_registry)
 
@@ -992,7 +1006,7 @@ def run_exec(command: str | None, args: ExecArgs) -> int:
 
     from local_operator.exec_session import run_session
 
-    factory = default_session_factory or _make_default_session_factory(args)
+    factory = default_session_factory or _make_default_session_factory(args, team)
 
     async def runner() -> int:
         session = factory()

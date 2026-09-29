@@ -587,6 +587,7 @@ async def download_agent_from_radient(
     ),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     env_config: EnvConfig = Depends(get_env_config),
+    provider_auth_store: AuthStore = Depends(get_provider_auth_store),
 ):
     """
     Download (pull) an agent from the Radient agents marketplace by agent ID.
@@ -598,8 +599,8 @@ async def download_agent_from_radient(
 
         # Download from Radient
         try:
-            imported_agent, renamed_from = agent_registry.download_agent_from_radient(
-                radient_client, agent_id
+            outcome = agent_registry.download_agent_from_radient(
+                radient_client, agent_id, auth_store=provider_auth_store
             )
         except Exception as e:
             logger.exception("Error downloading agent from Radient")
@@ -607,11 +608,17 @@ async def download_agent_from_radient(
                 status_code=400, detail=f"Error downloading agent from Radient: {e}"
             )
 
-        agent_serialized = imported_agent.model_dump()
+        agent_serialized = outcome.agent.model_dump()
         # A pull whose name is already held locally lands under a suffixed name;
         # the note is what lets the caller explain that instead of leaving the
         # user looking for an agent under the name they asked for (contract §3.6).
-        agent_serialized["renamed_from"] = renamed_from
+        agent_serialized["renamed_from"] = outcome.renamed_from
+        # Same rule for the model suggestion (§4.3, ``null`` when nothing was
+        # suggested or it applied): the import already succeeded -- this only
+        # says which suggestion was skipped and why.
+        agent_serialized["model_notice"] = (
+            outcome.model_notice.as_payload() if outcome.model_notice is not None else None
+        )
         return CRUDResponse(
             status=200,
             message="Agent downloaded from Radient successfully",
@@ -1433,6 +1440,7 @@ async def publish_team_to_radient(
     ),
     config_manager: ConfigManager = Depends(get_config_manager),
     provider_auth_store: AuthStore = Depends(get_provider_auth_store),
+    agent_registry: AgentRegistry = Depends(get_agent_registry),
 ):
     """
     Publish the local team with the given ID into an organization.
@@ -1465,7 +1473,12 @@ async def publish_team_to_radient(
             raise HTTPException(status_code=404, detail=f"Team with ID {team_id} not found")
 
         try:
-            document = hub_team_document(team)
+            # The agent registry powers the derive-from-manager fallback when
+            # the team has no STORED suggestion (§3.2). It is the app's own
+            # singleton -- the one every /v1/agents handler above already
+            # depends on -- so this request creates no store the process has
+            # not already built.
+            document = hub_team_document(team, agent_registry=agent_registry)
         except TeamDocumentError as exc:
             # A document this machine can already see the hub would refuse
             # (the local-refusal arm of the agent publication routes, team
@@ -1596,7 +1609,9 @@ async def pull_team_from_radient(
 
         try:
             outcome = await asyncio.to_thread(
-                TeamRegistry(config_manager.config_dir).import_hub_team, document
+                TeamRegistry(config_manager.config_dir).import_hub_team,
+                document,
+                auth_store=provider_auth_store,
             )
         except (ValueError, TypeError) as exc:
             raise HTTPException(
@@ -1607,6 +1622,12 @@ async def pull_team_from_radient(
         result = outcome.team.model_dump()
         result["renamed_from"] = outcome.renamed_from
         result["invalid_name"] = outcome.invalid_name
+        # The non-blocking model-suggestion report (§4.3): null when nothing was
+        # suggested or the suggestion was stored on the row; present with the
+        # reason when this machine could not honour it.
+        result["model_notice"] = (
+            outcome.model_notice.as_payload() if outcome.model_notice is not None else None
+        )
         return CRUDResponse(
             status=200,
             message="Team pulled from Radient successfully",
@@ -1949,6 +1970,7 @@ async def clear_agent_conversation(
 async def import_agent(
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     file: UploadFile = File(..., description="ZIP file containing agent state files"),
+    provider_auth_store: AuthStore = Depends(get_provider_auth_store),
 ) -> JSONResponse:
     """
     Import an agent from a ZIP file.
@@ -1978,14 +2000,19 @@ async def import_agent(
 
         # Use the AgentRegistry's import_agent method
         try:
-            agent_obj, renamed_from = agent_registry.import_agent(zip_path)
-            agent_serialized = agent_obj.model_dump()
+            outcome = agent_registry.import_agent(zip_path, auth_store=provider_auth_store)
+            agent_serialized = outcome.agent.model_dump()
             # Named on the response so the caller can say "imported as X — you
             # already have an agent called Y" rather than silently handing back
             # a name under which nothing the user asked for can be found. The
             # key is always present (null when nothing was renamed) so a client
             # never has to guess whether the backend was just too old to send it.
-            agent_serialized["renamed_from"] = renamed_from
+            agent_serialized["renamed_from"] = outcome.renamed_from
+            # The non-blocking model-suggestion report, same always-present rule
+            # (null when nothing was suggested or the suggestion applied).
+            agent_serialized["model_notice"] = (
+                outcome.model_notice.as_payload() if outcome.model_notice is not None else None
+            )
 
             response = CRUDResponse(
                 status=201,

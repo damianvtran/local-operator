@@ -16,8 +16,11 @@ from local_operator.clients._http import (
     response_body,
 )
 from local_operator.clients.radient import (
+    INSTRUCTION_SET_CONTENT_FIELDS,
     INSTRUCTION_SET_DOCUMENT_TYPE,
     INSTRUCTION_SET_FIELDS,
+    INSTRUCTION_SET_SUGGESTION_HOSTING_MAX_CHARS,
+    INSTRUCTION_SET_SUGGESTION_MODEL_MAX_CHARS,
     InstructionSetError,
     RadientClient,
     RadientImage,
@@ -1271,7 +1274,41 @@ def test_build_instruction_set_document_omits_absent_optionals() -> None:
     assert "effort" not in document
     assert "categories" not in document
     assert "tags" not in document
+    assert "model_suggestion" not in document
     assert document["delegate"] is False
+
+
+def test_build_instruction_set_document_carries_a_trimmed_model_suggestion() -> None:
+    """The advisory pair is emitted trimmed, under its own field set (§3.1).
+
+    It IS a document key (``INSTRUCTION_SET_FIELDS`` — the publish body's key
+    set stays asserted) but NOT a content field: the desktop republish
+    overrides path must keep refusing it in v1 (OQ5), so the suggestion can
+    only ever be row-derived.
+    """
+
+    document = build_instruction_set_document(
+        name="Coder",
+        description="Writes code.",
+        instructions="You write code.",
+        kind="role",
+        version="1.0.0",
+        model_suggestion={"hosting": " openrouter ", "model": " vendor/model "},
+    )
+
+    assert document["model_suggestion"] == {"hosting": "openrouter", "model": "vendor/model"}
+    assert "model_suggestion" in INSTRUCTION_SET_FIELDS
+    assert "model_suggestion" not in INSTRUCTION_SET_CONTENT_FIELDS
+    with pytest.raises(InstructionSetError) as refusal:
+        validate_document_overrides({"model_suggestion": {"hosting": "h", "model": "m"}})
+    assert refusal.value.field == "model_suggestion"
+
+
+def test_the_suggestion_caps_are_the_servers_numbers() -> None:
+    """Cap lockstep (§7): the client mirrors agent-server's 64/128 exactly."""
+
+    assert INSTRUCTION_SET_SUGGESTION_HOSTING_MAX_CHARS == 64
+    assert INSTRUCTION_SET_SUGGESTION_MODEL_MAX_CHARS == 128
 
 
 @pytest.mark.parametrize(
@@ -1304,6 +1341,39 @@ def test_build_instruction_set_document_omits_absent_optionals() -> None:
         ({"categories": ["not_a_category"]}, "categories", "must name categories"),
         ({"tags": ["t" * 65]}, "tags", "must hold items of 1 to 64 characters"),
         ({"version": " "}, "version", "must not be empty"),
+        (
+            {"model_suggestion": {"hosting": "", "model": "m"}},
+            "model_suggestion",
+            "must hold a non-empty hosting",
+        ),
+        (
+            {"model_suggestion": {"model": "m"}},
+            "model_suggestion",
+            "must hold a non-empty hosting",
+        ),
+        (
+            {"model_suggestion": {"hosting": "h", "model": "  "}},
+            "model_suggestion",
+            "must hold a non-empty model",
+        ),
+        (
+            {"model_suggestion": {"hosting": "h" * 65, "model": "m"}},
+            "model_suggestion",
+            "must hold a hosting of at most "
+            f"{INSTRUCTION_SET_SUGGESTION_HOSTING_MAX_CHARS} characters",
+        ),
+        (
+            {"model_suggestion": {"hosting": "h", "model": "m" * 129}},
+            "model_suggestion",
+            "must hold a model of at most "
+            f"{INSTRUCTION_SET_SUGGESTION_MODEL_MAX_CHARS} characters",
+        ),
+        ({"model_suggestion": "not-an-object"}, "model_suggestion", "must be an object"),
+        (
+            {"model_suggestion": {"hosting": 5, "model": "m"}},
+            "model_suggestion",
+            "must hold a non-empty hosting",
+        ),
     ],
 )
 def test_build_instruction_set_document_refuses_a_broken_field(
