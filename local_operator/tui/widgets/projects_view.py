@@ -1203,16 +1203,18 @@ class ProjectsView(Vertical):
         header = section_header_at(self._views, self._view, x, y, cursor=self._cursor)
         if header is not None:
             event.stop()
-            self._jump_to_section(header)
+            self._jump_to_section(header[1])
 
-    def _jump_to_section(self, label: str) -> None:
-        groups = sections_of(self._views)
-        if groups is None:
-            return
-        for group_label, indexes in groups:
-            if group_label == label and indexes:
-                self._select_index(min(indexes[0], max(self._painted_count() - 1, 0)))
-                return
+    def _jump_to_section(self, target: int) -> None:
+        """Header clicks land on the row the clicked band NAMES.
+
+        The band carries its own target — the first row of the block the
+        header heads, so a mixed team's timeline chart header lands on its
+        first DATED row rather than an undated member's tail line (UX round 1,
+        U3). Jumping by target (not by matching labels) is also what keeps
+        two sections whose labels collide from crossing wires (R1-2/U1).
+        """
+        self._select_index(min(target, max(self._painted_count() - 1, 0)))
 
     # -- leaving ------------------------------------------------------------
     def action_leave(self) -> None:
