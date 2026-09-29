@@ -405,11 +405,19 @@ class TranscriptPage:
     compaction replaces the JSONL atomically, so offsets become lies while IDs
     remain meaningful and let callers reconcile a replacement without keeping
     an unbounded mirror in memory.
+
+    ``has_newer`` is answered ONLY on an anchored (around) page, where the
+    reader bounds both sides of the page; ``None`` on every other mode means
+    the question was not asked, not that the answer is no — a ``before_id``
+    page has newer rows above it by construction. A ``False`` here is a fact
+    (the walk saw the file's end), never merely "the window ran out".
     """
 
     entries: tuple[TranscriptEntry, ...]
     has_more: bool
     reconciled: bool = False
+    #: Anchored pages only: a row newer than the page's newest exists.
+    has_newer: bool | None = None
 
 
 #: Backward read granularity, shared by the two readers below. One MiB is large
@@ -494,7 +502,83 @@ def _iter_complete_lines_backward(
             return
 
 
-def validate_page_request(before_id: str | None, through_id: str | None, limit: int) -> None:
+#: Forward read granularity for the anchored page's newer half. Unlike the
+#: backward walker's chunk (tuned for whole-file fallbacks and page windows),
+#: this half reads a bounded number of rows forward from a known offset, so a
+#: chunk is the most it can ever over-read: the walker stops the moment its
+#: caller stops consuming.
+_FORWARD_CHUNK_BYTES = 1 << 20
+
+
+def _iter_complete_lines_forward(
+    handle: BinaryIO,
+    start: int,
+    *,
+    end_of_file: int,
+    chunk_bytes: int = _FORWARD_CHUNK_BYTES,
+) -> Iterator[bytes]:
+    """Yield the journal's lines forward from ``start``, oldest first.
+
+    The other half of the anchored read (see :func:`_read_around_page`), and
+    deliberately the only forward walk inside the file. Lines are yielded as raw
+    bytes and blank/malformed rows are the CALLER's to skip, exactly as in
+    :func:`_iter_complete_lines_backward` — one splitter, two directions, so
+    the two halves of a page cannot disagree about where a row begins.
+
+    ``end_of_file`` is a hard bound, taken from the same stat as the rest of the
+    read, so a row appended while the page is being assembled is not half-seen;
+    hitting the recorded end is the ordinary exit, not an error.
+
+    The file's UNTERMINATED final line is yielded once the bound is reached, and
+    the caller's parse decides whether it is a row: the backward walker treats
+    the file's opening fragment as a complete row unless the HEAD is torn, and
+    this is the same judgement at the other end — a fragment cut by a crash
+    mid-append no longer parses and is dropped, while one that parses differs
+    from any other row only in its missing newline. Rows larger than a chunk are
+    handled with the backward walker's discipline: fragments accumulate in a
+    list and are joined exactly once, so a row costs one pass per chunk read,
+    never one copy per chunk.
+    """
+    handle.seek(start)
+    position = start
+    fragments: list[bytes] = []
+    unfinished = False
+    while position < end_of_file:
+        chunk = handle.read(min(chunk_bytes, end_of_file - position))
+        if not chunk:
+            break
+        position += len(chunk)
+        rest = chunk
+        if unfinished:
+            boundary = chunk.find(b"\n")
+            if boundary < 0:
+                fragments.append(chunk)
+                continue
+            fragments.append(chunk[:boundary])
+            yield b"".join(fragments)
+            fragments = []
+            unfinished = False
+            rest = chunk[boundary + 1 :]
+        pieces = rest.split(b"\n")
+        tail = pieces.pop()
+        for piece in pieces:
+            yield piece
+        fragments = [tail]
+        unfinished = True
+    if unfinished:
+        final = b"".join(fragments)
+        if final:
+            yield final
+
+
+def validate_page_request(
+    before_id: str | None,
+    through_id: str | None,
+    around_id: str | None,
+    before: int | None,
+    after: int | None,
+    limit: int,
+) -> None:
     """The page read's preconditions, shared by the sync reader and the façade.
 
     One validator rather than one per entry point, because these two are a
@@ -504,9 +588,23 @@ def validate_page_request(before_id: str | None, through_id: str | None, limit: 
     catches ``FileNotFoundError`` and reconciles, while both-cursors is a
     programming error its tests pin), so a second copy of this check that drifted
     by one clause would change what a client observes.
+
+    The anchored mode's clauses sit beside the cursor pair's for the same
+    reason: an anchor named together with a cursor, or a ``before``/``after``
+    with no anchor to count from, describes no window this reader could honour,
+    and answering it with some OTHER window is exactly the silent substitution
+    the cursor rules exist to prevent. The upper bounds are the wire's
+    (``≤ 500`` per side, declared by the route's query parameters); this
+    validator keeps only the part a caller cannot spell around — the sign.
     """
-    if before_id is not None and through_id is not None:
-        raise ValueError("choose before_id or through_id, not both")
+    if sum(one is not None for one in (before_id, through_id, around_id)) > 1:
+        raise ValueError("choose at most one of before_id, through_id or around_id")
+    if (before is not None or after is not None) and around_id is None:
+        raise ValueError("before and after are only meaningful with around_id")
+    if before is not None and before < 0:
+        raise ValueError("before must not be negative")
+    if after is not None and after < 0:
+        raise ValueError("after must not be negative")
     if limit < 1:
         raise ValueError("limit must be at least 1")
 
@@ -646,11 +744,157 @@ def _locate_cursor_row(handle: BinaryIO, end_of_file: int, cursor_id: str) -> in
     return _locate_cursor_row_in_bytes(handle, end_of_file, cursor_id, None)
 
 
+def _locate_row_in_bytes(handle: BinaryIO, end_of_file: int, raw: bytes) -> int | None:
+    """The offset just past the NEWEST row whose bytes are exactly ``raw``.
+
+    The byte needle that names cursors assumes a row OPENS with its id; a row
+    whose layout does not is exactly the case the walk exists to serve, and once
+    the walk has found such a row this puts the forward half of an anchored page
+    back on the same footing: search the row's own bytes, newest first, and
+    return the offset just past its terminating newline — or past its bytes at
+    EOF, for an unterminated final row.
+
+    The checks are the cursor search's, one step stricter because the needle is
+    a whole row rather than a prefix: a candidate counts only when it starts a
+    line AND the byte after it ends one (or ends the file). Together they reject
+    both a longer row that merely CONTAINS these bytes and an echo inside a
+    payload's nested object, without parsing a single row. Reading newest-first
+    keeps the duplicate rule the cursors state: an id that appears more than
+    once resolves to its newest occurrence.
+    """
+    if not raw:
+        return None
+    overlap = len(raw) - 1
+    position = end_of_file
+    while position > 0:
+        start = max(0, position - _BACKWARD_CHUNK_BYTES)
+        read_start = max(0, start - overlap)
+        handle.seek(read_start)
+        buf = handle.read(position - read_start)
+        index = buf.rfind(raw)
+        while index != -1:
+            hit = read_start + index
+            after = hit + len(raw)
+            if _byte_before(handle, hit) in (b"", b"\n"):
+                if after == end_of_file:
+                    return after
+                if after < end_of_file:
+                    handle.seek(after)
+                    if handle.read(1) == b"\n":
+                        return after + 1
+            index = buf.rfind(raw, 0, index)
+        position = start
+    return None
+
+
+def _read_around_page(
+    path: Path, around_id: str, *, before: int | None, after: int | None, limit: int
+) -> TranscriptPage:
+    """The anchored page behind ``read_transcript_page(around_id=...)``.
+
+    THE WINDOW. Up to ``before`` rows older than the anchor, the anchor row
+    itself, up to ``after`` rows newer — oldest first — with ``has_more`` and
+    ``has_newer`` each answered from one lookahead row beyond the window, so a
+    ``False`` means the walk saw the file's own edge and a ``True`` means one
+    more row provably exists. An unset count defaults to a window centred on the
+    anchor and at most ``limit`` rows wide: ``limit`` is the page size
+    everywhere else on this surface, so an around read without explicit counts
+    returns a page of the same size rather than one twice as tall.
+
+    THE TWO HALVES, and why they are two. The older half is the SAME backward
+    walk the cursors use, handed the anchor's END offset — the locator yields
+    END offsets, so its first row is the anchor and the walk then continues into
+    exactly the older rows. The newer half is the module's only forward walk,
+    started at the same offset, which is what keeps an anchored page from paying
+    for the rows between the anchor and EOF.
+
+    ANCHOR RESOLUTION mirrors the cursor rules: the byte locator first; on a
+    miss, the backward walk from EOF — the only pass that can answer whether the
+    row exists at all, and the one that collects the older rows anyway, so a
+    miss costs one walk and nothing else. A row the needle could not name (a
+    layout that does not open with the id) is still served: its own bytes are
+    then located individually so the forward half reads from its position. A row
+    no pass can vouch for returns the empty reconciled page, exactly as a
+    missing ``through_id`` does — and so does a file that moved under the read,
+    where serving half a window would be an answer about a file that no longer
+    exists at either end. A duplicate id resolves to the newest occurrence,
+    like the cursors: this is the one answer that cannot send a caller paging
+    into rows they have already seen.
+    """
+    if before is None:
+        before = limit // 2
+    if after is None:
+        after = max(0, limit - before - 1)
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        end_of_file = handle.tell()
+        located_end = _locate_cursor_row(handle, end_of_file, around_id)
+        anchor: TranscriptEntry | None = None
+        anchor_bytes: bytes | None = None
+        older: list[TranscriptEntry] = []
+        has_older = False
+        walk_end = end_of_file if located_end is None else located_end
+        for _chunk_start, lines in _iter_complete_lines_backward(handle, walk_end):
+            for raw in lines:
+                if not raw.strip():
+                    continue
+                entry = TranscriptEntry.from_json(raw.decode("utf-8", errors="replace"))
+                if entry is None:
+                    continue
+                if anchor is None:
+                    if located_end is not None:
+                        # Located path: the walk starts exactly at the anchor's
+                        # row, so anything else first means the file moved under
+                        # the read — the miss shape, not a page.
+                        if entry.id != around_id:
+                            return TranscriptPage((), False, True)
+                        anchor = entry
+                        continue
+                    if entry.id != around_id:
+                        continue
+                    anchor = entry
+                    anchor_bytes = raw
+                    continue
+                older.append(entry)
+                if len(older) > before:
+                    has_older = True
+                    break
+            if has_older:
+                break
+        if anchor is None:
+            return TranscriptPage((), False, True)
+        if located_end is None:
+            # The walk found rows the needle could not name (a layout that does
+            # not open with the id). The forward half needs the anchor's END
+            # OFFSET, so its exact bytes are located once; bytes that cannot
+            # place the row they were read from mean the file moved mid-read.
+            located_end = _locate_row_in_bytes(handle, end_of_file, anchor_bytes or b"")
+            if located_end is None:
+                return TranscriptPage((), False, True)
+        newer: list[TranscriptEntry] = []
+        has_newer = False
+        for raw in _iter_complete_lines_forward(handle, located_end, end_of_file=end_of_file):
+            if not raw.strip():
+                continue
+            entry = TranscriptEntry.from_json(raw.decode("utf-8", errors="replace"))
+            if entry is None:
+                continue
+            newer.append(entry)
+            if len(newer) > after:
+                has_newer = True
+                break
+        page = tuple(reversed(older[:before])) + (anchor,) + tuple(newer[:after])
+        return TranscriptPage(page, has_older, False, has_newer)
+
+
 def read_transcript_page(
     directory: str | Path,
     *,
     before_id: str | None = None,
     through_id: str | None = None,
+    around_id: str | None = None,
+    before: int | None = None,
+    after: int | None = None,
     limit: int = 100,
 ) -> TranscriptPage:
     """Read a tail page, or the page immediately before ``before_id``.
@@ -721,6 +965,19 @@ def read_transcript_page(
     cannot satisfy that snapshot, and serving a newer tail under an older state
     cursor would silently fold unseen rows into the paired watermark.
 
+    ``around_id`` is the third mode (design §D4): ONE anchored page — up to
+    ``before`` rows older than the anchor, the anchor row, up to ``after`` rows
+    newer, oldest→newest — with ``has_more`` and ``has_newer`` answering "rows
+    exist beyond this edge" from a one-row lookahead each, so a ``False`` is a
+    fact rather than a bound. The anchor is located by the same byte search as
+    the cursors, the older half is the same backward walk from the anchor's END
+    offset, and the newer half is the module's only forward walk from that same
+    offset — an anchored page costs the locator plus the two bounded halves,
+    never the rows between the anchor and EOF. ``before``/``after`` unset mean a
+    window centred on the anchor and at most ``limit`` rows wide; the anchor's
+    own walk means an anchor that exists only under a row layout the needle
+    cannot name is still served (see :func:`_read_around_page`).
+
     TWO DELIBERATE, NAMED DIFFERENCES from the forward reader, both about inputs
     that are already anomalous:
 
@@ -738,10 +995,12 @@ def read_transcript_page(
       read (a 500 on the desktop open). Robustness, not an accidental change:
       the two readers of the same file no longer disagree about a damaged row.
     """
-    validate_page_request(before_id, through_id, limit)
+    validate_page_request(before_id, through_id, around_id, before, after, limit)
     path = Path(directory) / TRANSCRIPT_FILENAME
     if not path.exists():
         raise FileNotFoundError(path)
+    if around_id is not None:
+        return _read_around_page(path, around_id, before=before, after=after, limit=limit)
     # Newest-first, holding at most ``limit + 1`` rows: the extra row is the
     # forward reader's lookahead, kept here only so ``has_more`` can be answered
     # without reading further back, and dropped when the page is assembled.

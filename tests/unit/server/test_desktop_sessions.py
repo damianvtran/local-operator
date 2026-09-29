@@ -9,6 +9,7 @@ import shutil
 import threading
 import time
 import uuid
+from collections.abc import Coroutine
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Literal, cast
@@ -29,9 +30,11 @@ from local_operator.server.utils.desktop_receipts import (
     ReceiptConflict,
 )
 from local_operator.server.utils.desktop_sessions import (
+    DesktopSessionBridge,
     DesktopSessions,
     SubagentChildUnavailable,
 )
+from local_operator.session import transcript_index as ti
 from local_operator.session.errors import RuntimeRetiring, SessionStoreUnavailable
 from local_operator.session.runtime import registry
 from local_operator.session.transcript import (
@@ -2050,7 +2053,7 @@ async def test_a_second_warm_never_orphans_the_first_task(tmp_path):
     scheduling two real requests to interleave at exactly that point is not
     something a test can make deterministic.
     """
-    started: list[asyncio.Task[None]] = []
+    engages: list[Coroutine[Any, Any, None]] = []
     release = asyncio.Event()
 
     async def parked_warm() -> None:
@@ -2059,35 +2062,44 @@ async def test_a_second_warm_never_orphans_the_first_task(tmp_path):
         # lock the first task has not taken.
         await release.wait()
 
+    def warm_runtime_factory() -> Coroutine[Any, Any, None]:
+        # COUNT THE ENGAGES THIS PATH STARTS, NOT THE PROCESS'S TASKS. The
+        # property under test is "how many engage tasks the bridge started",
+        # and a global ``asyncio.create_task`` patch cannot see that boundary:
+        # taking the bridge arms its own machinery, and the attention poll's
+        # first tick starts a ``refresh_attention`` task whose landing inside
+        # this window is scheduling noise. CI read ``3 == 2`` on five 3.13
+        # legs, the third task the poll's (desktop_sessions.py:3007, from the
+        # poll at 2943). This factory is called exactly once per engage the
+        # bridge starts -- ``_schedule_warm`` is the only caller -- so the
+        # count cannot be inflated by anything beside the property.
+        coro = parked_warm()
+        engages.append(coro)
+        return coro
+
     pool = DesktopSessions(tmp_path)
     sid = await pool.create(str(tmp_path))
     async with pool.session(sid) as bridge:
         assert bridge.remote is not None
-        bridge.remote.warm_runtime = parked_warm  # type: ignore[method-assign]
-        real_create_task = asyncio.create_task
-
-        def recording_create_task(coro):
-            task = real_create_task(coro)
-            started.append(task)
-            return task
-
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(asyncio, "create_task", recording_create_task)
-            first = await bridge.warm()
-            second = await bridge.warm()
-            assert (first, second) == ("warming", "warming")
-            assert len(started) == 1, f"a second warm started another task: {len(started)}"
-            assert bridge.warm_task is started[0]
-            release.set()
-            await started[0]
-            # A SETTLED warm must not wedge the path: the engage may have
-            # failed, leaving the viewer cold, and the next keystroke has to
-            # be free to try again.
-            release.clear()
-            assert await bridge.warm() == "warming"
-            assert len(started) == 2 and bridge.warm_task is started[1]
-            release.set()
-            await started[1]
+        bridge.remote.warm_runtime = warm_runtime_factory  # type: ignore[method-assign]
+        first = await bridge.warm()
+        second = await bridge.warm()
+        assert (first, second) == ("warming", "warming")
+        assert len(engages) == 1, f"a second warm started another engage: {len(engages)}"
+        assert bridge.warm_task is not None
+        assert bridge.warm_task.get_coro() is engages[0]
+        release.set()
+        await bridge.warm_task
+        # A SETTLED warm must not wedge the path: the engage may have
+        # failed, leaving the viewer cold, and the next keystroke has to
+        # be free to try again.
+        release.clear()
+        assert await bridge.warm() == "warming"
+        assert len(engages) == 2, f"a settled warm did not start a fresh engage: {len(engages)}"
+        assert bridge.warm_task is not None
+        assert bridge.warm_task.get_coro() is engages[1]
+        release.set()
+        await bridge.warm_task
     await pool.close()
 
 
@@ -8063,3 +8075,138 @@ async def test_the_paging_capability_is_published_beside_untouched_neighbours(dr
     assert features["session_catalogue_page"] == 1
     assert features["session_catalogue"] == 3
     assert features["session_pins"] == 1
+
+
+# ---------------------------------------------------------------------------
+# GET /v1/desktop/sessions/{session_id}/checkpoints — the checkpoint rail
+# ---------------------------------------------------------------------------
+
+CHECKPOINT_SID = "aaaabbbb0001"
+
+
+async def _seed_checkpoint_session(root: Path) -> tuple[str, str]:
+    """One run in a canonical session: start, user, answer, completion marker.
+
+    Written through the real ``Transcript`` writer, in the order the runtime
+    writes it — ``attention_started`` lands BEFORE its user row (S3 note 1) —
+    so the derivation is exercised on the wire shape rather than a convenient
+    one. Returns the (user, assistant) entry ids.
+    """
+    from local_operator.harness.types import Message
+    from local_operator.session.transcript import Transcript
+
+    session = root / "sessions" / CHECKPOINT_SID
+    session.mkdir(parents=True, exist_ok=True)
+    (session / "desktop.json").write_text(json.dumps({"version": 1, "cwd": str(root)}))
+    transcript = Transcript(session)
+    token = "token-for-the-route-test"
+    await transcript.append_custom(
+        "attention_started",
+        {"conversation_id": f"session/{CHECKPOINT_SID}", "token": token},
+    )
+    user_entry = await transcript.append_message(Message.user("what changed today?"))
+    answer_entry = await transcript.append_message(Message.assistant("Three things changed."))
+    await transcript.append_custom(
+        "completion_attention",
+        {
+            "conversation_id": f"session/{CHECKPOINT_SID}",
+            "token": token,
+            "anchor": answer_entry.id,
+            "kind": "complete",
+        },
+    )
+    return user_entry.id, answer_entry.id
+
+
+@pytest.mark.asyncio
+async def test_checkpoints_route_serves_the_manifest_over_http(draft_api) -> None:
+    """The whole rail path on the wire: auth, the cold build, then the manifest.
+
+    Driven over real HTTP through the app rather than a direct adapter call,
+    because what the renderer consumes is the ROUTE — its auth gate, its
+    response model and the state machine the poll loop reads. The build itself
+    is asynchronous by design (a 272 MB journal scans for ~22 s, S1), so the
+    first answer may be ``building``; this test polls the way the renderer
+    will, with a real-clock deadline rather than a fixed sleep.
+    """
+    client, root = draft_api
+    user_id, answer_id = await _seed_checkpoint_session(root)
+    ti._reset_for_tests()
+    path = f"/v1/desktop/sessions/{CHECKPOINT_SID}/checkpoints"
+
+    denied = await client.get(path, headers={"Authorization": "Bearer wrong"})
+    assert denied.status_code == 401
+
+    deadline = time.monotonic() + 60.0
+    while True:
+        response = await client.get(path)
+        assert response.status_code == 200, response.text
+        result = response.json()["result"]
+        if result["index"]["state"] == "ready":
+            break
+        assert result["index"]["state"] == "building", result
+        assert time.monotonic() < deadline, result
+        await asyncio.sleep(0.02)
+
+    checkpoints = result["checkpoints"]
+    assert [(c["kind"], c["id"]) for c in checkpoints] == [
+        ("user", user_id),
+        ("completion", answer_id),
+    ]
+    user, completion = checkpoints
+    assert user["turn"] == 1 and completion["turn"] == 1
+    assert user["seq"] < completion["seq"]
+    assert user["outcome"] is None
+    assert completion["outcome"] == "complete"
+    assert completion["naming"]["state"] == "pending"
+    assert isinstance(result["index"].get("built_at"), float)
+
+    # The side effect, under the ISOLATED root: the derive-cache was written to
+    # this test's config dir and nowhere else.
+    assert ti.index_path(root, CHECKPOINT_SID).is_file()
+
+
+@pytest.mark.asyncio
+async def test_checkpoints_route_missing_journal_and_bad_ids(draft_api) -> None:
+    """A journal-less session is an empty READY manifest; bad ids are 404s.
+
+    The empty manifest is the same answer ``history`` gives a draft: there is
+    nothing to derive from, so the rail renders nothing — and a 404 would tell
+    the pane its conversation does not exist when it plainly does.
+    """
+    client, root = draft_api
+    ti._reset_for_tests()
+    session = root / "sessions" / "ccccdddd0002"
+    session.mkdir(parents=True, exist_ok=True)
+    (session / "desktop.json").write_text(json.dumps({"version": 1, "cwd": str(root)}))
+
+    response = await client.get("/v1/desktop/sessions/ccccdddd0002/checkpoints")
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["index"]["state"] == "ready"
+    assert result["checkpoints"] == []
+
+    # Malformed shape (the pool's id contract) and a well-formed unknown id are
+    # both the shared 404, exactly as every other session route answers them.
+    for bad in ("0123456789AB", "ffffffff9999"):
+        response = await client.get(f"/v1/desktop/sessions/{bad}/checkpoints")
+        assert response.status_code == 404, response.text
+
+
+@pytest.mark.asyncio
+async def test_checkpoints_adapter_answers_unsupported_for_a_peer(tmp_path) -> None:
+    """A peer conversation has no local journal: v1 says so cleanly (D4).
+
+    The branch is one line, and this pins its CONTRACT — ``unsupported`` with
+    an empty list, never an error — without standing up a mesh fixture, by
+    calling the adapter on the minimal state it reads.
+    """
+    bridge = SimpleNamespace(remote_row=object(), remote=object(), session_id="aaaabbbb0001")
+    # ``cast`` because the adapter reads exactly these three attributes; a real
+    # bridge is constructed by the pool and there is no cheaper honest fake.
+    result = await DesktopSessionBridge.checkpoints(cast(DesktopSessionBridge, bridge))
+    assert result == {
+        "session_id": "aaaabbbb0001",
+        "index": {"state": "unsupported"},
+        "checkpoints": [],
+    }

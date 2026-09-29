@@ -33,7 +33,7 @@ from local_operator.session.placement import (
 )
 from tests.unit.network.test_relay_e2e import (  # noqa: F401 — fixtures
     NETWORK_NAME,
-    _pair,
+    _pair_settled,
     devices,
 )
 
@@ -114,6 +114,7 @@ def _move(
     keep: bool = False,
     wait_s: float = 0.0,
     from_replica: bool = False,
+    engage_on_arrival: bool = False,
     monkeypatch: pytest.MonkeyPatch | None = None,
 ) -> dict[str, Any]:
     """``lop sessions move``, driven the way the CLI drives it.
@@ -122,6 +123,11 @@ def _move(
     by calling the protocol directly: the hop the CLI makes is part of what the
     mesh's own error shapes are for, and a test that skipped it would not notice a
     local verb that never got registered.
+
+    ``engage_on_arrival`` is the verb's one opt-in flag (``--engage-on-arrival``), and
+    it is passed through here rather than by building the control frame in the caller:
+    a test that hand-rolled the frame would not be exercising the same hop the CLI's
+    flag travels.
     """
     if monkeypatch is not None:
         monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server.root))
@@ -133,6 +139,7 @@ def _move(
             wait_s=wait_s,
             root=server.root,
             from_replica=from_replica,
+            engage_on_arrival=engage_on_arrival,
         )
     )
 
@@ -148,7 +155,7 @@ def test_a_recall_moves_the_session_and_leaves_a_tombstone(
     """`--to local`: the phases in order, one holder at the end, and a cleanup log
     that says the conversation was MOVED rather than deleted."""
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     source = _owned_session(server_a)
     before = _transcript(server_a.root, SESSION)
 
@@ -204,7 +211,7 @@ def test_keep_mints_a_new_id_and_leaves_the_source_running(
 ) -> None:
     """`--keep`: a fork, not a move. The source keeps its id, its bytes and its lease."""
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     source = _owned_session(server_a)
     before = _transcript(server_a.root, SESSION)
     retired: list[str] = []
@@ -279,7 +286,7 @@ def test_the_invite_ack_names_the_id_the_pull_is_handed(
     from types import SimpleNamespace
 
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin", settings=server_b.settings)
+    _pair_settled(pair, monkeypatch, role="admin", settings=server_b.settings)
     _owned_session(server_a)
     handed: list[str] = []
 
@@ -324,7 +331,7 @@ def test_a_busy_source_refuses_with_its_own_sentence_and_mutates_nothing(
 ) -> None:
     """§6.4: refused, never drained. The owner's idle reason is the message."""
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     source = _owned_session(server_a)
     before = _transcript(server_a.root, SESSION)
     sentence = "This session is working right now — try again when the turn finishes."
@@ -356,7 +363,7 @@ def test_wait_re_probes_the_source_until_it_is_idle(
 ) -> None:
     """``--wait N`` is a FRESH idle probe each time, not a drain (§6.4)."""
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     _owned_session(server_a)
     before = _transcript(server_a.root, SESSION)
     calls = {"n": 0}
@@ -388,7 +395,7 @@ def test_a_source_that_changes_mid_move_rolls_back_on_both_sides(
     writer, and a second attempt moves it.
     """
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     source = _owned_session(server_a)
     original = _transcript(server_a.root, SESSION)
     real_ask = mobility.LinkTransport.ask
@@ -439,7 +446,7 @@ def test_a_peer_without_the_move_capability_is_refused(
     mutated, which is the property the chokepoint exists for.
     """
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="drive")
+    _pair_settled(pair, monkeypatch, role="drive")
     _owned_session(server_a)
 
     result = _move(server_b, SESSION, monkeypatch=monkeypatch)
@@ -468,7 +475,7 @@ def test_an_offload_to_a_peer_that_cannot_move_is_refused_before_the_invite(
     that changes the answer.
     """
     server_a, server_b, _host, _port = pair
-    record, _pair_host, _pair_port = _pair(
+    record, _pair_host, _pair_port = _pair_settled(
         pair, monkeypatch, role="drive", settings=server_b.settings
     )
     _owned_session(server_a)
@@ -556,7 +563,7 @@ def test_a_move_already_on_this_device_is_refused_with_a_sentence(
     pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     _owned_session(server_b)
 
     result = _move(server_b, SESSION, monkeypatch=monkeypatch)
@@ -575,7 +582,7 @@ def test_the_owner_is_resolved_from_the_federated_listing(
     ``lop sessions move <id> --to local`` has no other handle on it.
     """
     server_a, server_b, host, port = pair
-    record, _host, _port = _pair(pair, monkeypatch, role="admin")
+    record, _host, _port = _pair_settled(pair, monkeypatch, role="admin")
     _owned_session(server_a)
     link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
     assert link is not None, reason
@@ -590,7 +597,7 @@ def test_a_session_nobody_holds_is_refused_by_name(
     pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
 
     result = _move(server_b, "no-such-session", monkeypatch=monkeypatch)
 
@@ -705,7 +712,7 @@ def test_archive_on_a_peer_changes_the_owners_index_only(
 ) -> None:
     """design §8.3: NEVER write the local ``archived-sessions.json`` for a remote id."""
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     _owned_session(server_a)
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_b.root))
 
@@ -744,7 +751,7 @@ def test_archive_and_restore_on_a_peer_report_the_change_they_made(
     from local_operator.session import archived
 
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     _owned_session(server_a)
 
     peak = server_a.identity.device_id
@@ -777,7 +784,7 @@ def test_delete_on_a_peer_is_a_dry_run_without_confirmation(
 ) -> None:
     """A delete dispatched without ``confirmed`` must not be a delete (§8.1)."""
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     source = _owned_session(server_a)
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_b.root))
 
@@ -812,7 +819,7 @@ def test_delete_of_a_live_remote_session_is_refused_by_the_owners_guard(
     from local_operator.session.cleanup import _GUARD_REFUSALS
 
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     source = _owned_session(server_a)
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_b.root))
     # An armed wake is one of the owner's own guards, and it is refused even when

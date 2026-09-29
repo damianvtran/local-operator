@@ -20,6 +20,14 @@ THE CONTRACT THIS CLASS IMPLEMENTS (§4)
   and is logged at ERROR, because it is a bug in this layer rather than weather.
 * Concurrent callers share one in-flight call per cache key.
 
+The instance ALSO serves the MONITOR GATE (``docs/design/monitor-tool.md``
+§8.2): :meth:`ClassificationService.decide` answers one typed question about
+one bounded state — the changed-monitor fork's materiality question — under
+the SAME guards (enabled, leg resolution, the breaker, ``timeoutMs``, the
+fail-open posture) with its own small LRU. The monitor contract owns the
+fork's semantics; placing the method here is what makes the guards literally
+the same instance state instead of a copy that can drift.
+
 THE LATENCY BUDGET (the constraint that shapes this class)
 =========================================================
 
@@ -134,11 +142,13 @@ from local_operator.classification.recommend import (
     render_block,
 )
 from local_operator.classification.types import (
+    Answer,
     DecisionRequest,
     DecisionResponse,
     DecisionSchemaError,
     DecisionVendor,
     DecisionVendorError,
+    Question,
 )
 from local_operator.classification.vendors import build_vendor
 from local_operator.settings_io import strict_bool
@@ -209,6 +219,12 @@ RETRYABLE_KINDS = frozenset({"transport", "server", "overloaded", "rate-limit"})
 #: Cache entries before the oldest is evicted (§4: 64).
 CACHE_SIZE = 64
 
+#: Cache entries for :meth:`ClassificationService.decide` before the oldest is
+#: evicted (design monitor-tool.md §8.2: 32). Smaller than the message path's
+#: 64 because the key space is deltas — a monitor that flaps between two
+#: states re-asks the same question, and nothing else does.
+DECIDE_CACHE_SIZE = 32
+
 
 def _cache_key(request: RecommendationRequest, limit: int | None) -> str:
     """``sha256(user_message + candidates_digest)`` over the roster AS SENT.
@@ -257,6 +273,20 @@ def _cache_key(request: RecommendationRequest, limit: int | None) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _decide_key(state: str, question: Question) -> str:
+    """``sha256(question id + state)`` for :meth:`ClassificationService.decide`.
+
+    The monitor contract (§8.2) asks for a cache "keyed by ``sha256(state)``";
+    the question id rides in front as a domain separator because ``decide`` is
+    a public seam that TAKES a question, and a key that ignored it would serve
+    one question's answer to another — a false hit, the expensive direction.
+    With the single ``monitor_materiality`` question in use the two keys are
+    equivalent per state, which is what the contract's sentence describes.
+    """
+    payload = f"{question.id}\x00{state}"
+    return hashlib.sha256(payload.encode("utf-8", "replace")).hexdigest()
+
+
 class _NoUsableLeg(DecisionVendorError):
     """No leg resolved a credential — a configuration state, not an outage.
 
@@ -284,6 +314,13 @@ class ClassificationService:
         self._settings = settings
         self._cache: OrderedDict[str, Recommendation] = OrderedDict()
         self._inflight: dict[str, asyncio.Task[Recommendation]] = {}
+        #: :meth:`decide`'s own LRU (§8.2), separate from ``_cache`` because the
+        #: key spaces and value types differ: a recommendation is built from a
+        #: roster digest, a decision answer from one bounded delta. Only
+        #: successful answers are cached — a ``None`` covers "breaker open" and
+        #: "timed out", and caching either would serve a failure to a later
+        #: call that might have succeeded.
+        self._decide_cache: OrderedDict[str, Answer] = OrderedDict()
         self._consecutive_failures = 0
         self._circuit_open = False
         #: Question ids the vendor rejected on this session, disabled until the
@@ -358,6 +395,69 @@ class ClassificationService:
             logger.warning("classification: recommendation failed", exc_info=True)
             self._record_failure("error")
             return Recommendation(skipped="error")
+
+    async def decide(self, *, state: str, question: Question) -> Answer | None:
+        """One typed question under the same guards as ``recommend_resources``.
+
+        The monitor gate's seam (design monitor-tool.md §8.2): one call per
+        question over one bounded state, for the changed-monitor fork. ``None``
+        covers every non-answer — the layer disabled, no usable leg, the
+        breaker open, this question's shape disabled by a schema rejection, a
+        timeout, a transport failure — and callers treat ``None`` as "no
+        classifier" and fail OPEN (deliver). Never raises, cancellation
+        excepted.
+
+        A method on THIS service, not a service of its own, because the guards
+        it must share are instance state: the leg resolution with its credential
+        memo, the one keep-alive client, the circuit breaker, the disabled
+        question shapes. A second service would be a second client, a second
+        credential resolution and a second breaker — three pairs to get out of
+        step with each other.
+
+        The answer is cached in a small bounded LRU of its own keyed by
+        ``sha256(question id + state)`` (§8.2; see :func:`_decide_key`), so a
+        monitor flapping between two states re-asks each state once. Only
+        successful answers are cached — the message path's rule — so a ``None``
+        is never served from here.
+
+        The spend is logged at INFO by this method (see :func:`_log_decide_cost`):
+        the ``Answer`` return carries no figures, and the monitor path's caller
+        has no access to the vendor's accounting, so the layer's cost convention
+        lives where the call does.
+        """
+        if not self.enabled:
+            logger.debug("classification: decide skipped (disabled)")
+            return None
+        if self._circuit_open:
+            logger.debug("classification: decide skipped (circuit open)")
+            return None
+        if question.id in self._disabled_shapes:
+            # A schema rejection disabled this shape for the session; re-asking
+            # would spend a request per call to re-learn one fact (§4).
+            #
+            # Unlike the message path, this check runs BEFORE the cache read:
+            # ``_recommend`` serves a warm entry first and filters disabled
+            # shapes only on a miss (``_plan_for``). The difference is
+            # observable in one case — a state cached before the rejection
+            # stops being served — and it is the conservative direction: once
+            # the vendor has rejected this shape, the gate does not keep
+            # deciding from it, and every affected change falls OPEN to a
+            # delivery.
+            logger.debug("classification: decide skipped (shape %r disabled)", question.id)
+            return None
+        key = _decide_key(state, question)
+        cached = self._decide_cache.get(key)
+        if cached is not None:
+            self._decide_cache.move_to_end(key)
+            return cached
+        try:
+            return await self._decide_attempt(state, question, key)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — the fail-open posture covers every fault
+            logger.warning("classification: decide failed", exc_info=True)
+            self._record_failure("error")
+            return None
 
     # NO ``notice()`` METHOD, and its absence is the point rather than an omission.
     #
@@ -509,6 +609,63 @@ class ClassificationService:
         self._consecutive_failures = 0
         self._remember(key, recommendation)
         return recommendation
+
+    async def _decide_attempt(self, state: str, question: Question, key: str) -> Answer | None:
+        """One :meth:`decide` call: same deadline, same failure ladder, same cascade.
+
+        The ``_attempt`` shape minus everything that belongs to a roster: no
+        state builder (the caller bounded the state), no plan (one question),
+        no resource mapping. The failure branches map every outcome to
+        ``None`` — the caller's fail-open signal — and keep the layer's
+        accounting honest: a timeout or a vendor failure counts toward the
+        breaker (the vendor's own failures, once per call), while "no leg"
+        does not.
+        """
+        started = time.monotonic()
+        request = DecisionRequest(state=state, questions=(question,))
+        timeout_s = self.timeout_s
+        try:
+            async with asyncio.timeout(timeout_s):
+                response = await self._call_cascade(request, timeout_s)
+        except TimeoutError:
+            logger.warning("classification: decide timed out after %.0f ms", timeout_s * 1000)
+            self._record_failure("timeout")
+            return None
+        except DecisionSchemaError as exc:
+            self._disable_shape(exc.shape)
+            return None
+        except _NoUsableLeg:
+            # Not an outage and not our bug: nothing to call. No warning, no
+            # breaker movement — the ``_attempt`` rule, verbatim.
+            return None
+        except DecisionVendorError as exc:
+            logger.warning(
+                "classification: decide failed after %d attempt(s) in %.0f ms (%s: %s)",
+                exc.attempts,
+                (time.monotonic() - started) * 1000,
+                exc.kind,
+                exc,
+            )
+            self._record_failure(exc.kind)
+            return None
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — see the module docstring
+            logger.warning("classification: decide call failed", exc_info=True)
+            self._record_failure("error")
+            return None
+
+        answer = response.answers.get(question.id)
+        if answer is None:
+            # A 200 that does not answer THIS question is a non-answer like the
+            # rest (the parser deliberately tolerates a skipped question): fail
+            # open, and do NOT count it as a failure — the call itself worked.
+            logger.debug("classification: decide got no answer for %r", question.id)
+            return None
+        self._consecutive_failures = 0
+        self._remember_decision(key, answer)
+        self._log_decide_cost(response, question.id, answer, time.monotonic() - started)
+        return answer
 
     def _plan_for(self, request: RecommendationRequest) -> QuestionPlan:
         """Questions for this request, minus the shapes this session disabled."""
@@ -778,6 +935,39 @@ class ClassificationService:
         while len(self._cache) > CACHE_SIZE:
             self._cache.popitem(last=False)
 
+    def _remember_decision(self, key: str, answer: Answer) -> None:
+        """Insert one answered decision question into its own bounded LRU (§8.2)."""
+        self._decide_cache[key] = answer
+        self._decide_cache.move_to_end(key)
+        while len(self._decide_cache) > DECIDE_CACHE_SIZE:
+            self._decide_cache.popitem(last=False)
+
+    def _log_decide_cost(
+        self, response: DecisionResponse, question_id: str, answer: Answer, latency_s: float
+    ) -> None:
+        """Record what one :meth:`decide` cost, at INFO, on the vendor's own figures.
+
+        The message path's convention (``session_factory._log_classification_cost``),
+        moved into the service because the return value cannot carry it: the
+        seam returns an ``Answer``, which has no cost fields, and adding them
+        would be a second place the vendor's accounting shape lives. A figure
+        the vendor did not send reads ``-``, never a fabricated zero — the
+        package's own rule (``DecisionResponse``).
+        """
+        cost = response.cost_usd
+        logger.info(
+            "classification: decide vendor=%s model=%s tokens=%s/%s cost=%s latency=%.3fs "
+            "question=%s answer=%s",
+            response.vendor,
+            response.model,
+            response.input_tokens if response.input_tokens is not None else "-",
+            response.output_tokens if response.output_tokens is not None else "-",
+            f"${cost:.6f}" if isinstance(cost, (int, float)) else "-",
+            latency_s,
+            question_id,
+            answer.value,
+        )
+
     def _capped(self, recommendation: Recommendation, cap: int) -> Recommendation:
         """Apply the caller's cap to a cached recommendation.
 
@@ -798,6 +988,7 @@ class ClassificationService:
 __all__ = [
     "CACHE_SIZE",
     "CIRCUIT_FAILURE_THRESHOLD",
+    "DECIDE_CACHE_SIZE",
     "DEFAULT_AUTO",
     "DEFAULT_MAX_RECOMMENDATIONS",
     "DEFAULT_TIMEOUT_MS",

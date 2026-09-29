@@ -47,7 +47,7 @@ from tests.unit.network.test_mobility import (  # noqa: F401 — fixture `pair` 
     _owned_session,
     pair,
 )
-from tests.unit.network.test_relay_e2e import _pair, devices  # noqa: F401
+from tests.unit.network.test_relay_e2e import _pair_settled, devices  # noqa: F401
 
 #: A device that is in neither the pair nor the record's history: the one an id was
 #: handed ON to, which is the whole point of the check.
@@ -114,7 +114,7 @@ def test_the_record_answers_only_the_device_it_names(
     """
     both: Devices = request.getfixturevalue("pair")
     server_a, server_b, _host, _port = both
-    _pair(both, monkeypatch, role="admin", settings=server_b.settings)
+    _pair_settled(both, monkeypatch, role="admin", settings=server_b.settings)
     _owned_session(server_a)
     moved = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
     assert moved["ok"] is True, moved
@@ -164,7 +164,7 @@ def test_a_peer_that_answers_the_old_way_cannot_make_this_device_promote(
     """
     both: Devices = request.getfixturevalue("pair")
     server_a, server_b, _host, _port = both
-    _pair(both, monkeypatch, role="admin", settings=server_b.settings)
+    _pair_settled(both, monkeypatch, role="admin", settings=server_b.settings)
     _owned_session(server_a)
     staged = _staged_copy_of_the_receivers_move(server_a, server_b, monkeypatch)
     assert not (server_b.root / "sessions" / SESSION).is_dir()
@@ -213,7 +213,7 @@ def test_the_wire_refuses_a_third_device_and_leaves_the_copy(
     """
     both: Devices = request.getfixturevalue("pair")
     server_a, server_b, _host, _port = both
-    _pair(both, monkeypatch, role="admin", settings=server_b.settings)
+    _pair_settled(both, monkeypatch, role="admin", settings=server_b.settings)
     _owned_session(server_a)
     staged = _staged_copy_of_the_receivers_move(server_a, server_b, monkeypatch)
     write_tombstone(SESSION, device_id=THIRD, device_name="peer-c", config_dir=server_a.root)
@@ -244,7 +244,7 @@ def test_the_pull_route_reads_the_record_before_it_promotes(
     """
     both: Devices = request.getfixturevalue("pair")
     server_a, server_b, _host, _port = both
-    _pair(both, monkeypatch, role="admin", settings=server_b.settings)
+    _pair_settled(both, monkeypatch, role="admin", settings=server_b.settings)
     _owned_session(server_a)
     staged = _staged_copy_of_the_receivers_move(server_a, server_b, monkeypatch)
     assert not (server_b.root / "sessions" / SESSION).is_dir()
