@@ -309,7 +309,39 @@ class ImageContent(BaseModel):
     marker: int | None = Field(default=None, exclude=True)
 
 
-Content = TextContent | ImageContent
+class AudioContent(BaseModel):
+    """A recorded-audio block. ``data`` is base64-encoded bytes of ``mime_type``.
+
+    Mirrors :class:`ImageContent`, including ``marker`` (the composer chip the
+    recording cites, if a surface ever numbers one) and its ``exclude=True``
+    rule: a presentation fact must not reach a provider, a transcript row or a
+    context hash. Unlike an image there is at most ONE block per message in
+    v1 (the desktop ``Prompt`` bounds the list), which is why the sidecar
+    below can assume a single recording per forked record.
+
+    ``mime_type`` is the SNIFFED container, never the client's declaration
+    (``media.sniff_audio`` decides it at ingest): the OpenAI-compatible chat
+    wire keys its ``input_audio.format`` token on this field, and a mislabeled
+    capture would otherwise select the wrong token for the bytes — a provider
+    400 in the middle of a paid turn.
+
+    ``duration_ms`` is capture-side information for caps and later UX; no
+    writer computes it today (the daemon has no decoder) and no provider is
+    ever sent it — every wire renderer builds its audio part from ``data`` and
+    ``mime_type`` explicitly. It is deliberately NOT excluded from
+    ``model_dump``: unlike ``marker`` it is a property of the recording, so a
+    durable row keeping it is how a future surface can show a duration
+    without re-measuring.
+    """
+
+    type: Literal["audio"] = "audio"
+    data: str = ""
+    mime_type: str = "audio/wav"
+    duration_ms: int | None = None
+    marker: int | None = Field(default=None, exclude=True)
+
+
+Content = TextContent | ImageContent | AudioContent
 
 
 # ---------------------------------------------------------------------------
@@ -417,17 +449,27 @@ class Message(BaseModel):
         return "".join(block.text for block in self.content if isinstance(block, TextContent))
 
     @staticmethod
-    def user(text: str, images: "Sequence[ImageContent] | None" = None, **extra: Any) -> "Message":
+    def user(
+        text: str,
+        images: "Sequence[ImageContent] | None" = None,
+        audio: "Sequence[AudioContent] | None" = None,
+        **extra: Any,
+    ) -> "Message":
         """A user turn, optionally carrying attachments.
 
         Images follow the text rather than leading it: the prompt says what to
         do with them, and a model reading the instruction first knows what it
         is looking for. Empty text still yields a text block, so a message that
         is nothing but a pasted screenshot keeps the shape every provider
-        serializer expects.
+        serializer expects. Audio follows the images for the same reason with
+        one addition: a wire that can carry a recording as its own part shape
+        (``input_audio``, ``inline_data``) renders the text and stills it was
+        asked about first, so the part order matches the reading order a
+        model gets anywhere else.
         """
         content: list[Content] = [TextContent(text=text)]
         content.extend(images or ())
+        content.extend(audio or ())
         return Message(role="user", content=content, **extra)
 
     @staticmethod
@@ -2543,6 +2585,16 @@ class ModelSpec(BaseModel):
     max_output_tokens: int = 8_192
     supports_tools: bool = True
     supports_images: bool = True
+    # Whether the model takes AUDIO input on its wire (a recorded block, not a
+    # transcription call). DEFAULT FALSE ON PURPOSE, and the asymmetry with
+    # ``supports_images`` above is the whole argument: a wrong ``True`` sends a
+    # recording to a model that refuses it MID-TURN — a paid request whose only
+    # outcomes are a provider error or a silently useless attachment — while a
+    # wrong ``False`` degrades to the STT cascade, which is a working path in
+    # the safe direction (transcribe first, send text). Stated values come from
+    # the discovery chain (listing modalities → ``ModelInfo`` → here); silence
+    # stays ``False``.
+    supports_audio_input: bool = False
     supports_prompt_cache: bool = False
     # Public OpenAI Responses routing is a model capability, not a provider-wire
     # guess: compatibility providers may serve the same model id while exposing
