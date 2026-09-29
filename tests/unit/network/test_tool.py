@@ -508,7 +508,10 @@ def test_the_new_actions_render_what_the_cli_actually_emits() -> None:
 
 def test_the_credentials_digest_carries_the_shareable_block() -> None:
     """The agent surface mirrors the CLI's device-level ledger (design §2): the
-    shareability preflight, read through ``_scrub`` in the order the real path uses."""
+    shareability preflight, read through ``_scrub`` in the order the real path uses.
+
+    Provider-login rows ride the block too (Radient org projection): the scrubber must
+    pass an ``identity_label`` through, and the renderer must show it."""
     payload = {
         "ok": True,
         "networks": [],
@@ -529,6 +532,13 @@ def test_the_credentials_digest_carries_the_shareable_block() -> None:
                 "shared_with": [],
                 "remedy": "run '/mcp login https://n.example/mcp' here first",
             },
+            {
+                "provider": "radient",
+                "kind": "oauth-rotating",
+                "identity_label": "owner@example.test",
+                "shared_with": [],
+                "remedy": "lop network credential share radient --with <device>",
+            },
         ],
     }
     scrubbed = net_tool._scrub(payload)  # noqa: SLF001 — the scrub boundary under test
@@ -538,6 +548,9 @@ def test_the_credentials_digest_carries_the_shareable_block() -> None:
         " --with <device>",
         "      shared with cloud-node-1 (session)",
         "  notion  http  no login here yet — run '/mcp login https://n.example/mcp' here first",
+        "  radient  oauth-rotating  login held — share: lop network credential share radient"
+        " --with <device>",
+        "      signed in as owner@example.test",
     ]
     # An absent block leaves the old rendering (and its fallback) alone.
     assert net_tool._render("credentials", {"ok": True, "networks": []}) == [  # noqa: SLF001

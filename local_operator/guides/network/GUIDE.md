@@ -442,6 +442,16 @@ requested from the device that owns the credential, which lends a short-lived
 access token and never its refresh token (`lop network credential share|revoke`,
 `lop network credentials`).
 
+Provider logins are shareable by name, and the ledger lists them beside the MCP
+servers: `lop network credentials` shows a row per provider login this device
+holds — e.g. `radient  oauth-rotating  login held`, with the share command right
+beside it — and a peer that borrows one runs the call as that account without any
+login of its own. The Radient organization login is person-scoped: share it only
+to your own paired devices. A borrower pointed at a local or staging hub must
+also set `RADIENT_ORG_ALLOW_NONCANONICAL_BASE=1` on ITSELF — the destination
+guard runs where the request is sent, so the opt-in belongs to the borrowing
+device, not to the owner.
+
 A granted share is learned by PULLING, never pushed. The owner's document changes
 when `lop network credential share` runs there; this device reads it on its next
 `lop network credentials`, and a key it has not read yet is a key it has never
