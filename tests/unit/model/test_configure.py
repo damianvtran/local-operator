@@ -2819,6 +2819,26 @@ class TestInfoFromListing:
             _info_from_listing(text_only, "vendor/model", openrouter_default_model_info, "or")
         ).supports_images is False
 
+    def test_audio_modality_maps_to_supports_audio_input(self):
+        from local_operator.model.configure import _info_from_listing
+        from local_operator.model.registry import openrouter_default_model_info
+
+        voice, _ = self._listing(architecture={"input_modalities": ["text", "audio"]})
+        assert (
+            _info_from_listing(voice, "vendor/model", openrouter_default_model_info, "or")
+        ).supports_audio_input is True
+        text_only, _ = self._listing(architecture={"input_modalities": ["text"]})
+        assert (
+            _info_from_listing(text_only, "vendor/model", openrouter_default_model_info, "or")
+        ).supports_audio_input is False
+        # A listing with no modality field is silence, not a denial: the
+        # template's ``None`` must survive so the registry can answer for a
+        # direct provider whose own listing is lean.
+        unstated, _ = self._listing(architecture={})
+        assert (
+            _info_from_listing(unstated, "vendor/model", openrouter_default_model_info, "or")
+        ).supports_audio_input is None
+
     def test_missing_model_raises(self):
         from local_operator.model.configure import _info_from_listing
         from local_operator.model.registry import openrouter_default_model_info
@@ -5313,3 +5333,43 @@ def test_the_router_seed_is_the_routes_own_default_per_provider() -> None:
     # keeps the ``if router_levels`` branch the only place a seed is applied.
     assert aggregator_router_effort_default("ollama", "auto") is None
     assert aggregator_router_effort_default("radient", "some-vendor/other") is None
+
+
+def test_build_model_spec_carries_a_stated_audio_capability_and_defaults_closed() -> None:
+    """The discovery chain's LAST hop: ``ModelInfo`` -> ``ModelSpec``.
+
+    ``test_configure``'s modality test pins the discovery hop
+    (``_info_from_listing``), and ``test_types`` pins the field's default; this
+    pins the junction between them: a STATED capability survives
+    ``build_model_spec``, and everything unstated — an explicit ``None``, or a
+    duck-typed stub without the attribute at all — keeps the safe ``False``.
+    That is the wrong-True asymmetry the field documents, enforced at the one
+    boundary every path builds a spec through.
+    """
+    from types import SimpleNamespace
+
+    # The stub shape mirrors ``test_naming``'s stand-in: every NOT-dunder
+    # attribute a real info carries EXCEPT the one under test, because that
+    # absence is the case being pinned.
+    base: dict[str, Any] = dict(
+        id="muse-spark-1.3",
+        name="Muse Spark",
+        description="test",
+        context_window=200_000,
+        max_tokens=64_000,
+        supports_images=True,
+        supports_prompt_cache=True,
+    )
+
+    stated = build_model_spec(
+        "openrouter", "meta/muse-spark-1.3", ModelInfo(**base, supports_audio_input=True)
+    )
+    assert stated.supports_audio_input is True
+
+    unstated = build_model_spec("openrouter", "meta/muse-spark-1.3", ModelInfo(**base))
+    assert unstated.supports_audio_input is False
+
+    # Typed ``Any`` to say it deliberately: the point is a stand-in that is
+    # NOT a ModelInfo, the shape ``test_naming`` pins for the same defensive read.
+    stub: Any = SimpleNamespace(**base)
+    assert build_model_spec("openrouter", "meta/muse-spark-1.3", stub).supports_audio_input is False

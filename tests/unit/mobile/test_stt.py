@@ -8,10 +8,11 @@ Three layers under test:
   fail-closed, and the Radient adapter keeps the desktop route's temp-dir
   discipline.
 * ``mobile/stt.py`` — availability: the resolver's answer is PRESERVED
-  (its path, not our priority logic) and only filtered for executability;
+  (its path, not our priority logic) and only filtered for executability —
+  the SETTLED seam reads the cascade's ``AudioPathResolution`` (path-driven;
+  the pre-cascade tree's first-executable-row baseline remains covered);
   the persisted-credential rule keys on stored credentials; the TTL cache
-  serves repaints; the whole surface never raises; the pre-cascade tree
-  falls back to the first executable row.
+  serves repaints; the whole surface never raises.
 * ``describe_stt_failure`` — the desktop route's classifier mirrored locally:
   402 for a quota refusal (Radient's own or a provider credit marker), 502
   for everything else upstream, transport failures passed through verbatim.
@@ -55,10 +56,14 @@ def _fresh_availability_cache() -> Any:
 
 
 class _Resolution:
-    """The resolver's answer shape the adapter reads (see mobile/stt.py)."""
+    """A resolver answer in the SETTLED shape (``AudioPathResolution``'s side
+    of the seam): ``path`` — an ``AudioPath`` token, or the ``"none"`` no-path
+    spelling — plus the reason. There is deliberately no ``available`` field:
+    the reader DERIVES availability from the path, and a double that carried
+    one would let a regression re-read it unnoticed.
+    """
 
-    def __init__(self, available: bool, path: Optional[str], reason: str = "") -> None:
-        self.available = available
+    def __init__(self, path: Optional[str], reason: str = "") -> None:
         self.path = path
         self.reason = reason
 
@@ -108,13 +113,17 @@ def test_backend_ready_tracks_the_executor_probe(monkeypatch: pytest.MonkeyPatch
     assert backend_ready("provider_stt_superwhisper") is False
 
     # The BYO rungs are executable exactly when the cascade executor is in the
-    # tree; on this tree it is not, and both answers agree.
-    assert byo_executor() is None
-    assert backend_ready("provider_stt_elevenlabs") is False
-
-    monkeypatch.setattr(stt_backends, "byo_executor", lambda: object())
+    # tree — and it IS here (the cascade shipped): the callable check and both
+    # backend_ready answers are the same fact, read from the one probe.
+    assert callable(byo_executor())
     assert backend_ready("provider_stt_elevenlabs") is True
     assert backend_ready("provider_stt_openai") is True
+
+    # ...and the probe stays the gate: an absent executor flips them off again
+    # (the fail-closed half the sibling test drives through the real probe).
+    monkeypatch.setattr(stt_backends, "byo_executor", lambda: None)
+    assert backend_ready("provider_stt_elevenlabs") is False
+    assert backend_ready("provider_stt_openai") is False
 
 
 def test_the_executor_probe_fails_closed_on_any_exception(
@@ -131,7 +140,7 @@ def test_the_executor_probe_fails_closed_on_any_exception(
 
 
 @pytest.mark.asyncio
-async def test_unknown_and_unservable_tokens_raise_unavailable() -> None:
+async def test_unknown_and_unservable_tokens_raise_unavailable(tmp_path: Path) -> None:
     with pytest.raises(SttBackendUnavailable, match="Unknown voice path"):
         await transcribe_with_backend("not-a-token", b"xx", "audio/wav")
 
@@ -139,9 +148,17 @@ async def test_unknown_and_unservable_tokens_raise_unavailable() -> None:
         await transcribe_with_backend("provider_stt_superwhisper", b"xx", "audio/wav")
     assert caught.value.reason == "SuperWhisper has no transcription API."
 
+    # The cascade now DISPATCHES: with no stored key the token-targeted
+    # executor refuses the rung, and the bridge re-raises that as the same
+    # typed class the route answers 503 to — never the generic 500 a bare
+    # cascade SttUnavailable would have produced (agents review convergence,
+    # B1/Q7).
     with pytest.raises(SttBackendUnavailable) as caught:
-        await transcribe_with_backend("provider_stt_elevenlabs", b"xx", "audio/wav")
-    assert "not available in this build yet" in str(caught.value)
+        await transcribe_with_backend(
+            "provider_stt_elevenlabs", b"xx", "audio/wav", config_root=tmp_path
+        )
+    assert "No ElevenLabs API key is stored" in str(caught.value)
+    assert caught.value.path == "provider_stt_elevenlabs"
 
 
 # ---------------------------------------------------------------------------
@@ -210,29 +227,96 @@ async def test_the_radient_adapter_refuses_an_empty_credential(
 
 
 # ---------------------------------------------------------------------------
+# The cascade dispatch (the settled #1734 seam)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_cascade_dispatch_passes_the_audio_and_the_token_to_the_executor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The settled call SHAPE: token first, then BYTES + mime; no model.
+
+    This pins the conversion #1734 reserved to the cascade session (the old
+    call passed no audio at all and the token in the ``audio_path`` slot).
+    The executor's own availability re-check is its tests' subject; here a
+    fake executor proves what the bridge sends and what it adopts back —
+    including the provider label, which the cascade's ``SttOutcome`` does not
+    carry and the dispatched row must supply.
+    """
+    seen: dict[str, Any] = {}
+
+    class _CascadeOutcome:
+        text = "phone text"
+        path = "provider_stt_openai"
+
+    async def fake_executor(backend: str, audio: bytes, mime: str, **kwargs: Any) -> Any:
+        seen.update(backend=backend, audio=audio, mime=mime, kwargs=kwargs)
+        return _CascadeOutcome()
+
+    monkeypatch.setattr(stt_backends, "byo_executor", lambda: fake_executor)
+
+    outcome = await transcribe_with_backend(
+        "provider_stt_openai",
+        b"RIFFfake",
+        "audio/wav",
+        language="en",
+        prompt="hint",
+        model="gpt-something",
+        config_root=tmp_path,
+    )
+
+    assert outcome.text == "phone text"
+    assert outcome.path == "provider_stt_openai"
+    assert outcome.provider == "openai"
+    # The phone's ``model`` form field is an STT-model hint the Radient adapter
+    # honors; the cascade executor deliberately does not receive it.
+    assert seen == {
+        "backend": "provider_stt_openai",
+        "audio": b"RIFFfake",
+        "mime": "audio/wav",
+        "kwargs": {
+            "config_dir": tmp_path,
+            "store": None,
+            "language": "en",
+            "prompt": "hint",
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 # Availability
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_availability_uses_the_resolvers_path_and_filters_executability(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     async def resolver(**kwargs: Any) -> _Resolution:
-        return _Resolution(True, "provider_stt_superwhisper")
+        return _Resolution("provider_stt_superwhisper")
 
     answer = await stt_availability(resolver=resolver, config_root=tmp_path)
     assert answer["available"] is False
     assert answer["reason"] == "SuperWhisper has no transcription API."
 
     async def resolver2(**kwargs: Any) -> _Resolution:
-        return _Resolution(True, "provider_stt_elevenlabs")
+        return _Resolution("provider_stt_elevenlabs")
 
     # refresh=True: the previous answer is inside its TTL and a repaint would
     # legitimately be served from it (that is the cache test's subject, below).
+    # The resolver NAMED ElevenLabs; this machine has no stored key, so
+    # executability hides the mic with the credential's own sentence — not the
+    # old pre-cascade "not available in this build yet".
     answer = await stt_availability(resolver=resolver2, config_root=tmp_path, refresh=True)
     assert answer["available"] is False
-    assert "not available in this build yet" in answer["reason"]
+    assert answer["reason"] == "No ElevenLabs API key is stored on this machine."
+
+    # With the key stored, the same resolver answer lights the mic.
+    store_provider_key("ELEVENLABS_API_KEY", "stored-key", base=tmp_path)
+    answer = await stt_availability(resolver=resolver2, config_root=tmp_path, refresh=True)
+    assert answer["available"] is True
+    assert answer["path"] == "provider_stt_elevenlabs"
 
 
 @pytest.mark.asyncio
@@ -242,7 +326,7 @@ async def test_availability_requires_a_persisted_credential(
     """An ambient env key must not authorize a tunnel-reachable surface."""
 
     async def resolver(**kwargs: Any) -> _Resolution:
-        return _Resolution(True, "provider_stt_radient")
+        return _Resolution("provider_stt_radient")
 
     monkeypatch.setenv("RADIENT_API_KEY", "ambient-key")
     answer = await stt_availability(resolver=resolver, config_root=tmp_path, refresh=True)
@@ -264,7 +348,10 @@ async def test_availability_serves_the_ttl_cache_and_refresh_bypasses_it(
     async def resolver(**kwargs: Any) -> _Resolution:
         nonlocal calls
         calls += 1
-        return _Resolution(False, None, "nothing here")
+        # The settled no-path spelling: ``AudioPath.NONE`` as the resolver
+        # emits it. It is an ANSWER (unavailable, cached, reason preserved),
+        # not a resolver fault.
+        return _Resolution("none", "nothing here")
 
     first = await stt_availability(resolver=resolver, config_root=tmp_path)
     second = await stt_availability(resolver=resolver, config_root=tmp_path)
@@ -286,31 +373,55 @@ async def test_a_broken_resolver_degrades_to_unavailable_and_never_raises(
     assert answer["available"] is False
     assert answer["reason"], "an unavailable answer still owes a sentence"
 
-    # And a resolver answering a shape this build does not know is a FAILED
-    # resolver (fail-closed), not an accidental yes.
-    class _Unshaped:
-        path = "provider_stt_radient"
+    # And a resolver whose shape carries NO ``path`` at all — the
+    # PRE-settlement freeze (an ``available`` boolean) — is a FAILED resolver
+    # (fail-closed), not an accidental yes.
+    class _OldShape:
+        available = True
 
     async def shape_shift(**kwargs: Any) -> Any:
-        return _Unshaped()
+        return _OldShape()
 
     answer = await stt_availability(resolver=shape_shift, config_root=tmp_path, refresh=True)
     assert answer["available"] is False
 
+    # A resolver that names a path THIS build cannot map is a live answer, not
+    # a fault: the mic stays hidden with the mapping sentence (advertising a
+    # rung nothing can run would be advertising something that appears and
+    # fails).
+    class _FuturePath:
+        path = "provider_stt_deepgram"
+        reason = "A Deepgram API key is stored."
+
+    async def future(**kwargs: Any) -> Any:
+        return _FuturePath()
+
+    answer = await stt_availability(resolver=future, config_root=tmp_path, refresh=True)
+    assert answer["available"] is False
+    assert "cannot run" in answer["reason"]
+
 
 @pytest.mark.asyncio
 async def test_absent_resolver_falls_back_to_the_first_executable_row(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The pre-cascade bridge: the mic must work through the Radient leg.
+    """The mic must work through the Radient leg, resolver present OR absent.
 
-    On this tree ``local_operator.stt`` does not exist yet, so the probe is
-    absent and the baseline runs. The credential rule still applies.
+    The shipped tree carries ``local_operator.stt``: production reads the
+    REAL cascade resolver, and a stored Radient credential is what lights the
+    path. The transitional baseline (for a tree that predates the cascade
+    module) still answers the same question through its own code path —
+    monkeypatched here, because the probe now finds the module.
     """
     answer = await stt_availability(config_root=tmp_path, refresh=True)
     assert answer["available"] is False
 
     store_provider_key("RADIENT_API_KEY", "stored-key", base=tmp_path)
+    answer = await stt_availability(config_root=tmp_path, refresh=True)
+    assert answer["available"] is True
+    assert answer["path"] == "provider_stt_radient"
+
+    monkeypatch.setattr(mobile_stt, "_cascade_resolver", lambda: None)
     answer = await stt_availability(config_root=tmp_path, refresh=True)
     assert answer["available"] is True
     assert answer["path"] == "provider_stt_radient"

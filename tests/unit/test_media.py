@@ -17,6 +17,8 @@ from PIL import Image
 from local_operator.media import (
     SUPPORTED_IMAGE_MIME_TYPES,
     ImageInfo,
+    sniff_audio,
+    sniff_audio_file,
     sniff_image,
     sniff_image_file,
 )
@@ -197,3 +199,62 @@ def test_a_path_with_a_nul_byte_is_declined_not_raised(tmp_path) -> None:
     notice if it were dropped.
     """
     assert sniff_image_file(f"{tmp_path}/a\x00.png") is None
+
+
+# -- audio --------------------------------------------------------------------
+
+
+_AUDIO_CASES = [
+    # Each header is the shape the named writer actually emits; sniffing is by
+    # content, so the test feeds bytes, never a filename or a declared mime.
+    (b"RIFF\x24\x08\x00\x00WAVEfmt ", "audio/wav"),
+    (b"ID3\x04\x00\x00\x00\x00\x00\x00", "audio/mpeg"),
+    # A bare MPEG frame sync, no ID3 tag: ``\xff\xfb`` is MPEG-1 Layer III.
+    (b"\xff\xfb\x90\x00" + b"\x00" * 8, "audio/mpeg"),
+    # ADTS AAC shares the sync word; its layer bits are zero.
+    (b"\xff\xf1\x50\x80" + b"\x00" * 8, "audio/aac"),
+    (b"OggS\x00\x02\x00\x00\x00\x00", "audio/ogg"),
+    (b"fLaC\x00\x00\x00\x22", "audio/flac"),
+    # ``ftyp`` at offset 4, audio brand at offset 8: Apple voice memos (`M4A `)
+    # and the generic MP4 brands recorders emit (`mp42`/`isom`).
+    (b"\x00\x00\x00\x20ftypM4A \x00\x00\x00\x00", "audio/mp4"),
+    (b"FORM\x00\x00\x00\x10AIFF\x00\x00", "audio/aiff"),
+    (b"\x1a\x45\xdf\xa3\x01\x00\x00\x00\x00\x00\x00", "audio/webm"),
+]
+
+
+@pytest.mark.parametrize(("data", "mime"), _AUDIO_CASES)
+def test_every_supported_audio_container_is_named(data: bytes, mime: str) -> None:
+    info = sniff_audio(data)
+    assert info is not None, f"{mime} header was not recognised"
+    assert info.mime_type == mime
+
+
+@pytest.mark.parametrize(
+    ("label", "data"),
+    [
+        ("html", b"<!doctype html><html>hi</html>"),
+        ("empty", b""),
+        ("truncated wav", b"RIFF"),
+        # RIFF, but the WEBP encoding: the WAVE check must not be a prefix test.
+        ("webp", b"RIFF\x00\x00\x00\x00WEBP"),
+        # Reserved ADTS sampling index: a bare 0xFF 0xF* pair is not enough.
+        ("reserved adts", b"\xff\xf1\x3c\x80\x00\x00"),
+    ],
+)
+def test_what_is_not_readable_audio_is_refused(label: str, data: bytes) -> None:
+    """Same contract as the image reader: an unrecognised or unverifiable byte
+    string must NOT come back as audio, or the door ships a provider 400."""
+    assert sniff_audio(data) is None, label
+
+
+def test_an_audio_file_is_sniffed_by_header_and_an_unreadable_path_is_none(tmp_path) -> None:
+    """Extension-free is the normal case for a browser recording handed over as
+    a temp file; a missing path or a directory must be an answer (``None``), not
+    an exception, on the same keystroke path the image sniffer runs on."""
+    path = tmp_path / "recording"
+    path.write_bytes(b"RIFF\x24\x08\x00\x00WAVEjunk" + b"\x00" * 512)
+    info = sniff_audio_file(str(path))
+    assert info is not None and info.mime_type == "audio/wav"
+    assert sniff_audio_file(str(tmp_path / "missing")) is None
+    assert sniff_audio_file(str(tmp_path)) is None  # a directory

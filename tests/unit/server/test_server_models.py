@@ -83,6 +83,7 @@ def test_deepseek_http_catalogue_uses_authenticated_live_inventory(
                 name="Live Flash",
                 context_window=200_000,
                 supports_images=False,
+                supports_audio_input=True,
                 supports_tools=False,
                 reasoning=False,
             )
@@ -94,6 +95,7 @@ def test_deepseek_http_catalogue_uses_authenticated_live_inventory(
     rows = response.json()["result"]["models"]
     assert [row["id"] for row in rows] == ["deepseek-flash"]
     assert rows[0]["info"]["supports_images"] is False
+    assert rows[0]["info"]["supports_audio_input"] is True
     assert rows[0]["info"]["supports_tools"] is False
     assert rows[0]["info"]["context_window"] == 200_000
     assert seen[0][0] == "deepseek"
@@ -300,17 +302,25 @@ def test_list_models_with_openrouter(mock_list_models, client, mock_credential_m
     """Test the list_models endpoint with OpenRouter models."""
     # Mock the OpenRouterClient.list_models method
     mock_pricing = OpenRouterModelPricing(prompt=0.001, completion=0.002)
-    mock_model1 = OpenRouterModelData(
-        id="model1",
-        name="Model 1",
-        description="Test model 1",
-        pricing=mock_pricing,
+    # Built through ``model_validate`` rather than the constructor so the
+    # undeclared ``architecture`` rides in the entry's extras, exactly as the
+    # live client parses a listing response.
+    mock_model1 = OpenRouterModelData.model_validate(
+        {
+            "id": "model1",
+            "name": "Model 1",
+            "description": "Test model 1",
+            "pricing": mock_pricing,
+            "architecture": {"input_modalities": ["text", "audio"]},
+        }
     )
-    mock_model2 = OpenRouterModelData(
-        id="model2",
-        name="Model 2",
-        description="Test model 2",
-        pricing=mock_pricing,
+    mock_model2 = OpenRouterModelData.model_validate(
+        {
+            "id": "model2",
+            "name": "Model 2",
+            "description": "Test model 2",
+            "pricing": mock_pricing,
+        }
     )
     mock_response = OpenRouterListModelsResponse(data=[mock_model1, mock_model2])
     mock_list_models.return_value = mock_response
@@ -346,6 +356,12 @@ def test_list_models_with_openrouter(mock_list_models, client, mock_credential_m
         assert model1["info"]["description"] == "Test model 1"
         assert model1["info"]["input_price"] == 1000.0  # 0.001 * 1,000,000
         assert model1["info"]["output_price"] == 2000.0  # 0.002 * 1,000,000
+        # The listing's own modality statement reaches the entry; a listing
+        # that sent none leaves the field unstated (``None``, not a denial).
+        assert model1["info"]["supports_audio_input"] is True
+        model2 = next((m for m in openrouter_models if m.get("id") == "model2"), None)
+        assert model2 is not None
+        assert model2["info"]["supports_audio_input"] is None
 
 
 @patch.object(OpenRouterClient, "list_models")

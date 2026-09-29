@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import unicodedata
 from collections.abc import Sequence
@@ -17,6 +18,7 @@ from local_operator.compaction.thresholds import (
 from local_operator.harness.types import (
     DEFAULT_TURN_OUTPUT_TOKENS,
     AgentTool,
+    AudioContent,
     ChatRequest,
     ImageContent,
     Message,
@@ -39,11 +41,14 @@ from local_operator.providers.clients import (
     GoogleClient,
     MockClient,
     OpenAICompatClient,
+    WireCannotCarryAudio,
     _anthropic_stream_error,
     _effective_max_tokens,
     _estimate_slope,
     _estimated_prompt_tokens,
+    _is_empty_assistant,
     _message_to_openai,
+    _messages_to_openai_responses,
     _output_reserve_tokens,
     client_for_spec,
     raise_for_status,
@@ -6300,3 +6305,85 @@ def test_an_explicit_override_wins_over_the_router_seed() -> None:
     off_ladder = spec.model_copy(update={"reasoning_effort": "max"})
     dropped = client._build_body(ChatRequest(model=off_ladder, messages=[Message.user("hi")]))
     assert "reasoning_effort" not in dropped
+
+
+# ---------------------------------------------------------------------------
+# Audio blocks on the wires (the STT cascade's recording door)
+# ---------------------------------------------------------------------------
+
+_WAV_B64 = base64.b64encode(b"RIFF" + b"\x00" * 4 + b"WAVE" + b"\x00" * 24).decode("ascii")
+
+
+def _audio_message(mime: str = "audio/wav") -> Message:
+    return Message.user("listen", audio=[AudioContent(data=_WAV_B64, mime_type=mime)])
+
+
+async def test_openai_chat_renders_an_audio_block_as_input_audio() -> None:
+    """The recording's one sendable chat shape: ``input_audio`` + wav/mp3 token.
+
+    The format token is derived from the block's (sniffed) mime — never from a
+    caller's declaration — because the provider decodes by this token.
+    """
+    rendered = _message_to_openai(_audio_message("audio/wav"))
+
+    assert rendered["content"][-1] == {
+        "type": "input_audio",
+        "input_audio": {"data": _WAV_B64, "format": "wav"},
+    }
+
+
+async def test_openai_chat_renders_mp3_with_its_own_format_token() -> None:
+    rendered = _message_to_openai(_audio_message("audio/mpeg"))
+
+    assert rendered["content"][-1]["input_audio"]["format"] == "mp3"
+
+
+async def test_openai_chat_refuses_a_container_the_part_cannot_take() -> None:
+    """v1 does not transcode: anything but wav/mp3 is a TYPED refusal.
+
+    A silent drop would send the message the user watched leave without its
+    recording; a guessed token would 400 mid-turn.
+    """
+    with pytest.raises(WireCannotCarryAudio) as excinfo:
+        _message_to_openai(_audio_message("audio/webm"))
+
+    assert "audio/webm" in str(excinfo.value)
+
+
+async def test_the_responses_wire_refuses_audio_structurally() -> None:
+    """Responses takes text and images; audio input is a chat-completions
+    pattern. The guard must name the constraint rather than ship a body whose
+    audio quietly vanished."""
+    with pytest.raises(WireCannotCarryAudio) as excinfo:
+        _messages_to_openai_responses([_audio_message()])
+
+    assert "Responses" in str(excinfo.value)
+
+
+async def test_anthropic_refuses_audio_structurally() -> None:
+    with pytest.raises(WireCannotCarryAudio):
+        AnthropicClient._message_blocks(_audio_message())
+
+
+async def test_google_renders_an_audio_block_as_inline_data() -> None:
+    body = GoogleClient()._build_body(
+        ChatRequest(
+            model=_spec(provider="google", model_id="gemini-3.7-flash"),
+            messages=[_audio_message()],
+        )
+    )
+
+    assert {"inline_data": {"mime_type": "audio/wav", "data": _WAV_B64}} in body["contents"][-1][
+        "parts"
+    ]
+
+
+async def test_a_recording_counts_as_content_for_the_empty_assistant_drop() -> None:
+    """``_is_empty_assistant`` must treat audio like an image: a block is
+    content, and dropping a row that carried one is how a recording would be
+    erased from a replayed history without any error."""
+    message = Message(
+        role="assistant", content=[AudioContent(data=_WAV_B64, mime_type="audio/wav")]
+    )
+
+    assert _is_empty_assistant(message) is False

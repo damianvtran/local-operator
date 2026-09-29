@@ -888,6 +888,14 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     context_window = UNKNOWN_CONTEXT_WINDOW
     max_output = UNKNOWN_MAX_OUTPUT
     supports_images = True
+    # The mirror of ``supports_images`` with the OPPOSITE default, and the
+    # asymmetry is deliberate (see ``ModelSpec.supports_audio_input``): a wrong
+    # ``True`` spends a paid turn the model refuses, so only a stated capability
+    # opens the audio door and silence keeps it closed. ``getattr`` for the same
+    # stand-in reason the responses flag below documents: a duck-typed stub
+    # without the field (``test_naming``'s ``SimpleNamespace``) must keep the
+    # safe default rather than raise.
+    supports_audio_input = False
     supports_cache = False
     supports_responses_api = False
     if info is not None:
@@ -898,6 +906,9 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
             max_output = info.max_tokens
         if info.supports_images is not None:
             supports_images = info.supports_images
+        stated_audio = getattr(info, "supports_audio_input", None)
+        if stated_audio is not None:
+            supports_audio_input = bool(stated_audio)
         supports_cache = info.supports_prompt_cache
         supports_responses_api = bool(getattr(info, "supports_responses_api", False))
 
@@ -1208,6 +1219,7 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
             else True
         ),
         supports_images=supports_images,
+        supports_audio_input=supports_audio_input,
         supports_prompt_cache=supports_cache,
         supports_responses_api=supports_responses_api,
         requires_reasoning_echo=requires_reasoning_echo,
@@ -1628,6 +1640,10 @@ def _map_entry(model: Any, template: ModelInfo) -> ModelInfo:
     modalities = _extra_mapping(model, "architecture").get("input_modalities") or []
     if modalities:
         info.supports_images = "image" in modalities
+        # The same statement answers the audio question: a described list that
+        # omits ``audio`` is a denial, and an absent or empty list is silence
+        # that leaves the template's ``None`` deferring downstream.
+        info.supports_audio_input = "audio" in modalities
 
     pricing_extra = model.pricing.model_extra or {}
     cache_read = pricing_extra.get("input_cache_read")
@@ -2033,6 +2049,11 @@ def info_from_discovered_model(
         # already carries ``Optional[bool]`` with the same meaning, and
         # ``build_model_spec`` reads ``is not None`` before trusting it.
         info.supports_images = row.supports_images
+    if row.supports_audio_input is not None:
+        # Same three-state contract as ``supports_images`` above: a stated
+        # ``false`` is the provider's denial of audio input, and only silence
+        # defers to whatever the registry or catalogue paths supplied.
+        info.supports_audio_input = row.supports_audio_input
     if row.supports_tools is not None:
         info.supports_tools = row.supports_tools
     if row.reasoning is not None:

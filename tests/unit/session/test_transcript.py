@@ -87,6 +87,20 @@ async def test_input_metadata_round_trips_and_absence_stays_absent(transcript):
     assert replayed[1].input_path is None
 
 
+def test_the_stt_transcript_type_matches_the_sidecar_writer():
+    """The journal's copy of the sidecar's custom-entry type, pinned.
+
+    The constant is an INLINE literal in ``session/transcript.py`` — importing
+    it from ``stt.sidecar`` would pull ``httpx`` into that leaf module's import
+    graph — so nothing but this pin keeps the journal's vocabulary and the
+    writer's entry type together.
+    """
+    from local_operator.session.transcript import STT_TRANSCRIPT_CUSTOM_TYPE
+    from local_operator.stt.sidecar import STT_TRANSCRIPT_CUSTOM_TYPE as writer
+
+    assert STT_TRANSCRIPT_CUSTOM_TYPE == writer == "stt_transcript_v1"
+
+
 @pytest.mark.asyncio
 async def test_usage_cost_round_trips_and_old_rows_default_to_unreported(transcript):
     """Provider receipts are durable, while pre-receipt transcripts still load.

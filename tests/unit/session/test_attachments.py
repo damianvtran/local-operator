@@ -13,7 +13,12 @@ import base64
 
 import pytest
 
-from local_operator.harness.types import ImageContent, Message, TextContent
+from local_operator.harness.types import (
+    AudioContent,
+    ImageContent,
+    Message,
+    TextContent,
+)
 from local_operator.session.attachments import AttachmentStore
 from local_operator.session.transcript import Transcript
 
@@ -205,3 +210,46 @@ async def test_tiny_images_stay_inline(tmp_path):
     raw = transcript.path.read_text(encoding="utf-8")
     assert small in raw
     assert "attachment" not in raw
+
+
+#: RIFF/WAVE header plus padding, well over the 1 KiB externalization floor.
+WAV_BYTES = b"RIFF" + b"\x00\x00\x00\x00" + b"WAVE" + b"\x00" * 2048
+WAV_B64 = base64.b64encode(WAV_BYTES).decode("ascii")
+
+
+@pytest.mark.asyncio
+async def test_an_audio_block_externalizes_with_its_type_and_default_mime(tmp_path):
+    """A recording rides the SAME store, and its two encoded surprises are pinned.
+
+    ``audio/wav`` IS ``AudioContent``'s default, so ``exclude_defaults`` drops
+    the mime from the encoded row — measured before the fix, that made the store
+    fall back to its image default (``image/png``) and replay re-parse the block
+    as an ``ImageContent`` carrying audio bytes, i.e. a recording re-sent as an
+    image on every later turn. The row must therefore carry the explicit
+    ``type: "audio"`` discriminant, and the mime fallback must know which media
+    default it is falling back to.
+    """
+    import json
+
+    session_dir = tmp_path / "session"
+    transcript = Transcript(session_dir)
+    await transcript.append_message(
+        Message(
+            role="user",
+            content=[TextContent(text="listen"), AudioContent(data=WAV_B64)],
+        )
+    )
+
+    raw = transcript.path.read_text(encoding="utf-8")
+    assert WAV_B64 not in raw, "the payload should live in the store, not the row"
+    row = json.loads(raw.splitlines()[0])
+    block = row["payload"]["content"][-1]
+    assert block["type"] == "audio"
+    assert block["mime_type"] == "audio/wav"
+    assert "attachment" in block and "data" not in block
+
+    history = transcript.build_llm_history()
+    replayed = [m for m in history if isinstance(m, Message)][0]
+    (audio,) = [b for b in replayed.content if isinstance(b, AudioContent)]
+    assert base64.b64decode(audio.data) == WAV_BYTES
+    assert audio.mime_type == "audio/wav"

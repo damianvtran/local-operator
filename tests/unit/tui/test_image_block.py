@@ -18,7 +18,7 @@ import io
 import pytest
 from rich.text import Text
 
-from local_operator.harness.types import ImageContent
+from local_operator.harness.types import Content, ImageContent
 from local_operator.tui import images as images_mod
 from local_operator.tui.images import (
     MAX_COLS,
@@ -522,7 +522,11 @@ async def test_resume_replays_prompt_and_tool_images(monkeypatch) -> None:
             assert "▀" in _plain(block)
 
 
-def _user_content(text: str, image_b64: str):
+def _user_content(text: str, image_b64: str) -> list[Content]:
+    """The blocks ``Message.user`` stores for text + an image, typed as the
+    ``Content`` union so the literal assigns to ``Message.content`` (a
+    ``list`` is invariant: the inferred ``TextContent | ImageContent`` list
+    cannot widen to the union list)."""
     from local_operator.harness.types import TextContent
 
     return [

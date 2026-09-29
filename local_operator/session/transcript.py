@@ -52,6 +52,7 @@ from local_operator.harness.message_types import (
 )
 from local_operator.harness.types import (
     AgentMessage,
+    AudioContent,
     CustomMessage,
     Message,
     TextContent,
@@ -147,6 +148,23 @@ BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset(
         SESSION_SPEND_CUSTOM_TYPE,
     }
 )
+
+#: The forked transcription sidecar's durable record (the writer and the
+#: payload shape live in ``stt/sidecar.py``: ``{message_id, status, path,
+#: text, error, at}``, read BY ``message_id`` — every record is its own
+#: answer, so nothing collapses it and nothing treats it as a newest-wins
+#: row). Named here, beside the journal's other type vocabulary, so READERS
+#: never retype the literal; deliberately NOT imported from the writer, which
+#: would pull ``httpx`` into this module's import graph — ``this module is a
+#: leaf on purpose`` (see the note above ``_COLLAPSIBLE_CUSTOM_TYPES``).
+#: Drift is not left to care: ``tests/unit/session/test_transcript.py`` pins
+#: this constant against ``stt.sidecar.STT_TRANSCRIPT_CUSTOM_TYPE``.
+#: NOT a member of :data:`BOOKKEEPING_CUSTOM_TYPES` (its arrival follows a
+#: user row and is evidence work happened — the safe direction for an
+#: unknown type is "moves the clock") and NOT of
+#: ``_COLLAPSIBLE_CUSTOM_TYPES`` (records for different messages are not
+#: superseded copies of one another).
+STT_TRANSCRIPT_CUSTOM_TYPE = "stt_transcript_v1"
 
 
 def _is_bookkeeping_batch(entries: list["TranscriptEntry"]) -> bool:
@@ -302,6 +320,7 @@ def encode_message_payload(
       kept verbatim because that is exactly where byte fidelity matters.
     """
     payload = message.model_dump(exclude_defaults=True, exclude={"id"})
+    _stamp_audio_discriminants(message, payload)
     _externalize_attachments(payload, attachments)
     for call in payload.get("tool_calls") or ():
         raw = call.get("raw_arguments")
@@ -330,6 +349,37 @@ ATTACHMENT_KEY = "attachment"
 ATTACHMENT_MISSING = ""
 
 
+def _stamp_audio_discriminants(message: Message | CustomMessage, payload: dict[str, Any]) -> None:
+    """Re-add ``type: "audio"`` to encoded audio blocks, in place.
+
+    ``exclude_defaults`` drops ``type`` because it IS each block model's
+    default — harmless while every data-carrying block was an image, because
+    the ``Content`` union then could not be confused about what it was. With
+    TWO carriers the missing discriminant is ambiguous, and pydantic's smart
+    union resolves that ambiguity toward ``ImageContent`` (measured: a row
+    block ``{"data": ..., "mime_type": "audio/webm"}`` parses as an IMAGE
+    carrying audio bytes, and ``{"data": ...}`` — the wav default's row — the
+    same). A recording replayed as an image is re-sent as a base64 image on
+    every later turn, so the row MUST say what it holds.
+
+    Stamped from the SOURCE message's blocks, zipped positionally with the
+    dump (same list, same order — the dump is taken above, before anything
+    mutates either side), rather than guessed from mime prefixes: the source
+    model is the authority on which block is audio.
+
+    Only audio is stamped. Image rows keep dropping their default, so every
+    pre-existing row stays byte-identical — a message without audio blocks
+    gains nothing from this pass.
+    """
+    content = payload.get("content")
+    source = getattr(message, "content", None)
+    if not isinstance(content, list) or not isinstance(source, list):
+        return
+    for block, encoded in zip(source, content):
+        if isinstance(block, AudioContent) and isinstance(encoded, dict):
+            encoded["type"] = block.type
+
+
 def _externalize_attachments(payload: dict[str, Any], attachments: AttachmentStore | None) -> None:
     """Move inline base64 image payloads out of ``payload`` into the store.
 
@@ -347,14 +397,23 @@ def _externalize_attachments(payload: dict[str, Any], attachments: AttachmentSto
     for block in content:
         if not isinstance(block, dict):
             continue
-        # Identify image blocks by the ``data`` key, NOT by ``type``: the
+        # Identify media blocks by the ``data`` key, NOT by ``type``: the
         # encoder dumps with ``exclude_defaults``, and ``type`` IS the
         # pydantic default on both content models, so the discriminant is
-        # absent from the encoded row. A text block never carries ``data``.
+        # absent from the encoded row (audio blocks are stamped back by
+        # ``_stamp_audio_discriminants``; image blocks are not, and never
+        # needed to be). A text block never carries ``data``.
         data = block.get("data")
         if not isinstance(data, str) or len(data) < _ATTACHMENT_FLOOR_BYTES:
             continue
-        ref = attachments.put(data, str(block.get("mime_type", "image/png")))
+        # Which default the absent mime falls back to depends on WHICH block
+        # this is: the encoder drops ``type`` and, with it, a defaulted
+        # ``mime_type`` — ``image/png`` for an image, ``audio/wav`` for a
+        # recording — so the block's own discriminant is what decides. The
+        # audio branch is reachable because the stamp above guarantees the
+        # type on every audio block this pass ever sees.
+        default_mime = "audio/wav" if block.get("type") == "audio" else "image/png"
+        ref = attachments.put(data, str(block.get("mime_type", default_mime)))
         if ref is None:
             continue
         block.pop("data", None)

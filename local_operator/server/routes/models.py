@@ -16,7 +16,7 @@ from local_operator.clients.radient import RadientClient
 from local_operator.config import ConfigManager
 from local_operator.env import EnvConfig
 from local_operator.model.configure import info_from_discovered_model
-from local_operator.model.discovery import available_models
+from local_operator.model.discovery import _has_audio_input, available_models
 from local_operator.model.registry import (
     ProviderDetail,
     RecommendedOpenRouterModelIds,
@@ -386,6 +386,13 @@ async def list_models(
                             if model_pricing_completion is None or model_pricing_completion < 0.0:
                                 model_pricing_completion = 0.0
 
+                            # The gateway's own modality answer, where it sent
+                            # one: the declared schema stops at ``pricing``, so
+                            # ``architecture`` lives in the entry's extras.
+                            # Absent -> ``None`` (unstated), the same deferral
+                            # the registry rows use.
+                            architecture = (model.model_extra or {}).get("architecture")
+
                             # Get model info
                             model_info = ModelInfo(
                                 id=model.id,
@@ -395,6 +402,9 @@ async def list_models(
                                 max_tokens=None,
                                 context_window=None,
                                 supports_images=None,
+                                supports_audio_input=_has_audio_input(
+                                    architecture if isinstance(architecture, dict) else {}
+                                ),
                                 supports_prompt_cache=False,
                                 cache_writes_price=None,
                                 cache_reads_price=None,
@@ -448,6 +458,11 @@ async def list_models(
                             if model_pricing_completion is None or model_pricing_completion < 0.0:
                                 model_pricing_completion = 0.0
 
+                            # Same read as the OpenRouter block above: the
+                            # gateway's architecture is what answers the audio
+                            # question, and it lives in the entry's extras.
+                            architecture = (model.model_extra or {}).get("architecture")
+
                             # Get model info
                             model_info = ModelInfo(
                                 id=model.id,
@@ -457,6 +472,9 @@ async def list_models(
                                 max_tokens=None,
                                 context_window=None,
                                 supports_images=None,
+                                supports_audio_input=_has_audio_input(
+                                    architecture if isinstance(architecture, dict) else {}
+                                ),
                                 supports_prompt_cache=False,
                                 cache_writes_price=None,
                                 cache_reads_price=None,

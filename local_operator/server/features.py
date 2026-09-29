@@ -563,5 +563,20 @@ def feature_flags() -> dict[str, Any]:
         # renderer reads this key). Two faces, deliberately separate: they
         # gate two different wires, and neither implies the other.
         "input_mode": 1,
+        # THE SPEECH SURFACE: `GET /v1/stt/paths` (the ordered cascade report)
+        # and `POST /v1/stt/transcriptions` (the executor, with its 409
+        # `stt_unavailable` structured refusal), plus the audio-accepting
+        # message body the recording door rides (`Prompt.audio`, v1: at most
+        # one block per send). ONE key for the family because they are one
+        # contract revision: a client that can read the report is the client
+        # that can send the recording, and half the contract is not a state
+        # worth negotiating.
+        #
+        # WHY A KEY: `Prompt` is `extra="forbid"`, so an ungated audio send to
+        # an older backend would 422 the user's own message; absent, the mic
+        # stays off and the client keeps its text path. The LEGACY Radient
+        # transcription route is untouched by all of this and remains the
+        # ungated path for a client that has it.
+        "stt": 1,
         **({"references": 1} if at_references_enabled() else {}),
     }

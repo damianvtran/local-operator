@@ -48,6 +48,73 @@ class TurnInFlight(RuntimeError):
     """
 
 
+class AudioInputUnsupported(ValueError):
+    """The message carried a recording the selected model cannot be sent on
+    the audio door.
+
+    TWO SHAPES, ONE CODE, both raised at admission BEFORE any paid work:
+
+    * CAPABILITY — the selected model does not accept audio input at all
+      (``supports_audio_input`` is not stated). ``report`` is the resolver's
+      report (``resolve_audio_path``'s ``reason``), which names whether a
+      transcription path IS available instead — the remedy the caller can act
+      on. A send that bypassed this check would spend a turn on a request the
+      model refuses mid-stream.
+    * WIRE FORMAT — the model accepts audio, but its wire cannot carry this
+      capture's container (OQ-3: v1 does not transcode), refused at admission
+      so the row never becomes the every-later-request wedge agent review
+      round 1 (M2) measured. ``report`` is the wire's constraint clause,
+      composed beside the renderers
+      (``providers.clients.audio_format_refusal``).
+
+    THE DETAILED FORM names the model and carries the report. THE FACTS RIDE
+    THE ATTACH FRAME AS THEIR OWN BOUNDED FIELDS (``error_model``,
+    ``error_report``, ``error_format``), not as prose around the code: the far
+    side rebuilds this same object from them, sanitised and length-capped in
+    ``admission_error``, so a peer cannot push arbitrary text into a sentence
+    this side composes. THE BARE FORM (no arguments) is what that decoder
+    rebuilds from a frame WITHOUT the facts — an older runtime's frame, which
+    never raised the format shape at all — and adds the remedy.
+
+    A ``ValueError`` so it lands in the desktop control plane's
+    named-condition arm (``(ReceiptConflict, ValueError)``) rather than the
+    generic 503 that tells a client the runtime is unreachable — the wrong
+    remedy for a request that was refused on purpose.
+    """
+
+    code = "audio_input_unsupported"
+
+    def __init__(
+        self, *, model: str = "", report: str = "", format_unsupported: bool = False
+    ) -> None:
+        self.model = model
+        self.report = report
+        self.format_unsupported = format_unsupported
+        if model and format_unsupported:
+            sentence = (
+                f"The selected model ({model}) accepts audio input, but its wire "
+                f"cannot carry this recording: {report}."
+            )
+            sentence += (
+                " No transcoding happens in v1 — capture a supported format, or "
+                "transcribe the recording first."
+            )
+        elif model:
+            sentence = (
+                f"The selected model ({model}) does not accept audio input, so "
+                f"the recording cannot be sent to it."
+            )
+            if report:
+                sentence += f" Resolver report: {report}"
+        else:
+            sentence = (
+                "The selected model does not accept audio input, so the recording "
+                "cannot be sent to it. Transcribe the recording first, or switch "
+                "to a model that accepts audio input."
+            )
+        super().__init__(sentence)
+
+
 class RuntimeRetiring(ValueError, RuntimeError):
     """This runtime has committed to leaving; the message was not admitted.
 
@@ -609,11 +676,33 @@ class SessionStoreUnavailable(OSError):
         super().__init__("The session store could not be read" + (f": {detail}" if detail else "."))
 
 
+def _wire_text(value: object, *, limit: int) -> str:
+    """A bounded, control-character-free string off the attach wire, or "".
+
+    The sanitizer for the ONE refusal whose two facts (a model label and a
+    reason clause) are strings rather than closed-set tokens: the far side is
+    untrusted input, so anything that is not a plain ``str`` degrades to "",
+    non-printable characters are dropped rather than rendered, and the length
+    is capped so no peer can turn a refusal sentence into a wall of text. The
+    bounds match the sender's own caps in ``session/runtime/server.py``; an
+    over-long value is TRUNCATED here rather than rejected, because a sentence
+    with a clipped tail still names the model and the remedy while a dropped
+    field silently downgrades to the bare form.
+    """
+    if not isinstance(value, str):
+        return ""
+    text = "".join(ch for ch in value if ch.isprintable()).strip()
+    return text[:limit]
+
+
 def admission_error(
     code: str,
     count: int | None = None,
     trigger: str | None = None,
     leaving: str | None = None,
+    model: str | None = None,
+    report: str | None = None,
+    format_unsupported: bool | None = None,
 ) -> ValueError | None:
     """Decode only an enumerated category, never owner-supplied message text.
 
@@ -647,7 +736,29 @@ def admission_error(
     phrases rather than rendered — the frame's phrase is still a peer's words,
     and a table key is all this boundary admits of those (MINOR-1/U14/D11,
     round 5). It never reaches an error object; the trigger it resolves to does.
+
+    ``model``/``report``/``format_unsupported`` are the ONE category whose
+    facts cross as STRINGS rather than closed-set tokens (agent review round 1,
+    m2): the refusal must name the model and the reason on every surface, and
+    the daemon-side sentence is composed around them locally, after
+    ``_wire_text`` strips control characters and caps the length. Everything
+    else about the discipline is unchanged: the values only ever land inside
+    sentences this module builds, and a frame missing any of them rebuilds the
+    bare form exactly as an older peer's frame always did.
     """
+    if code == AudioInputUnsupported.code:
+        # The two facts ride their own BOUNDED fields (``error_model``,
+        # ``error_report``) plus one bool (``error_format``) — the same
+        # closed-shape carriage ``error_count``/``error_trigger`` established,
+        # not the ``message`` prose: each is sanitised and capped by
+        # ``_wire_text`` here, and the sentence is still rebuilt locally around
+        # them. A frame WITHOUT the facts (an older runtime, which never raised
+        # the format shape) degrades to the bare form, exactly as before.
+        return AudioInputUnsupported(
+            model=_wire_text(model, limit=200),
+            report=_wire_text(report, limit=300),
+            format_unsupported=format_unsupported is True,
+        )
     if code == AttachmentUnavailable.code:
         return AttachmentUnavailable()
     if code == RuntimeRetiring.code:

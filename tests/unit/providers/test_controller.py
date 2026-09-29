@@ -3730,7 +3730,7 @@ def test_initial_catalogue_layers_cached_aggregators_without_network(
             {
                 "fetched_at": time.time(),
                 "payload": {
-                    "capture": 6,
+                    "capture": 7,
                     "models": [
                         {
                             "id": "meta/llama-3.3-70b",
