@@ -13,7 +13,13 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from local_operator.compaction.tokens import estimate_messages_tokens
-from local_operator.harness.types import ChatRequest, ImageContent, Message, Usage
+from local_operator.harness.types import (
+    AudioContent,
+    ChatRequest,
+    ImageContent,
+    Message,
+    Usage,
+)
 from local_operator.providers.replay import replay_items
 
 
@@ -35,13 +41,18 @@ def _message_key(message: Message) -> tuple[Any, ...]:
     # Strings cache their Python hash, so revisiting long immutable history
     # does not encode it again. Include content rather than only stable ids:
     # pruning and restored/editable transcripts can retain an id after an edit.
+    #
+    # MEDIA blocks (image, audio) key on (type, bytes, mime) — the same shape
+    # for both, because both carry data + mime_type and a changed payload must
+    # change the key for the same reason an id-preserving edit must: the
+    # measure this key feeds is only valid for the exact conversation counted.
     return (
         message.id,
         message.role,
         tuple(
             (
                 (block.type, hash(block.data), block.mime_type)
-                if isinstance(block, ImageContent)
+                if isinstance(block, (ImageContent, AudioContent))
                 else (block.type, hash(block.text))
             )
             for block in message.content
