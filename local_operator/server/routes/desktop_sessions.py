@@ -25,7 +25,7 @@ from pydantic import (
 from starlette.background import BackgroundTask
 
 from local_operator.harness.types import ModelSpec
-from local_operator.media import SUPPORTED_IMAGE_MIME_TYPES
+from local_operator.media import SUPPORTED_AUDIO_MIME_TYPES, SUPPORTED_IMAGE_MIME_TYPES
 from local_operator.network.projection import ProjectionRefusal
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.desktop_mesh import MESH_ID_PATTERN
@@ -267,11 +267,15 @@ def _admission_failure_detail(error: BaseException) -> str:
     """
     from local_operator.session.errors import (
         AttachmentUnavailable,
+        AudioInputUnsupported,
         ProfileRegistryUnavailable,
         RuntimeRetiring,
     )
 
-    if isinstance(error, (AttachmentUnavailable, ProfileRegistryUnavailable, RuntimeRetiring)):
+    if isinstance(
+        error,
+        (AttachmentUnavailable, AudioInputUnsupported, ProfileRegistryUnavailable, RuntimeRetiring),
+    ):
         # Safe by construction: these carry no owner-supplied text.
         return f"failed; {error}"
     if isinstance(error, TimeoutError):
@@ -583,6 +587,14 @@ AttachmentDigest = Annotated[str, Path(pattern=r"^[a-f0-9]{32}$")]
 #: exactly what the ingress can produce (``sniff_image`` returns these four)
 #: and it excludes ``image/svg+xml``, which is script-bearing.
 ATTACHMENT_FALLBACK_MIME = "application/octet-stream"
+
+#: Mimes the two attachment-fetch routes may serve as themselves: the image
+#: set above plus the audio sniffer's output set. Same principle the comment
+#: above states (an allowlist of exactly what the media ingress can produce),
+#: extended to recordings now that durable user rows can carry them: a stored
+#: audio block is served as the container its bytes verified as, and anything
+#: else — including every non-audio mime — still falls back to octet-stream.
+ATTACHMENT_SERVABLE_MIME_TYPES = SUPPORTED_IMAGE_MIME_TYPES | SUPPORTED_AUDIO_MIME_TYPES
 
 
 class Input(BaseModel):
@@ -990,10 +1002,39 @@ class Image(Input):
         return value
 
 
+class Audio(Input):
+    """One recorded-audio block on the wire (see ``harness.types.AudioContent``).
+
+    The mime allowlist is the CAPTURE contract the sibling surfaces build to
+    (wav / mp3 / m4a / webm / ogg — the browser's own recorder produces webm),
+    enforced here so a typo'd container is refused by name before anything is
+    admitted. The declared value is still never TRUSTED downstream: the owner's
+    ingest sniffs the bytes (``media.sniff_audio``) and the block carries the
+    sniffed container, because the model wire keys its ``input_audio.format``
+    token on it. The size cap matches the image block's — the whole-body
+    900_000-byte budget below is the binding one, and base64 inflates 4/3 —
+    and v1 allows at most ONE block per send (``Prompt.audio``'s max_length).
+    """
+
+    data_b64: str = Field(max_length=1_000_000)
+    mime_type: Literal["audio/wav", "audio/mpeg", "audio/mp4", "audio/webm", "audio/ogg"]
+
+    @field_validator("data_b64")
+    @classmethod
+    def validate_data(cls, value: str) -> str:
+        if not value or not base64.b64decode(value, validate=True):
+            raise ValueError("A recording must contain base64 data")
+        return value
+
+
 class Prompt(Input):
     request_id: RequestID
     text: str = Field(max_length=200_000)
     images: list[Image] = Field(default_factory=list, max_length=8)
+    # The recording door: at most one block in v1 (a send is one recording —
+    # the sidecar forks once per block, and the wire budgets in `stt/audio.py`
+    # are sized for a single capture inside the 900 kB body cap).
+    audio: list[Audio] = Field(default_factory=list, max_length=1)
     mode: Literal["prompt", "steer"] = "prompt"
     # SILENT INPUT METADATA (see ``harness.types.Message.input_mode``): how the
     # user produced this send, and the route slot beside it. The enum is
@@ -1009,8 +1050,8 @@ class Prompt(Input):
 
     @model_validator(mode="after")
     def nonempty(self):
-        if not self.text.strip() and not self.images:
-            raise ValueError("Enter a message or attach an image")
+        if not self.text.strip() and not self.images and not self.audio:
+            raise ValueError("Enter a message or attach an image or recording")
         # A slash CONTROL must never become paid model chat, and this is the one
         # test that decides it: a draft that, as a whole, IS a command was meant
         # for the command endpoint. Anything else — every multi-line draft, every
@@ -1545,11 +1586,20 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         from local_operator.session.errors import (
             AsideUnanswered,
             AttachmentUnavailable,
+            AudioInputUnsupported,
             ProfileRegistryUnavailable,
             RuntimeRetiring,
         )
 
-        if isinstance(error, (AttachmentUnavailable, ProfileRegistryUnavailable, RuntimeRetiring)):
+        if isinstance(
+            error,
+            (
+                AttachmentUnavailable,
+                AudioInputUnsupported,
+                ProfileRegistryUnavailable,
+                RuntimeRetiring,
+            ),
+        ):
             # ``RuntimeRetiring`` IS IN THIS TUPLE FOR THE REASON THE ARM'S
             # OTHER FOUR REFUSALS ARE: the code is the contract. A retiring runtime refuses an
             # admission the client can ACT on differently from a broken one —
@@ -2718,7 +2768,7 @@ async def child_attachment(
     return Response(
         content=data,
         media_type=(
-            mime_type if mime_type in SUPPORTED_IMAGE_MIME_TYPES else ATTACHMENT_FALLBACK_MIME
+            mime_type if mime_type in ATTACHMENT_SERVABLE_MIME_TYPES else ATTACHMENT_FALLBACK_MIME
         ),
         headers={"X-Content-Type-Options": "nosniff"},
     )
@@ -2796,7 +2846,7 @@ async def attachment(session_id: str, digest: AttachmentDigest, request: Request
     return Response(
         content=data,
         media_type=(
-            mime_type if mime_type in SUPPORTED_IMAGE_MIME_TYPES else ATTACHMENT_FALLBACK_MIME
+            mime_type if mime_type in ATTACHMENT_SERVABLE_MIME_TYPES else ATTACHMENT_FALLBACK_MIME
         ),
         # Defence in depth on the one response here that can carry a type the
         # caller did not choose: with the allowlist above, an unexpected mime
@@ -2892,6 +2942,14 @@ async def prompt(session_id: str, body: Prompt, request: Request):
                         body.text,
                         command_id=body.request_id,
                         images=images,
+                        # Recordings travel UNSTAGED, deliberately: the peer
+                        # image stage exists so the SENDER's viewer can resolve
+                        # the digest the owner journals, and v1 has no audio
+                        # rendering surface on either side of a peer send —
+                        # `prepare_peer_audio` would stage bytes nothing reads.
+                        # The owner's own ingest sniffs and externalises them
+                        # exactly as it does for a local send.
+                        audio=[block.model_dump() for block in body.audio],
                         steer=body.mode == "steer",
                         # Silent input metadata, omitted from the attach frame
                         # when absent (``admit_prompt`` drops the None keys), so

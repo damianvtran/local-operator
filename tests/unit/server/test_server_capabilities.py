@@ -111,3 +111,21 @@ async def test_the_advertisement_is_read_from_the_switch_and_not_restated(
         seen.append(enabled)
     # The loop must actually have moved the switch, or it proves nothing.
     assert seen == [True, True, False, True]
+
+
+@pytest.mark.asyncio
+async def test_the_stt_key_is_advertised_unconditionally(test_app_client):
+    """The speech surface is a build fact, not a configuration.
+
+    The key gates the ``/v1/stt/*`` routes and the recording door on the
+    messages body (`Prompt.audio`); unlike ``references`` there is no switch
+    that may withhold it, so it must be present on a default process. Asserted
+    as ``>= 1`` because that is the comparison the client makes — a future bump
+    must keep this green, and an accidental ``0`` (which a client reads as
+    absent) must not.
+    """
+    response = await test_app_client.get("/v1/capabilities")
+
+    assert response.status_code == 200
+    features = _features(response.json())
+    assert features.get("stt", 0) >= 1
