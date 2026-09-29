@@ -186,12 +186,37 @@ def test_native_absent_or_malformed_file_is_a_noop(config_root: Path) -> None:
 def test_native_hookless_file_warns_instead_of_silently_loading_nothing(
     config_root: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A valid file without the top-level ``hooks`` key is the hand-written
-    mistake the docs promise is logged, not a silent no-op."""
-    (config_root / "hooks.json").write_text(json.dumps({"PostToolUse": []}))
+    """Every present-but-unusable shape warns — including the empty and
+    non-object forms (``[]``, ``{}``, a scalar) QA round 2 found silent."""
+    for raw in ("[]", "{}", '"x"', '{"hooks": []}', '{"PostToolUse": []}'):
+        (config_root / "hooks.json").write_text(raw)
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            assert hf.load_native_commands() == []
+        assert "has no top-level 'hooks' mapping" in caplog.text, raw
+
+
+def test_native_usable_disabled_or_absent_shapes_stay_silent(
+    config_root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A usable file, an explicitly disabled one, and a missing file make no noise."""
+    _settings(config_root / "hooks.json", {"PostToolUse": [_cmd("x")]})
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        assert [h.command for h in hf.load_native_commands()] == ["x"]
+    assert caplog.text == ""
+
+    (config_root / "hooks.json").write_text('{"disableAllHooks": true}')
+    caplog.clear()
     with caplog.at_level(logging.WARNING):
         assert hf.load_native_commands() == []
-    assert "has no top-level 'hooks' mapping" in caplog.text
+    assert caplog.text == ""
+
+    (config_root / "hooks.json").unlink()
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        assert hf.load_native_commands() == []
+    assert caplog.text == ""
 
 
 def test_native_loader_reads_timeout_defaults_and_matchers(config_root: Path) -> None:

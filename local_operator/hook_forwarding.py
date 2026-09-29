@@ -149,15 +149,27 @@ def native_hooks_enabled() -> bool:
     return native is True
 
 
-def _read_json(path: Path) -> dict[str, Any] | None:
+def _read_json_value(path: Path) -> tuple[bool, Any]:
+    """``(readable, value)``: the file's JSON value as written.
+
+    ``_read_json`` projects this onto ``dict | None``; callers that must
+    distinguish "no usable shape" from "no file" (the native loader) need the
+    present-but-unusable shapes that projection erases — an array, ``{}``, a
+    scalar. An unreadable file is logged once, here.
+    """
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return None
+        return (False, None)
     except (OSError, ValueError):
         logger.warning("hooks: could not read %s", path, exc_info=True)
-        return None
-    return data if isinstance(data, dict) else None
+        return (False, None)
+    return (True, value)
+
+
+def _read_json(path: Path) -> dict[str, Any] | None:
+    readable, value = _read_json_value(path)
+    return value if readable and isinstance(value, dict) else None
 
 
 def _project_root(cwd: str) -> Path:
@@ -294,23 +306,27 @@ def load_native_commands() -> list[HookCommand]:
     """Every ``type: command`` hook in ``config_dir()/hooks.json`` (Claude schema).
 
     Read at CALL time like the forwarded sources, so an edit lands on the next
-    tool call; an absent or unreadable file is a no-op, never an error for the
-    turn, and a file with no ``hooks`` mapping warns. ``disableAllHooks: true``
-    in the file disables its hooks.
+    tool call. An absent file is a no-op; unreadable JSON keeps its ``could not
+    read`` warning; every other present-but-unusable shape (no usable ``hooks``
+    mapping, an empty or non-object document) warns rather than loading nothing
+    in silence. ``disableAllHooks: true`` disables its hooks.
     """
     from local_operator.paths import config_dir
 
     path = config_dir() / "hooks.json"
-    data = _read_json(path)
-    if not data or data.get("disableAllHooks") is True:
+    readable, value = _read_json_value(path)
+    if not readable:
+        return []  # absent, or unreadable (already logged)
+    if isinstance(value, dict) and value.get("disableAllHooks") is True:
         return []
-    if not isinstance(data.get("hooks"), Mapping):
-        # A file that parses but declares no ``hooks`` mapping is the natural
-        # hand-written mistake (``{"PostToolUse": [...]}`` at the top level):
-        # say so rather than loading nothing in silence.
-        logger.warning("hooks: %s has no top-level 'hooks' mapping; nothing will run", path)
-        return []
-    return _commands_from(data, "native")
+    if isinstance(value, dict) and isinstance(value.get("hooks"), Mapping):
+        return _commands_from(value, "native")
+    # Present and valid JSON, but no usable ``hooks`` mapping: the natural
+    # hand-written mistake (``{"PostToolUse": [...]}`` at the top level), an
+    # empty document, or a non-object — say so rather than loading nothing in
+    # silence.
+    logger.warning("hooks: %s has no top-level 'hooks' mapping; nothing will run", path)
+    return []
 
 
 # ---------------------------------------------------------------------------
