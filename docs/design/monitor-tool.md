@@ -1456,6 +1456,8 @@ one.
 | system.md sentence change (net) | +159 | +36 | ~+57 |
 | no-action sentence (new) | 161 | 34 | ~58 |
 | guide description line | 150 | 37 | ~54 |
+| notify guidance sentence (system.md, new) | +83 | +21 | ~+30 |
+| notify guidance bullet (guide; lazy, no prefix cost) | 154 | 33 | ~55 |
 
 **Slice-2 re-measurement — the implemented classifier call (2026-09-28).** The
 classifier rows were re-run on the SHIPPED shape: the request is built by

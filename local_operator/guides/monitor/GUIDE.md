@@ -40,6 +40,10 @@ monitor({op:"create", name:"loom-pr-1710", tool:"bash",
 - `description`: what to watch for; it rides every delivery, so the agent
   reading a delta knows why the watch exists.
 - `name`: a short label; the id (`m1`, `m2`…) comes back in the receipt.
+- `notify` (optional bool): if the user asked to be told, arm with
+  `notify: true` — the turn this delivery opens then notifies on completion.
+  Otherwise leave it quiet; a monitor reporting without needing a reply is
+  the point.
 
 List and cancel:
 

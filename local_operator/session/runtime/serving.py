@@ -5005,7 +5005,20 @@ class ServingSessionHandle(SessionHandle):
             # ``unseen`` also makes the retry self-terminating: whatever surface
             # delivers, delivers by claiming, and the next attempt reads this
             # same field and finds nothing owed.
-            if not token or kind not in BRIDGE_NOTIFIABLE_KINDS or not state.get("unseen"):
+            #
+            # §14's origin-aware flag is read here too — slice-3 review round 1,
+            # F2: this arm was the ONE completion surface that never consulted
+            # it, so a quiet wake/monitor completion got an OS banner from the
+            # runtime whenever nothing else was running. SETTLED rather than
+            # DEFERRED, and no claim: nothing is owed to THIS process, and the
+            # unspent watermark is what lets the surfaces a user actually has
+            # open (sidebar, bridge) read the same value.
+            if (
+                not token
+                or kind not in BRIDGE_NOTIFIABLE_KINDS
+                or not state.get("unseen")
+                or not state.get("notify", True)
+            ):
                 return _ANNOUNCE_SETTLED
             if desktop_delivery_present(root, kind):
                 # Rung 2. DEFERRED rather than settled (R7): this answer is a

@@ -597,7 +597,29 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: The raise lands at head + 55 — the band this file keeps, and together with
 #: the known CI-vs-local offset (~25 billed) it clears CI rather than this
 #: machine alone — and the tighten band below (1,200) is not in play.
-BUDGET_BILLED_TOKENS = 34_587
+#:
+#: RAISED 34,587 -> 34,716 for slice 3 of the same Monitor design (§14 —
+#: origin-aware notifications: the ``notify`` parameter carried on wake and
+#: monitor deliveries, plus the §13.4 guidance sentences). Measured same-host,
+#: one tree after the other; the baseline is ``origin/main`` (a5007c8e6):
+#:
+#:   baseline (origin/main a5007c8e6)       96,044 chars = ~34,548 billed
+#:                                           (PASS, 39 billed of headroom)
+#:   head (this branch)                     96,357 chars = ~34,661 billed
+#:     = +313 chars = +113 billed: the wake tool's ``notify`` field and its
+#:       guidance sentence (+230 chars), and system.md's §13.4 sentence
+#:       (+83). The guide bullet rides ``guide://monitor`` and never enters
+#:       the prefix.
+#:
+#: THE TRIM ALTERNATIVE WAS ASSESSED AND DOES NOT FIT: the field ALONE costs
+#: +200 chars (~+72 billed) against main's 39 billed of headroom, so dropping
+#: both guidance sentences would still blow the ceiling by ~33; and the
+#: field's description IS §14.4's discovery surface, so shrinking it to fit
+#: would trade the feature for the number. The raise lands at head + 55 — the
+#: band this file keeps, and together with the known CI-vs-local offset (~25
+#: billed) it clears CI rather than this machine alone — and the tighten band
+#: below (1,200) is not in play.
+BUDGET_BILLED_TOKENS = 34_716
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
