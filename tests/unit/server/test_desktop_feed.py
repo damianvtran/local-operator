@@ -422,6 +422,56 @@ def test_a_quiet_completion_is_never_announced(tmp_path):
     assert announced[0]["payload"]["completion_token"] == loud_token
 
 
+def test_two_rows_one_tick_gate_per_row_quiet_then_loud(tmp_path):
+    """§14: each row's OWN notify value gates it (review round 1, F1).
+
+    A tick can carry two completions of one session. The latest state's value
+    must not decide the older row's fate: on the pre-fix head this cell
+    announced the QUIET completion too (two banners, one carrying the quiet
+    token), because the loud row had made the state notify=True.
+    """
+    root = tmp_path
+    sid = "r" * 12
+    _session(root, sid)
+
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _publish(root, sid, anchor="quiet-first", notify=False)
+    loud_token = _publish(root, sid, anchor="loud-second")
+    _tick(feed)
+    frames = _collect(feed, subscription)
+    asyncio.run(feed.close())
+
+    announced = _notified(frames)
+    assert len(announced) == 1, frames
+    assert announced[0]["payload"]["completion_token"] == loud_token
+
+
+def test_two_rows_one_tick_gate_per_row_loud_then_quiet(tmp_path):
+    """The other order: the quiet row must not swallow the loud one.
+
+    On the pre-fix head this cell produced NO banner at all — the quiet row was
+    latest, so the state gate skipped both.
+    """
+    root = tmp_path
+    sid = "s" * 12
+    _session(root, sid)
+
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    loud_token = _publish(root, sid, anchor="loud-first")
+    _publish(root, sid, anchor="quiet-second", notify=False)
+    _tick(feed)
+    frames = _collect(feed, subscription)
+    asyncio.run(feed.close())
+
+    announced = _notified(frames)
+    assert len(announced) == 1, frames
+    assert announced[0]["payload"]["completion_token"] == loud_token
+
+
 def test_the_feed_ships_the_bridge_payload_byte_for_byte(tmp_path):
     """ONE COMPLETION, ONE BANNER, on two transports.
 

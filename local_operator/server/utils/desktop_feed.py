@@ -1220,11 +1220,15 @@ class DesktopFeed:
         from the mock provider!" on the machine-wide channel.
 
         A THIRD FILTER IS §14, and it is not a test-hosting gate: the session
-        computed one ``notify`` value per completion and the projected state
-        carries it (``state["notify"]``), so a quiet wake/monitor completion
-        is filtered here without the feed re-deriving anything from the row's
-        kind or origin. ``.get``'s default True keeps rows from older builds
-        exactly as loud as they were.
+        computed one ``notify`` value per completion and the delta read carries
+        it PER ROW (``row["notify"]``), so a quiet wake/monitor completion is
+        filtered here without the feed re-deriving anything from the row's kind
+        or origin. The gate reads the ROW, never the conversation's latest
+        state — slice-3 review round 1's F1: one tick can carry two completions
+        of one session, and a state-based gate inverted §14 in both orders
+        (quiet-then-loud announced the quiet one; loud-then-quiet swallowed the
+        loud one). ``.get``'s default True keeps rows from older builds exactly
+        as loud as they were.
         """
         from local_operator.tui.notify import notifications_enabled
 
@@ -1244,9 +1248,13 @@ class DesktopFeed:
             state = states.get(identity)
             if state is None or not state.get("unseen"):
                 continue
-            if not state.get("notify", True):
-                # §14: quiet — the session decided this once, and the feed
-                # reads it; nothing here re-derives it from kind or origin.
+            if not row.get("notify", True):
+                # §14: quiet — read off THIS row, never the conversation's
+                # LATEST state (review round 1, F1): a tick can carry several
+                # completions of one session, and the latest row's value must
+                # not decide an older row's fate. ``published_since`` already
+                # carries each row's own value; ``state`` is for ``unseen``
+                # and presence only.
                 continue
             # ONE presence read per candidate SET (review round 2, R14), taken
             # lazily so a tick whose rows are all bridged still pays none: the
