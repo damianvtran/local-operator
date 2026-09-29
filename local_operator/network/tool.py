@@ -758,18 +758,36 @@ def _render(action: str, payload: dict[str, Any]) -> list[str]:
         # addresses a peer by (``resume.UNNAMED_DEVICE`` when it has none, design
         # round 1 D8). Both the token and the id stay in this tool's ``details``, which
         # is the machine register.
+        from local_operator.network import readiness as readiness_mod
         from local_operator.resume import UNNAMED_DEVICE, peer_reason_words
 
-        return [
-            f"{'reachable' if row.get('reachable') else 'unreachable':11} "
-            f"{str(row.get('name') or '').strip() or UNNAMED_DEVICE}"
-            + (
-                ""
-                if row.get("reachable")
-                else f"  {peer_reason_words(str(row.get('reason') or ''))}"
+        # THE SAME BUILD SEGMENT THE CLI'S OWN ROWS CARRY (design §4), through the one
+        # comparison and one spelling (``readiness.compare_builds`` / ``build_suffix``)
+        # — a stale peer is exactly the fact an offload decision turns on, and this
+        # digest is where the model reads it. Unknown stays silent (the old pinned
+        # lines are the A/B rule), and the stamp is read lazily so a listing with no
+        # known build pays nothing extra.
+        own_stamp: dict[str, str] | None = None
+        digest: list[str] = []
+        for row in rows:
+            line = (
+                f"{'reachable' if row.get('reachable') else 'unreachable':11} "
+                f"{str(row.get('name') or '').strip() or UNNAMED_DEVICE}"
             )
-            for row in rows
-        ]
+            if row.get("reachable"):
+                build = row.get("build")
+                if isinstance(build, dict) and build.get("version"):
+                    if own_stamp is None:
+                        from local_operator.network import relay as relay_mod
+
+                        own_stamp = relay_mod.build_stamp()
+                    line += readiness_mod.build_suffix(
+                        readiness_mod.compare_builds(build, own_stamp)
+                    )
+            else:
+                line += f"  {peer_reason_words(str(row.get('reason') or ''))}"
+            digest.append(line)
+        return digest
     if action == "doctor":
         # THE SAME WORDS THE CLI SHOWS ITS OWN READER, through the same renderer
         # (round 24, Q-R24-2): every string in that field is written for a person
@@ -917,6 +935,8 @@ def _render(action: str, payload: dict[str, Any]) -> list[str]:
             lines.append("the relay is not running on this device: applied locally")
         return lines
     if action == "credentials":
+        from local_operator.network import readiness as readiness_mod
+
         networks = payload.get("networks") or []
         lines: list[str] = []
         for network in networks:
@@ -936,6 +956,12 @@ def _render(action: str, payload: dict[str, Any]) -> list[str]:
                 # exactly where they are; the CLI's field is named so the heuristic cannot
                 # eat the one fact this listing exists to convey.
                 lines.append(f"  {row.get('credential_name')}  {row.get('kind')}  owner: {owner}")
+        # THE SAME BLOCK THE CLI PRINTS, through the one renderer
+        # (``readiness.shareable_lines``): the device-level ledger of what this device
+        # could offer — the shareability preflight design §2 added, so an agent asked
+        # "why did the share refuse" (or "what can this device share") reads the answer
+        # here instead of learning it at share time.
+        lines.extend(readiness_mod.shareable_lines(payload.get("shareable") or []))
         return lines or ["nothing is shared with or by this device"]
     if action == "definitions_state":
         lines = []

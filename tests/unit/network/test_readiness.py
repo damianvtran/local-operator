@@ -219,6 +219,42 @@ def test_git_row_says_what_commits_will_do() -> None:
     assert any("git config --global user.name" in remedy for remedy in bad_row["remedies"])
 
 
+def test_git_row_fills_the_remedy_with_this_devices_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Design §3: the one-time setup is surfaced with REAL values — this device's
+    own global git config — because the suggestion is the point. It stays a
+    suggestion: the operator may want a different identity on that device, and
+    ``ready`` still writes nothing on either side."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _write(
+        tmp_path / ".gitconfig",
+        "[user]\n\tname = Damian Tran\n\temail = damian@gominerva.com\n",
+    )
+    row = readiness.git_row(
+        _member(), _facts(git={"user_name": "", "user_email": ""}), peer_label="cloud-node-1"
+    )
+    remedy = " ".join(row["remedies"])
+    assert '`git config --global user.name "Damian Tran"`' in remedy
+    assert '`git config --global user.email "damian@gominerva.com"`' in remedy
+    assert "…" not in remedy
+
+
+def test_git_row_keeps_the_placeholder_for_values_this_device_lacks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A value this device does not have keeps the shipped ``"…"`` placeholder —
+    inventing one for the peer would be a suggestion that cannot run."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _write(tmp_path / ".gitconfig", "[user]\n\tname = Damian Tran\n")
+    row = readiness.git_row(
+        _member(), _facts(git={"user_name": "", "user_email": "someone@e.test"}), peer_label="box"
+    )
+    remedy = " ".join(row["remedies"])
+    assert '`git config --global user.name "Damian Tran"`' in remedy
+    assert '`git config --global user.email "…"`' in remedy
+
+
 # ---------------------------------------------------------------------------
 # (d)+(f) the user-scope MCP surface
 # ---------------------------------------------------------------------------
@@ -298,6 +334,27 @@ def test_mcp_has_row_is_three_valued_and_never_reads_as_false(
 
     monkeypatch.setattr(readiness, "_open_store", lambda root: _Store(OSError("unreadable")))
     assert readiness.mcp_servers_fact(tmp_path)["servers"][0]["has_row"] is None
+
+
+def test_a_missing_store_is_read_without_creating_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_open_store``'s absence answer is a definite False and must not be
+    re-resolved into an ambient store: ``McpTokenStorage(url, store=None)`` builds
+    ``AuthStore()`` for the process's ambient root — which CREATES the database,
+    so a read-only report would write one, and read the wrong root whenever the
+    two differ (found by the shareability ledger's creates-nothing cell)."""
+    (tmp_path / "mcp.json").write_text(
+        json.dumps(
+            {"mcpServers": {"notion": {"type": "http", "url": "https://mcp.notion.com/mcp"}}}
+        ),
+        encoding="utf-8",
+    )
+    ambient = tmp_path / "ambient-config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(ambient))
+    fact = readiness.mcp_servers_fact(tmp_path)
+    assert fact["servers"][0]["has_row"] is False
+    assert not (ambient / "auth.db").exists()
 
 
 def test_mcp_servers_row_names_the_missing_file(tmp_path: Path) -> None:
@@ -484,6 +541,37 @@ def test_mcp_credential_rows_walk_the_verdict_chain(tmp_path: Path) -> None:
         assert row["capability"] == readiness.CAPABILITY_MCP_CREDENTIAL
 
 
+def test_shareable_lines_render_every_login_state_once() -> None:
+    """One renderer for the CLI and the agent digest (design §2), so the two cannot
+    drift the way the readiness rows once did."""
+    rows = [
+        {
+            "server": "slack",
+            "transport": "http",
+            "login_here": True,
+            "remedy": "lop network credential share mcp:https://h.example/mcp --with <device>",
+            "shared_with": [{"device": "d_1", "name": "cloud-node-1", "scope": "session"}],
+        },
+        {
+            "server": "notion",
+            "transport": "sse",
+            "login_here": False,
+            "remedy": "run '/mcp login https://n.example/mcp' here first",
+            "shared_with": [],
+        },
+        {"server": "odd", "transport": "http", "login_here": None, "remedy": "", "shared_with": []},
+    ]
+    assert readiness.shareable_lines(rows) == [
+        "shareable here:",
+        "  slack  http  login held — share: lop network credential share mcp:https://h.example/mcp"
+        " --with <device>",
+        "      shared with cloud-node-1 (session)",
+        "  notion  sse  no login here yet — run '/mcp login https://n.example/mcp' here first",
+        "  odd  http  login state not known — this device's credential store could not be read",
+    ]
+    assert readiness.shareable_lines([]) == []
+
+
 # ---------------------------------------------------------------------------
 # (b) build parity
 # ---------------------------------------------------------------------------
@@ -531,6 +619,42 @@ def test_build_row_compares_versions_and_degrades() -> None:
         peer_label="cloud-node-1",
     )
     assert unparsable["ok"] is False and unparsable["code"] == readiness.CODE_UNKNOWN
+
+
+def test_compare_builds_is_the_one_version_ordering() -> None:
+    """The ordering ``peers`` and ``ready`` share, so the two cannot disagree about
+    which side is behind; unknown covers absent, unparsable, and neither-side-stated."""
+    assert readiness.compare_builds({"version": "0.64.1"}, {"version": "0.64.1"}) == (
+        readiness.BuildComparison("equal", "0.64.1", "0.64.1")
+    )
+    behind = readiness.compare_builds({"version": "0.63.2"}, {"version": "0.64.1"})
+    assert (behind.state, behind.peer_version, behind.own_version) == (
+        "behind",
+        "0.63.2",
+        "0.64.1",
+    )
+    assert readiness.compare_builds({"version": "0.66.0"}, {"version": "0.64.1"}).state == "ahead"
+    assert readiness.compare_builds({}, {"version": "0.64.1"}).state == "unknown"
+    assert (
+        readiness.compare_builds({"version": "0.28.0rc1"}, {"version": "0.64.1"}).state == "unknown"
+    )
+    assert readiness.compare_builds(None, None).state == "unknown"
+    assert readiness.compare_builds({"version": "0.64.1"}, "not-a-mapping").state == "unknown"
+
+
+def test_build_suffix_speaks_only_when_a_version_is_known() -> None:
+    assert readiness.build_suffix(readiness.BuildComparison("unknown", "", "")) == ""
+    assert (
+        readiness.build_suffix(readiness.BuildComparison("equal", "0.64.1", "0.64.1"))
+        == "  build 0.64.1"
+    )
+    assert (
+        readiness.build_suffix(readiness.BuildComparison("ahead", "0.66.0", "0.64.1"))
+        == "  build 0.66.0"
+    )
+    assert readiness.build_suffix(readiness.BuildComparison("behind", "0.63.2", "0.64.1")) == (
+        "  build 0.63.2 — behind this device (0.64.1); run `lop-update` there"
+    )
 
 
 # ---------------------------------------------------------------------------
