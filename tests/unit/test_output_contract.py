@@ -16,10 +16,10 @@ from pydantic import BaseModel
 
 from local_operator.output_contract import (
     OUTPUT_FORMATS,
+    MarkdownSchema,
     OutputContract,
     OutputContractError,
     OutputDecodeError,
-    MarkdownSchema,
     decode_output,
 )
 
@@ -148,9 +148,7 @@ def test_markdown_unterminated_fence_is_rejected() -> None:
 
 
 def test_first_schema_failure_is_preferred_over_later_decode_failures() -> None:
-    contract = OutputContract(
-        format="json", schema={"type": "object", "required": ["name"]}
-    )
+    contract = OutputContract(format="json", schema={"type": "object", "required": ["name"]})
     # First candidate decodes but fails the schema; the trailing prose does not
     # decode at all. The reported reason must be the schema failure.
     check = contract.check('```json\n{"age": 3}\n```\nno payload here at all')
@@ -387,9 +385,7 @@ def test_retry_message_shape() -> None:
 
 
 def test_retry_message_bounds_and_collapses_the_reason() -> None:
-    collapsed = OutputContract(format="json").retry_message(
-        attempt=1, error="first\nsecond   line"
-    )
+    collapsed = OutputContract(format="json").retry_message(attempt=1, error="first\nsecond   line")
     assert "Harness output check: first second line\n" in collapsed.text
     long_reason = "x" * 5000 + "\n\nsecond"
     message = OutputContract(format="json").retry_message(attempt=1, error=long_reason)
@@ -466,7 +462,7 @@ def test_no_contract_is_no_block() -> None:
 def test_decode_output_uses_the_same_ladder() -> None:
     assert decode_output('prose ```json\n{"a": 1}\n``` tail', "json") == {"a": 1}
     assert decode_output("a: 1\nb: 2", "yaml") == {"a": 1, "b": 2}
-    assert decode_output('[server]\nport = 80', "toml") == {"server": {"port": 80}}
+    assert decode_output("[server]\nport = 80", "toml") == {"server": {"port": 80}}
     assert decode_output("# Title\ntext", "markdown") == "# Title\ntext"
 
 

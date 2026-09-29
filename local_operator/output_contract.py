@@ -145,9 +145,7 @@ class OutputContract:
     # are ``init=False`` so the public constructor stays three arguments.
     _type_adapter: Any = field(default=None, init=False, repr=False, compare=False)
     _json_validator: Any = field(default=None, init=False, repr=False, compare=False)
-    _required_sections: tuple[str, ...] = field(
-        default=(), init=False, repr=False, compare=False
-    )
+    _required_sections: tuple[str, ...] = field(default=(), init=False, repr=False, compare=False)
     _system_block: str = field(default="", init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -250,9 +248,7 @@ class OutputContract:
         if self.format == "markdown":
             sentence = "Reply with the corrected markdown document only."
             if self._required_sections:
-                sentence += (
-                    f" Required sections, in order: {', '.join(self._required_sections)}."
-                )
+                sentence += f" Required sections, in order: {', '.join(self._required_sections)}."
             return sentence
         clause = {
             "json": (
@@ -440,14 +436,12 @@ class OutputContract:
         ``json.dumps`` can carry.
         """
         if self._type_adapter is not None:
-            return (
-                "- It must validate against this schema (JSON Schema): "
-                + json.dumps(self._type_adapter.json_schema(), indent=2)
+            return "- It must validate against this schema (JSON Schema): " + json.dumps(
+                self._type_adapter.json_schema(), indent=2
             )
         if self._json_validator is not None:
-            return (
-                "- It must validate against this schema (JSON Schema): "
-                + json.dumps(_plain(self.schema), indent=2)
+            return "- It must validate against this schema (JSON Schema): " + json.dumps(
+                _plain(self.schema), indent=2
             )
         return ""
 
@@ -530,9 +524,7 @@ def _iter_candidates(text: str, format: str) -> Iterator[str]:
         yield from _scan_bare_json_spans(text, skip=claimed_spans)
 
 
-def _scan_bare_json_spans(
-    text: str, *, skip: Sequence[tuple[int, int]] = ()
-) -> Iterator[str]:
+def _scan_bare_json_spans(text: str, *, skip: Sequence[tuple[int, int]] = ()) -> Iterator[str]:
     """Bare ``{``/``[``-anchored json spans, document order, bounded.
 
     ``skip`` regions (a cross-labelled fence's content) are not scanned: a

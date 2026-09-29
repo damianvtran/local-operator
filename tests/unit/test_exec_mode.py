@@ -1939,9 +1939,7 @@ def test_build_worker_argv_threads_the_output_contract_flags() -> None:
     """`--background` is the same request run elsewhere, and the schema path
     is absolutised BEFORE this boundary: the worker resolves it from its own
     cwd, so a relative path would silently name a different file there."""
-    args = ExecArgs(
-        output_format="json", output_schema="/abs/report.schema.json", output_retries=3
-    )
+    args = ExecArgs(output_format="json", output_schema="/abs/report.schema.json", output_retries=3)
     argv = build_worker_argv("do it", args)
     assert "--output-format=json" in argv
     assert "--output-schema=/abs/report.schema.json" in argv
