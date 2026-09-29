@@ -132,6 +132,9 @@ def test_push_lands_rows_on_the_peer_and_is_idempotent(
                 "env": {"GITLAB_TOKEN": "${GITLAB_TOKEN}", "PLAIN": "hunter2"},
             },
             "crm": {"type": "http", "url": "https://m.example/mcp"},
+            # The shape table keeps this one off the wire entirely; the push
+            # must SAY so on the side that can act on it.
+            "leaky": {"type": "http", "url": "https://x.example/ghp_" + "a" * 36},
         },
     )
 
@@ -140,9 +143,11 @@ def test_push_lands_rows_on_the_peer_and_is_idempotent(
     assert payload["ok"] is True
     row = payload["peers"][0]
     assert {item["name"] for item in row["installed"]} == {"crm", "gl"}, row
+    assert [item["name"] for item in row["withheld"]] == ["leaky"], row
 
     landed = _peer_servers(server_b)
     assert set(landed) == {"crm", "gl"}
+    assert "leaky" not in (server_b.root / "mcp.json").read_text(encoding="utf-8")
     # The literal NEVER arrives; the reference does; the held value is a
     # placeholder keyed by its own name, so `lop secret set PLAIN ...` there
     # is the actionable remedy (state lists it).
