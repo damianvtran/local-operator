@@ -3365,7 +3365,7 @@ async def test_ctrl_o_jumps_to_the_first_subagent_row():
 
 
 @pytest.mark.asyncio
-async def test_one_ctrl_o_lands_the_jump_when_the_rows_arrive_later():
+async def test_one_ctrl_o_lands_the_jump_when_the_rows_arrive_later(monkeypatch):
     """D13: from a layer-OFF sidebar, ONE press must reveal AND land.
 
     The chord cannot land its own jump here. `load_catalog` filters the hidden
@@ -3400,6 +3400,19 @@ async def test_one_ctrl_o_lands_the_jump_when_the_rows_arrive_later():
         app._refresh_sidebar = lambda: None  # type: ignore[method-assign]
         sidebar.cursor_id = "a1"
 
+        # Same standing constraint as
+        # `test_a_landed_jump_still_leaves_the_cursor_on_a_real_row` below: the
+        # arm happens INSIDE the press dispatch and the landing runs a beat
+        # later — here past a `pause` as well, so the gap is strictly larger —
+        # against a 1.0 s production window. That is a bet on load, not on this
+        # test's subject (D13: reveal AND land, and the re-adopt must not undo
+        # it). Pin the window generous for this cell ONLY; the deadline keeps
+        # its deterministic coverage in
+        # `test_an_armed_jump_does_not_fire_on_an_unrelated_later_poll`.
+        monkeypatch.setattr(
+            "local_operator.tui.widgets.session_sidebar.PENDING_SUBAGENT_JUMP_S",
+            60.0,
+        )
         await pilot.press("ctrl+o")
         await pilot.pause()
         assert sidebar.show_subagents is True, "ctrl+o did not reveal the hidden layer"
@@ -3518,7 +3531,7 @@ async def test_a_layer_already_on_arms_nothing_when_there_is_no_row():
 
 
 @pytest.mark.asyncio
-async def test_a_landed_jump_still_leaves_the_cursor_on_a_real_row():
+async def test_a_landed_jump_still_leaves_the_cursor_on_a_real_row(monkeypatch):
     """QA D3's guarantee must survive the jump landing before the re-adopt.
 
     `_land_pending_jump` runs FIRST so the re-adopt sees the landed cursor and
@@ -3539,15 +3552,26 @@ async def test_a_landed_jump_still_leaves_the_cursor_on_a_real_row():
         sidebar.current_id = "sess-not-in-list"
         sidebar.cursor_id = "a1"
 
+        # The chord ARMS the jump inside its own dispatch — `pilot.press`
+        # returns only after Textual's idle/animator/screen waits, so the arm
+        # happens mid-press and the beat that follows it (the press tail, then
+        # the statements below) is a beat this cell cannot remove and does not
+        # control. Against the production 1.0 s window that beat is a bet on
+        # load and it loses one: measured at ~1.04–1.12 s under CI-shaped load
+        # (QA round 1: 3 failures in 39 runs, the CI text `the jump did not
+        # land`). This cell's subject is the LANDING (a real row, a consistent
+        # caret), so its window is pinned generous for this cell ONLY. Both
+        # reads resolve the module global at call time, so the one patch
+        # reaches the arm (`action_jump_to_subagents`) and the expiry check
+        # (`_land_pending_jump`) alike; production keeps its 1.0 s. The
+        # deadline branch keeps deterministic coverage in
+        # `test_an_armed_jump_does_not_fire_on_an_unrelated_later_poll`, which
+        # moves the deadline into the past by hand, with no sleep.
+        monkeypatch.setattr(
+            "local_operator.tui.widgets.session_sidebar.PENDING_SUBAGENT_JUMP_S",
+            60.0,
+        )
         await pilot.press("ctrl+o")
-        # The rows arrive on the NEXT statement, with no beat between: the
-        # jump window is one second (`PENDING_SUBAGENT_JUMP_S`) and any
-        # `await` here is a bet on load — measured at 1.037 s between the
-        # chord and `set_entries` in a CI-shaped run, which expired the
-        # window before the rows existed and dropped the very intent this
-        # test exists to land. The sidebar's own re-poll returns in
-        # milliseconds by design, so "the rows are already here when the
-        # chord returns" is the shape being pinned, not a shortcut.
         assert sidebar._pending_jump_until > 0.0, "the chord did not arm the jump"
         sidebar.set_entries(layer_off + [_sub("s1", label="one", agent="qa")])
         await pilot.pause()
