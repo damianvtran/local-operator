@@ -46,6 +46,7 @@ _ALL_ACTIONS = (
     "panic",
     "log",
     "doctor",
+    "ready",
     "sessions",
     "trust",
     "credentials",
@@ -69,6 +70,7 @@ _SAMPLES: dict[str, dict[str, Any]] = {
     "panic": {"network": "devmesh"},
     "log": {"since": "15m"},
     "doctor": {},
+    "ready": {"peer": "device-b"},
     "sessions": {"peer": "device-b"},
     "trust": {"network": "devmesh"},
     "credentials": {},
@@ -612,6 +614,110 @@ def test_a_pasted_token_goes_to_a_private_file_and_does_not_survive_the_call(
 # ---------------------------------------------------------------------------
 
 
+#: A ready payload with the shape the live verb produces when rows fail: the
+#: reviewer's Q-1 repro (operator_authority + mcp_credential red), used to pin
+#: that the agent path keeps the rows and remedies the CLI/--json already had.
+_UNHEALTHY_READY: dict[str, Any] = {
+    "ok": False,
+    "code": "unhealthy",
+    "message": (
+        "operator_authority: operator authority is not installed on cloud-node-1 "
+        "(no anchor is installed, so the runtime trusts no key yet): an approval that "
+        "needs the operator — a write or command offloaded there — parks until someone "
+        "installs it; mcp_credential: if the `files` server needs a sign-in, this "
+        "device has no MCP login for https://mcp.example.test/files"
+    ),
+    "identity_present": True,
+    "checks": [
+        {
+            "check": "reachability",
+            "device_id": "d_1",
+            "device_name": "cloud-node-1",
+            "endpoint": "127.0.0.1:4097",
+            "ok": True,
+            "detail": "ok",
+            "observed": {"outcome": "connected", "winner_verified": True},
+            "remedies": [],
+        },
+        {
+            "check": "readiness",
+            "capability": "operator_authority",
+            "device_id": "d_1",
+            "device_name": "cloud-node-1",
+            "ok": False,
+            "code": "not_installed",
+            "detail": (
+                "operator authority is not installed on cloud-node-1 (no anchor is "
+                "installed, so the runtime trusts no key yet): an approval that needs "
+                "the operator — a write or command offloaded there — parks until someone "
+                "installs it"
+            ),
+            "remedies": [
+                "run `lop operator install` on cloud-node-1 (one privileged step), then "
+                "approvals for offloaded work can be answered from this device"
+            ],
+            "source": "peer",
+        },
+        {
+            "check": "readiness",
+            "capability": "mcp_credential",
+            "device_id": "d_1",
+            "device_name": "cloud-node-1",
+            "ok": False,
+            "code": "no_credential",
+            "detail": (
+                "if the `files` server needs a sign-in, this device has no MCP login for "
+                "https://mcp.example.test/files — run '/mcp login "
+                "https://mcp.example.test/files' here first"
+            ),
+            "remedies": [
+                "run '/mcp login https://mcp.example.test/files' here, then `lop network "
+                "credential share mcp:https://mcp.example.test/files --with cloud-node-1`"
+            ],
+            "source": "local",
+        },
+    ],
+}
+
+
+def test_a_ready_report_against_an_empty_store_is_an_error_with_its_rows() -> None:
+    """The real CLI, through the tool: a fresh store is an unhealthy report.
+
+    The gate must keep the rows on this path too — the report IS the product,
+    and ``is_error`` is how the loop knows the verb did not come back green.
+    """
+    result = _call("ready")
+    assert result.is_error
+    assert "FAIL" in _text(result)
+    assert _payload(result).get("code") == "unhealthy"
+
+
+def test_the_ready_digest_keeps_fail_rows_and_remedies_on_an_unhealthy_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """QA round 1, Q-1: an unhealthy report IS the report.
+
+    The gate sent ``ok:false`` payloads down the generic refusal branch, whose
+    text is ``code: message`` — so the FAIL rows and their remedies, the whole
+    product of this verb, never reached an agent while the hint promised them.
+    The stub returns the live shape (the reviewer's repro); the real-CLI cell
+    above covers the same gate end to end.
+    """
+
+    async def fake_cli(argv: list[str], timeout: float) -> tuple[int, str, str]:
+        assert argv[:2] == ["network", "ready"]
+        return 1, json.dumps(_UNHEALTHY_READY), ""
+
+    monkeypatch.setattr(net_tool, "_run_cli", fake_cli)
+    result = _call("ready", peer="cloud-node-1")
+    assert result.is_error
+    text = _text(result)
+    assert "FAIL readiness operator_authority cloud-node-1" in text
+    assert "lop operator install" in text
+    assert "mcp login https://mcp.example.test/files" in text
+    assert _payload(result)["code"] == "unhealthy"
+
+
 def test_a_read_on_an_empty_store_reports_rather_than_raises() -> None:
     result = _call("ls")
     assert not result.is_error
@@ -919,6 +1025,78 @@ def test_the_agent_digest_of_a_doctor_run_reads_in_words() -> None:
     # The row's own address is kept once, in its own column; the sentence that
     # repeated it does not.
     assert body.count("127.0.0.1:64994") == 1, body
+
+
+def test_the_agent_digest_of_a_ready_run_keeps_refused_and_silent_apart() -> None:
+    """The readiness digest reads like the CLI's, through the same reading.
+
+    The second half is the one a docstring cannot carry: a REFUSED connection
+    must not read as "nothing answered" on the agent's surface either, or the
+    model reports a sleeping machine for one whose relay is simply not running.
+    Remedies render under their row; the raw vocabulary stays in ``details``.
+    """
+    checks = [
+        {
+            "check": "reachability",
+            "device_id": "d_" + "c" * 32,
+            "device_name": "pi-box",
+            "endpoint": "10.0.0.9:7777",
+            "ok": False,
+            "detail": "connect_failed:ConnectionRefusedError",
+            "observed": {
+                "outcome": "refused",
+                "source_address": "10.0.0.2",
+                "interface": "en0",
+                "elapsed_ms": 12.0,
+                "budget_s": 3.0,
+                "attempted": True,
+                "last_seen_at": None,
+            },
+        },
+        {
+            "check": "reachability",
+            "device_id": "d_" + "b" * 32,
+            "device_name": "cloud-node-1",
+            "endpoint": "54.1.2.3:7777",
+            "ok": False,
+            "detail": "connect_failed:TimeoutError",
+            "observed": {
+                "outcome": "no_answer",
+                "source_address": "203.0.113.7",
+                "interface": "utun4",
+                "elapsed_ms": 3000.0,
+                "budget_s": 3.0,
+                "attempted": True,
+                "last_seen_at": None,
+            },
+        },
+        {
+            "check": "readiness",
+            "capability": "operator_authority",
+            "device_id": "d_" + "b" * 32,
+            "device_name": "cloud-node-1",
+            "ok": False,
+            "code": "not_installed",
+            "detail": (
+                "operator authority is not installed on cloud-node-1: an approval that "
+                "needs the operator parks until someone installs it"
+            ),
+            "remedies": ["run `lop operator install` on cloud-node-1 (one privileged step)"],
+        },
+    ]
+    lines = net_tool._render(  # noqa: SLF001 — the renderer under test
+        "ready", {"ok": False, "identity_present": True, "checks": checks}
+    )
+    body = "\n".join(lines)
+    for token in ("ConnectionRefusedError", "TimeoutError", "connect_failed"):
+        assert token not in body, (token, body)
+    assert "something answered this address and refused the connection" in body
+    assert "nothing answered this address before the budget ran out" in body
+    assert (
+        "FAIL readiness operator_authority cloud-node-1: operator authority is not installed"
+        in body
+    )
+    assert "  - run `lop operator install` on cloud-node-1 (one privileged step)" in body
 
 
 def test_the_agent_digest_carries_the_audit_state_at_its_own_column() -> None:

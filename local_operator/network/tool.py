@@ -84,6 +84,10 @@ READ_ACTIONS = frozenset(
         "peers",
         "log",
         "doctor",
+        # Peer readiness: every fact comes from the peer's own relay (or from this
+        # device's records when no relay answers), and the verb writes nothing —
+        # the same discipline that keeps the listing reads on this side.
+        "ready",
         "credentials",
         "definitions_state",
         # Its BARE form is a listing, which is why it is on this side of the union the
@@ -146,6 +150,10 @@ NetworkAction = Literal[
     "panic",
     "log",
     "doctor",
+    # The readiness report (readiness.py): the install question ``doctor`` does not
+    # ask — can a peer COMPLETE work offloaded to it — with the fix for each
+    # blocker. A read of the peer's own state, or of this device's records.
+    "ready",
     # The session plane's client half (``mesh-session-mobility.md`` §9.3): one peer's
     # sessions, and the four verbs that act on one. Before this the tool could see a
     # peer and drive nothing it held.
@@ -194,8 +202,8 @@ class NetworkParams(BaseModel):
     peer: str = Field(
         default="",
         description=(
-            "For sessions: the device to ask (a name from `peers`). Required by "
-            "create/engage/stop/delete."
+            "For sessions: the device to ask (a name from `peers`). For ready: the "
+            "device to report on. Required by create/engage/stop/delete."
         ),
     )
     all_peers: bool = Field(default=False, description="For sessions: list every device.")
@@ -352,6 +360,10 @@ def _argv_for(params: NetworkParams) -> tuple[list[str], str]:
         argv = ["network", "peers"]
     elif action == "doctor":
         argv = ["network", "doctor"]
+    elif action == "ready":
+        argv = ["network", "ready"]
+        if params.peer.strip():
+            argv += ["--peer", params.peer.strip()]
     elif action == "credentials":
         argv = ["network", "credentials"]
     elif action == "definitions_state":
@@ -769,6 +781,21 @@ def _render(action: str, payload: dict[str, Any]) -> list[str]:
                 "re-pair with a new invite"
             )
         return lines
+    if action == "ready":
+        # THE SAME ROWS THE CLI SHOWS ITS OWN READER, through the shared
+        # renderer (``readiness.render_check_lines``) — one loop, one register,
+        # so the digest and the CLI cannot drift (agent review round 1, NIT-2),
+        # and the reachability reading is this verb's own (a REFUSED connection
+        # must not read as "nothing answered" in an agent's digest any more than
+        # on a person's screen; the raw vocabulary stays in ``details``).
+        from local_operator.network import readiness as readiness_mod
+
+        ready_lines = readiness_mod.render_check_lines(payload.get("checks") or [])
+        if not ready_lines:
+            ready_lines = [readiness_mod.NOTHING_TO_CHECK_LINE]
+        if not payload.get("identity_present", True):
+            ready_lines.append(readiness_mod.NO_IDENTITY_LINE)
+        return ready_lines
     if action == "log":
         records = payload.get("records") or []
         if not records:
@@ -971,6 +998,11 @@ def _hint(action: str) -> str:
             "`panic` and `disconnect` mark a network untrusted; `trust` is the only "
             "way back, and it does NOT restore a member that was removed."
         )
+    if action == "ready":
+        return (
+            "Every FAIL row carries the command that clears it and the device to run it "
+            "on; pass 'peer' (a name or id) to narrow the report to one device."
+        )
     return ""
 
 
@@ -1052,6 +1084,16 @@ async def execute_network(
 
     scrubbed = _scrub(payload)
     if code != 0 or scrubbed.get("ok") is False:
+        if params.action == "ready" and isinstance(scrubbed.get("checks"), list):
+            # AN UNHEALTHY REPORT IS STILL THE REPORT (QA round 1, Q-1): the
+            # FAIL rows and their remedies are this verb's whole product, and
+            # the generic refusal branch below kept only ``code: message`` —
+            # dropping exactly the rows the hint says to read, on the one path
+            # they exist for. The rows read through the same renderer the
+            # healthy path uses; the raw payload still rides ``details``.
+            body = "\n".join(_render(params.action, scrubbed))
+            text, spill = spill_truncate(body, _TOOL, context)
+            return _error(tool_call_id, _TOOL, text, details=spill or {"network": scrubbed})
         # ``code`` + ``message`` IS THE REFUSAL FAMILY'S SHAPE, so it is read
         # before ``error`` (which only the install/uninstall diagnostics still
         # use) and before stderr, which in ``--json`` mode is empty BY DESIGN —

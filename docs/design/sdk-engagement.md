@@ -450,7 +450,34 @@ async with open_session(spec, roots=roots) as session:
   -- the apparatus tree, outside the episode. ``eval``/``lsp`` refuse under
   confinement (their reach is not filesystem-checkable in-process);
   ``local_operator/tools/confinement.py`` states the remaining holes
-  (metadata probes, network, Mach services, host-capability surfaces).
+  (metadata probes, Mach services, the daemon-mediated family, and the
+  host-capability scoping the browser/console/peer surfaces get).
+- **Episode network confinement (landed 2026-09-28).** The confinement above
+  was completed against the network the same day, because the next real-task
+  run measured the hole: the episode's model ran ``web_search``/``web_fetch``
+  calls against NeurIPS/ICML/ICLR award pages, alongside 27 ``bash`` calls --
+  the HOST's network, where the published harnesses can only reach their
+  GUEST's, which makes the arm's numbers incomparable and measures the
+  toolset rather than the harness. Shell children now run with no network
+  allowance, measured: a jailed child's TCP connects fail with ``EPERM``
+  against the open internet AND against the host's own loopback, UDP
+  ``sendto`` the same, name resolution fails fast, and even ``AF_UNIX``
+  connects are denied. The in-process spellings of the same reach --
+  ``web_search``, ``web_fetch``, the ``read <url>`` sugar, ``web_read`` and
+  ``browser`` -- refuse under confinement through
+  ``ToolConfinement.network_refusal`` (a kernel sandbox cannot wrap a call
+  the session's own process makes; ``browser`` can appear in an episode
+  through its cmux arm, a PATH lookup measured true under ``env -i``). The
+  GUEST's own network is untouched by construction: the only caller of
+  ``ToolConfinement.wrap`` is the ``bash`` tool, so the action bridge, the
+  adapter worker and the guest itself are never inside the jail -- the arm
+  still drives its VM, and the VM's internet access is the task
+  environment's. **Deferred finding (must ride the session-arm write-up):**
+  the arm's reduced surface -- shipped tools a real session has, refused
+  here -- has to be stated next to the arm's numbers rather than discovered
+  by a reader comparing inventories; ``local_operator/tools/confinement.py``
+  carries the full residual list (an already-open connection handed into the
+  jail keeps working -- measured; nothing hands one in).
 - The reply-channel arm is UNCHANGED and remains the default (design §5's
   not-to-be-moved list); the session arm writes a PILOT record and is not
   comparable to reply-arm results.

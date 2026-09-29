@@ -66,6 +66,7 @@ from local_operator.harness.types import (
 )
 from local_operator.paths import config_dir
 from local_operator.tools.builtin import validation_error_result
+from local_operator.tools.confinement import confinement_of
 from local_operator.web_search.cost import SEARCH_SPEND, estimate_search_cost
 from local_operator.web_search.models import SearchUsage, WebSearchSettings
 from local_operator.web_search.pages import PAGE_CONTEXTS, PageContext
@@ -254,6 +255,15 @@ async def execute_web_read(
         parsed = WebReadParams.model_validate(params)
     except ValidationError as error:
         return validation_error_result(tool_call_id, "web_read", error)
+
+    # A confined session refuses web_read before any settings or service are
+    # touched. Both of its paths are network paths -- the one-call form runs a
+    # search, and the replay form bills an auxiliary model call -- and neither
+    # is a child process a kernel sandbox can hold (see ``tools.confinement``,
+    # whose network_refusal is the one spelling of this refusal).
+    confinement = confinement_of(context)
+    if confinement is not None:
+        return _result(tool_call_id, confinement.network_refusal("web_read"), error=True)
 
     manager = ConfigManager(config_dir())
     settings: WebSearchSettings = load_read_settings(manager)
