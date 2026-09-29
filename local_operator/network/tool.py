@@ -90,6 +90,10 @@ READ_ACTIONS = frozenset(
         "ready",
         "credentials",
         "definitions_state",
+        # The user-scope MCP server list (``lop network mcp state``): a read of
+        # this device's own mcp.json. Push is NOT an action here — the precedent
+        # for the definitions push is the same (the tool has no push verb).
+        "mcp_state",
         # Its BARE form is a listing, which is why it is on this side of the union the
         # tests assert; ``_approval_tier`` upgrades it per call when the arguments
         # carry a mutation.
@@ -169,6 +173,11 @@ NetworkAction = Literal[
     # get here — "why does the peer resolve this name to the wrong thing".
     "credentials",
     "definitions_state",
+    # The third install-wide sync's read (``lop network mcp state``, mcpdefs.py):
+    # the user-scope MCP servers a peer would receive, their provenance, and the
+    # reference keys a mirror still needs — the question a failed offloaded
+    # server is usually the answer to. A read of this device's own mcp.json.
+    "mcp_state",
 ]
 
 
@@ -368,6 +377,8 @@ def _argv_for(params: NetworkParams) -> tuple[list[str], str]:
         argv = ["network", "credentials"]
     elif action == "definitions_state":
         argv = ["network", "definitions", "state"]
+    elif action == "mcp_state":
+        argv = ["network", "mcp", "state"]
     elif action == "log":
         argv = ["network", "log"]
         if params.since.strip():
@@ -937,6 +948,24 @@ def _render(action: str, payload: dict[str, Any]) -> list[str]:
                     + (f" (mirrored from {origin})" if origin else " (yours)")
                 )
         return lines or ["no agent or team definitions on this device"]
+    if action == "mcp_state":
+        lines = []
+        for row in payload.get("servers") or []:
+            origin = str(row.get("origin") or "")
+            line = f"server: {row.get('name')}  {row.get('transport')}" + (
+                f" (mirrored from {origin})" if origin else " (yours)"
+            )
+            # ``refs[].set`` is False only when the store was READ and does not
+            # hold the key; ``None`` (unreadable store) is not a "needs".
+            needs = [
+                str(ref.get("id"))
+                for ref in row.get("refs") or []
+                if isinstance(ref, dict) and ref.get("set") is False
+            ]
+            if needs:
+                line += " — needs: " + ", ".join(needs)
+            lines.append(line)
+        return lines or ["no user-scope MCP servers on this device"]
     if action == "member_rm":
         lines = [
             f"removed {payload.get('removed')}; epoch is now {payload.get('epoch')}",

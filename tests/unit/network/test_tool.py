@@ -51,6 +51,9 @@ _ALL_ACTIONS = (
     "trust",
     "credentials",
     "definitions_state",
+    # The user-scope MCP server list (mcpdefs.py): what a peer would receive and
+    # which reference keys a mirror still needs.
+    "mcp_state",
 )
 
 #: One plausible call per action, in the order the enum declares them. Defined once
@@ -75,6 +78,7 @@ _SAMPLES: dict[str, dict[str, Any]] = {
     "trust": {"network": "devmesh"},
     "credentials": {},
     "definitions_state": {},
+    "mcp_state": {},
 }
 
 
@@ -470,6 +474,28 @@ def test_the_new_actions_render_what_the_cli_actually_emits() -> None:
             "mirrored": {"agents": {"scout": "d_1"}, "teams": {}},
         },
     ) == ["agent: scout (mirrored from d_1)", "team: pod (yours)"]
+
+    assert net_tool._render(  # noqa: SLF001
+        "mcp_state",
+        {
+            "ok": True,
+            "servers": [
+                {
+                    "name": "gl",
+                    "transport": "stdio",
+                    "origin": "",
+                    "refs": [{"id": "GITLAB_TOKEN", "set": False}],
+                },
+                {"name": "crm", "transport": "http", "origin": "d_1", "refs": []},
+            ],
+        },
+    ) == [
+        "server: gl  stdio (yours) — needs: GITLAB_TOKEN",
+        "server: crm  http (mirrored from d_1)",
+    ]
+    assert net_tool._render("mcp_state", {"ok": True, "servers": []}) == [  # noqa: SLF001
+        "no user-scope MCP servers on this device"
+    ]
 
 
 def test_a_detached_ceremony_is_reaped_by_a_waiter_of_its_own() -> None:
