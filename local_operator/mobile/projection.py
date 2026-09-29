@@ -30,6 +30,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from local_operator.compaction.marker import COMPACTION_REFUSED_TYPE
+from local_operator.cross_session import SEND_TOOL_NAME, cross_session_hidden
 from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
 from local_operator.harness.comms import extract_parent_message
 
@@ -1181,6 +1182,12 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
     write/edit rows expand to their diff exactly like the live ones.
     """
     entries: list[TranscriptEntry] = []
+    # `display.hide_cross_session`, read ONCE per fold: folds run per attach /
+    # per history page, not per frame, and the reader is process-cached. The
+    # hidden rows are dropped as they are FOLDED (never appended), so nothing
+    # downstream — the result-pairing loop below, the cap, the client — can
+    # see them.
+    hide_cross_session = cross_session_hidden()
     # tool_call_id -> its row, local to this fold (a fresh fold re-pairs).
     tool_rows: dict[str, TranscriptEntry] = {}
     tool_args: dict[str, dict[str, Any]] = {}
@@ -1224,7 +1231,7 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                 # body plus the sender identity (from details["sender"]); the
                 # model-facing wrapped envelope in details["text"] never travels.
                 body = str(message.details.get("body") or "").strip()
-                if body:
+                if body and not hide_cross_session:
                     entries.append(
                         TranscriptEntry(
                             id=message.id,
@@ -1409,6 +1416,14 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                 user_run = bool(
                     message_bang and message.tool_calls[0] is call and call.name == "bash"
                 )
+                if hide_cross_session and call.name == SEND_TOOL_NAME:
+                    # `display.hide_cross_session`: no row and no correlation
+                    # entry. The result-pairing loop below reads
+                    # `tool_rows.get(...)` and already tolerates a missing row
+                    # (a call whose result it never indexed), so a hidden
+                    # `send`'s result settles into nothing rather than
+                    # becoming a new silent path.
+                    continue
                 entry = TranscriptEntry(
                     id=f"{message.id}:{call.id}",
                     kind="tool",
@@ -1800,6 +1815,11 @@ class ProjectionFold:
             # for a placeholder row) is correctly seen as an existing row.
             pre_existing = event.tool_call_id in self._tool_rows
             row = self._tool_row(event.tool_call_id, event.tool_name)
+            if row is None:
+                # `display.hide_cross_session`: the frame is consumed with
+                # nothing painted — `_tool_row` refused to mint (see there),
+                # and a row built under flag-off would have been found above.
+                return
             # Three endings to one dictation, in the frames the producer sends:
             #
             # * an ordinary frame — the model is still writing the call;
@@ -1875,6 +1895,11 @@ class ProjectionFold:
             row.details["argument_bytes"] = event.argument_bytes
         elif isinstance(event, ToolExecutionStartEvent):
             row = self._tool_row(event.tool_call_id, event.tool_name)
+            if row is None:
+                # `display.hide_cross_session`: a start with no row to run —
+                # nothing painted, and no start bookkeeping for a row that
+                # does not exist (see `_tool_row`).
+                return
             row.tool_state = "running"
             # The failure TEXT goes with the failure STATE. This row may have
             # been settled by a never-run verdict before its call started — two
@@ -1903,6 +1928,10 @@ class ProjectionFold:
             self._tool_args[event.tool_call_id] = event.args
         elif isinstance(event, ToolExecutionUpdateEvent):
             row = self._tool_row(event.tool_call_id, event.tool_name)
+            if row is None:
+                # `display.hide_cross_session`: an update for a row that was
+                # never minted — consumed, nothing painted.
+                return
             # Partial output means the call IS running. Normally the start
             # event already said so, but a relayed stream can deliver an
             # update whose start was dropped, and such a row would otherwise
@@ -1915,6 +1944,11 @@ class ProjectionFold:
                 row.details["partial"] = text[-TOOL_OUTPUT_TAIL_CHARS:]
         elif isinstance(event, ToolExecutionEndEvent):
             row = self._tool_row(event.tool_call_id, event.tool_name)
+            if row is None:
+                # `display.hide_cross_session`: an end for a row that was never
+                # minted — there is nothing to settle, and nothing was ever
+                # tracked for it (see `_tool_row`).
+                return
             result = event.result
             # The call's FAULT class, when its emitter marked one, decides the
             # tier first: {skipped, aborted} is an interruption (the user
@@ -2081,6 +2115,12 @@ class ProjectionFold:
         it delivers a peer message so an attached phone paints the peer card
         immediately, rather than waiting for the next full projection repaint.
         The row carries the sender identity in ``details`` for the label."""
+        if cross_session_hidden():
+            # `display.hide_cross_session`: nothing to echo — the row would be
+            # the very thing the flag hides. No append and no `_bump`: nothing
+            # changed on screen, so there is no frame to push. The durable
+            # history keeps the message; a repaint under flag-off shows it.
+            return
         self._append(
             TranscriptEntry(
                 id=f"peer-{time.time_ns()}",
@@ -3027,10 +3067,23 @@ class ProjectionFold:
                 row.final = True
             self._open_reasoning_id = None
 
-    def _tool_row(self, tool_call_id: str, tool_name: str) -> TranscriptEntry:
+    def _tool_row(self, tool_call_id: str, tool_name: str) -> TranscriptEntry | None:
+        """The live row for a tool call, minting one when absent.
+
+        Returns ``None`` instead of minting a ``send`` row under
+        ``display.hide_cross_session``: the live arms treat that as "this frame
+        has no row to act on — consume it, paint nothing". The refusal lives
+        here rather than at the arm heads so compose, start, update and end all
+        get it from one place, and only ever BEFORE a ``TranscriptEntry`` is
+        constructed. A frame whose row EXISTS — built while the flag was off —
+        resolves through the lookup above and keeps updating; forward-only,
+        matching the TUI (see ``tui/settings.py``'s ``_DEFAULT_NOTES``).
+        """
         entry_id = self._tool_rows.get(tool_call_id)
         row = self._find(entry_id) if entry_id else None
         if row is None:
+            if cross_session_hidden() and tool_name == SEND_TOOL_NAME:
+                return None
             row = TranscriptEntry(
                 id=f"tc-{tool_call_id}",
                 kind="tool",

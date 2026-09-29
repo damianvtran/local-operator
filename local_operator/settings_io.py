@@ -1906,6 +1906,37 @@ SETTINGS: tuple[Setting, ...] = (
             Choice("hidden", "hidden", "not shown"),
         ),
     ),
+    # Cross-session traffic — the `send` tool's own traces and the inbound
+    # peer receipts. Named for what it HIDES, unlike every show-positive
+    # `display.*` sibling above: a config file reads
+    # `display.hide_cross_session: true` as exactly what it does, while a
+    # `cross_session: true` could not be told from "show" without the help
+    # text. OFF is today's rendering. Read by the TUI gates and the phone fold
+    # through `local_operator.cross_session.cross_session_hidden()`; the
+    # forward-only mid-session semantics and the restore path are documented
+    # in `tui/settings.py`'s `_DEFAULT_NOTES`.
+    #
+    # The label carries the VERB ("Hide …") the way the key does: at rest
+    # the row reads `Hide cross-session traffic  off`, because a skimmer
+    # comparing it with `Status band on` / `Prompt chevron on` read a bare
+    # `Cross-session traffic  on` as "the traffic is on" (design review
+    # round 1, D4). The choices carry the FORWARD-ONLY scope, not the help:
+    # they render fully at every tested width down to 60x20 (a 54-cell list;
+    # the off member's 11-cell `(default)` tag is what bounds the clause
+    # length), and "reopen to re-read" is the half of the sentence a user
+    # flipping the switch actually needs (UX round 1, U1). Flat-dotted like
+    # every `display.*` key (the dot is part of the literal top-level key —
+    # see the block comment at `display.shimmer`).
+    Setting(
+        key="display.hide_cross_session",
+        path=("display.hide_cross_session",),
+        section="appearance",
+        label="Hide cross-session traffic",
+        kind=Kind.BOOL,
+        default=False,  # OFF = today's rendering; see tui/settings.py _DEFAULT_NOTES
+        help="Hide lop send traffic and inbound peer messages from transcripts.",
+        choices=_bool_choices("hide new; reopen to re-read", "show new; reopen to re-read"),
+    ),
     # -- the composer widget-visibility family (operator request, 2026-09-27) --
     #
     # One BOOL per composable piece of the composer: the status band and the
