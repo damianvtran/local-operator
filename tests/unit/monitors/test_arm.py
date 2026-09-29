@@ -553,3 +553,33 @@ async def test_the_owner_guard_refuses_an_answering_runtime_before_the_append(
     assert refused.value.status == STATUS_OWNER_BUSY
     assert "open in a running session" in str(refused.value)
     assert (directory / "transcript.jsonl").read_text(encoding="utf-8") == before
+
+
+@pytest.mark.asyncio
+async def test_the_storm_guard_refuses_the_third_identical_name(root: Path) -> None:
+    """§11.4's storm guard at the writer level: two rows named "watch" already
+    stand, so a third same-named arm is refused with the scheduler's sentence
+    verbatim and appends nothing — and it is the storm guard that catches it,
+    not the cap, which needs eight."""
+    directory = _session(
+        root,
+        "storm01",
+        [_row("m1", name="watch"), _row("m2", name="watch", arguments={"command": "ls m2"})],
+    )
+    before = (directory / "transcript.jsonl").read_text(encoding="utf-8")
+
+    with pytest.raises(MonitorWriteError) as refused:
+        await arm_monitor(
+            root,
+            "storm01",
+            {"name": "watch", "tool": "bash", "arguments": {"command": "ls other"}},
+        )
+
+    assert refused.value.status == STATUS_CONFLICT
+    assert refused.value.code == "monitor_refused"
+    assert str(refused.value) == (
+        "three monitors named 'watch' is a storm — cancel one or use a distinct name."
+    )
+    assert (directory / "transcript.jsonl").read_text(encoding="utf-8") == before
+    details = _latest(root, "storm01")
+    assert [row["id"] for row in details["monitors"]] == ["m1", "m2"]

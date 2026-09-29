@@ -296,6 +296,19 @@ def external_monitor_verdict(tool_name: str, arguments: Mapping[str, Any]) -> st
     from local_operator.harness.types import ToolContext
     from local_operator.tools.registry import TOOL_BUILDERS
 
+    # THE HARD REJECTS COME FIRST, with ``readonly_verdict``'s own sentences:
+    # all three entries (``task``/``ask``/``wait``) are session-only builders
+    # that resolve to ``None`` here, so without this line the builder-missing branch
+    # below would answer a call the evaluator CAN judge with "not available
+    # without a running session" — true, but it buries the reason the call is
+    # refused ("delegates autonomous work" / "sends a message" / "parks the
+    # turn") and sends the caller to a session that still cannot watch it. The
+    # map holds only plain static tool names, so this pre-check answers the same
+    # calls ``readonly_verdict`` refuses, with the same sentences.
+    hard = _HARD_REJECT.get(tool_name)
+    if hard is not None:
+        return hard
+
     builder = TOOL_BUILDERS.get(tool_name)
     if builder is None:
         if tool_name.startswith("mcp__"):
