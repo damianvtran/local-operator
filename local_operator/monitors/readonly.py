@@ -256,6 +256,77 @@ def _declared_verb_property(tool: AgentTool) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# The external resolver — the arm-time gate for writers OUTSIDE a session
+# ---------------------------------------------------------------------------
+#
+# A session's own validator (``Session._validate_monitor_call``) resolves the
+# tool from its LIVE inventory, which a writer standing outside the session
+# does not have: the cold paths (``monitors/arm.py``, reached by the desktop
+# routes) have no runtime to ask. The resolver below is the honest
+# approximation available without booting one:
+#
+# - the tool is built by the SAME registry the session's own tool list comes
+#   from (``tools.registry.TOOL_BUILDERS`` — the one place a builtin tool's
+#   tier and schema are defined), so a verdict here is the verdict the session
+#   would reach for the same call;
+# - what a cold resolver cannot prove stays REFUSED, never admitted: ``mcp__``
+#   tools (their ``readOnlyHint`` arrives from a live connection) and builders
+#   that only exist inside a running session (``wake``, ``monitor``, ``task``,
+#   ``console`` …) answer with a sentence saying so;
+# - the residue is session inventory GATING (a host config that disables a
+#   builtin). That is not a safety question — the run-time re-check (§6.8)
+#   refuses such a call at the tick and counts the failure — so it is
+#   deliberately not guessed at here.
+#
+# The import is inside the function because ``tools.registry`` reaches the
+# whole builtin tool tree, while this module is imported by ``session.py`` for
+# one predicate: the resolver pays for that tree only when an external arm
+# actually runs.
+
+
+def external_monitor_verdict(tool_name: str, arguments: Mapping[str, Any]) -> str | None:
+    """The read-only gate resolved WITHOUT a live session (§6, cold paths).
+
+    ``None`` = read-only (accept). A sentence = the refusal reason, and where
+    the call is one the evaluator itself can judge (``bash``, a read-tier
+    builtin, a hard-rejected tool) the sentence is ``readonly_verdict``'s own,
+    so the agent's tool, the CLI and the desktop route cannot describe one
+    call two ways.
+    """
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools.registry import TOOL_BUILDERS
+
+    builder = TOOL_BUILDERS.get(tool_name)
+    if builder is None:
+        if tool_name.startswith("mcp__"):
+            return (
+                f'monitor can\'t watch "{tool_name}" from outside its conversation: '
+                "an MCP tool's read-only hint can only be checked inside a running "
+                "session — ask that conversation's agent to arm the monitor."
+            )
+        return (
+            f'monitor can\'t watch "{tool_name}" from outside its conversation: '
+            "it is not a tool every session builds — ask that conversation's agent "
+            "to arm the monitor."
+        )
+    try:
+        tool = builder(ToolContext())
+    except Exception:  # noqa: BLE001 — fail closed: an unbuildable tool is unwatchable
+        return (
+            f'monitor can\'t watch "{tool_name}" from outside its conversation: '
+            "the tool could not be resolved here, so the call cannot be proven "
+            "read-only — ask that conversation's agent to arm the monitor."
+        )
+    if tool is None:
+        return (
+            f'monitor can\'t watch "{tool_name}" from outside its conversation: '
+            "it is not available without a running session — ask that "
+            "conversation's agent to arm the monitor."
+        )
+    return readonly_verdict(tool, arguments)
+
+
+# ---------------------------------------------------------------------------
 # bash (§6.4)
 # ---------------------------------------------------------------------------
 #

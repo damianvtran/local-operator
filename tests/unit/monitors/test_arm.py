@@ -1,7 +1,8 @@
-"""``monitors/arm.py`` — the external cancel writer for a session nobody owns.
+"""``monitors/arm.py`` — the external arm and cancel writers for a session
+nobody owns.
 
-The properties the CLI's ``lop monitor cancel`` relies on are the ones pinned
-here, and each is a silent failure if it drifts:
+The properties the desktop routes and the CLI's ``lop monitor cancel`` rely on
+are the ones pinned here, and each is a silent failure if it drifts:
 
 - the base is the TRANSCRIPT, never the index (a stale base resurrects a
   cancelled watch or writes a live one away);
@@ -27,6 +28,7 @@ from local_operator.monitors.arm import (
     STATUS_OWNER_BUSY,
     STATUS_SESSION_NOT_FOUND,
     MonitorWriteError,
+    arm_monitor,
     cancel_monitor,
 )
 from local_operator.monitors.store import entry_path, read_entry
@@ -345,3 +347,209 @@ async def test_the_owner_guard_refuses_behind_a_live_runtime(
     assert "open in a running session" in str(refused.value)
     details = _latest(root, "owned01")
     assert [row["id"] for row in details["monitors"]] == ["m1"], "nothing was written"
+
+
+# ---------------------------------------------------------------------------
+# arm_monitor — the desktop arm route's writer
+# ---------------------------------------------------------------------------
+
+
+def _freeze_first_check(monkeypatch: pytest.MonkeyPatch, delay_ms: int = 2_000) -> None:
+    """Pin the first-check jitter so ``next_due_at`` assertions are exact.
+
+    The window is `MonitorScheduler._first_check_delay_ms`'s (uniform 1-3 s),
+    and pinning it keeps these tests from asserting a range they would
+    otherwise have to restate.
+    """
+    from local_operator.monitors import arm as arm_module
+
+    monkeypatch.setattr(arm_module.random, "uniform", lambda _a, _b: float(delay_ms))
+
+
+def _append_count(root: Path, session_id: str) -> int:
+    text = (root / "sessions" / session_id / "transcript.jsonl").read_text(encoding="utf-8")
+    count = 0
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        payload = json.loads(line).get("payload") or {}
+        if payload.get("custom_type") == "monitor_schedules":
+            count += 1
+    return count
+
+
+@pytest.mark.asyncio
+async def test_arming_a_cold_session_writes_the_transcript_and_the_index(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The arm path for an existing conversation with nobody home: transcript
+    first, index second, and the index row carries the receipt's due instant
+    and the fresh counters the session would rebuild anyway."""
+    _session(root, "new01")
+    _freeze_first_check(monkeypatch)
+    now = 1_700_000_000_000
+
+    outcome = await arm_monitor(
+        root,
+        "new01",
+        {"name": "watch it", "tool": "bash", "arguments": {"command": "ls"}, "every": "60s"},
+        now_ms=now,
+    )
+
+    assert outcome.monitor_id == "m1"
+    assert outcome.name == "watch it"
+    assert outcome.remaining == 1
+    assert outcome.next_due_at == now + 2_000
+    assert outcome.index_written is True
+    assert outcome.already_armed is False and outcome.reactivated is False
+    details = _latest(root, "new01")
+    assert [row["id"] for row in details["monitors"]] == ["m1"]
+    assert details["next_seq"] == 2
+    entry = read_entry(root, "new01")
+    assert entry is not None
+    assert entry["monitors"][0]["id"] == "m1"
+    assert entry["monitors"][0]["next_due_at"] == now + 2_000
+    assert entry["monitors"][0]["disabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_an_identical_spec_is_answered_without_appending(root: Path) -> None:
+    """The dedupe identity is also the retry's idempotency key: a second arm of
+    the same call — whatever its name or interval — is the EXISTING row, and
+    the transcript's write log does not move."""
+    _session(root, "dup01")
+    first = await arm_monitor(
+        root, "dup01", {"tool": "bash", "arguments": {"command": "ls"}, "every": "60s"}
+    )
+    appends = _append_count(root, "dup01")
+
+    second = await arm_monitor(
+        root,
+        "dup01",
+        {"name": "renamed", "tool": "bash", "arguments": {"command": "ls"}, "every": "5m"},
+    )
+
+    assert second.monitor_id == first.monitor_id == "m1"
+    assert second.already_armed is True
+    assert second.reactivated is False
+    # The existing row is answered AS IS: the second request's name and
+    # interval describe the arm it asked for, not an edit of the row it hit
+    # (a different interval is cancel + create, §11.4).
+    assert second.name == first.name == "bash"
+    assert _append_count(root, "dup01") == appends, "a duplicate must not append"
+    details = _latest(root, "dup01")
+    assert len(details["monitors"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_disabled_spec_is_reactivated_rather_than_duplicated(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§11.3's "re-arm to reactivate": the failing watch keeps its id and its
+    snapshot baseline, and only its counters move."""
+    from local_operator.monitors import state as monitor_state
+    from local_operator.monitors.scheduler import fresh_counters
+
+    _session(root, "rev01", [_row("m1")])
+    dead = fresh_counters("m1", None)
+    dead.update({"disabled": True, "disabled_reason": "5 failed", "consecutive_failures": 5})
+    monitor_state.write_counters(root, "rev01", "m1", dead)
+    _freeze_first_check(monkeypatch)
+    now = 1_700_000_000_000
+
+    outcome = await arm_monitor(
+        root, "rev01", {"tool": "bash", "arguments": {"command": "ls"}, "every": "60s"}, now_ms=now
+    )
+
+    assert outcome.monitor_id == "m1"
+    assert outcome.reactivated is True
+    assert outcome.already_armed is False
+    assert outcome.next_due_at == now + 2_000
+    assert _append_count(root, "rev01") == 1, "the list did not move"
+    reset = monitor_state.read_counters(root, "rev01", "m1")
+    assert reset is not None
+    assert reset["disabled"] is False
+    assert reset["disabled_reason"] == ""
+    assert reset["next_due_at"] == now + 2_000
+
+
+@pytest.mark.asyncio
+async def test_the_read_only_gate_refuses_a_write_target_and_judges_bash(root: Path) -> None:
+    """The arm-time gate (`external_monitor_verdict`, §6.7): a write-tier tool
+    and a destructive bash line fail LOUDLY before anything is written, while a
+    provably read-only command arms."""
+    directory = _session(root, "ro01")
+
+    with pytest.raises(MonitorWriteError) as refused:
+        await arm_monitor(
+            root, "ro01", {"tool": "write", "arguments": {"path": "x"}, "every": "60s"}
+        )
+    assert refused.value.code == "monitor_refused"
+    assert refused.value.status == STATUS_CONFLICT
+    assert '"write"' in str(refused.value)
+
+    with pytest.raises(MonitorWriteError) as destructive:
+        await arm_monitor(
+            root, "ro01", {"tool": "bash", "arguments": {"command": "rm -rf /"}, "every": "60s"}
+        )
+    assert destructive.value.code == "monitor_refused"
+    assert "read-only" in str(destructive.value)
+
+    log = (directory / "transcript.jsonl").read_text(encoding="utf-8")
+    assert log.count("monitor_schedules") == 0
+
+    outcome = await arm_monitor(
+        root, "ro01", {"tool": "bash", "arguments": {"command": "ls -la"}, "every": "60s"}
+    )
+    assert outcome.monitor_id == "m1"
+
+
+@pytest.mark.asyncio
+async def test_the_cap_refuses_the_ninth_arm_with_its_own_sentence(root: Path) -> None:
+    """§11.4's cap is a rejection naming the remedy, never a silent drop — and
+    the transcript is untouched by the refused request."""
+    rows = [_row(f"m{i}", arguments={"command": f"ls {i}"}) for i in range(1, 9)]
+    _session(root, "cap01", rows)
+
+    with pytest.raises(MonitorWriteError) as refused:
+        await arm_monitor(
+            root, "cap01", {"tool": "bash", "arguments": {"command": "ls fresh"}, "every": "60s"}
+        )
+
+    assert refused.value.status == STATUS_CONFLICT
+    assert "monitor limit reached" in str(refused.value)
+    details = _latest(root, "cap01")
+    assert len(details["monitors"]) == 8
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_session_is_refused_rather_than_invented(root: Path) -> None:
+    with pytest.raises(MonitorWriteError) as refused:
+        await arm_monitor(root, "nosuch", {"tool": "bash", "arguments": {"command": "ls"}})
+
+    assert refused.value.status == STATUS_SESSION_NOT_FOUND
+    assert refused.value.code == "session_not_found"
+
+
+@pytest.mark.asyncio
+async def test_the_owner_guard_refuses_an_answering_runtime_before_the_append(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The arm path's pre-append guard, pinned separately from cancel's: an arm
+    behind a live owner would be deleted by that owner's next persist, so it is
+    refused with the same sentence and leaves the transcript untouched."""
+    from local_operator.mobile import attach_client
+    from local_operator.wakes import supervisor
+
+    directory = _session(root, "armown01", [_row("m1")])
+    before = (directory / "transcript.jsonl").read_text(encoding="utf-8")
+    monkeypatch.setattr(supervisor, "wedged_runtime", lambda *a, **k: None)
+    monkeypatch.setattr(attach_client, "find_runtime_record", lambda *a, **k: (None, 4242))
+    monkeypatch.setattr(attach_client, "dialable_record_exists", lambda *a, **k: True)
+
+    with pytest.raises(MonitorWriteError) as refused:
+        await arm_monitor(root, "armown01", {"tool": "bash", "arguments": {"command": "ls other"}})
+
+    assert refused.value.status == STATUS_OWNER_BUSY
+    assert "open in a running session" in str(refused.value)
+    assert (directory / "transcript.jsonl").read_text(encoding="utf-8") == before

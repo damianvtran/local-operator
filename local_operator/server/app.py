@@ -48,6 +48,7 @@ from local_operator.server.routes import (
     desktop_lifecycle,
     desktop_mcp,
     desktop_mesh,
+    desktop_monitors,
     desktop_profiles,
     desktop_projects,
     desktop_radient,
@@ -708,6 +709,14 @@ app.include_router(desktop_tunnel.router)
 # templates (`/v1/desktop/wakes`, `/v1/desktop/wakes/{a}/{b}`) collide with
 # nothing registered above.
 app.include_router(desktop_wakes.router)
+# The machine-wide MONITOR surface, the wake surface's standing-watch sibling:
+# list, arm and cancel over the monitor index. Registered after the wake surface
+# for the reason each block above gives — FastAPI matches in declaration order —
+# and its templates (`/v1/desktop/monitors`, `/v1/desktop/monitors/{a}/{b}`)
+# collide with nothing registered earlier: no block above declares
+# `/monitors`, and the sessions router has no single-segment `/v1/desktop/{...}`
+# path.
+app.include_router(desktop_monitors.router)
 # The machine-wide RUNTIME roster: which runtime PROCESSES are live, where each is
 # listening and whether it answered. Registered after the wake surface for the same
 # reason the wake surface is after the lifecycle routes — `/v1/desktop/runtimes`
