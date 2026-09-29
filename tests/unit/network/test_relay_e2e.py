@@ -1110,6 +1110,152 @@ def test_a_member_dials_and_gets_a_catalogue_reply(
     link.close("test")
 
 
+def test_a_link_that_has_begun_closing_is_never_handed_out(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``close`` opens a window in which the link is still selectable — it must not be.
+
+    THE DEFECT THIS PINS, measured on this fleet 2026-09-28 on the mobility cells. A
+    link is not closed when it starts closing: ``PeerLink.close`` waits up to
+    ``CLOSE_FLUSH_S`` for its writer before ``_closed`` is set, so through that window
+    the link is still in the table, still reports ``alive``, and its peer has already
+    gone — that is why the close began. An op that resolved it there sent its request
+    into a socket nobody was reading, waited its whole op timeout, and reported the
+    PEER as unreachable: the invite went out at +2.708 s, the refusal came at
+    +97.7 s, and an immediate retry dialled fresh and finished in 70 ms. Those numbers
+    and that mechanism are in ``PeerLink.closing``'s own docstring; THIS cell is the
+    reproduction, and it enters the window the way the product does — a real link on
+    real loopback sockets whose close has started — rather than by racing a real
+    peer's death, which is what made the CI failure a flake instead of a red.
+
+    WHAT THE LINK MUST DO FROM THAT INSTANT: take no new work. ``_link_for`` may not
+    hand it out (``alive`` is the wrong question — see the method), ``send`` may not
+    accept a frame into a socket the peer has left, and a request must come back empty
+    NOW rather than at its timeout, with no waiter left in the table for a reply that
+    is never coming. The last assertion is the consequence a user sees: with the dying
+    link out of the way ``_ensure_link`` DIALS the peer it can still reach, which is
+    the path the first move after a pairing has to take.
+    """
+    server_a, server_b, host, port = devices
+    # B MUST BE DIALABLE, because dialling is the answer this cell requires: A has no
+    # usable link to it, and ``_ensure_link``'s documented move is to dial the member's
+    # own endpoints. Same construction as the mobility fixture's paired relay.
+    server_b.bind_control()
+    server_b.start()
+    # THE JOIN LINK IS SETTLED FIRST, so the selection question below has an answer that
+    # is not an ordering accident: waiting on the pairing's own ``link_closed`` row is an
+    # event (``_pair_settled``), and without it the pairing's link can still be in the
+    # table and answering ``_link_for`` for the right reason.
+    record, _host, _port = _pair_settled(devices, monkeypatch, settings=server_b.settings)
+    link_b, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    assert link_b is not None, reason
+    # THE LINK THIS DIAL INSTALLED, named by the id both ends carry — not "the link A
+    # holds for B", which the pairing's own join link may still be at this moment.
+    link_a = server_a.links.get(link_b.link_id)  # noqa: SLF001 — the table under test
+    assert link_a is not None, "the peer's dial did not install a link on this side"
+    # REAL BEFORE IT IS DYING: a request over the live link is answered, so nothing
+    # below is passing because the rig was never wired up in the first place.
+    live = link_a.request({"op": "net_catalog", "req": 9001, "locality": "remote"}, timeout=10.0)
+    assert live is not None and live["op"] == "ack", live
+
+    peer = server_b.identity.device_id
+    with server_a._links_lock:  # noqa: SLF001 — no link may register while this is asked
+        # ONE CANDIDATE, OR THE ASSERTION IS ABOUT DICT ORDER. A pairing leaves more than
+        # one link to the same peer in the table (this side's own dials, the peer's), and
+        # ``_link_for`` answers with whichever comes first — so the others are closed
+        # through the product itself and the question below is about THIS link.
+        for extra in [
+            item
+            for item in server_a.links.values()
+            if item.device_id == peer and item is not link_a
+        ]:
+            extra.close("test", flush_s=0.0)
+        # AND THEN THE TABLE HAS EXACTLY ONE CANDIDATE, which is what makes the assertion
+        # below a statement about closing rather than about dict order. New links cannot
+        # arrive while this lock is held (:meth:`RelayServer.register_link` takes it),
+        # which is why the question is asked here and not a line later.
+        remaining = [item for item in server_a.links.values() if item.device_id == peer]
+        assert remaining == [link_a], "the rig kept another link to this peer"
+
+        link_a._flushing.set()  # noqa: SLF001 — close()'s first line, held for the assertions
+
+        assert (
+            server_a._link_for(peer) is None
+        ), "a link that has begun closing was handed out for new work"  # noqa: SLF001
+    assert (
+        link_a.send({"op": "net_catalog", "req": 9002, "locality": "remote"}) is False
+    ), "a frame was accepted into a link whose peer has gone"
+    assert (
+        link_a.request({"op": "net_catalog", "req": 9003, "locality": "remote"}, timeout=0.5)
+        is None
+    ), "a closing link answered a request"
+    # NOT MERELY "IT RETURNED None": the slot must be gone. A waiter left behind is a
+    # reply slot nothing will ever fill, and it is what the caller's own timeout would
+    # otherwise have been spent waiting on (see ``RelayServer.fail_replies``).
+    with server_a._links_lock:  # noqa: SLF001
+        pending = [
+            key for key in server_a._reply_waiters if key[0] == link_a.link_id  # noqa: SLF001
+        ]
+    assert pending == [], f"a request that got no reply left its slot behind: {pending}"
+
+    fresh = server_a._ensure_link(peer)  # noqa: SLF001
+    assert fresh is not None, "the peer was reachable and nothing was dialled"
+    assert fresh.link_id != link_a.link_id, "the dying link was reused instead of replaced"
+    answered = fresh.request({"op": "net_catalog", "req": 9004, "locality": "remote"}, timeout=10.0)
+    assert answered is not None and answered["op"] == "ack", answered
+
+
+def test_a_link_that_dies_answers_the_requests_it_was_carrying(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A link's death resolves its waiting requests — it is not left to their clocks.
+
+    THE SECOND HALF of the same 95 s refusal ``PeerLink.closing`` documents
+    (``test_a_link_that_has_begun_closing_is_never_handed_out`` pins the first).
+    Replies are routed by ``link.link_id``, and the reader that would deliver one is
+    the very thread closing the link — so a waiter still registered when the link goes
+    buys nothing but the rest of the requester's timeout, and the caller reads that
+    silence as a fact about the PEER. For a slow op that is 95 s (its owner's deadline
+    plus the reply margin) spent discovering something the link already knew the
+    moment its peer left.
+
+    THE SLOT IS TAKEN DIRECTLY, via the ``expect_reply`` that ``PeerLink.request``
+    itself calls, because the claim is about a reply that CANNOT come: driving it
+    through a real request would need a peer that goes silent without going away, and
+    every honest way to build that is another race. What is real here is the death —
+    the peer's own socket closes, this side's reader errors, and the link leaves the
+    table — and the wait is on ``wait_for``'s backstop (15 s against a 600 s timeout),
+    not on a machine-speed number.
+    """
+    server_a, server_b, host, port = devices
+    # THE JOIN LINK IS SETTLED FIRST — see the cell above for why: the pairing's own link
+    # outlives its ceremony, and this cell's subject is the death of ITS OWN link.
+    record, _host, _port = _pair_settled(devices, monkeypatch)
+    link_b, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    assert link_b is not None, reason
+    link_a = server_a.links.get(link_b.link_id)  # noqa: SLF001
+    assert link_a is not None, "the peer's dial did not install a link on this side"
+    # The link is UP and in the table before it is killed — the death has to be a death.
+    assert link_a.alive and link_a.link_id in server_a.links  # noqa: SLF001
+
+    waiter = server_a.expect_reply(link_a.link_id, 9100)
+    resolved: list[dict[str, Any] | None] = []
+    waiting = threading.Thread(target=lambda: resolved.append(waiter.wait(600.0)), daemon=True)
+    waiting.start()
+
+    link_b.close("peer-went-away")
+
+    assert net_fixtures.wait_for(lambda: resolved == [None]), (
+        "the link died with a request in flight and never resolved it: the caller is"
+        " still waiting on a reply the link's own death already answered"
+    )
+    with server_a._links_lock:  # noqa: SLF001
+        left = [key for key in server_a._reply_waiters if key[0] == link_a.link_id]  # noqa: SLF001
+    assert left == [], f"the dead link left reply slots behind: {left}"
+
+
 def test_a_read_member_cannot_prompt_through_the_link(
     devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
     monkeypatch: pytest.MonkeyPatch,

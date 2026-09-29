@@ -57,7 +57,7 @@ from tests.unit.network.test_mobility_busy_wait import (  # noqa: F401 — the o
     _Record as _BusyRecord,
 )
 from tests.unit.network.test_relay_e2e import (  # noqa: F401 — the fixture `pair` reaches for
-    _pair,
+    _pair_settled,
     devices,
 )
 from tests.unit.session.runtime.test_server import FakeHandle
@@ -216,10 +216,32 @@ def _arrivals(
 
 
 def _pair_and_own(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> Devices:
-    """Two paired relays, A holding one session. The destination is B on every route."""
+    """Two paired relays, A holding one session. The destination is B on every route.
+
+    THE PAIRING IS SETTLED BEFORE THE CELL'S FIRST MOVE, in the shape the mobility
+    family already uses (``_pair_settled``'s own docstring carries the measurement and
+    the shorter predicates it refuses). The pairing's join link OUTLIVES the ceremony by
+    the length of ``PeerLink.close``'s flush window, so a move driven inside it used to
+    resolve the dying link instead of dialling the reachable peer and answer
+    ``that device is unreachable (no answer on its link)`` after the slow op's whole
+    95 s — CI run 36518398815 failed
+    ``test_the_offload_carries_the_flag_to_the_destination`` exactly so, and every cell
+    here takes this one helper.
+
+    WHAT THE PRODUCT FIX ON THIS PR DID, AND WHAT IT LEFT TO THIS WAIT (relay.py).
+    ``_link_for`` no longer hands out a link that has begun closing, so the dominant
+    window now DIALS and the move lands; and a request whose link dies is resolved by
+    the death rather than by its own timeout, so the 95 s stall is structurally gone.
+    The boundary that remains is one no reader can close from this side: a link picked
+    while its peer is already gone and this side's reader has not yet noticed is
+    indistinguishable from a healthy one, so that move still fails — in milliseconds
+    now, and on a fact about the pairing's own link rather than about the engage flag
+    this file exists for. Waiting for the join link's own ``link_closed`` row removes
+    that race from the cells; it is an event, not a clock, and no bound moves.
+    """
     both: Devices = request.getfixturevalue("pair")
     server_a, server_b, _host, _port = both
-    _pair(both, monkeypatch, role="admin", settings=server_b.settings)
+    _pair_settled(both, monkeypatch, role="admin", settings=server_b.settings)
     _owned_session(server_a)
     return both
 
