@@ -56,7 +56,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Mapping, Protocol, c
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from local_operator.harness.types import ImageContent
+    from local_operator.harness.types import AudioContent, ImageContent
 
 from local_operator.harness.approval import (
     AUTHORITY_OPS,
@@ -207,6 +207,60 @@ async def image_blocks_in_thread(images: list[dict[str, str]] | None) -> list["I
     return await asyncio.to_thread(image_blocks, images)
 
 
+def audio_blocks(audio: list[dict[str, str]] | None) -> list["AudioContent"]:
+    """Decode the wire's ``[{data_b64, mime_type}]`` into bounded AudioContent blocks.
+
+    The mirror of :func:`image_blocks` with ONE deliberate difference and one
+    deliberate sameness:
+
+    * SAMENESS — bad entries are dropped, not fatal, and the format is decided
+      by CONTENT (``local_operator.media.sniff_audio``), never by the client's
+      declared ``mime_type``. That is not tidiness: the OpenAI-compatible part
+      keys its ``input_audio.format`` token (wav|mp3) on the stored mime, so a
+      browser that labels its webm capture ``audio/wav`` would otherwise pick
+      a token for a container the bytes are not — a provider 400 inside a paid
+      turn. The block's ``mime_type`` is therefore the SNIFFED one.
+    * DIFFERENCE — there is no thread-hop form, and there must not be a silent
+      one: the work here is one bounded base64 decode (the control frame's
+      1 MiB line cap bounds it) plus a header sniff, with no re-encode, so the
+      ~315 ms argument that puts ``image_blocks`` off-loop does not apply, and
+      a hop added for symmetry would only open a suspension point in callers
+      that reserve producer identities around this call.
+
+    Empty input yields an empty list, which every caller treats exactly like
+    no audio. v1 carries at most one block (the desktop ``Prompt`` bounds the
+    list); this function stays shape-agnostic and the sidecar forks once per
+    block it is handed.
+    """
+    if not audio:
+        return []
+    from local_operator.harness.types import AudioContent
+    from local_operator.media import sniff_audio
+
+    out: list[AudioContent] = []
+    for item in audio:
+        if not isinstance(item, dict):
+            logger.debug("audio block dropped: not a dict (%r)", type(item).__name__)
+            continue
+        data = item.get("data_b64") or item.get("data") or ""
+        if not data:
+            logger.debug("audio block dropped: no data_b64/data")
+            continue
+        try:
+            raw = base64.b64decode(data, validate=True)
+        except (ValueError, binascii.Error):
+            logger.debug("audio block dropped: data_b64 is not valid base64")
+            continue
+        info = sniff_audio(raw)
+        if info is None:
+            logger.debug("audio block dropped: unrecognised audio format")
+            continue
+        # The client's declared mime_type is deliberately NOT read: see the
+        # docstring. The bytes above are what a provider would decode.
+        out.append(AudioContent(data=data, mime_type=info.mime_type))
+    return out
+
+
 #: A prompt payload past 1 MB is a bug, not a prompt — the line limit the
 #: control socket reader enforces.
 _MAX_LINE_BYTES = 1 << 20
@@ -336,11 +390,16 @@ def _reference_image_payloads(
     precedent for the same reason.
 
     An image block is identified by carrying a LONG ``data`` string alongside
-    either the ``image`` type or a ``mime_type``, rather than by ``data`` alone
-    the way the durable encoder does it. The durable encoder has to key on
-    ``data`` because it dumps with ``exclude_defaults`` and so loses the block's
-    discriminant; the live wire dumps the models whole, so the discriminant is
-    right there to check.
+    either the ``image``/``audio`` type or a ``mime_type``, rather than by
+    ``data`` alone the way the durable encoder does it. The durable encoder
+    has to key on ``data`` because it dumps with ``exclude_defaults`` and so
+    loses the block's discriminant; the live wire dumps the models whole, so
+    the discriminant is right there to check. Audio rides the same pass — a
+    recording is heavier than any screenshot, so leaving it inline while
+    images externalize would be the one payload this machinery exists for
+    staying large — and the block it returns KEEPS its ``type``, which is what
+    keeps the receiving side (``attached._inline_attachment_references``)
+    from re-inlining it as an image.
 
     That NARROWS the exposure of a tool's free-form ``details`` payload rather
     than removing it, and the difference is worth stating: a ``details`` blob
@@ -5868,6 +5927,7 @@ class RuntimeServer:
             from local_operator.session.errors import (
                 AsideUnanswered,
                 AttachmentUnavailable,
+                AudioInputUnsupported,
                 OperatorAuthorityRequired,
                 ProfileRegistryUnavailable,
                 RuntimeRetiring,
@@ -5879,6 +5939,7 @@ class RuntimeServer:
                 (
                     AsideUnanswered,
                     AttachmentUnavailable,
+                    AudioInputUnsupported,
                     OperatorAuthorityRequired,
                     ProfileRegistryUnavailable,
                     RuntimeRetiring,
@@ -5911,6 +5972,26 @@ class RuntimeServer:
                 # path, host or identity, so it does not widen what
                 # ``session/errors.py`` admits across this boundary.
                 frame["error_count"] = exc.count
+            if isinstance(exc, AudioInputUnsupported):
+                # THE REFUSAL'S FACTS, AS THEIR OWN FIELDS rather than prose
+                # (agent review round 1, m2): the far side rebuilds the SAME
+                # refusal sentence around them (``admission_error``
+                # sanitises and caps each), so a desktop 409 names the model
+                # and the reason instead of the bare form, and a NEWER frame
+                # still degrades sanely on an older client — the unknown
+                # fields are dropped and the bare sentence rebuilt, which is
+                # what that client always produced. Bounded here as well as
+                # there, defensively: the sender owns its own caps.
+                # Present only when the refusal actually carries them: absent
+                # fields are the SAME shape an older runtime's frame sends, so
+                # the decoder has one absence to understand, and the bare form
+                # stays byte-for-byte what it always was.
+                if exc.model:
+                    frame["error_model"] = str(exc.model)[:200]
+                if exc.report:
+                    frame["error_report"] = str(exc.report)[:300]
+                if exc.format_unsupported:
+                    frame["error_format"] = True
             await self._send_to(conn, frame)
             await self._push()
 
@@ -6298,6 +6379,13 @@ class RuntimeServer:
                 fields["input_mode"] = frame.get("input_mode")
             if "input_path" in parameters:
                 fields["input_path"] = frame.get("input_path")
+            # The audio door rides the same probe. A frame that omits the key
+            # answers ``None`` (no recording), so every legacy send stays
+            # byte-identical, and a handle that predates this keyword never
+            # receives it — the candidate-level transport of
+            # ``input_mode``/``input_path``, one contract revision later.
+            if "audio" in parameters:
+                fields["audio"] = frame.get("audio")
             return await h.prompt(frame["text"], **fields)
         if op == "steer":
             fields = {"images": frame.get("images")}
@@ -6311,6 +6399,11 @@ class RuntimeServer:
                 fields["input_mode"] = frame.get("input_mode")
             if "input_path" in parameters:
                 fields["input_path"] = frame.get("input_path")
+            # ...and the recording rides it like an image does: a mid-turn
+            # audio send lands its blocks on the queued row rather than
+            # dropping them at a handle that cannot take the keyword.
+            if "audio" in parameters:
+                fields["audio"] = frame.get("audio")
             return await h.steer(frame["text"], **fields)
         if op == "abort":
             return await h.abort()

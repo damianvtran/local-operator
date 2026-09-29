@@ -1,4 +1,4 @@
-"""Image identification from bytes, by header, with no decode.
+"""Image and audio identification from bytes, by header, with no decode.
 
 Pillow IS available at runtime — ``pillow-heif`` is a BASE dependency
 (``pyproject.toml`` ``project.dependencies``; the ``[images]`` extra is an
@@ -16,6 +16,12 @@ on every file.
 Type is decided by CONTENT, never by extension. A `.png` that is actually HTML
 must not be handed to a provider as an image, and a screenshot saved without a
 suffix must still work — both arrive routinely from a clipboard.
+
+Audio is identified the same way and for the same reasons (``sniff_audio``).
+The STT cascade and the audio door both need to know what a byte string IS
+rather than what it claims to be, and a recording's container magic answers
+that from the first few bytes — no decoder, no dependency, and no cost that
+grows with the file.
 """
 
 from __future__ import annotations
@@ -27,6 +33,26 @@ from dataclasses import dataclass
 #: name but they cannot read is worse than an honest refusal, because the
 #: failure surfaces as a provider 400 halfway through a turn.
 SUPPORTED_IMAGE_MIME_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+
+#: Audio containers the desktop attachment fetch route may serve under their
+#: own content type. Deliberately the sniffer's full OUTPUT set
+#: (:func:`sniff_audio`): a stored block was admitted by CONTENT, so serving
+#: it as the type its bytes verified as is the honest answer, and anything
+#: outside this set still degrades to ``application/octet-stream`` + nosniff.
+#: This is NOT the capture allowlist — that is ``stt.audio.AUDIO_MIME_TYPES``,
+#: narrower on purpose (only what the surfaces are supposed to produce).
+SUPPORTED_AUDIO_MIME_TYPES = frozenset(
+    {
+        "audio/wav",
+        "audio/mpeg",
+        "audio/mp4",
+        "audio/webm",
+        "audio/ogg",
+        "audio/flac",
+        "audio/aiff",
+        "audio/aac",
+    }
+)
 
 #: Recognised but NOT directly sendable — a caller must transcode first (see
 #: ``helpers.convert_heic_to_png_file``). Named here anyway because "I do not
@@ -53,6 +79,20 @@ _HEIF_BRANDS = frozenset(
 _JPEG_SOF_MARKERS = frozenset(
     {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
 )
+
+#: ISO-BMFF brands browsers and recorders emit for audio files (``M4A``/``F4A``
+#: for Apple tools, the generic ``mp42``/``isom``/``iso2``/``iso6`` family the
+#: MediaRecorder implementations write). The container is shared with video, so
+#: a brand outside this list is reported as unrecognised rather than guessed:
+#: calling an unknown video ``audio/mp4`` would hand the audio door a block the
+#: wire then refuses mid-turn.
+_MP4_AUDIO_BRANDS = frozenset(
+    {b"M4A ", b"M4B ", b"F4A ", b"M4P ", b"mp42", b"isom", b"iso2", b"iso6"}
+)
+
+#: EBML magic. WebM/Matroska carries both audio and video; see ``sniff_audio``
+#: for why this module still answers ``audio/webm`` for it.
+_EBML_MAGIC = b"\x1a\x45\xdf\xa3"
 
 
 @dataclass(frozen=True)
@@ -211,5 +251,88 @@ def sniff_image_file(path: str) -> ImageInfo | None:
     try:
         with open(path, "rb") as handle:
             return sniff_image(handle.read(_SNIFF_BYTES))
+    except (OSError, ValueError):
+        return None
+
+
+@dataclass(frozen=True)
+class AudioInfo:
+    """What a header says about an audio file."""
+
+    mime_type: str
+
+
+def _frame_sync_mime(data: bytes) -> str | None:
+    """The mime for a bare MPEG-family frame sync, or ``None``.
+
+    MP3 and ADTS AAC share the sync word, so the sync alone cannot tell them
+    apart — the two LAYER bits after it can. Zero means this is an ADTS AAC
+    stream (which has no MPEG audio layer); otherwise it is MPEG audio, whose
+    reserved version pattern means the bytes are not a frame at all.
+    """
+    if len(data) < 2 or data[0] != 0xFF or (data[1] & 0xE0) != 0xE0:
+        return None
+    version = (data[1] >> 3) & 0x03
+    layer = (data[1] >> 1) & 0x03
+    if layer:
+        return None if version == 0x01 else "audio/mpeg"
+    if len(data) < 3:
+        return None
+    # ADTS puts the sampling-frequency index in the next byte; its reserved
+    # value is the one cross-check that keeps any 0xFF 0xF* pair from reading
+    # as audio.
+    sampling_index = (data[2] >> 2) & 0x0F
+    return None if sampling_index == 0x0F else "audio/aac"
+
+
+def sniff_audio(data: bytes) -> AudioInfo | None:
+    """Identify ``data`` as audio, or return ``None``.
+
+    Mirrors :func:`sniff_image`'s contract: ``None`` means "do not treat this
+    as audio" and covers both "not audio at all" and "a container whose
+    header did not verify as audio". A caller that ships a block it could not
+    verify is how a provider 400 gets into the conversation history, so the
+    refusal is the safe answer.
+
+    The reported mime is the FORMAT's, never a wire's: whether OpenAI's
+    ``input_audio`` accepts it (wav/mp3 only), Gemini's wider list, or an STT
+    endpoint accepts it is a question for admission, and deciding it here
+    would be one wire's constraint masquerading as the file's identity.
+
+    WebM/Matroska is reported as ``audio/webm`` even though the container also
+    carries video, deliberately: the recording path that reaches this function
+    produces audio, and ``None`` here would refuse the browser's own capture
+    format. A video passed through an audio door fails at the provider, which
+    is where that misclassification can actually be judged.
+    """
+    if len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WAVE":
+        return AudioInfo("audio/wav")
+    if data.startswith(b"ID3"):
+        return AudioInfo("audio/mpeg")
+    if data.startswith(b"OggS"):
+        return AudioInfo("audio/ogg")
+    if data.startswith(b"fLaC"):
+        return AudioInfo("audio/flac")
+    if len(data) >= 12 and data[4:8] == b"ftyp" and data[8:12] in _MP4_AUDIO_BRANDS:
+        return AudioInfo("audio/mp4")
+    if len(data) >= 12 and data.startswith(b"FORM") and data[8:12] in (b"AIFF", b"AIFC"):
+        return AudioInfo("audio/aiff")
+    if data.startswith(_EBML_MAGIC):
+        return AudioInfo("audio/webm")
+    frame_sync = _frame_sync_mime(data)
+    if frame_sync:
+        return AudioInfo(frame_sync)
+    return None
+
+
+def sniff_audio_file(path: str) -> AudioInfo | None:
+    """:func:`sniff_audio` against a file, reading only the header.
+
+    The same bounded read and the same ``None``-for-anything-unreadable
+    contract as :func:`sniff_image_file`, NUL byte in the name included.
+    """
+    try:
+        with open(path, "rb") as handle:
+            return sniff_audio(handle.read(_SNIFF_BYTES))
     except (OSError, ValueError):
         return None

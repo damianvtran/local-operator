@@ -172,8 +172,10 @@ def test_openai_compat_parses_a_captured_openrouter_payload() -> None:
     # because every write is billed at the 5m rate unless a caller asks otherwise.
     assert sonnet.cache_write_price == pytest.approx(3.75)
     assert sonnet.supports_images is True
+    assert sonnet.supports_audio_input is False
     assert sonnet.supports_prompt_cache is True
     assert rows[1].supports_images is False
+    assert rows[1].supports_audio_input is False
     assert rows[1].supports_prompt_cache is False
     assert rows[1].cache_write_price == 0.0
     # Both are priced, so neither claims to be free.
@@ -297,6 +299,35 @@ def test_the_free_flag_survives_a_cache_round_trip(tmp_path) -> None:
     assert cached_status == "cached", "premise: served from disk, not refetched"
     assert len(client.calls) == 1
     assert cached[0].free is True, "the stated zero must survive the document"
+
+
+def test_the_audio_flag_survives_a_cache_round_trip(tmp_path) -> None:
+    """``_rows_from_payload`` reads the wire fields back field by field, so a
+    new field is only as durable as its explicit read: without one, the second
+    open of a picker would deny audio to every row the first one left
+    'unstated' — the failure mode this round-trip pins."""
+    body = {
+        "data": [
+            {"id": "voice", "architecture": {"input_modalities": ["text", "audio"]}},
+            {"id": "silent"},
+        ]
+    }
+    client = _StubClient([_Response(200, body)])
+
+    live, live_status = available_models(
+        "openrouter", api_key=None, client=client, cache_dir=tmp_path
+    )
+    cached, cached_status = available_models(
+        "openrouter", api_key=None, client=client, cache_dir=tmp_path
+    )
+
+    assert (live_status, cached_status) == ("ok", "cached")
+    assert len(client.calls) == 1
+    for rows in (live, cached):
+        assert {row.id: row.supports_audio_input for row in rows} == {
+            "voice": True,
+            "silent": None,
+        }
 
 
 def test_a_meta_route_is_flagged_routed_by_either_price_shape_or_id() -> None:
@@ -426,6 +457,34 @@ def test_openai_compat_reads_the_legacy_modality_string() -> None:
     # Only the left of the arrow is input: a model that generates images is not
     # one you can send an image to.
     assert [row.supports_images for row in rows] == [True, False]
+
+
+def test_openai_compat_reads_audio_input_from_both_encodings() -> None:
+    """``_has_audio_input`` mirrors the image reader exactly: the modality
+    list, the LEFT of the legacy ``modality`` string, and ``None`` for a listing
+    that describes nothing — a gate that answered ``False`` there would deny the
+    model-audio rung to every model on every lean OpenAI-compatible endpoint."""
+    body = {
+        "data": [
+            {"id": "voice", "architecture": {"input_modalities": ["text", "audio"]}},
+            {"id": "text-only", "architecture": {"input_modalities": ["text"]}},
+            {"id": "legacy-voice", "architecture": {"modality": "text+audio->text"}},
+            {"id": "legacy-synth", "architecture": {"modality": "text->audio"}},
+            {"id": "silent"},
+        ]
+    }
+    rows = fetch_models("openrouter", api_key="k", client=_StubClient([_Response(200, body)]))
+
+    assert rows is not None
+    assert {row.id: row.supports_audio_input for row in rows} == {
+        "voice": True,
+        "text-only": False,
+        "legacy-voice": True,
+        # Only the left of the arrow is INPUT: a model that GENERATES audio is
+        # not one you can send audio to.
+        "legacy-synth": False,
+        "silent": None,
+    }
 
 
 def test_openai_compat_accepts_a_models_envelope() -> None:
@@ -1289,6 +1348,27 @@ def test_an_explicit_false_from_the_provider_beats_a_true_registry_row() -> None
     assert merged[0].supports_prompt_cache is True
 
 
+def test_audio_silence_defers_to_the_registry_and_a_stated_false_wins() -> None:
+    """The gpt-audio case, both ways. A direct OpenAI install gets an ids-only
+    row (silence) that must inherit the hand-transcribed ``True``; a wire that
+    STATES ``false`` must beat that same row, or the provider's denial would be
+    unreachable behind a bundled guess."""
+    static = {"m": _info("m", supports_audio_input=True)}
+
+    merged = merge_models(static, [DiscoveredModel(id="m")])
+    assert merged[0].supports_audio_input is True
+
+    merged = merge_models(static, [DiscoveredModel(id="m", supports_audio_input=False)])
+    assert merged[0].supports_audio_input is False
+
+
+def test_audio_unstated_on_both_sides_stays_none() -> None:
+    """No source stated anything; the third state must survive the merge rather
+    than collapsing into a denial for a model nothing is known about."""
+    merged = merge_models({"m": _info("m")}, [DiscoveredModel(id="m")])
+    assert merged[0].supports_audio_input is None
+
+
 def test_merge_normalises_the_registry_unknown_sentinels_to_zero() -> None:
     static = {"m": _info("m", context_window=-1, max_tokens=-1)}
     merged = merge_models(static, None)
@@ -1963,11 +2043,14 @@ def test_only_the_transport_that_changed_invalidates_its_cache(tmp_path) -> None
     ``routed`` meta-route flag, stored COMPUTED like ``free``: a version-5
     document carries ``routed: false`` for the routers, so without the bump
     ``radient/auto`` keeps rendering the word ``free`` until its TTL rolls.
+    And once more (7) at the audio-input modality read, a FIELD the version-6
+    writer never recorded, and one no other transport's reader starts reading,
+    so only these two pay the refetch.
     """
     assert discovery.listing_capture_version("anthropic") == 2
-    assert discovery.listing_capture_version("openrouter") == 6
-    assert discovery.listing_capture_version("radient") == 6
-    assert discovery.listing_capture_version("radient-key") == 6
+    assert discovery.listing_capture_version("openrouter") == 7
+    assert discovery.listing_capture_version("radient") == 7
+    assert discovery.listing_capture_version("radient-key") == 7
     # A generic local listing's capture stamp remains unchanged; endpoint
     # identity is carried by its cache key independently of payload version.
     assert discovery.listing_capture_version("vllm") == discovery.LISTING_CAPTURE_DEFAULT
@@ -2353,7 +2436,7 @@ def test_cached_available_models_reads_valid_disk_cache(tmp_path) -> None:
             {
                 "fetched_at": time.time(),
                 "payload": {
-                    "capture": 6,
+                    "capture": discovery.listing_capture_version("openrouter"),
                     "models": [
                         {
                             "id": "meta/llama-3.3-70b",

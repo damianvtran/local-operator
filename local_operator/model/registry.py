@@ -229,6 +229,8 @@ class ModelInfo(BaseModel):
         max_tokens (Optional[int]): Maximum number of tokens supported by the model.
         context_window (Optional[int]): Context window size of the model.
         supports_images (Optional[bool]): Whether the model supports images.
+        supports_audio_input (Optional[bool]): Whether the model accepts audio input;
+            ``None`` means no source has stated it (silence is not a denial).
         supports_prompt_cache (bool): Whether the model supports prompt caching.
         supports_responses_api (bool): Whether the model supports OpenAI's
             Responses API.
@@ -251,6 +253,13 @@ class ModelInfo(BaseModel):
     max_tokens: Optional[int] = None
     context_window: Optional[int] = None
     supports_images: Optional[bool] = None
+    # Three-state like ``supports_images`` above, and for the same reason:
+    # ``None`` means no source has stated anything, ``False`` is a statement
+    # that the model takes no audio. The asymmetry is deliberate — a wrong
+    # ``True`` sends audio to a model that refuses it mid-turn, while a wrong
+    # ``False`` degrades to the STT chain, the safe direction — so nothing may
+    # promote silence to either value.
+    supports_audio_input: Optional[bool] = None
     # Unknown differs from a provider's explicit denial; the spec builder must
     # not manufacture tool/reasoning support after a live listing denies it.
     supports_tools: Optional[bool] = None
@@ -1246,6 +1255,58 @@ openai_models: Dict[str, ModelInfo] = {
         description="OpenAI GPT-5.6 Sol: frontier model for complex professional work.",
         recommended=True,
     ),
+    # GPT-Audio family — the models whose product is audio in / audio out over
+    # Chat Completions. These rows are LOAD-BEARING for a direct-OpenAI
+    # install: OpenAI's own /v1/models is an ids-only listing (no modality to
+    # read) and models.dev flags almost none of this family (checked
+    # 2026-09-28: one audio row, ``gpt-realtime-2.1``, for the whole OpenAI
+    # catalogue), so no other machine source can answer the audio question for
+    # them. Numbers from https://developers.openai.com/api/docs/models/<id>
+    # (read 2026-09-28): 128,000 context / 16,384 max output; input modalities
+    # are text + audio, hence ``supports_images=False`` rather than absent.
+    # The price fields carry the TEXT-token rates; audio tokens bill far higher
+    # on gpt-audio/gpt-audio-1.5 ($32 in / $64 out per million on the same
+    # pages) and no field here can express a second rate, so a pure-audio turn
+    # is under-costed rather than blended from two rates.
+    "gpt-audio-1.5": ModelInfo(
+        id="gpt-audio-1.5",
+        name="GPT-Audio 1.5",
+        input_price=2.5,
+        output_price=10.0,
+        max_tokens=16_384,
+        context_window=128_000,
+        supports_images=False,
+        supports_audio_input=True,
+        supports_prompt_cache=False,
+        description="OpenAI's best voice model for audio in, audio out (Chat Completions).",
+        recommended=False,
+    ),
+    "gpt-audio": ModelInfo(  # default snapshot: gpt-audio-2025-08-28
+        id="gpt-audio",
+        name="GPT-Audio",
+        input_price=2.5,
+        output_price=10.0,
+        max_tokens=16_384,
+        context_window=128_000,
+        supports_images=False,
+        supports_audio_input=True,
+        supports_prompt_cache=False,
+        description="OpenAI's first generally available audio model (audio in, audio out).",
+        recommended=False,
+    ),
+    "gpt-audio-mini": ModelInfo(  # snapshots: 2025-10-06, 2025-12-15
+        id="gpt-audio-mini",
+        name="GPT-Audio Mini",
+        input_price=0.6,
+        output_price=2.4,
+        max_tokens=16_384,
+        context_window=128_000,
+        supports_images=False,
+        supports_audio_input=True,
+        supports_prompt_cache=True,
+        description="A cost-efficient version of GPT Audio.",
+        recommended=False,
+    ),
     "gpt-4o": ModelInfo(
         id="gpt-4o",
         name="GPT-4o",
@@ -1396,6 +1457,14 @@ openai_models: Dict[str, ModelInfo] = {
 
 
 google_models: Dict[str, ModelInfo] = {
+    # ``supports_audio_input`` on the current-generation rows below (3.x and
+    # 2.5): Google's audio guide (read 2026-09-28,
+    # https://ai.google.dev/gemini-api/docs/audio) documents audio
+    # understanding on the current text models, and this registry is where a
+    # direct-Google install gets that answer — Google's own listing carries
+    # token limits and no modality field (``discovery._fetch_gemini``). The
+    # 2.0/1.5 rows stay silent on purpose: silence defers downstream, while a
+    # wrong ``True`` is the one direction that costs a refused turn.
     # Gemini 3.8 Flash -- the suggested default for Google (`model.defaults`).
     # Prices from https://ai.google.dev/gemini-api/docs/pricing (read 2026-09-24):
     # $0.75 in / $3.75 out / $0.075 context-cache read per million, PROMOTIONAL
@@ -1410,6 +1479,7 @@ google_models: Dict[str, ModelInfo] = {
         max_tokens=65_536,
         context_window=1_048_576,
         supports_images=True,
+        supports_audio_input=True,
         supports_prompt_cache=True,
         input_price=0.75,
         output_price=3.75,
@@ -1423,6 +1493,7 @@ google_models: Dict[str, ModelInfo] = {
         max_tokens=65535,
         context_window=1048576,
         supports_images=True,
+        supports_audio_input=True,
         supports_prompt_cache=False,
         input_price=0.15,
         output_price=0.60,
@@ -1438,6 +1509,7 @@ google_models: Dict[str, ModelInfo] = {
         max_tokens=65535,
         context_window=1048576,
         supports_images=True,
+        supports_audio_input=True,
         supports_prompt_cache=False,
         input_price=1.25,
         output_price=10.0,

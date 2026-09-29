@@ -71,7 +71,7 @@ from local_operator.harness.types import (
 from local_operator.harness.wire import bound_agent_end_for_wire
 
 if TYPE_CHECKING:
-    from local_operator.harness.types import ImageContent
+    from local_operator.harness.types import AudioContent, ImageContent
     from local_operator.secrets.session import SessionRegistration
     from local_operator.session.errors import RuntimeRetiring
     from local_operator.session.runtime.publication import PublicationGate
@@ -91,6 +91,7 @@ from local_operator.mobile.types import (
 from local_operator.session.goal_loop import LOOP_CLEAR_ARGS, LOOP_STOP_ARGS
 from local_operator.session.runtime.inbox import SOURCE_PEER, SOURCE_USER
 from local_operator.session.runtime.server import SessionHandle
+from local_operator.session.runtime.server import audio_blocks as _audio_blocks
 from local_operator.session.runtime.server import (
     image_blocks_in_thread as _image_blocks_async,
 )
@@ -305,12 +306,13 @@ def _session_may_announce(session: Any) -> bool:
 
 
 def _already_bounded(images: Any) -> bool:
-    """Whether ``images`` are decoded ``ImageContent`` rather than wire dicts.
+    """Whether ``images``/``audio`` are decoded blocks rather than wire dicts.
 
     The wire carries ``[{"data_b64": ..., "mime_type": ...}]``; in-process
-    callers that have already run the bound pass ``ImageContent`` blocks. Both
-    reach ``prompt``/``steer``, and telling them apart is what lets an
-    already-bounded caller keep the prelude await-free (see ``prompt``).
+    callers that have already run the ingest pass ``ImageContent`` or
+    ``AudioContent`` blocks. Both reach ``prompt``/``steer``, and telling them
+    apart is what lets an already-decoded caller keep the prelude await-free
+    (see ``prompt``).
 
     An EMPTY list is "already bounded" -- there is nothing to decode, and the
     hop would only cost a suspension point.
@@ -371,6 +373,12 @@ class _PromptCommand:
     #: producer, which is what keeps the row byte-identical for them.
     input_mode: str | None = None
     input_path: str | None = None
+    #: The decoded recording blocks that ride this admission onto
+    #: ``Message.user(..., audio=...)``. ``None``/empty for every non-audio
+    #: producer, so the drain's probe only ever adds a keyword when there is a
+    #: recording to carry. The blocks are ALREADY sniffed (``audio_blocks``):
+    #: this queue never re-derives the format.
+    audio: list["AudioContent"] | None = None
 
     def __iter__(self):  # type: ignore[no-untyped-def]
         # Tuple compatibility for older diagnostics that inspect the queue.
@@ -2784,6 +2792,7 @@ class ServingSessionHandle(SessionHandle):
         command_id: str | None = None,
         input_mode: str | None = None,
         input_path: str | None = None,
+        audio: list[dict[str, str]] | list["AudioContent"] | None = None,
         *,
         wait_complete: bool = False,
         harness_injected: bool = False,
@@ -2797,6 +2806,12 @@ class ServingSessionHandle(SessionHandle):
         ``Session.prompt`` only when its signature takes them — the dispatch
         above already made the same probe on this method, so an owner from
         before the carriage never receives a keyword it would drop.
+
+        ``audio`` is the recording door's half of the same carriage: wire
+        dicts are decoded and sniffed here (``audio_blocks``, the owner-side
+        ingest images already use) or pass through already-decoded, and the
+        blocks reach ``Session.prompt`` only when its signature takes the
+        keyword — same probe, same reasoning.
 
         ``wait_for_turn`` makes an accepted prompt WAIT for a turn this queue
         did not open instead of failing after admission (see
@@ -2861,6 +2876,16 @@ class ServingSessionHandle(SessionHandle):
             cast(list["ImageContent"], images)
             if _already_bounded(images)
             else await _image_blocks_async(cast(list[dict[str, str]] | None, images))
+        )
+        # The recording is decoded in the same prelude, off the same
+        # already-decoded fast path, and with NO await of its own:
+        # ``audio_blocks`` is synchronous by design (a bounded base64 decode
+        # plus a header sniff), so it cannot reintroduce the suspension point
+        # the comment above exists to keep out of this span.
+        audio_blocks_decoded = (
+            cast(list["AudioContent"], audio)
+            if _already_bounded(audio)
+            else _audio_blocks(cast(list[dict[str, str]] | None, audio))
         )
         if not self._command_reservations.reserve(command_id, kind="prompt"):
             return "already admitted"
@@ -3012,6 +3037,7 @@ class ServingSessionHandle(SessionHandle):
             wait_for_turn,
             input_mode=input_mode,
             input_path=input_path,
+            audio=audio_blocks_decoded,
         )
         position = len(self._prompt_queue) + 1
         legacy_prompt = "message_id" not in inspect.signature(self._session.prompt).parameters
@@ -3697,6 +3723,12 @@ class ServingSessionHandle(SessionHandle):
                         fields["input_mode"] = command.input_mode
                     if "input_path" in parameters:
                         fields["input_path"] = command.input_path
+                    # The recording, probed like the silent metadata above: a
+                    # session from before the audio carriage never receives
+                    # the keyword, and the wire-dict decode already happened in
+                    # this command's prelude.
+                    if "audio" in parameters:
+                        fields["audio"] = command.audio
                     await self._session.prompt(command.text, command.images, **fields)
                 else:
                     # Legacy tests/third-party handles have no admission seam;
@@ -3768,6 +3800,7 @@ class ServingSessionHandle(SessionHandle):
         command_id: str | None = None,
         input_mode: str | None = None,
         input_path: str | None = None,
+        audio: list[dict[str, str]] | list["AudioContent"] | None = None,
     ) -> str:
         self._check_loop_thread()
         command_id = command_id or str(uuid.uuid4())
@@ -3783,6 +3816,14 @@ class ServingSessionHandle(SessionHandle):
             if _already_bounded(images)
             else await _image_blocks_async(cast(list[dict[str, str]] | None, images))
         )
+        # The recording, decoded like the images above and for the same
+        # reason; synchronous by construction (see ``audio_blocks``), so this
+        # adds no suspension point to the reserve-to-mutate span either.
+        audio_blocks_decoded = (
+            cast(list["AudioContent"], audio)
+            if _already_bounded(audio)
+            else _audio_blocks(cast(list[dict[str, str]] | None, audio))
+        )
         if not self._command_reservations.reserve(command_id, kind="steer"):
             return "already admitted"
         # THE UPDATE WINDOW, and a steer is the one admission that cannot simply
@@ -3794,13 +3835,14 @@ class ServingSessionHandle(SessionHandle):
         # the owner's receipt: the successor runs it, at the head of the turn the
         # prompt above it opens.
         #
-        # IMAGES ARE THE ONE THING THE VEHICLE CANNOT CARRY and take the refusal,
-        # exactly as an image-carrying prompt does (see that arm for why an inbox
-        # row cannot hold them). Checked on the RAW argument rather than on the
-        # decoded blocks because the decision has to happen before the attach, and
-        # a non-empty ``images`` is the same fact one decode earlier.
+        # IMAGES (AND NOW A RECORDING) ARE THE ONE THING THE VEHICLE CANNOT
+        # CARRY and take the refusal, exactly as an attachment-carrying prompt
+        # does (see that arm for why an inbox row cannot hold them). Checked on
+        # the RAW argument rather than on the decoded blocks because the
+        # decision has to happen before the attach, and a non-empty ``images``
+        # or ``audio`` is the same fact one decode earlier.
         if self._updating:
-            if images:
+            if images or audio:
                 self._command_reservations.reject(command_id)
                 raise self._retiring_refusal()
             try:
@@ -3833,6 +3875,12 @@ class ServingSessionHandle(SessionHandle):
             fields["input_mode"] = input_mode
         if "input_path" in parameters:
             fields["input_path"] = input_path
+        # The recording rides the steer exactly as it rides a prompt, probed
+        # the same way: a mid-turn audio send keeps its blocks on the queued
+        # row, and a session that predates the keyword gets none rather than a
+        # keyword it would drop.
+        if "audio" in parameters:
+            fields["audio"] = audio_blocks_decoded
         try:
             self._session.steer(text, blocks, **fields)
         except Exception:

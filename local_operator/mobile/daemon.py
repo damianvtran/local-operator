@@ -2672,6 +2672,13 @@ class MobileDaemon:
                 str(reply.get("error_code", "")),
                 reply.get("error_count"),
                 reply.get("error_trigger"),
+                # Same carriage as ``attach_client`` (agent review round 1,
+                # m2): the audio refusal's facts, so the phone's 422 copy names
+                # the model and the reason; absent on an older runtime's frame,
+                # which rebuilds the bare form as before.
+                model=reply.get("error_model"),
+                report=reply.get("error_report"),
+                format_unsupported=reply.get("error_format"),
             )
             if known is not None:
                 raise known

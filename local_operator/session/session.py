@@ -134,6 +134,7 @@ from local_operator.harness.types import (
     Aside,
     AsideResult,
     AskUserFn,
+    AudioContent,
     BrowserSurface,
     ChatRequest,
     CompactionEndEvent,
@@ -246,6 +247,7 @@ from local_operator.session.spend import recall as recall_spend
 from local_operator.session.spend import serving_identity, writer_stamp
 from local_operator.session.transcript import ENTRY_CUSTOM, ENTRY_MESSAGE, Transcript
 from local_operator.session.usage_seed import seed_reported_usage
+from local_operator.stt import AudioPath
 from local_operator.tools.builtin import (
     open_todos,
     restore_todos,
@@ -1437,6 +1439,16 @@ IMAGE_DROPPED_NOTICE = "[image omitted: the provider rejected it and it has been
 #: images, and the notice must not claim they are gone for good.
 IMAGE_OMITTED_TEXT_ONLY_NOTICE = "[image omitted: the current model does not accept images]"
 
+#: Stands in for a recording the ACTIVE model cannot be sent: its spec states
+#: no audio capability, or its wire cannot carry this capture's container (the
+#: format half of OQ-3 — v1 does not transcode). ONE notice for both halves,
+#: unlike the image pair above: both are read from the CURRENT spec on every
+#: render, so both lapse the moment a model that can take the recording is
+#: selected — the distinction the two image notices exist to draw (sticky
+#: provider refusal vs model condition) has no audio analogue until something
+#: records a provider-side audio rejection.
+AUDIO_OMITTED_NOTICE = "[recording omitted: the current model cannot receive it]"
+
 #: Stands in for an image whose PAYLOAD is no longer anywhere to be found — the
 #: attachment store lost the bytes under a transcript that still references
 #: them. Distinct from both notices above, and the distinction is not cosmetic:
@@ -1859,6 +1871,83 @@ def _without_images(messages: list[Message], *, model_incapable: bool = False) -
             else:
                 content.append(block)
         out.append(message.model_copy(update={"content": content}))
+    return out
+
+
+def _audio_refusal_for_model(model: ModelSpec, mime: str) -> str | None:
+    """Why this model cannot be sent a recording in ``mime``, or ``None``.
+
+    The two questions the admission gate asks, in the same order and from the
+    same sources, so the strip and the gate cannot disagree about whether a
+    block can go: capability first (``supports_audio_input``, read with
+    ``getattr`` and the safe ``False`` default), then the wire's own answer
+    (``providers.clients.audio_format_refusal``, which lives beside the
+    renderers it mirrors). In-process only — the message here is never shown
+    to a user; the strip's user-visible half is the notice it leaves.
+    """
+    if not bool(getattr(model, "supports_audio_input", False)):
+        return "the selected model does not accept audio input"
+    # Lazy like every other clients import in this module: only a history that
+    # CARRIES recordings pays it, and only on renders whose model refused one.
+    from local_operator.providers.clients import audio_format_refusal
+
+    return audio_format_refusal(model, mime)
+
+
+def _without_uncarryable_audio(messages: list[Message], model: ModelSpec) -> list[Message]:
+    """Every message with its audio blocks replaced by a one-line notice when
+    the ACTIVE model cannot be sent them.
+
+    The audio sibling of the ``supports_images`` strip (:func:`_without_images`),
+    here for the two cases a model SWITCH creates:
+
+    * the active spec states no audio capability — the session was switched
+      onto a model that takes none while the history still carries recordings;
+    * the active MODEL'S WIRE cannot carry this capture's container, and v1
+      does not transcode (OQ-3) — a recording made for one wire can be
+      uncarryable on another.
+
+    Without this pass either case leaves the block in every request render and
+    the wire renderer's typed refusal fires on the first request and EVERY
+    request after it — the sticky wedge agent review round 1 (M2) measured,
+    now reachable only through a switch because admission refuses uncarryable
+    captures at the door. Applied to the RENDERED history, never the
+    transcript: the archive keeps the recording, ``/export`` still has it, and
+    switching back to a model that can take it restores it on the next render
+    (acceptance reads the CURRENT spec, so nothing is sticky).
+
+    Consecutive recordings collapse to ONE notice, like the image passes — a
+    session replayed with a hundred recordings should not carry a hundred
+    identical apology lines.
+    """
+    if not any(
+        isinstance(block, AudioContent) for message in messages for block in message.content
+    ):
+        # The overwhelmingly common case (no recordings at all) pays one scan
+        # and no repair copies.
+        return messages
+    out: list[Message] = []
+    refusals: dict[str, str | None] = {}
+    for message in messages:
+        if not any(isinstance(block, AudioContent) for block in message.content):
+            out.append(message)
+            continue
+        content: list[Content] = []
+        changed = False
+        for block in message.content:
+            if not isinstance(block, AudioContent):
+                content.append(block)
+                continue
+            if block.mime_type not in refusals:
+                refusals[block.mime_type] = _audio_refusal_for_model(model, block.mime_type)
+            if refusals[block.mime_type] is None:
+                content.append(block)
+                continue
+            changed = True
+            if content and getattr(content[-1], "text", None) == AUDIO_OMITTED_NOTICE:
+                continue
+            content.append(TextContent(text=AUDIO_OMITTED_NOTICE))
+        out.append(message.model_copy(update={"content": content}) if changed else message)
     return out
 
 
@@ -3509,6 +3598,13 @@ class Session:
           this strip; it does NOT suspend the payload-less pass above, which has
           nothing to restore.
 
+          RECORDINGS GET THE SAME TREATMENT through
+          :func:`_without_uncarryable_audio`, applied in the same band for the
+          same two reasons (a model switched onto one that takes no audio, or a
+          wire that cannot carry the recorded container — OQ-3), and suspended
+          by ``keep_images`` the same way. It runs ABOVE the image early returns
+          because every return below feeds a request the recording would wedge.
+
         A FOURTH degrade runs LAST, and it is not about images being
         unacceptable either: the aggregate request can outgrow the provider's
         size cap even when every block in it is individually fine
@@ -3561,6 +3657,18 @@ class Session:
         rendered, missing_media = _without_unresolvable_frames(rendered)
         if missing_media:
             self._announce_missing_media_once(missing_media)
+        # THE AUDIO STRIP, ABOVE THE IMAGE EARLY RETURNS for the same reason
+        # the payload-less pass is: the branches below RETURN, and every one of
+        # them feeds a request that would wedge the same way, so a strip that
+        # ran after them would leave the original refusal live on those paths
+        # (agent review round 1, M2b). Suspended under ``keep_images`` — the
+        # live-context rebuild after a compaction — exactly like the image
+        # capability strip and for the same reason: the rebuilt window must
+        # not bake THIS model's omission into ``_context.messages``, because
+        # the next request re-renders (this method, ``keep_images=False``) and
+        # strips then.
+        if not keep_images:
+            rendered = _without_uncarryable_audio(rendered, self._model)
         if self._images_rejected:
             # Nothing to rebound once images are being dropped outright, and
             # dropping first saves decoding a block that is about to become a
@@ -6794,6 +6902,114 @@ class Session:
         )
 
     # -- driving turns --------------------------------------------------------
+
+    async def _refuse_audio_admission(self, audio: Sequence[AudioContent]) -> None:
+        """Refuse a recording the selected model cannot take (the rung-6 error).
+
+        TWO questions, in order, both asked BEFORE the row is written:
+
+        * CAPABILITY — the active spec's ``supports_audio_input``, read with
+          ``getattr`` and a ``False`` default so a reduced or older spec keeps
+          the safe direction. Only when the door is shut does the resolver run,
+          and only to make the refusal honest: its report names whether a
+          transcription path IS available (rungs 1-3), which is the remedy the
+          caller can act on.
+        * WIRE FORMAT — capable is not enough (agent review round 1, M2): the
+          model's wire decides which CONTAINERS reach it, and v1 does not
+          transcode (OQ-3), so a capture the wire cannot carry is refused
+          here rather than becoming durable and then failing EVERY later
+          request on that wire (the sticky wedge QA reproduced with a webm
+          capture: the first send raised ``WireCannotCarryAudio`` from inside
+          the renderer with zero HTTP calls, and so did every request after).
+          The check mirrors the renderers (``audio_format_refusal`` lives
+          beside them for exactly that reason) and the refusal names the
+          model and the wire's constraint.
+
+        Who reaches this, stated for reviewers: a client that gates its mic on
+        the resolver's ``model_audio_capable`` never does — this is the
+        backstop for a surface that sends audio anyway, and the point at which
+        such a send stops being a request and becomes a typed refusal.
+        """
+        model = self._model
+        # ONE import for both branches: the format branch raises before the
+        # capability branch's other lazy imports would have run, and a name
+        # imported only further down is still a local for the whole function
+        # (UnboundLocalError — caught by the round's own test).
+        from local_operator.session.errors import AudioInputUnsupported
+
+        if bool(getattr(model, "supports_audio_input", False)):
+            # Lazy like the neighbours' imports below: clients drags httpx and
+            # the whole provider surface, and only a capable model's audio
+            # send needs this half at all.
+            from local_operator.providers.clients import audio_format_refusal
+
+            for block in audio:
+                refusal = audio_format_refusal(model, block.mime_type)
+                if refusal is not None:
+                    raise AudioInputUnsupported(
+                        model=f"{model.provider}/{model.model_id}",
+                        report=refusal,
+                        format_unsupported=True,
+                    )
+            return
+        # Lazy imports like the neighbours': neither module is needed on any
+        # other prompt path, and this helper runs only for a recording that is
+        # about to be refused.
+        from local_operator.paths import config_dir
+        from local_operator.stt.cascade import resolve_audio_path
+
+        resolution = await resolve_audio_path(
+            config_dir=config_dir(),
+            model=model,
+            session_id=self.session_id,
+        )
+        raise AudioInputUnsupported(
+            model=f"{model.provider}/{model.model_id}",
+            report=resolution.reason,
+        )
+
+    def _fork_audio_sidecars(self, message: AgentMessage) -> None:
+        """Fork the transcription sidecar(s) for an audio-carrying durable row.
+
+        Called from EVERY site that makes a user row durable, immediately
+        after the append — never before, because a record that references a
+        message id the transcript does not have is a dangling row no reader
+        can resolve; and not later either, because the sidecar's one job is to
+        extract the recording best-effort while the turn that carried it is
+        still young. The writer sites are ``_run_turn``'s initial append loop,
+        ``_drain_steering`` (the steer door's write) and
+        ``_drop_pre_aborted_turn`` (a held delivery's write); the
+        already-durable branches at each skip the fork because the row was
+        written — and forked — by whichever site did persist it. The work is
+        fire-and-forget by construction: ``fork_audio_sidecar`` registers
+        through this session's own tracked-spawn seam (``_spawn_background``),
+        so ``dispose`` cancels it and every failure is a status on the record
+        instead of a raise into the turn.
+
+        One fork per block (v1 ships at most one per message); each record is
+        self-contained and keyed by the same ``message_id``, so a future
+        multi-block send degrades from "one recording described" to "each
+        recording described", never to "one record for two recordings".
+        """
+        if not isinstance(message, Message) or message.role != "user":
+            return
+        blocks = [block for block in message.content if isinstance(block, AudioContent)]
+        if not blocks:
+            return
+        # Lazy like every other stt import here: the sidecar drags httpx and
+        # the auth store, and no non-audio turn should pay for them.
+        from local_operator.paths import config_dir
+        from local_operator.stt.sidecar import fork_audio_sidecar
+
+        for block in blocks:
+            fork_audio_sidecar(
+                self,
+                message_id=message.id,
+                audio=block,
+                config_dir=config_dir(),
+                store=None,
+            )
+
     async def prompt(
         self,
         text: str,
@@ -6805,6 +7021,7 @@ class Session:
         harness_injected: bool = False,
         input_mode: str | None = None,
         input_path: str | None = None,
+        audio: Sequence[AudioContent] | None = None,
     ) -> None:
         """Run one user turn to completion (awaitable) or raise.
 
@@ -6813,6 +7030,14 @@ class Session:
         dictation send and carried straight onto the durable user row. Both
         default to ``None``, and a ``None`` adds no key to the row at all, so
         every pre-existing caller writes byte-identical rows.
+
+        ``audio`` is the recording door (see ``Message.user``): decoded
+        ``AudioContent`` blocks the model itself receives, which only an
+        audio-capable model may be given — the admission gate below refuses a
+        send the current spec cannot take BEFORE any paid work, and the row it
+        eventually writes is stamped ``model_audio_sidecar`` (the value is
+        daemon-derived; the ``provider_stt_*`` spellings are surface-asserted
+        for text-from-speech sends and never appear here).
 
         ``producer_command_id`` and ``admitted`` form the continuation
         admission seam: the caller receives a receipt only after the explicitly
@@ -6874,6 +7099,17 @@ class Session:
                 if self._compacting
                 else TURN_IN_FLIGHT
             )
+        # THE AUDIO DOOR'S CAPABILITY GATE, in the same "before any work" band
+        # as the lock probe above: a prompt carrying a recording for a model
+        # that cannot take one is refused here — before the expansion reads a
+        # referenced file or parks an approval card, and long before the turn
+        # spends a request the model would reject mid-stream. The refusal names
+        # the model and carries the resolver's report (see
+        # ``AudioInputUnsupported``); it is the audio door's rung-6 honest
+        # error. It is cheap for every OTHER prompt: the check is one truthiness
+        # test when ``audio`` is empty, which is every send but the recording.
+        if audio:
+            await self._refuse_audio_admission(audio)
         # `@path` expansion, and it runs HERE — after the probe, before the
         # lock, not inside it. An approval can park on a human indefinitely, and
         # in the TUI the app awaiting this prompt is the same one that would
@@ -6971,9 +7207,16 @@ class Session:
             # default to None on ``Message``).
             if input_mode is not None:
                 extra["input_mode"] = input_mode
-            if input_path is not None:
+            if audio:
+                # The audio door is DAEMON-DERIVED, never client-asserted (the
+                # vocabulary's own rule): the blocks are on the message this
+                # call is building, so the route slot records them whether or
+                # not a surface asserted anything, and a client assertion
+                # cannot overwrite a fact the daemon is holding in its hand.
+                extra["input_path"] = str(AudioPath.MODEL_AUDIO_SIDECAR)
+            elif input_path is not None:
                 extra["input_path"] = input_path
-            user = Message.user(text, images, **extra)
+            user = Message.user(text, images, audio=audio, **extra)
             if harness_injected:
                 # The stamp goes on the row THIS call mints, at the one place
                 # the row is born, so no caller can mint a chrome row without
@@ -7035,6 +7278,7 @@ class Session:
         producer_command_id: str | None = None,
         input_mode: str | None = None,
         input_path: str | None = None,
+        audio: Sequence[AudioContent] | None = None,
     ) -> None:
         """Inject an identified steering message into the running turn.
 
@@ -7045,15 +7289,39 @@ class Session:
         ``input_mode``/``input_path`` ride it for the same reason (a mid-turn
         dictation keeps its provenance when the queue drains), default to
         ``None``, and add no key to the row when absent.
+
+        ``audio`` rides it too — a mid-turn recording lands its blocks on the
+        queued row instead of being lost at a hop that cannot take them — with
+        ONE deliberate difference from ``prompt``: there is NO capability gate
+        here. ``steer`` is synchronous (it only queues; the drain at the next
+        boundary persists the row) while the gate's resolver is async, and
+        refusing AFTER the surfaces have acked a queued steer would be a
+        retraction, not an admission decision. The recording is still kept
+        from a model that cannot take it, one layer down: an audio block the
+        active spec or its wire cannot carry is replaced by a one-line notice
+        at HISTORY RENDER (``_without_uncarryable_audio``) before any request
+        is built, so a steer to an incapable model costs no provider refusal
+        and the model reads a notice where the recording was. What a steer
+        does NOT get is the typed ``AudioInputUnsupported`` a prompt raises at
+        its door; the renderer's structural refusal
+        (``WireCannotCarryAudio``) is only the backstop for the one
+        configuration the strip deliberately treats as the chat wire — a spec
+        that also states ``supports_responses_api``, whose body choice is a
+        process setting this layer does not read — not the mechanism this
+        door relies on.
         """
         extra: dict[str, Any] = {}
         if message_id:
             extra["id"] = message_id
         if input_mode is not None:
             extra["input_mode"] = input_mode
-        if input_path is not None:
+        if audio:
+            # Same daemon-derived rule as ``prompt``: an audio row's route
+            # slot records the audio door, whatever a surface asserted.
+            extra["input_path"] = str(AudioPath.MODEL_AUDIO_SIDECAR)
+        elif input_path is not None:
             extra["input_path"] = input_path
-        message = Message.user(text, images, **extra)
+        message = Message.user(text, images, audio=audio, **extra)
         self._steering_queue.put_nowait(message)
         if producer_command_id is not None:
             self._steering_producers[id(message)] = producer_command_id
@@ -10635,6 +10903,17 @@ class Session:
                             producer_command_id if message.id == admitted_id else None
                         ),
                     )
+                    # THE AUDIO SIDECAR FORKS ONLY HERE, strictly after the
+                    # append above made the row durable AND only for a row
+                    # THIS loop wrote: a record for a row the transcript does
+                    # not have would dangle, and a prompt that dies before
+                    # admission leaves nothing behind. A row another writer
+                    # persisted (a held delivery) already forked where it was
+                    # written — forking again here would write a twin record
+                    # under the same message id. Fire-and-forget — see
+                    # ``_fork_audio_sidecars`` for why dispose can cancel it
+                    # and why no failure of its own can reach this turn.
+                    self._fork_audio_sidecars(message)
                 if admitted is not None and message.id == admitted_id and not admitted.done():
                     # The append completed under Transcript's fsync boundary;
                     # only now may a producer discard its retained command.
@@ -11117,6 +11396,15 @@ class Session:
                         producer_command_id if message.id == admitted_id else None
                     ),
                 )
+                # A THIRD WRITER, SAME FORK CONTRACT: this is the point at
+                # which THIS path makes the row durable, so it is the point
+                # that forks its sidecar (the drain below queues the message
+                # for live context only and skips it precisely because the
+                # transcript already holds it). Today only text-shaped
+                # deliveries reach this path and the fork is a no-op; the call
+                # exists so "every writer of an audio row forks it" holds by
+                # construction rather than by the current call graph.
+                self._fork_audio_sidecars(message)
             if isinstance(message, CustomMessage):
                 self._append_or_park_journal(message)
             else:
@@ -12875,6 +13163,15 @@ class Session:
                 continue
             finally:
                 self._steering_producers.pop(id(message), None)
+            # THE STEER DOOR'S AUDIO FORK, at the same point the prompt door
+            # forks: strictly after THIS drain's own append made the row
+            # durable (see ``_fork_audio_sidecars`` — a record for a row the
+            # transcript does not have would dangle; the failed-append path
+            # above ``continue``d, so nothing forks without a row). The
+            # already-durable branch above skips it on purpose: that row was
+            # written, and forked, by its own writer, and forking again would
+            # write a twin record under the same message id.
+            self._fork_audio_sidecars(message)
             messages.append(message)
         # The drain is the ONLY consumer, so every courtesy message queued
         # before this boundary just left with it; anything queued after is a
