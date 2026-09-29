@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sys
 import time
 import uuid
@@ -103,7 +104,7 @@ from local_operator.evaluation.lifecycle import (
     CleanupPlan,
     aggregate_cleanup,
 )
-from local_operator.evaluation.protocol import ActionBatch, Observation
+from local_operator.evaluation.protocol import ActionBatch, FinishAction, Observation
 from local_operator.evaluation.record_sink import RecordSink, RecordSinkError
 from local_operator.evaluation.runner.action_tool import (
     ACTION_TOOL_NAME,
@@ -128,7 +129,13 @@ from local_operator.evaluation.runner.provider_client import (
     _ContextBuilder,
     build_completion_challenge,
 )
-from local_operator.harness.types import AgentEvent, ImageContent, TextContent
+from local_operator.harness.types import (
+    AgentEvent,
+    ImageContent,
+    Message,
+    MessageEndEvent,
+    TextContent,
+)
 from local_operator.headless_print import printable_event
 from local_operator.mcp.config import load_all_mcp_configs
 from local_operator.mcp.tool_bridge import create_mcp_tool_name
@@ -191,6 +198,80 @@ CHALLENGE_REPLY_GUIDANCE = (
     "Reply with a single `{tool_name}` call carrying either the same finish "
     "action, unchanged, or your corrective batch -- and nothing else."
 )
+
+#: The prose arm's assertion shapes (see :func:`prose_claims_completion`). A
+#: POSITIVE list on purpose: a terminal message that matches nothing is left
+#: alone, and the shapes below are the ones the sealed session-arm corpus
+#: actually exhibits. Mid-work narration ("Filenames corrected. Opening all 12
+#: numbered document scans ...", "Downloads mostly succeeded. Now fix #20
+#: ...") and plain answers match none of them, and each pattern is pinned by a
+#: unit test against the real sample it was calibrated from.
+_PROSE_COMPLETION_CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # "Done. ...", "**Done.**", "All done." -- the corpus's dominant shape.
+    re.compile(r"^[^\w\r\n]{0,8}(?:all\s+)?done\b", re.IGNORECASE),
+    # "the task is complete", "the work is done", "task completed".
+    re.compile(
+        r"\b(?:the\s+)?(?:task|job|work|assignment)\s+"
+        r"(?:is\s+|is\s+now\s+|now\s+)?(?:complete|completed|done|finished)\b",
+        re.IGNORECASE,
+    ),
+    # "the route is complete and displayed", "the document content is complete".
+    re.compile(
+        r"\b(?:is|are)\s+(?:now\s+|fully\s+|finally\s+)?(?:complete|completed|done|finished)\b",
+        re.IGNORECASE,
+    ),
+    # "I have completed", "I've finished", "I completed / finished ...".
+    re.compile(r"\bi\s+(?:have\s+|'ve\s+)?(?:completed|finished)\b", re.IGNORECASE),
+    # "completed the task", "finished all deliverables".
+    re.compile(
+        r"\b(?:completed|finished)\s+(?:the\s+|all\s+)?"
+        r"(?:task|job|work|assignment|deliverable)s?\b",
+        re.IGNORECASE,
+    ),
+    # "has/have been completed", "has now been finished".
+    re.compile(r"\b(?:has|have)\s+(?:now\s+)?been\s+(?:completed|finished)\b", re.IGNORECASE),
+)
+
+#: ``FinishAction.reason``'s field bound (``protocol.py``); a prose claim is
+#: synthesised into one, so it takes that field's bound rather than inventing
+#: a second one.
+_PROSE_CLAIM_MAX_CHARS = 10_000
+
+
+def prose_claims_completion(text: str) -> bool:
+    """Whether a TERMINAL prose message asserts the episode's task is finished.
+
+    WHY THIS EXISTS. The completion gate refuses an unverified ``done`` claim
+    once and re-asks the model to compare its claim against the screen -- but
+    the gate shipped in #1696 fires inside ``ActionBridge.call``, so it only
+    sees TOOL-mediated claims. The first field run of arm 1748 (task_003)
+    ended its final answer as prose -- "Done. Summary of what I determined
+    and did: ..." with NO tool call -- and the turn simply ended
+    (``agent_stop``): the gate never fired, and the run reads as an unverified
+    finish, which is exactly what the gate exists to prevent. This predicate is
+    the gate's answer-side detector for that terminal message (see
+    ``ActionBridge.prose_completion_challenge`` for when it is consulted).
+
+    WHAT IT IS AND IS NOT. A narrow positive list of assertion shapes the
+    corpus actually exhibits -- not a general "did the model succeed"
+    classifier, and it cannot be one: a terminal prose message carries no
+    other signal that separates a completion claim from mid-work narration or
+    a plain answer. The trade, in both directions:
+
+    * a FALSE POSITIVE costs the one bounded challenge cycle the gate was
+      entitled to anyway, and the challenge itself names continuing as a
+      legitimate reply ("a batch of actions that closes the gap");
+    * a FALSE NEGATIVE leaves exactly today's behaviour -- the ungated end --
+      so this list may lag a phrasing the corpus grows into, and the unit test
+      table is where a new real sample lands before it is added here.
+
+    The detector is English-language and structural (word shapes, not
+    semantics); it is deliberately NOT consulted for anything but an
+    episode's terminal message, so mid-run narration normally never reaches
+    it at all.
+    """
+
+    return any(pattern.search(text) for pattern in _PROSE_COMPLETION_CLAIM_PATTERNS)
 
 
 class SessionArmError(RuntimeError):
@@ -499,6 +580,17 @@ class ActionBridge:
         #: turn to the transcript the model is shown.
         self._initial_shown: tuple[str, list[Any]] | None = None
         self._last_shown: tuple[str, list[Any]] | None = None
+        #: The terminal assistant message the prose arm reads. Updated by
+        #: ``fold`` on every ``MessageEndEvent``, so once the turn ends this is
+        #: the message the run ended on -- a prose "Done" never reaches
+        #: ``call``, so the event stream is the only place the bridge can see
+        #: it (see ``prose_completion_challenge``).
+        self._last_assistant_message: Message | None = None
+        #: The most recent observation, for the prose challenge's frame
+        #: re-attachment. `arm` holds observation zero; every executed batch
+        #: replaces it, so it is the observation ``_last_shown`` was rendered
+        #: from and the one a corrective reply binds to.
+        self._last_observation: Observation | None = None
 
     def arm(self, observation: Observation) -> None:
         """Arm the token with the episode's first observation.
@@ -512,6 +604,7 @@ class ActionBridge:
             raise SessionArmError("the action bridge was already armed with an observation")
         self._token = PendingObservationToken(observation)
         self._initial_shown = (observation.observation_id, list(self.render(observation)))
+        self._last_observation = observation
 
     @property
     def initial_blocks(self) -> list[Any]:
@@ -549,11 +642,109 @@ class ActionBridge:
 
         Folding is the DRIVER's job (as in the loop-driven design): the
         engine does not know the token exists, so the arming happens on
-        ``TurnEndEvent`` and the next call reads the result.
+        ``TurnEndEvent`` and the next call reads the result. The prose arm of
+        the completion gate reads the stream from the same seam: the terminal
+        assistant message is the only copy of a prose "Done" the bridge can
+        see, because a message without a tool call never reaches ``call``.
         """
 
         if self._token is not None:
             self._token.fold(event)
+        if isinstance(event, MessageEndEvent):
+            message = event.message
+            # ``AgentMessage`` is a union (``Message | CustomMessage``); the
+            # prose arm only ever reads a real assistant ``Message``, and the
+            # isinstance check is what tells the type checker so.
+            if isinstance(message, Message) and message.role == "assistant":
+                self._last_assistant_message = message
+
+    def prose_completion_challenge(self) -> list[Any] | None:
+        """The gate's re-prompt for a terminal message that CLAIMS completion.
+
+        THE BYPASS THIS CLOSES. The gate inside ``call`` only ever sees a claim
+        the model made THROUGH the action tool. Arm 1748's first field run
+        (task_003) ended its final answer as prose -- "Done. Summary of what I
+        determined and did: ..." with no tool call at all -- and the turn
+        simply ended: ``agent_stop``, no challenge, no chance for the model to
+        compare its claim against the screen. This method is the gate's
+        answer-side arm; the driver calls it the moment the turn ends, and the
+        challenge itself -- text builder, reply guidance, bound -- is the ONE
+        already shipped on this channel, so the two arms cannot drift.
+
+        WHEN IT FIRES (all required, each load-bearing):
+
+        * the episode has NOT already ended (``end_requested is None`` and the
+          token is not terminal): a finish or a truncation has its own ending,
+          and the summary prose that often FOLLOWS an accepted finish (every
+          completed run in the corpus ends that way) must not earn a second
+          exchange;
+        * the gate is enabled and the SHARED budget is not spent -- the prose
+          arm draws from the same ``completion_challenges`` counter as the
+          finish-call arm, so one episode can never exceed the configured
+          number of challenges across BOTH paths;
+        * the terminal assistant message carries NO tool call -- a message with
+          one is ``call``'s business, not this arm's;
+        * its text matches :func:`prose_claims_completion` -- mid-work
+          narration, progress reports, plain answers and the empty terminal
+          messages of the silent-provider ending class never fire.
+
+        RETURNS the challenge content (the challenge text plus the SAME
+        rendered blocks the model was last shown, re-attached -- never
+        re-rendered) for the driver to deliver as one harness-injected user
+        turn, or ``None`` when the gate does not apply. The counter and the
+        record are updated HERE, so a firing is counted and auditable even if
+        the delivery then fails.
+        """
+
+        if self.end_requested is not None:
+            return None
+        if self._token is None or self._token.terminal:
+            return None
+        if not self.completion_gate or self._completion_fired >= self.completion_challenges:
+            return None
+        message = self._last_assistant_message
+        if message is None or message.tool_calls:
+            return None
+        text = message.text.strip()
+        if not prose_claims_completion(text):
+            return None
+        observation = self._last_observation
+        if observation is None:  # pragma: no cover - arm() always sets it
+            return None
+        # The claim is a CLAIM whether it arrived as a finish action or as
+        # prose; quoting it back through the same builder is what keeps the two
+        # arms' challenges byte-identical above the channel sentence. The
+        # synthesised status is ``done`` because that is what the message
+        # asserts, and it binds to the same last observation the challenge
+        # re-attaches -- the screen the claim is about.
+        claim = FinishAction(
+            observation_id=observation.observation_id,
+            status="done",
+            reason=text[:_PROSE_CLAIM_MAX_CHARS],
+        )
+        challenge = build_completion_challenge(
+            claim=claim,
+            instruction=self.instruction,
+            observation=observation,
+            reply_guidance=self.reply_guidance,
+        )
+        self._completion_fired += 1
+        if self.record is not None:
+            # Same record kind as the finish-call arm -- one counter, one
+            # budget -- and the ``trigger`` key is the discriminator for
+            # readers counting which arm fired; the finish-call row keeps its
+            # own historical shape.
+            self.record(
+                "completion_challenged",
+                {
+                    "status": "done",
+                    "reason": claim.reason,
+                    "challenge": challenge,
+                    "observation_id": observation.observation_id,
+                    "trigger": "terminal-message",
+                },
+            )
+        return [TextContent(text=challenge), *self._shown_blocks(observation)]
 
     async def start(self) -> None:
         self.endpoint.parent.mkdir(parents=True, exist_ok=True)
@@ -791,6 +982,7 @@ class ActionBridge:
                 self.record("batch", {"batch": batch, "result": result})
             rendered = self.render(result.observation)
             self._last_shown = (result.observation.observation_id, rendered)
+            self._last_observation = result.observation
             return {
                 "content": rendered,
                 "is_error": False,
@@ -1221,16 +1413,42 @@ async def run_session_episode(
             text, images = split_prompt_content(bridge.initial_blocks)
             prompt = PROMPT_HEADER.format(tool_name=declaration.tool_name) + "\n" + text
             wall_timer: asyncio.TimerHandle | None = None
+            wall_fired = False
+
+            def _on_wall() -> None:
+                nonlocal wall_fired
+                wall_fired = True
+                handle.session.abort("episode wall budget")
+
             if max_wall_s is not None:
                 # The wall bound is a KILL switch, not a cancellation of the
                 # await: abort() ends the turn through the normal stop path,
                 # so the record keeps the shape every other end has. The timer
                 # is cancelled the moment the turn ends on its own.
-                wall_timer = asyncio.get_running_loop().call_later(
-                    max_wall_s, handle.session.abort, "episode wall budget"
-                )
+                wall_timer = asyncio.get_running_loop().call_later(max_wall_s, _on_wall)
             try:
                 await handle.session.prompt(prompt, images=images or None)
+                # The completion gate's prose arm: a terminal message that
+                # CLAIMS completion without a tool call gets the SAME challenge
+                # a finish call gets, delivered against the state the model
+                # last saw. Arm 1748's task_003 ended with "Done. Summary ..."
+                # as prose and escaped the gate entirely; the re-prompt is one
+                # harness-injected user turn (the reply channel's re-prompt, in
+                # this channel's vocabulary -- the challenge text is the same
+                # builder the finish-call arm uses). The loop is bounded by the
+                # SHARED challenge budget inside the bridge, and it is skipped
+                # when the wall bound fired: the wall is a kill switch, and a
+                # re-prompt after it would spend past it.
+                while not wall_fired:
+                    challenge = bridge.prose_completion_challenge()
+                    if challenge is None:
+                        break
+                    challenge_text, challenge_images = split_prompt_content(challenge)
+                    await handle.session.prompt(
+                        challenge_text,
+                        images=challenge_images or None,
+                        harness_injected=True,
+                    )
             finally:
                 if wall_timer is not None:
                     wall_timer.cancel()

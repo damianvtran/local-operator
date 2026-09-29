@@ -452,6 +452,33 @@ async with open_session(spec, roots=roots) as session:
   Pinned by ``test_session_arm.py`` (unit) and the spawned rig
   (``test_session_arm_script.py``, incl. the challenge→corrective-action→
   re-declare rescue shape).
+- **Prose-completion arm of the gate (landed 2026-09-29).** The gate above
+  fires inside ``ActionBridge.call``, so it only ever saw TOOL-mediated claims.
+  Arm 1748's first field run (task_003) ended its final answer as PROSE --
+  "Done. Summary of what I determined and did: ..." with NO tool call at all --
+  and the loop simply ended: ``agent_stop``, no challenge, an unverified
+  finish exactly the way a tool-mediated one would have been. The driver now
+  asks the bridge once per turn end (``ActionBridge.prose_completion_challenge``):
+  when the episode has NOT already ended and the terminal assistant message
+  carries no tool call but ASSERTS completion (``prose_claims_completion``, a
+  narrow positive list calibrated on the sealed corpus and pinned per sample),
+  the SAME challenge -- same builder, same channel sentence, same shared
+  ``completion_challenges`` budget -- is delivered as ONE harness-injected user
+  turn (``Session.prompt(..., harness_injected=True)``) against the state the
+  model last saw. Mid-work narration (the ending both of arm 1716's 005/006
+  exhibit), plain answers and empty terminal messages never fire; a second
+  prose claim stands because the budget is one; the re-prompt is skipped when
+  the wall kill-switch fired. **Comparability, replayed rather than argued:**
+  evaluated programmatically against every sealed session record, the prose
+  arm fires ZERO times across all 13 arm-1716 records (the ten scored ones
+  included -- their ``agent_stop`` endings all left empty/error terminal
+  messages) and exactly ONCE across all 23 session records to date: on
+  arm 1748's task_003 itself, the bypass it exists to close. It is a fix for
+  the class that was escaping, not a semantic shift for the comparison set --
+  and as with every harness change it takes effect only through a NEW arm name
+  (the campaign builds arms with ``git archive <commit>``). Pinned by the new
+  unit tests and the spawned rig's ``--ending prose-claim``/``narration``
+  cases (the latter the discriminating negative, verbatim from 005).
 - **Episode tool confinement (landed 2026-09-28).** A session opened by the
   episode arm is confined to the run's scratch:
   ``Session.set_tool_confinement(scratch_root)`` installs it before the first
