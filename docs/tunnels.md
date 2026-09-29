@@ -290,14 +290,16 @@ clear it either, so the machine-readable remedy is the re-point there too.
 That command re-points the device: with no `--credential-id`, a dead pinned id
 is dropped and the current Radient login is selected (it still fails usefully
 when there is none, or several to choose from), the tunnel's record is read
-under that login, and the new binding is saved. If the selected login is not
-the account that owns the tunnel, the 404 is translated rather than printed
-raw: `configure` and `connect` compare the login's own account (a live
-`GET /v1/me`) against the owner the stored record names
-(`record.owner_account_id`) and either name the account mismatch outright or —
-when no comparison is possible — name both causes (a different Radient
-account, or a revoked tunnel) and link the console. Neither sentence echoes
-anything Radient's body said.
+under that login, and the new binding is saved. A 404 on that record is
+translated rather than printed raw: `configure` and `connect` compare the
+login's own account (a live `GET /v1/me`) against the owner the stored record
+names (`record.owner_account_id`) — and only when that record describes the
+tunnel actually being read — so the sentence is that comparison's own outcome.
+A mismatch names the different account and the re-point; a match says only
+that the tunnel may have been revoked and links the console; and when no
+comparison is possible (no stored owner, the account read fails, or the stored
+record describes a different tunnel) the sentence names both causes. None of
+them echoes anything Radient's body said.
 
 ## Trust boundaries and transport
 

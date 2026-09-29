@@ -802,6 +802,94 @@ async def test_a_404_without_a_comparable_owner_names_both_possibilities(
 
 
 @pytest.mark.asyncio
+async def test_a_404_with_a_matching_owner_says_revoked_not_another_account(
+    tmp_path, monkeypatch, connection
+):
+    """The compare MATCHED: the one possibility it excluded must not be named.
+
+    The stored record's owner and the selected login's live account are the same
+    (issue #1711, review round 1 F2/D2), so "it may belong to a different
+    Radient account" would name a possibility this very comparison just
+    excluded — the matched case gets its own revoked-only sentence instead.
+    """
+    from local_operator.tunnels import cli
+    from local_operator.tunnels.errors import RecordNotFound
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    with closing(AuthStore()) as store:
+        store.upsert_credential(
+            "radient",
+            {"type": "oauth", "account_id": "qa", "access": "live", "refresh": "live"},
+        )
+    stored = _stored(connection, credential_id=7)
+    stored["record"]["owner_account_id"] = "owner-1"
+    config.save(stored)
+    api = AsyncMock()
+    api.request.side_effect = [
+        RecordNotFound("Radient has no record of this tunnel for the selected login.")
+    ]
+    api.account_id.return_value = "owner-1"  # the comparison MATCHES
+    monkeypatch.setattr(cli, "RadientTunnels", lambda *_: api)
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+
+    with pytest.raises(ValueError) as raised:
+        await dispatch(parser.parse_args(["tunnel", "configure"]))
+
+    message = str(raised.value)
+    assert message == (
+        "Radient has no record of this tunnel for the selected login; it may "
+        "have been revoked. Check it in the Radient console "
+        "(https://console.radienthq.com/dashboard/tunnels)."
+    )
+    assert "different Radient account" not in message
+    api.account_id.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_connect_for_a_different_tunnel_id_does_not_blame_the_stored_record(
+    tmp_path, monkeypatch, connection
+):
+    """`connect --tunnel-id B` while the config holds A: A's record is not
+    evidence about B (issue #1711, review round 1 F1).
+
+    The previous spelling composed the sentence from A's record, so a 404 for B
+    could claim B "belongs to a different Radient account" — a fact this device
+    never established — and send the operator to sign in to an account that may
+    not own B. With the id mismatch the sentence is the both-possibilities one,
+    and the account read is not spent at all.
+    """
+    from local_operator.tunnels import cli
+    from local_operator.tunnels.errors import RecordNotFound
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    with closing(AuthStore()) as store:
+        store.upsert_credential(
+            "radient",
+            {"type": "oauth", "account_id": "qa", "access": "live", "refresh": "live"},
+        )
+    stored = _stored(connection, credential_id=7)  # record of connection's tunnel
+    stored["record"]["owner_account_id"] = "owner-1"
+    config.save(stored)
+    api = AsyncMock()
+    api.request.side_effect = [
+        {"eligible": True, "balance_usd": 10},
+        RecordNotFound("Radient has no record of this tunnel for the selected login."),
+    ]
+    monkeypatch.setattr(cli, "RadientTunnels", lambda *_: api)
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+
+    with pytest.raises(ValueError) as raised:
+        await dispatch(parser.parse_args(["tunnel", "connect", "tunnel-2", "--no-start"]))
+
+    message = str(raised.value)
+    assert "it may belong to a different Radient account, or it may have been revoked" in message
+    assert "belongs to a different Radient account than the selected login" not in message
+    api.account_id.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_account_id_reads_the_login_account_and_degrades_silently(tmp_path, monkeypatch):
     """`api.account_id`: `result.account.id`, live; None on every failure.
 
@@ -3161,7 +3249,14 @@ async def test_a_login_that_is_gone_is_never_reported_as_sign_in_expired(
 
     login_lines = [line for line in receipt.splitlines() if line.startswith("Login:")]
     assert len(login_lines) == 1, receipt
-    assert "saved login is gone from this device" in login_lines[0]
+    # The amended D1 copy, pinned exactly: 156 cells → two 80-column rows, and
+    # the sign-in made conditional (only the re-point clears the state; a
+    # sign-in is a precondition when the owning account is not on this device).
+    assert login_lines[0] == (
+        "Login: this tunnel's saved login is gone from this device — "
+        "run lop tunnel configure to re-point it (sign in to the account that "
+        "owns the tunnel if needed)."
+    )
     assert f"run {gateway.TERMINAL_REMEDY[gateway.OWNER_MISSING]}" in login_lines[0]
     assert "sign-in expired" not in login_lines[0]
     assert gateway.TERMINAL_REMEDY[gateway.LOGIN_REQUIRED] not in receipt

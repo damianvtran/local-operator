@@ -193,10 +193,15 @@ def _status_text(
             )
         else:
             command = gateway.TERMINAL_REMEDY[gateway.OWNER_MISSING]
+            # 156 cells → two 80-column rows (review round 1, D1): the previous
+            # spelling ran to three rows and framed a sign-in as an alternative
+            # fix, which it never is — only the re-point clears the state; a
+            # sign-in is a precondition when the owning account is not on this
+            # device, hence the conditional clause.
             lines.append(
                 "Login: this tunnel's saved login is gone from this device — "
-                f"run {command} to re-point it to a current login whose account "
-                "owns this tunnel, or sign in to that account."
+                f"run {command} to re-point it (sign in to the account that owns "
+                "the tunnel if needed)."
             )
     elif login["state"] == "deferred":
         # A state the store is WAITING OUT — the refresh token's last exchange is
@@ -330,11 +335,21 @@ async def _missing_record_message(api: RadientTunnels, old: dict[str, Any]) -> s
     composed from what this device CAN check: the selected login's own account
     (``GET /v1/me``, read live by `api.account_id`) against the owner the stored
     record names (``record.owner_account_id``, written when this device last
-    accepted the cloud's record). When that comparison cannot be made — no
-    stored record, no owner field, or the account read fails — the sentence
-    names BOTH possibilities rather than guessing one. Provider bodies are never
-    echoed (see `api.request`'s redaction rule); the only thing taken from the
-    refusal is that it was a 404, and everything else here is local.
+    accepted the cloud's record). Three outcomes, one branch each:
+
+    * a MISMATCH names the different account and the re-point command;
+    * a MATCH says only what is left — the tunnel may have been revoked — and
+      asks nothing (the account that owns it is exactly the one selected);
+    * no comparison possible (no stored owner, the account read fails, or the
+      record describes a DIFFERENT tunnel than the one being read — callers pass
+      a record-less dict for that last case) names both possibilities.
+
+    Provider bodies are never echoed (see `api.request`'s redaction rule); the
+    only thing taken from the refusal is that it was a 404, and everything else
+    here is local. ``old`` must therefore be evidence about the tunnel actually
+    read — the stored configuration when it is, an empty dict when it is not
+    (review round 1, F1: `connect --tunnel-id B` while the config holds A must
+    not blame A's owner for B's 404).
     """
     record = old.get("record")
     owner = record.get("owner_account_id") if isinstance(record, dict) else None
@@ -345,6 +360,15 @@ async def _missing_record_message(api: RadientTunnels, old: dict[str, Any]) -> s
             "Sign in to the account that owns the tunnel, then re-point this device: "
             "lop tunnel configure --credential-id <that login's id> (lop login-status "
             "lists ids)."
+        )
+    if account is not None and account == owner:
+        # The comparison IS made and MATCHES (review round 1, F2/D2): the other
+        # sentence's first possibility — a different account — is excluded by
+        # this login's own account, so only the revoked possibility is left,
+        # and nothing is asked.
+        return (
+            "Radient has no record of this tunnel for the selected login; it may "
+            f"have been revoked. Check it in the Radient console ({gateway.CONSOLE_URL})."
         )
     return (
         "Radient has no record of this tunnel for the selected login: it may belong to "
@@ -498,7 +522,13 @@ async def dispatch(args: argparse.Namespace) -> str:
                 try:
                     record = await api.request("GET", tunnel_path({"tunnel_id": identifier}))
                 except RecordNotFound as failure:
-                    raise ValueError(await _missing_record_message(api, old)) from failure
+                    # The stored record is evidence about the tunnel BEING READ
+                    # only when it is the same one: `connect --tunnel-id B` while
+                    # the config holds A must not blame A's owner for B's 404
+                    # (review round 1, F1). A record-less dict composes the
+                    # both-possibilities sentence instead.
+                    stored = old if identifier == old.get("tunnel_id") else {}
+                    raise ValueError(await _missing_record_message(api, stored)) from failure
                 gateway_port = config.port(record["gateway_port"])
             else:
                 if not old.get("tunnel_id"):
