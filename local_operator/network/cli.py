@@ -465,6 +465,33 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     )
     definitions_state.add_argument("--json", action="store_true")
 
+    # `lop network mcp`: what makes a peer able to RUN this device's MCP servers.
+    # Two verbs, the definitions pair's shape and reasons — `push` is the
+    # deliberate half of the sync the mesh-definitions cadence also performs, and
+    # `state` answers "why does that device not have my GitLab server" locally.
+    mcp = actions.add_parser(
+        "mcp",
+        help="Sync user-scope MCP server definitions so a peer can run your servers",
+        description=(
+            "A workload offloaded to another device assumes the MCP servers this device "
+            "runs — a GitLab server, a Linear server — and a freshly paired device has "
+            "none. `push` reconciles this device's user-scope servers onto a peer or "
+            "every peer. Values never travel: `${NAME}` references do, literals do not, "
+            "so a mirrored server whose key is missing on the peer refuses by name."
+        ),
+    )
+    mcp_actions = mcp.add_subparsers(dest="mcp_command")
+    mcp_push = mcp_actions.add_parser(
+        "push", help="Send this device's user-scope MCP servers to a peer"
+    )
+    mcp_push.add_argument("--peer", default="", help="the device to send them to")
+    mcp_push.add_argument("--all-peers", action="store_true", help="every linked peer")
+    mcp_push.add_argument("--json", action="store_true")
+    mcp_state = mcp_actions.add_parser(
+        "state", help="What this device holds, and which values a mirror still needs"
+    )
+    mcp_state.add_argument("--json", action="store_true")
+
     serve = actions.add_parser("serve", help="Run the relay in the foreground")
     serve.add_argument("--port", type=int, default=0)
     serve.add_argument("--address", default="")
@@ -5445,6 +5472,106 @@ def _cmd_definitions(args: argparse.Namespace) -> int:
     )
 
 
+def _cmd_mcp(args: argparse.Namespace) -> int:
+    """``lop network mcp push|state`` — user-scope MCP server definitions.
+
+    WHY THIS VERB EXISTS. The mesh-definitions cadence already carries these
+    rows to every paired member, so this verb is what the create path is to the
+    definitions: the DELIBERATE half. `push` is the form an operator reaches for
+    after "the pod has no GitLab server" (and the only form that reports per-row
+    outcomes on demand); `state` is local and relay-free, so it answers what
+    THIS device holds and which values a mirror still needs without a peer being
+    up — the same split, for the same reasons, as `definitions push|state`.
+    """
+    from local_operator.network import mcpdefs
+    from local_operator.network.types import MeshRefusal
+    from local_operator.paths import config_dir
+
+    verb = str(getattr(args, "mcp_command", None) or "state")
+    root = config_dir()
+    if verb == "push":
+        peer = str(getattr(args, "peer", "") or "")
+        # One request, two spellings: an absent `--peer` with `--all-peers` and an
+        # absent `--peer` alone both mean "every member", so the flag is not
+        # forwarded (the definitions verb's rule — a second spelling of the same
+        # instruction is something for two ends to disagree about).
+        if not peer and not bool(getattr(args, "all_peers", False)):
+            raise MeshRefusal(
+                "peer_required",
+                "name a device with --peer, or ask every device with --all-peers",
+            )
+        detail = _relay_answer("mcp_defs_sync", peer=peer, timeout=90.0)
+        rows = [item for item in (detail.get("peers") or []) if isinstance(item, dict)]
+        lines = [str(detail.get("message") or "")] if detail.get("message") else []
+        for item in rows:
+            label = str(item.get("device_id") or "?")
+            # The per-peer sentence is the PUSH's own (it is the party that saw
+            # the state round trip and the apply's summary), printed rather than
+            # re-derived here — the definitions verb's rule.
+            lines.append(f"{label}: {item.get('message') or item.get('code') or 'no answer'}")
+            for outcome in ("installed", "updated"):
+                for row in item.get(outcome) or []:
+                    if isinstance(row, dict):
+                        lines.append(f"  {outcome} server {row.get('name')!r}")
+            for conflict in item.get("conflicts") or []:
+                if isinstance(conflict, dict):
+                    lines.append(
+                        f"  server {conflict.get('name')!r}: "
+                        f"{conflict.get('reason') or 'refused'}"
+                    )
+            for refused in item.get("refused") or []:
+                if isinstance(refused, dict):
+                    lines.append(
+                        f"  server {refused.get('name')!r}: "
+                        f"{refused.get('reason') or 'refused'}"
+                    )
+            # THE SENDER'S OWN HONESTY: a row the shape table kept OFF the wire is
+            # named here, so "my GitLab server is not on the pod" has an answer on
+            # the side that can act on it (`shape` is the shape table's label, not
+            # a value — the whole point is that the value never left). The row
+            # also says it was NOT sent and names the move (design round 1, D3).
+            for withheld in item.get("withheld") or []:
+                if isinstance(withheld, dict):
+                    lines.append(
+                        f"  withheld server {withheld.get('name')!r}: "
+                        f"{mcpdefs.shape_likeness(str(withheld.get('shape') or ''))}"
+                        " — not sent; make the value a ${NAME} reference "
+                        "(env/headers) or drop the literal, then push again"
+                    )
+        return _emit(
+            args,
+            {"ok": bool(detail.get("ok")), "peers": rows},
+            lines or ["nothing to do"],
+        )
+
+    # ``state``: this device's own servers, their provenance, and — per mirror —
+    # the reference keys the LOCAL store does not hold yet (the keys to set).
+    rows = mcpdefs.state_rows(root)
+    lines: list[str] = []
+    for row in rows:
+        origin = str(row.get("origin") or "")
+        line = f"server: {row.get('name')}  {row.get('transport')}" + (
+            f" (mirrored from {origin})" if origin else " (yours)"
+        )
+        needs = [
+            str(ref.get("id"))
+            for ref in row.get("refs") or []
+            if isinstance(ref, dict) and ref.get("set") is False
+        ]
+        if needs:
+            line += " — needs: " + ", ".join(needs)
+        # A ROW THAT WILL NEVER TRAVEL (design round 1, D4): the shape scan
+        # withholds these at push time, so the local ledger must say so before a
+        # push discovers it — the same words as the receipt.
+        withheld = str(row.get("withheld") or "")
+        if withheld:
+            line += f" — will not travel: {mcpdefs.shape_likeness(withheld)}"
+        lines.append(line)
+    if not lines:
+        lines = ["no user-scope MCP servers on this device"]
+    return _emit(args, {"ok": True, "servers": rows}, lines)
+
+
 _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "init": _cmd_init,
     "invite": _cmd_invite,
@@ -5457,6 +5584,7 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "peers": _cmd_peers,
     "sessions": _cmd_sessions,
     "definitions": _cmd_definitions,
+    "mcp": _cmd_mcp,
     "serve": _cmd_serve,
     "start": _cmd_service("start"),
     "stop": _cmd_service("stop"),

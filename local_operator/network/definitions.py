@@ -1515,7 +1515,9 @@ def push_to_peer(
         "ok": ok,
         "code": "applied" if ok else "conflict",
         "message": (
-            f"sent {len(missing_agents)} agent and {len(missing_teams)} team definition(s)"
+            f"sent {len(missing_agents)} {'agent' if len(missing_agents) == 1 else 'agents'}"
+            f" and {len(missing_teams)} team "
+            f"{'definition' if len(missing_teams) == 1 else 'definitions'}"
             if ok
             else "that device would not take every definition: "
             + _describe_rows(conflicts + refused)
@@ -1941,7 +1943,8 @@ def local_sync_handler(server: "RelayServer") -> Any:
                 if not results
                 else (
                     f"{sum(1 for item in results if item.get('ok'))} of {len(results)} "
-                    "device(s) hold this device's definitions"
+                    f"{'device holds' if len(results) == 1 else 'devices hold'} "
+                    "this device's definitions"
                 )
             ),
         }
@@ -1958,6 +1961,42 @@ def local_sync_handler(server: "RelayServer") -> Any:
 #: hundreds of relays it never starts.
 _syncer_lock = threading.Lock()
 _syncers: dict[int, "DefinitionsSyncer"] = {}
+
+#: Per-member steps a SIBLING slice contributes to this syncer's tick, run
+#: INSIDE the ``mesh-definitions`` thread right after this device's own push for
+#: that member (see :meth:`DefinitionsSyncer.tick`). The seam exists because a
+#: second cadence over the same members would mean a second thread, a second set
+#: of floors and a second retry policy for one shared question — the MCP
+#: definition sync (``mcpdefs.py``) rides this thread through it. A step returns
+#: an outcome code (``str``) or ``None``; a code in :data:`POLICY_REFUSAL_CODES`
+#: parks the member on the refused floor exactly as this syncer's own refusal
+#: does — so a policy answer cannot become a retry storm from either layer —
+#: and any other code is logged at debug. Step codes are deliberately NOT
+#: appended to :meth:`tick`'s rows: those are this syncer's own pushes, a
+#: contract existing tests and surfaces read, and a step's outcome belongs to
+#: the step's own verbs (``lop network mcp push|state``).
+_TICK_STEPS: list[Callable[["RelayServer", str], Any]] = []
+_TICK_STEPS_GUARD = threading.Lock()
+
+
+def add_tick_step(step: Callable[["RelayServer", str], Any]) -> None:
+    """Register one post-push step for every member this syncer visits.
+
+    Idempotent by identity: ``install`` runs at relay construction, and the
+    suite builds hundreds of relays that never tick, so registering twice must
+    be free and must not duplicate the step. Steps are process-global because
+    they take the server as an argument (the module-level seam the definitions
+    syncer already is); keying them per relay would need a second registry with
+    no consumer.
+    """
+    with _TICK_STEPS_GUARD:
+        if step not in _TICK_STEPS:
+            _TICK_STEPS.append(step)
+
+
+def _tick_steps() -> tuple[Callable[["RelayServer", str], Any], ...]:
+    with _TICK_STEPS_GUARD:
+        return tuple(_TICK_STEPS)
 
 
 class DefinitionsSyncer(threading.Thread):
@@ -2048,7 +2087,7 @@ class DefinitionsSyncer(threading.Thread):
         moment = time.time() if now is None else now
         outcomes: list[tuple[str, str]] = []
         for device_id in self._targets():
-            blocked = _unholdable_capability(self._server, device_id, "net_definitions")
+            blocked = unholdable_capability(self._server, device_id, "net_definitions")
             if blocked:
                 # A MEMBER THAT CANNOT HOLD THE OP IS NOT ASKED ON A TIMER (Q-R1-3).
                 # The requirement is read from the ONE table that decides it
@@ -2090,6 +2129,27 @@ class DefinitionsSyncer(threading.Thread):
                     self._refused_at.pop(device_id, None)
                 elif str(result.get("code") or "") in POLICY_REFUSAL_CODES:
                     self._refused_at[device_id] = moment + REFUSED_MIN_INTERVAL_S
+            # SIBLING CADENCES RIDE THIS TICK (see ``add_tick_step``): the steps
+            # run after this member's own push, inside this thread and these
+            # floors, so a shared cadence costs no extra thread and no second
+            # retry policy. A step's policy-refusal code parks the member like
+            # this syncer's own refusal — the answer will not change between
+            # ticks, whoever asked the question. The step's code is NOT appended
+            # to the rows below: those are THIS syncer's own pushes, a contract
+            # tests and surfaces already read, and a step's outcome is evidence
+            # for the step's own on-demand verb — the tick only parks and logs.
+            for step in _tick_steps():
+                try:
+                    code = step(self._server, device_id)
+                except Exception:  # noqa: BLE001 — one step must not kill the cadence
+                    logger.debug("definitions: tick step failed", exc_info=True)
+                    continue
+                if not code:
+                    continue
+                logger.debug("definitions: tick step for %s answered %s", device_id, code)
+                if str(code) in POLICY_REFUSAL_CODES:
+                    with self._lock:
+                        self._refused_at[device_id] = moment + REFUSED_MIN_INTERVAL_S
         return outcomes
 
     def _targets(self) -> list[str]:
@@ -2159,8 +2219,13 @@ def _tick_seconds(root: Path) -> float:
         return SYNC_TICK_S
 
 
-def _unholdable_capability(server: "RelayServer", device_id: str, op: str) -> str:
+def unholdable_capability(server: "RelayServer", device_id: str, op: str) -> str:
     """The capability that blocks ``op`` to ``device_id``, or ``""`` when it does not.
+
+    Public because a SIBLING slice's cadence step asks the same question about
+    its own op (``mcpdefs.mesh_tick_step`` for ``net_mcp_defs``) and must get
+    the answer from ``types.OP_CAPABILITY`` — the same table the receiving
+    authoriser reads — rather than restating the rule.
 
     THE ANSWER IS OURS ONLY WHEN IT CANNOT DIFFER. The peer authorises an inbound
     frame against ITS OWN row for this device, so the local row is evidence and not

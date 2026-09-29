@@ -319,6 +319,7 @@ SLICE_PEER_OPS: frozenset[str] = frozenset(
         "net_session_lifecycle",
         "net_definitions",
         "net_readiness",
+        "net_mcp_defs",
     }
 )
 
@@ -334,6 +335,7 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
         "credential_placement",
         "definitions_sync",
         "peer_readiness",
+        "mcp_defs_sync",
     }
 )
 
@@ -347,6 +349,10 @@ SLICE_MODULES: tuple[str, ...] = (
     "local_operator.network.credentials",
     "local_operator.network.definitions",
     "local_operator.network.readiness",
+    # The MCP definition sync rides the definitions cadence (its ``install``
+    # registers a tick step there), so it is installed after that module but
+    # starts no thread of its own.
+    "local_operator.network.mcpdefs",
 )
 
 #: Which link, if any, THIS thread is currently serving a request for.

@@ -293,6 +293,13 @@ NET_OPS: tuple[str, ...] = (
     # least authority `net_catalog` needs: it reads files this device's own
     # user account can already read.
     "net_readiness",
+    # MCP SERVER DEFINITIONS (mcpdefs.py). The third install-wide sync after
+    # agents and teams: a peer with no user-scope MCP servers cannot run the
+    # workloads an offload assumes, and the rows this op installs can spawn
+    # commands — which is why it is its own named op, with its own capability
+    # row (``admin``, the same decision ``net_definitions`` records above) and
+    # its own audit event, rather than a section inside that bundle.
+    "net_mcp_defs",
     "net_bye",
     "ping",
 )
@@ -369,6 +376,11 @@ LOCAL_OPS: tuple[str, ...] = (
     "credential_grant",
     "credential_report",
     "credential_placement",
+    # The MCP definition sync's on-demand half (mcpdefs.py): reach every linked
+    # peer, or one named peer, and bring its user-scope MCP servers up to date.
+    # A local op for the same reason ``definitions_sync`` is one — this device's
+    # own relay being told to talk outward.
+    "mcp_defs_sync",
 )
 
 #: The phases ``net_session_move`` carries (§1.3 of the build plan). Declared
@@ -468,6 +480,12 @@ OP_CAPABILITY: dict[str, str | None] = {
     # those files is readable only to root or to the daemon, so a member that
     # may look at this device's catalogue may look at its readiness too.
     "net_readiness": "list",
+    # ``admin``, the same decision as ``net_definitions`` and for the same
+    # reason: installing a server writes DURABLE, install-wide state that can
+    # spawn commands for every FUTURE session, which is broader than any one
+    # conversation. A ``drive`` peer is told, in words, that the row could not
+    # be sent and why — never silently dropped.
+    "net_mcp_defs": "admin",
     "net_bye": None,
     "ping": "list",
 }

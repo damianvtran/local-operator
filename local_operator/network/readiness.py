@@ -918,9 +918,10 @@ def mcp_servers_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -
         code=CODE_NO_MCP_SERVERS,
         detail=detail,
         remedies=[
-            f"add the servers it needs on {peer_label} (its own `/mcp add …`, or "
-            "`lop mcp add` from a shell there; server config is per device and is not "
-            "copied over the mesh)"
+            f"run `lop network mcp push --peer {peer_label}` from the device that has "
+            "the servers (MCP server definitions travel; secret values never do), or add "
+            f"the servers on {peer_label} itself (its own `/mcp add …`, or `lop mcp add` "
+            "from a shell there)"
         ],
         source=SOURCE_PEER,
     )
