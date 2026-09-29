@@ -834,9 +834,7 @@ def machine_verdict(
     warn_mb = int(measured_total * MACHINE_WARN_FRACTION)
     act_mb = int(measured_total * MACHINE_ACT_FRACTION)
     suffix = (
-        f"; {unmeasured} of the fleet's processes could not be measured"
-        if unmeasured > 0
-        else ""
+        f"; {unmeasured} of the fleet's processes could not be measured" if unmeasured > 0 else ""
     )
     if fleet_mb >= act_mb:
         state = "act"
@@ -914,9 +912,7 @@ class Fragment:
     rows: tuple[tuple[int, int, int], ...] = ()
 
 
-def fragment_closure(
-    start: int, links: Mapping[int, list[int]], roots: Iterable[int]
-) -> set[int]:
+def fragment_closure(start: int, links: Mapping[int, list[int]], roots: Iterable[int]) -> set[int]:
     """``start`` plus everything under it that is not a session runtime.
 
     **WHY THE WALK STOPS AT A ROOT.** The guard may count and end a COMMAND
@@ -979,9 +975,7 @@ def fragments_ranked(
                 pids=subtree,
                 ppid=row.ppid,
                 pgid=row.pgid,
-                rows=tuple(
-                    (pid, by_pid[pid].ppid, by_pid[pid].pgid) for pid in subtree
-                ),
+                rows=tuple((pid, by_pid[pid].ppid, by_pid[pid].pgid) for pid in subtree),
             )
         )
     ranked.sort(key=lambda fragment: (-fragment.mb, fragment.pid))

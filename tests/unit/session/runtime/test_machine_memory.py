@@ -19,6 +19,7 @@ arithmetic these tests exist to pin.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from local_operator.session.runtime import machine_memory as mm
 
@@ -123,9 +124,15 @@ def _fake_runner(
     return run
 
 
-def _pass(**overrides: object) -> mm.MemoryPassReport:
-    """Run the pass against a 1,000 MB machine with the given fakes."""
-    kwargs: dict[str, object] = {
+def _pass(**overrides: Any) -> mm.MemoryPassReport:
+    """Run the pass against a 1,000 MB machine with the given fakes.
+
+    ``Any``, not ``object``: the overrides are unpacked straight into the
+    pass's typed keyword parameters, and ``object`` turns every one of them
+    into a reportArgumentType error without adding real safety to a test
+    helper whose overrides ARE the fakes (pyright 1.1.414).
+    """
+    kwargs: dict[str, Any] = {
         "runner": _fake_runner(topology=_table([(_ROOT, 1)]), rss={_ROOT: 50}),
         "pids_probe": lambda config_dir: [_ROOT],
         "total_mb": 1000,
@@ -203,9 +210,7 @@ def test_act_with_no_fragment_over_the_floor_warns_only() -> None:
     killer = _Killer()
     report = _pass(
         runner=_fake_runner(
-            topology=_table(
-                [(_ROOT, 1), (9900002, _ROOT), (9900003, _ROOT), (9900004, _ROOT)]
-            ),
+            topology=_table([(_ROOT, 1), (9900002, _ROOT), (9900003, _ROOT), (9900004, _ROOT)]),
             rss={_ROOT: 100, 9900002: 400, 9900003: 400, 9900004: 400},
         ),
         kill=killer,

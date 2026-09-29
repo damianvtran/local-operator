@@ -1263,12 +1263,9 @@ class _MachineMemorySweep:
 
         now = time.monotonic()
         kill_allowed = (
-            self.last_kill_at is None
-            or (now - self.last_kill_at) >= MACHINE_MEMORY_KILL_COOLDOWN_S
+            self.last_kill_at is None or (now - self.last_kill_at) >= MACHINE_MEMORY_KILL_COOLDOWN_S
         )
-        report = machine_memory_pass(
-            self.config_dir, apply=apply, kill_allowed=kill_allowed
-        )
+        report = machine_memory_pass(self.config_dir, apply=apply, kill_allowed=kill_allowed)
         if getattr(report, "killed", None) is not None:
             self.last_kill_at = now
         return report

@@ -238,16 +238,11 @@ def machine_memory_pass(
         )
 
     links = memory_guard.child_links(
-        [
-            memory_guard.ProcessNode(pid=pid, ppid=ppid, mb=0)
-            for pid, ppid, _pgid in rows_all
-        ]
+        [memory_guard.ProcessNode(pid=pid, ppid=ppid, mb=0) for pid, ppid, _pgid in rows_all]
     )
     closure = memory_guard.descendant_closure(roots, links)
 
-    usage = session_resource_usage(
-        sorted(closure), runner=base, footprint_probe=footprint_probe
-    )
+    usage = session_resource_usage(sorted(closure), runner=base, footprint_probe=footprint_probe)
     mb_of: dict[int, int] = {}
     unmeasured = 0
     for pid in sorted(closure):
@@ -264,9 +259,7 @@ def machine_memory_pass(
             mb_of[pid] = value // (1024 * 1024)
 
     fleet_mb = sum(mb_of.values())
-    verdict = memory_guard.machine_verdict(
-        fleet_mb, total_mb=total_mb, unmeasured=unmeasured
-    )
+    verdict = memory_guard.machine_verdict(fleet_mb, total_mb=total_mb, unmeasured=unmeasured)
 
     nodes = [
         memory_guard.ProcessNode(
@@ -331,11 +324,7 @@ def machine_memory_pass(
         _fragment_line(top),
     )
     candidate = next(
-        (
-            fragment
-            for fragment in ranked
-            if fragment.mb >= memory_guard.MACHINE_FRAGMENT_MIN_MB
-        ),
+        (fragment for fragment in ranked if fragment.mb >= memory_guard.MACHINE_FRAGMENT_MIN_MB),
         None,
     )
     if candidate is None:
@@ -420,9 +409,7 @@ def machine_memory_pass(
     )
 
 
-def _fragment_refusal(
-    fragment: memory_guard.Fragment, *, runner: Runner
-) -> tuple[str, str]:
+def _fragment_refusal(fragment: memory_guard.Fragment, *, runner: Runner) -> tuple[str, str]:
     """``("", "")`` when every process of the fragment still matches the snapshot.
 
     **THE DECISION IS A SNAPSHOT AND THE SIGNAL IS NOT** — the same hazard the
