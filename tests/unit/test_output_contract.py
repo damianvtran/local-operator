@@ -14,6 +14,7 @@ from typing import TypedDict
 import pytest
 from pydantic import BaseModel
 
+from local_operator.harness.types import Message
 from local_operator.output_contract import (
     OUTPUT_FORMATS,
     MarkdownSchema,
@@ -372,9 +373,21 @@ def test_label_is_the_format() -> None:
     assert OutputContract(format="yaml").label == "yaml"
 
 
+def _retry_message(contract: OutputContract, *, attempt: int, error: str) -> Message:
+    """``retry_message`` narrowed to the plain user ``Message`` it constructs.
+
+    The declared return type is the ``AgentMessage`` union (a retry is an
+    ordinary row beside the host-authored custom entries), and every
+    assertion below wants the concrete class: one narrow, one spelling.
+    """
+    message = contract.retry_message(attempt=attempt, error=error)
+    assert isinstance(message, Message)
+    return message
+
+
 def test_retry_message_shape() -> None:
-    message = OutputContract(format="json").retry_message(
-        attempt=2, error="not valid JSON: Expecting value"
+    message = _retry_message(
+        OutputContract(format="json"), attempt=2, error="not valid JSON: Expecting value"
     )
     assert message.role == "user"
     text = message.text
@@ -385,10 +398,12 @@ def test_retry_message_shape() -> None:
 
 
 def test_retry_message_bounds_and_collapses_the_reason() -> None:
-    collapsed = OutputContract(format="json").retry_message(attempt=1, error="first\nsecond   line")
+    collapsed = _retry_message(
+        OutputContract(format="json"), attempt=1, error="first\nsecond   line"
+    )
     assert "Harness output check: first second line\n" in collapsed.text
     long_reason = "x" * 5000 + "\n\nsecond"
-    message = OutputContract(format="json").retry_message(attempt=1, error=long_reason)
+    message = _retry_message(OutputContract(format="json"), attempt=1, error=long_reason)
     reason = message.text.split("\n", 1)[0].removeprefix("Harness output check: ")
     assert len(reason) <= 600
     assert reason.endswith("… (truncated)")
@@ -399,7 +414,7 @@ def test_retry_message_for_markdown_names_required_sections() -> None:
     contract = OutputContract(
         format="markdown", schema=MarkdownSchema(required_sections=("Summary",))
     )
-    text = contract.retry_message(attempt=1, error="missing required section 'Summary'").text
+    text = _retry_message(contract, attempt=1, error="missing required section 'Summary'").text
     assert "Reply with the corrected markdown document only." in text
     assert "Required sections, in order: Summary." in text
 
