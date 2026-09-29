@@ -1,0 +1,40 @@
+{
+  "note": "Boundary measurement of the shared hint stand-down (max-[385px]:hidden): the hint is hidden strictly below 385px.",
+  "385": {
+    "tasks": {
+      "label_w": 57,
+      "hint_w": 73,
+      "hint_display": "block"
+    },
+    "subagents": {
+      "label_w": 30,
+      "hint_w": 73,
+      "hint_display": "block"
+    }
+  },
+  "386": {
+    "tasks": {
+      "label_w": 57,
+      "hint_w": 73,
+      "hint_display": "block"
+    },
+    "subagents": {
+      "label_w": 31,
+      "hint_w": 73,
+      "hint_display": "block"
+    }
+  },
+  "384": {
+    "tasks": {
+      "label_w": 57,
+      "hint_w": 0,
+      "hint_display": "none"
+    },
+    "subagents": {
+      "label_w": 63,
+      "hint_w": 0,
+      "hint_display": "none"
+    }
+  },
+  "measured_with": "headless Chrome over CDP, dpr 2, the r1-stack scene (pending approval holding both rows shut)"
+}
