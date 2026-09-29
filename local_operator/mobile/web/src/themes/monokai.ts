@@ -56,8 +56,11 @@ export const monokai: ThemeDefinition = {
 		warningBorder: "#A76C22",
 
 		// Monokai's pink is F92672, which measures 4.19:1 on canvas. This is the
-		// smallest lift that clears 4.5:1 on both grounds and on its own wash.
-		danger: "#FB6097",
+		// smallest lift that clears 4.5:1 on canvas, surface, its own wash, and
+		// (D1, mobile UX batch 2 round 1) on `elevated`, where the refusal strips
+		// paint it as text: FB6097 measured 3.76:1 there, and this step along the
+		// same pink lands at 4.63:1 while every other ground improves.
+		danger: "#FC81AC",
 		dangerWash: "#40282C",
 		dangerBorder: "#D04573",
 

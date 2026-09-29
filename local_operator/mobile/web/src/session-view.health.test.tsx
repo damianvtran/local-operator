@@ -13,10 +13,13 @@
 // untrue, so at most one shows — pinned here, since an accidental second strip
 // is exactly the kind of regression a single-state assertion misses.
 //
-// WHAT THIS LAYER CANNOT PROVE: happy-dom does no layout, so "the strip takes
-// layout space rather than covering a control" (the reason it is `border-b`
-// in-flow rather than an overlay) is a rendered-frame question, proved by the
-// batch's headless captures.
+// WHAT THIS LAYER CANNOT PROVE: happy-dom does no layout, so the geometry the
+// overlay exists for — the transcript's top edge staying put while a rung
+// appears and clears, and the rung's dead space handing touches back to the
+// transcript — is a rendered-frame question, proved by the round's headless
+// captures and their measured y-stability numbers. What IS pinned here is the
+// structure that makes it true (`absolute` + `pointer-events-none` on the
+// ladder container, `pointer-events-auto` on the resume control).
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionScreen } from "./screens/session-view";
@@ -24,7 +27,10 @@ import type { SessionProjection } from "./types";
 
 const mocks = vi.hoisted(() => ({
 	setSessionPin: vi.fn(async () => ({ ok: true })),
-	resumeSession: vi.fn(async () => ({ ok: true, pid: 42, session_id: "resumed-1" })),
+	/* THE REAL SHAPE (agent-review NIT 1): the resume route echoes the id it was
+	   given (`daemon.py:3094`/`4313`), so the navigation is SAME-ROUTE and the
+	   test must pin that, not a fiction where a new id comes back. */
+	resumeSession: vi.fn(async () => ({ ok: true, pid: 42, session_id: "s1" })),
 	navigate: vi.fn(),
 }));
 
@@ -96,7 +102,7 @@ beforeEach(() => {
 	mocks.setSessionPin.mockClear();
 	mocks.setSessionPin.mockImplementation(async () => ({ ok: true }));
 	mocks.resumeSession.mockClear();
-	mocks.resumeSession.mockImplementation(async () => ({ ok: true, pid: 42, session_id: "resumed-1" }));
+	mocks.resumeSession.mockImplementation(async () => ({ ok: true, pid: 42, session_id: "s1" }));
 	mocks.navigate.mockClear();
 });
 afterEach(cleanup);
@@ -111,11 +117,47 @@ describe("an ended session (U7)", () => {
 
 		fireEvent.click(screen.getByRole("button", { name: "resume" }));
 		await waitFor(() => expect(mocks.resumeSession).toHaveBeenCalledWith("s1"));
-		// The phone follows the new session the daemon spawned.
-		await waitFor(() => expect(mocks.navigate).toHaveBeenCalledWith("/s/resumed-1"));
+		// The route echoes the id, so the phone lands on the SAME session route —
+		// the shape that makes U16 (below) a same-route survival problem.
+		await waitFor(() => expect(mocks.navigate).toHaveBeenCalledWith("/s/s1"));
 	});
 
-	it("renders the daemon's sentence when the resume is refused, not a dead control", async () => {
+	it("an ended CUT-OFF session offers exactly ONE resume affordance (U15)", () => {
+		/* The shape the daemon serves after a mid-turn death: the terminal
+		   repaint fills the end from the durable record, so `ended` and the
+		   cut-off receipt coexist. The composer used to grow a second, prominent
+		   `turn cut off — tap to resume` whose `continue` the dead runtime can
+		   never take — the strip's resume is the one path that respawns, so it
+		   must be the only one offered. */
+		slot = {
+			projection: projection({ ended: true, stop_reason: "aborted", cut_off: true }),
+			connected: true,
+		};
+		render(<SessionScreen sessionId="s1" />);
+
+		expect(screen.getByRole("button", { name: "resume" })).toBeTruthy();
+		expect(screen.queryByRole("button", { name: /tap to resume/ })).toBeNull();
+		expect(screen.queryByText("turn cut off — tap to resume")).toBeNull();
+	});
+
+	it("a SUCCEEDED resume that does not revive the session leaves the button usable (U16)", async () => {
+		/* The same-route no-op: the POST answers, the navigation lands where the
+		   component already is, and no live frame arrives. `busy` used to stay
+		   set, stranding `resuming…` disabled with no way out. */
+		slot = { projection: projection({ ended: true }), connected: true };
+		render(<SessionScreen sessionId="s1" />);
+
+		fireEvent.click(screen.getByRole("button", { name: "resume" }));
+		await waitFor(() => expect(mocks.resumeSession).toHaveBeenCalledTimes(1));
+		// Retrying is safe (the daemon coalesces concurrent resumes), so the
+		// control must come back — and a second press must actually fire again.
+		const again = await screen.findByRole("button", { name: "resume" });
+		expect((again as HTMLButtonElement).disabled).toBe(false);
+		fireEvent.click(again);
+		await waitFor(() => expect(mocks.resumeSession).toHaveBeenCalledTimes(2));
+	});
+
+	it("renders the daemon's sentence when the resume is refused, in one refusal voice (D5)", async () => {
 		mocks.resumeSession.mockImplementation(async () => {
 			throw new Error("no runtime to resume into");
 		});
@@ -123,10 +165,49 @@ describe("an ended session (U7)", () => {
 		render(<SessionScreen sessionId="s1" />);
 
 		fireEvent.click(screen.getByRole("button", { name: "resume" }));
-		await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("no runtime to resume into"));
+		await waitFor(() =>
+			expect(screen.getByRole("alert").textContent).toContain(
+				"Could not resume: no runtime to resume into",
+			),
+		);
 		// The affordance survives the refusal — retrying is the reader's call.
 		expect(screen.getByRole("button", { name: "resume" })).toBeTruthy();
 		expect(mocks.navigate).not.toHaveBeenCalled();
+	});
+
+	it("the ended strip rides the header as an overlay, not an in-flow row (U19/D4)", () => {
+		slot = { projection: projection({ ended: true }), connected: true };
+		render(<SessionScreen sessionId="s1" />);
+
+		/* The ladder container: absolutely positioned under the header, and
+		   pointer-events-none so its dead space passes touches through to the
+		   transcript beneath (scrolling from the strip's own row must work). */
+		const row = screen.getByText("this session has ended — its history is kept");
+		const ladder = row.closest("div.absolute");
+		expect(ladder?.className).toContain("pointer-events-none");
+		expect(ladder?.className).toContain("top-full");
+		// ...while the one control the rung owns opts back in.
+		expect(screen.getByRole("button", { name: "resume" }).className).toContain(
+			"pointer-events-auto",
+		);
+	});
+
+	it("says where a resume reopens the conversation (U18)", () => {
+		slot = { projection: projection({ ended: true }), connected: true };
+		render(<SessionScreen sessionId="s1" />);
+		expect(screen.getByText("resume reopens it in ~")).toBeTruthy();
+	});
+});
+
+describe("the route's tab title (U21)", () => {
+	it("uses the header's own fallback for an unnamed conversation", async () => {
+		/* The header has always said `untitled`; the tab title said `session`, so
+		   the task switcher and the screen disagreed about the same session. */
+		slot = { projection: projection({ conversation_name: "" }), connected: true };
+		render(<SessionScreen sessionId="s1" />);
+
+		expect(screen.getByText("untitled")).toBeTruthy();
+		await waitFor(() => expect(document.title).toBe("untitled — local operator"));
 	});
 });
 
@@ -198,5 +279,38 @@ describe("a refused pin (U2)", () => {
 		// The optimistic mark went back with the refusal — the button offers the
 		// press again rather than showing a ★ the daemon never accepted.
 		expect(screen.getByRole("button", { name: "pin this session" })).toBeTruthy();
+	});
+});
+
+describe("the refused pin's own exit (U17)", () => {
+	it("the line clears once the message it asked for lands", async () => {
+		mocks.setSessionPin.mockImplementation(async () => {
+			throw new Error("no saved messages yet — pin it after you send one");
+		});
+		const { rerender } = render(<SessionScreen sessionId="s1" />);
+
+		fireEvent.click(await screen.findByRole("button", { name: "pin this session" }));
+		const refusal = await waitFor(() => screen.getByRole("alert"));
+		expect(refusal.textContent).toContain("pin it after you send one");
+
+		/* The reader follows the instruction: one message is sent, the
+		   transcript's projection now carries it — and the line that named that
+		   exit retires instead of sitting above the new row as if it still
+		   applied. */
+		slot = {
+			projection: projection({
+				transcript: [
+					{
+						id: "u1",
+						kind: "user",
+						text: "first message",
+					} as SessionProjection["transcript"][number],
+				],
+			}),
+			connected: true,
+		};
+		rerender(<SessionScreen sessionId="s1" />);
+
+		await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
 	});
 });

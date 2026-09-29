@@ -9,6 +9,10 @@
  * second copy of one refusal is how two surfaces end up describing the same
  * rule differently (the same rule `humanizeGateError` follows).
  *
+ * The hygiene itself (the clamp, the bare-status rule, the sentence shape) is
+ * shared with the resume refusal in `lib/refusal` — this module keeps the pin's
+ * public names so its two call sites read as the pin's rule, and delegates.
+ *
  * THE BARE-STATUS CASE IS NOT A REASON. `request` falls back to the status when
  * a failing response's body is not JSON, and `409` under a button the reader
  * just pressed explains nothing, so that spelling gets the plain line instead —
@@ -21,21 +25,20 @@
  * message ended there.
  */
 
-export const PIN_REASON_MAX = 240;
+import {
+	clampRefusalReason,
+	refusalReason,
+	refusalText,
+	REFUSAL_REASON_MAX,
+} from "./refusal";
 
-export function clampPinReason(reason: string): string {
-	return reason.length > PIN_REASON_MAX
-		? `${reason.slice(0, PIN_REASON_MAX)}…`
-		: reason;
-}
+export const PIN_REASON_MAX = REFUSAL_REASON_MAX;
 
-export function pinRefusalReason(error: unknown): string {
-	const message = error instanceof Error ? error.message : String(error);
-	if (message === "" || /^\d{3}$/.test(message)) return "the daemon did not say why";
-	return message;
-}
+export const clampPinReason = clampRefusalReason;
+
+export const pinRefusalReason = refusalReason;
 
 /** The one sentence every surface shows for a refused pin. */
 export function pinRefusalText(error: unknown): string {
-	return `Could not save the pin: ${clampPinReason(pinRefusalReason(error))}`;
+	return refusalText("Could not save the pin", error);
 }
