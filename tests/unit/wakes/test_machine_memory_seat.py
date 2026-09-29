@@ -10,6 +10,7 @@ round.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from pathlib import Path
 
@@ -26,7 +27,7 @@ def _report(*, killed: bool = False) -> machine_memory.MemoryPassReport:
         runtimes=1,
         measured=1,
         unmeasured=0,
-        killed=machine_memory.memory_guard.Fragment(pid=990001, mb=2048) if killed else None,
+        killed=machine_memory.memory_guard.Fragment(pid=9900001, mb=2048) if killed else None,
         reason="fleet 900 MB of 1000 MB physical",
     )
 
@@ -100,3 +101,44 @@ def test_a_failed_pass_is_a_warning_not_a_crash(
         # The SEAT does not swallow: the exception belongs to the worker thread,
         # and `_finished` logs it. Swallowing here would hide it entirely.
         seat.sweep()
+
+
+def test_the_seat_logs_the_summary_when_it_changes(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    class _Report:
+        def __init__(self, summary: str) -> None:
+            self._summary = summary
+
+        def summary(self) -> str:
+            return self._summary
+
+    async def scenario() -> None:
+        seat = sup._MachineMemorySweep(tmp_path)
+
+        async def completed(text: str) -> "asyncio.Task[object]":
+            async def inner() -> object:
+                return _Report(text)
+
+            task = asyncio.ensure_future(inner())
+            await task
+            return task
+
+        first = await completed("machine memory: ok")
+        seat._finished(first)
+        again = await completed("machine memory: ok")
+        seat._finished(again)
+        warn = await completed("machine memory: warn - fleet 90% of physical")
+        seat._finished(warn)
+
+    caplog.set_level(logging.DEBUG, logger="local_operator.wakes.supervisor")
+    asyncio.run(scenario())
+    # First reading is a CHANGE (None -> ok) and goes out at INFO; the same
+    # reading again is DEBUG; a transition back out of ok is INFO again — the
+    # report is never dropped, only quieted.
+    assert [record.levelno for record in caplog.records] == [
+        logging.INFO,
+        logging.DEBUG,
+        logging.INFO,
+    ]
+    assert caplog.records[2].getMessage() == "machine memory: warn - fleet 90% of physical"

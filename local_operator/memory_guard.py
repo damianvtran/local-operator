@@ -773,6 +773,11 @@ class ProcessNode:
     pid: int
     ppid: int
     mb: int
+    #: The row's process-group id. Carried for ONE consumer: the pass's
+    #: signal-time re-check compares it against a fresh read before a stop goes
+    #: out (a recycled pid that now leads a group would take its whole group).
+    #: ``0`` means "not read" — callers that never re-check leave it at that.
+    pgid: int = 0
 
 
 @dataclass(frozen=True)
@@ -886,10 +891,49 @@ def descendant_closure(roots: Iterable[int], links: Mapping[int, list[int]]) -> 
 
 @dataclass(frozen=True)
 class Fragment:
-    """One candidate: a process and everything under it, in MB."""
+    """One candidate: a process and everything under it, in MB and in pids.
+
+    ``pids`` is the exact set the sum is over, so a reaper can walk what the
+    number counted. It is ROOT-AWARE: a live session runtime found inside the
+    subtree is neither summed into ``mb`` nor listed here nor traversed past —
+    a runtime and everything under it is not the guard's to count or to end,
+    the same judgement the candidate rule makes. ``ppid``/``pgid`` are the
+    root's row, carried for the pre-signal re-check.
+    """
 
     pid: int
     mb: int
+    pids: tuple[int, ...] = ()
+    ppid: int = 0
+    pgid: int = 0
+
+
+def fragment_closure(
+    start: int, links: Mapping[int, list[int]], roots: Iterable[int]
+) -> set[int]:
+    """``start`` plus everything under it that is not a session runtime.
+
+    **WHY THE WALK STOPS AT A ROOT.** The guard may count and end a COMMAND
+    tree; a session runtime inside a candidate's subtree — and everything under
+    it — is neither (see :func:`fragments_ranked` for the judgement). Stopping
+    the traversal, rather than only skipping the pid, is what makes the SUM and
+    the STOP agree: a number that included a runtime's workers would credit a
+    kill with memory it can never free.
+
+    Cycle-safe by a visited set, the same contract as
+    :func:`descendant_closure`. A root is never entered, so the returned set
+    contains no root pid and no pid reachable only through one.
+    """
+    root_set = set(roots)
+    seen: set[int] = set()
+    stack = [start] if start > 0 else []
+    while stack:
+        pid = stack.pop()
+        if pid in seen or pid in root_set:
+            continue
+        seen.add(pid)
+        stack.extend(links.get(pid, ()))
+    return seen
 
 
 def fragments_ranked(
@@ -905,32 +949,25 @@ def fragments_ranked(
     pass. A fragment rooted below a runtime is a command tree: fair game, and
     the same unit the per-command guard already ends at its own ceiling.
 
-    Subtree sums are memoized; a pid-recycle cycle terminates at zero through
-    the placeholder below rather than recursing forever. The sort is total
-    (``(-mb, pid)``) so two fragments of equal size rank deterministically — a
-    guard whose choice flickers between equal candidates is a guard whose log
-    cannot be read.
+    Each fragment's number and pid set come from :func:`fragment_closure`, so
+    both are ROOT-AWARE: a runtime nested inside a candidate's subtree is
+    neither summed nor listed nor walked past — the number and the stop agree
+    on what the guard may touch. The sort is total (``(-mb, pid)``) so two
+    fragments of equal size rank deterministically — a guard whose choice
+    flickers between equal candidates is a guard whose log cannot be read.
     """
     row_list = list(rows)
     links = child_links(row_list)
     mb_of = {row.pid: max(0, row.mb) for row in row_list}
     root_set = set(roots)
-    memo: dict[int, int] = {}
-
-    def size(pid: int) -> int:
-        if pid in memo:
-            return memo[pid]
-        # Placeholder BEFORE recursing: the cycle below reads it instead of
-        # re-entering, and the real sum overwrites it on the way out.
-        memo[pid] = 0
-        total = mb_of.get(pid, 0)
-        for child in links.get(pid, ()):
-            total += size(child)
-        memo[pid] = total
-        return total
-
     ranked = [
-        Fragment(pid=row.pid, mb=size(row.pid))
+        Fragment(
+            pid=row.pid,
+            mb=sum(mb_of.get(pid, 0) for pid in fragment_closure(row.pid, links, root_set)),
+            pids=tuple(sorted(fragment_closure(row.pid, links, root_set))),
+            ppid=row.ppid,
+            pgid=row.pgid,
+        )
         for row in row_list
         if row.pid not in root_set
     ]

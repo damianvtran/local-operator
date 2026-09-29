@@ -172,9 +172,11 @@ RESIDENCY_SWEEP_INTERVAL_S = 300.0
 #: unremarkable to out-of-memory-dialog inside half an hour, with the largest
 #: single movers growing GBs per ten minutes. A minute keeps the pass cheap
 #: beside a busy fleet and short enough to see a runaway before the operator
-#: does. WHY NOT FASTER: each pass is one ``ps`` plus one memory read per fleet
-#: pid, and the pass's kill path is rate-limited anyway; polling harder buys
-#: nothing the per-command guard does not already bound for single commands.
+#: does (50-120 ms measured, quiet to busy host). WHY NOT FASTER: each pass is
+#: one ``ps`` plus one memory read per fleet pid, and the pass's kill path is
+#: rate-limited anyway. A single command is already bounded by the per-command
+#: guard at its own ceiling; this pass exists for the SUM, which moves in
+#: minutes.
 MACHINE_MEMORY_INTERVAL_S = 60.0
 
 #: After this pass ends one fragment, how long before it may end another.
@@ -1165,6 +1167,10 @@ class _MachineMemorySweep:
         #: When this seat last ended a fragment (monotonic seconds), gating
         #: :data:`MACHINE_MEMORY_KILL_COOLDOWN_S`.
         self.last_kill_at: float | None = None
+        #: The last pass summary logged, so the seat can tell a CHANGE (worth
+        #: INFO: a warn rung crossed, a kill, an unmeasurable host appearing)
+        #: from the same reading again (DEBUG). The residency seat's rung.
+        self.last_summary: str | None = None
         self._task: "asyncio.Task[Any] | None" = None
 
     def seconds_until(self, now: float | None = None) -> float:
@@ -1184,8 +1190,9 @@ class _MachineMemorySweep:
         footprint samples do not belong inside the iteration that fires wakes,
         and nothing about the pass is urgent — it decides over a window of
         minutes. A pass already in flight is left alone, and the next one is
-        armed from here rather than from its completion, so a slow pass cannot
-        make the loop wake every second waiting for it.
+        armed from here rather than from its completion; an overdue pass
+        re-clamps the loop's sleep to ``MIN_SLEEP_S`` until it completes — the
+        same bounded shape the residency seat has, not a spin.
         """
         if self._task is not None and not self._task.done():
             return
@@ -1199,9 +1206,16 @@ class _MachineMemorySweep:
         """Log a finished pass. Never raises out of a done-callback.
 
         A FAILING PASS IS A WARNING, not an exception: the supervisor's other
-        work (wakes, engages) must not acquire a new crash path from a guard, and
-        a guard that fails silently would be worse than one that fails loudly —
-        so the failure gets the same channel every other pass failure uses.
+        work (wakes, engages) must not acquire a new crash path from a guard,
+        and a guard that fails silently would be worse than one that fails
+        loudly — so the failure gets the same channel every other pass failure
+        uses.
+
+        THE REPORT IS LOGGED, not dropped (the residency seat's shape): the
+        summary goes out at INFO when it CHANGES — the transitions worth a
+        line: ``ok`` → ``warn``, a kill, an unmeasurable host appearing — and
+        at DEBUG otherwise, so a healthy fleet does not rewrite the log every
+        minute while a silent ``unknown`` still leaves a trace.
         """
         if task.cancelled():
             return
@@ -1211,6 +1225,12 @@ class _MachineMemorySweep:
                 "the machine memory pass failed; the fleet's sum is unchecked",
                 exc_info=error,
             )
+            return
+        report = task.result()
+        summary = report.summary()
+        changed = summary != self.last_summary
+        self.last_summary = summary
+        (logger.info if changed else logger.debug)("%s", summary)
 
     async def shutdown(self) -> None:
         """Drop an in-flight pass on the way out (the residency pass's shape).

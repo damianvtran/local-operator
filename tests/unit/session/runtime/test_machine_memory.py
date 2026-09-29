@@ -6,12 +6,13 @@ real memory hog, or signals a real pid. The pass's footsteps are deliberately
 kept off the platform-dependent footprint arm: the readings below are carried by
 the RSS column of the injected ``ps`` table, which both ``darwin`` and ``linux``
 answer the same way, so these tests pin the DECISION (what is summed, what is
-ranked, what is ended) rather than re-testing ``mobile.resources``'s own probes
-(that module's suite owns them).
+ranked, what is ended, what is withheld) rather than re-testing
+``mobile.resources``'s own probes (that module's suite owns them).
 
-Fake pids are chosen far above any real allocation (990001+) so that a default
-footprint probe on a live test host cannot accidentally return a REAL number
-for them: a fake that collided with a live pid would silently rewrite the
+Fake pids are chosen ABOVE the largest pid any supported platform can allocate
+(Linux ``pid_max`` can reach 4,194,304; macOS caps at 99,998), so a live test
+host cannot accidentally answer a default footprint probe with a REAL number
+for a fake pid: a fake that collided with a live pid would silently rewrite the
 arithmetic these tests exist to pin.
 """
 
@@ -21,21 +22,25 @@ from pathlib import Path
 
 from local_operator.session.runtime import machine_memory as mm
 
-_ROOT = 990001
+_ROOT = 9900001
 
 
 class _Killer:
-    """Records the pids a pass asks to end; always reports delivery."""
+    """Records the fragments a pass asks to end; always reports delivery."""
 
     def __init__(self) -> None:
-        self.pids: list[int] = []
+        self.fragments: list[mm.memory_guard.Fragment] = []
 
-    def __call__(self, pid: int) -> bool:
-        self.pids.append(pid)
+    def __call__(self, fragment: mm.memory_guard.Fragment) -> bool:
+        self.fragments.append(fragment)
         return True
 
+    @property
+    def pids(self) -> list[int]:
+        return [fragment.pid for fragment in self.fragments]
 
-def _no_kill(pid: int) -> bool:
+
+def _no_kill(fragment: mm.memory_guard.Fragment) -> bool:
     return False
 
 
@@ -44,27 +49,59 @@ def _rss_line(pid: int, mib: int) -> str:
     return f"{pid} {mib * 1024}"
 
 
-def _table(rows: list[tuple[int, int]]) -> str:
-    """A ``ps -axo pid=,ppid=`` table from ``[(pid, ppid)]``."""
-    return "\n".join(f"{pid} {ppid}" for pid, ppid in rows)
+def _table(rows: list[tuple[int, int] | tuple[int, int, int]]) -> str:
+    """A ``ps -axo pid=,ppid=,pgid=`` table from ``(pid, ppid[, pgid])`` rows.
+
+    ``pgid`` defaults to the row's own pid — every fixture process leads its own
+    group, the shape a spawned command tree has (``start_new_session``), so the
+    pre-signal re-check compares against exactly the row the table showed.
+    """
+    lines = []
+    for row in rows:
+        pid, ppid = row[0], row[1]
+        pgid = row[2] if len(row) > 2 else pid
+        lines.append(f"{pid} {ppid} {pgid}")
+    return "\n".join(lines)
 
 
 def _fake_runner(
     *,
     topology: str | None = None,
     rss: dict[int, int] | None = None,
+    drift: bool = False,
 ) -> mm.Runner:
-    """A runner keyed on argv shape: the topology read, then the RSS batch.
+    """A runner keyed on argv shape: topology, the re-check row, the RSS batch.
 
-    A keyed fake rather than a sequence: the pass makes exactly one topology
-    read and one RSS read per ``session_resource_usage`` call today, but a fake
-    coupled to call ORDER is the brittleness that hides a broken pass the day a
-    tick grows a second read.
+    A keyed fake rather than a sequence: a fake coupled to call ORDER is the
+    brittleness that hides a broken pass the day a tick grows a second read.
+    ``drift`` makes the RE-CHECK read answer a changed row (a different
+    ``pgid``) — the recycled-pid shape the pre-signal withhold exists for.
     """
+    rows: dict[int, tuple[int, int]] = {}
+    if topology:
+        for line in topology.splitlines():
+            parts = line.split()
+            if len(parts) >= 2:
+                rows[int(parts[0])] = (
+                    int(parts[1]),
+                    int(parts[2]) if len(parts) >= 3 else 0,
+                )
 
     def run(argv: list[str]) -> tuple[int, str]:
-        if argv[:3] == ["ps", "-axo", "pid=,ppid="]:
+        if argv[:3] == ["ps", "-axo", "pid=,ppid=,pgid="]:
             return (0, topology) if topology is not None else (1, "")
+        if argv[:3] == ["ps", "-o", "pid=,ppid=,pgid="]:
+            try:
+                pid = int(argv[-1])
+            except (IndexError, ValueError):
+                return 1, ""
+            row = rows.get(pid)
+            if row is None:
+                return 1, ""
+            ppid, pgid = row
+            if drift:
+                pgid += 1
+            return 0, f"{pid} {ppid} {pgid}"
         if argv[:3] == ["ps", "-o", "pid=,rss="]:
             if rss is None:
                 return 1, ""
@@ -93,8 +130,8 @@ def _pass(**overrides: object) -> mm.MemoryPassReport:
 
 
 def test_parse_process_table_skips_noise_and_nonpositive_pids() -> None:
-    table = "1 0\nnot a row\n\n-5 1\n42 7 extra\n"
-    assert mm.parse_process_table(table) == [(1, 0), (42, 7)]
+    table = "1 0 1\nnot a row\n\n-5 1 1\n42 7 7 extra\n"
+    assert mm.parse_process_table(table) == [(1, 0, 1), (42, 7, 7)]
 
 
 # ---------------------------------------------------------------------------
@@ -113,15 +150,15 @@ def test_warn_names_the_largest_fragments_and_kills_nothing() -> None:
     killer = _Killer()
     report = _pass(
         runner=_fake_runner(
-            topology=_table([(_ROOT, 1), (990002, _ROOT)]),
-            rss={_ROOT: 100, 990002: 700},
+            topology=_table([(_ROOT, 1), (9900002, _ROOT)]),
+            rss={_ROOT: 100, 9900002: 700},
         ),
         kill=killer,
     )
     assert report.state == "warn"
     assert report.fleet_mb == 800
-    assert [fragment.pid for fragment in report.top][:1] == [990002]
-    assert killer.pids == []
+    assert [fragment.pid for fragment in report.top][:1] == [9900002]
+    assert killer.fragments == []
     assert report.killed is None
 
 
@@ -132,22 +169,24 @@ def test_act_ends_the_largest_fragment_at_or_above_the_floor() -> None:
             topology=_table(
                 [
                     (_ROOT, 1),
-                    (990002, _ROOT),
-                    (990003, 990002),
-                    (990004, _ROOT),
+                    (9900002, _ROOT),
+                    (9900003, 9900002),
+                    (9900004, _ROOT),
                 ]
             ),
-            rss={_ROOT: 50, 990002: 500, 990003: 600, 990004: 300},
+            rss={_ROOT: 50, 9900002: 500, 9900003: 600, 9900004: 300},
         ),
         kill=killer,
     )
     assert report.state == "act"
     assert report.fleet_mb == 1450
-    # 990002's fragment is 500 + 600 = 1100 MB, the largest; 990003 alone (600)
-    # and 990004 (300) are smaller.
-    assert killer.pids == [990002]
-    assert report.killed is not None and report.killed.pid == 990002
+    # 9900002's fragment is 500 + 600 = 1100 MB, the largest; 9900003 alone
+    # (600) and 9900004 (300) are smaller.
+    assert killer.pids == [9900002]
+    assert report.killed is not None and report.killed.pid == 9900002
     assert report.killed.mb == 1100
+    # The stop receives the exact subtree the sum counted, not a bare pid.
+    assert report.killed.pids == (9900002, 9900003)
 
 
 def test_act_with_no_fragment_over_the_floor_warns_only() -> None:
@@ -155,14 +194,14 @@ def test_act_with_no_fragment_over_the_floor_warns_only() -> None:
     report = _pass(
         runner=_fake_runner(
             topology=_table(
-                [(_ROOT, 1), (990002, _ROOT), (990003, _ROOT), (990004, _ROOT)]
+                [(_ROOT, 1), (9900002, _ROOT), (9900003, _ROOT), (9900004, _ROOT)]
             ),
-            rss={_ROOT: 100, 990002: 400, 990003: 400, 990004: 400},
+            rss={_ROOT: 100, 9900002: 400, 9900003: 400, 9900004: 400},
         ),
         kill=killer,
     )
     assert report.state == "act"
-    assert killer.pids == []
+    assert killer.fragments == []
     assert "no single fragment reaches" in report.reason
 
 
@@ -170,14 +209,14 @@ def test_kill_is_withheld_when_the_seat_says_so() -> None:
     killer = _Killer()
     report = _pass(
         runner=_fake_runner(
-            topology=_table([(_ROOT, 1), (990002, _ROOT), (990003, 990002)]),
-            rss={_ROOT: 50, 990002: 500, 990003: 600},
+            topology=_table([(_ROOT, 1), (9900002, _ROOT), (9900003, 9900002)]),
+            rss={_ROOT: 50, 9900002: 500, 9900003: 600},
         ),
         kill=killer,
         kill_allowed=False,
     )
     assert report.state == "act"
-    assert killer.pids == []
+    assert killer.fragments == []
     assert report.kill_withheld is True
     assert "withheld" in report.reason
 
@@ -186,14 +225,14 @@ def test_apply_false_measures_and_never_kills() -> None:
     killer = _Killer()
     report = _pass(
         runner=_fake_runner(
-            topology=_table([(_ROOT, 1), (990002, _ROOT), (990003, 990002)]),
-            rss={_ROOT: 50, 990002: 500, 990003: 600},
+            topology=_table([(_ROOT, 1), (9900002, _ROOT), (9900003, 9900002)]),
+            rss={_ROOT: 50, 9900002: 500, 9900003: 600},
         ),
         kill=killer,
         apply=False,
     )
     assert report.state == "act"
-    assert killer.pids == []
+    assert killer.fragments == []
     assert "does not apply" in report.reason
 
 
@@ -206,21 +245,71 @@ def test_unreadable_table_is_unknown_and_never_kills() -> None:
     killer = _Killer()
     report = _pass(runner=_fake_runner(topology=None), kill=killer)
     assert report.state == "unknown"
-    assert killer.pids == []
+    assert killer.fragments == []
+
+
+def test_unmeasurable_host_is_unknown_and_never_kills(monkeypatch) -> None:
+    # The production shape: ``total_mb`` is left None and the verdict measures
+    # the HOST — a host probe that cannot answer must not authorise a stop,
+    # however large a fragment is sitting in front of the pass.
+    monkeypatch.setattr(mm.memory_guard, "_total_memory_mb", lambda: None)
+    killer = _Killer()
+    report = _pass(
+        runner=_fake_runner(
+            topology=_table([(_ROOT, 1), (9900002, _ROOT), (9900003, 9900002)]),
+            rss={_ROOT: 50, 9900002: 500, 9900003: 600},
+        ),
+        kill=killer,
+        total_mb=None,
+    )
+    assert report.state == "unknown"
+    assert killer.fragments == []
+
+
+def test_total_mb_zero_is_unknown_too(monkeypatch) -> None:
+    killer = _Killer()
+    report = _pass(
+        runner=_fake_runner(
+            topology=_table([(_ROOT, 1), (9900002, _ROOT), (9900003, 9900002)]),
+            rss={_ROOT: 50, 9900002: 500, 9900003: 600},
+        ),
+        kill=killer,
+        total_mb=0,
+    )
+    assert report.state == "unknown"
+    assert killer.fragments == []
+
+
+def test_a_changed_candidate_row_withholds_the_stop() -> None:
+    # The candidate's row answers with a different pgid at re-check time: the
+    # snapshot is stale, so the stop is withheld, not delivered.
+    killer = _Killer()
+    report = _pass(
+        runner=_fake_runner(
+            topology=_table([(_ROOT, 1), (9900002, _ROOT), (9900003, 9900002)]),
+            rss={_ROOT: 50, 9900002: 500, 9900003: 600},
+            drift=True,
+        ),
+        kill=killer,
+    )
+    assert report.state == "act"
+    assert killer.fragments == []
+    assert report.kill_withheld is True
+    assert "changed before the signal" in report.reason
 
 
 def test_no_live_runtimes_is_empty_and_never_kills() -> None:
     killer = _Killer()
     report = _pass(pids_probe=lambda config_dir: [], kill=killer)
     assert report.state == "empty"
-    assert killer.pids == []
+    assert killer.fragments == []
 
 
 def test_unmeasured_processes_are_counted_not_guessed() -> None:
-    # 990002 has a table row but no RSS row: nothing can be read for it, and the
-    # pass must say so rather than treat it as free.
+    # 9900002 has a table row but no RSS row: nothing can be read for it, and
+    # the pass must say so rather than treat it as free.
     report = _pass(
-        runner=_fake_runner(topology=_table([(_ROOT, 1), (990002, _ROOT)]), rss={_ROOT: 50}),
+        runner=_fake_runner(topology=_table([(_ROOT, 1), (9900002, _ROOT)]), rss={_ROOT: 50}),
     )
     assert report.unmeasured == 1
     assert report.measured == 1
@@ -230,8 +319,8 @@ def test_unmeasured_processes_are_counted_not_guessed() -> None:
 def test_a_kill_that_delivers_nothing_is_not_recorded_as_one() -> None:
     report = _pass(
         runner=_fake_runner(
-            topology=_table([(_ROOT, 1), (990002, _ROOT), (990003, 990002)]),
-            rss={_ROOT: 50, 990002: 500, 990003: 600},
+            topology=_table([(_ROOT, 1), (9900002, _ROOT), (9900003, 9900002)]),
+            rss={_ROOT: 50, 9900002: 500, 9900003: 600},
         ),
         kill=_no_kill,
     )
