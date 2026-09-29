@@ -402,6 +402,49 @@ class TestDeliveryText:
         assert wake_receipt_headline(f"{final}\n\nCheck the deploy") == "w-9 (1)."
         assert "scratchpad" not in wake_receipt_headline(f"{final}\n\nCheck the deploy")
 
+    def test_engine_armed_rows_read_as_hers_not_as_raw_ids(self):
+        """D2: the greeting's first frame must not be a schedule id.
+
+        ``aida-greeting`` is the engine's handle, not words a person chose;
+        the label map lives beside the ids (``aida/proactive.py``) and this
+        function reads it lazily, so the two cannot drift. Everything the
+        user created still names itself — pinned so the substitution can never
+        earn the label onto somebody else's wake.
+        """
+        from local_operator.harness.rows import wake_receipt_headline
+
+        greeting = f"(alarm) Scheduled wake aida-greeting (1/1). {WAKE_SCRATCH_CLAUSE}"
+        assert wake_receipt_headline(f"{greeting}\n\nFirst-run greeting.") == (
+            "Aida's introduction (1/1)."
+        )
+        extra = f"(alarm) Scheduled wake aida-extra-2 (1). {WAKE_SCRATCH_CLAUSE}"
+        assert wake_receipt_headline(f"{extra}\n\nFollow up") == "Aida's follow-up (1)."
+        mine = f"(alarm) Scheduled wake w-9 (1). {WAKE_SCRATCH_CLAUSE}"
+        assert wake_receipt_headline(f"{mine}\n\nCheck the deploy") == "w-9 (1)."
+
+    def test_the_label_follows_a_renamed_chief_of_staff(self, tmp_path, monkeypatch):
+        """D4: the label is formatted at LOOKUP, not frozen at import time.
+
+        Under the packaged default a literal label is invisible; a rename made
+        the receipt lie — "Aida's introduction" above a body that signs off
+        "Introduce yourself as Sovereign", one card, two names (design review
+        round 3, D4). The lookup reads the same ``aida.name`` reader every
+        other surface uses, so the receipt and the delivered body agree by
+        construction; the default frames stay byte-identical.
+        """
+        from local_operator.harness.rows import wake_receipt_headline
+        from tests.unit.aida.conftest import isolated_root_path, write_config
+
+        root = isolated_root_path(tmp_path, monkeypatch)
+        write_config(root, {"aida": {"name": "Sovereign"}})
+
+        greeting = f"(alarm) Scheduled wake aida-greeting (1/1). {WAKE_SCRATCH_CLAUSE}"
+        assert wake_receipt_headline(f"{greeting}\n\nFirst-run greeting.") == (
+            "Sovereign's introduction (1/1)."
+        )
+        extra = f"(alarm) Scheduled wake aida-extra-2 (1). {WAKE_SCRATCH_CLAUSE}"
+        assert wake_receipt_headline(f"{extra}\n\nFollow up") == "Sovereign's follow-up (1)."
+
 
 # ---------------------------------------------------------------------------
 # Live scheduler

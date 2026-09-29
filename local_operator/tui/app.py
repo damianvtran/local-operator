@@ -4240,6 +4240,15 @@ class TranscriptScreen(Screen[None]):
             pass
 
 
+#: The no-provider cue — ONE string for the setup splash, the R28 view block
+#: and the refusal a send gets while she waits for a provider, so the three
+#: surfaces cannot drift apart (the wording is the splash's existing line:
+#: action first, then the diagnosis, then discovery).
+AIDA_NO_PROVIDER_CUE = (
+    "/login openai to get started — no provider configured (/provider lists all)."
+)
+
+
 class OperatorApp(App[None]):
     """Full-screen TUI over one ``SessionProtocol``."""
 
@@ -5308,6 +5317,12 @@ class OperatorApp(App[None]):
         #: there (see `_schedule_aida_boot_ensure`). Held so the task cannot be
         #: garbage-collected mid-flight; ``None`` until a CLI boot starts one.
         self._aida_boot_task: asyncio.Task[None] | None = None
+        #: Whether `/aida` has opened her setup-time view (R28): the app is in
+        #: the setup state and the user asked for HER, not for setup. While
+        #: set, the no-session answer is the shared provider cue (see
+        #: `_no_session_notice`) instead of "session is still starting…"; it
+        #: clears with the setup state it describes.
+        self._aida_setup_view = False
         self._fork_in_progress = False
         self._fork_source_session: Any = None
         self._fork_cancelled = False
@@ -14984,8 +14999,11 @@ class OperatorApp(App[None]):
         red line over an empty screen.
         """
         # First-run setup state (item A1/U1): the ONE construction "failure" that
-        # is not an error is "no hosting configured at all". The CLI let the app
-        # open precisely so the user can `/login` from here, so this reports the
+        # is not an error is "no hosting configured at all". The viewer factory
+        # RE-RAISES this family into this handler rather than swallowing it
+        # (slice B's U1/Q1 fix — swallowing built a cold viewer and made this
+        # state unreachable), and the CLI's preflight keeps the interactive
+        # path alive for exactly this, so the user can `/login` from here: the
         # guided next step in the app's own warning voice rather than a red
         # "session failed to start" that reads like a crash. The splash's
         # `/login` affordance and the `/model` / `/provider` surfaces are the
@@ -15080,6 +15098,9 @@ class OperatorApp(App[None]):
         so those cases name the real source instead.
         """
         self._setup_state = True
+        # A fresh entry into the setup state starts without her view on screen;
+        # `/aida` sets this when the user asks for HER (R28).
+        self._aida_setup_view = False
         # Remembered for the SAME reason `_invalid_hosting` is: the escape from
         # this variant is `/model`, which writes config and must then rebuild
         # the session that does not exist yet. Without it a user who picked a
@@ -15157,7 +15178,7 @@ class OperatorApp(App[None]):
             )
         else:
             self._announce_on_splash(
-                "/login openai to get started — no provider configured " "(/provider lists all).",
+                AIDA_NO_PROVIDER_CUE,
                 "warning",
                 headline="No provider configured",
             )
@@ -16427,7 +16448,18 @@ class OperatorApp(App[None]):
             notice(f"resuming session {resume_id}… (previous session left running)")
         else:
             notice(f"resuming session {resume_id}…")
-        self._run_session_transition(self._reload_session(preserve_outgoing=preserve_outgoing))
+        opening: Awaitable[None] = self._reload_session(preserve_outgoing=preserve_outgoing)
+        if self._aida_resume_targets_her(concrete):
+            # R20/R22's OTHER first contact: an install that already resolves a
+            # provider boots to a normal conversation and meets her from
+            # `/aida` (or the picker) instead of through the setup seam. Arm
+            # the owed greeting BEFORE the reload, so it fires into the
+            # conversation this resume is opening — the same deal
+            # `_open_aida_first_run` keeps for the setup exit (review round 1,
+            # U2: nothing armed it on this path, so first contact got no
+            # greeting at all).
+            opening = self._aida_arm_first_contact_then(concrete, opening)
+        self._run_session_transition(opening)
 
     def _detach_or_stop_outgoing(self) -> bool:
         """Decide what happens to the session being LEFT by a /resume.
@@ -18574,6 +18606,32 @@ class OperatorApp(App[None]):
                 f"it may still be running — lop stop {self._adopted_session_id} ends it",
                 failed,
             )
+        if self._setup_state:
+            # R28/U3: no session is coming until `/login` succeeds, so every
+            # answer that would otherwise say "session is still starting…"
+            # says the truth instead — the SAME cue the splash and the view
+            # carry, naming the one route that connects a provider. In her
+            # view it is framed as hers; at the splash it stands alone.
+            unsent_part = " — your message was not sent" if unsent else ""
+            if self._aida_setup_view:
+                # Addressed by the CONFIGURED name (#1699's key) like every
+                # other surface: a renamed operator must not meet "Aida"
+                # here and their chosen name a row above (fold resolution).
+                from local_operator.aida import naming as aida_naming
+
+                return (
+                    f"{AIDA_MARKER} {aida_naming.display_name()} can't reply yet"
+                    f"{unsent_part}: {AIDA_NO_PROVIDER_CUE}",
+                    starting,
+                )
+            # The shared cue already carries the diagnosis, so the splash arm
+            # does not repeat it in front of it (design review round 2, NIT):
+            # the line used to read "no provider configured — … — no provider
+            # configured (…)". The ONE-cue rule holds either way — this is the
+            # same string, without a second copy of its own opening words.
+            if unsent:
+                return (f"your message was not sent: {AIDA_NO_PROVIDER_CUE}", starting)
+            return (AIDA_NO_PROVIDER_CUE, starting)
         return ("session is still starting…", starting)
 
     def _retire_name_list_reserve(self) -> None:
@@ -36498,12 +36556,16 @@ class OperatorApp(App[None]):
         drops straight back into setup having said it was starting.
         """
         self._setup_state = False
+        # Her setup-time view (R28) ends with the state it described.
+        self._aida_setup_view = False
         self._model_missing_for = None
         self._invalid_hosting = None
         if self._on_config_changed is not None:
             self._on_config_changed()
         notice("starting session…", "info")
-        self._run_session_transition(self._reload_session())
+        # `_boot_after_setup` is the shared exit (see its docstring): it routes
+        # a fresh install to her (R26) and rebuilds as before otherwise.
+        self._run_session_transition(self._boot_after_setup())
 
     def _footer_persist_hint(self) -> str:
         """``PERSIST_HINT`` for the picker footer, or "" where it cannot be run.
@@ -42605,14 +42667,23 @@ class OperatorApp(App[None]):
         argument-taking form (the ``/team chart <name>`` shape), because a
         name with a space in it is one name, not three words of a request.
 
+        Those words run even when there is NO session, because `pause`/
+        `resume` write config that a later boot honours and `status` reads
+        disk; they are therefore checked before the session guard and never
+        open a view.
+
+        NO PROVIDER (R28). With the app in the setup state there is no session
+        to open and none is coming until `/login` succeeds, so a bare or
+        text-bearing `/aida` opens her VIEW instead: the shared cue as a
+        system block, framed as hers, with the request refused (and said so)
+        rather than dropped. The sends that follow are refused with the same
+        cue — never "session is still starting…", which promises a session
+        that cannot arrive.
+
         Both halves run in workers: opening resolves (and on first use
         creates) her session off the loop, and the control words write config
         and wake files under the aida lock, which must not park the loop.
         """
-        session = self._session
-        if session is None:
-            self._system_notice(*self._no_session_notice())
-            return
         text = arg.strip()
         escaped = text.startswith("=")
         if escaped:
@@ -42637,6 +42708,16 @@ class OperatorApp(App[None]):
                     self._aida_rename(rest.strip(), notice), thread=False, group="session"
                 )
                 return
+        session = self._session
+        if session is None:
+            if self._setup_state:
+                # R28: her view, at the shared cue (see the docstring).
+                self.run_worker(
+                    self._aida_open_without_provider(text), thread=False, group="session"
+                )
+                return
+            self._system_notice(*self._no_session_notice())
+            return
         if self._resume_factory is None:
             from local_operator.aida import naming as aida_naming
 
@@ -42684,6 +42765,156 @@ class OperatorApp(App[None]):
         if text:
             self._pending_aida_prompt = (session_id, text, attachments)
         self._resume_session(session_id, notice)
+
+    async def _aida_open_without_provider(self, text: str) -> None:
+        """R28: ``/aida`` in the setup state — her view, at the shared cue.
+
+        No provider means no session can be built, so opening her is: make
+        sure her durable session exists (the bootstrap writes her directory
+        WITHOUT a provider — R28 needs the view to work — and the boot ensure
+        usually made it already), set the app into her view so the composer
+        answers with the same cue, paint that cue as a system block framed as
+        hers, and — when the invocation carried a request — say plainly that
+        it was not sent rather than dropping it. The splash stays up: this IS
+        the setup state, and the splash is where the ``/login`` affordance
+        lives, so the block rides `_system_notice` (which leaves the empty
+        state intact) rather than the receipt path that retires it.
+        """
+        from local_operator import aida as aida_pkg
+        from local_operator.aida import naming as aida_naming
+
+        # The configured display name (#1699), read once for the sentences
+        # below — never raises (the default stands in). The fold's resolution
+        # keeps her rename propagating through THIS first-run surface too.
+        name = aida_naming.display_name()
+        self._aida_setup_view = True
+        try:
+            await aida_pkg.ensure_session()
+        except Exception:  # noqa: BLE001 — the view must render regardless
+            logger.warning("aida: ensure in the no-provider view failed", exc_info=True)
+        block = (
+            f"{AIDA_MARKER} {name} — your chief of staff. She can't reply yet: "
+            f"{AIDA_NO_PROVIDER_CUE}"
+        )
+        if text:
+            block += " Your message was not sent — say it again once you're connected."
+        else:
+            # No introduction promise here: the greeting is gated on
+            # `first_run_pending`, which is false on an install that already
+            # has conversations, so the old sentence was false there (design
+            # review round 1, D1). What remains is true on every install.
+            block += " Once you're set up, she can help connect your tools and integrations."
+        self._system_notice(block, "warning")
+        # The splash's single notice row becomes hers too, so the remaining
+        # frame reads as HER waiting state rather than generic setup; the
+        # toast is the short form for a user who missed the block.
+        self._announce_on_splash(
+            AIDA_NO_PROVIDER_CUE, "warning", headline=f"{name} — connect a provider"
+        )
+
+    async def _open_aida_first_run(self, notice: NoticeFn) -> bool:
+        """R26: on a fresh install, bind the post-setup rebuild to her session.
+
+        Runs at the ONE seam both exits from the setup state share (a
+        successful ``/login`` and the ``/model`` recovery). The predicate is
+        :func:`onboarding.first_run_pending` — no human conversations beside
+        hers AND the greeting still owed — so an existing install fails it and
+        boots exactly as before, and a wiped store cannot re-fire the greeting
+        (design §7 item 4's proposal: ``greeted_at`` never re-fires). The
+        ensure and the greet run BEFORE the reload, so the greeting row is
+        already armed when her conversation opens and fires into the session
+        this app owns. Returns whether the rebuild now targets her; every
+        refusal answers ``False``, because routing must never be able to fail
+        a login.
+        """
+        from local_operator import aida as aida_pkg
+        from local_operator.aida import onboarding
+        from local_operator.paths import config_dir
+
+        if self._resume_factory is None:
+            return False
+        try:
+            root = config_dir()
+            if not await asyncio.to_thread(onboarding.first_run_pending, root):
+                return False
+        except Exception:  # noqa: BLE001 — a predicate, never a boot dependency
+            logger.warning("aida: first-run predicate failed", exc_info=True)
+            return False
+        try:
+            session_id = await aida_pkg.ensure_session(root)
+        except Exception:  # noqa: BLE001 — best-effort, like every boot path
+            logger.warning("aida: first-run ensure failed", exc_info=True)
+            session_id = None
+        if not session_id:
+            return False
+        try:
+            # Best-effort: "paused"/"owner"/"no-provider" leave the greeting
+            # owed (it re-arms on the next resume/reconcile), and a failed arm
+            # must not cost the first conversation itself.
+            await onboarding.greet(root, session_id)
+        except Exception:  # noqa: BLE001
+            logger.warning("aida: first-run greet failed", exc_info=True)
+        self._session_factory = lambda: self._resume_factory(session_id)  # type: ignore[misc]
+        from local_operator.aida import naming as aida_naming
+
+        notice(f"{AIDA_MARKER} opening {aida_naming.display_name()}, your chief of staff…")
+        return True
+
+    def _aida_resume_targets_her(self, resume_id: str) -> bool:
+        """Whether ``resume_id`` is her conversation (best-effort, False on doubt).
+
+        One small state-file read on the resume path only; anything unreadable
+        answers False, so an ordinary resume is never delayed by an aida one.
+        """
+        try:
+            from local_operator.aida import state as aida_state
+            from local_operator.paths import config_dir
+
+            return aida_state.is_aida_session(config_dir(), resume_id)
+        except Exception:  # noqa: BLE001 — a lookup, never a resume dependency
+            logger.debug("aida: could not tell whether the resume target is hers", exc_info=True)
+            return False
+
+    async def _aida_arm_first_contact_then(self, session_id: str, opening: Awaitable[None]) -> None:
+        """Arm the owed greeting, THEN open her conversation (R20/R22).
+
+        ``opening`` is the reload this resume would have run; awaiting it after
+        the arm is what puts the row in place before her session loads. Every
+        step is best-effort — a predicate, an arm or even the aida import
+        failing must leave the open itself untouched.
+        """
+        try:
+            from local_operator.aida import onboarding
+            from local_operator.paths import config_dir
+
+            root = config_dir()
+            # The cheap ledger read FIRST: once the greeting has been armed or
+            # delivered — every open after the first — this is one small file
+            # read, and the full predicate (a sessions scan plus hosting
+            # resolution, which pulls session_factory in cold on first call)
+            # only runs while the greeting may actually be owed. The steady
+            # state's cost stays off the open path either way.
+            if onboarding.greeted_at(root) is None and await asyncio.to_thread(
+                onboarding.first_run_pending, root
+            ):
+                word = await onboarding.greet(root, session_id)
+                logger.debug("aida: first-contact greeting arm: %s", word)
+        except Exception:  # noqa: BLE001 — a greeting must never block her open
+            logger.warning("aida: first-contact arm failed", exc_info=True)
+        await opening
+
+    async def _boot_after_setup(self) -> None:
+        """Leave the setup state: route a fresh install to her (R26), boot.
+
+        ONE implementation for both ways out of setup (a successful `/login`
+        in `_login_flow` and the `/model` recovery through
+        `_leave_setup_state_and_boot`), so "the first conversation is hers"
+        cannot be true on one path and not the other. `_open_aida_first_run`
+        rebinds `_session_factory` when it routes; every refusal (and every
+        existing install) falls through to the ordinary rebuild.
+        """
+        await self._open_aida_first_run(self._notice)
+        await self._reload_session()
 
     async def _aida_control(self, word: str, notice: NoticeFn) -> None:
         """``pause`` / ``resume`` / ``status`` — receipts over the aida engine.
@@ -44517,6 +44748,9 @@ class OperatorApp(App[None]):
             # is hidden right now because the notice above is a transcript block.
             if self._setup_state:
                 self._setup_state = False
+                # Her setup-time view (R28) ends with the state it described:
+                # the routing below (or the ordinary rebuild) replaces it.
+                self._aida_setup_view = False
                 # Cleared with the state that owns it: the repair is written,
                 # and a LATER `/login` (the user adding a second provider) must
                 # not be read as another repair and overwrite their hosting.
@@ -44535,7 +44769,9 @@ class OperatorApp(App[None]):
                 if self._on_config_changed is not None:
                     self._on_config_changed()
                 await notice("starting session…", "info")
-                await self._reload_session()
+                # R26: a fresh install's first conversation is hers; every
+                # other install rebuilds exactly as before.
+                await self._boot_after_setup()
             elif getattr(self._providers.provider(provider), "local_setup", False):
                 if self._on_config_changed is not None:
                     self._on_config_changed()

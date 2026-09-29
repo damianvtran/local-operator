@@ -299,6 +299,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``aida.name`` lives in config.yml, and the session title it syncs is written "
         "through the session layer's own writers",
     ),
+    "local_operator/aida/profile.py": (
+        1,
+        "``SYSTEM_PROMPT_NAME``: the custom-instructions FILE at the config root, "
+        "never an entry of a session directory",
+    ),
     "local_operator/providers/oauth/zai.py": (1, "a keychain entry's name, not a path"),
     "local_operator/providers/oauth/kimi.py": (
         1,
