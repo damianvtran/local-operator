@@ -1810,8 +1810,12 @@ class AttachClient:
         THE CLIENT'S HALF OF THE CARRIAGE GATE — the relay's strip in
         ``MobileDaemon.request`` is the sibling — and this is the copy that a
         frame cannot route around, because it runs at the one point every
-        control frame is written (:meth:`_request_frame`). The pair reaches
-        the wire through more than one door: ``prompt``/``steer``/
+        annotation-carrying frame is written (:meth:`_request_frame`).
+        ``_request_payload`` is a second frame write point and does not strip;
+        no live path carries the annotation through it today, so every current
+        door is covered — a future op that gives it an annotation field must
+        route the pair through this strip as well. The pair reaches the wire
+        through more than one door: ``prompt``/``steer``/
         ``send_command`` build it in :meth:`_annotation_fields`, but the wake
         path (``launch._deliver``) and the desktop admit path
         (``attached.admit_prompt``) hand it straight to
