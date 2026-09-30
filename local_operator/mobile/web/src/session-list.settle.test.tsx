@@ -86,7 +86,8 @@ function instrument(name: string) {
 		get: () => layout,
 		configurable: true,
 	});
-	const style = new Proxy(card.style, {
+	const raw = card.style;
+	const style = new Proxy(raw, {
 		set(target, property, value) {
 			if (property === "transform") {
 				writes.push([String(property), String(value)]);
@@ -109,6 +110,7 @@ function instrument(name: string) {
 		}) as DOMRect;
 	return {
 		writes,
+		rawStyle: raw,
 		setLayout: (value: number) => {
 			layout = value;
 		},
@@ -118,7 +120,10 @@ function instrument(name: string) {
 	};
 }
 
-afterEach(cleanup);
+afterEach(() => {
+	cleanup();
+	vi.unstubAllGlobals();
+});
 
 describe("the settle's own window", () => {
 	it("does not re-measure its in-flight transform on a commit inside the window", () => {
@@ -193,5 +198,118 @@ describe("the settle's own window", () => {
 		   frame (after any click the lift produces, never before it). */
 		fireEvent.pointerUp(cardByName("Alpha"));
 		await waitFor(() => expect(order()).toEqual(["Beta", "Alpha"]));
+	});
+
+	it("continues from a settling card's current paint when its layout moves again", () => {
+		/* Round-1 review M1: the continuation branch (`prev.top +
+		   translateYOf(el) - top`) is what lets a card that is STILL gliding
+		   when its layout moves again carry on from where it paints; without a
+		   test here a regression would ship silently. `translateYOf` reads the
+		   computed transform, so the test stages a mid-flight pose in the
+		   element's inline style (what happy-dom's getComputedStyle reports)
+		   and stubs the matrix reader to parse it, exactly as a browser would. */
+		class FakeMatrixReadOnly {
+			f: number;
+			constructor(source: string) {
+				const translate = /translateY\((-?[\d.]+)px\)/.exec(source);
+				const matrix = /matrix\(([^)]+)\)/.exec(source);
+				this.f = translate
+					? parseFloat(translate[1])
+					: matrix
+						? parseFloat(matrix[1].split(",")[5] ?? "0")
+						: 0;
+			}
+		}
+		vi.stubGlobal("DOMMatrixReadOnly", FakeMatrixReadOnly);
+
+		sessionList = [
+			summary({ session_id: "a", conversation_name: "Alpha" }),
+			summary({ session_id: "b", conversation_name: "Beta" }),
+		];
+		const view = render(<SessionListScreen />);
+		const alpha = instrument("Alpha");
+
+		/* First move: down one slot, inverted at -160. */
+		alpha.setLayout(160);
+		act(() => {
+			sessionList = [
+				summary({ session_id: "b", conversation_name: "Beta" }),
+				summary({ session_id: "a", conversation_name: "Alpha" }),
+			];
+			view.rerender(<SessionListScreen />);
+		});
+		expect(alpha.writes).toEqual([
+			["transform", "translateY(-160px)"],
+			["transform", ""],
+		]);
+
+		/* Mid-flight: the card paints 30px below its layout slot (the -160
+		   inversion has interpolated to -30; a browser reports exactly that
+		   through the computed matrix). */
+		alpha.rawStyle.transform = "translateY(-30px)";
+		alpha.setPainted(-30);
+
+		/* The layout moves AGAIN while that transition is live: the slot moves
+		   from 160 to 200. The next settle must start from the paint
+		   (160 + -30 = 130) and invert at 130 - 200 = -70. A stale-coordinate
+		   regression would write the -40 of `prev.top - top` — the jump a
+		   mid-flight re-move would ship. */
+		alpha.setLayout(200);
+		act(() => {
+			sessionList = sessionList.map((row) => ({ ...row, mtime: row.mtime + 1 }));
+			view.rerender(<SessionListScreen />);
+		});
+		expect(alpha.writes.slice(2)).toEqual([
+			["transform", "translateY(-70px)"],
+			["transform", ""],
+		]);
+	});
+
+	it("coalesces a burst into one application and paints only the latest frame", async () => {
+		/* Round-1 review M2: several frames can arrive between two painted
+		   frames (the daemon pushes at ~24-30/s); the hand-off applies at most
+		   ONE per animation frame, and a frame still waiting when the next
+		   arrives must never paint at all. */
+		sessionList = [
+			summary({ session_id: "a", conversation_name: "Alpha" }),
+			summary({ session_id: "b", conversation_name: "Beta" }),
+		];
+		const view = render(<SessionListScreen />);
+		const order = () =>
+			[...document.querySelectorAll("main button")].map((el) =>
+				(el.textContent ?? "").includes("Alpha")
+					? "Alpha"
+					: (el.textContent ?? "").includes("Beta")
+						? "Beta"
+						: "Gamma",
+			);
+		const painted = () => document.body.textContent ?? "";
+
+		/* Frame A adds a session; frame B replaces A before the scheduled
+		   animation frame can run. Between the two, the DOM must still show
+		   the OLD rows — nothing paints mid-burst. */
+		act(() => {
+			sessionList = [
+				summary({ session_id: "a", conversation_name: "Alpha" }),
+				summary({ session_id: "b", conversation_name: "Beta" }),
+				summary({ session_id: "g", conversation_name: "Gamma" }),
+			];
+			view.rerender(<SessionListScreen />);
+		});
+		expect(painted()).not.toContain("Gamma");
+		act(() => {
+			sessionList = [
+				summary({ session_id: "b", conversation_name: "Beta" }),
+				summary({ session_id: "a", conversation_name: "Alpha" }),
+			];
+			view.rerender(<SessionListScreen />);
+		});
+		expect(painted()).not.toContain("Gamma");
+		expect(order()).toEqual(["Alpha", "Beta"]);
+
+		/* ONE application — the latest frame's — on the next animation frame;
+		   Gamma (frame A) never painted, not even momentarily. */
+		await waitFor(() => expect(order()).toEqual(["Beta", "Alpha"]));
+		expect(painted()).not.toContain("Gamma");
 	});
 });
