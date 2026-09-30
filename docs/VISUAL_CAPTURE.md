@@ -30,7 +30,9 @@ rsvg-convert /tmp/ask.svg -o /tmp/ask.png
 
 Use the worktree's own editable venv. No browser engine is installed or driven
 by these tools. Native PNG conversion uses optional `rsvg-convert` (librsvg).
-The gallery fails clearly if it is absent; `--svg-only` explicitly records that
+Never `qlmanage` for this — any `qlmanage` invocation registers a Dock-visible
+foreground app on macOS (see AGENTS.md §2). `rsvg-convert` is the one path, and
+the gallery fails clearly if it is absent; `--svg-only` explicitly records that
 raster validation was skipped. Images in the generated HTML index are navigation
 thumbnails; click through to native PNGs before assessing typography. A manifest
 `PASS` proves script/export/raster execution, **not visual approval**. Each
