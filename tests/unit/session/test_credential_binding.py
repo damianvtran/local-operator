@@ -176,7 +176,7 @@ def _recorder(transcript: Transcript, **kwargs: Any) -> CredentialBindingRecorde
 
 @pytest.mark.asyncio
 async def test_u1_roundtrip_version_gate_and_synthetic_refusal(tmp_path: Path) -> None:
-    """U1: write → latest_custom round-trip; unknown version → None; synthetics refused."""
+    """U1: round-trip; unknown version → None; string numerics → None; synthetics refused."""
     transcript = Transcript(tmp_path / "sess")
     bound = _binding()
     await record(transcript, bound)
@@ -199,6 +199,18 @@ async def test_u1_roundtrip_version_gate_and_synthetic_refusal(tmp_path: Path) -
     await transcript.append_custom(SESSION_BINDING_CUSTOM_TYPE, {**details, "version": 2})
     assert recall(transcript) is None
     await transcript.append_custom(SESSION_BINDING_CUSTOM_TYPE, {"version": 1, "provider": ""})
+    assert recall(transcript) is None
+
+    # Numeric fields are read STRICTLY, exactly as the spend ledger's reader
+    # reads its own (round-1 M1): ``json`` writes a number as a number, so a
+    # quoted one is a malformed row — never coerced into a confident binding.
+    await transcript.append_custom(
+        SESSION_BINDING_CUSTOM_TYPE, {**bound.to_details(), "version": "1"}
+    )
+    assert recall(transcript) is None
+    await transcript.append_custom(
+        SESSION_BINDING_CUSTOM_TYPE, {**bound.to_details(), "credential_id": "42"}
+    )
     assert recall(transcript) is None
 
     # Synthetic ids are refused at BOTH gates: construction raises, and a row
@@ -463,6 +475,9 @@ def test_recorder_for_session_gate_requires_document_and_identity(tmp_path: Path
     root.mkdir()
     transcript = Transcript(tmp_path / "sess")
 
+    # A ``None`` root is "nothing to gate on", never the ambient default
+    # (round-1 N1): the recorder must read the root it was built for.
+    assert recorder_for_session(transcript, config_dir=None, session_id=SESSION) is None
     assert recorder_for_session(transcript, config_dir=root, session_id=SESSION) is None
 
     document = placement_mod.PlacementDocument("n_binding", root=root, written_by=OWNER)
