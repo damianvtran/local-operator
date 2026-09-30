@@ -90,6 +90,7 @@ from local_operator.network.handshake import (
     Handshake,
     ListenerPolicy,
     pair_abort_frame,
+    pair_offer_frame,
     pair_result_frame,
     pair_timeout_seconds,
     sas_matches,
@@ -119,6 +120,7 @@ from local_operator.network.types import (
     CAPABILITY_WORDS,
     GRANTABLE_CAPABILITIES,
     NEEDS_ASK,
+    NET_PAIR_OPS,
     Granted,
     LinkContext,
     LinkPhase,
@@ -4879,7 +4881,7 @@ class RelayServer:
                 f"{granted.action} is not implemented in this build yet "
                 f"({_owning_document(granted.action)})",
             )
-        if granted.action in ("net_pair_ready", "net_pair_abort", "net_pair_result"):
+        if granted.action in NET_PAIR_OPS:
             return wire.refusal_frame(
                 req, f"{granted.action} is only valid on a link that is still pairing"
             )
@@ -7344,6 +7346,8 @@ class RelayServer:
         joiner_name: str,
         transcribed: str,
         peer_addr: str,
+        offer: list[dict[str, Any]],
+        offer_detail: dict[str, Any],
     ) -> PairDecision:
         """Design §5.3's second half: a person on the INVITING device confirms the code.
 
@@ -7363,6 +7367,17 @@ class RelayServer:
         invite = record.invite(invite_id)
         role = (invite.role if invite is not None else "read") or "read"
         window = pair_timeout_seconds(_remaining_of(record, invite_id))
+        from local_operator.network.credentials import offers as offers_mod
+
+        # §4.2's state rides the record so EVERY surface (the relay's inline
+        # prompt, `lop network confirm`, `--json`) renders the same fact: a peer
+        # that never advertised the capability cannot be shown a list, and the
+        # silence gets a sentence rather than reading as "nothing to share".
+        offer_state = (
+            offers_mod.OWNER_SKIPPED
+            if str(offer_detail.get("offer_skip") or "") == offers_mod.OWNER_SKIPPED
+            else offers_mod.OWNER_SENT
+        )
         pending = PendingPairing(
             invite_id=invite_id,
             network_id=record.network_id,
@@ -7381,7 +7396,11 @@ class RelayServer:
                 name=joiner_name,
                 transcribed=transcribed,
                 derived=result.sas,
+                offer_items=list(offer) if offer_state == offers_mod.OWNER_SENT else None,
+                offer_state=offer_state,
             ),
+            offer=list(offer),
+            offer_state=offer_state,
         )
         store.save_pending_pairing(pending, self.root)
         self.audit.record(
@@ -7395,6 +7414,7 @@ class RelayServer:
                     "subject": joiner_id,
                     "role": role,
                     "seconds_left": round(window, 1),
+                    **offer_detail,
                 },
             )
         )
@@ -7419,6 +7439,10 @@ class RelayServer:
                     "role": role,
                     "answered_by": decision.answered_by,
                     "cause": decision.reason,
+                    # The decision's own share set — the count the admission
+                    # below then intersects with the offer actually sent, so the
+                    # audit's requested-vs-granted pair reads as one story.
+                    "shares": len(decision.shares),
                 },
             )
         )
@@ -7426,6 +7450,8 @@ class RelayServer:
 
     def _await_pairing_decision(self, pending: PendingPairing, window: float) -> PairDecision:
         """The human's answer: inline when this process owns a terminal, else from disk."""
+        from local_operator.network.credentials import offers as offers_mod
+
         if self._has_terminal():
             answer = self._ask_in_terminal(pending)
             if answer is None:
@@ -7444,6 +7470,14 @@ class RelayServer:
                 matched=answer,
                 reason="" if answer else "declined",
                 answered_by="human",
+                # THE INLINE PROMPT IS A y/N FLOW, so its default IS the offered
+                # set — the inline person admits what the screen showed. "" states
+                # (a record from before the offer, or an old joiner) grant nothing.
+                shares=(
+                    offers_mod.owner_default_shares(pending.offer)
+                    if answer and pending.offer_state == offers_mod.OWNER_SENT
+                    else []
+                ),
             )
         deadline = time.monotonic() + window
         while time.monotonic() < deadline:
@@ -7517,6 +7551,23 @@ class RelayServer:
         deadline = wire.deadline_in(pair_timeout_seconds(_remaining_of(record, invite_id)))
         member_row: MemberRecord | None = None
         try:
+            # THE SHARE LIST IS THE FIRST SEALED RECORD (§2.3): sent before anything
+            # waits on a human, so both ends can show the same list before either
+            # person commits. Inside this try on purpose — a socket that dies sending
+            # it takes the same refusal/consume path every other failure does, and the
+            # joiner's bounded drain plus its tolerant first-result read absorb a
+            # slow frame rather than failing the ceremony.
+            from local_operator.network.credentials import offers as offers_mod
+
+            send_offer, offer_items, offer_detail = _pair_offer_for(handshake, self.root)
+            if send_offer:
+                sock.sendall(
+                    codec.seal(
+                        pair_offer_frame(
+                            items=offer_items, digest=offers_mod.digest_of(offer_items)
+                        )
+                    )
+                )
             try:
                 ready = codec.open(reader.read_record_payload(deadline))
             except TimeoutError as exc:
@@ -7561,6 +7612,8 @@ class RelayServer:
                 joiner_name=joiner_name,
                 transcribed=typed,
                 peer_addr=peer_addr,
+                offer=offer_items,
+                offer_detail=offer_detail,
             )
             if not (decision.decision == "admit" and decision.matched):
                 # A timeout and a decline are both refusals: an unanswered question
@@ -7626,6 +7679,22 @@ class RelayServer:
                     root=self.root,
                 )
                 consume(record, invite_id, outcome="admitted")
+                # GRANTS IN THE SAME LOCK (the design's admit-then-grant): the
+                # member row and invite consumption are the ceremony's outcome,
+                # and the placements + capability are written before the record
+                # is saved so the result frame can report the final set. A per-key
+                # failure is DROPPED with an audit — never a rollback — because
+                # the two humans already confirmed and a vanished credential must
+                # not cost the admission.
+                granted_keys, reduced_keys = _grant_pair_shares(
+                    record,
+                    joiner_id=joiner_id,
+                    decision=decision,
+                    offer_items=offer_items,
+                    owner_name=self.identity.name or record.self_device_id,
+                    root=self.root,
+                    audit=self.audit,
+                )
                 store.save(record, self.root)
             state = store.require_secrets(result.network_id, self.root)
             frame = pair_result_frame(
@@ -7647,6 +7716,14 @@ class RelayServer:
                 members_digest=members_digest_of(record),
                 material=state.secret,
                 rotations=dict(record.rotations),
+                # THE RECEIPT'S FINAL SET: what was actually served, drift and
+                # drops included. The joiner shows it ("available here: …") and it
+                # is the only fact that reconciles the two screens when a share
+                # could not be applied. ``reduced`` names the keys the owner's
+                # person removed at confirm — the deliberate half of the delta,
+                # which the joiner's receipt says differently from a failure.
+                shares=granted_keys,
+                reduced=reduced_keys,
             )
             sock.sendall(codec.seal(frame))
             self.audit.record(
@@ -7660,6 +7737,11 @@ class RelayServer:
                         "role": member_row.role,
                         "member_kind": member_row.kind,
                         "epoch": record.epoch,
+                        # The granted count, beside the requested one on
+                        # ``pairing_confirmed`` — the two differ exactly when a
+                        # share was dropped, which is the case the audit exists to
+                        # make answerable.
+                        "grants": len(granted_keys),
                     },
                 )
             )
@@ -8530,12 +8612,39 @@ class RelayServer:
             pending = open_pairings[0]
         admit = str(frame.get("decision") or "admit") == "admit"
         matched = bool(frame.get("matched")) and admit
+        # THE SHARE DECISION, REDUCE-ONLY (§3.3). The offered set is the list this
+        # relay SENT (``PendingPairing.offer``, state ``"sent"``); a frame with no
+        # ``shares`` key (the inline y/N flow, an older CLI) admits exactly the
+        # offered set, and a frame that names anything OUTSIDE it is refused by
+        # sentence with the remedy. The intersection at admission re-checks this,
+        # so an out-of-band decision file cannot widen the ceremony either.
+        from local_operator.network.credentials import offers as offers_mod
+
+        offered = list(pending.offer) if pending.offer_state == offers_mod.OWNER_SENT else []
+        servable = offers_mod.served_keys(offered)
+        wanted = frame.get("shares")
+        if wanted is None:
+            shares = sorted(servable)
+        elif not isinstance(wanted, list):
+            raise MeshRefusal("bad_request", "shares must be a list of credential keys")
+        else:
+            shares = [str(key) for key in wanted]
+            unoffered = [key for key in shares if key not in servable]
+            if unoffered:
+                raise MeshRefusal(
+                    "shares_not_offered",
+                    f"{unoffered[0]!r} is not being served in this ceremony, so it cannot be "
+                    "granted by it — the list can only be reduced here; to share it after "
+                    f"the join, run `lop network credential share {unoffered[0]} --with "
+                    f"{pending.joiner_device_id}` on this device",
+                )
         decision = PairDecision(
             invite_id=pending.invite_id,
             decision="admit" if matched else "decline",
             matched=matched,
             reason="" if matched else str(frame.get("reason") or "declined"),
             answered_by=str(frame.get("answered_by") or "human"),
+            shares=sorted(shares) if matched else [],
         )
         store.save_pair_decision(decision, self.root)
         return {
@@ -8543,6 +8652,11 @@ class RelayServer:
             "decision": decision.decision,
             "matched": decision.matched,
             "joiner_device_id": pending.joiner_device_id,
+            # THE ECHO (§4.5's skew check): a CLI that sent share choices can see
+            # whether the relay it reached understood them — an older daemon
+            # answers without this key, and the CLI says so by name rather than
+            # silently admitting more than the operator chose.
+            "shares": list(decision.shares),
         }
 
     # -- incident fan-out: what the PEERS report -----------------------------
@@ -9860,6 +9974,159 @@ def build_stamp() -> dict[str, str]:
     except Exception:  # noqa: BLE001
         ref = ""
     return {"version": number, "source_ref": ref}
+
+
+def _pair_offer_for(
+    handshake: Handshake, root: Path
+) -> tuple[bool, list[dict[str, Any]], dict[str, Any]]:
+    """``(send, items, audit detail)`` for the pair ceremony's share list.
+
+    THE GATE IS THE JOINER'S OWN ADVERTISEMENT: a build that does not know
+    ``pair-offer-v1`` never sees the frame (the both-sides rule caps exist for),
+    which is what lets this ship without moving either protocol version. When the
+    gate is closed the audit says WHY (``offer_skip`` = ``skipped_peer_unsupported``)
+    so the owner's confirm screen can say it too — an absent frame from an old peer
+    must stay distinguishable from an empty list from a new one.
+
+    AN UNREADABLE STORE IS AN EMPTY OFFER, NEVER A SKIPPED FRAME: an absent frame
+    is indistinguishable from an old peer's silence, so a store that cannot be
+    enumerated still SENDS (nothing), and the audit's ``offer_enumeration`` key
+    records that the emptiness was a failure rather than a fact.
+
+    THE DETAIL IS SCALARS (agent review round 1, N1): the audit writer's
+    ``_clean_value`` stringifies a nested dict, so the old ``{"offer": {...}}``
+    landed as a Python repr that matched neither the whitelist comment nor a
+    consumer. Three keys — ``offer_sent``, ``offer_digest``, ``offer_skip``
+    (plus ``offer_enumeration`` on the failure) — are machine-readable as written.
+    """
+    from local_operator.network.credentials import offers as offers_mod
+
+    if wire.PAIR_OFFER_V1 not in handshake.peer_capabilities:
+        return False, [], {"offer_skip": offers_mod.OWNER_SKIPPED}
+    try:
+        items = offers_mod.build_items(root)
+    except offers_mod.OfferEnumerationError:
+        empty = offers_mod.digest_of([])
+        return (
+            True,
+            [],
+            {"offer_sent": 0, "offer_digest": empty, "offer_enumeration": "unreadable"},
+        )
+    return True, items, {"offer_sent": len(items), "offer_digest": offers_mod.digest_of(items)}
+
+
+def _grant_pair_shares(
+    record: NetworkRecord,
+    *,
+    joiner_id: str,
+    decision: PairDecision,
+    offer_items: list[dict[str, Any]],
+    owner_name: str,
+    root: Path,
+    audit: Any,
+) -> tuple[list[str], list[str]]:
+    """Admission's credential grants: ``(granted, reduced)``. Caller holds the lock.
+
+    TWO REDUCE-ONLY GATES, on purpose: ``decision.shares`` was validated against
+    the offer where it was written (``_ctl_pair_confirm`` / ``_cmd_confirm``), and
+    this INTERSECTS it with the offer actually sent again — a decision file
+    written out of band still cannot widen what the wire offered.
+
+    ``reduced`` is the deliberate half of the delta: the offered keys the
+    decision left out. The result frame carries it so the joiner's receipt can
+    distinguish "the owner chose not to share this" from "the grant failed"
+    instead of pointing both at the share verb (UX round 1, U2).
+
+    ADMIT-THEN-GRANT, NEVER A ROLLBACK: the member row and the invite consumption
+    are the ceremony's outcome, and a per-key failure (the credential vanished
+    between the offer and the confirm; the document refused the key) is DROPPED
+    with an audit row and left out of the receipt, which names the remedy. Labels
+    and emails never enter the audit (§9: masked is display-level).
+    """
+    from local_operator.network.credentials import offers as offers_mod
+    from local_operator.network.credentials import placement as placement_mod
+    from local_operator.network.credentials.types import BROKER_CAPABILITY
+
+    servable = offers_mod.served_keys(offer_items)
+    wanted = [key for key in decision.shares if key in servable]
+    reduced = [key for key in servable if key not in set(wanted)]
+    if not wanted:
+        return [], reduced
+    granted: list[str] = []
+    with placement_mod.mutate(
+        record.network_id, root, self_device=record.self_device_id
+    ) as document:
+        for key in wanted:
+            try:
+                if not offers_mod.credential_here(key, root):
+                    _audit_pair_grant(
+                        audit, record, joiner_id, key, holders=0, skipped="no_local_credential"
+                    )
+                    continue
+                kind, provider, label = offers_mod.shape_for_key(key, root)
+                if document.entry(key) is None:
+                    document.declare(
+                        key,
+                        owner_device=record.self_device_id,
+                        owner_device_name=owner_name,
+                        provider=provider,
+                        kind=kind,
+                        identity_label=label,
+                        by=record.self_device_id,
+                    )
+                entry = document.grant(key, joiner_id, scope="session", by=record.self_device_id)
+                granted.append(key)
+                _audit_pair_grant(audit, record, joiner_id, key, holders=len(entry.holders))
+            except MeshRefusal:
+                # One key's refusal is not the ceremony's: the others still land.
+                _audit_pair_grant(audit, record, joiner_id, key, holders=0, skipped="refused")
+    if granted:
+        try:
+            set_member_capabilities(record, device_id=joiner_id, grant=[BROKER_CAPABILITY])
+        except MeshRefusal:
+            # Defensive only: the broker's own refusal names the remedy, and the
+            # placements above stand — what is dropped here is the borrower's
+            # ability to DIAL the broker, not the grant itself.
+            _audit_pair_grant(audit, record, joiner_id, "", holders=0, skipped="capability_refused")
+    return granted, reduced
+
+
+def _audit_pair_grant(
+    audit: Any,
+    record: NetworkRecord,
+    joiner_id: str,
+    key: str,
+    *,
+    holders: int,
+    skipped: str = "",
+) -> None:
+    """One ``credential.placement`` row per admission grant (or drop).
+
+    The same shape ``credential share`` writes, so one reader covers both: the
+    key, the act, the subject, and the holder count. ``skipped`` records WHY a
+    promised key was not served (``no_local_credential`` / ``refused``), which is
+    the audit's answer to "the receipt shows fewer keys than the offer did".
+    """
+    detail: dict[str, Any] = {
+        "credential_key": key,
+        "act": record.self_device_id,
+        "sub": joiner_id,
+        "owner_device": record.self_device_id,
+        "holders": holders,
+    }
+    if skipped:
+        detail["skipped"] = skipped
+    audit.record(
+        AuditEvent(
+            event="credential.placement",
+            actor=record.self_device_id,
+            subject=joiner_id,
+            network_id=record.network_id,
+            epoch=record.epoch,
+            actor_kind="device",
+            detail=detail,
+        )
+    )
 
 
 def _net_summary(record: NetworkRecord | None) -> dict[str, Any]:

@@ -338,6 +338,43 @@ bearer carries organization-write authority, and the operator's own explicit
 and `... --revoke <device>` change the list afterwards; both are
 owner-device-only verbs and both write an audit record (§4, DOC2 §4.3).
 
+**As built (2026-09-29).** The both-ends screen ships as one sealed
+`net_pair_offer` record sent by the owner right after `welcome` and drained by
+the joiner before either prompt; both screens then render the same rows through
+one module (`local_operator/network/credentials/offers.py`), the owner's confirm
+prompt offers the reduce-only `[t]` step, and admission grants exactly the
+intersection of the decision and the offer (one `credential.placement` per key
+plus the `broker_credential` capability, the same pair the share verb makes).
+Deltas from the design text above, recorded so the next reader does not have to
+diff the code against prose:
+
+* the row wording is the follow-up design memo's (`will be served` / `not
+offered`, heading `Credentials <inviter> will serve to this device:`, tail `the
+inviter can remove items before admitting; nothing else will be served.`) — not
+the `share: yes/no` column this section's mock shows;
+* `mcp-rotating` (MCP OAuth servers) defaults to **no** for v1 — the scope
+surface varies per server and the Radient precedent cuts this way; one constant
+in the offers module flips it;
+* the joining side is **informational** (no opt-out subset on `net_pair_ready`) —
+a documented fast-follow, not an accident;
+* a store with no join-capable candidates sends an EMPTY list rather than no
+record, so "nothing to share" and "older build" stay different sentences, and
+an unreadable store records `offer_enumeration: "unreadable"` (scalar
+`offer_sent` / `offer_digest` keys beside it) on the owner's audit;
+* the receipt says WHY a promised key is missing: a deliberate reduction gets
+`not available here: … — the other device chose not to share it` (no remedy — the
+result frame carries `reduced` for exactly this), while a grant that failed
+keeps the share-verb remedy;
+* the row schema evolves ADDITIVELY: the digest is over the canonical
+projection (unknown per-row fields ride), unknown kinds display through the
+renderer's fallback and can never grant, and a change to an existing field's
+MEANING ships as `pair-offer-v2`;
+* the `pool`-kind line from §6 is not implemented yet (pool invites do not exist
+at this ref); when they do, the extra line belongs in the same renderer.
+* older builds on either end see and send nothing — the wire order is
+byte-identical, gated by the both-sides `pair-offer-v1` capability, not by a
+protocol-version bump.
+
 ### 2.4 How a session resolves which device serves its credential
 
 The cascade is the existing one with **one new rung inserted last**, and the

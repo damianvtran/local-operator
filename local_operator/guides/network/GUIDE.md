@@ -66,6 +66,21 @@ rendering is not a contract.
    instead of the six digits: use it when the two machines do not share a
    private path. `--name` sets the name this device will be known by, `--host
    host:port` overrides the endpoint to dial.
+
+   WHEN BOTH BUILDS ARE NEW ENOUGH, BOTH SCREENS ALSO SHOW WHAT WILL BE SHARED
+   before anything is admitted: the joining side under the code (`Credentials
+   <inviter> will serve to this device:` with one row per credential — `will be
+   served` / `not offered`), and the same rows on the inviter's confirm screen.
+   The owner may only REMOVE rows (`[t]` at its prompt; nothing can be added in
+   a pairing), the confirm screen re-renders the list after each edit so the
+   frame you answer `y` at matches the grant, and the final set is what the
+   joined receipt reports (`available here: …`; a promised key the result does not
+   carry is named either as deliberately not shared or, if the grant failed,
+   with the remedy).
+   An older build on EITHER end shows no list and the ceremony is exactly what
+   it was before — the joiner's screen says the same, so an absence is never
+   read as "nothing to share".
+
    THE INVITER'S HALF, when its relay runs under a daemon and has no terminal to
    ask at, is `lop network confirm`: `--list` shows the parked pairing with both
    codes, and answering it records the person's decision for the waiting pairing
@@ -79,11 +94,20 @@ rendering is not a contract.
    ```bash
    lop network join @<token-file> --park --json
    # → {"status":"awaiting_confirmation","sas":"481926","shown":"481 926",
-   #    "fingerprint":…,"expires_at":…,"seconds_left":…,"sentence":…}   exit code 0
+   #    "fingerprint":…,"expires_at":…,"seconds_left":…,
+   #    "offers":[{"key":"openai","kind":"oauth-rotating","label":"d***@example.com",
+   #               "share":true},
+   #              {"key":"anthropic","kind":"api-key-static","label":"","share":false}],
+   #    "sentence":…}   exit code 0
    ```
 
    (`sas` is the compact spelling, `shown` and the `sentence` carry the spaced one —
-   the same six digits either way. A ceremony nobody answers exits `3`
+   the same six digits either way. `offers` is the share list: PRESENT as a (possibly
+   empty) list only when the other device sent one, absent for an older build — and
+   the `sentence` carries the same fact in words (`… will serve: openai.` /
+   `No credentials were offered.` / `The other device did not offer credentials …`),
+   so an agent that only reads the sentence can still say what will be shared. A
+   ceremony nobody answers exits `3`
    (`pairing_unanswered`), having sent nothing.)
 
    The first call prints this device's code and then WAITS (up to the same window the
@@ -97,8 +121,13 @@ rendering is not a contract.
 
    ```bash
    lop network join --confirm <code> --json      # the code THEY read, never one you chose
-   # → {"ok":true,"status":"joined","network_id":…,"epoch":…}
+   # → {"ok":true,"status":"joined","network_id":…,"epoch":…,"shares":["openai"]}
    ```
+
+   The joined receipt also names the final set in words — `available here: openai`,
+   plus `not available here:` lines beside it: a key the owner's person removed says so
+   ("the other device chose not to share it"), while a grant that failed names
+   the remedy.
 
    Hand them that command and the code, and let them run it. There is deliberately no
    flag on the `network` tool that completes a pairing: the digits both devices derive

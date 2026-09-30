@@ -127,6 +127,18 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "input to the sentence map (moved with the abort frame it reads)",
     ),
+    # The same two reads on the DRAIN path: the share list is the first sealed
+    # record after ``welcome``, and the frame that can stand there instead of it is
+    # the pair abort — its ``reason``/``detail`` go through ``refusal_from_pairing``
+    # (the same sentence map as ``_finish_pairing`` above), never to a line raw.
+    ("local_operator/network/cli.py", "_drain_pair_offer", "detail"): (
+        1,
+        "input to the sentence map, with the abort it was read from",
+    ),
+    ("local_operator/network/cli.py", "_drain_pair_offer", "reason"): (
+        1,
+        "input to the sentence map, with the abort it was read from",
+    ),
     # The tool's digest of a session VERB: the owner's own sentence for the op
     # ("runtime joining", "nothing to stop"), carried verbatim exactly as the CLI's
     # receipt carries it, because a flag and its English translation on two lines is

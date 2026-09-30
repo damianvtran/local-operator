@@ -242,10 +242,20 @@ CAUSES: frozenset[str] = frozenset(
 #: aspirational.
 DETAIL_KEYS: dict[str, frozenset[str]] = {
     "pairing_refused": frozenset({"cause", "subject"}),
-    "pairing_awaiting_confirmation": frozenset({"subject", "role", "seconds_left"}),
-    "pairing_confirmed": frozenset({"subject", "role", "answered_by"}),
+    "pairing_awaiting_confirmation": frozenset(
+        {
+            "subject",
+            "role",
+            "seconds_left",
+            "offer_sent",
+            "offer_digest",
+            "offer_skip",
+            "offer_enumeration",
+        }
+    ),
+    "pairing_confirmed": frozenset({"subject", "role", "answered_by", "shares"}),
     "invite_minted": frozenset({"role", "expires_at", "bound_device"}),
-    "member_admitted": frozenset({"role", "member_kind", "epoch"}),
+    "member_admitted": frozenset({"role", "member_kind", "epoch", "grants"}),
     # A device learns about a member it did not know about, from a peer that does.
     # This is a MEMBERSHIP change and it is how a newcomer becomes visible to the
     # devices that were already in the network (Q-R2-1), so it is recorded with the
@@ -329,7 +339,9 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "credential.grant_refused": frozenset({"credential_key", "act", "sub", "code", "capability"}),
     "credential.refresh": frozenset({"credential_key", "act", "sub", "cause"}),
     "credential.report": frozenset({"credential_key", "act", "sub", "failure"}),
-    "credential.placement": frozenset({"credential_key", "act", "sub", "owner_device", "holders"}),
+    "credential.placement": frozenset(
+        {"credential_key", "act", "sub", "owner_device", "holders", "skipped"}
+    ),
 }
 
 #: Detail keys that are dropped on sight, whatever the whitelist says. The second

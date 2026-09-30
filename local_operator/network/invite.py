@@ -643,14 +643,29 @@ def host_candidates(envelope: InviteEnvelope, override: str | None) -> list[str]
     return list(envelope.hosts)
 
 
-def joiner_prompt(envelope: InviteEnvelope, sas: str, fingerprint: str) -> str:
+def joiner_prompt(
+    envelope: InviteEnvelope,
+    sas: str,
+    fingerprint: str,
+    *,
+    offer_state: str = "",
+    offer_items: list[dict[str, Any]] | None = None,
+) -> str:
     """What the JOINING device shows its human before anything is admitted.
 
     ``code 481 926`` is a TRANSCRIPTION request, not a yes/no, and the fingerprint
     is printed in the same panel: the digits are worth ~20 bits and the fingerprint
     160, so a pairing over a public path has a real check available without a
     second command.
+
+    THE SHARE LIST SITS UNDER THE CODE BLOCK when the owner advertised it: the
+    same rows its own confirm screen shows (``credentials.offers`` renders both),
+    or the one line that says why there are none (§4.3 “did not offer” is a fact
+    about a build, §4.4 “offered nothing” about a store — they are different
+    sentences). An empty ``offer_state`` renders exactly the pre-feature prompt,
+    which is what keeps every caller that does not thread the offer byte-identical.
     """
+    from local_operator.network.credentials import offers as offers_mod
     from local_operator.network.wire import sas_display
 
     inviter = envelope.inviter_name or envelope.inviter_device_id
@@ -662,13 +677,41 @@ def joiner_prompt(envelope: InviteEnvelope, sas: str, fingerprint: str) -> str:
     # and the number granted are one value rather than two that drift with the token's
     # age (agent review round 1, MAJOR 2).
     seconds = pair_timeout_seconds(remaining_seconds(envelope))
-    return (
-        f"{inviter} ({network}) offers role {envelope.role} — code {sas_display(sas)}\n"
-        f"  fingerprint {fingerprint}\n"
+    lines = [
+        f"{inviter} ({network}) offers role {envelope.role} — code {sas_display(sas)}",
+        f"  fingerprint {fingerprint}",
+    ]
+    block = _offer_block(offers_mod, offer_state, list(offer_items or []), inviter=inviter)
+    if block:
+        # THE BLANK AFTER THE BLOCK IS LOAD-BEARING (design round 1, D3): without
+        # it the deadline and the "type the code" instruction render as if they
+        # were the last rows of the credential list, and they are the lines a
+        # person must not skip.
+        lines.extend(["", *block, ""])
+    lines.append(
         f"  you have {int(seconds)}s ({_minutes(seconds)}): type it on BOTH devices,"
-        " and a mistake can be retried with the same token\n"
-        "type the code shown there:"
+        " and a mistake can be retried with the same token"
     )
+    lines.append("type the code shown there:")
+    return "\n".join(lines)
+
+
+def _offer_block(
+    offers_mod: Any, state: str, items: list[dict[str, Any]], *, inviter: str
+) -> list[str]:
+    """The prompt's share-list section, or ``[]`` when this caller did not ask for one.
+
+    One renderer per PATH, and this is the prompt path's: the payload path renders
+    the same ``items`` as data (``_awaiting_payload``), so a person and an agent
+    cannot be told different lists.
+    """
+    if state == offers_mod.OFFER_LISTED and items:
+        return offers_mod.render_joiner_block(items, inviter=inviter)
+    if state in (offers_mod.OFFER_LISTED, offers_mod.OFFER_EMPTY):
+        return [offers_mod.render_state_line(offers_mod.OFFER_EMPTY)]
+    if state == offers_mod.OFFER_ABSENT:
+        return [offers_mod.render_state_line(offers_mod.OFFER_ABSENT)]
+    return []
 
 
 def remaining_seconds(envelope: InviteEnvelope, *, now: float | None = None) -> float:
@@ -726,8 +769,10 @@ def inviter_prompt_for(
     name: str,
     transcribed: str,
     derived: str,
+    offer_items: list[dict[str, Any]] | None = None,
+    offer_state: str = "",
 ) -> str:
-    """What the INVITING device shows its human — BOTH codes.
+    """What the INVITING device shows its human — BOTH codes, and the share list.
 
     §5.3 is "B transcribes, A compares", and the comparison is made by a PERSON on
     A: their own derived code is what the other screen must show. Printing only the
@@ -739,13 +784,33 @@ def inviter_prompt_for(
     One renderer, used by the relay's foreground prompt, the pending record (whose
     stored ``prompt`` is this string), ``lop network confirm`` and ``--json``: two
     renderings of one question is how two prompts drift apart.
+
+    THE SHARE LIST RIDES THE SAME STRING when the relay sent one — the owner's rows
+    are the same bytes the joiner's screen renders (``credentials.offers`` owns
+    both renderers). §4.2's "older build" line renders here too: when the other
+    device never advertised the capability, silence must be explained rather than
+    look like an empty list. An empty ``offer_state`` renders exactly the
+    pre-feature prompt, which is what keeps every caller that does not thread the
+    offer byte-identical.
     """
+    from local_operator.network.credentials import offers as offers_mod
     from local_operator.network.wire import sas_display
 
     label = name or device_id
-    return (
+    lines = [
         f'{device_id} ("{label}", new device) transcribed {sas_display(transcribed)} to join '
-        f"{network_name} as {role}.\n"
-        f"YOUR screen shows {sas_display(derived)}.\n"
-        "Do they match? Confirm only if the other device shows the same code."
-    )
+        f"{network_name} as {role}.",
+        f"YOUR screen shows {sas_display(derived)}.",
+    ]
+    if offer_state == offers_mod.OWNER_SKIPPED:
+        lines.append(offers_mod.OWNER_SKIPPED_LINE)
+    elif offer_state == offers_mod.OWNER_SENT:
+        items = list(offer_items or [])
+        if items:
+            # The trailing blank keeps the question off the list's tail (design
+            # round 1, D3) — same rule as the joiner's prompt.
+            lines.extend(["", *offers_mod.render_owner_block(items, joiner=label), ""])
+        else:
+            lines.append(offers_mod.OWNER_EMPTY_LINE)
+    lines.append("Do they match? Confirm only if the other device shows the same code.")
+    return "\n".join(lines)
