@@ -32,6 +32,30 @@ def speech_request_data():
     }
 
 
+def _speech_logged_the_stack(caplog) -> None:
+    """Assert the route logged an ERROR whose stack survived to ``caplog``.
+
+    Selected by logger name and message rather than level alone, so an
+    unrelated ERROR record cannot satisfy it and a missing record reads as an
+    assertion failure instead of a StopIteration (review round 3, minor).
+    ``exc_text`` counts alongside ``exc_info``: ``local_operator.mcp.redaction``
+    rewrites a record's exc_info into exc_text once any earlier test in the
+    worker has registered a credential, and the stack is present in either
+    form (the review round 3 blocker: asserting on ``exc_info`` alone made
+    these cells red in exactly the shards that run MCP tests first).
+    """
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "local_operator.server.routes.speech"
+        and record.levelname == "ERROR"
+        and "Failed to generate speech" in record.getMessage()
+    ]
+    assert records, "no ERROR record from the speech route"
+    record = records[0]
+    assert record.exc_info is not None or record.exc_text is not None
+
+
 @pytest.mark.asyncio
 async def test_create_speech_success(speech_request_data, mock_radient_client):
     """Test successful speech creation."""
@@ -82,8 +106,7 @@ async def test_create_speech_generic_exception(speech_request_data, mock_radient
     assert exc_info.value.status_code == 500
     assert "Failed to generate speech: Something went wrong" in exc_info.value.detail
     # The one fault class that needs a stack gets one (review round 2, finding 1).
-    record = next(r for r in caplog.records if r.levelname == "ERROR")
-    assert record.exc_info is not None
+    _speech_logged_the_stack(caplog)
 
 
 @pytest.mark.asyncio
@@ -138,7 +161,7 @@ async def test_create_speech_without_a_credential_answers_401(mock_radient_clien
         (
             402,
             "Your Radient credit balance is too low for speech. "
-            "Add credits in your Radient Console to continue.",
+            "Add credits in the Radient Console to continue.",
         ),
         (429, "Speech is unavailable right now. Try again in a moment."),
         (503, "Speech is temporarily unavailable. Try again in a moment."),
@@ -378,7 +401,7 @@ async def test_create_agent_speech_passes_refusals_through():
     assert exc_info.value.status_code == 402
     assert exc_info.value.detail == (
         "Your Radient credit balance is too low for speech. "
-        "Add credits in your Radient Console to continue."
+        "Add credits in the Radient Console to continue."
     )
 
 
@@ -411,8 +434,7 @@ async def test_create_agent_speech_500_logs_the_stack(caplog):
 
     assert exc_info.value.status_code == 500
     assert "Failed to generate speech: boom" in exc_info.value.detail
-    record = next(r for r in caplog.records if r.levelname == "ERROR")
-    assert record.exc_info is not None
+    _speech_logged_the_stack(caplog)
 
 
 @pytest.mark.parametrize("bad", ["EN", "En", "en-US", "e", "eng", "1a", " e", "éé"])

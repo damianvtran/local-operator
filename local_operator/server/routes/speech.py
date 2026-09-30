@@ -102,7 +102,7 @@ _SPEECH_REFUSAL_SENTENCES: Dict[int, str] = {
     401: "Your Radient sign-in has stopped working. Sign in again in the settings page.",
     402: (
         "Your Radient credit balance is too low for speech. "
-        "Add credits in your Radient Console to continue."
+        "Add credits in the Radient Console to continue."
     ),
     429: "Speech is unavailable right now. Try again in a moment.",
     503: "Speech is temporarily unavailable. Try again in a moment.",
