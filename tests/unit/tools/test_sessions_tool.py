@@ -1314,11 +1314,12 @@ async def test_peek_output_budgets_are_guarded_by_char_proxy_and_tokens(root: Pa
 @pytest.mark.asyncio
 async def test_peek_spill_fit_on_an_oversize_window(root: Path) -> None:
     """§14.7, verified: spill_truncate applies cleanly to peek bodies at these
-    sizes. The default 12-step window is designed to fit INLINE — bodies at
-    the 600-char clip cap plus headings and the footer stay under the 8 KiB
-    tool limit — and a 50-step window is over it by construction, so it must
-    come back as an elided body around a ``spill://`` handle whose byte count
-    is the FULL body, never as the raw ~32 KB."""
+    sizes. UNCLAMPED bodies (≤600 chars — no clamp marker) fit inline for the
+    default 12-step window; the moment any body needs the marker, the max-fill
+    default can cross the 8 KiB tool limit and then spills — the DESIGNED
+    handling (§8.4's budget vs the tool limit), not a bug, and both directions
+    are pinned below. A 50-step window is over the limit by construction; its
+    handle's byte count is the FULL body, never the raw ~32 KB."""
     rows = [_synth_row(i, text="s" * 600) for i in range(1, 61)]
     _write_journal(root, "ffff99990011", rows, title="spill case")
 
@@ -1326,6 +1327,22 @@ async def test_peek_spill_fit_on_an_oversize_window(root: Path) -> None:
     assert not small.is_error, small.text
     assert "spill" not in (small.details or {})
     assert len(small.text) < 8 * 1024
+
+    # The same default window over bodies that need the clamp marker — the
+    # budget test's own multiline fixture (its line structure is what pushes
+    # the raw body past 8 KiB: clipped head + marker + tail, indented per
+    # line). The result arrives elided around a handle: the claim above, locked.
+    long_body = (
+        "The frobnicator test failed on shard 3. Running pytest -q tests/unit/tools "
+        "-x gave an exit code of 1 after 42 seconds.\n"
+    ) * 30
+    long_body = (long_body * 4)[:2000]
+    clipped_rows = [_synth_row(i, text=long_body) for i in range(1, 61)]
+    _write_journal(root, "ffff99990012", clipped_rows, title="spill clip case")
+    clipped = await _peek(root, {"op": "peek", "session": "ffff99990012"})
+    assert not clipped.is_error, clipped.text
+    assert "spill" in (clipped.details or {})
+    assert len(clipped.text) < 9_000
 
     big = await _peek(root, {"op": "peek", "session": "ffff99990011", "steps": 50})
     assert not big.is_error, big.text
@@ -1357,7 +1374,13 @@ async def test_peek_refuses_unknown_ids_and_a_missing_transcript(root: Path) -> 
     result = await _peek(
         root, {"op": "peek", "session": "aaaa77778888", "query": "([", "regex": True}
     )
-    assert result.is_error and "not a valid regular expression" in result.text
+    # R-5: malformed arguments carry the fault marker, the shape `read`'s
+    # spill-search and `grep` use for the same class ("invalid regex '<p>': …").
+    from local_operator.harness.types import FAULT_INVALID_ARGUMENTS, FAULT_KEY
+
+    assert result.is_error is True
+    assert result.text.startswith("invalid regex '([':")
+    assert (result.details or {})[FAULT_KEY] == FAULT_INVALID_ARGUMENTS
 
     (root / "sessions" / "bbbb77778888").mkdir(parents=True)
     result = await _peek(root, {"op": "peek", "session": "bbbb77778888"})
@@ -1381,6 +1404,13 @@ def test_peek_validation_refusals_are_legible() -> None:
     )
     assert refusal is not None and "one window at a time" in refusal
     refusal = _sessions_validation_error(SessionsParams(op="peek", target="x", regex=True))
+    assert refusal == "`regex` needs `query`: it selects how the query matches."
+    # R-1: the regex-without-query refusal is hoisted above the digest branch,
+    # so the one shape that used to slip through — a digest folds no query —
+    # is refused like every other regex-without-query call.
+    refusal = _sessions_validation_error(
+        SessionsParams(op="peek", target="x", digest=True, regex=True)
+    )
     assert refusal == "`regex` needs `query`: it selects how the query matches."
     refusal = _sessions_validation_error(
         SessionsParams(op="peek", target="x", digest=True, steps=4)

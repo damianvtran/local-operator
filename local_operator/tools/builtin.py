@@ -13245,12 +13245,15 @@ class SessionsParams(BaseModel):
     digest: bool = Field(default=False, description="peek: compact fold instead of steps.")
 
 
-#: The window fields, which only ``peek`` has a meaning for. A set rather than
-#: an inline list in each place, because THREE sites must agree on it: the peek
-#: allowed-fields table, peek's own validator, and the refusal text a stray
-#: window field earns on another op ("applies to op='peek' only").
-_SESSIONS_PEEK_WINDOW_FIELDS = frozenset({"steps", "head", "before_id", "around_id"})
-_SESSIONS_PEEK_FIELDS = _SESSIONS_PEEK_WINDOW_FIELDS | frozenset({"regex", "digest"})
+#: The window fields, which only ``peek`` has a meaning for — ONE ordered
+#: constant for the sites that must agree on it: the allowed-fields table (via
+#: ``_SESSIONS_PEEK_FIELDS``), the validator's at-most-one-window check and
+#: BOTH of its conflict lists, and the stray-field refusal another op earns.
+#: A tuple rather than a set: every refusal lists the fields in the caller's
+#: reading order. The per-field LEGIBILITY checks are deliberately typed
+#: (counts vs ids) and name their fields where each type's rule lives.
+_SESSIONS_PEEK_WINDOW_FIELDS = ("steps", "head", "before_id", "around_id")
+_SESSIONS_PEEK_FIELDS = frozenset(_SESSIONS_PEEK_WINDOW_FIELDS) | frozenset({"regex", "digest"})
 
 #: What each op may carry. Keys outside the op's set are REFUSED rather than
 #: dropped: a ``name`` on ``stop`` or a ``query`` on ``spawn`` is a misspelled
@@ -13288,7 +13291,7 @@ def _sessions_peek_validation_error(params: SessionsParams, given: set[str]) -> 
     """
     from local_operator.harness.comms import PEEK_MAX_STEPS
 
-    windows = [field for field in ("steps", "head", "before_id", "around_id") if field in given]
+    windows = [field for field in _SESSIONS_PEEK_WINDOW_FIELDS if field in given]
     if len(windows) > 1:
         spelled = ", ".join(f"`{field}`" for field in windows)
         return (
@@ -13309,6 +13312,12 @@ def _sessions_peek_validation_error(params: SessionsParams, given: set[str]) -> 
             return f"`{field}` needs the entry id an earlier peek returned."
 
     query = str(params.query or "").strip()
+    # Hoisted ABOVE the digest branch (round-1 review, R-1): `digest=true
+    # regex=true` was the one regex-without-query shape that validated clean
+    # and then dropped the flag on the floor. `regex` selects how `query`
+    # matches, so it needs one wherever it appears.
+    if params.regex and not query:
+        return "`regex` needs `query`: it selects how the query matches."
     if params.digest:
         if windows:
             spelled = ", ".join(f"`{field}`" for field in windows)
@@ -13319,13 +13328,17 @@ def _sessions_peek_validation_error(params: SessionsParams, given: set[str]) -> 
                 "`query` locates one step. Pass one."
             )
         return None
-    if query and [field for field in ("head", "before_id", "around_id") if field in given]:
+    # Derived from the shared tuple, so a fifth window field lands in this
+    # refusal by construction; `steps` is the one that SURVIVES beside a query
+    # (it sizes the match window).
+    non_steps = [
+        field for field in _SESSIONS_PEEK_WINDOW_FIELDS if field in given and field != "steps"
+    ]
+    if query and non_steps:
         return (
             "`query` locates one step, so the window is `steps=N` around the match "
             "(default 12): drop `head`/`before_id`/`around_id` or drop `query`."
         )
-    if params.regex and not query:
-        return "`regex` needs `query`: it selects how the query matches."
     return None
 
 
@@ -14307,20 +14320,24 @@ def _peek_around(
     )
 
 
-def _peek_search(directory: Path, *, needle: str, regex: bool, need: int) -> _PeekWindow | str:
+def _peek_search(
+    directory: Path, *, needle: str, pattern: re.Pattern[str] | None, need: int
+) -> _PeekWindow | str:
     """Locate a needle walking backward from EOF, then window around the hit.
 
     The walk decodes rows newest-first and tests each row's text (a literal
-    substring, or ``re.search`` when the caller asks for regex — the design's
-    own two modes); it stops at the first hit or once `_PEEK_SCAN_BYTES` bytes
-    of rows have been walked past. The budget is the point: the reader's
-    docstring measured what a deep walk costs on a 262 MB journal, so this
-    never scans one silently — a miss is reported honestly, with the pointer
-    the caller needs to widen from a known position. The window itself is the
-    same anchored read ``around_id`` runs, so a hit and a cursor call render
-    one shape.
+    substring when ``pattern`` is ``None``, else the pre-compiled
+    ``pattern.search`` — the design's own two modes); it stops at the first
+    hit or once the row walk has crossed `_PEEK_SCAN_BYTES` (row-granular —
+    see the counter's comment for the one-row caveat). The budget is the
+    point: the reader's docstring measured what a deep walk costs on a 262 MB
+    journal, so this never scans one silently — a miss is reported honestly,
+    with the pointer the caller needs to widen from a known position. The
+    window itself is the same anchored read ``around_id`` runs, so a hit and a
+    cursor call render one shape.
 
-    ``str`` return: an unparsable regex (the caller's argument, made legible).
+    ``str`` return: an anchor that vanished between the walk and the window
+    read (a compaction between the two reads, reported as the miss it is).
     """
 
     from local_operator.resume import TRANSCRIPT_NAME
@@ -14329,13 +14346,6 @@ def _peek_search(directory: Path, *, needle: str, regex: bool, need: int) -> _Pe
         _iter_complete_lines_backward,
     )
 
-    if regex:
-        try:
-            pattern = re.compile(needle)
-        except re.error as exc:
-            return f"`query` is not a valid regular expression: {exc}"
-    else:
-        pattern = None
     path = directory / TRANSCRIPT_NAME
     scanned = 0
     hit_id = ""
@@ -14348,11 +14358,15 @@ def _peek_search(directory: Path, *, needle: str, regex: bool, need: int) -> _Pe
                 if not raw.strip():
                     continue
                 # Depth is counted ROW by ROW — the bytes walked past, newline
-                # included — not per chunk read. The guarantee is about how
-                # DEEP the search looked (a hit reports a depth at or under
-                # the budget; a miss reports the budget itself), and a
-                # chunk-granular count would break both on any journal
-                # smaller than one chunk.
+                # included — not per chunk read, because a chunk-granular
+                # count breaks on any journal smaller than one chunk. Caveat,
+                # deliberate: the budget is checked BEFORE the next row is
+                # added, so the row that crosses it is still walked and
+                # counted — `scanned_bytes` can overshoot `_PEEK_SCAN_BYTES`
+                # by up to ONE row's length (transcript.py measures rows of
+                # tens of MB; the miss test tolerates +2,000 for its ~950-byte
+                # rows). Under that, a hit reports its true depth and a miss
+                # reports the budget.
                 if scanned >= _PEEK_SCAN_BYTES:
                     budget_stop = True
                     break
@@ -14542,19 +14556,25 @@ def _peek_body(
 
 
 def _peek_read(
-    directory: Path, params: SessionsParams, *, need: int
+    directory: Path,
+    params: SessionsParams,
+    *,
+    need: int,
+    pattern: re.Pattern[str] | None,
 ) -> tuple[_PeekWindow | str, str]:
     """Run the one read the request describes; return ``(window|refusal, mode)``.
 
     The order is the design's two-level location: a ``query`` locates a step
     (the store-level search stays `list`'s job — this addresses ONE session),
     and the window selectors are the rest. Validation has already refused
-    combinations; this only picks the single remaining one.
+    combinations; this only picks the single remaining one. ``pattern`` is the
+    request's compiled regex (``None`` = literal mode), compiled by the caller
+    so a malformed one was classified as a fault before the thread started.
     """
 
     query = str(params.query or "").strip()
     if query:
-        return _peek_search(directory, needle=query, regex=bool(params.regex), need=need), "search"
+        return _peek_search(directory, needle=query, pattern=pattern, need=need), "search"
     if params.head is not None:
         return _peek_head(directory, need=need), "head"
     if params.before_id is not None:
@@ -14599,6 +14619,20 @@ async def _sessions_peek(
         if params.steps is not None
         else params.head if params.head is not None else _PEEK_DEFAULT_STEPS
     )
+    pattern: re.Pattern[str] | None = None
+    if params.regex:
+        query = str(params.query or "")
+        try:
+            pattern = re.compile(query)
+        except re.error as exc:
+            # Malformed is the MODEL's argument class, not the machine's:
+            # `query` is typed `string`, so an unbalanced group passes schema
+            # validation and only fails here — the same class `read` (its
+            # `?q=` handle fragment) and `grep` classify with
+            # `_invalid_arguments` (round-1 review, R-5). The compile happens
+            # HERE, once, so the search thread receives a pattern that cannot
+            # fail.
+            return _invalid_arguments(tool_call_id, "sessions", f"invalid regex '{query}': {exc}")
     try:
         if params.digest:
             digest = await asyncio.to_thread(
@@ -14614,7 +14648,9 @@ async def _sessions_peek(
             }
             text = digest.text
         else:
-            payload, mode = await asyncio.to_thread(_peek_read, directory, params, need=need)
+            payload, mode = await asyncio.to_thread(
+                _peek_read, directory, params, need=need, pattern=pattern
+            )
             if isinstance(payload, str):
                 return _error(tool_call_id, "sessions", payload)
             details = {
