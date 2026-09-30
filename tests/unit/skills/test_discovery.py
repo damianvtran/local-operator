@@ -183,11 +183,16 @@ class TestScanSkillsDir:
         assert skills["dmi"].hide is True
         assert all(s.source == "test" for s in skills.values())
 
-    def test_skips_dotdirs_and_nondirs_and_is_non_recursive(self, tmp_path: Path) -> None:
+    def test_skips_dotdirs_and_nondirs_and_stops_at_a_skill_boundary(self, tmp_path: Path) -> None:
+        # SEMANTIC CHANGE (bounded-depth walk, #1818): this used to be
+        # ``..._is_non_recursive``. The dotdir / non-dir assertions and the
+        # "a skill's own subtree is never scanned" assertion are unchanged;
+        # what is no longer true is that the scan stops at one level -- grouped
+        # descent is covered by TestBoundedDepthWalk.
         root = tmp_path / "skills"
         _write_skill(root, "real")
         _write_skill(root, ".hidden-dir")
-        # non-recursive: nested skill under a skill dir is not picked up
+        # boundary: nested skill under a skill dir is not picked up
         nested = root / "real" / "nested"
         nested.mkdir()
         (nested / "SKILL.md").write_text("---\ndescription: nested\n---\n", encoding="utf-8")
@@ -687,3 +692,430 @@ class TestPlainSkillNameDriveRuleIsPlatformGated:
         monkeypatch.setattr(discovery_module.Path, "is_dir", explode)
         for name in self._DRIVE_SHAPES:
             assert diagnose_missing_skill(name, [root]) is None, name
+
+
+def _plant(
+    root: Path, rel: str, *, description: str | None = "A test skill.", **kw: object
+) -> Path:
+    """Write a skill at a nested relative path (``group/sub/leaf``)."""
+    parent, _, leaf = rel.rpartition("/")
+    base = root / parent if parent else root
+    base.mkdir(parents=True, exist_ok=True)
+    return _write_skill(base, leaf, description=description, **kw)  # type: ignore[arg-type]
+
+
+class TestSkillMaxDepth:
+    """``LOCAL_OPERATOR_SKILL_MAX_DEPTH``: default, override, clamp, never raises."""
+
+    def test_default_is_three(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv(discovery_module.SKILL_MAX_DEPTH_ENV, raising=False)
+        assert discovery_module.skill_max_depth() == 3
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [("1", 1), ("2", 2), (" 4 ", 4), ("5", 5), ("0", 1), ("-7", 1), ("6", 5), ("999", 5)],
+    )
+    def test_override_is_honoured_and_clamped(
+        self, monkeypatch: pytest.MonkeyPatch, raw: str, expected: int
+    ) -> None:
+        monkeypatch.setenv(discovery_module.SKILL_MAX_DEPTH_ENV, raw)
+        assert discovery_module.skill_max_depth() == expected
+
+    @pytest.mark.parametrize("raw", ["", "   ", "abc", "2.5", "1e3"])
+    def test_invalid_or_blank_falls_back_to_default(
+        self, monkeypatch: pytest.MonkeyPatch, raw: str
+    ) -> None:
+        monkeypatch.setenv(discovery_module.SKILL_MAX_DEPTH_ENV, raw)
+        assert discovery_module.skill_max_depth() == 3
+
+    def test_depth_one_reproduces_the_flat_scan(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "skills"
+        _plant(root, "flat")
+        _plant(root, "group/grouped")
+        monkeypatch.setenv(discovery_module.SKILL_MAX_DEPTH_ENV, "1")
+        assert [s.name for s in scan_skills_dir(root, "t")] == ["flat"]
+        monkeypatch.setenv(discovery_module.SKILL_MAX_DEPTH_ENV, "2")
+        assert [s.name for s in scan_skills_dir(root, "t")] == ["flat", "grouped"]
+
+
+class TestBoundedDepthWalk:
+    """Grouped libraries are found; a skill boundary is never crossed."""
+
+    def test_grouped_library_is_discovered(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        _plant(root, "minerva/minerva-router")
+        _plant(root, "minerva/minerva-skills")
+        _plant(root, "flat")
+        skills = scan_skills_dir(root, source="t")
+        assert [s.name for s in skills] == ["flat", "minerva-router", "minerva-skills"]
+        router = next(s for s in skills if s.name == "minerva-router")
+        assert router.base_dir == root / "minerva" / "minerva-router"
+        assert router.file_path == root / "minerva" / "minerva-router" / "SKILL.md"
+
+    def test_second_grouping_level_within_the_cap(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        _plant(root, "vendor/product/deep-skill")
+        assert [s.name for s in scan_skills_dir(root, "t")] == ["deep-skill"]
+
+    def test_beyond_the_cap_is_not_discovered_or_fingerprinted(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        _plant(root, "kept")
+        before = roots_fingerprint([root])
+        too_deep = _plant(root, "a/b/c/d/noise")
+        assert [s.name for s in scan_skills_dir(root, "t")] == ["kept"]
+        # Lock-step: what the scanner ignores, the fingerprint must not watch --
+        # otherwise an edit inside vendored noise would force a rescan per miss.
+        # The root's own mtime legitimately moved (a group folder appeared), so
+        # compare the per-skill entries: no over-deep file is among them, and
+        # editing it changes nothing.
+        assert roots_fingerprint([root])[1:] == before[1:]
+        settled = roots_fingerprint([root])
+        too_deep.write_text("---\ndescription: changed and longer\n---\n")
+        assert roots_fingerprint([root]) == settled
+
+    def test_the_cap_is_inclusive(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        root = tmp_path / "skills"
+        _plant(root, "a/b/edge")  # depth 3
+        _plant(root, "a/b/c/over")  # depth 4
+        assert [s.name for s in scan_skills_dir(root, "t")] == ["edge"]
+        monkeypatch.setenv(discovery_module.SKILL_MAX_DEPTH_ENV, "4")
+        assert [s.name for s in scan_skills_dir(root, "t")] == ["edge", "over"]
+
+    def test_skill_internals_never_register(self, tmp_path: Path) -> None:
+        """The openai/codex#22275 failure mode: nested SKILL.md files inside a skill."""
+        root = tmp_path / "skills"
+        _plant(root, "group/real")
+        for trap in (
+            "group/real/references/cheatsheet",
+            "group/real/scripts/helper",
+            "group/real/assets/tpl",
+            "group/real/runtime-sources/vendor/pkg/sub",
+            "group/real/node_modules/pkg",
+        ):
+            _plant(root, trap)
+        assert [s.name for s in scan_skills_dir(root, "t")] == ["real"]
+
+    def test_a_dropped_skill_is_still_a_boundary(self, tmp_path: Path) -> None:
+        # Blank description -> dropped, but its references/ must not leak the
+        # moment its frontmatter breaks.
+        root = tmp_path / "skills"
+        _plant(root, "broken", description=None)
+        _plant(root, "broken/references/inner")
+        _plant(root, "disabled", enabled=False)
+        _plant(root, "disabled/inner")
+        assert scan_skills_dir(root, "t") == []
+
+    def test_a_grouping_folder_that_gains_a_skill_md_becomes_a_boundary(
+        self, tmp_path: Path
+    ) -> None:
+        root = tmp_path / "skills"
+        _plant(root, "group/inner")
+        assert [s.name for s in scan_skills_dir(root, "t")] == ["inner"]
+        (root / "group" / "SKILL.md").write_text("---\ndescription: now a skill\n---\n")
+        skills = scan_skills_dir(root, "t")
+        assert [s.name for s in skills] == ["group"]  # inner is no longer scanned
+
+    def test_dotdirs_are_skipped_at_every_level(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        _plant(root, ".git/skill")
+        _plant(root, "group/.hidden")
+        _plant(root, ".hidden-group/skill")
+        _plant(root, "group/visible")
+        assert [s.name for s in scan_skills_dir(root, "t")] == ["visible"]
+
+    def test_a_directory_named_skill_md_is_a_grouping_folder(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        (root / "odd" / "SKILL.md").mkdir(parents=True)
+        _plant(root, "odd/inner")
+        assert [s.name for s in scan_skills_dir(root, "t")] == ["inner"]
+
+    def test_symlinked_group_is_followed(self, tmp_path: Path) -> None:
+        library = tmp_path / "library"
+        _plant(library, "tool")
+        root = tmp_path / "skills"
+        root.mkdir()
+        (root / "linked-group").symlink_to(library, target_is_directory=True)
+        skills = scan_skills_dir(root, "t")
+        assert [s.name for s in skills] == ["tool"]
+        assert skills[0].file_path == root / "linked-group" / "tool" / "SKILL.md"
+
+    def test_symlink_cycle_terminates_at_the_cap(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        _plant(root, "group/real")
+        (root / "group" / "loop").symlink_to(root, target_is_directory=True)
+        assert [s.name for s in scan_skills_dir(root, "t")] == ["real"]
+        roots_fingerprint([root])  # must not raise or hang
+
+    def test_unreadable_group_is_tolerated(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        _plant(root, "ok")
+        locked = root / "locked"
+        locked.mkdir()
+        _plant(locked, "hidden-by-perms")
+        locked.chmod(0)
+        try:
+            assert [s.name for s in scan_skills_dir(root, "t")] == ["ok"]
+            roots_fingerprint([root])
+        finally:
+            locked.chmod(0o755)
+
+    def test_realpath_dedupe_across_roots_for_a_nested_skill(self, tmp_path: Path) -> None:
+        real = tmp_path / "real"
+        _plant(real, "grp/one")
+        alias = tmp_path / "alias-root"
+        alias.mkdir()
+        (alias / "grp").symlink_to(real / "grp", target_is_directory=True)
+        skills, warnings = discover_skills([real, alias])
+        assert [s.name for s in skills] == ["one"]
+        assert skills[0].file_path == real / "grp" / "one" / "SKILL.md"
+        assert warnings == []
+
+    def test_shallower_skill_wins_a_within_root_name_collision(self, tmp_path: Path) -> None:
+        # "aaa/dup" sorts BEFORE "zzz" in name order, yet the shallower
+        # "zzz" (depth 1, name: dup) must win: precedence is depth first.
+        root = tmp_path / "skills"
+        _plant(root, "aaa/dup")
+        _plant(root, "zzz", name="dup")
+        skills, warnings = discover_skills([root])
+        assert [s.file_path for s in skills] == [root / "zzz" / "SKILL.md"]
+        assert len(warnings) == 1 and "aaa" in warnings[0]
+
+    def test_equal_depth_collision_falls_back_to_walk_order(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        _plant(root, "b-group/dup")
+        _plant(root, "a-group/dup")
+        skills, _ = discover_skills([root])
+        assert [s.file_path for s in skills] == [root / "a-group" / "dup" / "SKILL.md"]
+
+    def test_earlier_root_still_beats_a_shallower_skill_in_a_later_root(
+        self, tmp_path: Path
+    ) -> None:
+        first, second = tmp_path / "first", tmp_path / "second"
+        _plant(first, "grp/dup")
+        _plant(second, "dup")
+        skills, _ = discover_skills([first, second])
+        assert [s.file_path for s in skills] == [first / "grp" / "dup" / "SKILL.md"]
+
+    def test_order_is_deterministic_across_repeated_scans(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        for rel in ("z/one", "a/two", "m/n/three", "flat-b", "flat-a", "Z/Upper"):
+            _plant(root, rel)
+        first = discover_skills([root])
+        for _ in range(5):
+            assert discover_skills([root]) == first
+        assert [s.name for s in first[0]] == sorted(
+            (s.name for s in first[0]), key=lambda n: (n.lower(), n)
+        )
+
+    def test_flat_tree_scan_order_is_the_old_one_level_order(self, tmp_path: Path) -> None:
+        # Byte-stability for flat roots: the walk order IS the sorted-children
+        # order the one-level scanner produced.
+        root = tmp_path / "skills"
+        # (no "a"/"A" pair: macOS volumes are case-insensitive)
+        for name in ("b", "A", "c", "Z"):
+            _plant(root, name)
+        assert [s.base_dir.name for s in scan_skills_dir(root, "t")] == sorted(["b", "A", "c", "Z"])
+
+
+class TestBoundedDepthFingerprint:
+    """The fingerprint watches exactly what the scanner registers."""
+
+    def test_flat_tree_entry_shape_is_unchanged(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        md = _plant(root, "alpha")
+        (root / "notes").mkdir()  # a dir with no SKILL.md contributes nothing
+        st = md.stat()
+        root_mtime = root.stat().st_mtime_ns
+        assert roots_fingerprint([root, tmp_path / "absent"]) == (
+            (str(root), root_mtime),
+            (str(root / "alpha"), st.st_mtime_ns, st.st_size),
+            (str(tmp_path / "absent"), None),
+        )
+
+    def test_nested_skill_md_edit_in_place_changes_it(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        md = _plant(root, "grp/blank", description=None)
+        before = roots_fingerprint([root])
+        st = md.stat()
+        md.write_text("---\ndescription: repaired now\n---\n# body\n")
+        os.utime(md, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+        assert roots_fingerprint([root]) != before
+
+    def test_nested_add_and_remove_change_it(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        _plant(root, "grp/one")
+        base = roots_fingerprint([root])
+        added = _plant(root, "grp/two")
+        with_two = roots_fingerprint([root])
+        assert with_two != base
+        added.unlink()
+        assert roots_fingerprint([root]) == base
+
+    def test_a_group_gaining_a_skill_md_changes_it(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        _plant(root, "grp/inner")
+        before = roots_fingerprint([root])
+        (root / "grp" / "SKILL.md").write_text("---\ndescription: g\n---\n")
+        after = roots_fingerprint([root])
+        assert after != before
+        # ... and the inner skill, now beyond the boundary, is no longer watched.
+        assert all("inner" not in str(entry) for entry in after)
+
+    def test_skill_internals_are_not_fingerprinted(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        _plant(root, "grp/real")
+        before = roots_fingerprint([root])
+        _plant(root, "grp/real/references/x")
+        assert roots_fingerprint([root]) == before
+
+    def test_unchanged_grouped_tree_is_stable(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        _plant(root, "a/b/c")
+        _plant(root, "grp/x")
+        assert roots_fingerprint([root]) == roots_fingerprint([root])
+
+    def test_fingerprint_and_scanner_walk_together(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """For every depth cap, watched skill dirs == registered skill dirs."""
+        root = tmp_path / "skills"
+        for rel in (
+            "flat",
+            "g/one",
+            "g/h/two",
+            "g/h/i/three",
+            "g/h/i/j/four",
+            "g/one/references/trap",
+            ".hid/skill",
+        ):
+            _plant(root, rel)
+        for depth in ("1", "2", "3", "4", "5"):
+            monkeypatch.setenv(discovery_module.SKILL_MAX_DEPTH_ENV, depth)
+            scanned = {str(s.base_dir) for s in scan_skills_dir(root, "t")}
+            watched = {entry[0] for entry in roots_fingerprint([root])[1:]}  # type: ignore[index]
+            assert scanned == watched, depth
+
+
+class TestDiagnoseNestedSkills:
+    """The miss-path diagnostic can name a skill that lives in a grouping folder."""
+
+    def test_nested_missing_description_names_the_nested_path(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        _plant(root, "minerva/broken", description=None)
+        message = diagnose_missing_skill("broken", [root])
+        assert message is not None
+        assert str(root / "minerva" / "broken" / "SKILL.md") in message
+        assert "no 'description'" in message
+
+    def test_nested_disabled(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        _plant(root, "grp/off", enabled=False)
+        message = diagnose_missing_skill("off", [root])
+        assert message is not None
+        assert "disabled by 'enabled: false'" in message
+        assert str(root / "grp" / "off" / "SKILL.md") in message
+
+    def test_nested_name_mismatch(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        _plant(root, "grp/dirname", name="other")
+        message = diagnose_missing_skill("dirname", [root])
+        assert message is not None
+        assert "declares name 'other'" in message
+        assert str(root / "grp" / "dirname" / "SKILL.md") in message
+
+    def test_nested_invalid_yaml(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        base = root / "grp" / "yaml"
+        base.mkdir(parents=True)
+        (base / "SKILL.md").write_text("---\ndescription: Lean 4: proofs\n---\n")
+        message = diagnose_missing_skill("yaml", [root])
+        assert message is not None and "invalid YAML" in message
+        assert str(base / "SKILL.md") in message
+
+    def test_beyond_the_cap_says_nothing(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        _plant(root, "a/b/c/d/deep", description=None)
+        assert diagnose_missing_skill("deep", [root]) is None
+
+    def test_skill_internals_are_not_diagnosed(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        _plant(root, "real")
+        _plant(root, "real/references/inner", description=None)
+        assert diagnose_missing_skill("inner", [root]) is None
+
+    def test_a_grouping_folder_sharing_the_name_earns_no_complaint(self, tmp_path: Path) -> None:
+        # A directory named ``name`` with no SKILL.md that is NOT a direct child
+        # of a root is just a group; only the direct-child case keeps today's
+        # "has no SKILL.md" message.
+        root = tmp_path / "skills"
+        (root / "grp" / "lonely").mkdir(parents=True)
+        assert diagnose_missing_skill("lonely", [root]) is None
+
+    def test_flat_messages_are_unchanged(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        (root / "empty").mkdir(parents=True)
+        assert (
+            diagnose_missing_skill("empty", [root])
+            == f"A directory 'empty' exists at {root} but has no SKILL.md."
+        )
+        _plant(root, "blank", description=None)
+        message = diagnose_missing_skill("blank", [root])
+        assert message == (
+            f"{root / 'blank' / 'SKILL.md'} has no 'description' in its frontmatter; "
+            "skills without one are not loaded. Add one and read the URL again."
+        )
+
+    def test_shallower_candidate_is_reported_before_a_deeper_one(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        _plant(root, "aaa/twin", description=None)  # deeper, sorts first by name
+        _plant(root, "zzz/yyy/twin", description=None)
+        message = diagnose_missing_skill("twin", [root])
+        assert message is not None and str(root / "aaa" / "twin" / "SKILL.md") in message
+        _plant(root, "twin", enabled=False)  # depth 1 now
+        message = diagnose_missing_skill("twin", [root])
+        assert message is not None and str(root / "twin" / "SKILL.md") in message
+
+    def test_root_precedence_beats_depth(self, tmp_path: Path) -> None:
+        first, second = tmp_path / "first", tmp_path / "second"
+        _plant(first, "grp/twin", description=None)
+        _plant(second, "twin", description=None)
+        message = diagnose_missing_skill("twin", [first, second])
+        assert message is not None and str(first / "grp" / "twin" / "SKILL.md") in message
+
+    def test_unsafe_names_spend_no_filesystem_work_even_with_a_walk(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root = tmp_path / "skills"
+        _plant(root, "grp/x")
+
+        def explode(*_a: object, **_k: object) -> object:
+            raise AssertionError("an unsafe name must not reach the filesystem")
+
+        monkeypatch.setattr(discovery_module, "_walk_skill_dirs", explode)
+        monkeypatch.setattr(discovery_module.Path, "is_dir", explode)
+        for name in ("..", "/etc", "a/b", "..\\..\\x", ".", ""):
+            assert diagnose_missing_skill(name, [root]) is None
+
+    def test_never_raises_on_an_unreadable_tree(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        locked = root / "locked"
+        _plant(locked, "x", description=None)
+        locked.chmod(0)
+        try:
+            assert diagnose_missing_skill("x", [root]) is None
+        finally:
+            locked.chmod(0o755)
+
+
+class TestScannerAndPredicateAgreeForGroupedNames:
+    def test_every_grouped_name_the_scanner_registers_is_admitted(self, tmp_path: Path) -> None:
+        root = tmp_path / "skills"
+        _plant(root, "g/plain")
+        _plant(root, "g/h/renamed", name="declared-name")
+        _plant(root, "a:b/c:d")
+        registered = [s.name for s in scan_skills_dir(root, "t")]
+        assert {"plain", "declared-name", "c:d"} <= set(registered)
+        for name in registered:
+            assert is_plain_skill_name(name) is True, name
