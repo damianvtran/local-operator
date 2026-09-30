@@ -14,12 +14,23 @@ than each growing its own dedupe.
 Three rules, and the third is what keeps suppression from becoming silence:
 
 * an identical card (same subject + same fingerprint) that is still
-  outstanding is suppressed;
+  outstanding is suppressed — where "outstanding" includes "still shown":
+  a record the caller's store no longer displays is void, not a suppression
+  (see ``record_visible``);
 * a CHANGED card — a different reason, or the same server failing again after
   a live recovery — is a state change and emits;
 * an outstanding card older than :data:`DEFAULT_REMIND_AFTER_S` re-emits as a
   reminder, so a long-lived conversation re-surfaces a condition it may have
   scrolled past instead of the suppression lasting forever.
+
+Visibility is part of outstandingness because suppression must never outlive
+the card it stands for: a caller whose store RETIRES rows it once held (the
+MCP caller's replay drops everything below its latest compaction cut) must
+be able to void a record, or the next identical failure would be suppressed
+with no surface showing anything. ``should_emit`` therefore takes an
+optional ``record_visible`` callback and re-validates its own record through
+it: a record the caller no longer shows is dropped and the durable lookup
+decides — the same answer for both halves of "outstanding".
 
 The unit of identity is the RENDERED CARD, not the reason string: the
 fingerprint is taken over the exact text the row would show (see
@@ -91,7 +102,9 @@ class NoticeGuard:
     * ``_outstanding`` — the card this guard last saw EMITTED, with when.
       Written by :meth:`note_emitted` only after the caller's write LANDS
       (recording a suppressed attempt as emitted would push the reminder
-      window out past a notice nobody ever saw), read by :meth:`should_emit`.
+      window out past a notice nobody ever saw), read by :meth:`should_emit`,
+      and dropped by it when the caller's ``record_visible`` reports the
+      emission is no longer shown.
     * ``_recovered`` — the subject recovered live in THIS process since that
       emission. Set by :meth:`note_recovered`, consumed by the next emission.
       Without it, a re-failure after a live recovery would be suppressed by
@@ -119,6 +132,7 @@ class NoticeGuard:
         fingerprint: str,
         *,
         find_previous: Callable[[str, str], float | None] | None = None,
+        record_visible: Callable[[str, str], bool] | None = None,
         now: float | None = None,
     ) -> bool:
         """Whether a notice for ``subject`` carrying this card should be written.
@@ -126,14 +140,25 @@ class NoticeGuard:
         Sources of "already outstanding", checked in order:
 
         1. this guard's own record — same process, since boot (or since the
-           last emission);
-        2. ``find_previous`` — the caller's DURABLE lookup, reached only when
-           the guard itself has no record. Called as ``find_previous(subject,
-           fingerprint)`` and must return the timestamp of the newest PERSISTED
-           notice for that subject when it is comparable to this card, else
-           ``None``. It is a callback because only the caller knows where its
-           notices persist (for MCP: a transcript scan);
+           last emission). Only trusted while the caller still SHOWS it: when
+           ``record_visible`` is supplied and reports the recorded emission
+           is gone (the MCP case: a compaction cut drops the row from every
+           replay), the record is void, dropped, and the durable lookup below
+           decides instead;
+        2. ``find_previous`` — the caller's DURABLE lookup, reached when the
+           guard has no record (or only a void one). Called as
+           ``find_previous(subject, fingerprint)`` and must return the
+           timestamp of the newest PERSISTED notice for that subject when it
+           is comparable to this card, else ``None``. It is a callback
+           because only the caller knows where its notices persist (for MCP:
+           a transcript scan);
         3. nothing outstanding — emit.
+
+        ``record_visible(subject, fingerprint) -> bool`` is the caller's
+        answer to "does your store still show the emission this guard
+        recorded?". Pass it when the caller's store can RETIRE rows it once
+        held (a replay with a compaction cut); ``None`` keeps the record
+        authoritative, which is correct for an append-only store.
 
         A match against either source is suppressed only while it is FRESH;
         past the reminder window it re-emits (the same card, one more time),
@@ -145,10 +170,12 @@ class NoticeGuard:
         shows, and the marker is consumed by the emission's
         :meth:`note_emitted`.
 
-        No side effects: a suppression is a read. Only :meth:`note_emitted`
-        and :meth:`note_recovered` mutate, so a caller that decides not to
-        write after an approving answer cannot leave the guard believing it
-        did.
+        A suppression is a read. The one write here is dropping a VOID
+        record — it can never suppress again, and forgetting it cannot
+        invent an emission. No other state changes: only
+        :meth:`note_emitted` and :meth:`note_recovered` record emissions, so
+        a caller that decides not to write after an approving answer cannot
+        leave the guard believing it did.
         """
         current = time.time() if now is None else now
         record = self._outstanding.get(subject)
@@ -159,7 +186,14 @@ class NoticeGuard:
                 # failure after the guard was re-armed in a way that kept the
                 # record. Emit.
                 return True
-            return self._is_stale(current, emitted_at)
+            if record_visible is None or record_visible(subject, fingerprint):
+                return self._is_stale(current, emitted_at)
+            # The record is VOID — the caller's store no longer shows the
+            # emission it stands for (for MCP: a compaction cut dropped the
+            # row from the replay). Clear it and fall through: a record that
+            # cannot be shown must not keep suppressing, and the durable
+            # lookup below is the one that knows what the store still shows.
+            self._outstanding.pop(subject, None)
         if subject in self._recovered:
             return True
         if find_previous is not None:
