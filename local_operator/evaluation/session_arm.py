@@ -34,7 +34,10 @@ without a terminal batch), ``truncated`` (the step budget or the wall bound
 ended the run; the state reached is still scored), ``failed_pre_bundle`` (the
 environment never came up, including a REFUSAL TO START: the record sink
 refuses before ``launch`` when the volume cannot hold the expected record plus
-its seal reserve), ``failed`` (the run died mid-episode).
+its seal reserve), ``failed`` (the run died mid-episode -- a bridge that could
+not re-establish its observation binding after a transport failure ends here
+too, with ``terminal_reason: "bridge-wedged"``, and never as ``agent_stop``,
+which reads as the model giving up).
 
 The record is a directory with ``events.jsonl`` (the session's own event
 stream, via ``headless_print.printable_event`` -- the same projection ``exec
@@ -84,6 +87,7 @@ from local_operator.evaluation.adapters.api import (
     ExecuteParams,
     Handshake,
     InspectRequirementsParams,
+    ObserveParams,
     PrepareParams,
     RequirementsResult,
     RescueDescriptor,
@@ -185,6 +189,26 @@ BUDGET_ACK = (
     "Episode step budget reached: the environment will not accept further "
     "actions and the run will be scored on the state reached. Do not call this "
     "tool again."
+)
+
+#: The ``terminal_reason`` a bridge records when its observation binding could
+#: not be re-established after a failed execute (the wedge). The driver maps it
+#: to ``status: "failed"`` -- NOT ``agent_stop``, which reads as a capability
+#: reading and forced every F1 triage to be re-derived from ``events.jsonl`` by
+#: hand. Named once; the record, the outcome and the tests all read it here.
+BRIDGE_WEDGED_TERMINAL = "bridge-wedged"
+
+#: The sentence a re-established binding delivers. The model's own batch ran
+#: (the adapter declared it committed) but the screen it produced is the one
+#: read-back that was lost, so the recovery must NOT imply the batch failed --
+#: and it must tell the model how to get current: a ``wait`` batch changes
+#: nothing and its own read-back returns the live screen.
+RECOVERY_AFTER_READBACK_LOSS = (
+    "Recovered: your last batch ran, but the environment could not return the "
+    "screen it produced (the observation read failed after its retries). The "
+    "episode continues. Do not assume that batch failed and do not repeat it "
+    "blindly; re-read the current state before acting again -- a `wait` batch "
+    "changes nothing and returns the current screen."
 )
 
 #: The completion challenge's channel sentence -- the ONE part of the shared
@@ -576,6 +600,59 @@ def split_prompt_content(blocks: Sequence[Any]) -> tuple[str, list[ImageContent]
     return "\n".join(texts), images
 
 
+def _bounded_cause(error: BaseException, *, limit: int = 300) -> str:
+    """``Class: message``, bounded -- the one rendering the wedge sentences,
+    the record payloads and the outcome diagnostic share.
+
+    Never a repr and never a traceback: the adapter's own discipline is that
+    its error text is canary-checked and safe to show, and a raw exception's
+    repr is the thing that is not (it can embed a literal credential).
+    """
+
+    return f"{type(error).__name__}: {error}"[:limit]
+
+
+def _bridge_wedge_sentence(
+    error: BaseException,
+    *,
+    committed: bool,
+    recovery_attempted: bool,
+    recover_error: BaseException | None,
+) -> str:
+    """The one sentence a wedge ends with -- model-facing, record and outcome.
+
+    It must say WHICH failure wedged the bridge and WHAT was tried, because
+    the ``end_requested``-only shape this replaces (an ``agent_stop``) left
+    every reader to reconstruct the cause from ``events.jsonl`` by hand. The
+    three branches mirror the three states the recovery can end in; the
+    sentence is deliberately singular so the transcript, the record and the
+    outcome cannot drift into three different stories.
+    """
+
+    if recover_error is not None:
+        attempted = (
+            "a re-read of the environment's current observation failed too "
+            f"({_bounded_cause(recover_error)})"
+        )
+    elif recovery_attempted:
+        attempted = "the re-read returned no observation"
+    elif committed:
+        attempted = (
+            "no re-read path is wired into this build, so the binding cannot " "be re-established"
+        )
+    else:
+        attempted = (
+            "the failure did not declare the batch committed, so the batch's "
+            "state is ambiguous and re-reading is not safe"
+        )
+    return (
+        f"action bridge wedged by a transport error ({_bounded_cause(error)}); "
+        f"{attempted}. The observation binding could not be re-established, so "
+        "no further batch -- including a finish -- can run and the episode is "
+        "ending."
+    )
+
+
 # ---------------------------------------------------------------------------
 # The bridge: the episode half of the action wire
 # ---------------------------------------------------------------------------
@@ -588,6 +665,14 @@ RecordBatch = Callable[[str, Mapping[str, Any]], None]
 #: read-back recovery; tests fill it with anything that looks like
 #: ``ExecuteResult``.
 ExecuteBatch = Callable[[ActionBatch], Awaitable[Any]]
+
+#: The re-bind seam: one bounded attempt to fetch the observation the episode
+#: may continue from, called by the bridge only after an execute failure the
+#: adapter declared COMMITTED (``_observation_phase_failure``). The driver
+#: fills it with the read-only ``observe`` call; tests fill it with a fake.
+#: ``None`` means the bridge has no re-read path and a failed execute is
+#: terminal -- legibly (see ``ActionBridge._after_failed_execute``).
+RecoverObservation = Callable[[], Awaitable[Observation]]
 
 
 @dataclass
@@ -617,6 +702,12 @@ class ActionBridge:
     max_steps: int
     record: RecordBatch | None = None
     ask: Callable[[ActionBatch], Awaitable[str | None]] | None = None
+    #: The re-bind seam (see :data:`RecoverObservation`): exactly ONE read of
+    #: the environment's current observation, attempted only after an execute
+    #: failure the adapter declared committed. The bridge owns WHEN; the
+    #: driver owns the RPC. ``None`` degrades a failed execute to a legible
+    #: end rather than a silent one.
+    recover: RecoverObservation | None = None
     #: The task as it was stated -- the reset observation's text -- restated by
     #: the completion challenge (the same source the runner's gate uses).
     instruction: str = ""
@@ -638,6 +729,12 @@ class ActionBridge:
     #: step budget). The driver reads it after the turn: a reason here is the
     #: episode's own terminal, and the driver will not re-prompt.
     end_requested: str | None = None
+    #: Set beside ``end_requested`` when the terminal is the bridge's OWN (a
+    #: wedge, :data:`BRIDGE_WEDGED_TERMINAL`): the one sentence naming the
+    #: transport failure and what was attempted. The driver folds it into the
+    #: outcome's ``diagnostic`` so the record and the driver's summary agree on
+    #: WHY the run ended, instead of both saying only that it ended.
+    end_diagnostic: str | None = None
 
     def __post_init__(self) -> None:
         # The token is armed with observation zero, which only exists once the
@@ -1061,7 +1158,14 @@ class ActionBridge:
                     "is_error": True,
                     "details": refusal.details,
                 }
-            result = await self.execute(batch)
+            try:
+                result = await self.execute(batch)
+            except Exception as error:  # noqa: BLE001 - _after_failed_execute owns it
+                # The token was consumed above, so a raise from here used to
+                # leave the bridge permanently unable to bind any later batch
+                # -- including a finish -- and the episode spun to an
+                # ``agent_stop``. The re-bind (or the legible end) is below.
+                return await self._after_failed_execute(error=error)
             self._steps += 1
             token.record_in_flight(result.observation)
             if self.record is not None:
@@ -1089,6 +1193,152 @@ class ActionBridge:
                 "is_error": False,
                 "details": {"receipt": result.receipt.model_dump(mode="json")},
             }
+
+    async def _after_failed_execute(self, *, error: Exception) -> dict[str, Any]:
+        """One bounded re-bind after an execute failure, or a legible end.
+
+        THE WEDGE THIS CLOSES (F1, arm 1796). ``call`` consumes the token
+        BEFORE the batch runs, so a batch can never bind to a screen nobody was
+        shown; until this method existed, a raise from ``execute`` left the
+        token consumed with nothing in flight. From then on every call -- the
+        next batch AND a ``finish`` -- was refused with "no action batch was
+        run: this call found no observation to bind to", and the episode could
+        only spin until the model gave up (``agent_stop``, reading as
+        capability). Measured cost: one action-phase RPC error destroyed 2 of
+        10 episodes (tasks 001 and 013), both sealed zero.
+
+        WHY RECOVERY, NOT MORE RETRIES. Raising the read-back retry count is a
+        comparability-affecting policy change (INFRA.md; it changes what the
+        arm measures). The defect here is STATE: the binding is destroyed by a
+        failure the ADAPTER declared committed, and the episode stays dead even
+        when the environment is healthy again. So this method attempts exactly
+        ONE re-bind through the driver's ``recover`` seam (a read-only fetch of
+        the environment's current observation), and only for that committed
+        class (``_observation_phase_failure``) -- the same predicate the
+        read-back retries trust. For any other failure the batch's state is
+        ambiguous, the supervisor has poisoned the session, and re-reading is
+        not safe; the episode ends legibly instead.
+
+        THE BOUND AND ITS COST. One ``recover`` call per failed batch, and none
+        at all on the healthy path; the call itself is bounded by the caller's
+        own step timeout (one RPC, 180 s worst case in the campaign config).
+        When it cannot yield an observation the episode ends HERE, terminally
+        (:meth:`_end_wedged`). ``finish`` stays refused for a wedged bridge on
+        purpose: no screen exists to bind it to, and the driver stops the turn
+        instead of leaving the model to discover that by refusing it.
+        """
+
+        recover = self.recover
+        committed = _observation_phase_failure(error)
+        recovery_attempted = recover is not None and committed
+        recovered: Observation | None = None
+        recover_error: Exception | None = None
+        if recovery_attempted and recover is not None:
+            try:
+                recovered = await recover()
+            except Exception as failure:  # noqa: BLE001 - the wedge sentence names it
+                recover_error = failure
+        if recovered is not None:
+            return self._deliver_recovery(error=error, recovered=recovered)
+        return self._end_wedged(
+            error=error,
+            committed=committed,
+            recovery_attempted=recovery_attempted,
+            recover_error=recover_error,
+        )
+
+    def _deliver_recovery(self, *, error: Exception, recovered: Observation) -> dict[str, Any]:
+        """Re-arm the token with the re-bound observation and answer the call.
+
+        Held IN FLIGHT, never armed directly: ``fold`` at the turn end arms
+        it, so the one-batch-per-turn invariant survives the recovery -- a
+        second call in the same turn still finds nothing pending and is
+        refused, exactly as after a normal batch.
+
+        THE SCREEN IS ALREADY IN THE TRANSCRIPT when the adapter's current
+        observation IS the one the model last saw (the wedge case: the batch
+        committed but its read-back was the thing that was lost). It is NOT
+        re-rendered then, because the renderer dedups a byte-identical repeat
+        into its "your last action changed nothing visible" note -- a claim
+        this path cannot make, since the lost read is exactly the one that
+        would have shown whether anything changed. The recovery sentence says
+        what happened instead and tells the model to re-read before acting.
+        """
+
+        token = self._token
+        if token is not None:
+            token.record_in_flight(recovered)
+        shown_before = self._last_observation
+        content: list[Any] = [TextContent(text=RECOVERY_AFTER_READBACK_LOSS)]
+        if shown_before is None or shown_before.observation_id != recovered.observation_id:
+            rendered = self.render(recovered)
+            self._last_shown = (recovered.observation_id, rendered)
+            self._last_observation = recovered
+            content = [*content, *rendered]
+        if self.record is not None:
+            self.record(
+                "recovered",
+                {
+                    "steps": self._steps,
+                    "transport_error": _bounded_cause(error, limit=500),
+                    "observation_id": recovered.observation_id,
+                },
+            )
+        return {
+            "content": content,
+            "is_error": True,
+            "details": {"recovered": True, "observation_id": recovered.observation_id},
+        }
+
+    def _end_wedged(
+        self,
+        *,
+        error: Exception,
+        committed: bool,
+        recovery_attempted: bool,
+        recover_error: Exception | None,
+    ) -> dict[str, Any]:
+        """End the episode: the observation binding cannot be re-established.
+
+        Terminal AND legible. The token is closed so no later call can bind,
+        and the terminal reason plus its diagnostic name the transport failure
+        -- the driver maps both into an outcome of ``failed`` /
+        ``bridge-wedged`` instead of the ``agent_stop`` that used to read as
+        the model giving up. The turn itself is stopped by the driver, which
+        watches this state from its event sink (``request_graceful_cancel``
+        keeps the failed call's result paired in the transcript).
+        """
+
+        token = self._token
+        if token is not None:
+            token.mark_terminal()
+        sentence = _bridge_wedge_sentence(
+            error,
+            committed=committed,
+            recovery_attempted=recovery_attempted,
+            recover_error=recover_error,
+        )
+        self.end_requested = BRIDGE_WEDGED_TERMINAL
+        self.end_diagnostic = sentence
+        if self.record is not None:
+            self.record(
+                "bridge_wedged",
+                {
+                    "steps": self._steps,
+                    "transport_error": _bounded_cause(error, limit=500),
+                    "recovery_attempted": recovery_attempted,
+                    "recover_error": (
+                        _bounded_cause(recover_error, limit=500)
+                        if recover_error is not None
+                        else None
+                    ),
+                },
+            )
+        return {
+            "content": [TextContent(text=sentence)],
+            "is_error": True,
+            "details": {"terminal": BRIDGE_WEDGED_TERMINAL},
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -1451,6 +1701,9 @@ async def run_session_episode(
             surface=surface,
             render=renderer.render,
             execute=_make_execute(adapter_session, config, record),
+            # The re-bind seam: one read-only ``observe`` after a failed
+            # execute the adapter declared committed (see ``_make_recover``).
+            recover=_make_recover(adapter_session, config, spec.episode_id),
             max_steps=config.max_steps,
             record=lambda kind, payload: record.write(
                 "action_" + kind,
@@ -1477,6 +1730,14 @@ async def run_session_episode(
         if episode_session.name is None and display_name:
             episode_session = replace(episode_session, name=display_name)
 
+        #: The wedge stop: sent once, when the bridge ends the episode because
+        #: its observation binding could not be re-established (see ``_sink``).
+        wedge_stop_sent = False
+        #: Bound by ``open_episode_session`` below; the sink reads it late
+        #: (a wedge can only be set by a call, which only happens after the
+        #: session is prompting, i.e. after this assignment).
+        handle: EpisodeSession | None = None
+
         def _sink(event: AgentEvent) -> None:
             # The sink sits on the engine's own dispatch path, where handler
             # errors are isolated and swallowed. A storage failure is already
@@ -1485,11 +1746,33 @@ async def run_session_episode(
             # event-fold error, a write after close) -- captured here, reported
             # in the outcome, and the run continues: a torn record stays
             # visible, and a paid episode is not lost to a logging fault.
+            nonlocal wedge_stop_sent
             try:
                 _on_event(record, bridge, event)
             except BaseException as error:  # noqa: BLE001 - see above
                 if not record_errors:
                     record_errors.append(error)
+            # Separated from the record path deliberately: the stop below is
+            # the driver's reaction to the WEDGE, not record bookkeeping, so a
+            # raise in it must not read as a torn record (and a record error
+            # must not skip the stop). The engine catches a handler raise and
+            # logs it; the outcome already carries the wedge reason either way.
+            if not wedge_stop_sent and bridge.end_requested == BRIDGE_WEDGED_TERMINAL:
+                # THE WEDGE STOP. The bridge could not re-establish its
+                # observation binding and has ended the episode itself;
+                # without this stop the model would spend whole turns on
+                # refusals (the shape that cost arm 1796 tasks 001/013) and
+                # the run would only end when the model gave up. The graceful
+                # cancel is the boundary-respecting stop: honoured after the
+                # failed call's result is paired into the transcript, before
+                # the next model request is spent -- and it is requested from
+                # the sink because this is the only driver-side seam that
+                # observes the session while the prompt is awaited.
+                wedge_stop_sent = True
+                if handle is not None:
+                    handle.session.request_graceful_cancel(
+                        bridge.end_diagnostic or "action bridge wedged"
+                    )
 
         handle = await open_episode_session(
             spec=episode_session,
@@ -1560,6 +1843,13 @@ async def run_session_episode(
         terminal_reason = bridge.end_requested
         if terminal_reason == "finish":
             status = "completed"
+        elif terminal_reason == BRIDGE_WEDGED_TERMINAL:
+            # The bridge could not re-establish its observation binding after a
+            # transport failure and ended the episode itself. That is an
+            # ENVIRONMENT death, not the model giving up: mapping it to the
+            # default ``agent_stop`` read as capability and sent every F1
+            # triage back into ``events.jsonl`` by hand.
+            status = "failed"
         elif terminal_reason == "max-steps" or steps >= config.max_steps:
             status = "truncated"
             terminal_reason = terminal_reason or "max-steps"
@@ -1632,8 +1922,19 @@ async def run_session_episode(
             )
         elif descriptor is not None:
             _discard_descriptor(config)
+        # A score failure on a run that already ended wedged is a CONSEQUENCE
+        # of the wedge (a failed re-read poisons the session, and a poisoned
+        # session cannot score), so the wedge stays the reported diagnostic --
+        # the root cause, not its sequel. Everywhere else a score failure is
+        # the outcome's reason, exactly as before.
+        diagnostic = bridge.end_diagnostic
         if score_error is not None:
-            raise score_error
+            if terminal_reason != BRIDGE_WEDGED_TERMINAL:
+                raise score_error
+            diagnostic = (
+                f"{diagnostic or 'action bridge wedged'} "
+                f"Scoring the state reached also failed: {_record_diagnostic(score_error)}."
+            )
         # The record's own failure is a property of the RECORD, not of the run:
         # the run is reported with its real status, steps and score, and the
         # record says what it lost. The old shape raised ``SessionArmError``
@@ -1647,6 +1948,7 @@ async def run_session_episode(
             score=score,
             steps=steps,
             terminal_reason=terminal_reason,
+            diagnostic=diagnostic,
             record_incomplete=record_failure is not None,
             record_diagnostic=(
                 _record_diagnostic(record_failure) if record_failure is not None else None
@@ -1878,6 +2180,40 @@ def _make_execute(
                 await asyncio.sleep(config.observation_retry_delay)
 
     return execute
+
+
+def _make_recover(
+    adapter_session: VerifiedAdapterSession, config: EpisodeConfig, episode_id: str
+) -> RecoverObservation:
+    """The re-bind seam: ONE bounded read of the environment's current state.
+
+    WHY ONE, AND WHY THIS CALL. The bridge calls this only after an execute
+    failure the adapter declared committed (``phase == "observation"``: the
+    batch applied, only the read-back lost) and whose configured read-back
+    retries have already run out -- so this is NOT a retry of that read-back
+    (raising those is a comparability-affecting change, see INFRA.md) but a
+    fresh state read through the read-only ``observe`` method every adapter
+    already answers (``reset_start`` reads observation zero through it). It
+    re-establishes what the bridge lost: a current observation the token can
+    be re-armed with. When it cannot -- the environment is still unable to
+    answer, or the read is refused -- the bridge ends the episode with the
+    wedge reason instead of leaving the model to spin (see
+    ``ActionBridge._end_wedged``).
+
+    THE BOUND AND ITS COST. Exactly one call per failed batch, none at all on
+    the healthy path; the call carries the same ``step_timeout`` every other
+    environment call in this arm carries (180 s in the campaign's config), so
+    the added worst case is one step-timeout of wall on a run that would
+    otherwise have died anyway.
+    """
+
+    async def recover() -> Observation:
+        result = await adapter_session.observe(
+            ObserveParams(episode_id=episode_id), timeout=config.step_timeout
+        )
+        return result.observation
+
+    return recover
 
 
 def _make_ask(
