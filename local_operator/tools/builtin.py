@@ -13137,9 +13137,11 @@ SESSIONS_LAUNCH_TIMEOUT_S = 120.0
 
 #: How long a ``starting`` job is polled for its ``running`` record after the
 #: launcher returns, before the receipt honestly reports the session id and
-#: pid as not yet published. The launcher already waited once; this is the
-#: shorter second read that catches a worker whose session booted just past
-#: the launcher's own deadline.
+#: pid as not yet published. The launcher already waited its own 5 s grace
+#: (``exec_mode._spawn_background``), and this second window is deliberately
+#: the SAME length rather than a shorter one (review round 1, R-3): a worker
+#: whose session booted just past the launcher's deadline still gets a full
+#: window, and a job that never publishes is bounded the same way.
 SESSIONS_READY_GRACE_S = 5.0
 _SESSIONS_READY_POLL_S = 0.1
 
@@ -13524,7 +13526,12 @@ def _sessions_marker_extras(session_id: str) -> dict[str, Any]:
         "transcript_path": None,
         "session_origin": None,
         "opened_by": None,
-        "sidebar_visibility": "listed",
+        # A directory that cannot be read is "unknown" visibility, never a
+        # guess: the pre-seeded value is what both early returns carry, and
+        # "listed" there asserted the one fact the read failed to establish
+        # (review round 1, R-4). The normal path overwrites it with the
+        # marker's own answer.
+        "sidebar_visibility": "unknown",
     }
     directory = config_dir() / "sessions" / session_id
     try:
@@ -13681,21 +13688,12 @@ async def _sessions_list_query(
     return _text(tool_call_id, "sessions", text, details=details)
 
 
-def _sessions_info_body(row: Mapping[str, Any], extras: Mapping[str, Any]) -> str:
-    """Two lines: the live-state row, then the durable facts about it."""
-    state = str(row.get("state") or "?")
-    name = str(row.get("conversation_name") or "(unnamed)")
-    parts = [f'"{name}" — {state}']
-    if row.get("session_id"):
-        parts.append(f"session {row['session_id']}")
-    if row.get("pid"):
-        parts.append(f"pid {row['pid']}")
-    if row.get("busy"):
-        parts.append("busy")
-    if row.get("pending"):
-        parts.append(f"pending {row['pending']}")
-    if row.get("model_label"):
-        parts.append(str(row["model_label"]))
+def _sessions_facts_line(extras: Mapping[str, Any]) -> str:
+    """The durable-facts line every ``info`` text ends with.
+
+    Shared by the row-backed and the disk-only bodies so the two cannot drift
+    into different sentences about the same directory (QA round 1, Q1).
+    """
     origin_text = extras.get("session_origin") or "the user's own (no marker)"
     second = [
         f"origin: {origin_text}",
@@ -13713,7 +13711,46 @@ def _sessions_info_body(row: Mapping[str, Any], extras: Mapping[str, Any]) -> st
         second.append(f"dir: {extras['session_dir']}")
     if extras.get("transcript_path"):
         second.append(f"transcript: {extras['transcript_path']}")
-    return ", ".join(parts) + "\n" + "; ".join(second)
+    return "; ".join(second)
+
+
+def _sessions_disk_only_body(facts: _SessionsDiskFacts, extras: Mapping[str, Any]) -> str:
+    """The ``info`` text when no listing row describes the session.
+
+    Two stored situations land here, and until review round 1 they shared one
+    wrong story: a session genuinely past the newest-first window, and one a
+    listing scan excludes at ANY limit because its origin is hidden
+    (``resume._is_hidden_origin`` — an ``agent-shell`` session is never in a
+    listing, so "past the window" was false for it; QA round 1, Q1). The
+    per-row reads need only the id, so the answer is composed from the
+    directory itself — and the reason named is the true one.
+    """
+    name = facts.name or "(unnamed)"
+    why = (
+        "hidden from every listing scan by its origin marker"
+        if extras.get("sidebar_visibility") == "hidden"
+        else "past the newest-first window a listing scan reads"
+    )
+    first = f'"{name}" — stored, {why}; it can still be resumed by its exact session id'
+    return first + "\n" + _sessions_facts_line(extras)
+
+
+def _sessions_info_body(row: Mapping[str, Any], extras: Mapping[str, Any]) -> str:
+    """Two lines: the live-state row, then the durable facts about it."""
+    state = str(row.get("state") or "?")
+    name = str(row.get("conversation_name") or "(unnamed)")
+    parts = [f'"{name}" — {state}']
+    if row.get("session_id"):
+        parts.append(f"session {row['session_id']}")
+    if row.get("pid"):
+        parts.append(f"pid {row['pid']}")
+    if row.get("busy"):
+        parts.append("busy")
+    if row.get("pending"):
+        parts.append(f"pending {row['pending']}")
+    if row.get("model_label"):
+        parts.append(str(row["model_label"]))
+    return ", ".join(parts) + "\n" + _sessions_facts_line(extras)
 
 
 async def _sessions_info(
@@ -13732,12 +13769,36 @@ async def _sessions_info(
     )
     if row is None:
         if stored:
+            # Two situations land here, and until review round 1 they shared
+            # one wrong sentence: a stored session genuinely past the
+            # newest-first window, and one a listing scan excludes at ANY
+            # limit because its origin is hidden (``resume._is_hidden_origin``
+            # — an ``agent-shell`` session never appears in a listing, so
+            # "past the window" was false for it; QA round 1, Q1). The
+            # per-row reads need only the id, so when the directory exists
+            # the answer is composed from disk; the error survives only for
+            # an id with no readable directory, where there is nothing to
+            # describe and no window claim to make.
+            extras = await asyncio.to_thread(_sessions_marker_extras, target.session_id)
+            if extras.get("session_dir"):
+                facts = await asyncio.to_thread(_sessions_disk_facts, target.session_id)
+                details = {
+                    "op": "info",
+                    "session_id": target.session_id,
+                    "listed": False,
+                    **extras,
+                }
+                text = _sessions_disk_only_body(facts, extras)
+                text, spill = spill_truncate(text, "sessions", context)
+                if spill:
+                    details.update(spill)
+                return _text(tool_call_id, "sessions", text, details=details)
             return _error(
                 tool_call_id,
                 "sessions",
-                f"session {target.session_id!r} exists in the store but is past the "
-                "newest-first window a listing scan reads; it can still be resumed by "
-                "its exact session id.",
+                f"session {target.session_id!r} has no readable session directory, so "
+                "there is nothing to describe; check the id, or run `lop sessions` "
+                "via bash for the raw listing.",
             )
         return _error(
             tool_call_id,
@@ -13777,6 +13838,20 @@ async def _sessions_stop(tool_call_id: str, params: SessionsParams) -> ToolResul
                 "run, and a stored conversation has none to end.",
             )
         return _error(tool_call_id, "sessions", target.error)
+
+    if target.record.pid == os.getpid():
+        # Self-guard on the same predicate ``send`` uses: the tool runs INSIDE
+        # the caller's session process, so a target naming this pid IS the
+        # session making the call. The ladder would socket-op (then signal)
+        # our own runtime and the call would die mid-flight with no receipt —
+        # refuse before the ladder (review round 1, R-2).
+        return _error(
+            tool_call_id,
+            "sessions",
+            "that target is this session; a session cannot stop itself — the ladder "
+            "would signal the very run making this call, which would die before it "
+            "could report anything back. Stop it from outside the session.",
+        )
 
     waited: list[str] = []
     outcome = await control.stop_session(
@@ -14004,7 +14079,13 @@ def _sessions_open_body(params: SessionsParams, details: Mapping[str, Any]) -> s
     """The one-line-ish receipt (§5.4): what was opened, where it shows up,
     and — for a hidden run — how each side still reaches it."""
     name = str(details.get("name") or "")
-    label = f'"{name}" ' if name else ""
+    # Two spellings, because the spaces differ per branch: ``named`` carries
+    # no trailing space and ``where`` starts with one, so composing them
+    # directly produced a double space in the resume receipt (review round 1,
+    # Q2). ``lead`` restores the trailing space the spawn sentences need
+    # before their literal verb.
+    named = f'"{name}"' if name else ""
+    lead = f"{named} " if named else ""
     bits = []
     if details.get("session_id"):
         bits.append(f"session {details['session_id']}")
@@ -14026,7 +14107,7 @@ def _sessions_open_body(params: SessionsParams, details: Mapping[str, Any]) -> s
         origin = details.get("origin") or "not recorded"
         visibility = details.get("sidebar_visibility") or "unknown"
         text = (
-            f"reopened {label}{where} — origin {origin} and sidebar visibility "
+            f"reopened {named}{where} — origin {origin} and sidebar visibility "
             f"unchanged ({visibility}): origin.json is written once and never "
             "re-stamped (visibility_changed: false)."
         )
@@ -14038,12 +14119,12 @@ def _sessions_open_body(params: SessionsParams, details: Mapping[str, Any]) -> s
         return text
     if details.get("sidebar_visibility") == "listed":
         text = (
-            f"opened {label}as a listed workstream{where} — visible in the operator's "
+            f"opened {lead}as a listed workstream{where} — visible in the operator's "
             "sidebar, /resume and the phone list."
         )
     else:
         text = (
-            f"opened {label}as an ephemeral session{where} — hidden from the sidebar "
+            f"opened {lead}as an ephemeral session{where} — hidden from the sidebar "
             "and /resume and silent."
         )
     text += opened_by
@@ -14083,6 +14164,21 @@ async def _sessions_open(
             return _error(tool_call_id, "sessions", _sessions_candidates_text(target))
         if not target.session_id:
             return _error(tool_call_id, "sessions", target.error)
+        if target.record is not None and target.record.pid == os.getpid():
+            # Same self-guard as ``stop`` (review round 1, R-2): ``resume``
+            # reopens a stored/stopped conversation, and a session that is
+            # already live HERE has nothing to reopen — asking the CLI to
+            # open a handle on the transcript this call is writing to is not
+            # a thing to discover through the lease. A stored id (no live
+            # record) cannot be told apart from any other stored session and
+            # is left to the CLI's own refusal, passed through verbatim.
+            return _error(
+                tool_call_id,
+                "sessions",
+                "that target is this session; a session cannot resume itself — it is "
+                "already live here. Continue the work in this session, or address a "
+                "different one.",
+            )
         resume_id = target.session_id
 
     argv = _sessions_open_argv(params, resume_id=resume_id)

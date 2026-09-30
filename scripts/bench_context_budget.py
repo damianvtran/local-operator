@@ -730,7 +730,7 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: (components rounded up; the total is the char counts': 3,062 / 2.78 =
 #: 1,101.4. The tool's own schema was trimmed once against the note's draft
 #: before this raise was written — the note's measured 781 cl100k param tokens
-#: to the shipped 699, description 782 chars — and the remaining cost is the
+#: to the shipped 699, description 788 chars — and the remaining cost is the
 #: price of the capability: six ops in ONE schema where six tools would be
 #: six, each op a flag surface the CLI already takes, with the visibility
 #: default (the incident fix) and the receipts in the text because a guide

@@ -51,7 +51,9 @@ from local_operator.session.runtime.types import SessionRecord
 from local_operator.tools.builtin import (
     SessionsParams,
     _describe_sessions_approval,
+    _sessions_marker_extras,
     _sessions_open_argv,
+    _sessions_open_body,
     _sessions_open_env,
     _sessions_published_pid,
     _sessions_tier,
@@ -496,6 +498,29 @@ async def test_info_reports_origin_visibility_and_opener(root: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_info_describes_a_stored_hidden_session_from_disk(root: Path) -> None:
+    """QA round 1, Q1: an ``agent-shell`` session is excluded from every
+    listing scan at ANY limit, so ``info`` must compose from disk (marker
+    extras + dir/transcript) instead of claiming a newest-first window it
+    was never in. Addressed by exact id, the only address a hidden session
+    has."""
+    directory = _session(root, "hidden000001", "sneaky")
+    mark_session_origin(directory, ORIGIN_AGENT_SHELL)
+    result = await execute_sessions(
+        "t", {"op": "info", "session": "hidden000001"}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    assert "hidden from every listing scan by its origin marker" in result.text
+    assert "window" not in result.text
+    details = result.details or {}
+    assert details["sidebar_visibility"] == "hidden"
+    assert details["session_origin"] == ORIGIN_AGENT_SHELL
+    assert details["session_dir"] == str(directory)
+    assert details["transcript_path"] == str(directory / "transcript.jsonl")
+    assert details["listed"] is False
+
+
+@pytest.mark.asyncio
 async def test_ambiguous_address_returns_the_shared_candidate_lines(root: Path) -> None:
     sleeper_a = _live_pid()
     sleeper_b = _live_pid()
@@ -589,7 +614,12 @@ def test_describe_approval_sentences_are_pinned() -> None:
 async def test_stop_runs_the_graceful_ladder_only(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    record = _publish_record(root, "abcdabcdabcd", "stoppable")
+    # The target's pid must NOT be this process's: the tool runs inside the
+    # caller's runtime, and a target naming our own pid is a self-stop, which
+    # the tool refuses before the ladder (review round 1, R-2). A real live
+    # subprocess makes the record "live" without being self.
+    worker = _live_pid()
+    record = _publish_record(root, "abcdabcdabcd", "stoppable", pid=worker.pid)
     captured: dict[str, Any] = {}
 
     class _Outcome:
@@ -620,6 +650,38 @@ async def test_stop_runs_the_graceful_ladder_only(
         assert captured["timeout_s"] == control.DEFAULT_TIMEOUT_S
         assert captured["_command"] == "sessions tool"
         assert (result.details or {})["method"] == "socket"
+    finally:
+        registry.unpublish(record.pid, root)
+        worker.terminate()
+        worker.wait(timeout=10)
+
+
+@pytest.mark.asyncio
+async def test_stop_refuses_a_self_target_and_never_reaches_the_ladder(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-2: a stop resolving to THIS process is refused before the ladder.
+
+    ``_publish_record`` defaults to this process's pid, so the record is
+    exactly the shape a session's own registration takes — and the stop would
+    socket-op, then signal, the very run making the call. "Nothing killed" is
+    asserted as the ladder never being entered.
+    """
+    record = _publish_record(root, "self00000000", "self target")
+    reached: list[Any] = []
+
+    async def _must_not_run(target: Any, **kwargs: Any) -> Any:  # pragma: no cover
+        reached.append(target)
+        raise AssertionError("the stop ladder must not be reached for a self target")
+
+    monkeypatch.setattr(control, "stop_session", _must_not_run)
+    try:
+        result = await execute_sessions(
+            "t", {"op": "stop", "session": record.session_id}, None, None, _context(root)
+        )
+        assert result.is_error
+        assert "cannot stop itself" in result.text
+        assert reached == []
     finally:
         registry.unpublish(record.pid, root)
 
@@ -689,7 +751,76 @@ async def test_resume_refuses_a_live_runtime_with_the_cli_sentence(root: Path) -
         lease.release()
 
 
+@pytest.mark.asyncio
+async def test_resume_refuses_a_self_target(root: Path) -> None:
+    """R-2's resume arm: a live record naming this process is this session.
+
+    ``resume`` reopens a stored/stopped conversation; one that is already
+    live here has nothing to reopen, and the CLI never gets the dial.
+    """
+    record = _publish_record(root, "self11111111", "self target")
+    try:
+        result = await execute_sessions(
+            "t",
+            {"op": "resume", "session": record.session_id, "prompt": "continue"},
+            None,
+            None,
+            _context(root),
+        )
+        assert result.is_error
+        assert "cannot resume itself" in result.text
+    finally:
+        registry.unpublish(record.pid, root)
+
+
 # --- receipts and schema budget ---------------------------------------------
+
+
+def test_marker_extras_say_unknown_when_the_directory_is_missing(root: Path) -> None:
+    """R-4: the unreadable arm must not assert a visibility it could not read."""
+    extras = _sessions_marker_extras("000000000000")
+    assert extras["session_dir"] is None
+    assert extras["sidebar_visibility"] == "unknown"
+
+
+def test_resume_receipt_spaces_the_id_once() -> None:
+    """Q2: ``{label}`` ended with a space and ``{where}`` began with one, so
+    the resume receipt shipped a double space ('reopened "held"  (session …)').
+
+    Both branches are pinned — the fix shares one ``named``/``lead`` pair, and
+    a regression in either spelling shows up here.
+    """
+    resume_text = _sessions_open_body(
+        SessionsParams(op="resume", session="a1", prompt="go"),
+        {
+            "op": "resume",
+            "name": "held",
+            "session_id": "a1b2c3d4e5f6",
+            "job_id": "j1",
+            "origin": ORIGIN_AGENT_SHELL,
+            "sidebar_visibility": "hidden",
+        },
+    )
+    assert 'reopened "held" (session a1b2c3d4e5f6, job j1)' in resume_text
+    assert '"held"  (' not in resume_text
+    assert "  " not in resume_text
+    spawn_text = _sessions_open_body(
+        SessionsParams(op="spawn", prompt="go"),
+        {
+            "op": "spawn",
+            "name": "w",
+            "session_id": "s1",
+            "sidebar_visibility": "listed",
+            "origin": ORIGIN_AGENT_WORKSTREAM,
+        },
+    )
+    assert 'opened "w" as a listed workstream (session s1)' in spawn_text
+    unnamed = _sessions_open_body(
+        SessionsParams(op="spawn", prompt="go"),
+        {"op": "spawn", "session_id": "s1", "sidebar_visibility": "listed"},
+    )
+    assert "opened as a listed workstream" in unnamed
+    assert "opened  as" not in unnamed
 
 
 def test_published_pid_requires_the_record_to_name_our_session(root: Path) -> None:
