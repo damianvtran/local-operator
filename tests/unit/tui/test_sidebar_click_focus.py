@@ -34,6 +34,7 @@ from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.session_sidebar import PIN_CELL_WIDTH
 
 from .test_app_pilot import FakeSession, _factory
+from .test_session_sidebar import _chip_span, _click_footer_cell
 
 
 def _app(**kwargs: Any) -> OperatorApp:
@@ -562,6 +563,54 @@ async def test_a_press_with_a_live_multi_select_moves_no_keyboard() -> None:
 
         assert app.focused is picker, "a list press moved the keyboard off the picker"
         assert app._focus_is_claimed() is True
+
+
+# -- the footer chip (reconciliation with #1841) ---------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_footer_chip_is_exempt_from_the_press_focus() -> None:
+    """Composition with #1841: the chip runs its OWN action; one cell off does not.
+
+    The chip slice's test pins that a chip press toggles the ⌥ layer and moves
+    no keyboard; this pins the same press against THIS slice's focus walk and
+    pairs it with the other half of the reconciliation, so the exemption
+    cannot widen: a press on a footer cell that is not the chip is a normal
+    press on the panel and focuses the list. The chip's cells come from its
+    own painted footer (`_chip_span`, the chip slice's own helper), never from
+    the widget's hit-test, so the pair still discriminates if the hit-test
+    drifts.
+    """
+    app = _app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        sidebar = await _open_list(pilot, app, "sess", "sess-b")
+        sidebar.set_subagent_total(4)
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        app._refresh_sidebar = lambda: None  # type: ignore[method-assign]
+
+        first, _end = _chip_span(sidebar)
+        await _click_footer_cell(pilot, app, sidebar, first)
+        for _ in range(3):
+            await pilot.pause()
+        assert sidebar.show_subagents is True, "the chip press did not flip the layer"
+        assert app.focused is editor, "the chip press took the keyboard for the list"
+        assert not sidebar.has_focus
+
+        first, _end = _chip_span(sidebar)
+        await _click_footer_cell(pilot, app, sidebar, first)
+        for _ in range(3):
+            await pilot.pause()
+        assert sidebar.show_subagents is False, "a second chip press must flip it back"
+        assert app.focused is editor, "the second chip press took the keyboard"
+
+        first, _end = _chip_span(sidebar)
+        await _click_footer_cell(pilot, app, sidebar, max(0, first - 1))
+        for _ in range(3):
+            await pilot.pause()
+        assert sidebar.has_focus, "a press off the chip no longer focuses the panel"
 
 
 # -- the drawer placement --------------------------------------------------------

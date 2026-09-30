@@ -316,8 +316,9 @@ _PEER_HEADER_PREFIX = "peer:"
 class SessionSidebar(Widget, can_focus=True):
     #: A pointer press on this list moves the keyboard to it — a row, the pin
     #: cell and the panel's dead space alike — and the list wears the shipped
-    #: focus ground. Two rules bound that, both from the issue #1357 decision
-    #: (`### lopdev — design decision: click-to-focus`, recorded on the issue):
+    #: focus ground. Three rules bound that: the two from the issue #1357
+    #: decision (`### lopdev — design decision: click-to-focus`, recorded on
+    #: the issue), plus the footer-chip exemption reconciled with #1841:
     #:
     #: * the press is refused while a hard claimant holds the keyboard — a live
     #:   approval or ask, the aside, a full-page mode or pushed screen, a
@@ -328,7 +329,11 @@ class SessionSidebar(Widget, can_focus=True):
     #: * in the narrow drawer placement a row press CLOSES the panel and the
     #:   keyboard goes back to the composer (G8/T1n), so a closed panel is never
     #:   left holding the keyboard — a hidden widget owning it is the "typed
-    #:   input going nowhere" state arriving by another route.
+    #:   input going nowhere" state arriving by another route;
+    #: * the footer chip's cells are EXEMPT: the chip is a control with its own
+    #:   action (#1841), so its press toggles the ⌥ layer and the keyboard
+    #:   stays where it was — one cell off the chip is a normal press on the
+    #:   panel and focuses the list.
     #:
     #: What makes the press safe is no longer "the list never gets the
     #: keyboard". The composer-focus change forbade the press for a real reason
@@ -362,18 +367,51 @@ class SessionSidebar(Widget, can_focus=True):
 
         ``Screen._forward_event`` consults this on every ``MouseDown`` before
         any handler here runs, and focuses the widget when it answers ``True``.
-        The base answer is :data:`FOCUS_ON_CLICK`; the addition is the ONE
-        hard-claim predicate (``composer_focus.focus_is_claimed``), so a press
-        on the list can never take the keyboard from a live approval/ask, the
-        aside, a pushed screen, a full-page mode or a read-only composer
-        (issue #1357 decision, G7). The press itself still acts on the row;
-        only the keyboard does not move.
+        The base answer is :data:`FOCUS_ON_CLICK` minus two exceptions:
+
+        * a hard claimant keeps its keys: the ONE hard-claim predicate
+          (``composer_focus.focus_is_claimed``) refuses the focus move for a
+          live approval/ask, the aside, a pushed screen, a full-page mode or a
+          read-only composer (issue #1357 decision, G7), so the press may act
+          on the row while the keyboard does not move;
+        * the footer chip is EXEMPT — the reconciliation with the chip slice
+          (#1841). The chip is a control with its OWN action (toggle the ⌥
+          layer), so a press on its cells must not also run the panel's
+          behaviour; that slice's test pins that a chip press moves no
+          keyboard. A press one cell OFF the chip is a normal press on the
+          panel and does focus the list.
+
+        The walk is handed no event coordinates, so the chip test reads
+        ``App.mouse_position`` — the press position set by every route before
+        forwarding: ``App.on_event`` for terminal input, the pilot's
+        ``_post_mouse_events``, and the chip slice's own footer gesture. The
+        cells come from :meth:`_chip_hit`, the chip's one hit zone, never a
+        copy of it — so the exemption covers exactly what the chip's press
+        covers, and nothing widens silently. The hit is resolved HERE, under
+        the ladder as painted when the press lands, and stashed for
+        ``on_mouse_down`` (``_press_chip_hit``): the walk's own focus move
+        repaints the footer — the focused rungs are shorter, so the chip's
+        cells move with them — and a handler that re-tested the cells
+        afterwards would reinterpret the gesture against cells the user never
+        saw.
 
         Soft on the other side, deliberately: this gate protects claims that
         need their keys, not a claim on who presses where. The list's own claim
         in ``_focus_is_claimed`` stays SOFT (design round D2), which is what
         lets the composer's own chrome take the keyboard back from it.
         """
+        position = getattr(self.app, "mouse_position", None)
+        if position is None:
+            # No press position to resolve against (a stripped harness): the
+            # chip cannot be claimed, so the stash is cleared and the focus
+            # decision stands — the pre-reconciliation behaviour.
+            self._press_chip_hit = False
+            return super().focus_on_click() and not focus_is_claimed(self.app)
+        self._press_chip_hit = self._chip_hit(
+            position.x - self.region.x, position.y - self.region.y
+        )
+        if self._press_chip_hit:
+            return False
         return super().focus_on_click() and not focus_is_claimed(self.app)
 
     #: Textual re-renders a widget on every pointer move to look for link
@@ -469,6 +507,14 @@ class SessionSidebar(Widget, can_focus=True):
         #: chip names no row, so `_pressed_id` stays empty for it — `on_click`
         #: reads this alone to run the layer flip and nothing else.
         self._pressed_chip = False
+        #: The chip hit resolved at PRESS time by `focus_on_click` and consumed
+        #: by `on_mouse_down`. The walk runs before any handler, and its focus
+        #: move repaints this footer (the focused rungs are shorter, so the
+        #: chip's cells move with them); re-testing the cells in the handler
+        #: would reinterpret a dead-space press against cells the user never
+        #: saw — measured during the click-to-focus reconciliation: a press one
+        #: cell left of the unfocused chip flipped the layer.
+        self._press_chip_hit = False
         self._deferred: tuple[CatalogEntry, ...] | None = None
         #: Row under the pointer, by identity rather than by row index: a
         #: catalog refresh reorders rows beneath a stationary pointer, and a
@@ -1712,12 +1758,15 @@ class SessionSidebar(Widget, can_focus=True):
             self._pressed_pin = self._pin_cell_pressed(event)
             self._pressed_chip = False
             self.capture_mouse()
-        elif event.button == 1 and self._chip_hit(event.x, event.y):
-            # A press on the footer chip. The flip fires on the CLICK, like the
-            # pin cell's, so a press dragged off the list is cancelled by
-            # `on_mouse_up` instead of toggling on the way out; and no row id
-            # is recorded — the chip belongs to no row, which is what keeps
-            # the click from opening, switching or pinning anything.
+        elif event.button == 1 and self._press_chip_hit:
+            # A press on the footer chip — the hit as resolved by the walk at
+            # PRESS time (`_press_chip_hit`; re-testing here would read the
+            # focused ladder the press itself may have just painted). The
+            # flip fires on the CLICK, like the pin cell's, so a press dragged
+            # off the list is cancelled by `on_mouse_up` instead of toggling
+            # on the way out; and no row id is recorded — the chip belongs to
+            # no row, which is what keeps the click from opening, switching or
+            # pinning anything.
             self._pressed_pin = False
             self._pressed_chip = True
             self.capture_mouse()
