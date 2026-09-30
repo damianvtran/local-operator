@@ -3864,8 +3864,12 @@ async def _pilot_send(
         return payload, [
             f"the connection to {peer} for {session_id} was lost during the turn:",
             str(exc),
-            "The turn may still be running there — re-read the session before assuming "
-            "it stopped.",
+            # The command is NAMED like its siblings name theirs (the timeout arm
+            # says `lop --resume {session_id}`, the stop copy `lop stop {id}`) so
+            # the reader leaves with a re-read rather than an instruction to
+            # re-read: design round 1, D3.
+            f"The turn may still be running there — `lop --resume {session_id}` shows "
+            "how far it got.",
         ]
     reply = _pilot_last_reply(viewer)
     payload.update(ok=True, outcome="finished", reply=reply)

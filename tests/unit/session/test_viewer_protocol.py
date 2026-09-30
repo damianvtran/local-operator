@@ -1286,9 +1286,17 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # rather than one because a stamp with no way to refresh it cannot tell "the
     # owner is there" from "the owner was there", which is the exact false-live
     # the pair exists to remove.
-    assert len(viewer_only) == 69, (
+    #
+    # 69 → 70 is the refusal record's un-record (PR #1808, QA round 2, Q-3):
+    # ``forget_gate_refusal`` clears the facade's one-notice-per-state record
+    # when a host surface DROPPED the notice, so the retry's refusal can deliver
+    # and display instead of being silenced by a record whose copy never showed.
+    # Viewer-only for the same reason ``set_gate_refusal_handler`` is — an owner
+    # ``Session`` answers its own gates and has no host above it that can drop a
+    # notice. Declared in ``ViewerSessionProtocol`` in the same commit.
+    assert len(viewer_only) == 70, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
-        "says 69, and the aggregate floor is set at 40 against that number. A "
+        "says 70, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "
         "genuinely a removal before editing this figure."
     )

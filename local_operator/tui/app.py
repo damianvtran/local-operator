@@ -8037,6 +8037,7 @@ class OperatorApp(App[None]):
         *,
         require_paint: bool = True,
         require_mount: bool = True,
+        require_card: bool = False,
     ) -> bool:
         """Whether this source's pending gate (if any) is correctly on screen.
 
@@ -8061,6 +8062,17 @@ class OperatorApp(App[None]):
         bound and answerable while reporting `is_mounted` False — and a band that
         withheld its sentence until the next pump is a band that keeps telling
         the user to reselect over a question that is already there.
+
+        ``require_card=True`` is the third switch, and the first that demands
+        MORE rather than less: for a caller that must know about the CARD
+        ITSELF rather than about readiness. With it, a source with no gate
+        answers False (there is no card that could be on screen) and the
+        approve-all latch does not stand in for one (the latch means "no card
+        is needed", which is the opposite of what such a caller asks). The
+        remote-park notice suppresses itself on exactly this question — its
+        premise is "the gate card is already on screen" — so a follower
+        carrying no card (beat-2 F-A: the auto-follow view rendered none) is
+        TOLD rather than silenced.
         """
         # `pending_gate`, not `frontend_state.pending_gate`: the latter clones
         # the entire state (jobs, usage, trajectories) on every display, which
@@ -8071,8 +8083,14 @@ class OperatorApp(App[None]):
         if gate is None and not hasattr(session, "pending_gate"):
             gate = getattr(getattr(session, "frontend_state", None), "pending_gate", None)
         if gate is None:
+            if require_card:
+                # No gate, no card: a caller that needs the card itself has
+                # nothing here. The default answer below is about readiness —
+                # nothing is owed, so nothing is stranded — which is the
+                # opposite question.
+                return False
             return self._ask_screen is None and self._approval is None
-        if gate.kind == "approval" and bool(source.draft.approve_all):
+        if gate.kind == "approval" and bool(source.draft.approve_all) and not require_card:
             return True
         card = self._ask_screen if gate.kind == "ask" else self._approval
         return bool(
@@ -12202,12 +12220,27 @@ class OperatorApp(App[None]):
 
         ``source`` is accepted for symmetry with the two handlers beside it and
         guards against reporting a refusal that belongs to a session the user has
-        since left: a notice about another conversation's card is noise.
+        since left: a notice about another conversation's card is noise. A dropped
+        notice is also UN-RECORDED at the session (R1-1 = Q-1): the refusal
+        channel's one-notice-per-state dedupe records at delivery, so without the
+        un-record a drop would silence the retry and the explanation would never
+        display anywhere on this surface.
         """
         source = source or self._interaction
 
         def show() -> None:
             if not self._is_current(source):
+                # THE HOST DROPPED IT: UN-RECORD IT (agent R1-1 = QA Q-1). The
+                # state was recorded session-side when the refusal surfaced
+                # (beat-2 F-B), and a record whose notice never displayed would
+                # silence the retry — the operator returns, answers again, and
+                # the explanation shows nowhere (measured: 0 notices). Clearing
+                # it here lets the next attempt deliver and display. Optional
+                # hook, like the refusal channel itself: only a session that can
+                # have a reply refused holds a record.
+                forget = getattr(source.session, "forget_gate_refusal", None)
+                if callable(forget):
+                    forget(error)
                 return
             # A REFUSED CARD'S OWN KEYSTROKE ALREADY WROTE A RECEIPT. The dock
             # card resolves on the keypress, so "✓ allowed  bash  rm -rf build/"
@@ -31130,11 +31163,17 @@ class OperatorApp(App[None]):
         * the toast is the surface that works on every machine (no delivery
           path, no focus gate), and it is why the banner is best-effort on top
           rather than the thing the feature rests on;
-        * while THIS app is attached to the very session that parked, NEITHER
-          fires: the gate card is on screen with the device hint on it, and a
-          toast over the app's own dock card would be the app interrupting
-          itself. The episode is consumed anyway — the user is looking at the
-          surface the notice would point them to.
+        * while THIS app is showing the gate card for the very session that
+          parked, NEITHER fires: the card is on screen with the device hint on
+          it, and a toast over the app's own dock card would be the app
+          interrupting itself. The episode is consumed anyway — the user is
+          looking at the surface the notice would point them to. THE CARD IS
+          THE CONDITION, not the attachment (beat-2 F-A): a viewer that holds
+          the session with no card on screen is told, because silence there
+          means nobody learns the peer is parked (`_remote_park_is_attached`
+          and `_remote_park_card_is_up` are the two halves, composed at the
+          call site — and the same attachment the copy's lead needs, design
+          round 1, D1).
 
         SILENCE IS NOT A CLEAR: `unanswered` names the devices that did not
         answer this read, and `park_edges` carries their episodes forward — a
@@ -31174,22 +31213,30 @@ class OperatorApp(App[None]):
                 if owner is not None:
                     toast.withdraw(owner)
             for park in edges:
-                if self._remote_park_is_attached(park):
+                # The CARD is the suppression condition; the attachment is what
+                # the attached copy's lead needs (design round 1, D1), so both
+                # halves are read here once.
+                attached = self._remote_park_is_attached(park)
+                if attached and self._remote_park_card_is_up():
                     continue
-                self._show_remote_park(park, toast)
+                self._show_remote_park(park, toast, attached=attached)
         except Exception:  # pragma: no cover - defensive; chrome must not raise
             logger.debug("remote park notice failed", exc_info=True)
 
     def _remote_park_is_attached(self, park: RemotePark) -> bool:
-        """Is THIS app attached to the session ``park`` describes?
+        """Whether THIS app's current session IS the peer session ``park`` names.
 
-        True when the app's current session IS the peer session that parked —
-        the viewer case the notice deliberately yields to, because the gate
-        card is already on screen there, wearing the hint that says where an
-        allow happens. Read from `_remote_owner_facts`, the same predicate the
-        lifecycle router acts on, so the two cannot disagree about which device
-        a session is on; a local session answers False (it can never be a
-        peer's park) and a cold app answers False too.
+        ATTACHMENT IS THE PREMISE, NOT THE ANSWER (beat-2 F-A). It is half of
+        the suppression the park notice applies — :meth:`_remote_park_card_is_up`
+        is the other, decided half — and it is also the fact the attached copy's
+        lead needs (design round 1, D1: the reader who IS this viewer must not
+        be told to open the session they are already looking at), so the park
+        loop reads it once and hands it to both.
+
+        Read from `_remote_owner_facts`, the same predicate the lifecycle
+        router acts on, so the two cannot disagree about which device a session
+        is on; a local session answers False (it can never be a peer's park)
+        and a cold app answers False too.
         """
         owner = self._remote_owner_facts()
         if owner is None:
@@ -31197,7 +31244,38 @@ class OperatorApp(App[None]):
         session_id, device_id, _ = owner
         return session_id == park.session_id and device_id == park.device_id
 
-    def _show_remote_park(self, park: RemotePark, toast: Toast) -> None:
+    def _remote_park_card_is_up(self) -> bool:
+        """Whether the gate card for the CURRENT session's gate is on screen.
+
+        THE CARD IS THE CONDITION, not the attachment (beat-2 F-A): an
+        attachment-only answer suppressed the notice for a viewer showing NO
+        CARD AT ALL — the auto-follow after a slash move rendered an empty
+        transcript with the facade holding no gate, and the origin learned
+        nothing while the peer sat parked for minutes. The card asked for here
+        is the gate card on screen wearing the hint that says where an allow
+        happens, through the one spelling of "a mounted card belongs to this
+        source's current gate" (``require_card``, which bypasses the
+        approve-all latch — that latch answers "no card is NEEDED", the
+        opposite question). The caller has established attachment; the source
+        guard below keeps a source for any OTHER session from answering.
+
+        A read that cannot answer ANSWERS THE PARK (False): a notice that fires
+        over a duplicate is chrome, a notice that never fires is the defect
+        this method exists to close.
+        """
+        # The source that DISPLAYS this session, not merely the last one minted:
+        # the card binding is checked against its token and gate generation, so a
+        # source for any other session must not answer here.
+        source = self._interactions.get(id(self._session), self._interaction)
+        if source.session is not self._session:
+            return False
+        try:
+            return self._sidebar_gate_card_ready(source, require_paint=False, require_card=True)
+        except Exception:  # noqa: BLE001 — an unanswerable read must not silence the park
+            logger.debug("remote park card check failed", exc_info=True)
+            return False
+
+    def _show_remote_park(self, park: RemotePark, toast: Toast, *, attached: bool = False) -> None:
         """Raise the one card and the one banner for ``park``.
 
         Card FIRST, banner second: the card needs no OS delivery path, so a
@@ -31209,6 +31287,10 @@ class OperatorApp(App[None]):
         conversation's name when it has one, so two parks on the same device are
         tellable apart on the card itself (UX round 1, U3); the placeholder name
         a peer never chose is dropped rather than printed as a title.
+
+        ``attached`` reaches the card because the reader's position decides the
+        lead (design round 1, D1); the banner is budgeted to one OS line and
+        carries no lead at all.
         """
         label = park.device_name or park.device_id
         key = (park.device_id, park.session_id)
@@ -31217,7 +31299,7 @@ class OperatorApp(App[None]):
 
         name = "" if park.name == UNTITLED_CONVERSATION else park.name
         toast.show(
-            remote_park_card(label, park.kind, name=name),
+            remote_park_card(label, park.kind, name=name, attached=attached),
             duration_ms=TOAST_FAILURE_MS,
             owner=owner,
         )
@@ -51119,7 +51201,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 134
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 135
     public members, and a positive ``isinstance`` walks every one of them.
     (The figure is RECOMPUTED with ``len(typing._get_protocol_attrs(...))`` at
     the time of measurement rather than adjusted by the size of one's own
