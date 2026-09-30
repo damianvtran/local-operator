@@ -203,9 +203,18 @@ async def create_agent_speech(
     Generates speech from an agent's last message.
     """
     try:
-        agent = agent_registry.get_agent(agent_id)
+        try:
+            agent = agent_registry.get_agent(agent_id)
+        except KeyError:
+            # ``AgentRegistry.get_agent`` raises ``KeyError`` for an unknown id
+            # rather than answering None (its docstring is the contract), so
+            # this is the 404 the route needs; without the catch the miss
+            # surfaced as a 500 wrapping the registry's own message.
+            raise HTTPException(
+                status_code=404, detail=f"Agent with ID {agent_id} not found"
+            ) from None
         if not agent:
-            raise HTTPException(status_code=404, detail="Agent not found")
+            raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
 
         _require_radient_credential(radient_client)
 
@@ -294,7 +303,14 @@ async def create_agent_speech(
         return Response(content=audio_data, media_type=media_type)
 
     except HTTPException as http_exc:
-        logger.exception(f"HTTPException: {http_exc}")
+        # Routine refusals -- the no-credential 401, the unknown-agent 404 --
+        # are logged as one line without a traceback; a full stack for an
+        # everyday state buries the faults that need one. Unmapped 5xx keep
+        # the traceback.
+        if http_exc.status_code >= 500:
+            logger.exception(f"HTTPException: {http_exc}")
+        else:
+            logger.warning(f"Speech request refused: {http_exc}")
         raise http_exc
     except APIError as upstream_exc:
         # Same classification as the /v1/tools/speech route above: an error

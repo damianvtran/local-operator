@@ -5,12 +5,13 @@ This module contains all the Pydantic models used for request and response valid
 in the Local Operator API.
 """
 
+import re
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, Generic, List, Optional, TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # AgentEditFields will be used in the routes module
 from local_operator.jobs import JobResult, JobStatus
@@ -1018,6 +1019,23 @@ class ExecutionVariablesResponse(BaseModel):
     )
 
 
+#: ISO 639-1 codes are exactly two lowercase ASCII letters; the hub validates
+#: the same shape (``omitempty,len=2,lowercase``), so this is what keeps a code
+#: the daemon accepts from being one the hub refuses downstream.
+_ISO_639_1_CODE = re.compile(r"\A[a-z]{2}\Z")
+
+
+def _validate_language_code(value: Optional[str]) -> Optional[str]:
+    """Validate an optional ISO 639-1 language code (two lowercase letters)."""
+    if value is None:
+        return None
+    if not _ISO_639_1_CODE.match(value):
+        raise ValueError(
+            'language_code must be a two-letter ISO 639-1 code in lowercase (e.g. "en").'
+        )
+    return value
+
+
 class SpeechRequest(BaseModel):
     """Request body for speech generation endpoint.
 
@@ -1053,6 +1071,11 @@ class SpeechRequest(BaseModel):
         ),
     )
 
+    @field_validator("language_code")
+    @classmethod
+    def _check_language_code(cls, value: Optional[str]) -> Optional[str]:
+        return _validate_language_code(value)
+
 
 class AgentSpeechRequest(BaseModel):
     """Request body for agent-based speech generation endpoint.
@@ -1074,6 +1097,11 @@ class AgentSpeechRequest(BaseModel):
             "Omitted when unset so the provider can auto-detect."
         ),
     )
+
+    @field_validator("language_code")
+    @classmethod
+    def _check_language_code(cls, value: Optional[str]) -> Optional[str]:
+        return _validate_language_code(value)
 
 
 class AgentEditFileRequest(BaseModel):

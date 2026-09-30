@@ -95,17 +95,25 @@ async def test_determine_voice_reclassifies_when_the_description_changes():
 
 
 @pytest.mark.asyncio
-async def test_the_cache_evicts_the_oldest_entry_at_the_bound(monkeypatch):
-    """A long-lived daemon never pins more than the bound's worth of agents."""
+async def test_the_cache_evicts_the_least_recently_used_entry(monkeypatch):
+    """A long-lived daemon never pins more than the bound's worth of agents.
+
+    Eviction is LRU, not FIFO: a hit moves its key to the most-recent end, so
+    the entry that goes is the least recently USED one.
+    """
     monkeypatch.setattr(speech_utils, "_GENDER_CACHE_MAX", 2)
     executor = _executor(gender="female")
 
-    for name in ("A", "B", "C"):
-        await determine_voice(_agent(name=name), executor)
+    await determine_voice(_agent(name="A"), executor)  # calls=1
+    await determine_voice(_agent(name="B"), executor)  # calls=2
+    await determine_voice(_agent(name="A"), executor)  # hit: A becomes most recent
+    assert executor.calls == 2
+
+    await determine_voice(_agent(name="C"), executor)  # calls=3; evicts B
+    await determine_voice(_agent(name="A"), executor)  # still cached -> no call
     assert executor.calls == 3
 
-    # "A"'s entry was the oldest and was evicted by "C", so it is asked again.
-    await determine_voice(_agent(name="A"), executor)
+    await determine_voice(_agent(name="B"), executor)  # evicted -> calls=4
     assert executor.calls == 4
 
 

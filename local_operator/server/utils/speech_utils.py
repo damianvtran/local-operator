@@ -77,9 +77,11 @@ def parse_gender_from_xml(xml_string: str) -> str:
 #: has ever seen.
 _GENDER_CACHE_MAX = 256
 
-#: The classification cache itself, insertion-ordered for FIFO eviction.
-#: Process-wide on purpose: the daemon is one process serving one user's
-#: agents, and the finding this cache answers is per-press model calls.
+#: The classification cache itself, insertion-ordered for LRU eviction: a
+#: hit moves its key to the most-recent end, and the bound below drops the
+#: front, which is the least recently USED entry. Process-wide on purpose:
+#: the daemon is one process serving one user's agents, and the finding this
+#: cache answers is per-press model calls.
 _GENDER_CACHE: "OrderedDict[str, str]" = OrderedDict()
 
 
