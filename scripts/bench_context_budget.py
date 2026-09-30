@@ -777,7 +777,47 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: same recorded 762-char platform gap, so CI remains the binding reading. The
 #: peel-off a future reduction can act on: dropping the peek fields from the
 #: schema should take this ceiling back down ~229 billed.
-BUDGET_BILLED_TOKENS = 37_164
+#:
+#: RAISED 37,164 -> 37,430 for the ``team`` tool's ``label``/``aliases``
+#: fields (the teams-label lane's core half: teams gain a local display label
+#: and extra addressing keys), stated with the arithmetic because the guard
+#: exists to make schema growth an explicit decision. Both are ADDITIONS to
+#: one existing schema -- rung 1 of the footprint ladder, the cheapest rung --
+#: and they are create/update fields only: no new tool, no new op, nothing on
+#: the list/show path, nothing on any other tool. Measured with THIS script on
+#: both trees, same machine, ISOLATED (``env -i HOME=$ISO
+#: LOCAL_OPERATOR_CONFIG_DIR=$ISO/.local-operator``):
+#:
+#:   base, this machine   103,232 chars = ~37,134 billed
+#:   head, this machine   103,902 chars = ~37,375 billed
+#:
+#: and the delta is the two fields and nothing else:
+#:
+#:   + tool_schemas    68,333 vs 67,663 = +670 chars = +241
+#:   total                                  +670 chars = +241
+#:
+#: On CI (where this gate runs) the stack's base read 103,232 chars =
+#: ~37,134 billed -- the same figure byte for byte -- PASS with 30 under the
+#: old ceiling, and this head is 103,902 chars = ~37,375 billed, so the
+#: ceiling is the CI head + 55, the band this file keeps.
+#:
+#: THE 762-CHAR GAP RECORDED ABOVE REPRODUCES HERE, AS CONFIG, NOT PLATFORM:
+#: on this machine the same tree reads +762 chars in ``tool_schemas`` when the
+#: run is NOT isolated (69,095 vs 68,333 at this head; 68,425 vs 67,663 at
+#: base -- the difference is constant) and byte-identical to CI when it is.
+#: The 762 is the operator's own CONFIG-DIR content (keeping the real HOME but
+#: pointing ``LOCAL_OPERATOR_CONFIG_DIR`` at an empty dir reproduces the
+#: isolated reading exactly -- e.g. a configured MCP surface), which CI does
+#: not have. So a local NON-isolated head reads 37,649 = +219 above this
+#: ceiling, entirely that gap; CI remains the binding reading, and an isolated
+#: local run can be compared to CI directly.
+#:
+#: The trade: labels/aliases on the tool schema are the ONLY model-facing
+#: documentation of the new fields, and each sentence prevents a real misuse
+#: (the empty-string reset; the whole-list replacement; the collision rule).
+#: The peel-off a future reduction can act on: dropping the two fields from
+#: the schema should take this ceiling back down ~241 billed.
+BUDGET_BILLED_TOKENS = 37_430
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
