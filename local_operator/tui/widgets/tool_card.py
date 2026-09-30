@@ -273,6 +273,7 @@ _TOOL_CATEGORY: dict[str, str] = {
     "project": "tool.row.name_meta",
     "project_delete": "tool.row.name_meta",
     "send": "tool.row.name_meta",
+    "sessions": "tool.row.name_meta",
     "wake": "tool.row.name_meta",
     "ask": "tool.row.name_meta",
 }
@@ -811,6 +812,18 @@ def _summary_from_args(tool_name: str, args: dict[str, object]) -> str:
         # one word that says whether the peer was woken, steered, or quietly
         # mailboxed.
         return _send_summary(args) or tool_name
+    if tool_name == "sessions":
+        # A dedicated branch for the same class as ``send``: the generic scan
+        # keeps only the first two identity scalars, which for these calls is
+        # the target — so a `stop` and a `peek` on one session painted
+        # byte-identical rows and the OP, the discriminator, was never drawn
+        # at all. The words live in `harness/rows.py` because the phone draws
+        # the same decision for the same call (`mobile/projection.py` calls
+        # the same function), and one implementation cannot drift; imported
+        # at the call like this package's other `harness/rows.py` helpers.
+        from local_operator.harness.rows import sessions_row_summary
+
+        return sessions_row_summary(args) or tool_name
     parts = [
         text
         for key, value in args.items()

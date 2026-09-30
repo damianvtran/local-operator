@@ -1633,6 +1633,7 @@ def test_every_builtin_tool_has_a_glyph_in_both_sets() -> None:
         "task",
         "agent",
         "send",
+        "sessions",
     }
     assert builtins <= set(NERD_TOOL_ICONS)
     assert builtins <= set(PLAIN_TOOL_ICONS)
@@ -1743,6 +1744,36 @@ def test_the_project_pair_reads_as_a_board_and_never_as_the_wrench(monkeypatch) 
 
     assert _category_element("project") == "tool.row.name_meta"
     assert _category_element("project_delete") == "tool.row.name_meta"
+
+
+def test_the_sessions_glyph_is_the_second_window_not_the_wrench(monkeypatch) -> None:
+    """PR C: a `sessions` row used to lead with the generic wrench.
+
+    Both tables must resolve it by name, it must not take either default, and
+    it must not duplicate its nearest neighbours: `task`/`agent` (work handed
+    to a child) and `send` (a note to a peer). The category follows the tool
+    family too — coordination, not work on the machine (``tool.row.name_meta``,
+    the desktop UI's own lane).
+    """
+    assert NERD_TOOL_ICONS["sessions"] != NERD_ICON_DEFAULT
+    assert PLAIN_TOOL_ICONS["sessions"] != PLAIN_ICON_DEFAULT
+    assert NERD_TOOL_ICONS["sessions"] not in {
+        NERD_TOOL_ICONS["task"],
+        NERD_TOOL_ICONS["agent"],
+        NERD_TOOL_ICONS["send"],
+    }
+    assert PLAIN_TOOL_ICONS["sessions"] not in {
+        PLAIN_TOOL_ICONS["task"],
+        PLAIN_TOOL_ICONS["agent"],
+        PLAIN_TOOL_ICONS["send"],
+    }
+
+    monkeypatch.setattr(glyph_mod, "settings_get", lambda key, default=None: True)
+    assert tool_icon("sessions") == NERD_TOOL_ICONS["sessions"]
+    monkeypatch.setattr(glyph_mod, "settings_get", lambda key, default=None: False)
+    assert tool_icon("sessions") == PLAIN_TOOL_ICONS["sessions"]
+
+    assert _category_element("sessions") == "tool.row.name_meta"
 
 
 def test_the_console_marker_is_a_fact_about_the_process_not_a_forgery() -> None:
@@ -2654,6 +2685,136 @@ def test_send_summary_stands_in_for_a_missing_target() -> None:
     read as though the peer were called "wake"."""
     row = ToolCard("t", "send", {"message": "hello there"})._build_row(80).plain
     assert "wake · ?" in row
+
+
+def test_sessions_summary_leads_with_the_op_and_the_visibility() -> None:
+    """PR C: the op is the discriminator, and it must be the first word.
+
+    The generic scan kept only the first identity scalar — the target — so a
+    `stop` and a `peek` on one session painted byte-identical rows, and a
+    `spawn` painted as the bare name it would have had without the tool. The
+    visibility leads right after the op for the same reason: the default
+    (`workstream`) is the fix this tool ships, and an omitted flag must not be
+    the one thing a narrow row drops.
+    """
+    spawn = ToolCard("t", "sessions", {"op": "spawn", "name": "night-audit", "prompt": "go"})
+    assert "spawn · workstream · night-audit" in spawn._build_row(100).plain
+
+    ephemeral = ToolCard(
+        "t",
+        "sessions",
+        {"op": "spawn", "prompt": "fix the shard", "visibility": "ephemeral"},
+    )
+    # No name: the prompt stands in, and the op + visibility still lead it.
+    assert "spawn · ephemeral · fix the shard" in ephemeral._build_row(100).plain
+
+    assert (
+        "stop · release-crew"
+        in ToolCard("t", "sessions", {"op": "stop", "target": "release-crew"})._build_row(100).plain
+    )
+
+
+def test_sessions_ops_never_collide_at_narrow_widths() -> None:
+    """The defect class the leading op exists for, pinned on rendered rows.
+
+    Three different commitments on one long target must stay three different
+    rows at every width the row can be asked to paint — a `stop` ends a run,
+    an `info` only reads it, and before this change both painted the same
+    sentence once the shared target truncated.
+    """
+    target = "minerva-user-dashboard-release-cutter"
+    for width in (40, 48, 52, 60, 62, 80):
+        rows = {
+            ToolCard("t", "sessions", {"op": op, "target": target})._build_row(width).plain
+            for op in ("stop", "info", "resume")
+        }
+        assert len(rows) == 3, f"ops collide at {width} columns: {rows}"
+
+    # And the spawn pair differs by its VISIBILITY even when the name sheds:
+    # the invisible disposition must never be the field that truncation ate.
+    for width in (40, 60, 80):
+        rows = {
+            ToolCard(
+                "t",
+                "sessions",
+                {
+                    "op": "spawn",
+                    "name": "a-very-long-workstream-name-that-will-shed",
+                    "visibility": visibility,
+                },
+            )
+            ._build_row(width)
+            .plain
+            for visibility in ("workstream", "ephemeral")
+        }
+        assert len(rows) == 2, f"visibilities collide at {width} columns: {rows}"
+
+
+def test_sessions_address_follows_the_resolvers_precedence() -> None:
+    """pid, then the exact id, then the substring — the tool's own order.
+
+    The row must not disagree with the approval prompt about WHICH session a
+    call names, and `?` stands in when nothing addresses: the row is painted
+    before the call settles, and a blank slot reads as though the next field
+    were the target (the send row's rule).
+    """
+    row = ToolCard("t", "sessions", {"op": "stop", "pid": 48213})._build_row(80).plain
+    assert "stop · pid 48213" in row
+    row = ToolCard("t", "sessions", {"op": "stop", "session": "abcdef123456"})._build_row(80).plain
+    assert "stop · session abcdef123456" in row
+    row = ToolCard("t", "sessions", {"op": "stop"})._build_row(80).plain
+    assert "stop · ?" in row
+
+
+def test_sessions_peek_rows_keep_the_window_rightmost() -> None:
+    """`peek · <target> · last 12` — PR B ships the op; this branch ships
+    ahead of it so the row is a summary rather than the `op=peek` the phone
+    painted, and the window rides last because it is what varies between two
+    peeks on one target."""
+    row = (
+        ToolCard("t", "sessions", {"op": "peek", "target": "release-crew", "steps": 12})
+        ._build_row(100)
+        .plain
+    )
+    assert "peek · release-crew · last 12" in row
+    row = (
+        ToolCard("t", "sessions", {"op": "peek", "target": "release-crew", "head": 20})
+        ._build_row(100)
+        .plain
+    )
+    assert "peek · release-crew · first 20" in row
+    row = (
+        ToolCard("t", "sessions", {"op": "peek", "target": "release-crew", "digest": True})
+        ._build_row(100)
+        .plain
+    )
+    assert "peek · release-crew · digest" in row
+    # No window named: no claim about one (the tool's default applies).
+    row = ToolCard("t", "sessions", {"op": "peek", "target": "release-crew"})._build_row(100).plain
+    assert "peek · release-crew" in row
+    assert "last" not in row and "first" not in row
+
+
+def test_sessions_list_rows_say_what_the_list_asks_for() -> None:
+    """The list op's differentiators are the flag and the query; the bare call
+    stays the bare word."""
+    row = ToolCard("t", "sessions", {"op": "list"})._build_row(80).plain
+    assert "list" in row
+    row = (
+        ToolCard("t", "sessions", {"op": "list", "include_stored": True, "query": "flaky shard"})
+        ._build_row(100)
+        .plain
+    )
+    assert "list · stored · flaky shard" in row
+
+
+def test_sessions_summary_never_invents_a_mode_for_an_unknown_op() -> None:
+    """A newer tool's op paints its own word and nothing else; a call with no
+    readable op falls back to the tool name rather than an empty row."""
+    row = ToolCard("t", "sessions", {"op": "frobnicate"})._build_row(80).plain
+    assert "frobnicate" in row
+    row = ToolCard("t", "sessions", {})._build_row(80).plain
+    assert "sessions" in row
 
 
 def test_the_row_keeps_the_arguments_when_the_model_supplied_an_intent() -> None:

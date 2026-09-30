@@ -1289,3 +1289,112 @@ def output_limit_call_receipt(details: Mapping[str, Any] | None) -> str | None:
     if arm == OUTPUT_LIMIT_TURN:
         return _LIMIT_ENDED_TURN_RECEIPT
     return None
+
+
+def _sessions_scalar(value: object) -> str:
+    """One ``sessions`` argument as a one-line string ("" when unusable).
+
+    Whitespace collapsed so a multi-line prompt cannot break a row, numbers
+    stringified because ``pid``/``steps`` ride the row, and booleans refused
+    deliberately — a bool is not an address, and ``True`` on the row would be
+    a field name dressed as a value.
+    """
+    if isinstance(value, str):
+        return " ".join(value.split())
+    if isinstance(value, bool):
+        return ""
+    if isinstance(value, (int, float)):
+        return str(value)
+    return ""
+
+
+def _sessions_address(args: Mapping[str, object]) -> str:
+    """The one thing an addressed ``sessions`` op acts on, in the resolver's order.
+
+    ``pid``, then the session id, then the substring — the same precedence the
+    tool's own resolver uses, so the row cannot disagree with the call (or the
+    approval prompt) about WHICH session it names.
+    """
+    pid = args.get("pid")
+    if isinstance(pid, int) and not isinstance(pid, bool):
+        return f"pid {pid}"
+    session = _sessions_scalar(args.get("session"))
+    if session:
+        return f"session {session}"
+    return _sessions_scalar(args.get("target")) or "?"
+
+
+def _sessions_peek_window(args: Mapping[str, object]) -> str:
+    """The peek row's window, in the op's own words (``last 12`` / ``first 20``).
+
+    Empty when the call names no window: the tool's default applies, and the
+    row must not claim a value nobody read.
+    """
+    steps = args.get("steps")
+    if isinstance(steps, int) and not isinstance(steps, bool):
+        return f"last {steps}"
+    head = args.get("head")
+    if isinstance(head, int) and not isinstance(head, bool):
+        return f"first {head}"
+    if args.get("digest") is True:
+        return "digest"
+    query = _sessions_scalar(args.get("query"))
+    if query:
+        return f"search {query}"
+    before = _sessions_scalar(args.get("before_id"))
+    if before:
+        return f"before {before}"
+    around = _sessions_scalar(args.get("around_id"))
+    return f"around {around}" if around else ""
+
+
+def sessions_row_summary(args: Mapping[str, object]) -> str:
+    """One ``sessions`` tool row's summary, for every host to call.
+
+    WHY IT LIVES HERE rather than beside either renderer: the row is drawn on
+    two surfaces (the TUI tool card's collapsed row and the phone's transcript
+    row), the two are required to say the same thing about one call, and this
+    module is where the shared row decisions live (see the header — "a decision
+    made in one renderer is a decision the other will not make"). Pure by
+    contract: a Mapping of the call's arguments in, one line out, no host
+    imports.
+
+    THE OP LEADS because both rows shed from the RIGHT, and the op is the
+    discriminator: `stop` and `peek` on one session painted byte-identical
+    rows under the generic first-scalars scan. ``spawn`` carries its VISIBILITY
+    next — both values — because the invisible disposition is the incident this
+    tool exists to prevent: the one field that must survive a narrow row is the
+    one that says whether the operator will see the run.
+
+    ``?`` stands in when an addressed op names no address: the row is painted
+    before the call settles, and a blank slot reads as though the next field
+    were the target (the send row's rule). ``workstream`` stands in when a
+    spawn omits the flag because that is the tool schema's own default —
+    spelled here rather than imported so this module keeps its no-imports
+    contract, and pinned by tests on both hosts so a schema change cannot
+    leave the row claiming a value no call produced. An unknown op returns its
+    own word and nothing else, never a guess; "" when even that is unreadable,
+    and the caller substitutes the tool name.
+    """
+    op = _sessions_scalar(args.get("op"))
+    if op == "spawn":
+        visibility = _sessions_scalar(args.get("visibility")) or "workstream"
+        name = _sessions_scalar(args.get("name")) or _sessions_scalar(args.get("prompt"))
+        parts = [op, visibility] + ([name] if name else [])
+        return " · ".join(parts)
+    if op in ("stop", "resume", "info", "peek"):
+        parts = [op, _sessions_address(args)]
+        if op == "peek":
+            window = _sessions_peek_window(args)
+            if window:
+                parts.append(window)
+        return " · ".join(parts)
+    if op == "list":
+        parts = [op]
+        if args.get("include_stored") is True:
+            parts.append("stored")
+        query = _sessions_scalar(args.get("query"))
+        if query:
+            parts.append(query)
+        return " · ".join(parts)
+    return op
