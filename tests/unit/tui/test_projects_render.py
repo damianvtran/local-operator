@@ -506,16 +506,71 @@ def test_the_clamp_marker_names_the_key_that_actually_toggles_it() -> None:
     from local_operator.tui.projects_render import (
         UPDATE_BODY_LINES,
         older_updates_text,
+        update_body_is_clamped,
         update_body_lines,
         update_more_lines_text,
     )
 
     assert update_more_lines_text(4, expanded=False).plain == "[4 more lines — ↵ expand]"
     assert update_more_lines_text(4, expanded=True).plain == "[4 more lines — ↵ collapse]"
+    # Inflected: `1 more line` (agent review round 1, NIT-1).
+    assert update_more_lines_text(1, expanded=False).plain == "[1 more line — ↵ expand]"
     assert older_updates_text(7).plain == "… 7 older updates"
     body = "\n".join(f"line {n}" for n in range(1, UPDATE_BODY_LINES + 3))
     assert len(update_body_lines(body)) == UPDATE_BODY_LINES + 2
     assert update_body_lines("a\r\nb") == ["a", "b"]
+    # The predicate behind the row's verb (design D1): fits == no tail.
+    assert update_body_is_clamped("a\nb") is False
+    assert update_body_is_clamped("\n".join(str(n) for n in range(UPDATE_BODY_LINES))) is False
+    assert update_body_is_clamped(body) is True
+
+
+def test_the_marker_wears_muted_not_dim() -> None:
+    """Design review round 1, D4: the feed's one affordance must read as one.
+
+    `dim` is the quiet layer (paths, day headers) and sits at 3.77:1 on the
+    light ground; `muted` is 8.62 dark / 7.18 light.
+    """
+    from rich.style import Style
+
+    from local_operator.tui.projects_render import update_more_lines_text
+
+    seen: list[str] = []
+
+    def resolver(key: str) -> Style:
+        seen.append(key)
+        return Style()
+
+    update_more_lines_text(2, expanded=False, style_for=resolver)
+    assert seen == ["muted"], seen
+
+
+def test_the_path_row_abbreviates_home_and_keeps_the_file_tail() -> None:
+    """Design review round 1, D2: the tail is what tells one row from another.
+
+    At 100 columns the stored path is 126 cells against a 95-cell box, so a
+    right-truncation cut it inside the unique hex and every attachment row read
+    ``…/attachments/<cut>…``.
+    """
+    from pathlib import Path
+
+    from local_operator.tui.projects_render import attachment_path_text
+
+    home = str(Path.home())
+    attachment = {"path": f"{home}/.local-operator/projects/attachments/6870f1/eb904c99aa.png"}
+    unmeasured = attachment_path_text(attachment).plain
+    assert unmeasured.startswith("    → ~/.local-operator/")
+    fitted = attachment_path_text(attachment, width=60).plain
+    assert "…" in fitted
+    assert fitted.endswith(".png"), fitted
+    assert cell_len(fitted) <= 60
+    # The missing marker is reserved BEFORE the path is cut, so the caveat
+    # survives at the width the page has.
+    with_marker = attachment_path_text({**attachment, "missing": True}, width=60).plain
+    assert with_marker.endswith("[missing on disk]"), with_marker
+    assert cell_len(with_marker) <= 60
+    # A path that already fits is untouched.
+    assert "…" not in attachment_path_text({"path": "~/a/b.png"}, width=95).plain
 
 
 def test_detail_footer_names_progress_reporter_and_staleness() -> None:

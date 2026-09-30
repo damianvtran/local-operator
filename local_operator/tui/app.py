@@ -32762,8 +32762,12 @@ class OperatorApp(App[None]):
         from pathlib import Path
 
         if not Path(path).exists():
+            # The row's own words, not a second vocabulary for the same fact:
+            # the path line says `[missing on disk]` and this explains it
+            # (design review round 1, D5 — the old sentence re-stated the
+            # marker and named the store instead of the file).
             view.show_notice(
-                f"'{message.name}' is no longer on disk — the copy under the project store is gone"
+                f"{message.name} is missing on disk — its stored copy was moved or deleted"
             )
             return
         from local_operator.tui.attachments import opener_argv

@@ -401,16 +401,22 @@ async def test_detail_section_jumps_move_the_row_cursor_to_the_neighbour(
 
 
 def _dom_top_section(page: Any) -> str | None:
-    """The section the viewport actually shows: the last heading at/above the
-    container's content top, read from live widget regions — the DOM truth a
-    ruler assertion compares against."""
+    """The section the viewport actually shows, read from live widget regions.
+
+    The last heading at/above the container's content top — the DOM truth a
+    ruler assertion compares against. A heading's ``.gap-above`` blank row
+    counts as part of its section (design review round 1, D6): when the top row
+    is that blank the reader is looking at the heading below it, not at the
+    section that scrolled away above.
+    """
     base = page.content_region.y
     best: str | None = None
     for child in page.children:
         section = getattr(child, "section", None)
         if section is None:
             continue
-        if child.region.y <= base:
+        start = child.region.y - (1 if "gap-above" in child.classes else 0)
+        if start <= base:
             best = section[0]
         else:
             break
@@ -935,13 +941,12 @@ async def test_enter_on_an_attachment_asks_the_host_to_open_it(
         assert view._mode == "detail"  # the page keeps the reader
 
 
-async def test_a_gone_attachment_is_flagged_and_answered_honestly(tmp_path: Path) -> None:
-    """Spec §7.4: ``[missing on disk]`` plus a sentence, never a silent no-op."""
+async def test_a_gone_attachment_is_flagged_and_offers_no_verb(tmp_path: Path) -> None:
+    """Spec §7.4 + UX round 1, U3: the row stops offering what it cannot do."""
     registry = _feed_registry(tmp_path)
     project = registry.get_project_by_name("parity-spec")
     assert project is not None
-    stored = Path(project.updates[0].attachments[0].path)
-    stored.unlink()
+    Path(project.updates[0].attachments[0].path).unlink()
     session = _ProjectSession()
     session.project_registry = registry
     app = OperatorApp(lambda: _factory(session))
@@ -952,16 +957,40 @@ async def test_a_gone_attachment_is_flagged_and_answered_honestly(tmp_path: Path
         await pilot.pause()
         await pilot.pause()
         page = view._detail_page
-        rows = page.painted_rows()
-        assert any("[missing on disk]" in row for row in rows)
+        assert any("[missing on disk]" in row for row in page.painted_rows())
+        # The row is still a cursor stop, but it advertises nothing: the reader
+        # learns the row is dead from the marker, not from spending a press.
+        attachment_rows = [row for row in page._selectables if "open" in (row.action_label() or "")]
+        assert attachment_rows == []
+        assert page.selected_action_label() != "open"
+
+
+async def test_a_copy_that_vanishes_after_composition_answers_honestly(
+    tmp_path: Path,
+) -> None:
+    """The handler still guards at the boundary: a press against a gone file."""
+    session = _ProjectSession()
+    session.project_registry = _feed_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        page = view._detail_page
         while page.selected_action_label() != "open":
             await pilot.press("down")
             await pilot.pause()
+        # Delete it AFTER composition, so the page still believes it is there.
+        project = session.project_registry.get_project_by_name("parity-spec")
+        assert project is not None
+        Path(project.updates[0].attachments[0].path).unlink()
         await pilot.press("enter")
         await pilot.pause()
         await pilot.pause()
         assert view._mode == "detail"  # the page keeps the reader
-        assert "no longer on disk" in view.rendered_rows()[-1]
+        assert "missing on disk" in view.rendered_rows()[-1]
 
 
 async def test_a_row_without_the_updates_field_still_loads(tmp_path: Path) -> None:
@@ -1006,7 +1035,9 @@ async def test_a_long_attachment_path_is_fitted_to_its_row(tmp_path: Path) -> No
         # `content` is a union on the Static; the file's own idiom is getattr.
         text = str(getattr(path_row.content, "plain", ""))
         assert text.strip().startswith("→ ")
-        assert text.endswith("…")
+        # Middle-ellipsized: the FILE's tail survives, which is what tells one
+        # attachment row from another (design review round 1, D2).
+        assert "…" in text and text.strip().endswith(".png")
         assert path_row.region.height == 1  # fitted: nothing wrapped
         assert cell_len(text) <= path_row.region.width
 
@@ -1031,8 +1062,240 @@ async def test_the_selected_feed_row_is_on_screen_when_the_page_opens(tmp_path: 
         await pilot.pause()
         page = view._detail_page
         row = page._selectables[page.selected_index]
-        screen_y = page.content_region.y + row.region.y - int(page.scroll_offset.y)
-        assert page.region.y <= screen_y <= page.region.y + page.region.height - 1
+        # `region.y` IS the painted screen row (measured: the same value the
+        # frame shows), so containment is a direct comparison — the earlier
+        # `content_region.y + region.y - scroll_offset.y` reconstruction
+        # described a different quantity than the one it claimed (agent review
+        # round 1, MINOR-4).
+        assert page.region.y <= row.region.y <= page.region.y + page.region.height - 1
+
+
+async def test_a_one_line_entry_offers_no_verb_and_toggles_nothing(tmp_path: Path) -> None:
+    """Design review round 1, D1: no hint for a key that cannot act.
+
+    The first thing a reader saw on open was `↵ expand` on an entry with nothing
+    to expand: the press flipped the row's label while `painted_rows()` stayed
+    byte-identical.
+    """
+    registry = ProjectRegistry(tmp_path)
+    project = registry.create_project(ProjectEdit(name="shorty", title="Shorty"))
+    registry.update_project(project.id, ProjectEdit(progress="one line only"), reporter="operator")
+    session = _ProjectSession()
+    session.project_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "shorty")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        page = view._detail_page
+        assert page.selected_action_label() is None
+        assert "expand" not in view.rendered_rows()[-1]
+        before = page.painted_rows()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert page.painted_rows() == before
+        assert page.selected_action_label() is None
+        assert page._expanded == set()
+
+
+async def test_expanding_an_entry_does_not_leak_into_another_project(tmp_path: Path) -> None:
+    """Agent review round 1, MINOR-1: expansion is per-project view state."""
+    registry = ProjectRegistry(tmp_path)
+    long_body = "\n".join(f"line {n}" for n in range(1, 12))
+    for name in ("alpha", "beta"):
+        project = registry.create_project(ProjectEdit(name=name, title=name.title()))
+        registry.update_project(project.id, ProjectEdit(progress=long_body), reporter="operator")
+    session = _ProjectSession()
+    session.project_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "alpha")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        page = view._detail_page
+        assert page.selected_action_label() == "expand"
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert page.selected_action_label() == "collapse"
+        assert any("line 11" in row for row in page.painted_rows())
+        await pilot.press("escape")
+        await pilot.pause()
+        view = await _open(pilot, app, "beta")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        page = view._detail_page
+        # beta's own entry: same ordinal, different project — not expanded.
+        assert page.selected_action_label() == "expand"
+        assert not any("line 11" in row for row in page.painted_rows())
+
+
+async def test_clicking_a_feed_row_selects_and_a_second_click_acts(tmp_path: Path) -> None:
+    """UX review round 1, U4: the new affordances are not keyboard-only.
+
+    One `esc` away the canvas selects on the first click and acts on the
+    second; the page's rows looked the same and did nothing at all.
+    """
+    session = _ProjectSession()
+    session.project_registry = _feed_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        page = view._detail_page
+        stamps = [row for row in page._selectables if "expand" in (row.action_label() or "")]
+        assert stamps, page.painted_rows()
+        target = stamps[0]
+        # The first click moves the cursor and reveals, like the canvas.
+        await pilot.click(target, offset=(3, 0))
+        await pilot.pause()
+        await pilot.pause()
+        assert page._selectables[page.selected_index] is target
+        assert page.selected_action_label() == "expand"
+        # A second click on the SAME row activates it (both clicks in one
+        # chain, the canvas's `event.chain == 2`).
+        await pilot.click(target, offset=(3, 0), times=2)
+        await pilot.pause()
+        await pilot.pause()
+        assert page.selected_action_label() == "collapse"
+        assert any("line 11" in row for row in page.painted_rows())
+
+
+async def test_the_hint_row_re_syncs_the_verb_after_a_toggle(tmp_path: Path) -> None:
+    """UX review round 1, U2: the verb is the hint row's own input.
+
+    The footer kept offering `↵ expand` on the row the reader had just opened
+    and only caught up on the next cursor move — the press's only visible
+    effect being that the offered key no longer matched what it would do.
+    """
+    session = _ProjectSession()
+    session.project_registry = _feed_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+
+        def hints() -> str:
+            import re
+
+            text = " ".join(
+                hint.rendered()
+                for hint in view._hints.children
+                if isinstance(hint, HintButton) and hint.display
+            )
+            return re.sub(r"\s+", " ", text)
+
+        assert "↵ expand" in hints()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        # No cursor move in between: the toggle itself must re-arm the hint.
+        assert "↵ collapse" in hints()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert "↵ expand" in hints()
+
+
+async def test_the_cursor_stays_on_screen_through_every_feed_stop(tmp_path: Path) -> None:
+    """UX round 1, U1: `↓` through the feed never leaves the row off-screen.
+
+    The earlier reveal clamped the scroll itself, comparing the row's
+    ``region.y`` (a SCREEN row) with ``scroll_offset.y`` (a virtual one): the
+    cursor went off-screen at 4/14 stops at 100x30 and 8/14 at 60x24 while the
+    footer kept advertising a verb. Both sizes are walked here.
+    """
+    for size in ((100, 30), (60, 24)):
+        # A store per size: the fixture names its project, and one tmp_path
+        # cannot hold two of them.
+        store = tmp_path / f"{size[0]}x{size[1]}"
+        store.mkdir()
+        session = _ProjectSession()
+        session.project_registry = _feed_registry(store)
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=size) as pilot:
+            await _boot(pilot, app)
+            view = await _open(pilot, app, "parity-spec")
+            await pilot.press("d")
+            await pilot.pause()
+            await pilot.pause()
+            page = view._detail_page
+            stops = page.selectable_count
+            assert stops > 1
+            for _ in range(stops - 1):
+                await pilot.press("down")
+                await pilot.pause()
+                row = page._selectables[page.selected_index]
+                assert (
+                    page.region.y <= row.region.y <= page.region.y + page.region.height - 1
+                ), f"cursor off-screen at {size}, stop {page.selected_index} of {stops}"
+
+
+async def test_the_cursor_is_on_screen_when_a_tall_page_opens(tmp_path: Path) -> None:
+    """The pin the design round asked for in place of the old literal (D6).
+
+    A tall page reveals its first selectable row on open — the standing
+    "reveal-then-act" rule. Measured on the page box, because the literal it
+    replaces ("opens at overview") no longer holds once a feed sits above the
+    milestones.
+    """
+    session = _ProjectSession()
+    session.project_registry = _feed_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.pause()
+        page = view._detail_page
+        assert page.max_scroll_y > 0, "the fixture must be taller than the box"
+        row = page._selectables[page.selected_index]
+        assert page.region.y <= row.region.y <= page.region.y + page.region.height - 1
+
+
+async def test_the_ruler_matches_the_dom_truth_at_every_scroll_offset(tmp_path: Path) -> None:
+    """Design review round 1, D6: a heading's blank row belongs to ITS section.
+
+    The defect was one specific offset — the one the page OPENS at, where the
+    viewport's top row is the updates heading's ``.gap-above`` blank and the
+    ruler still named the description that had scrolled away above it. Rather
+    than pin that single state, this sweeps every offset the page can hold and
+    asserts the reading equals the DOM truth at each: with the gap ignored by
+    the anchor math, the boundary offset disagrees.
+    """
+    session = _ProjectSession()
+    session.project_registry = _feed_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.pause()
+        page = view._detail_page
+        assert page.max_scroll_y > 0, "the fixture must be taller than the box"
+        for offset in range(int(page.max_scroll_y) + 1):
+            page.scroll_to(y=offset, animate=False)
+            await pilot.pause()
+            truth = _dom_top_section(page)
+            ruler = view.rendered_rows()[1]
+            if truth is None:
+                continue
+            assert ruler.startswith(f"── {truth} "), (offset, ruler, truth)
 
 
 async def test_the_canvas_ladder_advertises_d_detail_and_keeps_the_60_snapshot(

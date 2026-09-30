@@ -331,7 +331,12 @@ class ProjectsView(Vertical):
         self._canvas = Static(classes="projects-view-canvas")
         self._body = ScrollableContainer(self._canvas, classes="projects-view-body")
         self._detail_page = ProjectDetailPage(
-            self._detail_row_action, _style_resolver(), on_nav=self._detail_nav
+            self._detail_row_action,
+            _style_resolver(),
+            on_nav=self._detail_nav,
+            # A toggle changes the selected row's verb, which is the hint row's
+            # own input (UX review round 1, U2).
+            on_state_change=self._detail_state_changed,
         )
         self._detail_page.display = False
         # The pinned footer: the highlighted project's detail in the list view,
@@ -775,6 +780,16 @@ class ProjectsView(Vertical):
         if self._last is None or not self._last.sections:
             return
         self._paint_rule()
+
+    def _detail_state_changed(self) -> None:
+        """The detail page changed a row's own verb: re-arm the chrome.
+
+        Without this the footer kept offering `↵ expand` on the row the reader
+        had just opened (UX review round 1, U2). Deferred like every other
+        chrome paint here — the toggled page settles first, so the hint is
+        measured against the row it will act on.
+        """
+        self.call_after_refresh(self._paint_detail_chrome)
 
     def _detail_scroll_changed(self, *_args: Any) -> None:
         """The detail's ruler tracks ITS viewport (design §6).

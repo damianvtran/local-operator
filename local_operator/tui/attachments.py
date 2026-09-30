@@ -49,6 +49,11 @@ async def open_path_quietly(path: str) -> bool:
     A ``False`` never means "maybe" — it means nothing was launched, or the
     launcher reported a non-zero exit. The caller states that outcome rather
     than swallowing it, which is the whole point of returning a boolean here.
+
+    ONE deadline covers the whole call: the read and the wait must not each
+    spend :data:`OPEN_PATH_TIMEOUT_S`, or a wedged opener is killed at twice
+    the bound the constant states (measured 20.0 s against a ``sleep 30``
+    child — agent review round 1, MINOR-3).
     """
     argv = opener_argv(path)
     if argv is None:
@@ -67,23 +72,25 @@ async def open_path_quietly(path: str) -> bool:
         logger.debug("attachment opener failed to start: %s", argv[0], exc_info=True)
         return False
 
-    async def _drain() -> None:
-        if process.stdout is None:
-            return
-        raw = await process.stdout.read()
-        text = raw.decode("utf-8", "replace").strip()
-        if text:
-            logger.info("attachment opener (%s): %s", argv[0], text)
+    async def _read_and_wait() -> int:
+        if process.stdout is not None:
+            raw = await process.stdout.read()
+            text = raw.decode("utf-8", "replace").strip()
+            if text:
+                logger.info("attachment opener (%s): %s", argv[0], text)
+        return await process.wait()
 
-    drain = asyncio.ensure_future(_drain())
     try:
-        await asyncio.wait_for(asyncio.shield(drain), timeout=OPEN_PATH_TIMEOUT_S)
+        return await asyncio.wait_for(_read_and_wait(), timeout=OPEN_PATH_TIMEOUT_S) == 0
     except asyncio.TimeoutError:
-        logger.debug("attachment opener timed out: %s", sys.argv[0])
+        # The opener is named rather than this process's own entry path: the
+        # message is about the child that hung (agent review round 1, MINOR-2).
+        logger.debug("attachment opener timed out: %s", argv[0])
+        try:
+            process.kill()
+        except ProcessLookupError:  # pragma: no cover — it exited between the two
+            pass
+        return False
     except Exception:  # noqa: BLE001 — a drain failure must not mask the exit code
-        logger.debug("attachment opener drain failed", exc_info=True)
-    try:
-        return await asyncio.wait_for(process.wait(), timeout=OPEN_PATH_TIMEOUT_S) == 0
-    except asyncio.TimeoutError:
-        process.kill()
+        logger.debug("attachment opener failed", exc_info=True)
         return False

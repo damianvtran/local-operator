@@ -38,15 +38,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable, NamedTuple, Sequence, cast
 
 from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
 
-from local_operator.projects import _SESSION_ID_RE, PROJECT_ROW_CAP, PROJECT_STATUSES
+from local_operator.projects import PROJECT_ROW_CAP, PROJECT_STATUSES
 from local_operator.projects import age_text as derived_age_text
-from local_operator.projects import display_name, file_size_text
+from local_operator.projects import display_name, file_size_text, is_session_id
 from local_operator.projects import milestone_state as derived_milestone_state
 from local_operator.projects import truncate_row
 
@@ -2367,7 +2368,7 @@ def update_reporter_text(by: str) -> str:
         return ""
     if reporter == "operator":
         return "the operator"
-    if _SESSION_ID_RE.fullmatch(reporter):
+    if is_session_id(reporter):
         return f"session {reporter}"
     return reporter
 
@@ -2458,6 +2459,17 @@ def update_body_lines(text: str) -> list[str]:
     return [line.rstrip() for line in str(text or "").replace("\r\n", "\n").split("\n")]
 
 
+def update_body_is_clamped(text: str) -> bool:
+    """Does this entry's body overflow the clamp — i.e. is there a tail to open?
+
+    THE predicate behind the row's verb (design review round 1, D1): a stamp
+    whose body fits the clamp is not expandable, so it must advertise no verb
+    and hold no ``_expanded`` state — a hint for a key that does nothing is
+    exactly what the page's own rule forbids.
+    """
+    return len(update_body_lines(text)) > UPDATE_BODY_LINES
+
+
 def update_more_lines_text(
     count: int, *, expanded: bool, style_for: StyleFor | None = None
 ) -> Text:
@@ -2465,11 +2477,16 @@ def update_more_lines_text(
 
     The key is advertised only because it is bound: `↵` on the entry's stamp
     row toggles this entry, the same slot every other row verb uses, so the
-    marker names a key that does what it says (the page's own rule).
+    marker names a key that does what it says (the page's own rule). Two
+    corrections from design review round 1: the count is INFLECTED (``1 more
+    line``), and the ink is ``muted`` rather than ``dim`` (D4) — this is the
+    feed's only in-content affordance and it was sharing the quiet ink of
+    paths and day headers, at 4.55:1 dark and 3.77:1 light.
     """
     resolver = _styles(style_for)
     verb = "collapse" if expanded else "expand"
-    return Text(f"[{count} more lines — ↵ {verb}]", style=resolver("dim"), no_wrap=True)
+    noun = "line" if count == 1 else "lines"
+    return Text(f"[{count} more {noun} — ↵ {verb}]", style=resolver("muted"), no_wrap=True)
 
 
 def attachment_row_text(
@@ -2495,6 +2512,57 @@ def attachment_row_text(
     return line
 
 
+def _home_relative(path: str) -> str:
+    """``/Users/me/x`` → ``~/x`` — the head every row shares is the noise.
+
+    Design review round 1, D2: at 100 columns the stored path is 126 cells (114
+    with ``~``) against a 95-cell box, so the ellipsis landed in the unique hex
+    tail and every row read ``…/attachments/<cut>…``.
+    """
+    if not path.startswith("/"):
+        return path
+    try:
+        home = str(Path.home()).rstrip("/")
+    except Exception:  # noqa: BLE001 — no home is a cosmetic loss, not a failure
+        return path
+    if home and path.startswith(home + "/"):
+        return "~" + path[len(home) :]
+    return path
+
+
+def _middle_ellipsize(text: str, budget: int) -> str:
+    """``head…tail`` within ``budget`` cells, keeping BOTH ends (design D2).
+
+    The tail carries the information — ``…/eb904c…png`` names the file and its
+    extension — while the head is the same on every row of the feed, so a plain
+    right-truncation keeps exactly the part that distinguishes nothing.
+    """
+    if cell_len(text) <= budget:
+        return text
+    if budget <= 1:
+        return "…"
+    # The tail gets the larger share: it is the part that names the file.
+    tail_budget = max(budget * 2 // 3, 1)
+    head_budget = max(budget - tail_budget - 1, 0)
+    head = ""
+    used = 0
+    for char in text:
+        size = cell_len(char)
+        if used + size > head_budget:
+            break
+        head += char
+        used += size
+    tail = ""
+    used = 0
+    for char in reversed(text):
+        size = cell_len(char)
+        if used + size > tail_budget:
+            break
+        tail = char + tail
+        used += size
+    return f"{head}…{tail}"
+
+
 def attachment_path_text(
     attachment: dict[str, Any], *, width: int | None = None, style_for: StyleFor | None = None
 ) -> Text:
@@ -2509,26 +2577,24 @@ def attachment_path_text(
     the line readable: Textual WRAPS a ``Static``'s text whatever its
     ``no_wrap`` says — measured, a 113-cell path in a 95-cell box painted as
     a bare ``→`` with the rest hard-split onto the following rows. Given the
-    width the line is fitted HERE, cell-accurate, with an ellipsis, and the
-    missing marker is reserved space before the path is cut so the caveat
-    never falls off the end.
+    width the path is abbreviated (``~`` for the home prefix) and
+    MIDDLE-ellipsized so the file's own tail survives, with the missing
+    marker's cells reserved first so the caveat never falls off the end.
     """
     resolver = _styles(style_for)
-    path = str(attachment.get("path") or "(no path recorded)")
+    path = _home_relative(str(attachment.get("path") or "(no path recorded)"))
     marker = "  [missing on disk]" if attachment.get("missing") else ""
+    prefix = "    → "
     line = Text(no_wrap=True)
-    line.append(f"    → {path}", style=resolver("dim"))
-    if width is not None:
-        reserved = cell_len(marker)
-        budget = max(width - reserved, 1) if reserved and reserved < width else width
-        if cell_len(line.plain) > budget:
-            line.truncate(budget, overflow="ellipsis")
-        if reserved and reserved < width:
+    if width is None:
+        line.append(f"{prefix}{path}", style=resolver("dim"))
+        if marker:
             line.append(marker, style=resolver("stale"))
-        elif cell_len(line.plain) > width:
-            line.truncate(width, overflow="ellipsis")
         return line
-    if marker:
+    reserved = cell_len(marker) if cell_len(marker) < width else 0
+    budget = max(width - reserved - cell_len(prefix), 1)
+    line.append(f"{prefix}{_middle_ellipsize(path, budget)}", style=resolver("dim"))
+    if reserved:
         line.append(marker, style=resolver("stale"))
     return line
 
