@@ -473,6 +473,7 @@ def resolve_profile(
     name: str | None,
     *,
     registry: Any = None,
+    strict_registry: bool = False,
 ) -> AgentProfile | None:
     """Resolve a role NAME to a profile: registry first, then packaged seeds.
 
@@ -491,12 +492,32 @@ def resolve_profile(
     answers the two methods used here), and every access below is already
     guarded, so a narrower annotation would claim a coupling the code does not
     actually require.
+
+    ``strict_registry`` (the launch/resume path) turns a registry READ FAILURE
+    from "fall through to the packaged seed" into a raise: a seed carries no
+    operator pin, so falling through there is how a pinned role could launch
+    on an un-pinned model — the silent substitution the strict tier path
+    refuses one layer up. A genuinely ABSENT row still resolves to the seed
+    (or ``None``), strict or not; the distinction is read-vs-absent, not
+    role-vs-no-role.
     """
 
     key = (name or "").strip()
     if not key:
         return None
     if registry is not None:
+        if strict_registry:
+            # ENFORCE READABILITY FIRST, with the same gate the resume-
+            # admission path and the desktop profile routes use: it raises
+            # ``ProfileRegistryUnavailable`` when a definition could not be
+            # read, so a caller that must not silently inherit a pinned
+            # role's model can tell "genuinely no role row" (the seed/None
+            # fallthrough below, unchanged) apart from "the registry could
+            # not be read". Duck-typed like every other access here — hosts
+            # attach any object answering the two methods used below.
+            complete = getattr(registry, "require_complete_metadata", None)
+            if callable(complete):
+                complete()
         try:
             agent = registry.get_agent_by_name(key)
             if agent is not None and not is_role(agent):
@@ -524,6 +545,12 @@ def resolve_profile(
                     None,
                 )
         except Exception:  # noqa: BLE001 - registry problems must not fail a launch
+            if strict_registry:
+                # A read that fails even after the completeness gate is still
+                # not "no role of that name": surface it instead of falling
+                # through to a seed, which could silently drop an operator
+                # pin in exactly the case strict callers must refuse.
+                raise
             agent = None
             logger.warning("agent registry lookup failed for %r", key)
         # The row must be MARKED a role. An unmarked same-named agent falls

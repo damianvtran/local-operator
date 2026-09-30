@@ -94,6 +94,7 @@ def _consumer_defaults() -> dict[str, object]:
     from local_operator.providers.failover import (
         CONNECTIVITY_BACKOFF_CAP_MS,
         CONNECTIVITY_MAX_RETRIES,
+        DEFAULT_PINNED_FALLBACK,
         RetrySettings,
     )
     from local_operator.session.cleanup import (
@@ -158,6 +159,7 @@ def _consumer_defaults() -> dict[str, object]:
         "retry.usageReservePercent": retry.usage_reserve_percent,
         "retry.usageAwareAccountPick": retry.usage_aware_account_pick,
         "retry.fallbackChains": dict(retry.fallback_chains),
+        "retry.pinnedFallback": DEFAULT_PINNED_FALLBACK,
         # Empty means "auto-resolve" (bash on PATH, else /bin/sh) rather than
         # an interpreter, so the consumer's constant is the empty string too.
         "bash.shell": BASH_SHELL_DEFAULT,

@@ -1314,6 +1314,21 @@ class AgentRegistry:
             )
             raise ProfileRegistryUnavailable(count=len(self._incomplete_agent_dirs))
 
+    def refresh_now(self) -> None:
+        """Force a metadata rescan NOW, bypassing ``_refresh_interval``.
+
+        ``Session._resolve_subagent_model`` calls this on the spawn/resume
+        path so a role pin written moments ago on ANY surface (the agent
+        editor, an import, another process) reaches the very next launch: the
+        ordinary reads refresh at most once per interval, and a launch is
+        exactly the moment where a stale view means the wrong model runs — or
+        the operator's pin is silently missed entirely. Repair of a failed
+        snapshot is the other caller-visible benefit: the next launch
+        re-stats the tree rather than answering from an aged cache.
+        """
+        self._refresh_agents_metadata()
+        self._last_refresh_time = time.time()
+
     def _refresh_if_needed(self) -> None:
         """
         Refresh agent metadata from disk if the refresh interval has elapsed.

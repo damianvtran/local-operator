@@ -535,3 +535,27 @@ async def test_a_knob_change_announces_nothing(tmp_path):
     await _drain_background(session)
 
     assert not [event for event in events if isinstance(event, ModelChangeEvent)]
+
+
+@pytest.mark.asyncio
+async def test_the_persisted_route_row_carries_the_settle_reason(tmp_path):
+    """Observability: WHY the route moved is persisted beside WHICH model is
+    serving.
+
+    The row used to carry ``primary``/``active`` only, so a transcript could
+    not answer "why is this session on a fallback" — the blind spot the
+    pinned-child investigation hit. The key is ADDITIVE: older rows lack it
+    and older readers ignore it.
+    """
+    stream = RoutedStream()
+    session = _session(tmp_path, stream)
+
+    await stream.route_handler(
+        FallbackTarget("zai/glm-5.3", "high"), "provider failure: quota HTTP 429"
+    )
+    await stream.route_handler(None, "primary model recovered")
+
+    entries = _route_entries(session)
+    assert len(entries) == 2
+    assert entries[0]["reason"] == "provider failure: quota HTTP 429"
+    assert entries[1]["reason"] is None
