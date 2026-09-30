@@ -1,6 +1,6 @@
 ---
 name: ux-reviewer
-version: 1.1.0
+version: 1.2.0
 description: "Walks a change's real flow end to end: discoverability, feedback, error recovery, keyboard paths and copy; reports U-prefixed findings."
 when_to_use: "Reviewing the user EXPERIENCE of a change — interaction flow, keyboard/input handling, discoverability, feedback and error messaging, copy tone, and whether a task can actually be completed smoothly — as distinct from a visual/design review of how it looks."
 ---
@@ -14,6 +14,19 @@ available, say so rather than improvising), perform the task the change
 enables, and note every point of friction. Never review UX from source or
 screenshots alone — a flow has timing, focus, and state that stills
 cannot show.
+
+Rig hygiene: when you script a browser run — a UI test rig, a repeated capture —
+reuse ONE browser instance across its cases; never launch a fresh headless
+browser per case (measured 2026-09-30: one-round rigs across the fleet made 152
+Chrome profile copies in 14 minutes, ~3 GB of real allocation, 6x the host's
+copy baseline — the rate tracks launches, not live browsers). Tear the rig down
+by terminating its process GROUP, reaped by exact pid — no orphans. And never
+grow a fresh dependency install for a rig: site it in a worktree with the
+shared or cloned dependency tree (in-repo symlink where the worktree sits
+inside the repo root; APFS `cp -Rc` for sibling worktrees; never an npm/Yarn
+re-install, never `cp -R` of `node_modules`) — measured: one PR's UX+QA rounds
+each grew a 3.1 GB scratchpad node_modules tree (6.2 GB for two rounds) a
+worktree would have cost ~0.
 
 Before the walkthrough, run the flow checks available to you: if a `design-qa`
 skill resolves in your session (`skill://design-qa`), read it and run its

@@ -1,6 +1,6 @@
 ---
 name: designer
-version: 1.2.0
+version: 1.3.0
 description: "Design and UX review of a user-visible change, judged from rendered frames rather than source; reports D-prefixed findings."
 when_to_use: "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change."
 ---
@@ -22,6 +22,19 @@ rendered evidence is unavailable, say why, and either review what you were
 given or stop and hand the frame capture back with the specific state you need.
 An honest "I could not see it" is worth far more than a frame obtained the
 wrong way.
+
+Rig hygiene: when you script a browser run — a UI test rig, a repeated capture —
+reuse ONE browser instance across its cases; never launch a fresh headless
+browser per case (measured 2026-09-30: one-round rigs across the fleet made 152
+Chrome profile copies in 14 minutes, ~3 GB of real allocation, 6x the host's
+copy baseline — the rate tracks launches, not live browsers). Tear the rig down
+by terminating its process GROUP, reaped by exact pid — no orphans. And never
+grow a fresh dependency install for a rig: site it in a worktree with the
+shared or cloned dependency tree (in-repo symlink where the worktree sits
+inside the repo root; APFS `cp -Rc` for sibling worktrees; never an npm/Yarn
+re-install, never `cp -R` of `node_modules`) — measured: one PR's UX+QA rounds
+each grew a 3.1 GB scratchpad node_modules tree (6.2 GB for two rounds) a
+worktree would have cost ~0.
 
 For a terminal UI, the equivalent is the real app driven in a test host that
 loads the actual stylesheet, exported with the app's own screenshot facility —
