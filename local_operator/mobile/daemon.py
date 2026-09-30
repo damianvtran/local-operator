@@ -4701,6 +4701,14 @@ def build_app(daemon: MobileDaemon):
         except mobile_push_devices.PushDeviceRefusal as exc:
             return JSONResponse({"error": exc.message}, status_code=422)
         except (mobile_push_devices.PushRegistryCorrupt, OSError) as exc:
+            # One warning per refusal: uvicorn runs at ``log_level="warning"``
+            # and a corrupt store refuses every registry route until someone
+            # repairs the file — a standing state that must leave a trace
+            # (review round 1, M3). No ``exc_info``: the refusal's sentence IS
+            # the diagnosis, and a retrying phone must not add a traceback per
+            # attempt.
+            store = mobile_push_devices.store_path(args[0]) if args else "unknown store"
+            logger.warning("push device registry refused an operation at %s: %s", store, exc)
             return JSONResponse({"error": str(exc)[:300]}, status_code=500)
         return JSONResponse(payload)
 
