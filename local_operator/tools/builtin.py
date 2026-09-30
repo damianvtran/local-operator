@@ -64,7 +64,7 @@ from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Se
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, BinaryIO, Literal, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, BinaryIO, Literal, NamedTuple, cast
 from urllib.parse import urlsplit
 
 from pydantic import (
@@ -185,6 +185,13 @@ from local_operator.tools.spill import (
 )
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    # Annotation-only, deliberately: the peek helpers below speak in transcript
+    # entries, but this module must not import the transcript module at import
+    # time — its dependency weight belongs to the session stack, and every
+    # function that touches it imports it inside its own body.
+    from local_operator.session.transcript import TranscriptEntry
 
 # ---------------------------------------------------------------------------
 # Shared limits and helpers
@@ -13158,17 +13165,17 @@ _SESSIONS_JOB_LINE_RE = re.compile(r"^Background job ([^:\s]+):", re.MULTILINE)
 #: The tool's description — a module constant so the builder, the budget
 #: guard and the PR's measurement all read the same bytes (design note §3.4).
 _SESSIONS_TOOL_DESCRIPTION = (
-    "Manage OTHER local `lop` sessions on this machine (top-level sessions and"
-    " stored conversations; subagents are `hub`'s). `list` shows what is running"
-    " (add `include_stored` for stored conversations, `query` to search names and"
-    " recent content); `info` describes one session — its state, directory, origin"
-    " and whether the operator's sidebar lists it; `spawn` opens a parallel session"
-    " for work the USER asked to run separately — it is a listed workstream by"
-    ' default (use `visibility="ephemeral"` only for a throwaway run the'
-    " operator did not ask to see); `resume` reopens a stored/stopped session"
-    " headlessly; `stop` ends a running session gracefully. Address a session with"
-    " exactly one of `session` (exact id), `target` (name/cwd substring) or `pid`."
-    " Steering mid-turn is `send` with now=True."
+    "Manage OTHER local `lop` sessions (top-level and stored; subagents are"
+    " `hub`'s). `list` shows what is running — add `include_stored` or `query`;"
+    " `info` describes one (state, directory, origin, sidebar visibility); `spawn`"
+    " opens a parallel session for work the USER asked to run separately — it is a"
+    ' listed workstream by default (use `visibility="ephemeral"` only for a'
+    " throwaway run the operator did not ask to see); `resume` reopens a"
+    " stored/stopped session headlessly; `stop` ends a running session gracefully;"
+    " `peek` reads a bounded transcript window (tail/head/cursor/search, or a"
+    " `digest`). Address a session with exactly one of `session` (exact id),"
+    " `target` (name/cwd substring) or `pid`. Steering mid-turn is `send` with"
+    " now=True."
 )
 
 
@@ -13186,16 +13193,18 @@ class SessionsParams(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    op: Literal["list", "info", "spawn", "resume", "stop"] = Field(
+    op: Literal["list", "info", "spawn", "resume", "stop", "peek"] = Field(
         description=(
-            "list sessions; info one; spawn a parallel session (work the USER asked "
-            "for; listed by default); resume a stored one; stop a running one."
+            "list; info; spawn (only work the USER asked to run separately; listed by "
+            "default); resume; stop; peek a transcript."
         )
     )
-    session: str | None = Field(default=None, description="info/resume/stop: exact session id.")
+    session: str | None = Field(
+        default=None, description="info/resume/stop/peek: exact session id."
+    )
     target: str | None = Field(
         default=None,
-        description=("info/resume/stop: substring of name, id or cwd; live first, then stored."),
+        description="info/resume/stop/peek: name/id/cwd substring; live, then stored.",
     )
     pid: int | None = Field(default=None, description="info/stop: exact pid.")
     prompt: str | None = Field(
@@ -13203,19 +13212,16 @@ class SessionsParams(BaseModel):
         description="spawn/resume: message to run (required).",
     )
     name: str | None = Field(default=None, description="spawn: title.")
-    team: str | None = Field(default=None, description="spawn: team to attach.")
-    profile: str | None = Field(default=None, description="spawn: role to attach.")
+    team: str | None = Field(default=None, description="spawn: team.")
+    profile: str | None = Field(default=None, description="spawn: role.")
     model: str | None = Field(default=None, description="spawn: <provider>/<model-id>.")
     visibility: Literal["workstream", "ephemeral"] = Field(
         default="workstream",
-        description=(
-            "spawn: 'workstream' (default) lists the run for the operator; "
-            "'ephemeral' (explicit) hides it and stays silent."
-        ),
+        description="spawn: 'workstream' lists the run (default); 'ephemeral' hides it.",
     )
     background: bool = Field(
         default=True,
-        description="spawn/resume: detach; v1's only value.",
+        description="spawn/resume: detach (v1's only value).",
     )
     include_stored: bool = Field(
         default=False,
@@ -13224,9 +13230,27 @@ class SessionsParams(BaseModel):
     limit: int = Field(default=20, ge=1, le=100, description="list: max rows.")
     query: str | None = Field(
         default=None,
-        description="list: search stored sessions by name/content.",
+        description="list: search stored sessions by name/content; peek: locate a step.",
     )
+    # --- peek windows (design §8; PR B) -------------------------------------
+    steps: int | None = Field(default=None, description="peek: last N steps (default 12, max 50).")
+    head: int | None = Field(default=None, description="peek: first N steps instead of the tail.")
+    before_id: str | None = Field(
+        default=None, description="peek: steps just before this entry id."
+    )
+    around_id: str | None = Field(
+        default=None, description="peek: window centred on this entry id."
+    )
+    regex: bool = Field(default=False, description="peek: `query` is a regex.")
+    digest: bool = Field(default=False, description="peek: compact fold instead of steps.")
 
+
+#: The window fields, which only ``peek`` has a meaning for. A set rather than
+#: an inline list in each place, because THREE sites must agree on it: the peek
+#: allowed-fields table, peek's own validator, and the refusal text a stray
+#: window field earns on another op ("applies to op='peek' only").
+_SESSIONS_PEEK_WINDOW_FIELDS = frozenset({"steps", "head", "before_id", "around_id"})
+_SESSIONS_PEEK_FIELDS = _SESSIONS_PEEK_WINDOW_FIELDS | frozenset({"regex", "digest"})
 
 #: What each op may carry. Keys outside the op's set are REFUSED rather than
 #: dropped: a ``name`` on ``stop`` or a ``query`` on ``spawn`` is a misspelled
@@ -13240,13 +13264,69 @@ _SESSIONS_OP_FIELDS: dict[str, frozenset[str]] = {
     ),
     "resume": frozenset({"op", "session", "target", "pid", "prompt", "background"}),
     "stop": frozenset({"op", "session", "target", "pid"}),
+    "peek": frozenset({"op", "session", "target", "pid", "query"}) | _SESSIONS_PEEK_FIELDS,
 }
 
 _SESSIONS_ADDRESS_FIELDS = ("session", "target", "pid")
 
 #: Ops that address ONE existing session. ``spawn`` creates one; ``list`` reads
 #: the set; the shared resolver runs for these.
-_SESSIONS_TARGET_OPS = frozenset({"info", "resume", "stop"})
+_SESSIONS_TARGET_OPS = frozenset({"info", "resume", "stop", "peek"})
+
+
+def _sessions_peek_validation_error(params: SessionsParams, given: set[str]) -> str | None:
+    """``peek``'s window rules (design §3.2): one window, and windows that fit.
+
+    The window selectors are mutually exclusive because each names a DIFFERENT
+    place to read from; two at once describe no window this tool could honour,
+    and honouring one silently is the substitution the transcript reader's own
+    ``validate_page_request`` exists to refuse one level down. ``digest`` is a
+    different READ (a fold of the newest rows), so a window beside it would be
+    dropped on the floor, and a search beside it would fight over what the
+    window means — both refused for the reason the op table refuses stray
+    fields at all: a misspelled intent must not be silently ignored.
+    """
+    from local_operator.harness.comms import PEEK_MAX_STEPS
+
+    windows = [field for field in ("steps", "head", "before_id", "around_id") if field in given]
+    if len(windows) > 1:
+        spelled = ", ".join(f"`{field}`" for field in windows)
+        return (
+            "peek reads one window at a time: pass at most one of `steps`, `head`, "
+            f"`before_id`, `around_id` (got {spelled})."
+        )
+    for field in ("steps", "head"):
+        value = getattr(params, field)
+        if field in given and (value is None or value < 1):
+            return f"`{field}` needs a count of at least 1."
+        if value is not None and value > PEEK_MAX_STEPS:
+            return (
+                f"`{field}={value}` is too many for one peek (max {PEEK_MAX_STEPS}); "
+                "page through with `before_id` instead."
+            )
+    for field in ("before_id", "around_id"):
+        if field in given and not str(getattr(params, field) or "").strip():
+            return f"`{field}` needs the entry id an earlier peek returned."
+
+    query = str(params.query or "").strip()
+    if params.digest:
+        if windows:
+            spelled = ", ".join(f"`{field}`" for field in windows)
+            return f"`digest` folds the newest rows on its own; drop {spelled}."
+        if query:
+            return (
+                "`digest` and `query` are different reads — digest folds the tail, "
+                "`query` locates one step. Pass one."
+            )
+        return None
+    if query and [field for field in ("head", "before_id", "around_id") if field in given]:
+        return (
+            "`query` locates one step, so the window is `steps=N` around the match "
+            "(default 12): drop `head`/`before_id`/`around_id` or drop `query`."
+        )
+    if params.regex and not query:
+        return "`regex` needs `query`: it selects how the query matches."
+    return None
 
 
 def _sessions_validation_error(params: SessionsParams) -> str | None:
@@ -13297,9 +13377,16 @@ def _sessions_validation_error(params: SessionsParams) -> str | None:
             return f"`{field}` does not apply to op='{op}' — it takes no address."
         if field == "background":
             return "`background` applies to spawn/resume only."
+        if field in _SESSIONS_PEEK_FIELDS:
+            return f"`{field}` applies to op='peek' only."
         if op == "list":
             return f"`{field}` applies to other ops; list takes no `{field}`."
         return f"`{field}` applies to op='spawn' only."
+
+    if op == "peek":
+        refusal = _sessions_peek_validation_error(params, given)
+        if refusal is not None:
+            return refusal
 
     if op in _SESSIONS_TARGET_OPS:
         provided = [
@@ -13324,7 +13411,7 @@ def _sessions_tier(args: dict[str, Any]) -> Literal["read", "write", "exec"]:
     keeps ``exec`` — a tier must never downgrade on a guess.
     """
     op = str(args.get("op") or "")
-    if op in ("list", "info"):
+    if op in ("list", "info", "peek"):
         return "read"
     if op in ("spawn", "resume"):
         return "write"
@@ -13892,6 +13979,682 @@ async def _sessions_stop(tool_call_id: str, params: SessionsParams) -> ToolResul
     return _text(tool_call_id, "sessions", "\n".join([*waited, outcome.line]), details=details)
 
 
+# ---------------------------------------------------------------------------
+# peek — bounded transcript inspection (design §8; PR B)
+# ---------------------------------------------------------------------------
+
+
+#: Steps a peek shows when the caller names no count (design §8.2). The hard
+#: ceiling is ``comms.PEEK_MAX_STEPS`` (50, imported where it is used) — the
+#: same number ``hub``'s peek refuses with, so both peeks turn an absurd count
+#: into the same legible refusal instead of two private ideas of "too many".
+_PEEK_DEFAULT_STEPS = 12
+
+
+#: How many ROWS one page read asks for while hunting ``need`` steps. A step is
+#: one message row; a page also carries the bookkeeping rows (checkpoints, todo
+#: snapshots, spend records) that render as nothing, so the ask is a multiple
+#: of the step count and the walk reads another page only when density is worse
+#: than that. Both terms are deliberate: too small and a dense tail pays a
+#: second page read; too large and the first read stops being "the chunk that
+#: carries the window" that ``read_transcript_page`` prices at.
+#: ``_PEEK_MAX_PAGES`` bounds the walk itself: the ordinary cost is ONE read,
+#: and a journal whose tail is a wall of bookkeeping rows still terminates —
+#: the footer's cursor is then the honest continuation point.
+_PEEK_MAX_PAGES = 4
+
+
+#: Byte depth the backward needle search may scan before it returns the honest
+#: miss (design §8.1). It is the SAME 16 MiB window the reader gives its cursor
+#: locator (``transcript._PAGE_LOCATE_WINDOW_BYTES``), so "deep" means one
+#: thing in the reader and in the search that rides it; a test pins the two
+#: numbers equal so they cannot drift apart silently.
+_PEEK_SCAN_BYTES = 16 << 20
+
+
+#: Rows a digest reads from the tail (design §8.3's "~40 entries").
+_PEEK_DIGEST_ROWS = 40
+
+
+def _peek_page_rows(need: int) -> int:
+    """Entries per page read for a ``need``-step walk — see the constants."""
+    return min(400, max(48, need * 4))
+
+
+def _peek_short_id(entry_id: str) -> str:
+    """First 8 chars of an entry id, for HEADERS only.
+
+    Never for the footer's cursors: those must be pasted back verbatim, and a
+    truncated cursor is the one suggestion this surface must not make.
+    """
+    return entry_id[:8] + "…" if len(entry_id) > 8 else entry_id
+
+
+class _PeekWindow(NamedTuple):
+    """One rendered step window — or the honest miss that answered a search.
+
+    ``steps`` is oldest→newest and numbered 1..N WITHIN THE WINDOW: operator
+    journals are not small (262 MB measured), so there is no counted total to
+    number against — cursor ids and booleans, not absolute indices (design
+    §8.2/§14.3). ``miss`` is the search's sentence when the needle was not
+    found inside the scan budget; a window with steps and a miss never occurs.
+    The cursor fields carry ENTRY ids (not step ids): stable across compaction,
+    which byte offsets are not, and exclusive/inclusive exactly as
+    ``read_transcript_page`` documents them.
+    """
+
+    steps: list[Any]
+    has_older: bool = False
+    has_newer: bool | None = None
+    before_cursor: str | None = None
+    after_cursor: str | None = None
+    scanned_bytes: int | None = None
+    match_id: str | None = None
+    match_step: int | None = None
+    miss: str = ""
+    note: str = ""
+
+
+class _PeekDigest(NamedTuple):
+    """The fold ``peek digest=true`` returns, already rendered."""
+
+    text: str
+    steps_seen: int
+    tool_calls: int
+    has_older: bool
+
+
+def _peek_message_entries(entries: Sequence[TranscriptEntry]) -> list[TranscriptEntry]:
+    """The entries that RENDER as steps — the renderer's own filter.
+
+    ``_render_transcript_steps`` counts only ``message`` rows (compaction and
+    bookkeeping rows are invisible to a reader), so any step arithmetic must
+    count with the same predicate; keeping it in one place is what stops the
+    walk's window from disagreeing with the renderer's count.
+    """
+
+    from local_operator.session.transcript import ENTRY_MESSAGE
+
+    return [entry for entry in entries if entry.type == ENTRY_MESSAGE]
+
+
+def _peek_window(
+    entries: list[TranscriptEntry],
+    *,
+    need: int,
+    has_older: bool,
+    has_newer: bool | None,
+    match_id: str | None = None,
+    scanned_bytes: int | None = None,
+    note: str = "",
+) -> _PeekWindow:
+    """Assemble the SHOWN window from chronological entries — the last ``need``
+    steps, which is the newest end for every walk this tool runs (tail reads,
+    ``before_id`` pages, and search windows all page backward from a newer
+    edge; the head read passes its own prefix where the same final slice lands
+    on the same rows because it IS the prefix).
+
+    ``has_older`` is true when the reader's stop page says rows follow below
+    the page OR when anything was read below the oldest SHOWN step — a
+    bookkeeping row under the window is still a row the reader has not seen
+    (design §8.2: a ``False`` must be a fact, never just "the window ran out").
+    """
+
+    from local_operator.harness.comms import PeekStep, _render_transcript_steps
+
+    message_entries = _peek_message_entries(entries)
+    shown_messages = message_entries[-need:]
+    oldest_shown: TranscriptEntry | None = shown_messages[0] if shown_messages else None
+    older_row_below = False
+    if oldest_shown is not None:
+        for entry in entries:
+            if entry is oldest_shown:
+                break
+            older_row_below = True
+    steps = _render_transcript_steps(entries)
+    shown = steps[-need:] if len(steps) > need else steps
+    # Renumber 1..N within the window: the renderer numbers every row it was
+    # given, so a window that dropped older steps would otherwise start at 5.
+    # The same slice re-bases ``match_step`` (computed against the SHOWN
+    # messages below), keeping the marker pointed at the step it names.
+    if shown and shown[0].index != 1:
+        offset = shown[0].index - 1
+        shown = [
+            PeekStep(step.index - offset, step.kind, step.heading, step.body) for step in shown
+        ]
+    match_step = None
+    if match_id is not None:
+        for position, entry in enumerate(shown_messages, start=1):
+            if entry.id == match_id:
+                match_step = position
+                break
+    # The cursors page from the SHOWN steps, never from rows the walk read past
+    # while hunting for them: a `before_id` cursor into a row the caller never
+    # saw makes the next page SKIP everything between the two (a dense 48-row
+    # page would skip 36 message rows). The reader's cursor is exclusive, so
+    # "oldest shown entry" continues exactly where the window stopped — no
+    # gap, no repeat. Only an empty window falls back to the read rows, and
+    # then only for the has_older case, where there is nothing to continue from.
+    if shown_messages:
+        before_cursor: str | None = shown_messages[0].id
+        after_cursor: str | None = shown_messages[-1].id
+    else:
+        before_cursor = entries[0].id if entries else None
+        after_cursor = entries[-1].id if entries else None
+    return _PeekWindow(
+        steps=shown,
+        has_older=has_older or older_row_below,
+        has_newer=has_newer,
+        before_cursor=before_cursor,
+        after_cursor=after_cursor,
+        scanned_bytes=scanned_bytes,
+        match_id=match_id,
+        match_step=match_step,
+        note=note,
+    )
+
+
+def _walk_steps(directory: Path, *, cursor: str | None, need: int) -> _PeekWindow | str:
+    """Collect up to ``need`` steps walking backward from ``cursor`` (or EOF).
+
+    Reads with ``read_transcript_page`` — the page reader the desktop uses and
+    the one whose cost contract ("the tail page costs the chunk that carries
+    it") this walk keeps — one page at a time until ``need`` message rows are
+    collected, the journal's start is reached, or ``_PEEK_MAX_PAGES`` reads are
+    spent. ``before_id`` is the reader's exclusive cursor, so consecutive pages
+    can neither repeat nor skip a row.
+
+    Returns the rendered window, or the sentence for a caller-named cursor that
+    names nothing: the reader answers that case by reconciling to the current
+    TAIL, and this tool refuses instead — a tail under a caller's cursor is the
+    silent substitution the reader's own ``validate_page_request`` refuses one
+    level down, and the caller may then re-ask with an id a real read returned.
+    """
+
+    from local_operator.session.transcript import read_transcript_page
+
+    collected: list[TranscriptEntry] = []
+    read_cursor = cursor
+    stop_page = None
+    pages = 0
+    while True:
+        page = read_transcript_page(directory, before_id=read_cursor, limit=_peek_page_rows(need))
+        if read_cursor is not None and page.reconciled:
+            return (
+                f"no transcript entry with id {read_cursor!r} — entry ids are stable "
+                "across compaction, but a replaced journal drops old ones; use an id "
+                "an earlier peek returned, or read the tail."
+            )
+        collected = list(page.entries) + collected
+        stop_page = page
+        pages += 1
+        if len(_peek_message_entries(collected)) >= need or not page.has_more:
+            break
+        if pages >= _PEEK_MAX_PAGES or not page.entries:
+            break
+        read_cursor = page.entries[0].id
+    assert stop_page is not None  # the loop body always runs at least once
+    return _peek_window(
+        collected,
+        need=need,
+        # The stop page's ``has_more`` is the reader's own answer to "older rows
+        # exist"; ``_peek_window`` adds the bookkeeping rows read below the
+        # window. ``has_newer``: the tail read starts at the file's end, so
+        # nothing is newer (False is a fact here, not a bound); a ``before_id``
+        # window has every row above it newer BY CONSTRUCTION — the cursor row
+        # itself (the reader's own docstring makes the same two claims).
+        has_older=bool(stop_page.has_more),
+        has_newer=False if cursor is None else True,
+        note=(
+            "the bounded walk stopped before it collected every requested step; "
+            "continue with `before_id` below"
+            if (
+                pages >= _PEEK_MAX_PAGES
+                and stop_page.has_more
+                and len(_peek_message_entries(collected)) < need
+            )
+            else ""
+        ),
+    )
+
+
+def _peek_head(directory: Path, *, need: int) -> _PeekWindow:
+    """First ``need`` steps, read forward from byte zero and STOPPING.
+
+    The transcript module's forward walker is a generator exactly so the
+    caller's stop is the bound: this consumes rows until it holds ``need``
+    message rows (or the journal ends, or ``_PEEK_SCAN_BYTES`` of rows have
+    been read — the search's own honest cap, said out loud in the footer).
+    A head read must not parse a whole journal to answer "how did this start"
+    (design §8.2/§11.8); one lookahead row beyond the window answers
+    ``has_newer`` the way the anchored page's lookahead answers it.
+    """
+
+    from local_operator.resume import TRANSCRIPT_NAME
+    from local_operator.session.transcript import (
+        TranscriptEntry,
+        _iter_complete_lines_forward,
+    )
+
+    path = directory / TRANSCRIPT_NAME
+    entries: list[TranscriptEntry] = []
+    scanned = 0
+    capped = False
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        end_of_file = handle.tell()
+        walker = _iter_complete_lines_forward(handle, 0, end_of_file=end_of_file)
+        for raw in walker:
+            scanned += len(raw) + 1
+            entry = TranscriptEntry.from_json(raw.decode("utf-8", errors="replace"))
+            if entry is not None:
+                entries.append(entry)
+            if len(_peek_message_entries(entries)) >= need:
+                break
+            if scanned >= _PEEK_SCAN_BYTES:
+                capped = True
+                break
+        # One lookahead beyond the window answers ``has_newer``; blank lines are
+        # not rows, so skip them rather than counting a torn journal's noise.
+        has_newer = any(raw.strip() for raw in walker)
+    return _peek_window(
+        entries,
+        need=need,
+        has_older=False,  # the walk began at byte zero; nothing precedes it
+        has_newer=has_newer,
+        scanned_bytes=scanned,
+        note=(
+            f"the read stopped at the {_PEEK_SCAN_BYTES >> 20} MiB scan bound before "
+            "collecting every requested step"
+            if capped
+            else ""
+        ),
+    )
+
+
+def _peek_around(
+    directory: Path, *, anchor: str, need: int, mark: str | None = None
+) -> _PeekWindow | str:
+    """The anchored window around one entry id — the shape a cursor call and a
+    search hit share (design §8.1: a match renders through the anchored page).
+
+    One page read: ``before`` older rows, the anchor, ``after`` newer rows, with
+    the reader's own one-row-lookahead booleans for both edges — so "older"/
+    "newer" are facts, not window lengths. ``mark`` is the entry a search hit on
+    (the anchor itself, in that call): it picks the ``← match`` marker and, when
+    the matched row is not a message row, deliberately marks NO step — the
+    match is then named by id in the footer only.
+    """
+
+    from local_operator.session.transcript import read_transcript_page
+
+    before = need // 2
+    after = max(0, need - before - 1)
+    page = read_transcript_page(directory, around_id=anchor, before=before, after=after, limit=need)
+    if page.reconciled and not page.entries:
+        return (
+            f"no transcript entry with id {anchor!r} — entry ids are stable across "
+            "compaction, but a replaced journal drops old ones; use an id an earlier "
+            "peek returned."
+        )
+    entries = list(page.entries)
+    return _peek_window(
+        entries,
+        need=need,
+        has_older=bool(page.has_more),
+        has_newer=page.has_newer,
+        match_id=mark,
+    )
+
+
+def _peek_search(directory: Path, *, needle: str, regex: bool, need: int) -> _PeekWindow | str:
+    """Locate a needle walking backward from EOF, then window around the hit.
+
+    The walk decodes rows newest-first and tests each row's text (a literal
+    substring, or ``re.search`` when the caller asks for regex — the design's
+    own two modes); it stops at the first hit or once `_PEEK_SCAN_BYTES` bytes
+    of rows have been walked past. The budget is the point: the reader's
+    docstring measured what a deep walk costs on a 262 MB journal, so this
+    never scans one silently — a miss is reported honestly, with the pointer
+    the caller needs to widen from a known position. The window itself is the
+    same anchored read ``around_id`` runs, so a hit and a cursor call render
+    one shape.
+
+    ``str`` return: an unparsable regex (the caller's argument, made legible).
+    """
+
+    from local_operator.resume import TRANSCRIPT_NAME
+    from local_operator.session.transcript import (
+        TranscriptEntry,
+        _iter_complete_lines_backward,
+    )
+
+    if regex:
+        try:
+            pattern = re.compile(needle)
+        except re.error as exc:
+            return f"`query` is not a valid regular expression: {exc}"
+    else:
+        pattern = None
+    path = directory / TRANSCRIPT_NAME
+    scanned = 0
+    hit_id = ""
+    budget_stop = False
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        end_of_file = handle.tell()
+        for _chunk_start, lines in _iter_complete_lines_backward(handle, end_of_file):
+            for raw in lines:
+                if not raw.strip():
+                    continue
+                # Depth is counted ROW by ROW — the bytes walked past, newline
+                # included — not per chunk read. The guarantee is about how
+                # DEEP the search looked (a hit reports a depth at or under
+                # the budget; a miss reports the budget itself), and a
+                # chunk-granular count would break both on any journal
+                # smaller than one chunk.
+                if scanned >= _PEEK_SCAN_BYTES:
+                    budget_stop = True
+                    break
+                scanned += len(raw) + 1
+                text = raw.decode("utf-8", errors="replace")
+                if pattern is None:
+                    found = needle in text
+                else:
+                    found = pattern.search(text) is not None
+                if found:
+                    entry = TranscriptEntry.from_json(text)
+                    if entry is not None:
+                        hit_id = entry.id
+                        break
+            if hit_id or budget_stop:
+                break
+    if not hit_id:
+        if end_of_file == 0:
+            return _PeekWindow(
+                steps=[],
+                scanned_bytes=0,
+                miss=f"no match for {needle!r}: this transcript is empty.",
+            )
+        whole = not budget_stop
+        where = "this transcript" if whole else f"the last {scanned:,} bytes of this transcript"
+        return _PeekWindow(
+            steps=[],
+            scanned_bytes=scanned,
+            miss=(
+                f"no match for {needle!r} in {where} — the search is bounded on "
+                "purpose and never scans an operator-size journal silently; widen "
+                "it by starting from a known entry id with `peek around_id=<id>`."
+            ),
+        )
+    window = _peek_around(directory, anchor=hit_id, need=need, mark=hit_id)
+    if isinstance(window, str):
+        return window  # the anchor vanished between the walk and the window read
+    return window._replace(scanned_bytes=scanned)
+
+
+def _peek_live_state(record: Any) -> str:
+    """``stored``, or ``live`` plus the record's own busy/pending words.
+
+    Reads the SAME fields the listings paint (``SessionRecord.busy``,
+    ``.pending``), so the digest's state line cannot drift from the sidebar's.
+    """
+
+    if record is None:
+        return "stored"
+    bits: list[str] = []
+    if getattr(record, "busy", False):
+        bits.append("busy")
+    pending = getattr(record, "pending", None)
+    if pending:
+        bits.append(f"pending {pending}")
+    return "live" + (f", {', '.join(bits)}" if bits else "")
+
+
+def _fold_line(text: str, limit: int) -> str:
+    """One digest line: the first non-empty line, collapsed, clipped to ``limit``.
+
+    "The newest assistant line" is taken literally — a multi-line message
+    contributes its opening line, not a paragraph folded into a run-on where
+    the assistant's prose and its tool-call list run together. Head-only with
+    an ellipsis: the full step is one `peek steps=` away, and a fold that kept
+    head AND tail per line would print more of the transcript than the digest
+    exists to avoid.
+    """
+
+    flat = ""
+    for raw in text.splitlines():
+        flat = " ".join(raw.split())
+        if flat:
+            break
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+
+
+def _peek_digest_fold(steps: list[Any], *, has_older: bool, live_state: str) -> _PeekDigest:
+    """Fold a tail window of steps to ≤10 lines (design §8.3).
+
+    The LINE COUNT is an invariant, not a hope: the header, the newest ask and
+    the newest assistant line each take one line, and the tool tail keeps the
+    last calls that fit the remaining budget (never more than eight). Counts
+    are per kind as §8.3 pins them; other kinds (hub traffic, system notes)
+    are counted in the total and folded into one "+N more" only when present.
+    """
+
+    counts = {"user": 0, "assistant": 0, "tool": 0}
+    others = 0
+    for step in steps:
+        if step.kind in counts:
+            counts[step.kind] += 1
+        else:
+            others += 1
+    parts = [f"user {counts['user']}", f"assistant {counts['assistant']}", f"tool {counts['tool']}"]
+    if others:
+        parts.append(f"+{others} more")
+    older = "more above" if has_older else "whole transcript"
+    lines = [f"digest: {len(steps)} steps seen ({', '.join(parts)}) — {live_state}; {older}"]
+
+    ask = next((step for step in reversed(steps) if step.kind == "user"), None)
+    if ask is not None:
+        lines.append(f"ask: {_fold_line(ask.body, 80) or ask.heading}")
+    reply = next((step for step in reversed(steps) if step.kind == "assistant"), None)
+    if reply is not None:
+        lines.append(f"assistant: {_fold_line(reply.body, 120) or reply.heading}")
+
+    calls = [step for step in steps if step.kind == "tool"][-8:]
+    room = max(0, 10 - len(lines))
+    for step in calls[-min(8, room) :] if room else []:
+        base, _, rest = step.heading.partition(" result")
+        label = base + (" (error)" if "error" in rest else "")
+        summary = _fold_line(step.body, 60)
+        lines.append(f"tool: {label} · {summary}" if summary else f"tool: {label}")
+    return _PeekDigest(
+        text="\n".join(lines),
+        steps_seen=len(steps),
+        tool_calls=counts["tool"],
+        has_older=has_older,
+    )
+
+
+def _peek_digest(directory: Path, *, live_state: str) -> _PeekDigest:
+    """Read the tail window and fold it — the same bounded reader as `steps`."""
+
+    from local_operator.harness.comms import _render_transcript_steps
+    from local_operator.session.transcript import read_transcript_page
+
+    page = read_transcript_page(directory, limit=_PEEK_DIGEST_ROWS)
+    return _peek_digest_fold(
+        _render_transcript_steps(list(page.entries)),
+        has_older=bool(page.has_more),
+        live_state=live_state,
+    )
+
+
+def _peek_body(
+    name: str,
+    session_id: str,
+    mode: str,
+    window: _PeekWindow,
+    *,
+    anchor: str = "",
+    query: str = "",
+) -> str:
+    """One window's text: header, steps, and the footer's continuation hints.
+
+    The shape mirrors ``hub``'s peek (``_hub_peek``: header, numbered steps with
+    indented bodies, one parenthesized footer) with the two deviations §8.2
+    names: no counted total — step numbers are window-relative — and hints that
+    are cursor ids. Footer cursors are printed in FULL: they are meant to be
+    pasted back, and a truncated id names nothing.
+    """
+
+    phrase = {
+        "tail": "from the tail",
+        "head": "from the start",
+        "before": f"immediately before {_peek_short_id(anchor)}",
+        "around": f"centred on {_peek_short_id(anchor)}",
+        "search": f"around the match for {_fold_line(query, 40)!r}",
+    }.get(mode, mode)
+    if not window.steps:
+        if mode == "tail":
+            return f'"{name}" ({session_id}) — no steps yet: the transcript has no ' "message rows."
+        return f'"{name}" ({session_id}) — no steps {phrase}.'
+    lines = [f'"{name}" ({session_id}) — {len(window.steps)} step(s) {phrase}:']
+    for step in window.steps:
+        marker = "  ← match" if step.index == window.match_step else ""
+        lines.append(f"{step.index:>4}  {step.heading}{marker}")
+        if step.body:
+            for body_line in step.body.splitlines():
+                lines.append(f"      {body_line}")
+    hints: list[str] = []
+    if window.match_id:
+        hints.append(f"match {window.match_id}")
+    if window.scanned_bytes is not None:
+        hints.append(f"scanned {window.scanned_bytes:,} bytes")
+    if window.has_older and window.before_cursor:
+        hints.append(f"before_id={window.before_cursor} for earlier")
+    if window.has_newer and window.after_cursor and mode in ("head", "around", "search"):
+        hints.append(f"around_id={window.after_cursor} for later")
+    if window.note:
+        hints.append(window.note)
+    if hints:
+        lines.append("(" + "; ".join(hints) + ")")
+    return "\n".join(lines)
+
+
+def _peek_read(
+    directory: Path, params: SessionsParams, *, need: int
+) -> tuple[_PeekWindow | str, str]:
+    """Run the one read the request describes; return ``(window|refusal, mode)``.
+
+    The order is the design's two-level location: a ``query`` locates a step
+    (the store-level search stays `list`'s job — this addresses ONE session),
+    and the window selectors are the rest. Validation has already refused
+    combinations; this only picks the single remaining one.
+    """
+
+    query = str(params.query or "").strip()
+    if query:
+        return _peek_search(directory, needle=query, regex=bool(params.regex), need=need), "search"
+    if params.head is not None:
+        return _peek_head(directory, need=need), "head"
+    if params.before_id is not None:
+        return _walk_steps(directory, cursor=params.before_id, need=need), "before"
+    if params.around_id is not None:
+        return _peek_around(directory, anchor=params.around_id, need=need), "around"
+    return _walk_steps(directory, cursor=None, need=need), "tail"
+
+
+async def _sessions_peek(
+    tool_call_id: str, params: SessionsParams, context: ToolContext | None
+) -> ToolResult:
+    """``peek``: a bounded window of one session's transcript (design §8).
+
+    Never a whole-file parse: every mode rides the bounded readers
+    (`read_transcript_page` and the module's forward walker), caps what it
+    reads, and reports what it actually saw — `has_older`/`has_newer` and
+    cursor ids instead of a counted total nobody can afford on an operator-size
+    journal, and an honest miss instead of a silent slow scan. All reads run in
+    a worker thread, like every other op's I/O in this tool.
+    """
+
+    target = await _sessions_target(params)
+    if target.candidates:
+        return _error(tool_call_id, "sessions", _sessions_candidates_text(target))
+    if not target.session_id:
+        return _error(tool_call_id, "sessions", target.error)
+    session_id = target.session_id
+    directory = config_dir() / "sessions" / session_id
+
+    from local_operator.resume import TRANSCRIPT_NAME, session_name
+
+    def _peek_name() -> str:
+        """The header's name: the live record's, else the stored title, else the id."""
+
+        if target.record is not None and target.record.conversation_name:
+            return target.record.conversation_name
+        return session_name(directory) or f"session {session_id}"
+
+    need = (
+        params.steps
+        if params.steps is not None
+        else params.head if params.head is not None else _PEEK_DEFAULT_STEPS
+    )
+    try:
+        if params.digest:
+            digest = await asyncio.to_thread(
+                _peek_digest, directory, live_state=_peek_live_state(target.record)
+            )
+            details: dict[str, Any] = {
+                "op": "peek",
+                "mode": "digest",
+                "session_id": session_id,
+                "steps_seen": digest.steps_seen,
+                "tool_calls": digest.tool_calls,
+                "has_older": digest.has_older,
+            }
+            text = digest.text
+        else:
+            payload, mode = await asyncio.to_thread(_peek_read, directory, params, need=need)
+            if isinstance(payload, str):
+                return _error(tool_call_id, "sessions", payload)
+            details = {
+                "op": "peek",
+                "mode": mode,
+                "session_id": session_id,
+                "steps_shown": len(payload.steps),
+                "has_older": payload.has_older,
+                "has_newer": payload.has_newer,
+            }
+            if payload.scanned_bytes is not None:
+                details["scanned_bytes"] = payload.scanned_bytes
+            if payload.match_id:
+                details["match_id"] = payload.match_id
+            if payload.miss:
+                text = payload.miss
+            else:
+                name = await asyncio.to_thread(_peek_name)
+                text = _peek_body(
+                    name,
+                    session_id,
+                    mode,
+                    payload,
+                    anchor=str(params.before_id or params.around_id or ""),
+                    query=str(params.query or "").strip(),
+                )
+    except FileNotFoundError:
+        return _error(
+            tool_call_id,
+            "sessions",
+            f"session {session_id!r} has no transcript to peek at "
+            f"({directory / TRANSCRIPT_NAME}) — it may not have written a first "
+            "turn yet.",
+        )
+    text, spill = spill_truncate(text, "sessions", context)
+    if spill:
+        details.update(spill)
+    return _text(tool_call_id, "sessions", text, details=details)
+
+
 def _sessions_open_argv(params: SessionsParams, *, resume_id: str = "") -> list[str]:
     """The ``lop exec`` arguments for one spawn/resume (no interpreter prefix).
 
@@ -14304,6 +15067,8 @@ async def execute_sessions(
         return await _sessions_list(tool_call_id, params, context)
     if params.op == "info":
         return await _sessions_info(tool_call_id, params, context)
+    if params.op == "peek":
+        return await _sessions_peek(tool_call_id, params, context)
     if params.op == "stop":
         return await _sessions_stop(tool_call_id, params)
     return await _sessions_open(tool_call_id, params, context)
