@@ -518,6 +518,13 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
         {"default": ["zai/glm-5.3"]},
         lambda s, w: dict(RetrySettings.from_settings(s.routing_settings).fallback_chains),
     ),
+    # Read per call by both pin-policy entry points (the walk and the quota
+    # preflight), so the rebound mapping is the whole contract — the same
+    # shape as `modelFallback` above.
+    "retry.pinnedFallback": (
+        "cross-family",
+        lambda s, w: RetrySettings.from_settings(s.routing_settings).pinned_fallback,
+    ),
     # Observed on the auth STORE, deliberately (review round 2, B1). Every
     # other `retry.*` key is live because `from_settings` re-reads the mapping
     # per call; this one is pushed into the store, which then owns the value.
