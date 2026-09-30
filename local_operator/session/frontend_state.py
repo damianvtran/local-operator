@@ -2403,6 +2403,14 @@ class JobState(BaseModel):
     #: stay valid; the value is a token from ``incidents.CUT_OFF_CAUSES``.
     cut_off_cause: str = ""
     model_label: str | None = None
+    #: The pin the launch resolved, when one did (``None``/``""`` when no pin
+    #: chose the child). Carried to follow the runtime's stamp (``AsyncJob``): a
+    #: viewer attached to another process builds its rows here, and without
+    #: this the band under the child's page could only show the effective
+    #: label — exactly the silent substitution the pair exists to render.
+    #: ``Optional`` like ``model_label``: the sidecar row of an unpinned child
+    #: carries ``None``, and a strict reader must not reject it.
+    requested_model_label: str | None = None
     context_window: int | None = None
     usage: Usage | None = None
     # None knowledge marks old runtimes, which still need the legacy pricing path.
@@ -2632,6 +2640,7 @@ class JobState(BaseModel):
             error_text=str(getattr(job, "error_text", "") or getattr(job, "error", "") or ""),
             result_text=str(getattr(job, "result_text", "") or getattr(job, "result", "") or ""),
             model_label=getattr(job, "model_label", None),
+            requested_model_label=getattr(job, "requested_model_label", None),
             context_window=getattr(job, "context_window", None),
             usage=usage,
             direct_cost=direct_cost,
