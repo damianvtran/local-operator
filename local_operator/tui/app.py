@@ -389,6 +389,7 @@ from local_operator.tui.widgets.org_chart_view import (
 )
 from local_operator.tui.widgets.projects_view import (
     ProjectsView,
+    ProjectsViewAttachmentOpened,
     ProjectsViewDismissed,
     ProjectsViewJumpRequested,
     ProjectsViewMilestoneToggled,
@@ -19230,7 +19231,35 @@ class OperatorApp(App[None]):
                 )
             except Exception:  # noqa: BLE001 — one row must not hide the rest
                 logger.debug("projects: view composition failed", exc_info=True)
+        self._mark_missing_attachments(views)
         return views
+
+    @staticmethod
+    def _mark_missing_attachments(views: list[Any]) -> None:
+        """Flag attachments whose copy is gone, at COMPOSITION time (spec §7.4).
+
+        The detail page is I/O-free by construction, so the one filesystem fact
+        its attachment rows need — whether the file is still there — is decided
+        here, where every other store read already happens (the mode's two
+        composition events: open and `r`). This annotates the COMPOSED view
+        dicts only, so no schema, tool receipt or route payload changes shape.
+        """
+        from pathlib import Path
+
+        for view in views:
+            if not isinstance(view, dict):
+                continue
+            project = view.get("project")
+            if not isinstance(project, dict):
+                continue
+            for entry in project.get("updates") or []:
+                if not isinstance(entry, dict):
+                    continue
+                for attachment in entry.get("attachments") or []:
+                    if not isinstance(attachment, dict):
+                        continue
+                    path = str(attachment.get("path") or "")
+                    attachment["missing"] = not path or not Path(path).exists()
 
     def _projects_live_overlay(self) -> dict[str, dict[str, Any]] | None:
         """Fresher in-memory TODOS for this process's own session (§3 source 3).
@@ -32711,6 +32740,54 @@ class OperatorApp(App[None]):
             updated_at=_time.time(),
             own_session=self._own_session_id(),
         )
+
+    def on_projects_view_attachment_opened(self, message: ProjectsViewAttachmentOpened) -> None:
+        """`↵` on an attachment row: hand the copied file to the OS (spec §7.4).
+
+        The spawn is off-loop (``open``/``xdg-open`` hand off to a GUI and
+        return, so the event loop never waits on a desktop), and the outcome is
+        stated on the PAGE's own footer — the mode the reader is looking at,
+        which is the rule every other detail refusal follows (UX round 1,
+        U1/U4/U5). A path that is gone, or a platform with no opener, gets the
+        honest sentence instead of a silent no-op.
+        """
+        message.stop()
+        view = self._projects_view
+        if view is None:
+            return
+        path = message.path
+        if not path:
+            view.show_notice(f"'{message.name}' has no stored path to open")
+            return
+        from pathlib import Path
+
+        if not Path(path).exists():
+            view.show_notice(
+                f"'{message.name}' is no longer on disk — the copy under the project store is gone"
+            )
+            return
+        from local_operator.tui.attachments import opener_argv
+
+        if opener_argv(path) is None:
+            view.show_notice(f"no file opener on this platform — the path is {path}")
+            return
+        view.show_notice(f"opening {message.name}…")
+        self.run_worker(self._open_attachment(message.name, path), group="open-attachment")
+
+    async def _open_attachment(self, name: str, path: str) -> None:
+        """The off-loop half: spawn the OS opener and report what it said."""
+        from local_operator.tui.attachments import open_path_quietly
+
+        opened = await open_path_quietly(path)
+        view = self._projects_view
+        if view is None:
+            return
+        if opened:
+            view.show_notice(f"opened {name}")
+        else:
+            # The path is repeated because this is the failure a reader can act
+            # on themselves — the rule the link-opener's receipt states.
+            view.show_notice(f"could not open {name} — the path is {path}")
 
     def on_projects_view_milestone_toggled(self, message: ProjectsViewMilestoneToggled) -> None:
         """`↵` on a milestone row: flip completion through the store, re-show.

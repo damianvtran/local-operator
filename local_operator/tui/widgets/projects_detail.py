@@ -33,16 +33,26 @@ from textual.widgets import Static
 
 from local_operator.tui.link_markup import autolink_bare_urls
 from local_operator.tui.projects_render import (
+    UPDATE_BODY_LINES,
+    UPDATES_PER_PAGE,
     StyleFor,
+    attachment_path_text,
+    attachment_row_text,
     detail_meta_line,
     detail_milestone_row_text,
     detail_section_heading,
     detail_session_row_text,
     detail_todo_lines,
+    older_updates_text,
+    update_body_lines,
+    update_day_label,
+    update_more_lines_text,
+    update_stamp_text,
 )
 
 #: A row action the page relays to its host: ``(kind, row)`` with kind
-#: ``"session"`` (open the conversation) or ``"milestone"`` (toggle it).
+#: ``"session"`` (open the conversation), ``"milestone"`` (toggle it) or
+#: ``"attachment"`` (hand the copied file to the platform opener).
 RowAction = Callable[[str, dict[str, Any]], None]
 
 
@@ -111,6 +121,162 @@ class DetailSentenceRow(DetailRow):
     def __init__(self, sentence: str, style_for: StyleFor) -> None:
         super().__init__(classes="projects-detail-sentence")
         self.update(Text(sentence, style=style_for("dim"), no_wrap=True))
+
+
+class DetailDayRow(DetailRow):
+    """A day group's header inside the updates feed (spec §7.3).
+
+    Not selectable and not a section: it groups the entries under it the way
+    the timeline's axis rows group cards, so the ruler (which names SECTIONS)
+    never reports it.
+    """
+
+    def __init__(self, label: str, style_for: StyleFor) -> None:
+        super().__init__(classes="projects-detail-day")
+        self.update(Text(label, style=style_for("dim"), no_wrap=True))
+
+
+class DetailUpdateStampRow(DetailRow):
+    """One feed entry's stamp line — ``↵`` toggles its clamped body (§7.3)."""
+
+    selectable = True
+
+    def __init__(
+        self,
+        entry: dict[str, Any],
+        *,
+        index: int,
+        expanded: bool,
+        on_toggle: Callable[[int], None],
+        style_for: StyleFor,
+    ) -> None:
+        super().__init__(classes="projects-detail-update")
+        self._entry = entry
+        self._index = index
+        self._expanded = expanded
+        self._on_toggle = on_toggle
+        self._style_for = style_for
+        self.section_label = "updates"
+        self.set_selected(False)
+
+    def set_selected(self, selected: bool) -> None:
+        self.update(update_stamp_text(self._entry, selected=selected, style_for=self._style_for))
+
+    def action_label(self) -> str | None:
+        """The verb NAMED at its effect, like every other row verb here."""
+        return "collapse" if self._expanded else "expand"
+
+    def action_verb(self) -> str | None:
+        return "collapse" if self._expanded else "expand"
+
+    def activate(self) -> None:
+        self._on_toggle(self._index)
+
+
+class DetailUpdateBodyRow(DetailRow):
+    """One feed entry's markdown body, clamped to :data:`UPDATE_BODY_LINES`.
+
+    The body goes through the transcript's rich-Markdown path, the same one
+    the description uses. Unclamped, a long entry would dominate the page and
+    push the sections below it off the viewport; the marker row under it names
+    the key that opens the rest.
+    """
+
+    def __init__(self, text: str, *, expanded: bool, style_for: StyleFor) -> None:
+        super().__init__(classes="projects-detail-update-body")
+        lines = update_body_lines(text)
+        self._shown = "\n".join(lines if expanded else lines[:UPDATE_BODY_LINES]).strip()
+        if self._shown:
+            self.update(Markdown(autolink_bare_urls(self._shown)))
+        else:
+            self.update(Text("(no text in this entry)", style=style_for("dim"), no_wrap=True))
+
+    def readback(self) -> str | None:
+        """The body's source, for ``painted_rows`` (the prose row's reason)."""
+        return self._shown or None
+
+
+class DetailUpdateMarkerRow(DetailRow):
+    """The clamp marker under an overflowing entry (spec §7.3)."""
+
+    def __init__(self, count: int, *, expanded: bool, style_for: StyleFor) -> None:
+        super().__init__(classes="projects-detail-update-marker")
+        self.update(update_more_lines_text(count, expanded=expanded, style_for=style_for))
+
+
+class DetailAttachmentRow(DetailRow):
+    """One attachment affordance — ``↵`` opens the file with the OS (§7.4).
+
+    The path is NOT part of this widget: a two-line ``Text`` inside one ``Static``
+    measured as four rows and painted the path's continuation as a bare ``→``
+    (caught in the frame pass). The path gets its own row under this one
+    (:class:`DetailAttachmentPathRow`), which is also why the row's own verb
+    stays the affordance's.
+    """
+
+    selectable = True
+
+    def __init__(
+        self,
+        attachment: dict[str, Any],
+        *,
+        on_action: RowAction,
+        style_for: StyleFor,
+    ) -> None:
+        super().__init__(classes="projects-detail-attachment")
+        self._attachment = attachment
+        self._on_action = on_action
+        self._style_for = style_for
+        self.section_label = "updates"
+        self.set_selected(False)
+
+    def set_selected(self, selected: bool) -> None:
+        self.update(
+            attachment_row_text(self._attachment, selected=selected, style_for=self._style_for)
+        )
+
+    def action_label(self) -> str | None:
+        return "open"
+
+    def action_verb(self) -> str | None:
+        return "open"
+
+    def activate(self) -> None:
+        self._on_action("attachment", self._attachment)
+
+
+class DetailAttachmentPathRow(DetailRow):
+    """``→ <path>`` under its attachment, always shown (spec §7.4).
+
+    Not selectable: the affordance above it carries the verb, so a second
+    cursor stop on the same file would make `↑↓` cost two presses per
+    attachment. The ``[missing on disk]`` marker rides this line.
+    """
+
+    def __init__(self, attachment: dict[str, Any], style_for: StyleFor) -> None:
+        super().__init__(classes="projects-detail-attachment-path")
+        self._attachment = attachment
+        self._style_for = style_for
+        self.update(attachment_path_text(attachment, style_for=style_for))
+
+    def fit_width(self, width: int) -> None:
+        """Re-fit the path to the width the ROW actually has, not the page's.
+
+        Textual wraps a ``Static``'s text regardless of ``no_wrap``, so a long
+        path must be cut HERE, with an ellipsis; the two widths differ by the
+        scrollbar's column (measured: the page's content box is 96 cells while
+        the row's own region is 95), and fitting to the larger one left the
+        last cell to wrap onto a row of its own.
+        """
+        target = self.size.width or width
+        if target > 0:
+            self.update(
+                attachment_path_text(self._attachment, width=target, style_for=self._style_for)
+            )
+
+    def readback(self) -> str | None:
+        """The path line as plain text, for ``painted_rows``."""
+        return attachment_path_text(self._attachment).plain or None
 
 
 class DetailMetaRow(DetailRow):
@@ -288,6 +454,10 @@ class ProjectDetailPage(VerticalScroll):
         self._own_session: str | None = None
         self._project_id: str | None = None
         self._project_name = ""
+        #: Feed entries the reader has opened past the clamp, by entry ordinal.
+        #: Page-local VIEW state (never written anywhere): `↵` on an entry's
+        #: stamp toggles it, and a re-show keeps what the reader opened.
+        self._expanded: set[int] = set()
         self._selectables: list[DetailRow] = []
         self._selected = 0
 
@@ -366,6 +536,8 @@ class ProjectDetailPage(VerticalScroll):
         rows.append(DetailHeadingRow("description", None, self._style_for))
         rows.append(DetailProseRow(str(project.get("description") or ""), self._style_for))
 
+        rows.extend(self._update_rows(project))
+
         milestones = [m for m in project.get("milestones") or [] if isinstance(m, dict)]
         done = sum(1 for m in milestones if m.get("completed_at"))
         rows.append(
@@ -412,6 +584,83 @@ class ProjectDetailPage(VerticalScroll):
         else:
             rows.append(DetailSentenceRow("no sessions linked", self._style_for))
         return rows
+
+    def _update_rows(self, project: dict[str, Any]) -> list[DetailRow]:
+        """The ``updates`` section: day-grouped entries, newest first (spec §7.3).
+
+        The store keeps the log oldest-first; the page reverses it and groups
+        by LOCAL day, because the feed is read as a diary. An entry's body is
+        clamped (``↵`` on its stamp opens the rest), and its attachments are
+        child rows carrying the kind, the size and the path. The render cap
+        keeps one trailing row naming whatever the page did not draw — the
+        store still has it.
+        """
+        entries = [e for e in project.get("updates") or [] if isinstance(e, dict)]
+        rows: list[DetailRow] = [
+            DetailHeadingRow("updates", str(len(entries)) if entries else None, self._style_for)
+        ]
+        if not entries:
+            rows.append(DetailSentenceRow("no updates recorded yet", self._style_for))
+            return rows
+        newest_first = list(reversed(entries))
+        shown = newest_first[:UPDATES_PER_PAGE]
+        ordinal_of = {id(entry): position for position, entry in enumerate(newest_first)}
+        day = ""
+        for entry in shown:
+            label = update_day_label(str(entry.get("at") or ""))
+            if label != day:
+                day = label
+                rows.append(DetailDayRow(f"── {label} ──", self._style_for))
+            index = ordinal_of[id(entry)]
+            expanded = index in self._expanded
+            rows.append(
+                DetailUpdateStampRow(
+                    entry,
+                    index=index,
+                    expanded=expanded,
+                    on_toggle=self._toggle_entry,
+                    style_for=self._style_for,
+                )
+            )
+            body = str(entry.get("text") or "")
+            rows.append(DetailUpdateBodyRow(body, expanded=expanded, style_for=self._style_for))
+            hidden = len(update_body_lines(body)) - UPDATE_BODY_LINES
+            if hidden > 0:
+                rows.append(
+                    DetailUpdateMarkerRow(hidden, expanded=expanded, style_for=self._style_for)
+                )
+            attachments = [a for a in entry.get("attachments") or [] if isinstance(a, dict)]
+            for attachment in attachments:
+                rows.append(
+                    DetailAttachmentRow(
+                        attachment, on_action=self._on_action, style_for=self._style_for
+                    )
+                )
+                rows.append(DetailAttachmentPathRow(attachment, self._style_for))
+        older = len(newest_first) - len(shown)
+        if older > 0:
+            rows.append(DetailSentenceRow(older_updates_text(older).plain, self._style_for))
+        return rows
+
+    def _toggle_entry(self, index: int) -> None:
+        """`↵` on an entry's stamp: show or hide the clamped tail (spec §7.3).
+
+        Pure VIEW state, held here rather than in the host: nothing is written
+        and no store read is needed, so the page stays the I/O-free renderer
+        it is. The re-show keeps the row cursor — the selectable order does not
+        change when a body's tail appears.
+        """
+        if index in self._expanded:
+            self._expanded.discard(index)
+        else:
+            self._expanded.add(index)
+        if self._view is not None:
+            self.show(
+                self._view,
+                own_session=self._own_session,
+                selected=self._selected,
+                style_for=self._style_for,
+            )
 
     # -- cursor -------------------------------------------------------------
     def painted_rows(self) -> list[str]:
@@ -510,11 +759,43 @@ class ProjectDetailPage(VerticalScroll):
 
     def _reveal_selected(self) -> None:
         row = self._current()
-        if row is not None:
-            try:
-                row.scroll_visible(animate=False)
-            except Exception:  # noqa: BLE001 — a reveal is a bonus, never a failure
-                pass
+        if row is None:
+            return
+        try:
+            row.scroll_visible(animate=False)
+        except Exception:  # noqa: BLE001 — a reveal is a bonus, never a failure
+            return
+        # Textual's ``scroll_visible`` treats a row sitting on the viewport's
+        # bottom EDGE as visible, while the painted rows stop one cell earlier
+        # — measured: at 60x24 the page's own entry row stayed one row below
+        # the box, so the feed looked empty until a key was pressed. The clamp
+        # below is the difference, and it only ever moves by the row or two
+        # the boundary case is off by.
+        box = self.region.height
+        if box <= 0 or row.region.height <= 0:
+            return
+        try:
+            top = int(self.scroll_offset.y)
+            bottom = top + box - 1  # the LAST painted row
+            if row.region.y > bottom:
+                self.scroll_to(y=row.region.y - box + 1, animate=False)
+            elif row.region.y < top:
+                self.scroll_to(y=row.region.y, animate=False)
+        except Exception:  # noqa: BLE001 — a reveal is a bonus, never a failure
+            pass
+
+    def reveal_selected(self) -> None:
+        """Scroll the cursor's row into view — the view's DEFERRED re-reveal.
+
+        ``show`` reveals once, but a page being ENTERED is still hidden while
+        it builds, so its rows have no regions yet and that reveal is a no-op;
+        the first layout can then leave the selected row below the fold.
+        Measured at 60x24: the selected entry sat one row under the box, so
+        the feed looked empty until the reader pressed a key. The canvas
+        solves the same problem with a deferred second pass (``load``'s
+        ``_scroll_cursor_into_view``); this is that pass for the page.
+        """
+        self._reveal_selected()
 
     # -- ruler anchors ------------------------------------------------------
     def section_anchors(self) -> list[tuple[int, str, str | None]]:
@@ -552,6 +833,11 @@ class ProjectDetailPage(VerticalScroll):
             return
         for child in self.children:
             if isinstance(child, DetailMetaRow):
+                child.fit_width(width)
+            elif isinstance(child, DetailAttachmentPathRow):
+                # The path is a whole-line fit like the meta sentence: both
+                # must be cut at the box, because a Static wraps what it is
+                # given (see `attachment_path_text`).
                 child.fit_width(width)
 
     def on_resize(self) -> None:

@@ -37,16 +37,16 @@ trailing no-dates section instead of on a row pretending to have a schedule.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, NamedTuple, Sequence, cast
 
 from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
 
-from local_operator.projects import PROJECT_ROW_CAP, PROJECT_STATUSES
+from local_operator.projects import _SESSION_ID_RE, PROJECT_ROW_CAP, PROJECT_STATUSES
 from local_operator.projects import age_text as derived_age_text
-from local_operator.projects import display_name
+from local_operator.projects import display_name, file_size_text
 from local_operator.projects import milestone_state as derived_milestone_state
 from local_operator.projects import truncate_row
 
@@ -2341,6 +2341,202 @@ def detail_todo_lines(
     if not lines:
         lines.append(Text("todo snapshots: none yet", style=resolver("dim"), no_wrap=True))
     return lines
+
+
+#: Entries the detail page renders before one trailing ``N older updates`` row
+#: (spec §7.3): the store keeps them all (cap ``UPDATES_MAX``); the page stays
+#: bounded so a long history cannot make one frame unbounded work.
+UPDATES_PER_PAGE = 100
+
+#: Body lines an UNEXPANDED update entry shows before its ``N more lines``
+#: marker; `↵` on the entry's stamp toggles the rest in (spec §7.3).
+UPDATE_BODY_LINES = 6
+
+
+def update_reporter_text(by: str) -> str:
+    """The stamp's reporter clause, on the footer's own vocabulary.
+
+    ``operator`` reads ``the operator`` and a session id reads ``session <id>``
+    — the SAME two shapes :func:`detail_progress_line` paints, so one reporter
+    is named one way everywhere. Anything else is an agent label and stands as
+    written. ``""`` is unknown and renders nothing, so the stamp is the time
+    alone (spec §7.3).
+    """
+    reporter = str(by or "").strip()
+    if not reporter:
+        return ""
+    if reporter == "operator":
+        return "the operator"
+    if _SESSION_ID_RE.fullmatch(reporter):
+        return f"session {reporter}"
+    return reporter
+
+
+def update_local_moment(at: str) -> datetime | None:
+    """An entry's ``at`` as a LOCAL moment, or ``None`` when unparseable.
+
+    The store writes ISO-8601 UTC; every surface that SHOWS a time renders it
+    in the reader's own clock (the spec's ``local time``). A row whose stamp
+    will not parse returns ``None`` so the stamp falls back to the raw text
+    rather than guessing a day it cannot know.
+    """
+    text = str(at or "").strip()
+    if not text:
+        return None
+    try:
+        moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone()
+
+
+def update_day_label(at: str, *, now: float | None = None) -> str:
+    """The day-group header text: ``today`` / ``yesterday`` / ``25 Sep`` (+year).
+
+    The two relative words are compared on the SAME local basis the stamp is
+    rendered on and the store dates from (:func:`local_operator.projects._local_today`),
+    so a group labelled ``today`` is the day the reader is having. A date in
+    another year carries the year, because ``25 Sep`` alone would read as the
+    next one (the rule :func:`format_short_date` states).
+    """
+    from local_operator.projects import _local_today
+
+    moment = update_local_moment(at)
+    if moment is None:
+        return str(at or "").strip() or "unknown date"
+    day = moment.date()
+    today = _local_today() if now is None else datetime.fromtimestamp(now).date()
+    if day == today:
+        return "today"
+    if day == today - timedelta(days=1):
+        return "yesterday"
+    label = f"{day.day} {day.strftime('%b')}"
+    if day.year != today.year:
+        label += f" {day.year}"
+    return label
+
+
+def update_stamp_text(
+    entry: dict[str, Any], *, selected: bool = False, style_for: StyleFor | None = None
+) -> Text:
+    """``17:52 · session ab12cd34ef56`` — the entry's stamp line.
+
+    The SELECTED entry states the full local date (``2026-09-27 17:52``), the
+    compact form otherwise: within a day group the date is the group header's
+    job, and repeating it on every row would spend the width the reporter
+    needs (spec §7.3).
+    """
+    resolver = _styles(style_for)
+    line = Text(no_wrap=True)
+    at = str(entry.get("at") or "")
+    moment = update_local_moment(at)
+    if moment is None:
+        stamp = at.strip()
+    elif selected:
+        stamp = moment.strftime("%Y-%m-%d %H:%M")
+    else:
+        stamp = moment.strftime("%H:%M")
+    if stamp:
+        line.append(stamp, style=resolver("name"))
+    reporter = update_reporter_text(str(entry.get("by") or ""))
+    if reporter:
+        line.append(" · " if stamp else "", style=resolver("dim"))
+        line.append(reporter, style=resolver("dim"))
+    return line
+
+
+def update_body_lines(text: str) -> list[str]:
+    """An entry's markdown body as its own source lines (the clamp unit).
+
+    The body renders through the transcript's rich-Markdown path, and the
+    clamp counts LINES OF THE SOURCE: rendering to count wrapped lines would
+    cost a Console per entry per repaint, and the spec's ``6 body lines`` is
+    the entry's own shape rather than the viewport's.
+    """
+    return [line.rstrip() for line in str(text or "").replace("\r\n", "\n").split("\n")]
+
+
+def update_more_lines_text(
+    count: int, *, expanded: bool, style_for: StyleFor | None = None
+) -> Text:
+    """The clamp marker: ``[4 more lines — ↵ expand]`` (``↵ collapse`` when open).
+
+    The key is advertised only because it is bound: `↵` on the entry's stamp
+    row toggles this entry, the same slot every other row verb uses, so the
+    marker names a key that does what it says (the page's own rule).
+    """
+    resolver = _styles(style_for)
+    verb = "collapse" if expanded else "expand"
+    return Text(f"[{count} more lines — ↵ {verb}]", style=resolver("dim"), no_wrap=True)
+
+
+def attachment_row_text(
+    attachment: dict[str, Any], *, selected: bool = False, style_for: StyleFor | None = None
+) -> Text:
+    """``[img] board-60x20.png · 82 KB`` — one attachment affordance (spec §7.4).
+
+    A terminal cannot render the image, and this row does not pretend: it
+    carries the KIND, the name and the size, and the path lives on its own
+    line under it (:func:`attachment_path_text`). The kind word is the
+    store's own classification, so the row cannot disagree with what was
+    copied in.
+    """
+    resolver = _styles(style_for)
+    kind = str(attachment.get("kind") or "data")
+    name = str(attachment.get("name") or "(unnamed)")
+    size = attachment.get("bytes")
+    line = Text(no_wrap=True)
+    line.append(f"[{'img' if kind == 'image' else 'file'}]", style=resolver("dim"))
+    line.append(f" {name}", style=resolver("name" if selected else "dim"))
+    if isinstance(size, int) and size >= 0:
+        line.append(f" · {file_size_text(size)}", style=resolver("dim"))
+    return line
+
+
+def attachment_path_text(
+    attachment: dict[str, Any], *, width: int | None = None, style_for: StyleFor | None = None
+) -> Text:
+    """``→ <path>`` — always shown, with ``[missing on disk]`` when it is gone.
+
+    The path is the one thing a reader can act on themselves (copy it, open
+    it elsewhere), so it is never hidden behind a selection; the missing
+    marker rides the same line, and `↵` answers with the honest sentence
+    rather than a silent no-op.
+
+    ``width`` is the MEASURED box the row renders into, and it is what makes
+    the line readable: Textual WRAPS a ``Static``'s text whatever its
+    ``no_wrap`` says — measured, a 113-cell path in a 95-cell box painted as
+    a bare ``→`` with the rest hard-split onto the following rows. Given the
+    width the line is fitted HERE, cell-accurate, with an ellipsis, and the
+    missing marker is reserved space before the path is cut so the caveat
+    never falls off the end.
+    """
+    resolver = _styles(style_for)
+    path = str(attachment.get("path") or "(no path recorded)")
+    marker = "  [missing on disk]" if attachment.get("missing") else ""
+    line = Text(no_wrap=True)
+    line.append(f"    → {path}", style=resolver("dim"))
+    if width is not None:
+        reserved = cell_len(marker)
+        budget = max(width - reserved, 1) if reserved and reserved < width else width
+        if cell_len(line.plain) > budget:
+            line.truncate(budget, overflow="ellipsis")
+        if reserved and reserved < width:
+            line.append(marker, style=resolver("stale"))
+        elif cell_len(line.plain) > width:
+            line.truncate(width, overflow="ellipsis")
+        return line
+    if marker:
+        line.append(marker, style=resolver("stale"))
+    return line
+
+
+def older_updates_text(count: int, *, style_for: StyleFor | None = None) -> Text:
+    """``… N older updates`` — the trailing row for the render cap (spec §7.3)."""
+    resolver = _styles(style_for)
+    return Text(f"… {count} older updates", style=resolver("dim"), no_wrap=True)
 
 
 def aggregate_footer(
