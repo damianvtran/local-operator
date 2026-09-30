@@ -32947,9 +32947,7 @@ class OperatorApp(App[None]):
                 # plain attribute reads, and a stale or absent stats reading
                 # must not strip the one comparison that makes a substitution
                 # visible.
-                requested_model_label=str(
-                    getattr(job, "requested_model_label", "") or ""
-                ),
+                requested_model_label=str(getattr(job, "requested_model_label", "") or ""),
             )
         # `job_cost` answers None both for "no price for this model" and for
         # "no usage recorded yet". The band distinguishes them: a child that

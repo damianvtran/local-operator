@@ -188,9 +188,7 @@ def test_the_notice_carries_the_four_facts() -> None:
     """
     job = _pinned_job()
     emitted: list[Any] = []
-    asyncio.run(
-        _relay(job, emitted)(_fallback_event(reason="anthropic refused (rate limit)"))
-    )
+    asyncio.run(_relay(job, emitted)(_fallback_event(reason="anthropic refused (rate limit)")))
 
     notices = [e for e in emitted if isinstance(e, NoticeEvent)]
     assert len(notices) == 1
