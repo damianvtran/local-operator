@@ -56,6 +56,7 @@ from local_operator.harness.rows import (
     is_harness_chrome,
     is_harness_notice_row,
     output_limit_call_receipt,
+    sessions_row_summary,
     turn_cut_tool_call,
     user_row_text,
     wake_receipt_headline,
@@ -350,6 +351,19 @@ def _summarize_args(tool_name: str, args: dict[str, Any]) -> str:
     The ordering below is the TUI's priority: what a reader scans for first
     is the file or command being touched, not the options around it.
     """
+    if tool_name == "sessions":
+        # The same shared decision the TUI draws (`harness/rows.py` —
+        # `sessions_row_summary`), so the phone and the terminal say the same
+        # thing about one call; compacted to this module's uniform row cap
+        # like every other summary here. The op leads on both because both
+        # rows shed from the right, and the generic `op=…` fallback this
+        # replaces dropped the op entirely — a `stop` and a `peek` on one
+        # session painted identical rows. A degenerate call (no readable op)
+        # falls back to the tool NAME, the substitution the shared contract
+        # documents and the TUI's row performs — without the `or tool_name`
+        # the phone painted a blank summary cell while the terminal painted
+        # `sessions` for the same call (round-1 review, R2).
+        return _compact(sessions_row_summary(args), 80) or tool_name
     for key in ("path", "file_path", "file", "command", "pattern", "query", "url"):
         value = args.get(key)
         if isinstance(value, str) and value:

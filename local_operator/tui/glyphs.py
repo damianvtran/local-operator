@@ -133,6 +133,16 @@ NERD_TOOL_ICONS: dict[str, str] = {
     # the collapsed row says; the paper plane above is the same event seen from
     # the sending side.
     "peer": "\uf01c",
+    # nf-fa-window_restore: a second window opened beside this one — the noun
+    # for a PARALLEL SESSION, which is what the sessions tool opens and manages.
+    # Not `task`/`agent`'s nf-fa-users: those are work handed to a CHILD, while
+    # a peer session is a window of its own that this session watches rather
+    # than owns — the same distinction the `console` comment above draws
+    # between a shell and a screen in a frame. The alternate candidate,
+    # nf-fa-clone, reads as "a copy of something" where a spawned workstream is
+    # its own run; both were rendered for the design round (the alternate is
+    # painted by ``scripts/sessions_tool_shot.py <out> nerd settled clone``).
+    "sessions": "\uf2d2",
 }
 
 #: Nerd Font glyph for any ``mcp__*`` tool: a plug, because what the row is
@@ -186,6 +196,11 @@ PLAIN_TOOL_ICONS: dict[str, str] = {
     # conversation seen from its two ends, so a reader scanning a ledger full
     # of cross-session traffic reads direction off the arrow alone.
     "peer": "\u2190",
+    # `□` (U+25A1, WGL4): an empty second frame — the window beside this one,
+    # drawn at one cell. Unused elsewhere in this table (`wake`/`monitor` hold
+    # the circles), and deliberately not a second `»` (that mark is work passed
+    # ONWARD, to a child, where a peer session is opened BESIDE this one).
+    "sessions": "\u25a1",
 }
 
 #: Plain fallback for ``mcp__*`` — a discrete module docked onto the harness.
