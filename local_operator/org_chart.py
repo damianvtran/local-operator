@@ -138,17 +138,24 @@ def _team_node(
     here; a team whose id is in it is a cycle and stops. ``depth`` guards the
     absolute nesting limit independently, so the tree is bounded even if a
     cycle somehow slipped the path check.
+
+    The label a resolved team node carries is the team's DISPLAY form
+    (``Team.display_label``: the stored label, else the derived Title-Case
+    default), because the chart is a rendering of the org a reader would
+    launch. The addressable key stays visible where it is needed: the title
+    row names the charted team by key, and every command that addresses a
+    team takes the key.
     """
 
     if depth > MAX_ORG_DEPTH:
         # Past the limit: a visible truncation marker rather than more
         # recursion. Carries the team_id so a reader can still see WHICH team
         # was cut, and the renderer draws it as a "⋯" node.
-        return OrgNode(team.name, "depth", detail="depth limit", team_id=team.id)
+        return OrgNode(team.display_label(), "depth", detail="depth limit", team_id=team.id)
     if team.id in path:
         # Second visit to a team already on this branch: a cycle. Stop with a
         # leaf — NO recursion — so A→B→A terminates instead of looping.
-        return OrgNode(team.name, "cycle", detail="already shown above", team_id=team.id)
+        return OrgNode(team.display_label(), "cycle", detail="already shown above", team_id=team.id)
     path2 = path | {team.id}
     children: list[OrgNode] = []
     # 1) the manager is the FIRST child of the team boundary, always present
@@ -174,7 +181,7 @@ def _team_node(
             node = _agent_node(member.role, agents, count=member.count)
         children.append(node)
     return OrgNode(
-        team.name,
+        team.display_label(),
         "team",
         detail=_team_detail(team),
         children=tuple(children),

@@ -2959,3 +2959,290 @@ def test_import_hub_team_without_a_suggestion_carries_no_notice(tmp_path: Path) 
 
     assert outcome.model_notice is None
     assert outcome.team.model_suggestion is None
+
+
+# --- Labels and aliases: display metadata and extra addressing keys ---------------
+
+
+def test_default_label_derives_a_title_case_name() -> None:
+    """The derived default splits on every legal name separator, keeps the rest."""
+    assert teams_module._default_label("data-quality") == "Data Quality"
+    assert teams_module._default_label("lopdev") == "Lopdev"
+    assert teams_module._default_label("radient-net") == "Radient Net"
+    assert teams_module._default_label("my.team_name") == "My Team Name"
+    assert teams_module._default_label("Already") == "Already"
+
+
+def test_create_persists_the_derived_label_and_normalizes_a_custom_one(
+    tmp_path: Path,
+) -> None:
+    registry = TeamRegistry(tmp_path)
+    derived = registry.create_team(TeamEditFields(name="data-quality"))
+    # Persisted, not just displayed: the value is durable from this write on.
+    assert derived.label == "Data Quality"
+    dumped = yaml.safe_load((registry.teams_dir / derived.id / "team.yml").read_text())
+    assert dumped["label"] == "Data Quality"
+    assert dumped["aliases"] == []
+
+    custom = registry.create_team(
+        TeamEditFields(name="rad-1", label="  Rad   One\t ", aliases=["Rad", "r1"])
+    )
+    # Whitespace collapses to the stored shape; everything else is preserved.
+    assert custom.label == "Rad One"
+    assert custom.aliases == ["Rad", "r1"]
+    assert custom.display_label() == "Rad One"
+    assert custom.display_with_key() == "Rad One (rad-1)"
+
+
+def test_label_refuses_over_cap_and_control_characters(tmp_path: Path) -> None:
+    registry = TeamRegistry(tmp_path)
+    team = registry.create_team(TeamEditFields(name="ops"))
+    with pytest.raises(ValueError, match="at most 80"):
+        registry.update_team(team.id, TeamEditFields(label="x " * 41))
+    with pytest.raises(ValueError, match="control characters"):
+        registry.create_team(TeamEditFields(name="other", label="a\u200bb"))
+    # An empty label is legal: it means "derive", not an error.
+    assert registry.update_team(team.id, TeamEditFields(label="")).label == "Ops"
+
+
+def test_update_label_none_leaves_and_empty_resets_to_derived(tmp_path: Path) -> None:
+    registry = TeamRegistry(tmp_path)
+    team = registry.create_team(TeamEditFields(name="ops", label="Ops Display"))
+
+    assert registry.update_team(team.id, TeamEditFields(description="d")).label == "Ops Display"
+    assert registry.update_team(team.id, TeamEditFields(label=None)).label == "Ops Display"
+
+    # An explicit "" is a RESET to the derived default, not "no label".
+    assert registry.update_team(team.id, TeamEditFields(label="")).label == "Ops"
+    # A whitespace-only value normalizes to "" and resets the same way.
+    assert registry.update_team(team.id, TeamEditFields(label="   ")).label == "Ops"
+    # ... and a custom value replaces it again.
+    assert registry.update_team(team.id, TeamEditFields(label="Second")).label == "Second"
+
+
+def test_aliases_validate_shape_cap_and_casefold_duplicates(tmp_path: Path) -> None:
+    registry = TeamRegistry(tmp_path)
+    team = registry.create_team(TeamEditFields(name="alpha", aliases=["A1", "a2"]))
+    assert team.aliases == ["A1", "a2"]
+
+    with pytest.raises(ValueError, match="1-64 characters"):
+        registry.create_team(TeamEditFields(name="spacey", aliases=["has space"]))
+    with pytest.raises(ValueError, match="listed more than once"):
+        registry.create_team(TeamEditFields(name="dup", aliases=["one", "ONE"]))
+    with pytest.raises(ValueError, match="at most 8"):
+        registry.create_team(TeamEditFields(name="many", aliases=[f"a{i}" for i in range(9)]))
+    with pytest.raises(ValueError, match="own name"):
+        registry.create_team(TeamEditFields(name="selfy", aliases=["selfy"]))
+    # A provided list REPLACES the stored one; the empty list clears it.
+    assert registry.update_team(team.id, TeamEditFields(aliases=["fresh"])).aliases == ["fresh"]
+    assert registry.update_team(team.id, TeamEditFields(aliases=[])).aliases == []
+
+
+def test_name_and_alias_keys_do_not_collide_casefolded(tmp_path: Path) -> None:
+    registry = TeamRegistry(tmp_path)
+    registry.create_team(TeamEditFields(name="alpha", aliases=["first"]))
+
+    # name vs name / alias vs name / name vs alias / alias vs alias.
+    with pytest.raises(ValueError, match="already exists"):
+        registry.create_team(TeamEditFields(name="ALPHA"))
+    with pytest.raises(ValueError, match="is the name of team"):
+        registry.create_team(TeamEditFields(name="beta", aliases=["ALPHA"]))
+    with pytest.raises(ValueError, match="already an alias of team"):
+        registry.create_team(TeamEditFields(name="first"))
+    with pytest.raises(ValueError, match="already an alias of team"):
+        registry.create_team(TeamEditFields(name="beta", aliases=["FIRST"]))
+
+    # The update path is the same rule: a rename onto another row's alias is
+    # refused; a rename onto one's OWN still-listed alias is refused too, since
+    # the written state would carry the name as an alias -- dropping the alias
+    # in the same write lands the rename.
+    beta = registry.create_team(TeamEditFields(name="beta", aliases=["b"]))
+    with pytest.raises(ValueError, match="already an alias of team"):
+        registry.update_team(beta.id, TeamEditFields(name="First"))
+    with pytest.raises(ValueError, match="own name"):
+        registry.update_team(beta.id, TeamEditFields(name="b"))
+    renamed = registry.update_team(beta.id, TeamEditFields(name="b", aliases=[]))
+    assert renamed.name == "b" and renamed.aliases == []
+
+
+def test_lookup_resolves_aliases_casefolded_name_first(tmp_path: Path) -> None:
+    registry = TeamRegistry(tmp_path)
+    registry.create_team(TeamEditFields(name="data-quality", aliases=["dq", "DataQ2"]))
+
+    # Aliases resolve casefolded; the name path resolves as before.
+    for key in ("dq", "DQ", "DataQ2", "data-quality"):
+        resolved = registry.get_team_by_name(key)
+        assert resolved is not None, key
+        assert resolved.name == "data-quality", key
+    assert registry.get_team_by_name("nope") is None
+
+
+def test_lookup_prefers_a_name_over_a_hand_edited_alias_collision(tmp_path: Path) -> None:
+    """Writers keep the namespaces disjoint; a hand-edited row can still collide.
+
+    The name-first order is what keeps resolution deterministic when the
+    editors' rule never saw one side.
+    """
+
+    def write(row_id: str, body: dict[str, Any]) -> None:
+        row = tmp_path / "teams" / row_id
+        row.mkdir(parents=True)
+        (row / "team.yml").write_text(
+            yaml.safe_dump(
+                {
+                    "id": row_id,
+                    "created_date": "2026-01-01T00:00:00Z",
+                    "description": "",
+                    "manager": "manager",
+                    "members": [],
+                    **body,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    write("11111111-2222-3333-4444-555555555551", {"name": "shared"})
+    write("11111111-2222-3333-4444-555555555552", {"name": "other", "aliases": ["shared"]})
+
+    resolved = TeamRegistry(tmp_path).get_team_by_name("shared")
+    assert resolved is not None and resolved.name == "shared"
+
+
+def test_legacy_team_yml_without_label_loads_and_persists_the_derived_one(
+    tmp_path: Path,
+) -> None:
+    """Old rows load unchanged, render the derived default, and persist it on write."""
+    row_id = "11111111-2222-3333-4444-555555555555"
+    row = tmp_path / "teams" / row_id
+    row.mkdir(parents=True)
+    (row / "team.yml").write_text(
+        yaml.safe_dump({"id": row_id, "name": "lopdev", "created_date": "2026-01-01T00:00:00Z"}),
+        encoding="utf-8",
+    )
+    registry = TeamRegistry(tmp_path)
+    team = registry.get_team_by_name("lopdev")
+    assert team is not None
+    assert team.label == "" and team.aliases == []
+    assert team.display_label() == "Lopdev"
+    assert team.display_with_key() == "Lopdev (lopdev)"
+
+    registry.update_team(team.id, TeamEditFields(description="touched"))
+    assert registry.get_team(team.id).label == "Lopdev"
+
+
+def test_team_yml_with_label_aliases_and_an_unknown_key_still_loads(tmp_path: Path) -> None:
+    """Additive both ways: the new fields load here, unknown extras are ignored."""
+    row_id = "11111111-2222-3333-4444-555555555555"
+    row = tmp_path / "teams" / row_id
+    row.mkdir(parents=True)
+    (row / "team.yml").write_text(
+        yaml.safe_dump(
+            {
+                "id": row_id,
+                "name": "crew",
+                "created_date": "2026-01-01T00:00:00Z",
+                "label": "Crew Display",
+                "aliases": ["c"],
+                "future_field": {"nested": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    team = TeamRegistry(tmp_path).get_team_by_name("c")
+    assert team is not None
+    assert (team.label, team.aliases) == ("Crew Display", ["c"])
+
+
+def test_dump_round_trip_carries_label_and_aliases() -> None:
+    team = Team(
+        id="t",
+        name="ops",
+        created_date=datetime.now(timezone.utc),
+        label="Ops Team",
+        aliases=["o"],
+    )
+    dumped = team.model_dump(mode="json")
+    assert dumped["label"] == "Ops Team" and dumped["aliases"] == ["o"]
+    again = Team.model_validate(dumped)
+    assert (again.label, again.aliases) == ("Ops Team", ["o"])
+
+
+def test_import_hub_team_labels_the_published_spelling_when_it_mapped(
+    tmp_path: Path,
+) -> None:
+    registry = TeamRegistry(tmp_path)
+    outcome = registry.import_hub_team(
+        {"name": "Feature Release Crew", "members": [], "instructions": "You ship."}
+    )
+    assert outcome.team.name == "Feature-Release-Crew"
+    assert outcome.team.label == "Feature Release Crew"
+    assert outcome.team.display_with_key() == "Feature Release Crew (Feature-Release-Crew)"
+
+
+def test_import_hub_team_labels_a_collision_suffix(tmp_path: Path) -> None:
+    registry = TeamRegistry(tmp_path)
+    registry.create_team(TeamEditFields(name="Release-Crew"))
+    outcome = registry.import_hub_team(
+        {"name": "Release-Crew", "members": [], "instructions": "You ship."}
+    )
+    assert outcome.team.name == "Release-Crew-2"
+    assert outcome.team.label == "Release-Crew"
+
+
+def test_import_hub_team_leaves_an_unchanged_name_to_the_derived_default(
+    tmp_path: Path,
+) -> None:
+    registry = TeamRegistry(tmp_path)
+    outcome = registry.import_hub_team(
+        {"name": "release-crew", "members": [], "instructions": "You ship."}
+    )
+    assert outcome.team.name == "release-crew"
+    # Nothing custom is stored; the derived default (persisted at the save)
+    # still gives the row its display label.
+    assert outcome.team.label == "Release Crew"
+
+
+def test_import_hub_team_suffixes_past_a_local_alias(tmp_path: Path) -> None:
+    """The collision loop must be alias-aware: create_team refuses a name that
+    collides with a local alias, so the pull has to move the candidate on."""
+    registry = TeamRegistry(tmp_path)
+    registry.create_team(TeamEditFields(name="other", aliases=["Shared"]))
+    outcome = registry.import_hub_team(
+        {"name": "Shared", "members": [], "instructions": "You ship."}
+    )
+    assert outcome.team.name == "Shared-2"
+
+
+def test_cli_list_and_show_render_label_first_with_the_key(tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    registry = TeamRegistry(config_dir)
+    registry.create_team(TeamEditFields(name="data-quality", label="Data Quality", aliases=["dq"]))
+
+    listed = _run_teams_cli(config_dir, "list")
+    assert listed.returncode == 0, listed.stderr
+    assert "Data Quality (data-quality)" in listed.stdout
+
+    # Addressed by the ALIAS; the header still paints label (key).
+    shown = _run_teams_cli(config_dir, "show", "dq")
+    assert shown.returncode == 0, shown.stderr
+    assert "╭─ Team Data Quality (data-quality)" in shown.stdout
+
+
+def test_cli_create_carries_label_and_repeatable_alias(tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    result = _run_teams_cli(
+        config_dir,
+        "create",
+        "feature-release",
+        "--label",
+        "Feature Release",
+        "--alias",
+        "fr",
+        "--alias",
+        "fr-v2",
+    )
+    assert result.returncode == 0, result.stderr
+    team = TeamRegistry(config_dir).get_team_by_name("fr")
+    assert team is not None
+    assert team.label == "Feature Release"
+    assert team.aliases == ["fr", "fr-v2"]

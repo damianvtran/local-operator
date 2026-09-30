@@ -372,6 +372,29 @@ async def test_picker_second_slot_reoffers_teams_feeding_the_chart() -> None:
 
 
 @pytest.mark.asyncio
+async def test_picker_rows_keep_the_key_and_enrich_the_description() -> None:
+    """The name column stays the typeable KEY; the label leads the description."""
+    session = FakeSession()
+    session.team_registry = _registry(
+        TeamEditFields(
+            name="data-quality",
+            label="Data Quality",
+            description="Finds issues",
+            manager="manager",
+            members=[TeamMember(role="coder")],
+        )
+    )
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        app.query_one(Editor).focus()
+        await _type(pilot, "/team ")
+        editor = app.query_one(Editor)
+        rows = [(c.name, c.detail, c.description) for c in editor.picker._choices]
+    assert ("data-quality", "1 member", "Data Quality · Finds issues") in rows
+
+
+@pytest.mark.asyncio
 async def test_mode_does_not_scroll_the_screen_and_esc_restores() -> None:
     session = FakeSession()
     session.team_registry = _nested_registry()

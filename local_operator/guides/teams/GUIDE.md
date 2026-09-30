@@ -39,6 +39,31 @@ Then:
 
 Example: "create a Feature Release Team with a manager, coder, designer, architect, and security reviewer" → install those starters (author a `security-reviewer` role if none exists), agree collaboration ("architect designs, coder implements, reviewer and designer sign off, manager reports"), create the team, and stop. Do not start the work until they send `/team Feature-Release …`.
 
+## Names, labels and aliases
+
+A team has exactly one addressable key: its **name** (letters, digits, dot,
+underscore, hyphen; no spaces). Everything you type resolves by key —
+`/team <name> <request>`, `team show <name>`, `--team <name>`, `team:<name>` —
+and no display form ever changes it.
+
+A team can also carry a display **label** (free text, spaces allowed) and extra
+**aliases** (more TUI-safe keys resolving to the same team):
+
+- The label is painted FIRST by every listing — `/team`, the org chart, the
+  picker, the settings pane, the status band — with the key beside it when they
+  differ (`Feature Release (feature-release)`), so you can still type the key.
+  It is LOCAL display metadata: it never rides the hub push document and
+  hub-sync merges never touch it.
+- A team with no label renders a derived Title-Case default
+  (`data-quality` → `Data Quality`), which is persisted on the team's next write.
+- Each alias is another key for the same team (`--alias`, or `aliases=` on the
+  `team` tool). Up to 8, each obeying the name rule; no alias may collide
+  (case-insensitively) with any team's name or another team's alias.
+- Set them with the `team` tool (`label=` / `aliases=`), the CLI
+  (`lop teams create feature-release --label "Feature Release" --alias fr`), or
+  the desktop API. On `update`, `label=""` resets to the derived default
+  rather than clearing it.
+
 ## Nested teams (orgs)
 
 A member slot can reference ANOTHER team instead of an agent, turning a flat roster into an **org** — a team of teams. Prefix the member token with `team:`:

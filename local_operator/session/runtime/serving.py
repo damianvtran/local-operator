@@ -6905,14 +6905,16 @@ class ServingSessionHandle(SessionHandle):
                 kind="notice", text="no teams yet. Ask the agent to create one.", style="info"
             )
         # ``member_count()``, matching the TUI's own producer (D2). The old
-        # `len(members) + 1` assumed the manager is not on the roster — false
-        # for real teams — and collapsed multi-count slots; the plural was also
+        # `len(members) + 1` assumed the manager is not on the roster -- false
+        # for real teams -- and collapsed multi-count slots; the plural was also
         # keyed to a different number than the one displayed. A detached
         # runtime and an in-process one must answer the same question with the
-        # same number.
+        # same number. The first slot carries the label-first display form
+        # (label, key beside it when they differ): the viewer paints that slot
+        # verbatim, so both producers must agree byte for byte.
         items = [
             (
-                team.name,
+                self._team_row_display(team),
                 f"Led by {team.manager} · {team.member_count()} "
                 f"{'member' if team.member_count() == 1 else 'members'}",
                 (team.description or "").strip(),
@@ -6920,6 +6922,21 @@ class ServingSessionHandle(SessionHandle):
             for team in teams
         ]
         return SlashResult(kind="block", data={"type": "team_list", "items": items})
+
+    @staticmethod
+    def _team_row_display(team: Any) -> str:
+        """The ``team_list`` row's first slot: label first, KEY beside it.
+
+        Best-effort like the listing itself: a reduced double without
+        ``display_with_key`` falls back to its plain name.
+        """
+        display = getattr(team, "display_with_key", None)
+        if callable(display):
+            try:
+                return str(display() or getattr(team, "name", "") or "")
+            except Exception:  # noqa: BLE001 — a listing is never worth an error
+                pass
+        return str(getattr(team, "name", "") or "")
 
     def _team_attach_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
         """``/team <name> [<request>]`` on the owner: resolve, then attach.

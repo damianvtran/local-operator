@@ -97,6 +97,14 @@ class TeamEdit(Input):
     description: str | None = None
     manager: str | None = None
     members: list[TeamMember] | None = None
+    #: Display metadata (see ``local_operator.teams.Team``): a LOCAL-only label
+    #: every listing shows label-first, and extra addressing keys. Deliberately
+    #: no ``max_length``: the registry validates the stored shape (whitespace
+    #: collapsed, 80 characters, no controls) and a route cap stricter than the
+    #: registry would refuse values the other write paths accept. A label of ""
+    #: resets to the derived default; ``None``/absent leaves it alone.
+    label: str | None = None
+    aliases: list[str] | None = None
     instructions: str | None = Field(default=None, max_length=8000)
     project: str | None = Field(default=None, max_length=8000)
 
@@ -107,6 +115,10 @@ class TeamCreate(Input):
     description: str | None = None
     manager: str | None = None
     members: list[TeamMember] | None = None
+    #: See TeamEdit. Creation just carries them through; an absent label means
+    #: the derived default, an absent alias list means none.
+    label: str | None = None
+    aliases: list[str] | None = None
     instructions: str | None = Field(default=None, max_length=8000)
     project: str | None = Field(default=None, max_length=8000)
 

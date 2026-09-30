@@ -451,6 +451,31 @@ async def test_bare_team_lists_without_a_user_row() -> None:
 
 
 @pytest.mark.asyncio
+async def test_band_paints_the_custom_label_and_falls_back_to_the_name() -> None:
+    """The band is a display: a labelled team reads as its label (resolved from
+    the registry when the session carries only the key); an unresolvable name
+    stays exactly what it was handed."""
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    session = FakeSession()
+    registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    registry.create_team(TeamEditFields(name="data-quality", label="Data Quality"))
+    session.team_registry = registry
+
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/team data-quality ship it")
+        band = _band_text(app)
+        # The two fallbacks, exercised where they live.
+        assert app._team_band_text("no-such-team") == "no-such-team"
+        assert app._team_band_text("") == ""
+
+    assert "Data Quality" in band, band
+    assert "data-quality" not in band, band
+
+
+@pytest.mark.asyncio
 async def test_team_request_attaches_and_sends() -> None:
     """`/team <name> <request>` stamps the team and sends the request as a turn."""
     from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
@@ -475,8 +500,10 @@ async def test_team_request_attaches_and_sends() -> None:
     assert session.attached_teams[0].name == "feature-release"
     assert session.prompts == ["ship the dashboard"]
     assert rows == ["ship the dashboard"], rows
-    # U2: the band names the active roster after the attach.
-    assert "feature-release" in band, band
+    # U2: the band names the active roster after the attach -- as the team's
+    # DISPLAY label (the derived default here), the form the label-first
+    # surfaces paint; the key stays the addressing form everywhere else.
+    assert "Feature Release" in band, band
 
 
 @pytest.mark.asyncio
@@ -1370,7 +1397,9 @@ def test_agent_and_team_listing_headers_outrank_their_entries() -> None:
             name="feature-release", manager="manager", members=[TeamMember(role="coder")]
         )
     )
-    _assert_header_outranks(app._team_list_block([team]), "teams", "feature-release")
+    _assert_header_outranks(
+        app._team_list_block([team]), "teams", "Feature Release (feature-release)"
+    )
 
 
 @pytest.mark.asyncio

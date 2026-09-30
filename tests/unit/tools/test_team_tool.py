@@ -143,3 +143,48 @@ async def test_lock_timeout_returns_structured_error_without_traceback(
     assert "Timed out waiting for the teams registry lock" in text
     assert "retry after the other lop process finishes" in text
     assert "could not save team" not in text
+
+
+def test_team_params_carry_label_and_aliases_and_refuse_unknown_fields() -> None:
+    from pydantic import ValidationError
+
+    from local_operator.tools.team_tool import TeamParams
+
+    params = TeamParams(op="create", name="x", label="Display", aliases=["dx"])
+    assert params.label == "Display" and params.aliases == ["dx"]
+    # Unknown fields are refused (constructed from a dict: the point is the
+    # MODEL's extra="forbid", so the typo must not fail a type check first).
+    with pytest.raises(ValidationError):
+        TeamParams.model_validate({"op": "create", "name": "x", "labell": "typo"})
+
+
+@pytest.mark.asyncio
+async def test_create_renders_label_first_and_aliases_resolve(context) -> None:
+    created = await call(
+        context,
+        op="create",
+        name="data-quality",
+        label="Data Quality",
+        aliases=["dq"],
+        description="Finds issues",
+    )
+    assert "created team 'data-quality'" in created  # the receipt stays key-based
+
+    listed = await call(context, op="list")
+    assert "Data Quality (data-quality)" in listed
+
+    # The alias resolves, and the header paints label (key).
+    shown = await call(context, op="show", name="dq")
+    assert "Data Quality (data-quality). Led by manager" in shown
+    assert "launch with /team data-quality <request>" in shown
+
+
+@pytest.mark.asyncio
+async def test_update_resets_a_label_and_replaces_aliases(context, registry) -> None:
+    await call(context, op="create", name="ops", label="Ops Display", aliases=["o1"])
+    updated = await call(context, op="update", name="ops", label="", aliases=["o2"])
+    assert "updated team" in updated
+    team = registry.get_team_by_name("ops")
+    assert team is not None
+    assert team.label == "Ops"  # reset to the derived default
+    assert team.aliases == ["o2"]  # replaced wholesale, not merged
