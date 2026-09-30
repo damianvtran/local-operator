@@ -203,6 +203,36 @@ def test_reconcile_on_a_hold_leaves_the_record(isolated_root: Path) -> None:
     assert triggers.read_pending_record(root, SESSION_ID) is not None
 
 
+def test_consume_skips_while_the_master_switch_is_off(isolated_root: Path) -> None:
+    """Round 1 (R2): the master switch was creation-only — a record pending
+    when it flipped still armed a row and fired a real check-in.
+
+    ``consume_triggers`` now asks the same gate the pass and the supervisor
+    use; the record is LEFT (nothing settles), so a re-enable inside its TTL
+    reconsiders it and the TTL drops it otherwise.
+    """
+    root = _root_with_row(isolated_root)
+    _record(root, [_instance_entry()])
+    settings = root / "wakes" / "triggers" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(
+        json.dumps({"schema_version": 1, "values": {"wakes.triggers.enabled": False}})
+    )
+
+    out = proactive.consume_triggers([], config_dir=root, session_id=SESSION_ID, now_ms=NOW_MS)
+    assert out.schedules == []
+    assert out.settle is None
+    assert triggers.read_pending_record(root, SESSION_ID) is not None
+
+    settings.write_text(
+        json.dumps({"schema_version": 1, "values": {"wakes.triggers.enabled": True}})
+    )
+    out = proactive.consume_triggers([], config_dir=root, session_id=SESSION_ID, now_ms=NOW_MS)
+    assert len(out.schedules) == 1
+    assert out.schedules[0].id.startswith("aida-trigger-")
+    assert out.settle is not None
+
+
 # -- settle and the session seams -------------------------------------------------
 
 

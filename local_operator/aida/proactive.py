@@ -785,6 +785,9 @@ def consume_triggers(
 
     THE CONSUME PROTOCOL (design §3.2), in order:
 
+    0. The shared decline gate (``triggers.declines``) — master switch, env,
+       and the belt-and-braces aida states — must be clear; a gated record is
+       LEFT, never settled (review round 1, R2).
     1. Read ``<config>/wakes/triggers/pending/<session_id>.json``; none ⇒
        no-op. This is only reachable from the engine's ACTIVE branch, so the
        hold/reactive re-check has already happened authoritatively.
@@ -805,6 +808,16 @@ def consume_triggers(
     root = Path(config_dir)
     record = wake_triggers.read_pending_record(root, session_id)
     if record is None:
+        return TriggerConsume(schedules=current, notes=[], changed=False)
+
+    # THE SAME GATE THE PASS AND THE SUPERVISOR USE (review round 1, R2): the
+    # master switch is creation-AND-consumption, so a record that PREDATES a
+    # switch-off must not arm a check-in either. The record is LEFT — nothing
+    # settles — so re-enabling within its TTL reconsiders it and the TTL drops
+    # it otherwise; the engine's own declines (disable/pause/reactive/env) are
+    # already authoritative above (the ACTIVE branch returned first), and
+    # sharing the gate keeps every lever on ONE reader.
+    if wake_triggers.declines(root, session_id) is not None:
         return TriggerConsume(schedules=current, notes=[], changed=False)
 
     moment = int(time.time() * 1000) if now_ms is None else int(now_ms)
@@ -1322,6 +1335,12 @@ def mark_held(config_dir: Path | str, session_id: str, *, now_ms: int | None = N
     keeps it (the rebuild clears only ``stopped_at``). Best-effort by
     contract — the config key is the authority and the guards above do not
     consult this file — so every failure is logged and answered ``False``.
+
+    A ROWLESS entry cannot be stamped: ``wake_store.write_entry`` treats an
+    empty schedule list as "remove the entry", and a pause must never delete
+    one. That shape is covered by the published ``aida.cadence.paused`` bit
+    the pause writes through the settings facade (``triggers.declines``), so
+    the supervisor's record plumbing stops all the same (review round 1, R1).
     """
     from local_operator.wakes import store as wake_store
 
@@ -1348,7 +1367,13 @@ def mark_held(config_dir: Path | str, session_id: str, *, now_ms: int | None = N
 
 
 def clear_held(config_dir: Path | str, session_id: str) -> bool:
-    """Drop ``held_at`` from her wake-index entry. Best-effort, like :func:`mark_held`."""
+    """Drop ``held_at`` from her wake-index entry. Best-effort, like :func:`mark_held`.
+
+    Symmetric with :func:`mark_held`, including the rowless no-op: an entry
+    with no schedules carries no marker to clear (and rewriting it would
+    delete it), and the config-published pause bit is what gate paths read
+    for that shape.
+    """
     from local_operator.wakes import store as wake_store
 
     root = Path(config_dir)

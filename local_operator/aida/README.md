@@ -220,6 +220,7 @@ settings a user authors.
 | `wakes.triggers.min_gap_minutes` | `60` | minimum spacing between trigger wakes to one target |
 | `wakes.triggers.project_staleness.enabled` | `true` | the project-staleness source's own switch |
 
-All seven are editable from `/settings` (section "Aida") and `lop config`.
+All of these are editable from `/settings` (sections "Aida", "Projects" and
+"Wake triggers") and `lop config`.
 Renames made through `/aida rename` or a conversation rename also write
 `aida.name`, so the two gestures and the settings page cannot drift apart.

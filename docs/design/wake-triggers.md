@@ -90,13 +90,23 @@ imports inside the functions that need them.
 2. `<config>/aida/state.json` absent/unreadable/nameless ⇒ skip (reads only;
    zero footprint).
 3. `wakes.triggers.enabled` false, or the source's own `enabled()` false ⇒ skip.
-4. Paused (`/aida pause` sets `held_at` on her wake-index entry;
-   `store.is_held`) ⇒ no record and no engagement.
-5. Reactive class ⇒ skip (a minimal, fail-closed mirror of
+4. `aida.enabled` false ⇒ skip — nothing creates, engages or arms a check-in
+   for a target the operator turned off.
+5. `aida.cadence.paused` true ⇒ skip. BOTH pause surfaces write this key,
+   which is why the gate lives on it: the `held_at` marker below only exists
+   while the entry carries schedules (a rowless entry cannot be stamped —
+   `store.write_entry` treats an empty schedule list as "remove the entry").
+6. Her wake-index entry is held (`store.is_held` — `stopped_at`/`held_at`) ⇒
+   no record and no engagement.
+7. Reactive class ⇒ skip (a minimal, fail-closed mirror of
    `action_class.session_action_class`; any doubt reads reactive). The engine
    re-checks authoritatively at consume.
-6. Disable-with-leftovers costs at most one spurious engage; her load then
-   drops the armed rows.
+8. A record that predates a decline state is INERT — no engagement, no
+   residency, no consume — until a lever lifts (a re-enable within the 72 h
+   TTL reconsiders it) or `reconcile` drops it. THE ONE GATE
+   (`triggers.declines`) is asked by creation, the supervisor's record
+   plumbing (`_due_sessions`/`_has_fireable_wakes`) and the engine's consume,
+   so no path can honour a lever the others ignore.
 
 ## 6. Supervisor integration
 
@@ -144,7 +154,10 @@ record only after the persist — the crash windows hang off that ordering.
   something wants the engine; the serving-start drain covers boot). Follow-ups
   if it bites: hand the record to the live runtime as a peer errand, or a
   cheap stat in the runtime's beat loop.
-- **≤ one spurious engage** after a config-disable with leftover armed rows.
+- **Disable/pause with leftovers**: a pending record is INERT until a lever
+  lifts or the 72 h TTL drops it (the single decline gate); her own leftover
+  INDEX rows still cost at most one boot, whose load-time filter drops them
+  (unchanged, #1695).
 - **Triple-crash duplicate**: a millisecond-scale window can re-arm one row
   once; bounded by the budget.
 - **Snapshot lag** on a hand-edited `config.yml` until the next publish point.

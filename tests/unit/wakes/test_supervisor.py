@@ -1804,6 +1804,56 @@ def test_has_fireable_wakes_counts_a_pending_record(tmp_path: Path) -> None:
     )
 
 
+def test_due_sessions_and_residency_skip_a_declined_target(tmp_path: Path, monkeypatch) -> None:
+    """A record that predates a decline is NOT owed work (review round 1, R1).
+
+    ``_due_sessions`` counted a pending record as due and ``_has_fireable_wakes``
+    as fireable regardless of ``aida.enabled``, a settings-surface pause, a
+    class flip, the env switch or the trigger master switch — the supervisor
+    stayed resident for a disabled assistant and re-engaged her every time she
+    was cold, up to the record's 72 h TTL. Both now ask ``triggers.declines``,
+    the one gate, through the published snapshot the supervisor can read.
+    """
+    root, session_id = _trigger_root(tmp_path)
+    record = _pending_record(root, session_id)
+
+    # Sanity: with no decline anywhere the record is due and fireable (the
+    # pre-gate behaviour these cells must not lose).
+    assert _due_sessions({}, NOW_MS, config_dir=root, triggers={session_id: record})
+    assert _has_fireable_wakes({}, config_dir=root, triggers={session_id: record}) is True
+
+    settings = root / "wakes" / "triggers" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    for key, value in (
+        ("aida.enabled", False),
+        ("aida.cadence.paused", True),
+        ("wakes.triggers.enabled", False),
+    ):
+        settings.write_text(json.dumps({"schema_version": 1, "values": {key: value}}))
+        assert _due_sessions({}, NOW_MS, config_dir=root, triggers={session_id: record}) == []
+        assert _has_fireable_wakes({}, config_dir=root, triggers={session_id: record}) is False
+
+    # The env kill switch gates the same two calls.
+    settings.unlink()
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_AIDA", "1")
+    assert _due_sessions({}, NOW_MS, config_dir=root, triggers={session_id: record}) == []
+    assert _has_fireable_wakes({}, config_dir=root, triggers={session_id: record}) is False
+    monkeypatch.delenv("LOCAL_OPERATOR_NO_AIDA")
+
+    # A class flip on a leftover record: same answer, fail-closed.
+    row = root / "agents" / "aid1"
+    row.mkdir(parents=True)
+    (row / "agent.yml").write_text("name: aida\ntags:\n- role\n- class:reactive\n")
+    assert _due_sessions({}, NOW_MS, config_dir=root, triggers={session_id: record}) == []
+    assert _has_fireable_wakes({}, config_dir=root, triggers={session_id: record}) is False
+    (row / "agent.yml").unlink()
+
+    # Callers with NO root keep the pre-gate behaviour (documented on the
+    # function): the gate cannot be asked without a directory, and the one
+    # production caller always passes one.
+    assert _due_sessions({}, NOW_MS, triggers={session_id: record})
+
+
 @pytest.mark.asyncio
 async def test_serve_once_evaluates_a_trigger_and_engages(
     tmp_path: Path, engagements, no_live_runtimes, monkeypatch

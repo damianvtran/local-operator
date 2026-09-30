@@ -4458,6 +4458,7 @@ def write_setting(manager: "ConfigManager", setting: Setting, value: Any) -> Non
     _invalidate_caches()
     _notify_watcher(manager)
     _publish_trigger_settings(manager, setting)
+    _sync_aida_hold_marker(manager, setting)
 
 
 def reset_setting(manager: "ConfigManager", setting: Setting) -> None:
@@ -4476,6 +4477,7 @@ def reset_setting(manager: "ConfigManager", setting: Setting) -> None:
     _invalidate_caches()
     _notify_watcher(manager)
     _publish_trigger_settings(manager, setting)
+    _sync_aida_hold_marker(manager, setting)
 
 
 def _reload_before_write(manager: "ConfigManager") -> None:
@@ -4720,6 +4722,45 @@ def _publish_trigger_settings(manager: "ConfigManager", setting: Setting) -> Non
 # "provider/model" string or a `{provider, model, effort}` mapping. The page
 # edits it as two levels (chains, then hops within one chain), so the helpers
 # below are the only place that shape is known outside `providers/failover.py`.
+
+
+def _sync_aida_hold_marker(manager: "ConfigManager", setting: Setting) -> None:
+    """Mirror an ``aida.cadence.paused`` write onto her wake-index entry.
+
+    ``/aida pause`` stamps the derived ``held_at`` marker itself, but the SAME
+    key written through a settings surface — the /settings row, ``lop config``,
+    ``PATCH /v1/settings`` — never touched the entry, so the supervisor's INDEX
+    paths kept treating her armed rows as fireable while every settings
+    surface said she was paused (review round 1, R1). Routing the write
+    through the pause writer's own marker helpers makes both pause surfaces
+    produce the same on-disk state. Best-effort by contract: a failure must
+    never fail the settings write that already landed.
+
+    A ROWLESS entry is a deliberate no-op: ``store.write_entry`` treats an
+    empty schedule list as "remove the entry", so there is nothing there to
+    hold — the trigger layer's publish-gated ``triggers.declines`` covers that
+    shape instead, and the snapshot re-publish above carries the paused bit to
+    the supervisor regardless.
+    """
+    if setting.key != "aida.cadence.paused":
+        return
+    try:
+        from local_operator.aida import proactive
+        from local_operator.wakes import triggers
+
+        root = getattr(manager, "config_dir", None)
+        if root is None:
+            return
+        target = triggers.target_session_id(root)
+        if not target:
+            return
+        paused = strict_bool(read_setting(manager, setting), False)
+        if paused:
+            proactive.mark_held(root, target)
+        else:
+            proactive.clear_held(root, target)
+    except Exception:  # noqa: BLE001 — a derived marker never fails a settings write
+        logger.warning("could not sync aida's hold marker", exc_info=True)
 
 
 def read_chains(manager: "ConfigManager") -> dict[str, list[str]]:

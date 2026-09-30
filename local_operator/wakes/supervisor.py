@@ -404,6 +404,7 @@ def _due_sessions(
     index: dict[str, dict[str, Any]],
     now_ms: int,
     *,
+    config_dir: Path | None = None,
     deliveries: Mapping[str, dict[str, Any]] | None = None,
     spooled: Mapping[str, dict[str, Any]] | None = None,
     triggers: Mapping[str, dict[str, Any]] | None = None,
@@ -439,6 +440,15 @@ def _due_sessions(
     the row once an engagement makes a runtime exist), so it earns an
     engagement too — and a paused/stopped target is skipped exactly like its
     schedules, which is the no-engagement half of the suppression matrix.
+
+    ``config_dir`` is what makes the FULL gate askable for a pending record:
+    ``trigger_mod.declines`` reads the published snapshot's
+    ``aida.enabled``/``aida.cadence.paused`` and the class mirror, so a record
+    that PREDATES a pause/disable/class-flip/switch-off is NOT due — engaging
+    it would boot an assistant the operator turned off and keep this process
+    resident for it (review round 1, R1; the creation-side gates alone left
+    exactly that hole). Callers without a root keep the pre-gate behaviour,
+    which is why the one production caller always passes it.
     """
     from local_operator.wakes import triggers as trigger_mod
     from local_operator.wakes.spooled import next_attempt_at_ms
@@ -579,13 +589,21 @@ def _due_sessions(
     # first row wins and the later kind does not duplicate it). The cwd prefers
     # the target's own index entry when one exists; a target with no entry at
     # all — her session with no armed rows — still engages, from the home
-    # directory, which is what the spooled path does too.
+    # directory, which is what the spooled path does too. A target in a
+    # DECLINE state is skipped here (see the docstring): the record stays on
+    # disk but is not owed, so nothing is engaged and nothing keeps the
+    # supervisor resident for it.
     already = {row[0] for row in due}
     for session_id, record in (triggers or {}).items():
         if not isinstance(record, dict) or session_id in already or session_id in dormant:
             continue
         if trigger_mod.next_attempt_at_ms(record) > now_ms:
             continue
+        if config_dir is not None:
+            reason = trigger_mod.declines(config_dir, session_id)
+            if reason is not None:
+                logger.debug("trigger record for %s skipped (%s)", session_id, reason)
+                continue
         entry = index.get(session_id)
         cwd = entry.get("cwd") if isinstance(entry, dict) else None
         noted = record.get("noted_at_ms")
@@ -1469,7 +1487,12 @@ class _Sweeper:
         """Start an engagement for every due session. Returns how many started."""
         launched = 0
         for session_id, cwd, due_ms in _due_sessions(
-            index, moment, deliveries=deliveries, spooled=spooled, triggers=triggers
+            index,
+            moment,
+            config_dir=config_dir,
+            deliveries=deliveries,
+            spooled=spooled,
+            triggers=triggers,
         ):
             if self.engage(config_dir, session_id, cwd, due_ms, moment):
                 launched += 1
@@ -1670,6 +1693,8 @@ def _has_fireable_wakes(
     walked to (≤ :data:`spooled.RETRY_CAP_S`): "still owed a turn" is still work,
     which is why there is no attempt cap to end it.
     """
+    from local_operator.wakes import triggers as trigger_mod
+
     moment = now_ms if now_ms is not None else int(time.time() * 1000)
     if spooled:
         for session_id, record in spooled.items():
@@ -1685,10 +1710,16 @@ def _has_fireable_wakes(
         # A PENDING TRIGGER RECORD IS WORK THIS PROCESS CAN DO, exactly as a
         # lone spooled turn is: engaging its target is what makes a runtime
         # exist to consume it. The dormant skip agrees with ``_due_sessions``
-        # (a held target's record is deliberately not fireable), and ghosts are
-        # already dropped by the reconciler that ran beside the read.
+        # (a held target's record is deliberately not fireable), ghosts are
+        # already dropped by the reconciler that ran beside the read, and a
+        # DECLINE state (``trigger_mod.declines`` — paused/disabled/reactive/
+        # switch-off/env) makes the record NOT work this process can do:
+        # staying resident for it would keep a disabled assistant's check-in
+        # owed forever (review round 1, R1).
         for session_id, record in triggers.items():
             if not isinstance(record, dict):
+                continue
+            if config_dir is not None and trigger_mod.declines(config_dir, session_id) is not None:
                 continue
             entry = index.get(session_id)
             if isinstance(entry, dict) and _is_held_entry(entry):

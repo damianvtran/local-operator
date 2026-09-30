@@ -194,6 +194,49 @@ def test_a_paused_target_writes_no_record(tmp_path: Path) -> None:
     assert triggers.sweep(root, now_ms=NOW_MS) == ["aida00000001"]
 
 
+def test_a_settings_pause_and_a_disable_decline_at_creation(tmp_path: Path) -> None:
+    """Both decline states reach the pass through the published snapshot.
+
+    Round 1 (R1): the creation gate read only the entry's ``held_at``, so a
+    pause written through the settings row (which stamped nothing) and
+    ``aida.enabled=false`` both kept sweeping records. The gate now asks the
+    snapshot, which both surfaces write.
+    """
+    root = _root(tmp_path)
+    _aida(root)
+    _project(root, "atlas")
+    settings = root / "wakes" / "triggers" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+
+    settings.write_text(json.dumps({"schema_version": 1, "values": {"aida.cadence.paused": True}}))
+    assert triggers.declines(root, "aida00000001") == "paused"
+    assert triggers.sweep(root, now_ms=NOW_MS) == []
+
+    settings.write_text(json.dumps({"schema_version": 1, "values": {"aida.enabled": False}}))
+    assert triggers.declines(root, "aida00000001") == "disabled"
+    assert triggers.sweep(root, now_ms=NOW_MS) == []
+
+    settings.unlink()
+    assert triggers.declines(root, "aida00000001") is None
+    assert triggers.sweep(root, now_ms=NOW_MS) == ["aida00000001"]
+
+
+def test_a_burst_under_a_lever_creates_nothing(tmp_path: Path) -> None:
+    """QA round 1: a disabled/paused target must not get a record from a burst
+    either — creation is gated before evaluation, and the file set proves
+    nothing was written."""
+    root = _root(tmp_path)
+    _aida(root)
+    for index in range(5):
+        _project(root, f"p-{index}")
+    settings = root / "wakes" / "triggers" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps({"schema_version": 1, "values": {"aida.enabled": False}}))
+    before = sorted(str(p.relative_to(root)) for p in root.rglob("*"))
+    assert triggers.sweep(root, now_ms=NOW_MS) == []
+    assert sorted(str(p.relative_to(root)) for p in root.rglob("*")) == before
+
+
 # -- the class mirror ------------------------------------------------------------
 
 
@@ -241,6 +284,36 @@ def test_an_unreadable_agent_row_reads_reactive(tmp_path: Path) -> None:
         assert triggers._class_reactive(root, "aida00000001") is True
     finally:
         (row / "agent.yml").chmod(0o644)
+
+
+def test_a_role_row_reads_flow_tags_and_a_commented_name(tmp_path: Path) -> None:
+    """PyYAML shapes the line reader used to miss: a flow-style tag list and a
+    trailing comment on the ``name:`` line. Both made the row invisible to the
+    mirror, which then read the SEED's class while the engine read the ROW's
+    (review round 1, R3)."""
+    root = _root(tmp_path)
+    _aida(root)
+    row = root / "agents" / "aid1"
+    row.mkdir(parents=True)
+    (row / "agent.yml").write_text(
+        "name: aida  # the operator's assistant\ntags: [role, class:reactive]\n"
+    )
+    assert triggers._class_reactive(root, "aida00000001") is True
+
+    (row / "agent.yml").write_text('name: "aida" # note\ntags: ["role", "class:proactive"]\n')
+    assert triggers._class_reactive(root, "aida00000001") is False
+
+
+def test_an_unreadable_tags_shape_reads_reactive(tmp_path: Path) -> None:
+    """A ``tags:`` value this reader cannot parse is DOUBT, not "no role tag"
+    (R3): the mirror fails closed so the seed cannot silently win a class the
+    engine would read differently."""
+    root = _root(tmp_path)
+    _aida(root)
+    row = root / "agents" / "aid1"
+    row.mkdir(parents=True)
+    (row / "agent.yml").write_text("name: aida\ntags: [role, class:proactive\n")  # unbalanced
+    assert triggers._class_reactive(root, "aida00000001") is True
 
 
 # -- records, dedupe, bounds -----------------------------------------------------
@@ -527,6 +600,50 @@ def test_read_settings_falls_back_to_defaults(tmp_path: Path) -> None:
     assert triggers.read_settings(root) == dict(triggers.DEFAULTS)
 
 
+def test_the_snapshot_defaults_pin_the_aida_levers() -> None:
+    """The two ``aida.*`` snapshot defaults are the engine's own constants:
+    an absent snapshot must not flip either lever."""
+    from local_operator.aida import proactive
+
+    assert triggers.DEFAULTS["aida.enabled"] == proactive.DEFAULT_ENABLED
+    assert triggers.DEFAULTS["aida.cadence.paused"] == proactive.DEFAULT_PAUSED
+
+
+def test_a_settings_pause_stamps_and_clears_the_hold_marker(tmp_path: Path, monkeypatch) -> None:
+    """A pause written through the settings row now stamps exactly like
+    ``/aida pause`` does (round 1, R1): the facade hook routes the write
+    through the pause writer's marker helpers.
+
+    A ROWLESS entry is deliberately untouched — ``store.write_entry`` treats an
+    empty schedule list as "remove the entry" — and is covered instead by the
+    snapshot gate above.
+    """
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+
+    root = _root(tmp_path)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    _aida(root)
+    entry = root / "wakes" / "aida00000001.json"
+    entry.parent.mkdir(exist_ok=True)
+    entry.write_text(
+        json.dumps(
+            {"schema": 1, "session_id": "aida00000001", "schedules": [{"id": "aida-cadence"}]}
+        )
+    )
+    manager = ConfigManager(config_dir=root)
+    setting = settings_io.resolve_key("aida.cadence.paused")
+    assert setting is not None
+
+    settings_io.write_setting(manager, setting, True)
+    assert "held_at" in json.loads(entry.read_text())
+    assert triggers.read_settings(root)["aida.cadence.paused"] is True
+
+    settings_io.reset_setting(manager, setting)
+    assert "held_at" not in json.loads(entry.read_text())
+    assert triggers.read_settings(root)["aida.cadence.paused"] is False
+
+
 def test_a_settings_write_republishes_the_snapshot(tmp_path: Path, monkeypatch) -> None:
     """The facade hook: a TUI/UI/CLI edit lands in the snapshot immediately.
 
@@ -551,6 +668,15 @@ def test_a_settings_write_republishes_the_snapshot(tmp_path: Path, monkeypatch) 
 
     settings_io.reset_setting(manager, setting)
     assert triggers.read_settings(root)["wakes.triggers.max_per_day"] == 6
+
+    # The Aida levers ride the same snapshot (round 1, R1): a pause/enable edit
+    # through the facade republishes for the supervisor's record plumbing.
+    pause = settings_io.resolve_key("aida.cadence.paused")
+    assert pause is not None
+    settings_io.write_setting(manager, pause, True)
+    assert triggers.read_settings(root)["aida.cadence.paused"] is True
+    settings_io.reset_setting(manager, pause)
+    assert triggers.read_settings(root)["aida.cadence.paused"] is False
 
     # An edit of an UNRELATED key must not create the trigger store at all
     # (the gate in ``settings_io._publish_trigger_settings``).

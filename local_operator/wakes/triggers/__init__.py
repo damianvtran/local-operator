@@ -20,11 +20,16 @@ is the one always-on process whose job is "make a runtime exist for this
 session", which is exactly what a trigger needs. The *possibility* of a future
 trigger deliberately does NOT keep the supervisor resident — on an aida-enabled
 install her daily cadence row is fireable work, and a pending record counts as
-fireable work while it is owed. A disabled install has no state file and this
-module then reads nothing and writes nothing (see the suppression matrix).
+fireable work while it is owed AND no decline state holds (:func:`declines`).
+A disabled install has no state file and this module then reads nothing and
+writes nothing (see the suppression matrix).
 
-**The suppression matrix** (checked in this order every pass; any failure
-skips the target, and every arm is fail-closed):
+**The suppression matrix** is the ONE gate (:func:`declines`), asked by every
+path that could create, engage, keep resident, or arm a check-in — the pass
+(:func:`sweep`), the supervisor's record plumbing (``_due_sessions`` /
+``_has_fireable_wakes``) and the engine's consume (``consume_triggers``) — so
+a lever cannot be honoured on one path and ignored on another. In order, and
+every arm is fail-closed:
 
 1. ``LOCAL_OPERATOR_NO_AIDA`` truthy in the process environment ⇒ skip.
 2. ``<config>/aida/state.json`` absent/unreadable/nameless ⇒ skip — she was
@@ -32,12 +37,22 @@ skips the target, and every arm is fail-closed):
    nothing (the zero-footprint property, pinned by tests).
 3. ``wakes.triggers.enabled`` false (or the source's own ``enabled()``) from
    the published settings snapshot ⇒ skip.
-4. Paused: her wake-index entry exists and is held (``store.is_held`` — the
-   ``held_at`` the ``/aida pause`` path stamps) ⇒ no record and no engagement.
-5. Reactive class: fail-closed — see :func:`_class_reactive`.
-6. Disable-with-leftovers: her index entry may still hold armed rows until her
-   next load drops them; the first trigger attempt engages her, the load drops
-   them, and gates (2)/(4) hold from then on (≤ one spurious engage).
+4. ``aida.enabled`` false (``"disabled"``) ⇒ skip — nothing creates, engages
+   or arms for a target the operator turned off.
+5. ``aida.cadence.paused`` true (``"paused"``) ⇒ skip. Both pause surfaces
+   write this key; the derived ``held_at`` marker (step 6) only exists while
+   her entry carries schedules, so the published key is what makes a
+   settings-surface pause and a rowless-entry pause behave as one.
+6. Paused/stopped marker: her wake-index entry is held (``store.is_held`` —
+   ``stopped_at``/``held_at``) ⇒ no record and no engagement.
+7. Reactive class: fail-closed — see :func:`_class_reactive`.
+8. Disable-with-leftovers: any record that PREDATES a decline state stays on
+   disk but is inert — no engagement, no residency, no consume — until a
+   lever lifts (a re-enable within the 72 h TTL reconsiders it) or
+   :func:`reconcile` drops it. The trigger layer therefore spends NO spurious
+   engage on a disabled/paused target; the one boot that clears her own
+   leftover INDEX rows is the engine's load-time filter (unchanged), and the
+   engaged runtime is what runs it.
 
 **Dedupe and bounds live in one place.** One wake per *condition instance*,
 identified by ``(source, key, fingerprint)`` — the fingerprint is the same
@@ -60,7 +75,9 @@ against THE configured values, so config-aware writers publish
 settings write/reset paths, Aida's boot and reconcile) and the pass reads the
 snapshot (:func:`read_settings`), falling back to the module defaults — which
 are identical to the registry's, so a missing snapshot cannot change behaviour,
-only miss a recent edit.
+only miss a recent edit. The snapshot carries ``aida.enabled`` and
+``aida.cadence.paused`` beside the trigger keys precisely so the supervisor's
+record plumbing can see the engine's decline states without reading YAML.
 """
 
 from __future__ import annotations
@@ -100,19 +117,31 @@ STATE_SCHEMA = 1
 SETTINGS_SCHEMA = 1
 
 #: The keys the snapshot carries, in one place. The settings registry owns the
-#: rows; these are the names the supervisor-side reader resolves.
+#: rows; these are the names the supervisor-side reader resolves. The two
+#: ``aida.*`` keys are here because the engine's DECLINE states must reach the
+#: supervisor's record plumbing: creation, engagement and residency all gate
+#: on them through :func:`declines`, and the supervisor cannot read
+#: ``config.yml`` to learn them any other way.
 SNAPSHOT_KEYS: tuple[str, ...] = (
     "projects.stale_after_hours",
     "wakes.triggers.enabled",
     "wakes.triggers.max_per_day",
     "wakes.triggers.min_gap_minutes",
     "wakes.triggers.project_staleness.enabled",
+    "aida.enabled",
+    "aida.cadence.paused",
 )
 
 #: The master switch's default. Registered in ``settings_io`` as a literal (the
 #: CLI's settings layer must not import this package), and pinned against this
 #: constant by ``tests/unit/test_settings_io.py`` so the two cannot drift.
 DEFAULT_ENABLED = True
+
+#: The Aida enable/pause defaults, spelled as literals like everything else
+#: here and pinned against ``proactive.DEFAULT_ENABLED``/``DEFAULT_PAUSED`` by
+#: tests, so an absent snapshot cannot flip either lever.
+DEFAULT_AIDA_ENABLED = True
+DEFAULT_AIDA_PAUSED = False
 
 #: Per-target rolling-24 h budget on check-in wakes. ``0`` disables.
 DEFAULT_MAX_PER_DAY = 6
@@ -129,6 +158,8 @@ DEFAULTS: Mapping[str, Any] = {
     "wakes.triggers.max_per_day": DEFAULT_MAX_PER_DAY,
     "wakes.triggers.min_gap_minutes": DEFAULT_MIN_GAP_MINUTES,
     "wakes.triggers.project_staleness.enabled": True,
+    "aida.enabled": DEFAULT_AIDA_ENABLED,
+    "aida.cadence.paused": DEFAULT_AIDA_PAUSED,
 }
 
 #: A pending record older than this is dropped by :func:`reconcile`: a check-in
@@ -700,24 +731,63 @@ def _attached_profile_name(config_dir: Path, session_id: str) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
-def _tag_lines(text: str) -> list[str]:
-    """The block-list items PyYAML emits for a ``tags:`` list, unquoted.
+def _scalar_value(raw: str) -> str:
+    """A YAML value with quotes stripped and a trailing comment dropped.
 
-    ``agents.save_agent`` dumps with ``default_flow_style=False``, so a tag
-    list is one ``- <tag>`` line per item; anything else in the file (other
-    fields' prose included) is ignored unless it LOOKS like a list item, which
-    is why this reads lines rather than the whole text.
+    ``name: aida  # note`` parses to ``aida`` in YAML; a reader that kept the
+    comment made the row invisible to the class mirror and let the SEED's
+    class win while the engine read the ROW's (review round 1, R3). A ``#``
+    starts a comment only after whitespace and only OUTSIDE quotes; an
+    unterminated quote is returned as written, so it matches nothing rather
+    than something wrong.
+    """
+    value = raw.strip()
+    if value and value[0] in "\"'":
+        end = value.find(value[0], 1)
+        return value[1:end] if end != -1 else value
+    for position, char in enumerate(value):
+        if char == "#" and (position == 0 or value[position - 1] in " \t"):
+            return value[:position].rstrip()
+    return value
+
+
+def _tag_lines(text: str) -> tuple[list[str], bool]:
+    """``(tags, unreadable)`` from an agent row's text.
+
+    Block style (what ``agents.save_agent`` emits with
+    ``default_flow_style=False``) is the common case: one ``- <tag>`` line per
+    item, and anything else in the file (other fields' prose included) is
+    ignored unless it LOOKS like a list item, which is why this reads lines
+    rather than the whole text. FLOW style — ``tags: [role, class:reactive]``
+    — is a hand-edit shape PyYAML accepts but the line reader missed: the row
+    then looked tag-less, the mirror fell back to the seed's class while the
+    engine read the row's (review round 1, R3). Flow items are parsed when the
+    brackets balance; a ``tags:`` value in any other shape answers
+    ``unreadable=True``, which the caller reads as DOUBT (reactive) rather
+    than "no role tag" — the fail-closed direction the module already takes.
     """
     items: list[str] = []
     for line in text.splitlines():
         stripped = line.strip()
+        if stripped.startswith("tags:"):
+            value = _scalar_value(stripped.split(":", 1)[1])
+            if not value:
+                continue  # block list: the ``- `` lines below carry the items
+            if not value.startswith("["):
+                return (items, True)  # a scalar/mapping tags value: not readable
+            end = value.rfind("]")
+            if end == -1:
+                return (items, True)  # unbalanced flow list: doubt
+            for part in value[1:end].split(","):
+                token = _scalar_value(part.strip())
+                if token:
+                    items.append(token)
+            continue
         if not stripped.startswith("- "):
             continue
-        item = stripped[2:].strip()
-        if len(item) >= 2 and item[0] == item[-1] and item[0] in "\"'":
-            item = item[1:-1]
+        item = _scalar_value(stripped[2:].strip())
         items.append(item)
-    return items
+    return (items, False)
 
 
 def _registry_class_token(config_dir: Path, name: str) -> tuple[bool, str | None]:
@@ -751,14 +821,16 @@ def _registry_class_token(config_dir: Path, name: str) -> tuple[bool, str | None
         for line in text.splitlines():
             if not line.lstrip().startswith("name:"):
                 continue
-            raw = line.split(":", 1)[1].strip()
-            if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
-                raw = raw[1:-1]
-            row_name = raw
+            row_name = _scalar_value(line.split(":", 1)[1])
             break
         if not row_name or row_name.casefold() != wanted:
             continue
-        tags = _tag_lines(text)
+        tags, unreadable_tags = _tag_lines(text)
+        if unreadable_tags:
+            # A ``tags:`` value in a shape this reader cannot parse — doubt
+            # reads reactive, exactly as an unreadable row does (R3).
+            matches.append((True, None))
+            continue
         is_role_row = any(tag == "role" for tag in tags)
         if not is_role_row:
             continue  # resolve_profile ignores non-role rows; the seed stands
@@ -807,13 +879,87 @@ def _seed_class_token(name: str) -> str | None:
     return None
 
 
+def target_session_id(config_dir: Path | str) -> str | None:
+    """The trigger target's session id from ``aida/state.json``, or ``None``.
+
+    Public because the settings facade's hold-marker hook and the tests resolve
+    the same fact through this one reader (schema check included), not a second
+    JSON reader that could drift.
+    """
+    try:
+        return _aida_target(Path(config_dir))
+    except Exception:  # noqa: BLE001 — a resolver must answer, not raise
+        return None
+
+
+def declines(
+    config_dir: Path | str | None,
+    session_id: str,
+    *,
+    values: Mapping[str, Any] | None = None,
+) -> str | None:
+    """Why the trigger layer must treat ``session_id`` as inert, or ``None``.
+
+    THE SINGLE GATE. Creation (:func:`sweep`), the supervisor's record
+    plumbing (``supervisor._due_sessions`` / ``_has_fireable_wakes``) and the
+    engine's consume (``proactive.consume_triggers``) all ask this ONE
+    question, so a lever cannot be honoured on one path and ignored on another
+    — the round-1 shape where a pending record outlived
+    ``aida.enabled=false``, a settings-surface pause, a class flip or
+    ``LOCAL_OPERATOR_NO_AIDA`` and kept being engaged (and kept the supervisor
+    resident) until its 72 h TTL.
+
+    The reasons, in the order they are checked. Any answer but ``None`` means
+    inert; every step is fail-closed — an unreadable fact reads as a decline:
+
+    * ``"env"`` — ``LOCAL_OPERATOR_NO_AIDA`` truthy.
+    * ``"off"`` — the master switch (``wakes.triggers.enabled``).
+    * ``"disabled"`` — ``aida.enabled`` false: nothing may create, engage or
+      arm a check-in for a target the operator turned off.
+    * ``"paused"`` — ``aida.cadence.paused`` true. BOTH pause surfaces write
+      this key, which is why the gate lives on it: the derived ``held_at``
+      marker only exists while her entry carries schedules (``/aida pause``
+      on a rowless entry cannot stamp one — ``store.write_entry`` treats an
+      empty schedule list as "remove the entry" — and a pause written
+      through the settings row never ran the pause writer at all before this
+      round).
+    * ``"held"`` — her wake-index entry is parked (``stopped_at``/
+      ``held_at``).
+    * ``"reactive"`` — the class mirror (fail-closed, see
+      :func:`_class_reactive`).
+
+    ``values`` lets a caller that already read the snapshot pass it in;
+    otherwise the snapshot is read here. ``config_dir=None`` cannot be
+    evaluated, so the caller gets ``None`` (the pre-gate answer) rather than a
+    guess — the one production caller always has a root.
+    """
+    root = Path(config_dir) if config_dir is not None else None
+    if root is None:
+        return None
+    if _env_disabled():
+        return "env"
+    vals = dict(values) if values is not None else read_settings(root)
+    if not _strict_bool(vals.get("wakes.triggers.enabled"), DEFAULT_ENABLED):
+        return "off"
+    if not _strict_bool(vals.get("aida.enabled"), DEFAULT_AIDA_ENABLED):
+        return "disabled"
+    if _strict_bool(vals.get("aida.cadence.paused"), DEFAULT_AIDA_PAUSED):
+        return "paused"
+    if _target_held(root, session_id):
+        return "held"
+    if _class_reactive(root, session_id):
+        return "reactive"
+    return None
+
+
 def sweep(config_dir: Path | str | None = None, *, now_ms: int | None = None) -> list[str]:
     """One trigger evaluation pass. Returns the targets whose records were
     written or merged.
 
-    The whole suppression matrix, in order (see the module docstring). In the
-    suppressed states this performs READS ONLY — one env read and one stat/read
-    of ``aida/state.json`` — so a machine that never enabled the target never
+    The whole suppression matrix, in order, through the ONE gate
+    (:func:`declines`) every other record path shares. In the suppressed states
+    this performs READS ONLY — one env read and the state/snapshot/entry/class
+    reads the gate needs — so a machine that never enabled the target never
     grows a ``wakes/triggers/`` directory from this path.
     """
     root = Path(config_dir) if config_dir is not None else _default_config_dir()
@@ -825,11 +971,9 @@ def sweep(config_dir: Path | str | None = None, *, now_ms: int | None = None) ->
     if not target:
         return []
     values = read_settings(root)
-    if not _strict_bool(values.get("wakes.triggers.enabled"), DEFAULT_ENABLED):
-        return []
-    if _target_held(root, target):
-        return []
-    if _class_reactive(root, target):
+    reason = declines(root, target, values=values)
+    if reason is not None:
+        logger.debug("trigger sweep skipped for %s: %s", target, reason)
         return []
     moment = _now_ms() if now_ms is None else int(now_ms)
     instances = evaluate_all(root, moment, values)
