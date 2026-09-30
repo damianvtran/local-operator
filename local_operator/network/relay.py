@@ -120,6 +120,7 @@ from local_operator.network.types import (
     CAPABILITY_WORDS,
     GRANTABLE_CAPABILITIES,
     NEEDS_ASK,
+    NET_PAIR_OPS,
     Granted,
     LinkContext,
     LinkPhase,
@@ -4880,7 +4881,7 @@ class RelayServer:
                 f"{granted.action} is not implemented in this build yet "
                 f"({_owning_document(granted.action)})",
             )
-        if granted.action in ("net_pair_ready", "net_pair_abort", "net_pair_result"):
+        if granted.action in NET_PAIR_OPS:
             return wire.refusal_frame(
                 req, f"{granted.action} is only valid on a link that is still pairing"
             )
