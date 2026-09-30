@@ -42134,6 +42134,10 @@ class OperatorApp(App[None]):
         message.stop()
         picker = self._editor().picker
         skills = self._discovered_skills()
+        # Beside the row fill, because both are answers to the same question:
+        # the editor's `$` ink resolves against this snapshot, and the composer
+        # may have been remounted (a session switch) since the last push.
+        self._push_skill_names()
         if not skills:
             picker.set_choices([])
             picker.set_notice("no skills found — see `/skills`")
@@ -45820,10 +45824,36 @@ class OperatorApp(App[None]):
                 skills, _warnings = discover_skills(roots)
                 self._skills_by_name = {skill.name: skill for skill in skills}
                 self._skills_fingerprint = fingerprint
+                # A rescan is the ONE place the vocabulary changes: push it so
+                # the ink can never resolve against a set older than the one a
+                # submit would read (the render-side half of this cache).
+                self._push_skill_names()
         except Exception:
             if self._skills_by_name is None:
                 self._skills_by_name = {}
         return self._skills_by_name
+
+    def _push_skill_names(self) -> None:
+        """Hand the editor the discovered vocabulary its `$` ink resolves against.
+
+        The same push contract as ``set_name_choices``: the app owns discovery
+        (it is I/O — a filesystem walk gated by a fingerprint probe), and the
+        editor gets a cheap immutable snapshot for its render pass, so the
+        render path never walks the skills tree itself.
+
+        Called from the two places the vocabulary becomes or changes an answer:
+        ``on_skill_query_opened`` (the composer may have been remounted since
+        the last push) and the rescan branch of :meth:`_discovered_skills`. An
+        unpublished (``None``) map pushes NOTHING — the editor must claim no
+        ink until the app has answered at least once.
+        """
+        if self._skills_by_name is None:
+            return
+        try:
+            editor = self._editor()
+        except Exception:  # noqa: BLE001 — a push must never take the app down
+            return
+        editor.set_skill_names(frozenset(self._skills_by_name))
 
     async def _expand_references(self, text: str) -> str:
         """Expand every ``@path`` in ``text``, painting one notice per problem.

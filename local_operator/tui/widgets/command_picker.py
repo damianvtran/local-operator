@@ -41,6 +41,7 @@ count.
 
 from __future__ import annotations
 
+import string
 from enum import Enum
 from typing import Any, Callable, NamedTuple, Sequence
 
@@ -668,6 +669,73 @@ def skill_token_is_leading(text: str, token: SlashContext) -> bool:
     indented ``  $research`` is still the buffer's first token.
     """
     return not text[: token.start].strip()
+
+
+#: The RESOLVER's name class — an alphanumeric head, then alphanumerics, dots,
+#: underscores and hyphens — read off the submit-side
+#: ``_INVOCATION_RE`` (``local_operator/skills/invoke.py``) rather than imported
+#: from it, deliberately: that module pulls ``skills.discovery`` in, and this
+#: one is on the TUI boot path (the app imports the widget tree at start). The
+#: same one-way-dependency reason ``Editor._command_names`` reproduces the
+#: registry's membership test.  ``tests/unit/tui/test_skill_highlight.py`` pins
+#: the agreement against the real regex, so the two cannot drift silently.
+#: Letters and digits EXPLICITLY, not ``str.isalnum``: the regex is
+#: ASCII-classed, and a span that read a Unicode letter the resolver will not
+#: is a span that inks a token which can never fire.
+_SKILL_NAME_HEAD = frozenset(string.ascii_letters + string.digits)
+_SKILL_NAME_TAIL = _SKILL_NAME_HEAD | frozenset("._-")
+
+
+def skill_token_spans(line: str) -> list[tuple[int, int, str]]:
+    """EVERY boundary ``$name`` token on ``line``, as ``(start, end, name)``.
+
+    The whole-line counterpart of :func:`skill_token`, the way
+    :func:`~local_operator.sigils.at_token_spans` is of ``at_token``, and it
+    exists for the ink pass's question rather than the picker's: the picker
+    needs "the token the CARET is in" (one answer), while the composer's
+    ``$`` ink needs "every token this LINE names" (all of them), so a draft
+    holding two tokens can be painted without the caret deciding which one
+    goes dark. It reads the same boundary rule (:func:`_is_boundary`) as
+    every other tokenizer here, so the spans cannot disagree with the
+    picker's about where a token starts.
+
+    The EXTENT is the resolver's own name class (``_SKILL_NAME_HEAD`` /
+    ``_SKILL_NAME_TAIL``) — ``$`` then ``[A-Za-z0-9][A-Za-z0-9._-]*`` — NOT
+    the picker's to-whitespace one, and the two differ exactly where the
+    reader cares: ``$research,`` is a token that WILL fire (the comma is
+    outside the class and stays request text), while ``$research.`` parses the
+    name ``research.`` and will NOT.  Inking to whitespace would paint the
+    comma as part of the name (a claim the resolver contradicts) and would
+    paint ``$research.`` as ``research`` (a claim it contradicts the other
+    way).
+
+    A bare ``$`` opens no span, mirroring the resolver's "a ``$`` followed by
+    nothing usable does not match at all"; a ``$`` whose head is not
+    alphanumeric (``$_private``, ``$ßeta``) likewise opens none, which
+    UNDER-promises rather than over-promises — the submit-side parser is
+    ASCII-headed, so such a token is prose and gets no ink at all.
+
+    Pure and host-free: reads its argument and the two rules above, consults
+    no vocabulary and no widget.  Whether a span is worth painting — resolved,
+    inert, or nothing — is the caller's question, not the grammar's.
+    """
+    spans: list[tuple[int, int, str]] = []
+    index = 0
+    while index < len(line):
+        if line[index] != "$" or not _is_boundary(line, index):
+            index += 1
+            continue
+        end = index + 1
+        if end < len(line) and line[end] in _SKILL_NAME_HEAD:
+            end += 1
+            while end < len(line) and line[end] in _SKILL_NAME_TAIL:
+                end += 1
+        if end > index + 1:
+            spans.append((index, end, line[index + 1 : end]))
+        # ``max`` so a bare ``$`` (no usable name) still advances, and a token
+        # ending where it starts cannot stall the scan.
+        index += max(end - index, 1)
+    return spans
 
 
 def _active_sigil(line: str, column: int, sigil: str) -> int | None:
