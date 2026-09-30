@@ -463,20 +463,113 @@ def test_fit_stops_at_the_first_rung_that_fits() -> None:
 
 
 def test_fit_sheds_from_the_tightest_rung_when_no_rung_fits() -> None:
-    """The last resort is unchanged: when even the tightest rung is over
-    budget, the shed replaces the oldest frames with notices and no message is
+    """The last resort: when even the tightest rung is over budget — the
+    unprotected walk included, so every frame is re-rendered first — the shed
+    replaces the oldest frames with notices, terminates, and no message is
     removed."""
     history, _frames = _real_history(6)
     _CONTEXT_FRAME_CACHE.clear()
 
     out, downscaled, dropped, rung = fit_frames_to_wire_budget(history, budget=40_000)
 
-    assert dropped > 0
-    assert downscaled == 5, "the rungs were not applied before the shed"
+    assert dropped == 6, "every frame must go when even the floor cannot fit"
+    assert downscaled == 6, "the rungs were not applied before the shed"
     assert rung == IMAGE_CONTEXT_EDGES[-1], "the shed reports the tightest rung"
+    assert _image_blocks_of(out) == [], "a frame survived a shed that cannot fit"
     assert estimate_wire_bytes(out) <= 40_000
     assert len(out) == len(history)
     assert [m.id for m in out] == [m.id for m in history]
+
+
+def test_fit_descends_the_newest_frame_when_no_protected_rung_fits() -> None:
+    """The QA-round boundary: one oversize frame against a tight budget.
+
+    The newest-frame protection must not be the reason a session goes blind.
+    When no rung fits with the newest kept full, the walk runs again with the
+    newest unprotected and stops at the first rung that fits — so the model
+    receives a degraded view of the screen instead of no view at all, and
+    nothing is dropped.
+    """
+    history, _frames = _real_history(1)
+    _CONTEXT_FRAME_CACHE.clear()
+    widest, _ = downscale_stale_frames(
+        history, keep_recent_frames=0, max_edge=IMAGE_CONTEXT_EDGES[0]
+    )
+    budget = estimate_wire_bytes(widest) - 1
+
+    out, downscaled, dropped, rung = fit_frames_to_wire_budget(history, budget=budget)
+
+    assert dropped == 0, "a frame was dropped although the frame's own rung fits"
+    assert downscaled == 1, "the newest frame was not re-rendered"
+    assert rung == IMAGE_CONTEXT_EDGES[1], "the unprotected walk must stop at its first fit"
+    assert len(_image_blocks_of(out)) == 1, "the session lost the only frame it had"
+    assert estimate_wire_bytes(out) <= budget
+    assert _image_blocks_of(out)[0].data != _image_blocks_of(history)[0].data
+
+    # The prompt-cache property holds on the new path too: re-fitting the same
+    # history is byte-stable.
+    again, _d, _x, rung_again = fit_frames_to_wire_budget(history, budget=budget)
+    assert rung_again == rung
+    assert [b.data for b in _image_blocks_of(again)] == [b.data for b in _image_blocks_of(out)]
+
+
+def test_fit_keeps_every_frame_when_only_the_newest_descent_fits() -> None:
+    """Newest over budget AND older frames in context: nothing may be dropped.
+
+    QA round 1's case (b): six oversize frames against a budget where the
+    protected walk's tightest rung is still over but the unprotected walk
+    fits. The failure this repairs kept one frame and dropped five; every
+    frame must survive, with the newest among the re-rendered.
+    """
+    history, frames = _real_history(6)
+    _CONTEXT_FRAME_CACHE.clear()
+    floor, _ = downscale_stale_frames(
+        history, keep_recent_frames=0, max_edge=IMAGE_CONTEXT_EDGES[-1]
+    )
+    budget = estimate_wire_bytes(floor)
+
+    out, downscaled, dropped, rung = fit_frames_to_wire_budget(history, budget=budget)
+
+    assert dropped == 0, "frames were dropped although rendering all six fits"
+    assert downscaled == 6, "not every frame was re-rendered"
+    assert rung == IMAGE_CONTEXT_EDGES[-1]
+    blocks = _image_blocks_of(out)
+    assert len(blocks) == 6
+    original = _image_blocks_of(frames)[0].data
+    assert all(block.data != original for block in blocks)
+    assert estimate_wire_bytes(out) <= budget
+    assert [m.id for m in out] == [m.id for m in history]
+
+
+def test_fit_prefers_the_protected_walk_at_its_boundary() -> None:
+    """The second walk engages exactly one byte below the protected walk's
+    boundary: at the budget where the protected walk's tightest rung fits, the
+    newest frame is untouched; one byte tighter, the newest descends.
+
+    This is the property the common path rests on — an episode where the
+    protected walk fits renders exactly as it did before the descent existed —
+    stated as a boundary pair rather than as two separate tests.
+    """
+    history, _frames = _real_history(2)
+    _CONTEXT_FRAME_CACHE.clear()
+    protected, _ = downscale_stale_frames(
+        history, keep_recent_frames=1, max_edge=IMAGE_CONTEXT_EDGES[-1]
+    )
+    boundary = estimate_wire_bytes(protected)
+
+    out, _downscaled, dropped, rung = fit_frames_to_wire_budget(history, budget=boundary)
+    assert dropped == 0
+    assert rung == IMAGE_CONTEXT_EDGES[-1]
+    assert (
+        _image_blocks_of(out)[-1].data == _image_blocks_of(history)[-1].data
+    ), "the newest frame must keep full fidelity while a protected rung fits"
+
+    out2, _downscaled2, dropped2, rung2 = fit_frames_to_wire_budget(history, budget=boundary - 1)
+    assert dropped2 == 0
+    assert (
+        rung2 == IMAGE_CONTEXT_EDGES[0]
+    ), "one byte below the boundary the newest must descend to the widest fitting rung"
+    assert _image_blocks_of(out2)[-1].data != _image_blocks_of(history)[-1].data
 
 
 def test_fit_is_a_no_op_under_budget_and_when_disabled() -> None:
