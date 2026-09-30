@@ -670,6 +670,26 @@ class AskQueue:
             logger.warning(
                 "ask index: could not write entry for %s", self._session_id, exc_info=True
             )
+        self._publish_state()
+
+    def _publish_state(self) -> None:
+        """Hand the new fold to the host's wire publisher, if it has one.
+
+        ``_refresh`` is the ONE place the queue's visible state changes —
+        enqueue, answer, decline, dismiss and every reconcile all end here — so
+        it is also where the wire has to be told (design §4: the frontend state,
+        the projection and the list rows publish the fold the moment it moves).
+        A PROBE rather than a direct call, for the reason every other optional
+        hook on this object is one: the session double in this package's tests
+        has no publisher, and a queue must not require a wire to exist.
+        """
+        publish = getattr(self._session, "publish_ask_state", None)
+        if not callable(publish):
+            return
+        try:
+            publish()
+        except Exception:  # noqa: BLE001 — a wire is never worth failing the log
+            logger.debug("ask: could not publish the ask state", exc_info=True)
 
     # -- the deadline wake row ---------------------------------------------
 

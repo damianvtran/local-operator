@@ -256,6 +256,44 @@ def timeout_row_id(ask_id: str) -> str:
     return f"{TIMEOUT_ROW_PREFIX}{ask_id}"
 
 
+#: The separator in a MIRROR request id (design §4, "legacy mirror"): the
+#: single-slot ``pending_gate``/``pending`` card carries
+#: ``"<ask_id>.<qidx>"`` so an old client's per-question answer can be mapped
+#: back onto the whole-ask queue. Kept here (the leaf module) because three
+#: publishers build it and two answer routes parse it, and a second spelling of
+#: the separator is how a mirrored answer would silently stop resolving.
+MIRROR_REQUEST_SEPARATOR = "."
+
+
+def mirror_request_id(ask_id: str, question_index: int = 0) -> str:
+    """The legacy single-slot ``request_id`` for one question of a queued ask."""
+    return f"{ask_id}{MIRROR_REQUEST_SEPARATOR}{int(question_index)}"
+
+
+def parse_mirror_request_id(value: str) -> tuple[str, int] | None:
+    """``(ask_id, question_index)`` for a mirrored request id, else ``None``.
+
+    ``None`` is the ordinary answer: every request id that is NOT a mirrored
+    question id is an approval or a live picker, and the callers fall through to
+    the blocking path unchanged. The index is parsed permissively — a malformed
+    tail is not a mirrored id rather than an error — because this runs on the
+    answer path where the only two outcomes are "route to the queue" and
+    "route to the gate".
+    """
+    raw = str(value or "")
+    head, sep, tail = raw.rpartition(MIRROR_REQUEST_SEPARATOR)
+    if not sep or not head or not tail:
+        return None
+    if not tail.isdigit():
+        return None
+    if not head.startswith("a-"):
+        # Ask ids are ``a-<hex>`` (``new_ask_id``). Requiring the prefix keeps a
+        # live picker's ``token_hex(8)`` request id — which is also hex digits —
+        # from being misread as an ask.
+        return None
+    return head, int(tail)
+
+
 def expected_row_ids(record: Mapping[str, Any]) -> list[str]:
     """The transcript row ids THIS status requires, in delivery order.
 
@@ -556,6 +594,40 @@ def read_index(config_dir: Path | str, *, now: int | None = None) -> dict[str, d
         entry["session_id"] = session_id
         index[session_id] = entry
     return index
+
+
+def index_asks(config_dir: Path | str, *, now: int | None = None) -> list[dict[str, Any]]:
+    """Every ask worth showing across sessions, newest-first within each status.
+
+    The AGGREGATE view (design §4: ``GET /api/asks`` on the relay and
+    ``GET /v1/desktop/asks`` on the desktop plane) — one read of the derived
+    index, no runtime and no session directory walk, which is the whole reason
+    the index lives outside the session dir. Each row is the frozen
+    ``PendingAsk`` shape plus the two facts a row for ANOTHER session needs:
+    ``session_id`` and ``cwd``.
+
+    The same horizon rule as ``AskQueue.projection`` and the index's own
+    staleness sweep is applied HERE too, so a reader of this function cannot
+    disagree with the writer about whether a week-old settled ask is still worth
+    showing: one horizon, three readers.
+    """
+    stamp = now if now is not None else now_ms()
+    horizon_ms = LATE_WINDOW_S * _MILLIS
+    rows: list[dict[str, Any]] = []
+    for session_id, entry in (read_index(config_dir, now=stamp) or {}).items():
+        for ask in _entry_asks(entry):
+            status = str(ask.get("status") or "")
+            if status in (STATUS_EXPIRED, STATUS_DISMISSED):
+                continue
+            expires_at = int(ask.get("expires_at") or 0)
+            if expires_at and stamp - expires_at > horizon_ms:
+                continue
+            row = dict(ask)
+            row["session_id"] = session_id
+            row["cwd"] = str(entry.get("cwd") or "")
+            rows.append(row)
+    rows.sort(key=lambda row: (row.get("status") != STATUS_OPEN, -int(row.get("created_at") or 0)))
+    return rows
 
 
 def write_entry(

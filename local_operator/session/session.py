@@ -3663,6 +3663,12 @@ class Session:
         # is what this lock is for (review round 1, MAJOR 4).
         self._ask_wake_lock = asyncio.Lock()
         self._ask_reach: Callable[[], Any] | None = None
+        #: The host's wire publisher for the ask fold (design §4, N2). A
+        #: runtime/terminal host registers one so the queue's own change path
+        #: (``AskQueue._refresh`` -> ``publish_ask_state``) can push the asks
+        #: onto the MOBILE projection as well as the frontend state; a headless
+        #: session leaves it ``None`` and only the frontend state carries them.
+        self._ask_state_sink: Callable[[Any, Any], None] | None = None
         # The monitor scheduler is the wake scheduler's twin (design
         # monitor-tool.md §5.1): in-process, one timer, a persist callback and
         # a deliver callback — plus the check runner, which executes the
@@ -8395,6 +8401,47 @@ class Session:
             self._spawn_background(_apply())
         except Exception:  # noqa: BLE001 — best-effort, like every wake-index writer
             logger.warning("ask: could not retire the deadline wake row", exc_info=True)
+
+    def set_ask_state_sink(self, sink: "Callable[[Any, Any], None] | None") -> None:
+        """Register the host's publisher for the ask fold (design §4, N2).
+
+        The sibling of :meth:`set_ask_reach`, and it exists for the same reason:
+        a Session owns the queue and the frontend state, but the MOBILE
+        projection and the legacy single-slot card are built by whichever host
+        is attached, and only that host can repaint them. The sink receives
+        ``(rows, open_count)`` — the frozen wire shape and its open tally — so a
+        host never re-derives the fold.
+        """
+        self._ask_state_sink = sink
+
+    def publish_ask_state(self) -> None:
+        """Push the queue's fold to every wired surface (design §4, N2).
+
+        The ONE publication seam: the queue calls it on every change (see
+        ``AskQueue._publish_state``), and ``refresh_from_session`` folds the same
+        values into the periodic snapshot, so the two can never disagree about
+        which asks are open.
+
+        PRESENCE IS THE CAPABILITY PROXY, so this publishes ABSENCE — ``None``,
+        not an empty list — whenever the queue is not there (the flag is off, or
+        this host has no ask surface). A client keys "this runtime has queued
+        asks" on the field's presence, which is the design's own rule for the
+        whole A2→F window: while the server default is still blocking, a field
+        that shipped anyway would take a new client down the queued path against
+        a blocking backend.
+        """
+        from local_operator.session.frontend_state import ask_wire
+
+        rows, open_count = ask_wire(self)
+        store = getattr(self, "_frontend_state_store", None)
+        if store is not None:
+            store.mutate(asks=rows, asks_open=open_count)
+        sink = self._ask_state_sink
+        if sink is not None:
+            try:
+                sink(rows, open_count)
+            except Exception:  # noqa: BLE001 — a repaint is never worth a turn
+                logger.debug("ask: the host's state sink failed", exc_info=True)
 
     def set_ask_handler(self, handler: AskUserFn | None) -> None:
         """Install the host's interactive-question surface (see SessionProtocol).
