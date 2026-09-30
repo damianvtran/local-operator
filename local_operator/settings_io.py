@@ -1663,6 +1663,46 @@ SETTINGS: tuple[Setting, ...] = (
         default={},
         help="Ordered provider/model hops tried when a call keeps failing.",
     ),
+    Setting(
+        key="retry.pinnedFallback",
+        path=("retry", "pinnedFallback"),
+        section="failover",
+        label="Pinned child fallback",
+        # ENUM: the value space is two words this module owns, and the runtime
+        # degrades any other shape to the default (see `RetrySettings.
+        # from_settings`), so the page should offer exactly the two.
+        kind=Kind.ENUM,
+        # The literal is deliberate, like every default in this file; the code
+        # constant is `DEFAULT_PINNED_FALLBACK` in providers/failover.py, and
+        # `_consumer_defaults()` in tests/unit/test_settings_io.py pins the
+        # pair to each other.
+        default="same-family",
+        # NOTE ON THE COPY (review round 1, D1/D3): the row's two choice
+        # descriptions render ONLY on the expanded rows, where the painted
+        # field — truncation ellipsis included — is 17/26 cells at 60x20 and
+        # 23/32 at 100x30 (captured frames), and every enum description in
+        # this registry is a short phrase for exactly that reason. So each
+        # description IS a micro-hint (the discriminating words lead), and the
+        # help — which is the sentence, read on the detail line's 93 cells at
+        # 100x30 — keeps `same-family hops only, or any vendor (announced)`,
+        # the clause the overlong predecessor clipped at every size.
+        help=(
+            "What a pinned child may fall back to: same-family hops only, or "
+            "any vendor (announced)."
+        ),
+        choices=(
+            Choice(
+                "same-family",
+                "same family only",
+                "same vendor only",
+            ),
+            Choice(
+                "cross-family",
+                "allow cross-vendor",
+                "any vendor (announced)",
+            ),
+        ),
+    ),
     # -- appearance ---------------------------------------------------------
     Setting(
         key="tui.theme",

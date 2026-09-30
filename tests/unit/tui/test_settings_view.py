@@ -1749,8 +1749,12 @@ def _row_id(view: SettingsView, index: int) -> str:
     [
         # `down` and `ctrl+n` step off the add row onto the next SETTING; at
         # 4344dbda both landed back on `chain_add`, which is the stuck key.
-        ("down", "setting:tui.theme"),
-        ("ctrl+n", "setting:tui.theme"),
+        # The next setting after the cascade's expanded rows is
+        # `retry.pinnedFallback` (added with the pinned-child policy, right
+        # after `retry.fallbackChains` in the failover section) — this roster
+        # names the real list's adjacency, so a new row updates it here.
+        ("down", "setting:retry.pinnedFallback"),
+        ("ctrl+n", "setting:retry.pinnedFallback"),
         # `up` steps into the chain the commit just created — its trailing
         # `+ add a hop` row is the new neighbour above. At 4344dbda it skipped
         # the inserted rows entirely and landed on the cascade's setting row,
