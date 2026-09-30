@@ -154,6 +154,7 @@ from local_operator.tui.widgets.command_picker import (
     completion_for,
     ghost_for,
     skill_token,
+    skill_token_spans,
     slash_argument,
     slash_argument_context,
     slash_context,
@@ -2090,6 +2091,13 @@ class Editor(TextArea):
         # prose beside it, because there was no rule at all). See
         # `_reference_runs` for what "resolvable" is asked, and why.
         "text-area--at-reference",
+        # The `$skill` pair (see `_paint_skill`): a leading `$name` that IS a
+        # discovered skill — the fifth sentence in the composer's vocabulary
+        # of "structure that will NOT be sent as message text" — and the muted
+        # ink for one that will. The same component-class/stylesheet reason as
+        # the five above.
+        "text-area--skill",
+        "text-area--skill-unknown",
     }
 
     def __init__(
@@ -2178,6 +2186,17 @@ class Editor(TextArea):
         # and paint a team name green under `/agent` (a name that is not a valid
         # agent). ``None`` until a list has filled the snapshot.
         self._name_choices_family: str | None = None
+        #: The discovered skill names the `$` ink resolves against, lower-cased,
+        #: or ``None`` until the app has pushed a vocabulary at least once. The
+        #: distinction is load-bearing: an empty frozenset is a SETTLED answer
+        #: ("no skills installed" — nothing resolves, and the inert dim is
+        #: still allowed), while ``None`` means the vocabulary is UNKNOWN, so no
+        #: ink at all is claimed — the same no-claims-while-unanswered rule the
+        #: desktop's loading state gets (and no dim flash before the answer
+        #: lands). Pushed by the app where it fills the picker's skill rows (see
+        #: :meth:`set_skill_names`); the render pass must never walk the skills
+        #: tree itself — that is I/O on every keystroke-frame.
+        self._skill_names: frozenset[str] | None = None
         # Per-render-pass memo for :meth:`_slash_runs` (CR1). ``render_line`` is
         # called once per visible screen row and the runs are identical for every
         # row of a frame; this caches the parse against a key of every input it
@@ -2200,6 +2219,13 @@ class Editor(TextArea):
         # the first frame that asks.
         self._reference_runs_cache: (
             tuple[tuple[object, ...], dict[int, list[tuple[int, int]]]] | None
+        ) = None
+        # Memo for :meth:`_skill_runs`, the same render-pass shape as the two
+        # above: ``render_line`` runs once per visible screen row and the spans
+        # are identical for every row of a frame. ``None`` until the first row
+        # of the first frame that asks.
+        self._skill_runs_cache: (
+            tuple[tuple[object, ...], dict[int, list[tuple[int, int, str]]]] | None
         ) = None
         # Guards the picker resync inside ``load_text`` so ``_set_text_and_caret``
         # can move the caret first and sync ONCE at the final position (D5). Set
@@ -2444,10 +2470,12 @@ class Editor(TextArea):
                     content = content.stylize(ContentStyle.from_rich_style(cursor_style), 0, 1)
                 return Strip(content.render_segments(self.visual_style), content.cell_length)
         # Slash highlighting LAST so its own line-0/leading-`/` bail is the cheap
-        # rejection on the common prose path. The two passes never contend for
-        # the same cells: a marker opens with `[` and lives in the message tail,
-        # the command word and name open with `/` on line 0 — so order is
-        # immaterial for correctness (see :meth:`_paint_slash`).
+        # rejection on the common prose path. The three sigil passes never
+        # contend for the same cells: a marker opens with `[` and lives in the
+        # message tail, the command word and name open with `/` on line 0, and
+        # a `$` opens only after whitespace — where a `/` word has already
+        # ended — so order is immaterial for correctness (see
+        # :meth:`_paint_slash`).
         #
         # NO ghost-specific caret pass runs here, and adding one back is a
         # regression, not a fix. #378 shipped `_paint_ghost_caret`, which moved
@@ -2475,8 +2503,12 @@ class Editor(TextArea):
         # ghost's first cell. :meth:`_paint_ghost_ink` only re-inks that one
         # cell; it does not move the caret.
         return self._paint_ghost_ink(
-            self._paint_reference_ink(
-                self._paint_slash(self._paint_markers(super().render_line(y), y), y), y
+            self._paint_skill(
+                self._paint_reference_ink(
+                    self._paint_slash(self._paint_markers(super().render_line(y), y), y),
+                    y,
+                ),
+                y,
             ),
             y,
         )
@@ -2892,6 +2924,32 @@ class Editor(TextArea):
             return
         self._name_choices = names
         self._name_choices_family = family
+        self.refresh()
+
+    def set_skill_names(self, names: frozenset[str]) -> None:
+        """The discovered skill names the ``$`` ink resolves against (sync, no I/O).
+
+        Pushed by the app where it fills the picker's skill rows — the answer
+        to ``SkillQueryOpened`` — and again whenever a rescan replaces the
+        vocabulary at submit, so the ink can never resolve against a set older
+        than the one a submit would read. Lower-cased HERE so the membership
+        test is the resolver's own case-insensitive one while costing no
+        per-keystroke lowering, and a frozenset so the render pass tests
+        membership in O(1).
+
+        Refreshes when the snapshot actually changes, mirroring
+        :meth:`set_name_choices` and for its measured reason: the names arrive
+        one message-loop tick AFTER the keystroke that opened the token, by
+        which point ``render_line`` has already painted — and cached — the
+        line without them, so without the refresh the ink would only settle on
+        the NEXT keystroke. Gated on a real change so an unchanged re-push is
+        not a repaint.
+        """
+        lowered = frozenset(name.lower() for name in names)
+        if lowered == self._skill_names:
+            return
+        self._skill_names = lowered
+        self._skill_runs_cache = None
         self.refresh()
 
     @property
@@ -4825,6 +4883,153 @@ class Editor(TextArea):
             strip,
             [(start, end, "text-area--at-reference") for start, end in self._reference_cells(y)],
         )
+
+    def _skill_runs(self) -> dict[int, list[tuple[int, int, str]]]:
+        """Document line -> the `$name` spans to ink, with their component class.
+
+        Spans and treatment are ONE computation: which ink a token takes
+        (resolved or inert) is decided where the vocabulary and the picker
+        state are at hand, and the paint carries it — unlike the reference
+        pass, whose single class is attached at paint time.
+
+        Memoized per render pass, keyed on every input the computation reads —
+        the text, the vocabulary snapshot, and the picker state that gates the
+        inert treatment. The picker terms are in the key because the list
+        OPENING or CLOSING on an unchanged buffer moves the ink (a suppressed
+        prefix becomes an inert word once the list closes): `_slash_runs`
+        carries the same three flags for the same reason. ``render_line`` runs
+        once per visible screen row and the spans are identical for every row
+        of a frame, so the memo is what makes the parse once per frame rather
+        than once per row.
+        """
+        key = (
+            self.text,
+            self._skill_names,
+            self._picker.mode,
+            self._picker.is_open(),
+            self._picker.is_pending(),
+        )
+        cached = self._skill_runs_cache
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        runs = self._compute_skill_runs()
+        self._skill_runs_cache = (key, runs)
+        return runs
+
+    def _compute_skill_runs(self) -> dict[int, list[tuple[int, int, str]]]:
+        """The uncached body of :meth:`_skill_runs` — see its docstring.
+
+        The gates, in the order they are asked:
+
+        - LEADING only, and that is a whole-BUFFER question
+          (:func:`skill_token_is_leading`): until an inline `$name` is
+          reassembled to the front by an accept, it is not what the anchored
+          submit-side parser reads, so nothing about it is true yet.
+        - a name that IS in the settled vocabulary paints resolved — even
+          while the list is open, where its own row is one keystroke away.
+          The ink claims "this token will fire", which is exactly what the
+          submit-side membership test will say.
+        - an unresolved token paints NOTHING while the skill list owns it
+          (rows offered, or the one-tick fill window): a prefix under an open
+          list is in progress, not a typo — the suppression
+          `text-area--slash-unknown` already gets.
+        - otherwise the INERT muted ink, but only for the narrow shape its
+          sentence is true of: the token IS the whole trimmed draft, so a
+          submit would send exactly this word as prose. `$zzz fix this` is
+          prose too, but dimming its head would say "inert" about a line that
+          is going somewhere. Lowercase evidence is required as well (the
+          picker's own inline rule), which is what keeps `$5` and `$PATH` —
+          money and shell — out.
+        """
+        names = self._skill_names
+        if names is None or "$" not in self.text:
+            # ``None``: the app has not answered for this session's vocabulary
+            # yet, so any claim — green or dim — would be a guess. No ``$``:
+            # nothing to decide, and the early out is what keeps the split and
+            # the per-line scan off every prose frame.
+            return {}
+        picking = self._picker.mode is PickerMode.SKILL and (
+            self._picker.is_open() or self._picker.is_pending()
+        )
+        trimmed = self.text.strip()
+        runs: dict[int, list[tuple[int, int, str]]] = {}
+        offset = 0
+        for line_index, line in enumerate(self.text.split("\n")):
+            for start, end, name in skill_token_spans(line):
+                # Leading is the buffer's first token question, so only the
+                # first span of the buffer can ever answer it: any earlier
+                # non-whitespace disqualifies every later span.
+                if self.text[: offset + start].strip():
+                    continue
+                if name.lower() in names:
+                    component = "text-area--skill"
+                elif (
+                    not picking
+                    and line[start:end] == trimmed
+                    and any(char.islower() for char in name)
+                ):
+                    component = "text-area--skill-unknown"
+                else:
+                    continue
+                runs.setdefault(line_index, []).append((start, end, component))
+            offset += len(line) + 1
+        return runs
+
+    def _skill_cells(self, y: int) -> list[tuple[int, int, str]]:
+        """``(x_start, x_end, component_class)`` for skill cells on screen row ``y``.
+
+        The third projection of the same screen-row -> document-column mapping
+        :meth:`_slash_cells` and :meth:`_reference_cells` use, including the
+        wrap boundary: a `$skill` token in a long draft that soft-wraps must
+        paint on whichever wrapped row carries it. What differs is the line
+        filter — the skill pass carries spans on EVERY line, so it asks the map
+        per row rather than restricting to one — and the per-span component,
+        which rides the span because the compute decided it.
+        """
+        runs = self._skill_runs()
+        if not runs:
+            return []
+        wrapped = self.wrapped_document
+        absolute_y = self.scroll_offset.y + y
+        if absolute_y >= wrapped.height:
+            return []
+        row_line, section_start = wrapped.offset_to_location(Offset(0, absolute_y))
+        spans = runs.get(row_line)
+        if not spans:
+            return []
+        line = self.document.get_line(row_line)
+        offsets = wrapped.get_offsets(row_line)
+        section_index = bisect_right(offsets, section_start)
+        wraps_on = section_index < len(offsets)
+        section_end = offsets[section_index] if wraps_on else len(line)
+        gutter = self.gutter_width
+        cells: list[tuple[int, int, str]] = []
+        for col_start, col_end, component in spans:
+            start = max(col_start, section_start)
+            end = min(col_end, section_end)
+            if start >= end:
+                continue  # this token lives entirely on another wrapped row
+            x_start = wrapped.location_to_offset((row_line, start)).x
+            if wraps_on and end >= section_end:
+                # ``end`` IS the wrap offset, which location_to_offset reads as
+                # column 0 of the NEXT row; the token runs to this row's text end.
+                x_end = cell_len(
+                    expand_tabs_inline(line[section_start:section_end], self.indent_width)
+                )
+            else:
+                x_end = wrapped.location_to_offset((row_line, end)).x
+            cells.append((x_start + gutter, x_end + gutter, component))
+        return cells
+
+    def _paint_skill(self, strip: Strip, y: int) -> Strip:
+        """Overlay the resolved/inert `$skill` ink on an already-rendered row.
+
+        Foreground-only, like the slash and reference passes and for the same
+        reason — see :meth:`_overlay_runs`. Composing rather than replacing is
+        what lets a skill token sit inside a selection or under the caret
+        without either losing its own state.
+        """
+        return self._overlay_runs(strip, self._skill_cells(y))
 
     async def _on_mouse_down(self, event: events.MouseDown) -> None:
         """Note a press that landed inside a marker; the release decides.
