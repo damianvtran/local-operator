@@ -1096,6 +1096,31 @@ class ServingSessionHandle(SessionHandle):
         install_reach = getattr(self._session, "set_ask_reach", None)
         if callable(install_reach):
             install_reach(self._ask_reach_probe)
+        # The queue's own change path publishes through the session, and the
+        # PHONE projection is this handle's to repaint -- so the sink is
+        # installed from the same place, for the same reason the reach probe is:
+        # only the host can reach the surfaces a Session cannot see (design §4).
+        install_sink = getattr(self._session, "set_ask_state_sink", None)
+        if callable(install_sink):
+            install_sink(self._ask_state_changed)
+
+    def _ask_state_changed(self, rows: Any, open_count: Any) -> None:
+        """The session's ask fold moved: re-front the mirror and repaint.
+
+        Called by ``Session.publish_ask_state`` (which the queue drives on every
+        enqueue/answer/decline/dismiss/reconcile) so the phone projection carries
+        the new asks WITHOUT waiting for the next unrelated refresh. The legacy
+        card is re-fronted by the same call, because ``_publish_pending_gate``
+        reads the fold's ``pending`` — which now falls back to the head open
+        ask's mirrored card when no real gate is waiting (design §4).
+        """
+        try:
+            self._fold.set_asks(list(rows) if rows is not None else None, open_count)
+        except Exception:  # noqa: BLE001 -- a repaint is never worth a turn
+            logger.debug("ask: could not install the wire fold", exc_info=True)
+        self._publish_pending_gate()
+        if self._on_projection is not None:
+            self._on_projection()
 
     def _ask_reach_probe(self) -> list[str]:
         """Surface names something is attached as, for a queued ask's receipt.
@@ -4601,6 +4626,15 @@ class ServingSessionHandle(SessionHandle):
         # the per-question identity: a stale tap targets an id whose future is
         # gone and is rejected below. No separate index check is needed here.
         del question_index
+        # THE LEGACY MIRROR (design §4). For one release a queued ask is also
+        # projected as today's per-question card, whose request id is
+        # ``"<ask_id>.<qidx>"``; an old client taps it and sends THIS op, so the
+        # synthetic id has to resolve onto the whole-ask queue rather than onto a
+        # gate future that never existed. Nothing else is touched: every other
+        # request id is an approval or a live picker and falls through unchanged.
+        mirrored = await self._mirror_ask_answer(request_id, value)
+        if mirrored is not None:
+            return mirrored
         # Resolve with the QUESTION id the harness asked under — never our
         # request id, which the harness never saw.
         question_id = self._pending_question_ids.get(request_id, request_id)
@@ -4609,6 +4643,46 @@ class ServingSessionHandle(SessionHandle):
         except ValueError as exc:
             # Human, reconciling copy: a stale tap means another front end won.
             raise ValueError("that question was already answered") from exc
+        return "answered"
+
+    async def _mirror_ask_answer(self, request_id: str, value: str | None) -> str | None:
+        """Answer a queued ask through the legacy mirrored card id, or ``None``.
+
+        ``None`` is "this is not a mirrored ask id" — the ordinary case on every
+        runtime, and the one that keeps the blocking path byte-identical.
+        An EMPTY value is a DISMISSAL in the blocking path's terms (today's Esc),
+        so it declines the ask here too rather than recording a blank answer:
+        the two paths must mean the same thing by the same tap.
+        """
+        from local_operator.asks import store as ask_store
+
+        parsed = ask_store.parse_mirror_request_id(request_id)
+        if parsed is None:
+            return None
+        ask_id, question_index = parsed
+        queue = self._session.ask_queue()
+        if queue is None:
+            raise ValueError("this session's runtime predates queued asks")
+        record = queue.find(ask_id)
+        if record is None:
+            raise ValueError("that question was already answered")
+        if not value:
+            outcome = self._session.decline_ask(ask_id, by="mirror")
+        else:
+            questions = list(record.get("questions") or [])
+            key = (
+                str(questions[question_index].get("id") or "")
+                if 0 <= question_index < len(questions)
+                else ""
+            )
+            if not key:
+                raise ValueError("that question was already answered")
+            outcome = self._session.respond_ask(ask_id, {key: [value]}, by="mirror")
+        if not outcome.get("ok"):
+            raise ValueError(str(outcome.get("error") or "the answer was refused"))
+        # Await the delivery for the same reason the queued-ask op does: the
+        # caller's "answered" must be a claim about a row that EXISTS.
+        await self._session.reconcile_asks()
         return "answered"
 
     @_on_session_loop
@@ -5437,10 +5511,13 @@ class ServingSessionHandle(SessionHandle):
         if store is None:
             return
         try:
-            # `_sync_pending` already fronts the queue onto `projection.pending`
-            # for the phone's "1 of N" badge; reuse that rather than reaching
-            # into the queue, so both surfaces can never disagree about which
-            # card is current.
+            # THE ASK FOLD FIRST, and the order is the contract: `_sync_pending`
+            # fronts the queue onto `projection.pending` for the phone's "1 of N"
+            # badge and, when nothing is blocking, onto the head open ask's
+            # MIRRORED card (design §4) -- so the asks have to be installed
+            # before the front is read, or the desktop's legacy card would lag
+            # the phone's by one publication.
+            self._refresh_ask_projection()
             front = self._projection.pending
             payload = front.to_json() if front is not None else None
             if payload is not None:
@@ -5455,6 +5532,24 @@ class ServingSessionHandle(SessionHandle):
             store.mutate(pending_gate=payload)
         except Exception:  # noqa: BLE001 — a card is never worth failing a gate
             logger.debug("could not publish the pending gate", exc_info=True)
+
+    def _refresh_ask_projection(self) -> None:
+        """Install the session's ask fold into the phone projection (§4, N2).
+
+        Read through the ONE derivation every publisher uses
+        (``session.frontend_state.ask_wire``), so the phone, the desktop and the
+        list rows cannot disagree about which asks are open. Absence (``None``)
+        is carried through rather than flattened to an empty list: presence is
+        the client-side capability proxy, and a runtime without queued asks must
+        look exactly like the old runtime it is.
+        """
+        from local_operator.session.frontend_state import ask_wire
+
+        try:
+            rows, open_count = ask_wire(self._session)
+            self._fold.set_asks(rows, open_count)
+        except Exception:  # noqa: BLE001 -- the card is chrome; the gate is not
+            logger.debug("could not publish the ask fold", exc_info=True)
 
     def _notifiable_session_name(self) -> str:
         """This conversation's name, or ``""`` when banners may not carry it.
