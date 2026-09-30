@@ -16237,9 +16237,11 @@ class Session:
         CONCURRENTLY with the turn, so the safety comes from the shape of the
         request instead of from the timing:
 
-        * ``isolated`` — at most two AUTH attempts (the second only when a
-          bearer was rejected outright and a read-only re-resolve hiding that
-          row produced a different one; the pre-existing fast-mode-refusal
+        * ``isolated`` — at most two AUTH attempts (the second only when the
+          bearer was refused on the class the turn rotates on and a read-only
+          re-resolve produced a different one — a sibling if the pool has one,
+          otherwise the same account with a forced refresh; the pre-existing
+          fast-mode-refusal
           re-ask can add one more), no fallback chain, no credential rotation,
           no sticky-route read or write, no quota preflight, no effort-boundary
           classification, a read-only credential resolve and not the session's
@@ -16248,7 +16250,8 @@ class Session:
         * ``replayable=False`` — deliberately the opposite of the compaction
           errand below. Replay exists so a stalled read does not permanently
           lose an EXPENSIVE result; a title is worth its one or two attempts
-          and no more (see ``isolated`` for the auth-shaped second one).
+          and no more (see ``isolated`` for the one extra attempt, on the class
+          the turn's own rotation acts on).
         * ``max_tokens`` — bounds a model that ignores the output format.
         * cheapest route available: the ``lo`` subagent tier when the operator
           has configured one, otherwise this session's model — either way
