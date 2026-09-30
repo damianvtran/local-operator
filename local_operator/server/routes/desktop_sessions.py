@@ -2040,8 +2040,11 @@ def _config_run_directory(pool: Any) -> str:
     marker and reported in diagnostics, and a renderer that supplied it would be
     inventing a path it cannot verify exists: the "a directory the user never
     named" failure the cwd admission exists to prevent, arrived at from the other
-    side. The config root is the one directory the run's own work reaches, so it
-    is also the honest answer for the reader who sees it in ``lop sessions``.
+    side. The config root is the one directory the run's own work actually
+    reaches, which is what makes it the honest value for a reader who inspects the
+    marker — the run itself is absent from every listing by design
+    (``resume.ORIGIN_AGENT_CONFIG``), so no list is the surface this is written
+    for.
 
     ``pool.root`` rather than ``paths.config_dir()``: the pool was built from one
     root and every registry the run edits is derived from that same one, so

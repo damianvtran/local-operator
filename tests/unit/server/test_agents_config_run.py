@@ -491,6 +491,95 @@ def test_the_op_scope_is_one_way(tmp_path: Path) -> None:
         session.set_tool_inventory(AGENTS_CONFIG_TOOLS, ops={"agent": ("list", "sync")})
 
 
+def test_omitting_a_tool_from_the_op_scope_does_not_clear_it(tmp_path: Path) -> None:
+    """Saying LESS must not widen: an omitted tool keeps the scope in force.
+
+    The scope mapping is replaced on every call, so a second declaration that
+    restated one tool's scope and said nothing about another used to DROP the
+    second's — the omission spelling of the same width increase the restated
+    shape is refused for. Latent when it was found (only the run's own declaration
+    passes ``ops``), but the invariant is stated in three places, and the wrap that
+    enforces a scope lives on the tool OBJECT while the scope is re-derived from
+    every pristine rebuild — which is the second half of this test.
+    """
+    from local_operator.session_factory import (
+        AGENTS_CONFIG_TOOL_OPS,
+        AGENTS_CONFIG_TOOLS,
+    )
+
+    session = _session_with(
+        tmp_path,
+        [
+            _op_tool("agent", ["list", "reset", "sync", "create"], []),
+            _op_tool("team", ["list", "create"], []),
+        ],
+    )
+    session.set_tool_inventory(AGENTS_CONFIG_TOOLS, ops=AGENTS_CONFIG_TOOL_OPS)
+    # Restates ``team`` only. ``agent`` must keep the scope already in force.
+    session.set_tool_inventory(AGENTS_CONFIG_TOOLS, ops={"team": ("list", "create")})
+    assert session.__dict__["_declared_tool_ops"]["agent"] == frozenset(
+        AGENTS_CONFIG_TOOL_OPS["agent"]
+    ), "an omitted tool must keep its scope, not lose it"
+
+    # AND RE-DERIVED, not merely remembered: a pristine tool object arriving
+    # through ``refresh_tools`` is re-filtered, which is the shape an in-product
+    # rebuild takes (``Session._refresh_effort_tier_schemas`` -> ``create_tools``)
+    # and the shape in which a dropped scope becomes a dispatched ``agent reset``.
+    session.refresh_tools(
+        [
+            _op_tool("agent", ["list", "reset", "sync", "create"], []),
+            _op_tool("team", ["list", "create"], []),
+        ]
+    )
+    schema = next(t for t in session._tools if t.name == "agent").parameters
+    assert "reset" not in schema["properties"]["op"]["enum"]
+    assert "sync" not in schema["properties"]["op"]["enum"]
+
+
+def _session_at(directory: Path, tools: list[Any]) -> Any:
+    """A real ``Session`` whose transcript directory IS ``directory``.
+
+    The transcript directory is what ``apply_config_run_shape`` reads, so a test
+    about the read must control it exactly rather than through ``_session_with``'s
+    throwaway name.
+    """
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+
+    return Session(
+        model=MODEL,
+        stream_fn=_never_streams,
+        tools=tools,
+        transcript=Transcript(directory),
+        system_blocks_provider=lambda: ["sys"],
+    )
+
+
+def test_a_run_whose_marker_lost_its_purpose_still_shapes(tmp_path: Path) -> None:
+    """FAIL CLOSED: the durable origin is the second witness, not a fallback.
+
+    ``read_desktop_purpose`` is deliberately tolerant, so on its own a damaged
+    marker is indistinguishable from an ordinary conversation — and the failure
+    that must never happen is a session every listing still HIDES booting
+    UNBOUNDED with shell and file tools, with nothing anywhere saying so. The two
+    records are read together, and the origin alone is enough.
+    """
+    from local_operator.session_factory import apply_config_run_shape
+
+    damaged = tmp_path / "sessions" / "run-damaged"
+    damaged.mkdir(parents=True)
+    mark_session_origin(damaged, ORIGIN_AGENT_CONFIG)
+    (damaged / "desktop.json").write_text("{ this is not json", encoding="utf-8")
+
+    session = _session_at(
+        damaged, [_op_tool("agent", ["list", "sync"], []), _op_tool("bash", [], [])]
+    )
+    assert apply_config_run_shape(session) is True
+    assert {tool.name for tool in session._tools} == {
+        "agent"
+    }, "an origin of agent-config must shape the run even when its marker is unreadable"
+
+
 def test_applying_the_run_shape_needs_the_marker(tmp_path: Path) -> None:
     """The shape follows the MARKER, so it holds for a run resumed hours later.
 

@@ -106,6 +106,7 @@ from local_operator.session.restored_rows import record_field, roster_records
 from local_operator.session.retention import (
     DESKTOP_MARKER_NAME,
     DESKTOP_PURPOSE_KEY,
+    read_desktop_purpose,
     session_activity,
 )
 from local_operator.session.runtime import registry
@@ -1045,12 +1046,29 @@ async def _move_session(bridge: DesktopSessionBridge, requested: str) -> MoveRec
     # for a conversation that has not run yet (``draft_birth_selection``). Read
     # through the same helpers every other marker reader uses, so a marker this
     # route could not parse degrades here exactly as it does there.
+    #
+    # ``purpose`` IS CARRIED FOR THE SAME REASON AND AT HIGHER STAKES. This is the
+    # marker's SECOND writer (the create site is the first), and the purpose key is
+    # what tells the runtime child that a session is a configuration run — the run's
+    # tool declaration and preamble are keyed on it. A move that dropped it would
+    # leave a session that is still HIDDEN from every listing (its ``origin.json`` is
+    # untouched) and no longer BOUNDED: the next boot would build the full builtin
+    # inventory, shell and file tools included, with nothing anywhere saying so.
+    # The bytes are the contract the two writers share; a field only one of them
+    # knows about is a field the other silently erases.
     previous_model = await asyncio.to_thread(
         lambda: stored_draft_model(read_desktop_marker(marker_dir))
     )
+    previous_purpose = await asyncio.to_thread(read_desktop_purpose, marker_dir)
     previous_marker = await asyncio.to_thread(read_marker)
     try:
-        await asyncio.to_thread(write_desktop_marker, marker_dir, directory, model=previous_model)
+        await asyncio.to_thread(
+            write_desktop_marker,
+            marker_dir,
+            directory,
+            model=previous_model,
+            purpose=previous_purpose or None,
+        )
     except OSError as error:
         # THE FIRST MUTATION REFUSES WITH ITS REAL CAUSE, and there is nothing
         # to roll back (review R2). ``_stage_and_replace`` writes the whole

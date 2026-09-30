@@ -8602,7 +8602,9 @@ class Session:
         the same ``ValueError``. Stated because the hole it closes is otherwise
         invisible — a second call is the one place a run's op scope could be
         lifted after the fact, and the invariant that makes the names meaningful
-        would read as though it covered this too.
+        would read as though it covered this too. OMITTING a tool from ``ops`` is
+        not a way around it either: a scope in force is carried forward, so the
+        only directions left are "the same" and "narrower".
         """
         incoming = None if names is None else frozenset(names)
         incoming_ops = (
@@ -8640,25 +8642,30 @@ class Session:
         # after the fact. ``None`` ("no op scope stated") is read as "no change"
         # rather than "lift the scope", matching ``names=None`` in the branch
         # above — the value an absent scope has must never be the loosening one.
+        #
+        # IN-FORCE SCOPES ARE CARRIED FORWARD BEFORE ANYTHING IS COMPARED, and
+        # that merge is not a convenience: this mapping is REPLACED at the end of
+        # this method, so a call that restated one tool's scope and said nothing
+        # about another would otherwise DROP the second's — the omission shape of
+        # exactly the width increase the check below refuses. It is the same hole
+        # as ``names=None`` one level up, arrived at by saying less rather than by
+        # saying more, and it is reachable in product code because the wrap that
+        # enforces a scope lives on the tool OBJECT while the scope itself is
+        # re-derived from every pristine rebuild (``create_tools``).
         in_force_ops = self._declared_tool_ops
         if in_force_ops is not None:
-            if incoming_ops is None:
-                # Not a warning: this one is reached by the ORDINARY second call
-                # (a host re-declaring the same names, which is the common shape),
-                # and the honest reading is "the scope in force stands".
-                incoming_ops = dict(in_force_ops)
-            else:
-                widened_ops = {
-                    name: sorted(values - in_force_ops.get(name, values))
-                    for name, values in incoming_ops.items()
-                    if name in in_force_ops
-                }
-                widened_ops = {name: extra for name, extra in widened_ops.items() if extra}
-                if widened_ops:
-                    raise ValueError(
-                        "a tool declaration's op scope is one-way for the life of a "
-                        f"session: refusing to widen {widened_ops}"
-                    )
+            incoming_ops = {**in_force_ops, **(incoming_ops or {})}
+            widened_ops = {
+                name: sorted(values - in_force_ops.get(name, values))
+                for name, values in incoming_ops.items()
+                if name in in_force_ops
+            }
+            widened_ops = {name: extra for name, extra in widened_ops.items() if extra}
+            if widened_ops:
+                raise ValueError(
+                    "a tool declaration's op scope is one-way for the life of a "
+                    f"session: refusing to widen {widened_ops}"
+                )
         self._declared_tools = incoming
         if incoming_ops is not None:
             self._declared_tool_ops = incoming_ops

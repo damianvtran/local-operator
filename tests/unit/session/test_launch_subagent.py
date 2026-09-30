@@ -2928,6 +2928,49 @@ async def test_a_declared_parent_inventory_bounds_its_child(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_a_declared_parent_hands_its_op_scope_to_the_child(tmp_path, monkeypatch):
+    """A declaration's reach is its names AND the ops those names are cut down to.
+
+    Names alone would hand the child the whole of a tool the parent was declared
+    not to have in full: ``agent sync`` and ``agent reset`` sitting behind a parent
+    that may only author. That is the same one-hop-down leak the names half exists
+    to close, and it is invisible from the parent — the parent still cannot reach
+    them, and the child's transcript is the only place it would show.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.session_factory import (
+        AGENTS_CONFIG_TOOL_OPS,
+        AGENTS_CONFIG_TOOLS,
+    )
+
+    config = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    # The registry is what makes ``agent`` and ``team`` exist for the CHILD to
+    # build: they are createIf-gated on it, so without one this test would be
+    # asserting about an inventory that has neither tool in it.
+    parent = make_session(tmp_path, OneShotStream(), agent_registry=AgentRegistry(config))
+    parent.set_tool_inventory(AGENTS_CONFIG_TOOLS, ops=AGENTS_CONFIG_TOOL_OPS)
+
+    child = await build_child(parent)
+    try:
+        assert child.__dict__["_declared_tool_ops"] == {
+            name: frozenset(values) for name, values in AGENTS_CONFIG_TOOL_OPS.items()
+        }, "the op scope did not travel with the names"
+        agent_tool = next(tool for tool in child._tools if tool.name == "agent")
+        enum = agent_tool.parameters["properties"]["op"]["enum"]
+        assert (
+            "reset" not in enum and "sync" not in enum
+        ), f"the child was offered ops its parent was declared not to have: {enum}"
+        refused = await agent_tool.execute(
+            "call-1", {"op": "sync"}, None, None, child._build_tool_context()
+        )
+        assert refused.is_error, "a scoped-out op must be refused in the child too"
+    finally:
+        await child.dispose()
+        await parent.dispose()
+
+
+@pytest.mark.asyncio
 async def test_an_undeclared_parent_leaves_its_child_untouched(tmp_path, monkeypatch):
     """The negative case: with no declaration the child is built exactly as it
     was before this feature existed — full local reach, no declaration recorded."""
