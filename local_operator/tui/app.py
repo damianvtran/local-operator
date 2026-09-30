@@ -391,6 +391,7 @@ from local_operator.tui.widgets.projects_view import (
     ProjectsView,
     ProjectsViewDismissed,
     ProjectsViewJumpRequested,
+    ProjectsViewMilestoneToggled,
     ProjectsViewRefreshRequested,
 )
 from local_operator.tui.widgets.reasoning import DEFAULT_REASONING, ReasoningBlock
@@ -19255,12 +19256,20 @@ class OperatorApp(App[None]):
             return None
         open_count = 0
         total = 0
+        next_items: list[str] = []
         for phase in todos:
             for item in getattr(phase, "items", None) or ():
                 total += 1
                 if getattr(item, "status", "") == "pending":
                     open_count += 1
-        return {session_id: {"todos": {"open": open_count, "total": total}}}
+                    text = str(getattr(item, "text", "") or "")
+                    # The detail page's `— next: …` clause: the first three
+                    # PENDING items in phase order, from this process's own
+                    # state — fresher than the persisted snapshot the counts
+                    # would otherwise come from (P2, spec §7.2 row 5).
+                    if text and len(next_items) < 3:
+                        next_items.append(text)
+        return {session_id: {"todos": {"open": open_count, "total": total, "next": next_items}}}
 
     def _cmd_team(
         self,
@@ -32573,6 +32582,7 @@ class OperatorApp(App[None]):
                     view=view,
                     associated=associated if associated is not None else frozenset(),
                     updated_at=_time.time(),
+                    own_session=self._own_session_id(),
                 )
             elif highlight:
                 self._projects_view.focus_project(highlight)
@@ -32603,6 +32613,7 @@ class OperatorApp(App[None]):
             view=view,
             associated=associated if associated is not None else frozenset(),
             updated_at=_time.time(),
+            own_session=self._own_session_id(),
         )
 
     def _close_projects_view(self) -> bool:
@@ -32654,14 +32665,16 @@ class OperatorApp(App[None]):
         remote-owner guard, the local attach, the full reboot), so the page
         adds no second way to change sessions. Anything else is answered
         honestly — the states that exist, and the command that starts one —
-        never a silent no-op. The page closes first in both cases: the notice
-        lands in the transcript that the mode was hiding.
+        never a silent no-op. A live jump leaves the mode (the reader goes to
+        the conversation); a DEAD link keeps the page and lands its sentence
+        on the page's own footer — the transcript the mode hides is not a
+        surface (UX round 1, U4).
         """
         message.stop()
         live = [session_id for session_id, state in message.sessions if state == "live"]
         current = str(getattr(self._session, "session_id", "") or "") if self._session else ""
-        self._close_projects_view()
         if live:
+            self._close_projects_view()
             # The terminal's OWN session is checked FIRST (review r1 NIT 6):
             # when it is one of several live links, whether `↵` says "already
             # in" or switches to a sibling must not depend on the store's link
@@ -32673,9 +32686,11 @@ class OperatorApp(App[None]):
                 return
             self._resume_session(live[0], self._notice)
             return
-        self._system_notice(
-            project_jump_no_live_text(message.project_name, message.sessions), "info"
-        )
+        # No live session: the page KEEPS the reader and says so on its own
+        # footer; the copy is the shipped one.
+        view = self._projects_view
+        if view is not None:
+            view.show_notice(project_jump_no_live_text(message.project_name, message.sessions))
 
     def on_projects_view_refresh_requested(self, message: ProjectsViewRefreshRequested) -> None:
         """``r`` on the page — recompose HERE and hand the widget fresh data.
@@ -32691,7 +32706,66 @@ class OperatorApp(App[None]):
             return
         import time as _time
 
-        view.load(views=self._projects_payload(), updated_at=_time.time())
+        view.load(
+            views=self._projects_payload(),
+            updated_at=_time.time(),
+            own_session=self._own_session_id(),
+        )
+
+    def on_projects_view_milestone_toggled(self, message: ProjectsViewMilestoneToggled) -> None:
+        """`↵` on a milestone row: flip completion through the store, re-show.
+
+        The SAME core the tool and the API use (``registry.set_milestone``),
+        so the page adds no second write path (spec §10.5). The recomposition
+        that follows is what makes the row, the header count and the footer
+        rollup agree — every derived fact comes from the store, never from an
+        optimistic guess in the widget. A refusal is never a silent no-op: it
+        lands on the PAGE's own footer line, where the reader pressed — the
+        transcript the mode hides is not asked to carry it (UX round 1, U1).
+        """
+        message.stop()
+        view = self._projects_view
+        registry = self._project_registry()
+        if view is None or registry is None:
+            return
+        from local_operator.projects import MilestoneEdit, store_error_text
+
+        try:
+            registry.set_milestone(
+                message.project_id,
+                MilestoneEdit(name=message.name, completed=message.completed),
+            )
+        except Exception as exc:  # noqa: BLE001 — a keystroke never crashes the app
+            if isinstance(exc, KeyError):
+                # The store grew one: the project is gone (this path's only
+                # KeyError source). Human words with the project NAME — the
+                # raw store message carries a UUID (UX round 1, U1).
+                name = message.project_name or "that project"
+                view.show_notice(
+                    f"'{name}' is no longer in the store — the milestone was not updated"
+                )
+            else:
+                view.show_notice(f"could not update the milestone: {store_error_text(exc)}")
+            return
+        import time as _time
+
+        view.load(
+            views=self._projects_payload(),
+            updated_at=_time.time(),
+            own_session=self._own_session_id(),
+        )
+
+    def _own_session_id(self) -> str | None:
+        """THIS process's session id, or ``None`` — the detail page's anchor.
+
+        The `◆` marker and `own session` label on the detail page follow this
+        id, and only when it is actually linked to the project shown.
+        """
+        session = self._session
+        if session is None:
+            return None
+        session_id = str(getattr(session, "session_id", "") or "")
+        return session_id or None
 
     def on_settings_capture(self, message: SettingsCapture) -> None:
         """Arm or disarm the binding gate a hotkey row needs to listen.
