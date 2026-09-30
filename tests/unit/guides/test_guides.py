@@ -173,7 +173,7 @@ def test_every_guide_reference_in_the_code_resolves() -> None:
     can promise. A reference in a user's own script is theirs to get right.
 
     BOTH `.py` and `.md`, the latter because the highest-traffic reference site in
-    the harness is the packaged system prompt: `prompts_md/system.md` carries seven
+    the harness is the packaged system prompt: `prompts_md/system.md` carries six
     `guide://` pointers and rides every session on every turn, so a rename there
     is a dead end in front of every model — and a `.py`-only walk could not see it
     (QA round 1, Q4, which demonstrated exactly that by breaking the prompt and
