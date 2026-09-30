@@ -1325,6 +1325,10 @@ class AttachedSession:
         self._background_approval = False
         self._keep_gate_reply = False
         self._gate_answered_key: tuple[str, str, int] | None = None
+        #: The last refused gate reply already carried to the host, as
+        #: ``(gate identity, sentence)``. One notice per STATE — see
+        #: ``_refusal_is_new_state``; a new gate or a changed sentence speaks.
+        self._gate_refusal_notified: tuple[tuple[str, str, int] | None, str] | None = None
         # Snapshot creation is not retryable: navigation must retire the UI,
         # not close the response channel after the owner has begun a copy.
         self._snapshot_clients: dict[AttachClient, int] = {}
@@ -1818,6 +1822,8 @@ class AttachedSession:
         checkpoint leaves the synthesised state untouched. Opening a
         conversation must never fail because its last status row did.
         """
+        from local_operator.wakes.store import scheduled_rows
+
         checkpoint = self._cold_checkpoint
         if checkpoint is None:
             return self._seed_cold_usage(self._restore_cold_subagents(state))
@@ -1918,8 +1924,13 @@ class AttachedSession:
                 # a stale copy would re-show a wake that already fired. Only
                 # fall back to the durable rows when the index gave nothing,
                 # which is the corrupt/deleted-index case its own self-healing
-                # rebuild is designed around.
-                "wakes": list(state.wakes) if state.wakes else list(durable.wakes),
+                # rebuild is designed around — and filter the fallback too: a
+                # checkpoint written by a build that predates the patience
+                # filter would otherwise carry hidden rows into the same chip
+                # and Wakes section (agent review round 1, R1).
+                "wakes": (
+                    list(state.wakes) if state.wakes else list(scheduled_rows(durable.wakes))
+                ),
                 **self._restored_model_specs(state, durable),
             }
         )
@@ -2448,19 +2459,23 @@ class AttachedSession:
         }
 
     def _cold_wakes(self) -> list[WakeState]:
-        """The session's scheduled wakes, from the live wake index.
+        """The session's VISIBLE wakes, from the live wake index.
 
         An INPUT to state synthesis rather than something it reads, because the
         index is a derived file a supervisor rewrites without opening the
         session. A session created cold has no index and no rows; an unreadable
-        one is the same absence.
+        one is the same absence. Patience waits are filtered with the one
+        shared filter (``wakes.store.scheduled_rows``): this list feeds the
+        same desktop chip and Wakes section as the live read, and a cold frame
+        that showed a hidden timer would be the same leak one state earlier
+        (agent review round 1, R1).
         """
-        from local_operator.wakes.store import read_entry
+        from local_operator.wakes.store import read_entry, scheduled_rows
 
         wakes: list[WakeState] = []
         try:
             entry = read_entry(self._config_dir, self._session_id)
-            for schedule in (entry or {}).get("schedules", []) or []:
+            for schedule in scheduled_rows((entry or {}).get("schedules", [])):
                 if isinstance(schedule, dict):
                     try:
                         wakes.append(WakeState.model_validate(schedule))
@@ -6467,6 +6482,61 @@ class AttachedSession:
             and self._gate_key == self._gate_identity(pending)
         )
 
+    def _refusal_is_new_state(self, pending: PendingRequest, error: BaseException) -> bool:
+        """Whether this refused reply is a state the host has not been told about.
+
+        ONE NOTICE PER STATE (beat-2 F-B). The owner refuses EVERY answer this
+        pane posts to a gate it cannot allow — that is by design (issue #1310)
+        — and one parked gate can be answered many times: the operator presses
+        ALLOW again on the re-armed card, or a delta re-arms the bridge and a
+        background answer is refused again. Each attempt used to post an
+        identical ``not applied — …`` notice, and the beat measured 15+
+        verbatim copies beside a single parked card: a stream of new problems
+        where there is one standing fact. The state is the
+        ``(gate identity, sentence)`` pair; repeats of it are dropped here, and
+        a DIFFERENT gate — or a changed sentence, like the unconfigured
+        anchor's copy — speaks again.
+        """
+        key = (self._gate_identity(pending), str(error))
+        if self._gate_refusal_notified == key:
+            return False
+        self._gate_refusal_notified = key
+        return True
+
+    def forget_gate_refusal(self, error: BaseException) -> None:
+        """Un-record a refusal whose delivery the host DROPPED, so a retry speaks.
+
+        THE RECORD IS MADE AT DELIVERY, AND THE DELIVERY CAN BE DROPPED (agent
+        review R1-1 = QA Q-1). ``_refusal_is_new_state`` records the state when
+        the refusal surfaces, but a host surface may discard a notice it cannot
+        show — the TUI drops one for a source that is not current — and without
+        this method the recorded state then silenced the RETRY: the operator
+        returned, answered again, and the explanation displayed nowhere at all
+        (measured: 0 notices). The drop path calls this with the same error it
+        dropped; the state stops counting as told, and the next attempt records
+        and speaks again.
+
+        Scoped by the sentence — the half the dropper holds — plus a re-derived
+        gate identity when the store is readable: a refusal does not resolve its
+        gate, so at drop time the parked gate IS the identity the record was
+        made under, and a record for any OTHER live gate is left standing. A
+        store that cannot answer cannot re-derive the key, and the sentence
+        alone decides; the residual is a same-sentence refusal for a different
+        gate whose cleared record makes one later repeat speak twice — a
+        duplicate notice, never a missing one, which is the direction this
+        channel errs in.
+        """
+        recorded = self._gate_refusal_notified
+        if recorded is None or recorded[1] != str(error):
+            return
+        try:
+            pending = self.pending_gate
+        except Exception:  # noqa: BLE001 — a store that cannot answer must not fail the drop
+            pending = None
+        if pending is not None and recorded[0] != self._gate_identity(pending):
+            return
+        self._gate_refusal_notified = None
+
     async def _run_approval(self, pending: PendingRequest) -> None:
         #: Whether this answer was produced WITHOUT a person (the background
         #: branch below). Read by the refusal arm, which must not re-arm in that
@@ -6534,7 +6604,7 @@ class AttachedSession:
             # the host's own surface when it has one.
             logger.warning("gate reply refused by the owner: %s", error)
             notify = self._gate_refusal_handler
-            if notify is not None:
+            if notify is not None and self._refusal_is_new_state(pending, error):
                 with contextlib.suppress(Exception):
                     notify(error)
             # PUT THE CARD BACK, or the sentence that names a deny names an
@@ -6546,8 +6616,9 @@ class AttachedSession:
             # already knows about. Clearing the key and asking for the gate
             # again is what makes "deny it from here" true rather than a
             # consolation; the operator who presses Allow twice gets the same
-            # refusal and the same notice, which is the honest outcome on a pane
-            # that cannot allow.
+            # refusal again — and no second notice, because the sentence already
+            # on screen reports this exact state (beat-2 F-B measured the
+            # repeats as noise, not news).
             if not answered_without_a_person:
                 # THE KEY GOES BACK WITH THE ARM. ``_gate_reply_is_current``
                 # requires ``_gate_key`` to equal this pending's identity, so an
@@ -8585,6 +8656,25 @@ class AttachedSession:
         self._gates_detached = False
         self._maybe_start_gate()
 
+    async def cleanup_after_class_switch(self, profile_name: str) -> dict[str, Any]:
+        """The viewer's answer to a class switch: nothing to cancel in THIS process.
+
+        ``/agent class`` writes the registry from whichever process the user
+        is looking at, and that write is the whole switch — the class is read
+        live at every arm and every fire (``action_class.session_action_class``,
+        and the delivery-time guard the design turns on). The owner-side
+        cleanup this mirrors (``Session.cleanup_after_class_switch``) cancels
+        the session's pending patience rows immediately, which is an
+        OPTIMISATION over the mechanism rather than the mechanism itself: a
+        fire that finds a reactive class retires silently at that read, and the
+        episode TTL bounds the difference (design §8.2.6). Only the OWNER holds
+        the wake writer, so a viewer cannot do that work without a control op
+        this design does not define — and the empty outcome is the honest
+        answer here: nothing was cancelled, so the caller's receipt renders the
+        switch without the clause rather than claiming work nobody did.
+        """
+        return {"session": self._session_id, "patience_cancelled": [], "cadence_dropped": False}
+
     async def adopt_aside(self, messages: list[Message]) -> None:
         """Promote the aside exchange into the conversation through the owner.
 
@@ -9302,6 +9392,12 @@ class AttachedSession:
         round 2, D9 — the third door round 1's D1 named, verified with a real
         client on a real socket). A host with no surface for it leaves this unset
         and the refusal is logged.
+
+        The channel speaks ONCE PER REFUSAL STATE: the same gate refused again
+        is not re-sent (``_refusal_is_new_state`` — beat-2 F-B measured the
+        repeats as 15+ verbatim copies). The sentence is about the parked state,
+        and a repeat reports that state has not moved; a NEW gate or a changed
+        sentence is a new state and speaks.
         """
         self._gate_refusal_handler = handler
 

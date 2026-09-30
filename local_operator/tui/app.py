@@ -192,6 +192,7 @@ from local_operator.slash_commands import (
     PROJECT_PAGE_VERBS,
     SESSION_COPY_FLAG,
     SLASH_COMMANDS,
+    agent_subcommand_rows,
     network_subcommand_rows,
     primary_slash_name,
     project_jump_already_text,
@@ -8036,6 +8037,7 @@ class OperatorApp(App[None]):
         *,
         require_paint: bool = True,
         require_mount: bool = True,
+        require_card: bool = False,
     ) -> bool:
         """Whether this source's pending gate (if any) is correctly on screen.
 
@@ -8060,6 +8062,17 @@ class OperatorApp(App[None]):
         bound and answerable while reporting `is_mounted` False — and a band that
         withheld its sentence until the next pump is a band that keeps telling
         the user to reselect over a question that is already there.
+
+        ``require_card=True`` is the third switch, and the first that demands
+        MORE rather than less: for a caller that must know about the CARD
+        ITSELF rather than about readiness. With it, a source with no gate
+        answers False (there is no card that could be on screen) and the
+        approve-all latch does not stand in for one (the latch means "no card
+        is needed", which is the opposite of what such a caller asks). The
+        remote-park notice suppresses itself on exactly this question — its
+        premise is "the gate card is already on screen" — so a follower
+        carrying no card (beat-2 F-A: the auto-follow view rendered none) is
+        TOLD rather than silenced.
         """
         # `pending_gate`, not `frontend_state.pending_gate`: the latter clones
         # the entire state (jobs, usage, trajectories) on every display, which
@@ -8070,8 +8083,14 @@ class OperatorApp(App[None]):
         if gate is None and not hasattr(session, "pending_gate"):
             gate = getattr(getattr(session, "frontend_state", None), "pending_gate", None)
         if gate is None:
+            if require_card:
+                # No gate, no card: a caller that needs the card itself has
+                # nothing here. The default answer below is about readiness —
+                # nothing is owed, so nothing is stranded — which is the
+                # opposite question.
+                return False
             return self._ask_screen is None and self._approval is None
-        if gate.kind == "approval" and bool(source.draft.approve_all):
+        if gate.kind == "approval" and bool(source.draft.approve_all) and not require_card:
             return True
         card = self._ask_screen if gate.kind == "ask" else self._approval
         return bool(
@@ -12201,12 +12220,27 @@ class OperatorApp(App[None]):
 
         ``source`` is accepted for symmetry with the two handlers beside it and
         guards against reporting a refusal that belongs to a session the user has
-        since left: a notice about another conversation's card is noise.
+        since left: a notice about another conversation's card is noise. A dropped
+        notice is also UN-RECORDED at the session (R1-1 = Q-1): the refusal
+        channel's one-notice-per-state dedupe records at delivery, so without the
+        un-record a drop would silence the retry and the explanation would never
+        display anywhere on this surface.
         """
         source = source or self._interaction
 
         def show() -> None:
             if not self._is_current(source):
+                # THE HOST DROPPED IT: UN-RECORD IT (agent R1-1 = QA Q-1). The
+                # state was recorded session-side when the refusal surfaced
+                # (beat-2 F-B), and a record whose notice never displayed would
+                # silence the retry — the operator returns, answers again, and
+                # the explanation shows nowhere (measured: 0 notices). Clearing
+                # it here lets the next attempt deliver and display. Optional
+                # hook, like the refusal channel itself: only a session that can
+                # have a reply refused holds a record.
+                forget = getattr(source.session, "forget_gate_refusal", None)
+                if callable(forget):
+                    forget(error)
                 return
             # A REFUSED CARD'S OWN KEYSTROKE ALREADY WROTE A RECEIPT. The dock
             # card resolves on the keypress, so "✓ allowed  bash  rm -rf build/"
@@ -14087,7 +14121,15 @@ class OperatorApp(App[None]):
         # ONCE per pass, mirroring the replay fold's narration read: a display
         # preference cannot change part-way through one repaint.
         hide_cross_session = cross_session_hidden()
+        from local_operator.harness.rows import is_hidden_tool_call
+
         for call in calls:
+            # HIDDEN tools never paint a row on any seam: this one restores the
+            # row for a call already in flight, so skipping it here is what
+            # keeps a resumed ``patience`` call from appearing where the live
+            # path refuses to mount it (UX round 1, U2).
+            if is_hidden_tool_call(call):
+                continue
             call_id = getattr(call, "id", "") or ""
             if not call_id or call_id in live_cards:
                 continue
@@ -18736,9 +18778,14 @@ class OperatorApp(App[None]):
             editor.set_name_choices(frozenset(c.name.lower() for c in self._team_choices()))
             return
         if command in ("agent", "agents"):
-            choices = self._agent_choices()
+            choices = self._agent_argument_choices(editor)
             picker.set_choices(choices)
-            editor.set_name_choices(frozenset(c.name.lower() for c in choices))
+            # The NAME-completion vocabulary stays names-only, exactly as
+            # ``/team``'s does: its reserved ``chart`` word is a picker ROW but
+            # never a Tab completion ("Tab must never silently open a chart
+            # when the user meant to message"), and the same rule protects
+            # ``/agent`` — Tab completes profiles, the picker shows the verb.
+            editor.set_name_choices(frozenset(c.name.lower() for c in self._agent_choices()))
 
     def _project_argument_choices(self, editor: Any) -> list[ArgumentChoice]:
         """Rows for the ``/project <…>`` list: the reserved verbs, then names.
@@ -19446,6 +19493,9 @@ class OperatorApp(App[None]):
         """
         session = self._session
         registry = getattr(session, "agent_registry", None) if session is not None else None
+        from local_operator.action_class import PROACTIVE, class_from_tags
+        from local_operator.action_class import normalize as normalize_action_class
+
         rows: list[tuple[str, str, str]] = []
         seen: set[str] = set()
         if registry is not None and hasattr(registry, "list_agents"):
@@ -19466,6 +19516,15 @@ class OperatorApp(App[None]):
                     if is_role(agent):
                         profile = profile_from_agent(registry, agent)
                         facts = "role"
+                        # The CLASS leads the optional facts (design round 1,
+                        # D1): the settings pane truncates this line to 27
+                        # cells, and a marker appended after a configured
+                        # role's model/effort was the first thing cut — the
+                        # surface §8.1.3 puts forward as where the class is
+                        # visible could not show it on exactly the agents that
+                        # carry config detail.
+                        if normalize_action_class(profile.action_class) == PROACTIVE:
+                            facts += " · proactive"
                         # Model/effort are facts a user picks a hat by; the
                         # rest of the profile is what the attach applies.
                         if profile.model:
@@ -19477,7 +19536,10 @@ class OperatorApp(App[None]):
                         seen.add(profile.name.lower())
                     elif is_specialist(agent):
                         summary = str(agent.description or "").strip()
-                        specialists.append((str(agent.name), "specialist", summary))
+                        class_fact = (
+                            " · proactive" if class_from_tags(agent.tags) == PROACTIVE else ""
+                        )
+                        specialists.append((str(agent.name), f"specialist{class_fact}", summary))
                         seen.add(str(agent.name).lower())
                 except Exception:
                     continue
@@ -19497,7 +19559,10 @@ class OperatorApp(App[None]):
             if profile is None:
                 continue
             summary = (profile.when_to_use or profile.description or "").strip()
-            seeds.append((profile.name, "role · packaged", summary))
+            seed_facts = "role · packaged"
+            if normalize_action_class(profile.action_class) == PROACTIVE:
+                seed_facts += " · proactive"
+            seeds.append((profile.name, seed_facts, summary))
         rows.extend(sorted(seeds, key=lambda row: row[0].lower()))
         return rows
 
@@ -19506,6 +19571,87 @@ class OperatorApp(App[None]):
         return [
             ArgumentChoice(name, summary or "no description", detail=facts)
             for name, facts, summary in self._agent_profile_rows()
+        ]
+
+    def _agent_argument_choices(self, editor: Any) -> list[ArgumentChoice]:
+        """Rows for the ``/agent <…>`` list: agent NAMES first, then the reserved verb.
+
+        The ``/team`` ordering rule, applied to this command's one reserved
+        first token. In the first slot the agent NAMES come first and the
+        reserved ``class`` row is appended AFTER them: ``argument_suggestions``
+        returns rows in list order for an empty query, so a bare ``/agent `` +
+        Tab completes the sole (or first) AGENT — the common action is
+        attaching/messaging — and the verb can never be what Tab silently
+        lands in (UX round 2, U4; the same collision-safety ``/team``'s
+        ``chart`` row documents). The verb stays fully discoverable: the row
+        is visible in the list, and the matcher ranks it up the moment the
+        user types ``c``/``cl``/``class`` — a typed query is scored, not
+        list-ordered.
+
+        An agent literally named ``class`` collides with the reserved word
+        exactly as a team named ``chart`` collides with its subcommand: its
+        row completes to the ``=class `` ESCAPE (the handlers strip one
+        leading ``=``), which its detail names. The same rule covers a name
+        that ITSELF starts with ``=`` (R4-2 — ``=`` is not a reserved
+        character): such a row completes doubled (``==foo``), because the
+        strip removes exactly one and the doubled form resolves the literal
+        name.
+
+        Once ``class `` is in the buffer the second slot re-offers the profile
+        names as ``class <name>`` compounds, which complete to the report
+        form.
+        """
+        from local_operator.tui.widgets.command_picker import slash_argument
+
+        argument = slash_argument(
+            editor.text,
+            editor._argument_commands,
+            editor._caret_offset(),
+            editor._command_names,
+        )
+        if argument is None:
+            return []
+        first, space, _rest = argument.partition(" ")
+        names = self._agent_choices()
+        if not space:
+            rows: list[ArgumentChoice] = []
+            for choice in names:
+                if choice.name.casefold() == "class" or choice.name.startswith("="):
+                    # The escape row. Two cases, one shape: completing a bare
+                    # `class` would route to the subcommand, and completing a
+                    # name that already starts with `=` would resolve its
+                    # STRIPPED spelling — the handlers remove exactly ONE `=`,
+                    # so both complete to a row whose leading `=` makes the
+                    # strip a no-op against the name that follows (R4-2).
+                    rows.append(
+                        ArgumentChoice(
+                            f"={choice.name}",
+                            choice.description,
+                            detail=f"attach · {choice.detail}",
+                        )
+                    )
+                else:
+                    rows.append(choice)
+            # The reserved row is offered AFTER the names — discoverable, and
+            # rank-able by a typed query, but never the default Tab completion.
+            rows.extend(
+                ArgumentChoice(word, help_text, detail="subcommand")
+                for word, help_text in agent_subcommand_rows()
+            )
+            return rows
+        if first.casefold() not in {word for word, _help in agent_subcommand_rows()}:
+            return []
+        return [
+            ArgumentChoice(
+                # U7: a name whose OWN spelling starts with `=` completes
+                # DOUBLED (`class ==foo`), because the class resolver strips
+                # exactly one `=` like the attach seams — completing it raw
+                # offered a compound the grammar itself refused.
+                f"{first.casefold()} {'=' if choice.name.startswith('=') else ''}{choice.name}",
+                choice.description,
+                detail=choice.detail,
+            )
+            for choice in names
         ]
 
     def _agent_list_block(self, rows: list[tuple[str, str, str]]) -> RichBlock:
@@ -19575,6 +19721,53 @@ class OperatorApp(App[None]):
             return
         self._status.update(team=str(getattr(self._session, "active_team_name", "") or ""))
 
+    def _cmd_agent_class(self, rest: str, notice: NoticeFn) -> None:
+        """``/agent class <name> [proactive|reactive]`` — the class switch (R36).
+
+        ``/agent class <name>`` REPORTS the current class; the second token
+        flips it. Mirrors ``/team chart``'s grammar, escapes included: a
+        leading ``=`` on the name is the literal-name escape, and
+        ``/agent class class …`` reaches an agent literally named ``class``
+        through the grammar itself.
+
+        Runs in a worker: the flip writes the registry (disk) and the
+        best-effort cleanup that follows touches the session's wake writer —
+        neither may park the event loop. The grammar itself lives in
+        ``action_class.class_switch_receipt``, shared with the two routed
+        handlers (see ``_agent_class_worker``).
+        """
+        session = self._session
+        if session is None:
+            self._system_notice(*self._no_session_notice())
+            return
+        registry = getattr(session, "agent_registry", None)
+        if registry is None or not hasattr(registry, "get_agent_by_name"):
+            self._system_notice(
+                "agents are unavailable in this session. Ask the agent to create one.",
+                "warning",
+            )
+            return
+        self.run_worker(self._agent_class_worker(rest, notice), thread=False, group="session")
+
+    async def _agent_class_worker(self, rest: str, notice: NoticeFn) -> None:
+        """Run the SHARED switch grammar and report its receipt as a notice.
+
+        ``class_switch_receipt`` owns the grammar and the wording; this worker
+        only adapts the result to this host's notice plumbing, so the routed
+        and unrouted receipts are the same sentences by construction
+        (review/UX round 1, U1).
+        """
+        from local_operator.action_class import class_switch_receipt
+        from local_operator.session.frontend_state import SlashResult
+
+        session = self._session
+        if session is None:
+            self._system_notice(*self._no_session_notice())
+            return
+        result = await class_switch_receipt(session, rest, SlashResult)
+        severity: NoticeKind = "warning" if getattr(result, "style", "") == "warning" else "info"
+        notice(str(getattr(result, "text", "") or ""), severity)
+
     def _cmd_agent(
         self,
         arg: str,
@@ -19616,9 +19809,34 @@ class OperatorApp(App[None]):
                 return
             self._append_block(self._agent_list_block(rows))
             return
+        # The first argument token is a small RESERVED subcommand namespace,
+        # exactly as `/team` reserves `chart` and `/aida` reserves pause/resume/
+        # status. One reserved word: `class`, the R36 proactive-class switch.
+        # It wins in first position, with the two `/team` escape hatches —
+        # `/agent class class <cls>` switches an agent literally named `class`
+        # (the second token is the name), and a leading `=` on the name
+        # (`/agent =class …`) means "literal name, never a subcommand", and the
+        # strip removes exactly ONE `=` — `=` is NOT a reserved character in
+        # profile names (`create_agent(name="=foo")` succeeds), so a profile
+        # whose name itself starts with `=` is addressed by doubling it
+        # (`/agent ==foo` reaches the profile literally named `=foo`; review
+        # round 4, R4-2: the escape is positional, not a charset restriction).
+        first, _, rest = arg.partition(" ")
+        if first.strip().casefold() in {word for word, _help in agent_subcommand_rows()}:
+            self._cmd_agent_class(rest.strip(), notice)
+            return
         name, _, request = arg.partition(" ")
         name = name.strip()
         request = request.strip()
+        # The `=` escape (see the subcommand comment above). The strip runs
+        # BEFORE the clear/none check below, so `/agent =none` DETACHES — it
+        # does not reach a profile literally named `none` (the old comment
+        # claimed otherwise; review round 5, behaviour intended). A name whose
+        # own spelling starts with `=` is reached by DOUBLING the escape
+        # (`/agent ==none` → the profile `=none`), and the bare words
+        # clear/none stay reserved by the detach verb.
+        if name.startswith("="):
+            name = name[1:]
         # ``clear``/``none`` are the DETACH verb, not a name to look up — the
         # mirror of ``/goal`` with no text clearing the objective. A real agent
         # literally named "clear" is a non-concern: profile names are curated,
@@ -26408,6 +26626,13 @@ class OperatorApp(App[None]):
                 )
             if kind == "error":
                 return notifier.notify_error(body=body)
+            if kind == "retired":
+                # THE RETIRE-FOR-BUILD DELIVERY LEG (round 2, MAJOR-1): the
+                # error/waiting arms below are semantic helpers over one kind
+                # each, so the new kind routes through the same composer-fed
+                # ``send`` — its subtitle "Retired" and its house sentence come
+                # from the shared vocabulary, and no failure wording is added.
+                return notifier.send("retired", body=body)
             if kind in ("approval", "ask"):
                 return notifier.notify_waiting(kind, body=body)
         except Exception:  # pragma: no cover - defensive; chrome must not raise
@@ -26462,7 +26687,12 @@ class OperatorApp(App[None]):
         wording (the live `interrupted`/error sentence): it is the live,
         turn-scoped statement and restating it as the poller's dimmer
         `Interrupted`/`Stopped with an error` would rewrite a row the user has
-        already read for no gain.
+        already read for no gain. The ONE exception is `retired` (2026-09-29):
+        it restates the row it adopts, because the live cut row carries the
+        classified sentence rather than the canonical receipt — already in the
+        warning tier since design round 2 D2, so the restate swaps the WORDING
+        to `RETIRED_NOTICE_TEXT` and adds the anchor (see the tail of this
+        method).
 
         BOTH KINDS, and the kind must MATCH. This used to accept only
         `interrupted`, on the reasoning that an `error` outcome "is a different
@@ -26494,10 +26724,19 @@ class OperatorApp(App[None]):
         outcome was on screen the whole time.
         """
         block = self._own_interrupt_notice
-        if kind not in {"interrupted", "error"} or block is None:
+        if kind not in {"interrupted", "error", "retired"} or block is None:
             return False
         if self._own_interrupt_kind and self._own_interrupt_kind != kind:
-            return False
+            # THE RETIRE-FOR-BUILD ARM'S ONE CORRESPONDENCE (2026-09-29): the
+            # live row for a cut turn is painted by the error branch — the
+            # classified end arrives as `aborted=False, error=<cut sentence>`,
+            # its tier flipped to warning for the retired token (design round
+            # 2, D2) — so a `retired` outcome must adopt THAT row. Refusing
+            # here (the pre-arm behaviour for unknown kinds) would append the
+            # poller's warning row beside the live cut row, two rows for one
+            # cut.
+            if not (kind == "retired" and self._own_interrupt_kind == "error"):
+                return False
         if block not in self._transcript_view().blocks():
             # NOT consumed. Clearing the reference before this test burnt it on
             # a failure that is routinely transient: a sidebar switch parks the
@@ -26512,6 +26751,15 @@ class OperatorApp(App[None]):
         # adoption, and a later publication must get its own row.
         self._own_interrupt_notice = None
         self._own_interrupt_kind = ""
+        # RETIRED RESTATES ITS ADOPTED ROW, the one exception to the docstring's
+        # rule that an adopted row keeps its own wording. The live cut row IS
+        # the classified sentence in the error tier; adopting it unchanged
+        # would keep exactly the failure framing this arm removes. `restate`
+        # re-freezes the block in place, so one cut stays one row.
+        if kind == "retired":
+            from local_operator.harness.rows import RETIRED_NOTICE_TEXT
+
+            block.restate(RETIRED_NOTICE_TEXT, "warning")
         block.completion_anchor_id = anchor
         return True
 
@@ -27389,7 +27637,17 @@ class OperatorApp(App[None]):
             if (
                 anchor
                 and state.get("unseen")
-                and state.get("kind") in {"error", "interrupted"}
+                # ``closed`` joins the replay kinds (v2, 2026-09-29): a neutral
+                # closure must still paint a row when its conversation is
+                # reopened. The words AND the info tier come from
+                # ``completion_notice``'s own closed arm — nothing here may
+                # upgrade it to danger, and `_adopt_own_interrupt_notice`
+                # refuses the kind so this branch appends rather than adopts.
+                # ``retired`` joins too (retire-for-build arm, 2026-09-29): a
+                # bound-cut turn must paint its warning row on reopen, from
+                # ``completion_notice``'s retired arm, and its OWN adopt arm
+                # below restates a live cut row rather than duplicating it.
+                and state.get("kind") in {"error", "interrupted", "closed", "retired"}
                 and getattr(self, "_attention_retry_token", None) != (id(session), token)
             ):
                 transcript = self._transcript_view()
@@ -30905,11 +31163,17 @@ class OperatorApp(App[None]):
         * the toast is the surface that works on every machine (no delivery
           path, no focus gate), and it is why the banner is best-effort on top
           rather than the thing the feature rests on;
-        * while THIS app is attached to the very session that parked, NEITHER
-          fires: the gate card is on screen with the device hint on it, and a
-          toast over the app's own dock card would be the app interrupting
-          itself. The episode is consumed anyway — the user is looking at the
-          surface the notice would point them to.
+        * while THIS app is showing the gate card for the very session that
+          parked, NEITHER fires: the card is on screen with the device hint on
+          it, and a toast over the app's own dock card would be the app
+          interrupting itself. The episode is consumed anyway — the user is
+          looking at the surface the notice would point them to. THE CARD IS
+          THE CONDITION, not the attachment (beat-2 F-A): a viewer that holds
+          the session with no card on screen is told, because silence there
+          means nobody learns the peer is parked (`_remote_park_is_attached`
+          and `_remote_park_card_is_up` are the two halves, composed at the
+          call site — and the same attachment the copy's lead needs, design
+          round 1, D1).
 
         SILENCE IS NOT A CLEAR: `unanswered` names the devices that did not
         answer this read, and `park_edges` carries their episodes forward — a
@@ -30949,22 +31213,30 @@ class OperatorApp(App[None]):
                 if owner is not None:
                     toast.withdraw(owner)
             for park in edges:
-                if self._remote_park_is_attached(park):
+                # The CARD is the suppression condition; the attachment is what
+                # the attached copy's lead needs (design round 1, D1), so both
+                # halves are read here once.
+                attached = self._remote_park_is_attached(park)
+                if attached and self._remote_park_card_is_up():
                     continue
-                self._show_remote_park(park, toast)
+                self._show_remote_park(park, toast, attached=attached)
         except Exception:  # pragma: no cover - defensive; chrome must not raise
             logger.debug("remote park notice failed", exc_info=True)
 
     def _remote_park_is_attached(self, park: RemotePark) -> bool:
-        """Is THIS app attached to the session ``park`` describes?
+        """Whether THIS app's current session IS the peer session ``park`` names.
 
-        True when the app's current session IS the peer session that parked —
-        the viewer case the notice deliberately yields to, because the gate
-        card is already on screen there, wearing the hint that says where an
-        allow happens. Read from `_remote_owner_facts`, the same predicate the
-        lifecycle router acts on, so the two cannot disagree about which device
-        a session is on; a local session answers False (it can never be a
-        peer's park) and a cold app answers False too.
+        ATTACHMENT IS THE PREMISE, NOT THE ANSWER (beat-2 F-A). It is half of
+        the suppression the park notice applies — :meth:`_remote_park_card_is_up`
+        is the other, decided half — and it is also the fact the attached copy's
+        lead needs (design round 1, D1: the reader who IS this viewer must not
+        be told to open the session they are already looking at), so the park
+        loop reads it once and hands it to both.
+
+        Read from `_remote_owner_facts`, the same predicate the lifecycle
+        router acts on, so the two cannot disagree about which device a session
+        is on; a local session answers False (it can never be a peer's park)
+        and a cold app answers False too.
         """
         owner = self._remote_owner_facts()
         if owner is None:
@@ -30972,7 +31244,38 @@ class OperatorApp(App[None]):
         session_id, device_id, _ = owner
         return session_id == park.session_id and device_id == park.device_id
 
-    def _show_remote_park(self, park: RemotePark, toast: Toast) -> None:
+    def _remote_park_card_is_up(self) -> bool:
+        """Whether the gate card for the CURRENT session's gate is on screen.
+
+        THE CARD IS THE CONDITION, not the attachment (beat-2 F-A): an
+        attachment-only answer suppressed the notice for a viewer showing NO
+        CARD AT ALL — the auto-follow after a slash move rendered an empty
+        transcript with the facade holding no gate, and the origin learned
+        nothing while the peer sat parked for minutes. The card asked for here
+        is the gate card on screen wearing the hint that says where an allow
+        happens, through the one spelling of "a mounted card belongs to this
+        source's current gate" (``require_card``, which bypasses the
+        approve-all latch — that latch answers "no card is NEEDED", the
+        opposite question). The caller has established attachment; the source
+        guard below keeps a source for any OTHER session from answering.
+
+        A read that cannot answer ANSWERS THE PARK (False): a notice that fires
+        over a duplicate is chrome, a notice that never fires is the defect
+        this method exists to close.
+        """
+        # The source that DISPLAYS this session, not merely the last one minted:
+        # the card binding is checked against its token and gate generation, so a
+        # source for any other session must not answer here.
+        source = self._interactions.get(id(self._session), self._interaction)
+        if source.session is not self._session:
+            return False
+        try:
+            return self._sidebar_gate_card_ready(source, require_paint=False, require_card=True)
+        except Exception:  # noqa: BLE001 — an unanswerable read must not silence the park
+            logger.debug("remote park card check failed", exc_info=True)
+            return False
+
+    def _show_remote_park(self, park: RemotePark, toast: Toast, *, attached: bool = False) -> None:
         """Raise the one card and the one banner for ``park``.
 
         Card FIRST, banner second: the card needs no OS delivery path, so a
@@ -30984,6 +31287,10 @@ class OperatorApp(App[None]):
         conversation's name when it has one, so two parks on the same device are
         tellable apart on the card itself (UX round 1, U3); the placeholder name
         a peer never chose is dropped rather than printed as a title.
+
+        ``attached`` reaches the card because the reader's position decides the
+        lead (design round 1, D1); the banner is budgeted to one OS line and
+        carries no lead at all.
         """
         label = park.device_name or park.device_id
         key = (park.device_id, park.session_id)
@@ -30992,7 +31299,7 @@ class OperatorApp(App[None]):
 
         name = "" if park.name == UNTITLED_CONVERSATION else park.name
         toast.show(
-            remote_park_card(label, park.kind, name=name),
+            remote_park_card(label, park.kind, name=name, attached=attached),
             duration_ms=TOAST_FAILURE_MS,
             owner=owner,
         )
@@ -45717,7 +46024,7 @@ class OperatorApp(App[None]):
         if command == "team":
             return self._team_slash_result(args, SlashResult)
         if command == "agent":
-            return self._agent_slash_result(args, SlashResult)
+            return await self._agent_slash_result(args, SlashResult)
         if command == "model":
             if not args.strip():
                 # Bare /model opens the invoker's OWN picker — there is nothing
@@ -46416,7 +46723,7 @@ class OperatorApp(App[None]):
         # from the detached runtime.
         return self._team_attach_slash_result(arg, registry, SlashResult)
 
-    def _agent_slash_result(self, arg: str, SlashResult: Any) -> Any:
+    async def _agent_slash_result(self, arg: str, SlashResult: Any) -> Any:
         if not arg:
             rows = self._agent_profile_rows()
             if not rows:
@@ -46426,6 +46733,14 @@ class OperatorApp(App[None]):
                     style="info",
                 )
             return SlashResult(kind="block", data={"type": "agent_list", "items": rows})
+        # The reserved word, for the same reason the runtime's handler has it:
+        # a session hosted by THIS app answers a follower out of here, and the
+        # switch must be reachable from that seam too (review/UX round 1, U1).
+        first, _, rest = arg.partition(" ")
+        if first.strip().casefold() in {word for word, _help in agent_subcommand_rows()}:
+            from local_operator.action_class import class_switch_receipt
+
+            return await class_switch_receipt(self._session, rest.strip(), SlashResult)
         return self._agent_attach_slash_result(arg, SlashResult)
 
     def _team_attach_slash_result(self, arg: str, registry: Any, SlashResult: Any) -> Any:
@@ -46497,6 +46812,15 @@ class OperatorApp(App[None]):
         session = self._session
         name, _, request = arg.partition(" ")
         name = name.strip()
+        # The ``=`` escape, mirroring ``_team_attach_slash_result`` above and
+        # the other two agent seams (``_cmd_agent``, ``serving.py``): the strip
+        # removes exactly ONE ``=`` and the remainder is looked up literally,
+        # so a profile literally named ``class`` — and any name that itself
+        # starts with ``=``, addressed by doubling it — stays reachable from a
+        # follower of THIS app's session (review round 4, R4-1: this builder
+        # was the one seam without it).
+        if name.startswith("="):
+            name = name[1:]
         request = request.strip()
         if name.lower() in ("clear", "none") and not request:
             detach = getattr(session, "clear_agent_profile", None)
@@ -47710,7 +48034,14 @@ class OperatorApp(App[None]):
             cost=cost_text,
         )
         if message.error:
-            notice = NoticeBlock(self._with_recovery_hint(message.error), "error")
+            # TIER AT THE CLASSIFIER, not on the next poller tick (design round
+            # 2, D2): a retire-for-build cut is the same fact the toast raises
+            # as `retired`, and the live row must agree from its FIRST frame —
+            # waiting for the ~1 s restate painted ✗ danger over a cut that is
+            # warning ink everywhere else. Every other errored end keeps the
+            # error tier.
+            live_tier = "warning" if message.cut_off_cause == "runtime-retired" else "error"
+            notice = NoticeBlock(self._with_recovery_hint(message.error), live_tier)
             self._append_block(notice)
             # HELD for the same reason `_finalize_turn` holds the interrupted
             # row: the attention poller reads the same durable outcome back a
@@ -47737,8 +48068,11 @@ class OperatorApp(App[None]):
             # carries. Passed rather than inferred from `aborted`/`error`: the
             # whole taxonomy flip is that a cut-off arrives as
             # `aborted=False, error=<notice>`, so an inference here would read
-            # every cut-off as a completion (design review round 1, D2).
+            # every cut-off as a completion (design review round 1, D2). The
+            # CAUSE TOKEN rides beside the bool for the notification ladder's
+            # retire-for-build arm (round 2, MAJOR-1).
             cut_off=message.cut_off,
+            cut_off_cause=message.cut_off_cause,
             # §14: the session's ONE notify value, forwarded untouched; the
             # funnel gates the completion/error toasts on it below.
             notify=message.notify,
@@ -47996,6 +48330,7 @@ class OperatorApp(App[None]):
         source: str,
         outcome_known: bool = True,
         cut_off: bool = False,
+        cut_off_cause: str = "",
         notify: bool = True,
     ) -> None:
         """Retire the turn. The ONE exit, however the turn ended.
@@ -48006,6 +48341,12 @@ class OperatorApp(App[None]):
         and its one use is the wording of the stranded tool cards: a turn cut
         off says ``cut off`` on each card instead of ``interrupted``, which is
         now reserved for a recorded stop (design review round 1, D2).
+        ``cut_off_cause`` is the TOKEN behind it, and it decides which toast
+        this turn raises: a ``runtime-retired`` cut is a warning-tier update
+        transition, not a failure, so the ladder raises the ``retired`` kind
+        whose composer words say so (agent review round 2, MAJOR-1 — the live
+        OS toast is the one surface the poller's restate cannot reach). Every
+        other errored end keeps the ``error`` kind.
 
         Every terminal side effect a turn owes the user lives here — the
         working line, the band, the waiting latch, the per-turn cost accrual,
@@ -48253,7 +48594,15 @@ class OperatorApp(App[None]):
             # session's rule; the gate is read anyway so this funnel never
             # contradicts the ONE value it was handed.
             if notify:
-                self._notify("error")
+                # THE RETIRE-FOR-BUILD CUT RAISES ITS OWN TOAST (round 2,
+                # MAJOR-1): ``runtime-retired`` is an update-phase transition
+                # that really did cut a turn, so the banner must be TRUTHFUL
+                # but DISTINGUISHED FROM A FAILURE — the kind decides both its
+                # words and its category (``Notifier.send`` reads
+                # CONTEXTS/BODIES), and "Stopped with an error" is the sentence
+                # this arm exists to remove from a surface that fires once.
+                # Every other errored end keeps the error kind.
+                self._notify("retired" if cut_off_cause == "runtime-retired" else "error")
         else:
             # Counts QUEUED and backgrounded work too (see
             # `_outstanding_delegated_jobs`): a child parked at the capacity
@@ -49361,6 +49710,15 @@ class OperatorApp(App[None]):
         reasonable reading of that frame was that the agent had hung.
         """
         event = message.event
+        # A HIDDEN tool's row never paints (UX round 1, U2): the announcement
+        # is where the row first exists, and suppressing it at the SOURCE —
+        # before the supersede/rekey bookkeeping — is what keeps the later
+        # start/end frames from finding a registry to adopt. The rows stay in
+        # the model's context; only the screen skips them.
+        from local_operator.harness.rows import is_hidden_tool_name
+
+        if is_hidden_tool_name(getattr(event, "tool_name", None)):
+            return
         # The call's real id has just arrived for a row this surface mounted
         # under an index-derived placeholder: REKEY the row rather than letting
         # the lookup below miss and mount a second one. Without this the
@@ -49483,6 +49841,15 @@ class OperatorApp(App[None]):
 
     def on_tool_started(self, message: ToolStarted) -> None:
         event = message.event
+        # HIDDEN tools paint nothing, at EVERY seam (UX round 1, U2): the
+        # composing gate above suppresses the announcement, and this one stops
+        # a start frame from mounting a fresh card for a call with none — the
+        # belt to that brace, because the two frames race and either can be a
+        # viewer's first sight of the call.
+        from local_operator.harness.rows import is_hidden_tool_name
+
+        if is_hidden_tool_name(getattr(event, "tool_name", None)):
+            return
         # The call's own start instant, stamped by the producer and folded by
         # the session. Preferred over the map because it is the SAME value for
         # the row the live path paints and the row a switch back repaints: a
@@ -49908,7 +50275,14 @@ class OperatorApp(App[None]):
             logger.debug("queued-elsewhere row was already gone", exc_info=True)
 
     def _foreign_queued_rows(self, source: SessionInteraction) -> list[Any]:
-        """Spooled owner rows this surface is NOT already showing as queued."""
+        """Spooled owner rows this surface is NOT already showing as queued.
+
+        A harness continuation is EXCLUDED (``harness_injected``): it is chrome
+        no surface paints, so counting it would announce — and hold up — the
+        queued-elsewhere notice for messages nobody is waiting on. The field is
+        read defensively because rows written before it existed default to
+        False, and an old BUILD reading a new row ignores the key entirely.
+        """
         directory = self._session_directory(source)
         if directory is None:
             return []
@@ -49916,7 +50290,10 @@ class OperatorApp(App[None]):
 
         try:
             rows = [
-                line for line in peek_inbox(directory) if getattr(line, "source", "") == SOURCE_USER
+                line
+                for line in peek_inbox(directory)
+                if getattr(line, "source", "") == SOURCE_USER
+                and not getattr(line, "harness_injected", False)
             ]
         except Exception:  # a read on the paint path must never take the app down
             logger.debug("could not read the spool", exc_info=True)
@@ -50824,7 +51201,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 133
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 135
     public members, and a positive ``isinstance`` walks every one of them.
     (The figure is RECOMPUTED with ``len(typing._get_protocol_attrs(...))`` at
     the time of measurement rather than adjusted by the size of one's own
@@ -51496,6 +51873,18 @@ class _TreeRow(Text):
 NOTIFICATIONS_LISTING_ROWS = 10
 
 
+#: The words ``/notifications`` prints for kinds whose STORE TOKEN is not the
+#: word a person reads. The original kinds keep their token because it already
+#: reads as itself (``complete``/``error``/``interrupted``); the v2 kinds do
+#: not — "— closed" is a journal token, not English (agent review round 1,
+#: NIT-1), and ``retired`` needs its why. An UNKNOWN kind keeps its raw token
+#: on purpose: a receipt may be terse, never wrong.
+NOTIFICATION_KIND_WORDS: dict[str, str] = {
+    "closed": "completed",
+    "retired": "retired for an update",
+}
+
+
 def _notifications_listing(
     entries: Sequence[CatalogEntry], budget: int, *, clearing: bool = False
 ) -> str:
@@ -51543,8 +51932,11 @@ def _notifications_listing(
         mark = COMPLETION_MARKERS.get(entry.completion_kind, COMPLETION_MARKERS["complete"])[0]
         lead = f"  {mark} "
         # The kind is dropped rather than left empty when the store's row predates
-        # the taxonomy: "✓ name —  · 2h" would read as a missing column.
-        kind = f" — {entry.completion_kind}" if entry.completion_kind else ""
+        # the taxonomy: "✓ name —  · 2h" would read as a missing column. The
+        # WORD comes from ``NOTIFICATION_KIND_WORDS`` where the token is not one
+        # (see its own note): the v2 kinds must not surface as journal tokens.
+        word = NOTIFICATION_KIND_WORDS.get(entry.completion_kind, entry.completion_kind)
+        kind = f" — {word}" if entry.completion_kind else ""
         tail = f"{kind} · {format_age(max(0, time.time() - entry.row.mtime))}"
         label = entry.row.name or UNTITLED_CONVERSATION
         if budget <= 0:

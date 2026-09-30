@@ -42,6 +42,7 @@ import {
 import { applyTheme, getTheme, THEMES } from "../theme";
 import { shortenHome } from "../lib/format";
 import { MARK_DATA_URI } from "../lib/mark";
+import { clampPinReason, pinRefusalReason } from "../lib/pin-refusal";
 import type { SessionSummary } from "../types";
 import { cn } from "../lib/cn";
 
@@ -367,6 +368,22 @@ function SessionCard({
 						{pendingLabel}
 					</span>
 				) : null}
+				{/* SESSION HEALTH, SAID OUT LOUD (mobile UX batch 2, U7). The summary
+				    now carries the daemon's own `ended`/`degraded` receipts (the same
+				    facts its projection serves), and a row that rendered neither was
+				    indistinguishable from a live one: an ended conversation looked
+				    openable-and-running forever, and a degraded one — whose socket the
+				    relay cannot reach — looked exactly as live as a healthy session.
+				    Quiet by design (`text-ink-dim`, no dot, no danger ink): this is
+				    state a reader should notice on the row that has it, not an alarm
+				    that outranks the decision word beside it. `not answering` is the
+				    register the TUI uses for the same condition. */}
+				{s.ended ? (
+					<span className="shrink-0 text-meta text-ink-dim">ended</span>
+				) : null}
+				{s.degraded ? (
+					<span className="shrink-0 text-meta text-ink-dim">not answering</span>
+				) : null}
 				{/* A PINNED ROW CARRIES ITS ★, and it rides the RIGHT cluster rather than
 				    the state slot. The TUI made exactly this call (`session_sidebar.py`
 				    `_special_mark`): a ★ in the state column made the sessions a user
@@ -478,35 +495,8 @@ function ThemePicker({
 	);
 }
 
-/* The daemon's own words for a refused pin, or a plain line when it gave none.
-
-    The route's error body IS the reason and the remedy (`no saved messages yet —
-    pin it after you send one`), written for this reader, so it passes through
-    rather than being re-worded here — a second copy of one refusal is how two
-    surfaces end up describing the same rule differently (the same rule
-    `humanizeGateError` follows).
-
-    THE BARE-STATUS CASE IS NOT A REASON. `request` falls back to the status when
-    a failing response's body is not JSON, and `409` under a button the reader
-    just pressed explains nothing, so that spelling gets the plain line instead —
-    as does a failure that carried no message at all. */
-function pinRefusalReason(error: unknown): string {
-	const message = error instanceof Error ? error.message : String(error);
-	if (message === "" || /^\d{3}$/.test(message)) return "the daemon did not say why";
-	return message;
-}
-
-/* A REFUSAL IS THE DAEMON'S SENTENCE AND NOTHING BOUNDS IT. It is an error body,
-   so a stack trace or a multi-line dump under the action would run the sheet out
-   of its column; the clamp keeps the opening, which is the part that names the
-   rule, and marks the cut rather than pretending the message ended there. */
-const PIN_REASON_MAX = 240;
-
-function clampPinReason(reason: string): string {
-	return reason.length > PIN_REASON_MAX
-		? `${reason.slice(0, PIN_REASON_MAX)}…`
-		: reason;
-}
+/* The daemon's own words for a refused pin come from `lib/pin-refusal` — shared
+   with the session view so one refusal cannot grow two sentences (batch 2, U2). */
 
 export function SessionListScreen() {
 	const { sessions, connected } = useSessions();
@@ -797,6 +787,17 @@ export function SessionListScreen() {
 				<h1 className="text-meta font-medium tracking-[0.18em] text-ink">
 					local operator
 				</h1>
+				{/* OFFLINE, QUIETLY (mobile UX batch 2, U11). `connected === false` on
+				    this screen used to change nothing once rows were on it: the list
+				    kept painting a frozen frame as though it were live. The chip is
+				    gated on holding data — an empty list already says `connecting…`
+				    in its placeholder — and it clears itself the moment a frame
+				    lands, because `connected` flips back on the SSE's own open. */}
+				{sessions.length > 0 && !connected ? (
+					<span role="status" className="ml-auto shrink-0 text-meta text-ink-dim">
+						reconnecting…
+					</span>
+				) : null}
 			</header>
 			{/* BROWSER SCROLL ANCHORING STAYS ON (QA round 4, Q6). An earlier round
 			    opted the list out (`overflow-anchor: none`), and with the opt-out every

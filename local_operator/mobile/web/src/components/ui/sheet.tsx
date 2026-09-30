@@ -122,30 +122,39 @@ export function Sheet({
 	   `onClose` and dismissed the sheet. iOS Safari fires the same release
 	   click; Android may suppress it.
 
-	   THE DISCRIMINATOR IS THE GESTURE, NOT A CLOCK. The click belongs to the
-	   opening press iff NO pointerdown has been seen since mount — the opening
+	   THE DISCRIMINATOR IS THE GESTURE, NOT A CLOCK, AND IT IS PER-POINTER
+	   (mobile UX batch 2). The click belongs to the opening press iff the
+	   pointer that RELEASED was never seen pressing since mount — the opening
 	   gesture's own pointerdown predates the sheet, because it is what started
-	   the hold. So: arm on a pointerup with no since-mount pointerdown, and
-	   swallow the single click that follows it. A fresh press answers scrim/✕
-	   as always (its pointerdown disarms), a keyboard activation passes (a
-	   keydown precedes Enter/Space activation and disarms), and a platform that
-	   synthesises no click leaves nothing armed past the next press. This also
-	   covers the ✕ and any action row a release click could land on, not just
-	   the scrim the defect was measured on. */
+	   the hold. The first revision tracked one document-wide boolean, so with
+	   two fingers the interleave collapsed: A long-presses (sheet opens, A
+	   still held), B taps the scrim, A releases first — A's `pointerup` cleared
+	   the flag, B's then read "no down since mount" and armed, and B's genuine
+	   tap was eaten (agent review round 1, MINOR 1). The `seenDown` set makes
+	   the LAST release decide: `armed = !seenDown.has(pointerId)` at each
+	   `pointerup`, so a seen pointer's release disarms just as naturally as an
+	   unseen one arms. A fresh press answers scrim/✕ as always (its pointerdown
+	   disarms), a keyboard activation passes (a keydown precedes Enter/Space
+	   activation and disarms), and a platform that synthesises no click leaves
+	   nothing armed past the next press. This also covers the ✕ and any action
+	   row a release click could land on, not just the scrim the defect was
+	   measured on. */
 	useEffect(() => {
 		if (!open) return;
-		let downSinceMount = false;
+		/* Pointer ids, "seen down since mount". The opening gesture's down
+		   happened before this effect existed, so its id is absent — the ghost.
+		   A cancelled pointer's id stays: no click can follow a cancel, and a
+		   reused id will have pressed since mount anyway. */
+		const seenDown = new Set<number>();
 		let armed = false;
-		const onPointerDown = () => {
-			downSinceMount = true;
+		const onPointerDown = (event: PointerEvent) => {
+			seenDown.add(event.pointerId);
 			armed = false;
 		};
-		const onPointerUp = () => {
-			if (!downSinceMount) armed = true;
-			downSinceMount = false;
-		};
-		const onPointerCancel = () => {
-			downSinceMount = false;
+		const onPointerUp = (event: PointerEvent) => {
+			/* The LAST release decides — an unseen id arms the ghost click, a
+			   seen id disarms whatever an earlier release armed. */
+			armed = !seenDown.has(event.pointerId);
 		};
 		const onKeyDown = () => {
 			armed = false;
@@ -158,13 +167,11 @@ export function Sheet({
 		};
 		window.addEventListener("pointerdown", onPointerDown, true);
 		window.addEventListener("pointerup", onPointerUp, true);
-		window.addEventListener("pointercancel", onPointerCancel, true);
 		window.addEventListener("keydown", onKeyDown, true);
 		window.addEventListener("click", onClick, true);
 		return () => {
 			window.removeEventListener("pointerdown", onPointerDown, true);
 			window.removeEventListener("pointerup", onPointerUp, true);
-			window.removeEventListener("pointercancel", onPointerCancel, true);
 			window.removeEventListener("keydown", onKeyDown, true);
 			window.removeEventListener("click", onClick, true);
 		};

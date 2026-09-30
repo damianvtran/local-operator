@@ -29,6 +29,8 @@ scheduler would be a second definition that the model could not see.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 #: A wake starts a full turn; sub-minute starves the user. Constrained at the
@@ -69,6 +71,11 @@ class WakeSchedule(BaseModel):
     until_at: int | None = None  # hard stop
     limit: int | None = None  # retire after N deliveries
     fired_count: int = 0
+    #: When the row was created. For patience rows this is the EPISODE START and
+    #: is preserved across a continuation's re-arms — the episode TTL
+    #: (``proactive.patience.episode_ttl_ms``) is measured from it, and the
+    #: fire/retire decision reads it back even when the row was retired and a
+    #: fresh snapshot written.
     created_at: int = 0
     #: The desktop request that ARMED this row, when one did — its origin, not its
     #: provenance in the bookkeeping sense. It exists so that "did this request's
@@ -90,6 +97,54 @@ class WakeSchedule(BaseModel):
     #: a row carrying it (``extra="forbid"`` + ``load()``'s drop-with-warning),
     #: and a new build reads an old row as quiet — how those rows behaved.
     notify: bool = False
+
+    # ---- patience fields (proactive-class agents; R29–R38) ------------------
+    #
+    # A patience wait is a HIDDEN internal timer attached to a message an agent
+    # sent: it exists so the agent can notice "no reply arrived" and decide
+    # whether to follow up, under hard bounds. It rides this same schedule
+    # engine deliberately (one writer, one supervisor, one persist path — see
+    # the design's §8.2.1): ``kind`` is what makes it a different MECHANISM on
+    # shared substrate, and ``hidden`` is what keeps it out of every rendered
+    # surface while its fire text still reaches the model's context.
+    #
+    # COST, STATED: ``extra="forbid"`` means an OLD build drops patience rows
+    # on load. They are minutes-lived and the design accepted this; the PR that
+    # added them states it too.
+
+    #: ``scheduled`` is an ordinary wake (today's behaviour exactly, and what
+    #: every pre-patience row reads as). ``patience`` rows are hidden,
+    #: created only by the ``patience`` tool / ``send(patience=…)``, and
+    #: filtered out of every human-facing listing and count.
+    kind: Literal["scheduled", "patience"] = "scheduled"
+    #: Hidden deliveries emit no receipt event and are skipped by replay — the
+    #: requirement is "no wake line, no card, no badge, no timer notification"
+    #: while the TEXT stays in the model's context (``harness/render.py`` turns
+    #: ``wake_prompt`` custom messages into user messages either way).
+    hidden: bool = False
+    #: One episode = a chain of unanswered waits (R31/R35). ``episode_id``
+    #: equals the row's own id for patience rows; the FIRE carries it into the
+    #: transcript so a continuation after the row retired can still be
+    #: classified from the shared truth (restart-safe).
+    episode_id: str = ""
+    #: Which outbound message this wait belongs to: 1 = the message that
+    #: started the episode; each re-arm increments it. ``max_attempts`` bounds
+    #: it (R35).
+    attempt: int = 0
+    #: When THIS attempt was armed (epoch ms). The cancel-on-reply watermark
+    #: compares it against the session's last real user/peer inbound: a fire
+    #: whose ``armed_at`` predates that inbound is retired silently — the
+    #: cross-runtime half of R34 that cannot rely on the in-memory cancel.
+    armed_at: int = 0
+    #: The outbound message reference this wait attaches to. Spellings:
+    #: ``message:<id>`` (a conversation message; the default target flushes the
+    #: turn's own output id at turn end) or ``peer:<name-or-id>`` (armed via
+    #: ``send(patience=…)``; the fire note names that peer). Empty = unnamed.
+    armed_after: str = ""
+    #: Optional agent-supplied note, rendered into the fire text so the next
+    #: turn knows what the wait was about (R38: the agent supplies judgement;
+    #: the mechanism supplies defaults and bounds).
+    note: str = ""
 
 
 class DueWake(BaseModel):

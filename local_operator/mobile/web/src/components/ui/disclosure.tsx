@@ -49,6 +49,7 @@ export function Disclosure({
 	forceClosed = false,
 	className,
 	headerClassName,
+	hintClassName,
 }: {
 	header: ReactNode;
 	children: ReactNode;
@@ -64,6 +65,9 @@ export function Disclosure({
 	forceClosed?: boolean;
 	className?: string;
 	headerClassName?: string;
+	/** Extra classes for the held-shut hint — see its own note below; the
+	    subagents roster passes a stand-down width, nothing else does. */
+	hintClassName?: string;
 }) {
 	const [open, setOpen] = useState(defaultOpen);
 	const shown = open && !forceClosed;
@@ -98,8 +102,19 @@ export function Disclosure({
 					/* Says why it is inert, in the row itself, at no vertical cost.
 					   `shrink-0` so a long panel label truncates before this does —
 					   the panel budget this state enforces is measured in rows, so
-					   the explanation must not wrap the header onto a second one. */
-					<span className="shrink-0 text-meta text-ink-dim">· answer first</span>
+					   the explanation must not wrap the header onto a second one.
+
+					   `hintClassName` is the one caller that must let it stand down
+					   (mobile UX batch 2, 320x568): the subagents row carries THREE
+					   counts beside the hint and at narrow widths they cannot share
+					   one line — the row overflowed and the hint, a later sibling,
+					   painted over the tail of the danger `· 1 failed` count. Above
+					   the measured fit width everything shows; below it the counts
+					   and the label come first (D4: a failed fan-out is the least
+					   expendable token in this row). */
+					<span className={cn("shrink-0 text-meta text-ink-dim", hintClassName)}>
+						· answer first
+					</span>
 				) : null}
 			</button>
 			{shown ? children : null}

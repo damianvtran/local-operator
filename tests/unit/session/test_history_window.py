@@ -635,6 +635,177 @@ async def _compacted_journal(directory: Path, *, compactions: int, rows_each: in
     return transcript, written
 
 
+@pytest.mark.asyncio
+async def test_hidden_wake_rows_never_reach_the_display_window(tmp_path: Path) -> None:
+    """The desktop history drops hidden fires; the model's replay keeps them.
+
+    The visible wake beside the hidden one is the control: over-suppression
+    would hide a wake the user actually scheduled. Assertions are on ROW
+    IDs, not rendered text — a wake custom row reaches the desktop as its
+    ``CustomMessage`` (its text is the client's to render), so text cannot
+    be the discriminator.
+    """
+    from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
+
+    transcript = Transcript(tmp_path / "sess")
+    await transcript.append_messages([Message.user("ask"), Message.assistant("answer")])
+    hidden = CustomMessage(
+        custom_type=WAKE_PROMPT_MESSAGE_TYPE,
+        attribution="user",
+        details={
+            "text": "hidden patience fire",
+            "kind": "patience",
+            "hidden": True,
+            "wake_id": "patience-1",
+            "occurrence": 1,
+        },
+    )
+    visible = CustomMessage(
+        custom_type=WAKE_PROMPT_MESSAGE_TYPE,
+        attribution="user",
+        details={"text": "visible wake fire", "wake_id": "w1", "occurrence": 3},
+    )
+    await transcript.append_messages([hidden, visible])
+
+    page = window(transcript)
+    ids = {str(getattr(m, "id", "")) for m in page.messages}
+    assert hidden.id not in ids
+    assert visible.id in ids
+    # Display-only: the model's own replay still carries the hidden fire.
+    llm_ids = {str(getattr(m, "id", "")) for m in transcript.build_llm_history(through_id=None)}
+    assert hidden.id in llm_ids
+
+
+@pytest.mark.asyncio
+async def test_hidden_wake_rows_are_stripped_from_audit_pages_too(tmp_path: Path) -> None:
+    """The AUDIT phase serves stored rows verbatim — it needs its own arm.
+
+    The wakes are appended BEFORE a compaction whose kept window starts after
+    them, so the whole walk has to enter the audit phase to reach them; the
+    visible wake's presence in the walked rows proves the phase really was
+    walked, rather than the hidden row being absent from an unwalked region.
+    """
+    from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
+
+    transcript = Transcript(tmp_path / "s")
+    hidden = CustomMessage(
+        custom_type=WAKE_PROMPT_MESSAGE_TYPE,
+        attribution="user",
+        details={
+            "text": "hidden patience fire",
+            "kind": "patience",
+            "hidden": True,
+            "wake_id": "patience-1",
+            "occurrence": 1,
+        },
+    )
+    visible = CustomMessage(
+        custom_type=WAKE_PROMPT_MESSAGE_TYPE,
+        attribution="user",
+        details={"text": "visible wake fire", "wake_id": "w1", "occurrence": 3},
+    )
+    await transcript.append_messages([hidden, visible])
+    batch = [Message.user(f"kept row {index}") for index in range(4)]
+    await transcript.append_messages(batch)
+    await transcript.append_compaction("summary", batch[0].id, 500)
+
+    rows, pages = _walk(transcript, max_messages=3)
+    assert any(page.audit for page in pages), "the walk never entered the audit phase"
+    ids = {str(getattr(m, "id", "")) for m in rows}
+    assert visible.id in ids
+    assert hidden.id not in ids
+
+
+def _patience_arm_and_read_pairs() -> tuple[list[Message], Message, Message, Message, Message]:
+    """The reviewer's R2-1 repro, as product-shaped rows.
+
+    The arm is the shape the product writes when the patience tool runs (a
+    text-less assistant row carrying one ``patience`` call, then its tool
+    result); the read pair is the CONTROL — an ordinary call/result that must
+    keep rendering, so an over-broad filter fails this test too.
+    """
+    arm_call = Message.assistant(
+        "", tool_calls=[ToolCall(id="call-patience", name="patience", arguments={"op": "arm"})]
+    )
+    arm_result = Message.tool_result(
+        ToolResult(
+            tool_call_id="call-patience",
+            tool_name="patience",
+            content=[TextContent(text="armed 5m")],
+        )
+    )
+    read_call = Message.assistant(
+        "", tool_calls=[ToolCall(id="call-read", name="read", arguments={"path": "f"})]
+    )
+    read_result = Message.tool_result(
+        ToolResult(
+            tool_call_id="call-read",
+            tool_name="read",
+            content=[TextContent(text="file body")],
+        )
+    )
+    return (
+        [arm_call, arm_result, read_call, read_result],
+        arm_call,
+        arm_result,
+        read_call,
+        read_result,
+    )
+
+
+@pytest.mark.asyncio
+async def test_patience_tool_rows_never_reach_the_display_window(tmp_path: Path) -> None:
+    """R2-1: the arm's TOOL ROWS cross the owner→viewer window unless filtered.
+
+    The fire filter beside this one proves the phase subtracted the wake
+    delivery; the arm's own call/result pair is a separate shape — a rendered
+    ``Message`` (not a custom wake row) — and it painted on the wire (client
+    payloads ``tool_calls=[{name:'patience'}]`` / ``tool_name='patience'``)
+    until the window builders learned the second shape. Display-only: the
+    model's own replay must keep the pair, or the agent cannot see the wait it
+    armed.
+    """
+    transcript = Transcript(tmp_path / "sess")
+    pair, arm_call, arm_result, read_call, read_result = _patience_arm_and_read_pairs()
+    await transcript.append_messages([Message.user("ask"), Message.assistant("answer")])
+    await transcript.append_messages(pair)
+
+    page = window(transcript)
+    ids = {str(getattr(m, "id", "")) for m in page.messages}
+    assert arm_call.id not in ids and arm_result.id not in ids, "the arm's rows painted"
+    assert read_call.id in ids and read_result.id in ids, "the control call was eaten"
+    rendered = " ".join(
+        (getattr(m, "text", "") or "") + " " + json.dumps(m.model_dump(mode="json"))
+        for m in page.messages
+    )
+    assert "armed 5m" not in rendered and '"patience"' not in rendered
+    # Display-only: the model's replay still carries the arm's pair.
+    llm_ids = {str(getattr(m, "id", "")) for m in transcript.build_llm_history(through_id=None)}
+    assert arm_call.id in llm_ids and arm_result.id in llm_ids
+
+
+@pytest.mark.asyncio
+async def test_patience_tool_rows_are_stripped_from_audit_pages_too(tmp_path: Path) -> None:
+    """The audit phase serves stored rows verbatim — the second arm again.
+
+    The pair is appended BEFORE a compaction whose kept window starts after
+    it, so reaching it requires the audit phase; the control pair's presence in
+    the walked rows proves that phase really was walked.
+    """
+    transcript = Transcript(tmp_path / "s")
+    pair, arm_call, arm_result, read_call, read_result = _patience_arm_and_read_pairs()
+    await transcript.append_messages(pair)
+    batch = [Message.user(f"kept row {index}") for index in range(4)]
+    await transcript.append_messages(batch)
+    await transcript.append_compaction("summary", batch[0].id, 500)
+
+    rows, pages = _walk(transcript, max_messages=3)
+    assert any(page.audit for page in pages), "the walk never entered the audit phase"
+    ids = {str(getattr(m, "id", "")) for m in rows}
+    assert read_call.id in ids and read_result.id in ids, "the control call was eaten"
+    assert arm_call.id not in ids and arm_result.id not in ids, "the arm's rows painted"
+
+
 def _walk(transcript: Transcript, **kwargs):
     """Follow the whole backward chain, returning (rows, pages, audit_pages)."""
     page = window(transcript, **kwargs)

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-09-29T10:07:08Z",
-  "generator_version": "0.64.0",
+  "generated_at": "2026-09-29T22:19:09Z",
+  "generator_version": "0.64.3",
   "source": "https://github.com/damianvtran/local-operator",
   "seeds": [
     {
@@ -9,14 +9,15 @@
       "description": "Your chief of staff: orchestrates agents and teams on your behalf, keeps an eye on everything in flight, and reports back.",
       "when_to_use": "Handing a request to a team or specialist, starting parallel work across agents, or asking for a status roll-up of everything in flight.",
       "version": "1.2.0",
-      "instructions_sha256": "1db276f805891a95a310ae03f5aa125f95cf4bc2334dcdf0e0e1e5e097d8ff1e",
-      "instructions_chars": 7984,
+      "instructions_sha256": "77223a53302c1600e2a97a122893d83a36950289140c7693da37cd4ca27bdc9f",
+      "instructions_chars": 7997,
       "tools": null,
       "effort": null,
       "delegate": true,
       "tags": [
         "role",
-        "delegate:yes"
+        "delegate:yes",
+        "class:proactive"
       ],
       "categories": [
         "role"

@@ -255,6 +255,32 @@ describe("the pin gesture", () => {
 		expect(applySessionPin).toHaveBeenCalledWith("a1", true);
 		await waitFor(() => expect(setSessionPin).toHaveBeenCalledWith("a1", true));
 	});
+
+	it("a second finger's scrim tap still dismisses when the opening finger releases first (batch 2, MINOR 1)", async () => {
+		sessionList = [summary({ session_id: "a1", conversation_name: "Alpha" })];
+		render(<SessionListScreen />);
+		const card = cardByName("Alpha");
+		longPress(card);
+		const scrim = await screen.findByRole("button", { name: "close" });
+
+		/* The two-finger interleave the first guard ate (agent review round 1,
+		   MINOR 1): A held the row (its pointerdown predates the sheet), B
+		   presses the scrim, A releases FIRST, B releases second, and both
+		   fingers' release clicks arrive. A's ghost click must still be
+		   swallowed (the U1 property), and B's genuine tap must pass — the
+		   per-pointer set makes B's release disarm what A's armed. Under the
+		   old document-wide flag, A's release cleared the evidence and B's
+		   release armed instead, so B's tap was eaten. */
+		fireEvent.pointerDown(scrim, { pointerId: 2 });
+		fireEvent.pointerUp(card, { pointerId: 1 });
+		fireEvent.click(scrim); /* A's ghost release click — swallowed */
+		expect(screen.getByRole("button", { name: "Pin to the top" })).toBeTruthy();
+
+		/* B's own release disarms the pending ghost: B's tap dismisses. */
+		fireEvent.pointerUp(scrim, { pointerId: 2 });
+		fireEvent.click(scrim);
+		expect(screen.queryByRole("button", { name: "Pin to the top" })).toBeNull();
+	});
 });
 
 describe("empty sections cost no heading (design round 1, D1)", () => {

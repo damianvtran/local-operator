@@ -444,6 +444,15 @@ class _ChildRecord:
     #: attribute it was added to outlast, and a child that settled hours ago is
     #: normally resumed after a restart (review round 3, R6).
     restricted: bool = False
+    #: The team, team lineage (ids, top first) and depth the child was born
+    #: under (BEN-7-D1). Persisted like ``restricted`` and for the same reason:
+    #: a resume rebuilds against a session that is not necessarily the real
+    #: parent, so these cannot be re-derived there. An old sidecar loads with
+    #: ``""``/``()``/``0``, meaning "unknown"; resume then falls back to the
+    #: ancestry it can still see.
+    team_name: str = ""
+    team_lineage: tuple[str, ...] = ()
+    depth: int = 0
     #: The child's transcript directory. Set at attach; the whole basis of
     #: resume, and the reason a record outlives the job row.
     session_dir: Path | None = None
@@ -760,7 +769,7 @@ class RosterPass:
         running: dict[str, bool] = {}
         twins: dict[Path, list[_ChildRecord]] = {}
         for record in self.records:
-            job = self._root_jobs.get(record.job_id) if self._root_jobs is not None else None
+            job = self._roster_row(record)
             live = job is not None and job.status == "running"
             running[record.job_id] = live
             if live and record.session_dir is not None:
@@ -773,7 +782,31 @@ class RosterPass:
 
     def job_row(self, record: _ChildRecord) -> Any | None:
         """The record's row in the OWNING session's manager, as ``_describe`` reads it."""
-        return self._root_jobs.get(record.job_id) if self._root_jobs is not None else None
+        return self._roster_row(record)
+
+    def _roster_row(self, record: _ChildRecord) -> Any | None:
+        """The live row the roster reads for one record.
+
+        The root's manager first — the flat case, and the same single point
+        ``get()`` this has always been — then the pass's own index, which is
+        where a GRANDCHILD's row lives: its job is registered in its parent's
+        manager, so the root's never held it and a running grandchild used to
+        render as gone-and-resumable while ``resume`` (which asks
+        :meth:`SubagentComms._is_running`) refused it as still running. The two
+        must agree; ``_describe``'s settle-window branch says so explicitly.
+
+        Never ``job_ref``. That is a retained snapshot kept so a settled child
+        stays inspectable after its manager swept the row, so reading it as the
+        current row resurrects a stale ``running`` over a recorded outcome and
+        the row renders "still settling" instead of resumable. The roster asks
+        "is this child live NOW", which only a manager can answer.
+        """
+        if self._root_jobs is not None:
+            job = self._root_jobs.get(record.job_id)
+            if job is not None:
+                return job
+        indexed = self._indexed_jobs.get(record.job_id)
+        return indexed[1] if indexed is not None else None
 
     def is_running(self, record: _ChildRecord) -> bool:
         """Whether the record's job row says running, resolved once for the pass."""
@@ -1195,6 +1228,9 @@ class SubagentComms:
         launch_message_id: str = "",
         agent_role: str = "",
         effort: str = "",
+        team_name: str = "",
+        team_lineage: tuple[str, ...] = (),
+        depth: int = 0,
     ) -> None:
         """Note a child that has been registered but may not have started.
 
@@ -1232,6 +1268,9 @@ class SubagentComms:
             existing.launch_message_id = launch_message_id
             existing.agent_role = agent_role
             existing.effort = effort
+            existing.team_name = team_name
+            existing.team_lineage = tuple(team_lineage)
+            existing.depth = depth
             existing.job_ref = self.job(job_id)
             self._notify_change()
             return
@@ -1244,6 +1283,9 @@ class SubagentComms:
             launch_message_id=launch_message_id,
             agent_role=agent_role,
             effort=effort,
+            team_name=team_name,
+            team_lineage=tuple(team_lineage),
+            depth=depth,
         )
         self._records[job_id].job_ref = self.job(job_id)
         self._evict_overflow()
@@ -1282,6 +1324,12 @@ class SubagentComms:
             # truthy, so a fold can only ever preserve a denial, never clear
             # one.
             record.restricted = record.restricted or prior.restricted
+            # A continuation is the same child, so it keeps the team it was
+            # born under (BEN-7-D1); the live launch already stamped these
+            # when it had them.
+            record.team_name = record.team_name or prior.team_name
+            record.team_lineage = record.team_lineage or prior.team_lineage
+            record.depth = record.depth or prior.depth
             record.attempt_aliases = list(
                 dict.fromkeys([*prior.attempt_aliases, prior.job_id, *record.attempt_aliases])
             )
@@ -1566,11 +1614,21 @@ class SubagentComms:
 
     # -- addressing -----------------------------------------------------------
 
-    def live_ids(self) -> list[str]:
-        """Job ids of children that are running right now."""
-        return [job_id for job_id, record in self._records.items() if self._is_running(record)]
+    def live_ids(self, scope: str | None = None) -> list[str]:
+        """Job ids of children that are running right now.
 
-    def resolve(self, target: str) -> tuple[list[str], str | None]:
+        ``scope`` narrows to that job's descendants: a pod lead's ``"all"``
+        means its own subtree, never its siblings' (BEN-7-D5).
+        """
+        sessions = self._sessions()
+        allowed = self.descendant_ids(scope) if scope else None
+        return [
+            job_id
+            for job_id, record in self._records.items()
+            if (allowed is None or job_id in allowed) and self._is_running(record, sessions)
+        ]
+
+    def resolve(self, target: str, *, scope: str | None = None) -> tuple[list[str], str | None]:
         """Resolve one address to job ids: ``(ids, error)``.
 
         Accepts a job id, ``"all"`` (every running child) or a label. Labels
@@ -1578,16 +1636,35 @@ class SubagentComms:
         resolving them here means it does not have to keep a private id
         table; an ambiguous label is an error listing the candidates rather
         than a silent pick.
+
+        ``scope`` is the calling child's own job id when a delegating child
+        (a pod lead) addresses ITS subagents: every answer is confined to
+        that job's descendants, and an id outside them is refused as "not
+        your subagent" rather than acted on (BEN-7-D5). ``None`` is the top
+        session, which addresses the whole tree as before.
         """
         target = target.strip()
         if not target:
             return [], "empty target"
         if target == "all":
-            live = self.live_ids()
+            live = self.live_ids(scope)
             return (live, None) if live else ([], "no running subagents")
+        allowed = self.descendant_ids(scope) if scope else None
+        # Canonicalize through the attempt aliases BEFORE matching, as
+        # ``_job_from`` does: a resumed child's pre-resume id is not a record
+        # key, so without this the address fell through to the label path and
+        # a lead aiming at its own resumed worker read as ``unknown subagent``
+        # (or missed the ``not your subagent`` refusal outside its subtree).
+        target = self._aliases.get(target, target)
         if target in self._records:
+            if allowed is not None and target not in allowed:
+                return [], f"not your subagent: {target!r}"
             return [target], None
-        matches = [job_id for job_id, record in self._records.items() if record.label == target]
+        matches = [
+            job_id
+            for job_id, record in self._records.items()
+            if record.label == target and (allowed is None or job_id in allowed)
+        ]
         if len(matches) > 1:
             # A resumed child reuses its label, so the stopped record and its
             # continuation both match. Only one of them can be running, and a
@@ -1595,12 +1672,17 @@ class SubagentComms:
             # the first resume would permanently revoke the label the model
             # was told to address children by. An ambiguity among SETTLED
             # records is real and still reported.
-            live = [job_id for job_id in matches if self._is_running(self._records[job_id])]
+            sessions = self._sessions()
+            live = [
+                job_id for job_id in matches if self._is_running(self._records[job_id], sessions)
+            ]
             if len(live) == 1:
                 return live, None
             return [], f"label {target!r} is ambiguous: {', '.join(matches)}"
         if len(matches) == 1:
             return matches, None
+        if allowed is not None and any(r.label == target for r in self._records.values()):
+            return [], f"not your subagent: {target!r}"
         return [], f"unknown subagent {target!r}"
 
     def record_outcome(
@@ -1764,6 +1846,9 @@ class SubagentComms:
                     # and a resumed grandchild that can activate the writes it
                     # was refused (review round 3, R6).
                     "restricted": record.restricted,
+                    "team_name": record.team_name,
+                    "team_lineage": list(record.team_lineage),
+                    "depth": record.depth,
                     # Read off the retained row when there is one, because the
                     # runner keeps that label current (a provider fallback
                     # rewrites it); the restored copy covers a row that did
@@ -1865,6 +1950,14 @@ class SubagentComms:
                 # never recorded. A denial can only ever be ADDED afterwards,
                 # by the attach stamp or the live computation.
                 restricted=bool(row.get("restricted")),
+                # Missing on a pre-BEN-7 sidecar: "unknown", see the field.
+                team_name=str(row.get("team_name") or ""),
+                team_lineage=tuple(str(item) for item in row.get("team_lineage") or () if item),
+                depth=(
+                    row["depth"]
+                    if isinstance(row.get("depth"), int) and not isinstance(row["depth"], bool)
+                    else 0
+                ),
                 # Missing defaults to "" for a sidecar written before this
                 # field existed; the resume then reads only the live row.
                 model_label=str(row.get("model_label") or ""),
@@ -2302,7 +2395,7 @@ class SubagentComms:
         if record.child is None:
             if record.settled or not self._is_running(record):
                 return Reply(job_id, record.label, error=self._gone_reason(record))
-            jobs = self._jobs()
+            jobs = self._owning_jobs(job_id)
             job = jobs.get(job_id) if jobs is not None else None
             parked = bool(job is not None and getattr(job, "queued", False))
             # Parked behind the capacity gate: no amount of yielding starts it,
@@ -2412,7 +2505,9 @@ class SubagentComms:
         cancel reports the state rather than pretending to act."""
         record = self._record(job_id)
         label = record.label if record is not None else job_id
-        jobs = self._jobs()
+        # The manager that OWNS the job: a grandchild runs in its parent's
+        # manager, and the root's knew nothing of it ("unknown job") (BEN-7-D5).
+        jobs = self._owning_jobs(job_id)
         if jobs is None:
             return Delivery(job_id, label, "failed", "no job manager attached to this session")
         job = jobs.get(job_id)
@@ -2471,7 +2566,7 @@ class SubagentComms:
                 "subagent has not started yet, so there is no transcript to pause; "
                 "use op='cancel' to drop it",
             )
-        jobs = self._jobs()
+        jobs = self._owning_jobs(job_id)
         if jobs is None:
             return Delivery(
                 job_id, record.label, "failed", "no job manager attached to this session"
@@ -2540,7 +2635,12 @@ class SubagentComms:
             )
         if not (record.session_dir / TRANSCRIPT_FILENAME).exists():
             return None, f"transcript for {record.label} is gone from disk; launch a new one"
-        jobs = self._jobs()
+        # Relaunch under the child's REAL parent when that parent is live, so
+        # the continuation lands in the ledger that owns it and its replies
+        # reach the agent that delegated (BEN-7-D5). A direct child's parent is
+        # this session, as before.
+        launch_parent = self._launch_parent(record)
+        jobs = getattr(launch_parent, "jobs", None)
         if jobs is None:
             return None, "no job manager attached to this session"
         # The role and tier are carried FORWARD, not re-defaulted. Everything
@@ -2567,6 +2667,22 @@ class SubagentComms:
         # silently downgraded every resumed child to a generic no-role one.
         agent = record.agent_role or "task"
         effort = record.effort or None
+        # The team, lineage and depth the child was born under ride the
+        # record for the reason ``restricted`` does: the session this rebuilds
+        # against need not be the real parent, and a resumed pod worker must
+        # come back as a pod worker, not as a member of the root's team
+        # (BEN-7-D1, D7).
+        from local_operator.harness.subagent import (
+            TeamLaunchError,
+            resolve_launch_target,
+        )
+
+        try:
+            target = resolve_launch_target(
+                agent, launch_parent, carried=self._carried_launch(record)
+            )
+        except TeamLaunchError as exc:
+            return None, f"cannot resume {record.label}: {exc}"
         # A resume is a SECOND LAUNCH, so it must re-resolve the tier into a
         # model the way the first one did (``run_subagent`` explains why the
         # tier does not survive that resolution and rides separately). Passing
@@ -2601,7 +2717,9 @@ class SubagentComms:
             from local_operator.harness.subagent import SubagentModelUnavailable
 
             try:
-                resolved = resolve(agent, effort, strict=True)
+                # The role the child RUNS as: a ``team:pod`` lead is pod's
+                # manager, whose tier the first launch priced (BEN-7-D1).
+                resolved = resolve(target.role, effort, strict=True)
             except SubagentModelUnavailable as exc:
                 return None, f"cannot resume {record.label}: {exc}"
             if isinstance(resolved, ModelSpec):
@@ -2613,7 +2731,7 @@ class SubagentComms:
         new_job_id = run_subagent(
             label=record.label,
             prompt=message,
-            parent_session=self._session,
+            parent_session=launch_parent,
             jobs_manager=jobs,
             model_spec=model_spec,
             resume_dir=record.session_dir,
@@ -2621,6 +2739,7 @@ class SubagentComms:
             effort=effort,
             restricted=record.restricted,
             inherited_model=inherited,
+            target=target,
         )
         if inherited is not None or note:
             self._resume_models[new_job_id] = (inherited is not None and not note, note)
@@ -2630,6 +2749,61 @@ class SubagentComms:
         # invited to "resume" a run that is already going.
         record.paused = False
         return new_job_id, None
+
+    def _launch_parent(self, record: _ChildRecord) -> Any:
+        """The session a resumed child runs under: its live parent, else the root.
+
+        A LIVE parent wins so the continuation is owned by the agent that
+        delegated it. An orphan — a restart, or a sidecar whose parent row is
+        gone — falls back to this session rather than refusing, because
+        refusing deletes the recovery ``_inherited_model`` was built for: it
+        walks the RECORDED lineage precisely so a nested child can be resumed
+        when its parent no longer exists, and a refusal makes every branch of
+        that walk unreachable (D5 addendum 2, manager ruling 2026-09-26).
+
+        The fallback re-parents the JOB only. The child's team, lineage and
+        depth ride its own record (``_carried_launch``), so a resumed pod worker
+        still carries pod's preamble rather than the root's team.
+        """
+        if not record.parent_job_id:
+            return self._session
+        parent = self._record(record.parent_job_id)
+        if parent is not None and parent.child is not None and not parent.settled:
+            return parent.child
+        return self._session
+
+    def _carried_launch(self, record: _ChildRecord) -> Any:
+        """The team, lineage, depth and reporting line a resume re-enters.
+
+        A record written before these fields existed carries depth 0
+        ("unknown"): it falls back to what the registry can still see — depth
+        from the surviving ancestry, and the root's team, which is what every
+        resume stamped before BEN-7.
+        """
+        from local_operator.harness.subagent import (
+            CarriedLaunch,
+            describe_reports_to,
+            lookup_team,
+        )
+
+        team_name, lineage, depth = record.team_name, record.team_lineage, record.depth
+        if depth <= 0:
+            depth = len(self.ancestors(record.job_id)) + 1
+            root_team = getattr(self._session, "active_team", None)
+            team_name = str(getattr(root_team, "name", "") or "") if root_team else ""
+            root_id = getattr(root_team, "id", None) if root_team else None
+            lineage = (str(root_id),) if root_id else ()
+        reports_to = describe_reports_to("", "", None)
+        parent = self._record(record.parent_job_id) if record.parent_job_id else None
+        if parent is not None:
+            role = parent.agent_role or "task"
+            if role.lower().startswith("team:"):
+                team = lookup_team(self._session, role[len("team:") :])
+                role = str(getattr(team, "manager", role)) if team is not None else role
+            reports_to = describe_reports_to(parent.team_name, role, parent.job_id)
+        return CarriedLaunch(
+            team_name=team_name, team_lineage=tuple(lineage), depth=depth, reports_to=reports_to
+        )
 
     # -- child -> parent ------------------------------------------------------
 
@@ -2676,16 +2850,53 @@ class SubagentComms:
                 ),
             },
         )
-        self._session.queue_aside(lambda: message)
+        self._parent_session_of(record).queue_aside(lambda: message)
         return "delivered to the parent (it will read this at its next step)"
+
+    def _parent_session_of(self, record: _ChildRecord | None) -> Any:
+        """The live session of a child's REAL parent, else the root.
+
+        A worker's note belongs to the lead that launched it; delivering every
+        reply to the root bypassed the tier and left the lead blind (BEN-7-D5
+        probe: root asides 1, lead asides 0). A parent that has already
+        settled cannot read it, so the root gets it rather than nobody.
+        """
+        if record is not None and record.parent_job_id:
+            parent = self._record(record.parent_job_id)
+            if parent is not None and parent.child is not None and not parent.settled:
+                return parent.child
+        return self._session
 
     # -- internals ------------------------------------------------------------
 
     def _jobs(self) -> Any:
         return getattr(self._session, "jobs", None)
 
-    def _is_running(self, record: _ChildRecord) -> bool:
-        jobs = self._jobs()
+    def _owning_jobs(self, job_id: str, sessions: Sequence[Any] | None = None) -> Any:
+        """The job manager whose ledger holds ``job_id``: the root's for a direct
+        child, the live parent's for a grandchild.
+
+        Found by the same root-first walk :meth:`_job_from` uses, so a direct
+        child resolves to the root's manager exactly as before. Falls back to
+        the root's when no live session holds the row (a swept or settled job),
+        which is the answer every caller gave before BEN-7-D5.
+        """
+        record = self._record(job_id)
+        lookup = record.job_id if record is not None else job_id
+        for session in sessions if sessions is not None else self._sessions():
+            manager = getattr(session, "jobs", None)
+            try:
+                if manager is not None and manager.get(lookup) is not None:
+                    return manager
+            except Exception:
+                continue
+        return self._jobs()
+
+    def _is_running(self, record: _ChildRecord, sessions: Sequence[Any] | None = None) -> bool:
+        # Through the owning manager: the root's alone misreported every
+        # running grandchild as stopped, which also let ``resume`` start a
+        # second child on a live transcript (BEN-7-D5).
+        jobs = self._owning_jobs(record.job_id, sessions)
         if jobs is None:
             return False
         job = jobs.get(record.job_id)
@@ -2711,7 +2922,7 @@ class SubagentComms:
         ``queued`` can answer this: ``status`` reads ``running`` from
         registration, before a line has run.
         """
-        jobs = self._jobs()
+        jobs = self._owning_jobs(record.job_id)
         job = jobs.get(record.job_id) if jobs is not None else None
         return job is not None and getattr(job, "started_at", None) is not None
 
@@ -2743,7 +2954,7 @@ class SubagentComms:
         and the card truncates the reason as content — so a stuttered label
         spends the exact cells that would otherwise have carried the state.
         """
-        jobs = self._jobs()
+        jobs = self._owning_jobs(record.job_id)
         job = jobs.get(record.job_id) if jobs is not None else None
         if job is not None and getattr(job, "queued", False):
             return (
@@ -2775,7 +2986,7 @@ class SubagentComms:
         # down) leads the job row, which the manager stamps a moment later.
         # Reading the row first would tell the caller the subagent "is
         # running" in the same breath as telling it to go fetch the result.
-        jobs = self._jobs()
+        jobs = self._owning_jobs(record.job_id)
         job = jobs.get(record.job_id) if jobs is not None else None
         if record.settled and (job is None or job.status == "running"):
             state = "finishing"

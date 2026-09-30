@@ -34,10 +34,13 @@ export const gruvboxLight: ThemeDefinition = {
 		ink: "#3C3836",
 		inkMuted: "#665C54",
 		// Canonical dark4 7C6F64 measures 4.21:1 on `sunken`, under the 4.5
-		// floor for a tertiary weight. Darkened minimally along its own warm
-		// gray; dark4 itself still serves as the structural border below, where
-		// the floor is 3:1 and it clears with room.
-		inkDim: "#776A60",
+		// floor for a tertiary weight — and 4.33–4.34:1 on the two semantic
+		// washes, which paint dim ink for real (the failed tool row's gauge,
+		// the selected quick-pick's trailing text; D3). Darkened along its own
+		// warm gray until all of them clear; dark4 itself still serves as the
+		// structural border below, where the floor is 3:1 and it clears with
+		// room.
+		inkDim: "#73665D",
 		inkDisabled: "#A89984",
 
 		hairline: "#DFD4B1",

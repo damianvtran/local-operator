@@ -50,7 +50,56 @@ A bare token (no prefix) stays an agent, so the existing `coder` / `reviewer:2` 
 
 `team show <name>` badges a nested slot `(team)` so an org is distinguishable from a flat roster.
 
-> The chart renders the **declared** org — the structure the roster describes. The runtime that lets a manager delegate INTO a nested team's manager is a separate capability; a team-boundary node is tagged `(declared)` so the chart never implies a wiring that is not live yet.
+## Running a nested team
+
+A nested team is launched like a role: `task(agent="team:<name>")` starts that
+team's **manager** as a child, briefed with the sub-team's own roster and
+collaboration/project briefs. The prefix is case-insensitive. A bare name is a
+team launch only when the parent's roster has a `kind: team` slot of that name
+and no agent slot sharing it — if a roster declares both a member and a
+sub-team called `pod`, the bare `pod` stays an agent launch and the prefix is
+what starts the team.
+
+`team:pod:2` on a **roster** means the manager may run up to two independent
+`team:pod` leads; it is advisory, exactly like `coder:2`. As a **launch**
+argument a count is an error: one `task` call starts one child, so launch one
+`team:pod` per copy you want.
+
+Depth counts hops below the top session: the top is 0, its `task` children are
+1, their children 2. In any tree that runs a team, a launch that would sit
+deeper than `subagents.max_team_depth` (default 3, clamped to 1–8) is refused
+with a `depth cap:` error naming the depth and the key. A cycle — a team that
+nests a team above it, including itself — is refused with a `cycle:` error
+naming the chain, and an unknown name with `unknown team`. These are errors,
+never a silent generic child: a launch that cannot run says so instead of
+pretending to delegate.
+
+Every `team:` launch at any depth, and every launch at depth 2 or deeper inside
+a team lineage, carries one line of chain of command: who it reports to, that
+it must not push, merge, deploy, release, delete data or print secrets, and
+that when the work needs one of those it stops that step and escalates through
+`hub` with what it would have run and why. Depth-1 members of the top session's
+own team carry the team brief without that line; the base safety rules cover
+them.
+
+That line is prompt-level, not enforcement: session-wide auto-approve reaches
+delegated work, so a grandchild under `--yolo` has no human gate. The escalation
+wording is what stands in for one — keep it in force when you edit a team's
+instructions.
+
+A lead that holds `task` (a sub-team's manager) gets the parent-shaped `hub`
+over **its own** subtree: list, peek, send, ask, steer, pause, cancel and
+resume its workers, and nothing else — an id outside its descendants is refused
+as `not your subagent`. `to=["parent"]` (or a bare `message` with no `op`)
+reports up to the agent that delegated to it. A non-delegating child keeps the
+message-only `hub`.
+
+Resuming a stopped child relaunches it under its live parent when that parent
+is still running, so the continuation lands in the ledger that owns it. When
+the parent is gone — a restart, or a sidecar whose parent row did not survive —
+the resume falls back to this session rather than refusing, and the child keeps
+the team, lineage and depth its own record carries: a pod worker resumed after
+its lead died still comes back under the pod's brief, not the root team's.
 
 ## Running a team
 
@@ -63,7 +112,7 @@ A bare token (no prefix) stays an agent, so the existing `coder` / `reviewer:2` 
 - `/team chart chart` charts a team literally named `chart` (the second token is the `[name]`).
 - `/team =chart <request>` TALKS to a team named `chart` — a leading `=` on the first token means "literal team name, never a subcommand" (`=` cannot appear in a real team name, so it never collides).
 
-Inside the chart: `+`/`-` change zoom tier (outline → standard → detailed), `f` fits to the viewport width (never collapsing past where the members are visible), `e` expands/collapses the whole canvas, `?` toggles a glyph legend (◆ manager, `?` unresolved, `↩` cycle, `⋯` depth-limit, `·N` members, `×N` copies, and what `(declared)` means). Arrows scroll a line; `shift+←/→` page horizontally and `PageUp/PageDown` vertically; `Home`/`End` jump to the top-left / bottom-right corner; `Esc` leaves. The chart is wide, so horizontal scroll (the `↔↕` footer hint) is the primary way to reach members off the right edge.
+Inside the chart: `+`/`-` change zoom tier (outline → standard → detailed), `f` fits to the viewport width (never collapsing past where the members are visible), `e` expands/collapses the whole canvas, `?` toggles a glyph legend (◆ manager, `?` unresolved, `↩` cycle, `⋯` depth-limit, `·N` members, `×N` copies). Arrows scroll a line; `shift+←/→` page horizontally and `PageUp/PageDown` vertically; `Home`/`End` jump to the top-left / bottom-right corner; `Esc` leaves. The chart is wide, so horizontal scroll (the `↔↕` footer hint) is the primary way to reach members off the right edge.
 
 As the manager:
 

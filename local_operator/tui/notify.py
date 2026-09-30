@@ -129,6 +129,7 @@ from pathlib import Path
 from typing import Callable, Literal, Mapping
 
 from local_operator import terminals
+from local_operator.harness.rows import CLOSED_NOTICE_TEXT, RETIRED_NOTICE_TEXT
 from local_operator.proc import spawn_detached
 from local_operator.tui.settings import settings_get
 
@@ -168,11 +169,38 @@ CONTEXT_COMPLETE = "Complete"
 CONTEXT_INPUT_REQUIRED = "Input required"
 CONTEXT_ATTENTION = "Needs attention"
 CONTEXT_INTERRUPTED = "Interrupted"
+#: The retire-for-build arm's own category (2026-09-29; seed 7e797aaaf6e7).
+#: REQUIRED to be a distinct entry rather than a synonym for error's "Needs
+#: attention", for the two reasons CONTEXT_INTERRUPTED documents next door:
+#: folding it into error would make every update-cut banner assert a failure
+#: (design round 1, D3), and the digest resolves a uniform set through this
+#: map — a shared value would make two DIFFERENT kinds resolve to one
+#: category, which its vocabulary test refuses. Unlike ``closed`` this kind
+#: MUST be registered: retired announces (a turn was cut and the user should
+#: know), and an unregistered kind resolves to "Complete"/"Task complete" —
+#: a lie, which is the defect class this whole vocabulary exists to avoid.
+CONTEXT_RETIRED = "Retired"
 BODY_COMPLETE = "Task complete"
 BODY_APPROVAL = "Waiting for approval"
 BODY_ASK = "Waiting for your answer"
 BODY_ERROR = "Stopped with an error"
 BODY_INTERRUPTED = "Stopped before finishing"
+#: The retire-for-build row's sentence, shared verbatim with ``rows.py`` (the
+#: module that owns this row on both surfaces) so the banner cannot drift
+#: from the row it stands for. Warning-tier in the row; the banner's own
+#: urgency comes from the kind, not from this string.
+BODY_RETIRED = RETIRED_NOTICE_TEXT
+#: The neutral post-completion closure's sentence (v2 directive, 2026-09-29).
+#: The words live in ``harness/rows.py`` — the module that owns this row on
+#: both surfaces — and are imported rather than retyped so the banner cannot
+#: drift from the row it stands for. Deliberately NOT an entry in
+#: :data:`CONTEXTS` (nor in :data:`NotifyKind`): a closure is never announced
+#: — the record publishes with ``notify=False``, which every announce path
+#: already reads — so growing the notification CATEGORY vocabulary for it
+#: would widen two pinned contracts (and collide the "Complete" context with
+#: ``complete``'s) with no reachable caller. It lives in :data:`BODIES` because
+#: that is where a call site names an event and gets the house sentence.
+BODY_CLOSED = CLOSED_NOTICE_TEXT
 
 #: Short state categories for notification surfaces with a title/subtitle/body
 #: split. Approval and ask intentionally share the category: both mean the turn
@@ -192,6 +220,7 @@ CONTEXTS: dict[str, str] = {
     "ask": CONTEXT_INPUT_REQUIRED,
     "error": CONTEXT_ATTENTION,
     "interrupted": CONTEXT_INTERRUPTED,
+    "retired": CONTEXT_RETIRED,
 }
 
 #: The digest's subtitle when the sessions it stands for did NOT all end the
@@ -243,7 +272,7 @@ def digest_subtitle(kinds: Sequence[str]) -> str:
 #: Notification kinds. ``complete`` is an edge the user may ignore; the two
 #: waiting kinds are edges the turn is BLOCKED on, which is why they are
 #: separated — see :func:`urgency_for`.
-NotifyKind = Literal["complete", "approval", "ask", "error", "interrupted"]
+NotifyKind = Literal["complete", "approval", "ask", "error", "interrupted", "retired"]
 
 #: Bodies keyed by kind, so a call site names the event rather than the prose.
 BODIES: dict[str, str] = {
@@ -252,6 +281,8 @@ BODIES: dict[str, str] = {
     "ask": BODY_ASK,
     "error": BODY_ERROR,
     "interrupted": BODY_INTERRUPTED,
+    "closed": BODY_CLOSED,
+    "retired": BODY_RETIRED,
 }
 
 #: Title for a background completion whose session has no STORED name, and the
@@ -285,11 +316,36 @@ BACKGROUND_FALLBACK_TITLE = "A session finished"
 # these functions take whatever label the caller resolved rather than looking
 # one up.
 REMOTE_PARK_APPROVAL_TITLE = "Waiting for approval on {device}"
-REMOTE_PARK_APPROVAL_BODY = (
-    "Open the session here to deny it. Allowing it happens on {device} (Touch ID) or "
-    "on a phone paired with it. If nothing there can check a signature: run "
-    "`lop operator install` on {device} (one privileged step) — `lop network ready "
-    "--peer {device}` shows the operator_authority row."
+#: The lead asks for the ONE deny gesture its reader can make. "Open the
+#: session here to deny it." is true for a reader somewhere else; the reader
+#: who IS this attached origin with no card on screen has nothing to open
+#: (beat-2 F-A / design round 1, D1), so that shape takes the attached lead.
+#: Everything after the lead is true in BOTH shapes and lives once in
+#: :data:`REMOTE_PARK_APPROVAL_REMAINDER`; the ask's single sentence already
+#: carries the right gesture for both readers, so only the approval lead
+#: swaps, and an attached phrasing for the ask waits on the designer if the
+#: ask shape ever needs one.
+REMOTE_PARK_APPROVAL_LEAD = "Open the session here to deny it."
+REMOTE_PARK_APPROVAL_ATTACHED_LEAD = (
+    "Its gate card has not reached this view — deny it here once it does."
+)
+#: The clause names the row's OWN old-peer answer (beat-2 F-D, disambiguated
+#: per design round 1, D4): a peer that predates readiness reporting answers
+#: ``peer_too_old`` on the row the card points at, where the reader's next
+#: step is ``lop-update``. Without it a reader following the card met a
+#: different vocabulary at the exact step the card sent them to.
+REMOTE_PARK_APPROVAL_REMAINDER = (
+    "Allowing it happens on {device} (Touch ID) or on a phone paired with it. "
+    "If nothing there can check a signature: run `lop operator install` on {device} "
+    "(one privileged step) — `lop network ready --peer {device}` shows the "
+    "operator_authority row (a peer too old to report that row answers "
+    "`peer_too_old`, and needs `lop-update` first)."
+)
+REMOTE_PARK_APPROVAL_BODY = REMOTE_PARK_APPROVAL_LEAD + " " + REMOTE_PARK_APPROVAL_REMAINDER
+#: The same card for the reader the F-A fix exists for: attached, with the
+#: gate card not on screen. Only the lead differs (see above).
+REMOTE_PARK_APPROVAL_ATTACHED_BODY = (
+    REMOTE_PARK_APPROVAL_ATTACHED_LEAD + " " + REMOTE_PARK_APPROVAL_REMAINDER
 )
 REMOTE_PARK_ASK_TITLE = "Waiting for your answer on {device}"
 REMOTE_PARK_ASK_BODY = "Open the session here to answer it."
@@ -320,7 +376,7 @@ REMOTE_PARK_ASK_HINTS = (
 )
 
 
-def remote_park_card(device: str, kind: str, *, name: str = "") -> str:
+def remote_park_card(device: str, kind: str, *, name: str = "", attached: bool = False) -> str:
     """The in-app card for a park on ``device``: title line(s), then the body.
 
     THREE LINES WHEN THE CONVERSATION IS NAMED, two when it is not: the name
@@ -331,6 +387,12 @@ def remote_park_card(device: str, kind: str, *, name: str = "") -> str:
     drops the placeholder name a peer never chose rather than titling a card
     with it.
 
+    ``attached`` names the reader who IS this attached origin (the shape the
+    park notice fires for when its gate card is not on screen): the approval
+    lead swaps so the card does not send that reader to open a session they
+    are already looking at (beat-2 F-A / design round 1, D1). The caller
+    computes it from the same predicate the suppression uses.
+
     ``kind`` other than ``"approval"`` takes the ask wording: the two are the
     only kinds the vocabulary mints today (``normalise_pending`` translates a
     boolean to ``ask``), and a future kind that reaches here reads as "someone
@@ -338,7 +400,8 @@ def remote_park_card(device: str, kind: str, *, name: str = "") -> str:
     """
     if kind == "approval":
         title = REMOTE_PARK_APPROVAL_TITLE.format(device=device)
-        body = REMOTE_PARK_APPROVAL_BODY.format(device=device)
+        template = REMOTE_PARK_APPROVAL_ATTACHED_BODY if attached else REMOTE_PARK_APPROVAL_BODY
+        body = template.format(device=device)
     else:
         title = REMOTE_PARK_ASK_TITLE.format(device=device)
         body = REMOTE_PARK_ASK_BODY.format(device=device)

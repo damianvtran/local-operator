@@ -47,6 +47,7 @@ from __future__ import annotations
 import ast
 import faulthandler
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -430,6 +431,17 @@ class _ArmPathChild:
     where the parent stops reading the moment it has SEEN the fire, so the dump cannot
     finish. The only difference between the two runs is whether the dump completes,
     which is what makes the result a measurement of that rather than of the rig.
+
+    THE OTHER CLASS THIS RIG HAS SEEN is a SIGNAL DEATH in the child under CI
+    contention, always after the fire and before ``ARMED``: rc=-11 SIGSEGV in runs
+    36522096548 and 36524206106 (both ``test (3.12, 1)``, output ending ``TICK 1 /
+    TIMER-ARMED control / GO``), and rc=-7 SIGBUS once in the sibling detachment
+    cell. Its cause is not the arm path — ~1.5k local executions of this child
+    (plus enlarged walks and throttled drains) never reproduced it — and the rig's
+    job is to REPORT a death rather than hide it, so the child runs with CPython's
+    crash handler and the message carries rc, the signal's name and the child's own
+    dump state. A signal death stays a precondition failure: the sentinel
+    assertions are untouched and there is no retry.
     """
 
     def __init__(self, tmp_path: Path, mode: str, *, keep_draining: bool) -> None:
@@ -453,7 +465,15 @@ class _ArmPathChild:
                 str(self.dump_dir),
                 "60",
             ],
-            env=_child_env(tmp_path),
+            # A SIGNAL DEATH IN THIS CHILD MUST LEAVE A READING: with no crash
+            # handler enabled, the 2026-09-29 CI deaths (runs 36522096548,
+            # 36524206106) reported only `rc=-11` and the output up to `GO` — the
+            # child died silently, so a runner fault could not be told from a real
+            # crash. PYTHONFAULTHANDLER makes the child print its own fatal-error
+            # report (the thread and the frame it died in) into the captured
+            # output through the merged stderr. It only engages on a fatal signal;
+            # a death still reds the cell and nothing here retries or loosens.
+            env=_child_env(tmp_path, PYTHONFAULTHANDLER="1"),
             cwd=str(tmp_path),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -561,7 +581,15 @@ class _ArmPathChild:
         rely on when the control child died on CI.
         """
         rc = self.process.returncode
-        status = "still running" if rc is None else f"rc={rc}"
+        if rc is None:
+            status = "still running"
+        else:
+            status = f"rc={rc}"
+            if rc < 0:
+                try:
+                    status += f" ({signal.Signals(-rc).name})"
+                except ValueError:  # an unnamed signal number: rc alone still reads
+                    pass
         dump = stall_watchdog.dump_path(self.process.pid, self.dump_dir)
         present = "present" if dump.exists() else "absent"
         return f"child: {status}; its own dump file is {present}"

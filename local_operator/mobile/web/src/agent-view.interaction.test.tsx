@@ -929,3 +929,39 @@ describe("AgentConversation", () => {
 		}
 	});
 });
+
+describe("the detail loader's failure kinds (U6, batch 2)", () => {
+	function mountAgentRoute(jobId: string) {
+		const { projection } = fixture();
+		vi.spyOn(store, "useProjection").mockReturnValue({ projection, connected: true });
+		vi.spyOn(store, "retainProjectionStream").mockReturnValue(() => undefined);
+		vi.spyOn(store, "retainSessionListStream").mockReturnValue(() => undefined);
+		history.replaceState({}, "", `#/s/root/a/${jobId}`);
+		return render(<App />);
+	}
+
+	it("calls a 5xx transient — retryable copy, not the expired-or-removed claim", async () => {
+		/* The route used to map ANY failure to "no longer available… expired or
+		   been removed" — a permanent verdict about the child for a temporary
+		   fact about the request. */
+		vi.mocked(api.getSubagentDetail).mockRejectedValue(new api.HttpError(500, "boom"));
+		mountAgentRoute("u6-transient");
+
+		await waitFor(() => expect(screen.getByText("Couldn't load this agent.")).toBeTruthy());
+		expect(screen.queryByText(/no longer available/i)).toBeNull();
+		expect(screen.queryByText(/expired or been removed/i)).toBeNull();
+		expect(screen.getByText("The request didn't go through. Retry to try again.")).toBeTruthy();
+		expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+	});
+
+	it("keeps the terminal card for a 404 — that IS the verdict the copy claims", async () => {
+		vi.mocked(api.getSubagentDetail).mockRejectedValue(
+			new api.HttpError(404, "unknown subagent"),
+		);
+		mountAgentRoute("u6-terminal");
+
+		await waitFor(() => expect(screen.getByText("This agent is no longer available.")).toBeTruthy());
+		expect(screen.getByText("It may have expired or been removed.")).toBeTruthy();
+		expect(screen.queryByText(/Couldn't load this agent/i)).toBeNull();
+	});
+});

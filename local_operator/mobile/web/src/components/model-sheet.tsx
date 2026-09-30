@@ -163,7 +163,20 @@ export function ModelSheet({
 						</button>
 					);
 				})}
-				{!error && models !== null && filtered.length === 0 ? (
+				{!error && models !== null && models.length === 0 ? (
+					/* EMPTY CATALOGUE — a different fact from "the filter matched
+					   nothing" (U9, batch 2). The daemon resolves `{"models": []}` on a
+					   machine with no persisted provider credentials, and the only text
+					   this sheet had for it was the filter advice below — telling the
+					   reader to try a provider or a model name when the inventory itself
+					   is empty, which cannot succeed and blames their query for it. The
+					   recovery is on the machine (the runtime's providers), not on this
+					   screen. */
+					<p className="px-3 py-2 text-body-sm text-ink-dim">
+						no models available from this machine — check the runtime's
+						providers
+					</p>
+				) : !error && models !== null && filtered.length === 0 ? (
 					/* Name the recovery rather than stating a verdict: with the
 					   provider headers gone there is no visible inventory left to
 					   scan as a fallback, so "no matching models" alone leaves

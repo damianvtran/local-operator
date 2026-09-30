@@ -11,9 +11,12 @@ beside the other derived stores under ``cache/transcript_index/``.
 WHAT IT DERIVES, and from what:
 
 - **User checkpoints** — one per ``message`` row whose ``role`` is ``user`` and
-  which is not a harness injection (``payload.kind == "custom"`` with a
-  ``custom_type`` — the ``_journal_injection_ids`` rule). Steers count; they are
-  user messages.
+  which is the operator's own words: not a harness injection
+  (``payload.kind == "custom"`` with a ``custom_type`` — the
+  ``_journal_injection_ids`` rule), and not harness chrome (the
+  ``provider_payload.harness_injected`` stamp, or a text the shared recognisers
+  claim — ``_is_harness_user_row``, the folds' own decision). Steers count;
+  they are user messages.
 - **Completion checkpoints** — one per turn whose span (its opening user row to
   just before the next user checkpoint) contains at least one message row that is
   not the opening user row. The checkpoint's ``id`` is the span's closing ANSWER
@@ -28,7 +31,10 @@ WHAT IT DERIVES, and from what:
   journal order (the find slice consumes these; injected rows stay searchable and
   are marked so ranking can demote them). Tool rows are never indexed: they are
   machine output, and indexing them makes every path-like query match everything
-  (``session_search``'s rule).
+  (``session_search``'s rule). Harness chrome rows are skipped whole, for the
+  user-checkpoint bullet's reason plus find's own: a hit's reveal jump must land
+  on a row a surface paints, and the find wire carries no injected flag to
+  demote one by.
 
 THE S3 REFINEMENTS, stated where they live (spike S3, 31 real journals at
 origin/main 2026-09-28, approved before implementation):
@@ -137,7 +143,12 @@ logger = logging.getLogger(__name__)
 #: ``custom_type=None`` — the key is simply absent — and slip them past
 #: ``transcript_find``'s hidden-cross-session gate, a silent leak rather than
 #: the stale-cache miss a version mismatch is allowed to be.
-TRANSCRIPT_INDEX_VERSION = 2
+#:
+#: 3: role-user rows that are harness chrome are skipped whole (no checkpoint,
+#: no doc — F1 of local-operator-ui#670). The bump IS the correctness again:
+#: the frozen prefix re-derives only on a full rescan, so without it every
+#: version-2 file would keep serving the rows its scan already minted.
+TRANSCRIPT_INDEX_VERSION = 3
 
 #: Per-doc cap on stored message text. A match beyond the cap is a stated miss.
 DOC_TEXT_CAP = 32 * 1024
@@ -630,6 +641,44 @@ def _inject_text(details: Any) -> str:
     return ""
 
 
+def _is_harness_user_row(entry_id: str, payload: dict[str, Any], text: str) -> bool:
+    """Whether a role-user message row is harness chrome, not the operator's words.
+
+    The SAME both-legs decision every display fold makes, asked from the one
+    implementation (:mod:`local_operator.harness.rows`): the structural stamp
+    (``provider_payload.harness_injected``) on rows this build minted, and the
+    text recognisers — the chrome prompt families and the legacy notice heads —
+    for rows written before the stamp existed. Lazy import, like the folds:
+    ``harness.rows`` pulls ``compaction.cutpoint`` on first use.
+
+    The entry id rides IN beside the payload because the notice predicate's
+    third leg — the legacy elision-id check — reads it, and a message payload
+    carries no id (``encode_message_payload`` excludes it; the id is already
+    the entry's). Payload-only, that leg is silently unreachable — which is how
+    a pre-#857 ``compaction-elision-<count>`` row (journalled by the previous
+    revision; the retained ``PRESERVED_TURN_ELISION_ID_PREFIX`` exists so such
+    transcripts still parse) stayed filed as the operator's words (QA round 1,
+    Q-1).
+
+    WHY THE INDEX ASKS (F1 of local-operator-ui#670): every index product is a
+    human readout — the rail's hover card, find's snippets — and a harness row
+    filed as "user" paints the harness's words as the operator's. The UI review
+    reproduced it on a row carrying the stamp (this module did not read
+    ``provider_payload`` at all), and rows written before the stamp existed leak
+    by text on top; both legs close here because both reach the index. Skipped
+    WHOLE rather than marked injected: the find wire carries no injected flag (a
+    marked doc still arrives as a user-role snippet), and a find hit's reveal
+    jump must land on a row that renders — these rows render nowhere. The row
+    itself stays in the journal and in the model's context, the folds' exact
+    contract.
+    """
+    from local_operator.harness.rows import is_harness_chrome, is_harness_notice_row
+
+    # A row-shaped view: the predicate reads id, provider_payload and content,
+    # and the id lives on the entry rather than in the payload.
+    return is_harness_notice_row({**payload, "id": entry_id}) or is_harness_chrome(text)
+
+
 def _classify(
     ordinal: int, line_start: int, line_end: int, head: bytes, line: bytes | None
 ) -> _Row:
@@ -671,6 +720,18 @@ def _classify(
             )
         role = payload.get("role")
         if role == "user" or role == "assistant":
+            text = _content_text(payload)
+            if role == "user" and _is_harness_user_row(id_, payload, text):
+                # Harness chrome, skipped whole: no user checkpoint (the rail
+                # would caption it "Your message"), no find doc, no turn content.
+                return _Row(
+                    ordinal=ordinal,
+                    offset=line_start,
+                    end=line_end,
+                    id=id_,
+                    ts=ts,
+                    kind="other",
+                )
             return _Row(
                 ordinal=ordinal,
                 offset=line_start,
@@ -678,7 +739,7 @@ def _classify(
                 id=id_,
                 ts=ts,
                 kind=str(role),
-                text=_content_text(payload),
+                text=text,
             )
         if role == "tool":
             return _Row(
@@ -963,6 +1024,24 @@ class _Derivation:
             index = bisect_right(self.user_ords, ordinal) - 1
             if index < 0 or self.user_ords[index] < start:
                 continue
+            if marker_kind == "closed":
+                # A NEUTRAL CLOSURE (v2 directive, 2026-09-29, session
+                # 23fc556c3799) is INERT for the rail: it records that a
+                # zero-work follow-up run ended after the previous turn's
+                # output was delivered, so it may neither claim the tick
+                # (``closed`` is not a rail outcome) nor CLEAR it — the
+                # earlier ``complete`` marker for the same turn must stand,
+                # which is exactly the masking this fix exists to stop.
+                continue
+            if marker_kind == "retired":
+                # RETIRE-FOR-BUILD (2026-09-29): the rail's vocabulary is
+                # frozen (``CheckpointOutcome``), so the kind is normalized to
+                # an EXISTING cut value — and ``interrupted`` (CircleSlash,
+                # warning) is the honest one: ``error`` is the failure framing
+                # this arm exists to remove, while the warning slash is the
+                # rail's "cut short" mark and matches the row's own warning
+                # tier. Eligibility keeps its usual no-claim rule below.
+                marker_kind = OUTCOME_INTERRUPTED
             outcomes[index] = marker_kind if eligible else None
 
         # Only markers bound to a run by token count as evidence: an orphan

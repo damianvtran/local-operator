@@ -5231,6 +5231,70 @@ async def test_only_half_the_wording_is_not_the_condition():
 
 
 @pytest.mark.asyncio
+async def test_an_input_refusal_recovery_is_narrated_and_rides_the_transcript():
+    """A recovered refusal means the turn ran on a NARROWED request: say so.
+
+    The failover walk records the degradation on the end event's payload (the
+    durable trace); the loop's job is the visible half -- one warning notice --
+    and keeping the payload on the message so a reader of the transcript can
+    see the model reasoned over less than the caller built. A silent
+    degradation would be worse than either.
+    """
+    stream = ScriptedStream(
+        [
+            [
+                StreamTextDelta(delta="continued"),
+                StreamEndEvent(
+                    stop_reason="stop",
+                    provider_payload={
+                        "input_refusal_recovery": {
+                            "degradations": [
+                                "screenshots_removed",
+                                "older_observations_removed",
+                            ]
+                        }
+                    },
+                ),
+            ]
+        ]
+    )
+    context = LoopContext()
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], context, make_config(stream), None):
+        events.append(event)
+
+    notices = [e for e in events if isinstance(e, NoticeEvent)]
+    assert any(
+        "inappropriate input content" in n.text
+        and "(screenshots omitted, then older observations removed)" in n.text
+        for n in notices
+    )
+    # The durable record reaches the transcript message, not just the wire.
+    assistant = [m for m in context.messages if isinstance(m, Message)][-1]
+    assert assistant.provider_payload == {
+        "input_refusal_recovery": {
+            "degradations": ["screenshots_removed", "older_observations_removed"]
+        }
+    }
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent) and end.error is None
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_turn_shows_no_recovery_notice():
+    """No payload key, no notice, no bookkeeping: the happy path is untouched."""
+    stream = ScriptedStream([[StreamTextDelta(delta="hi"), StreamEndEvent(stop_reason="stop")]])
+    context = LoopContext()
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], context, make_config(stream), None):
+        events.append(event)
+
+    assert not [e for e in events if isinstance(e, NoticeEvent)]
+    assistant = [m for m in context.messages if isinstance(m, Message)][-1]
+    assert assistant.provider_payload is None
+
+
+@pytest.mark.asyncio
 async def test_a_conversation_continued_on_an_aggregator_route_echoes_reasoning():
     """The failing path, end to end against a server that ENFORCES the rule.
 

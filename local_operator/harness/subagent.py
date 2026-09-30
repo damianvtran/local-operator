@@ -629,6 +629,277 @@ def _resolve_role(agent: str, parent_session: "Session") -> "AgentProfile | None
         return None
 
 
+class TeamLaunchError(Exception):
+    """A launch named a team it cannot run (BEN-7-D2/D3).
+
+    Raised BEFORE a job is registered, so ``execute_task``'s existing
+    launcher-failure path reports it by name and no child exists. The
+    alternative it replaces was a silent generic child told "you are
+    team:pod" (BEN-1 N3), which looked like delegation and was not.
+    """
+
+
+#: Default ceiling on how deep a TEAM-bearing tree may launch (BEN-7-D3).
+#: Depth counts hops below the top session: the top is 0, its ``task``
+#: children are 1. Measured basis: 1,505 of 1,546 child sessions were depth 1,
+#: 33 depth 2, and the only depth-3/4 chain was a probe. Only trees with a team
+#: somewhere are capped; a team-less tree keeps today's unbounded behaviour.
+DEFAULT_MAX_TEAM_DEPTH = 3
+
+#: The ``task`` ``agent`` prefix that starts another team's manager.
+TEAM_LAUNCH_PREFIX = "team:"
+
+#: Where a top session's launches report. A depth-1 child has no parent job.
+TOP_SESSION_REPORTS_TO = "the operator's top session"
+
+
+def read_max_team_depth() -> int:
+    """``subagents.max_team_depth``, clamped to ``1..MAX_ORG_DEPTH``.
+
+    Read at launch, like the tier selectors, so an edit applies live. Never
+    raises: a corrupt config must cost the operator the configured value, not
+    the delegation, so anything unusable means the default.
+    """
+    from local_operator.config import ConfigManager
+    from local_operator.teams import MAX_ORG_DEPTH
+
+    try:
+        raw = ConfigManager(config_dir()).get_config_value("subagents", None)
+        value = raw.get("max_team_depth") if isinstance(raw, dict) else None
+        if value is None or isinstance(value, bool):
+            return DEFAULT_MAX_TEAM_DEPTH
+        return max(1, min(MAX_ORG_DEPTH, int(value)))
+    except Exception:  # noqa: BLE001 — a bad value must not fail a launch
+        logger.warning("subagents.max_team_depth is unreadable; using the default")
+        return DEFAULT_MAX_TEAM_DEPTH
+
+
+@dataclass(frozen=True)
+class LaunchTarget:
+    """What one launch resolves to: the single contract from the ``task`` tool
+    through ``run_subagent`` and ``_build_child_session`` to ``comms.resume``
+    (BEN-7-D1). Every later launch feature goes through it."""
+
+    #: The role the child RUNS as (a ``team:`` launch runs as the sub-team's
+    #: manager), used for the profile, the preamble and the model tier.
+    role: str
+    #: The team whose text the child carries, or None.
+    team: Any
+    #: Team ids from the top down. Stamped rather than derived from comms
+    #: ancestry, because the registry evicts settled records and an evicted
+    #: ancestor would undercount depth and fail the cap open (D1 (b)).
+    team_lineage: tuple[str, ...]
+    depth: int
+    reports_to: str
+    is_team_launch: bool
+
+
+@dataclass(frozen=True)
+class CarriedLaunch:
+    """What a resume carries forward from the child's record (BEN-7-D1).
+
+    ``comms.resume`` rebuilds against a session that may not be the child's
+    real parent, so the team, lineage and depth the child was born with cannot
+    be re-derived there and ride the record instead, like ``restricted``.
+    """
+
+    team_name: str
+    team_lineage: tuple[str, ...]
+    depth: int
+    reports_to: str
+
+
+def _session_lineage(session: "Session") -> tuple[str, ...]:
+    """A session's team lineage. A child carries a stamp; the top session's is
+    its attached team alone, or nothing."""
+    stamped = getattr(session, "_team_lineage", None)
+    if stamped is not None:
+        return tuple(stamped)
+    team = getattr(session, "active_team", None)
+    team_id = getattr(team, "id", None) if team is not None else None
+    return (str(team_id),) if team_id else ()
+
+
+def _session_depth(session: "Session") -> int:
+    depth = getattr(session, "_delegation_depth", 0)
+    return depth if isinstance(depth, int) and depth >= 0 else 0
+
+
+def lookup_team(session: "Session", name: str) -> Any:
+    """The registered team called ``name`` (the registry casefolds), or None.
+
+    None also covers "no registry" and an unreadable one: the caller turns it
+    into a named ``unknown team`` error rather than a generic child.
+    """
+    registry = getattr(session, "team_registry", None)
+    if registry is None or not hasattr(registry, "get_team_by_name"):
+        return None
+    try:
+        return registry.get_team_by_name(name)
+    except Exception:  # noqa: BLE001 — the caller turns None into a named error
+        logger.warning("could not look up team %r", name, exc_info=True)
+        return None
+
+
+def describe_reports_to(team_name: str, role: str, job_id: str | None) -> str:
+    """``"<team> <role> (job <id>)"`` for a parent, or the top session (D2).
+
+    ``role`` is the role the parent RUNS as: a ``team:pod`` parent is pod's
+    manager, which is the name a child should report to.
+    """
+    if not job_id:
+        return TOP_SESSION_REPORTS_TO
+    head = f"{team_name} {role or 'task'}" if team_name else (role or "task")
+    return f"{head} (job {job_id})"
+
+
+def _parent_reports_to(parent_session: "Session") -> str:
+    job_id = getattr(parent_session, "_job_id", None)
+    if not job_id:
+        return TOP_SESSION_REPORTS_TO
+    role = "task"
+    team = getattr(parent_session, "active_team", None)
+    comms = getattr(parent_session, "subagent_comms", None)
+    node = comms.node(job_id) if comms is not None and hasattr(comms, "node") else None
+    if node is not None and getattr(node, "agent_role", ""):
+        role = str(node.agent_role)
+    if role.lower().startswith(TEAM_LAUNCH_PREFIX) and team is not None:
+        role = str(getattr(team, "manager", role))
+    team_name = str(getattr(team, "name", "") or "") if team is not None else ""
+    return describe_reports_to(team_name, role, job_id)
+
+
+def _team_slot_kinds(team: Any, name: str) -> set[str]:
+    kinds: set[str] = set()
+    for member in getattr(team, "members", None) or ():
+        if str(getattr(member, "role", "")) == name:
+            kinds.add(str(getattr(member, "kind", "agent")))
+    return kinds
+
+
+def resolve_launch_target(
+    agent: str,
+    parent_session: "Session",
+    *,
+    carried: CarriedLaunch | None = None,
+) -> LaunchTarget:
+    """Resolve one ``task`` launch to the team and depth its child runs under.
+
+    Raises :class:`TeamLaunchError` for an unknown team, a counted launch, a
+    manager that cannot delegate, a cycle, or a fresh launch past the depth
+    cap (a resume keeps its recorded depth) — never a silent generic child
+    (BEN-1 N3).
+    """
+    agent = agent or "task"
+    parent_team = getattr(parent_session, "active_team", None)
+    sub_name = ""
+    if agent.lower().startswith(TEAM_LAUNCH_PREFIX):
+        sub_name = agent[len(TEAM_LAUNCH_PREFIX) :].strip()
+        if not sub_name:
+            raise TeamLaunchError(f"invalid team launch {agent!r}: no team name")
+        if ":" in sub_name:
+            raise TeamLaunchError(
+                f"{agent!r} names a count; launch one "
+                f"'{TEAM_LAUNCH_PREFIX}{sub_name.split(':', 1)[0]}' per copy"
+            )
+    elif (
+        carried is None
+        and parent_team is not None
+        and _team_slot_kinds(parent_team, agent) == {"team"}
+    ):
+        # (Not on resume: a bare-name team launch was recorded as
+        # ``team:<name>``, so a carried bare name is always an agent launch.)
+        # Bare name: a team launch ONLY when the roster's slot of that name is
+        # a team and no agent slot shares it; a clash stays an agent launch,
+        # exactly as today, so depth-1 meaning cannot shift (D2 (d)).
+        sub_name = agent
+
+    if carried is not None:
+        # A resume re-enters the team the child was BORN under, at the depth
+        # its record carries. Checks that guarded its original launch are not
+        # re-run: it already exists. That includes the depth cap — a child
+        # recorded at depth N resumes at N even after the operator lowers
+        # ``subagents.max_team_depth`` below it, and only its FURTHER launches
+        # are capped (the ``if lineage:`` check below). Refusing the resume
+        # instead would strand work that already exists; a resume is recovery,
+        # not a new launch.
+        team = None
+        if carried.team_name:
+            if parent_team is not None and getattr(parent_team, "name", "") == carried.team_name:
+                team = parent_team
+            else:
+                team = lookup_team(parent_session, carried.team_name)
+            if team is None:
+                raise TeamLaunchError(
+                    f"team {carried.team_name!r} this subagent ran under no longer exists"
+                )
+        role = str(team.manager) if sub_name and team is not None else agent
+        return LaunchTarget(
+            role=role,
+            team=team,
+            team_lineage=tuple(carried.team_lineage),
+            depth=carried.depth,
+            reports_to=carried.reports_to or TOP_SESSION_REPORTS_TO,
+            is_team_launch=bool(sub_name),
+        )
+
+    depth = _session_depth(parent_session) + 1
+    parent_lineage = _session_lineage(parent_session)
+    if sub_name:
+        sub = lookup_team(parent_session, sub_name)
+        if sub is None:
+            raise TeamLaunchError(f"unknown team {sub_name!r}")
+        role = str(sub.manager)
+        if role == "scout":
+            raise TeamLaunchError(f"team {sub.name!r} manager {role!r} cannot delegate")
+        profile = _resolve_role(role, parent_session)
+        if profile is not None and not profile.may_delegate:
+            # Never force ``task`` onto a non-delegating role to make the
+            # launch work (frozen rule; D2 (b)).
+            raise TeamLaunchError(f"team {sub.name!r} manager {role!r} cannot delegate")
+        if sub.id in parent_lineage:
+            names = _lineage_names(parent_session, parent_lineage)
+            raise TeamLaunchError(
+                f"cycle: team {sub.name!r} is already above this session ({' > '.join(names)})"
+            )
+        team: Any = sub
+        lineage = parent_lineage + (str(sub.id),)
+    else:
+        role = agent
+        team = parent_team
+        lineage = parent_lineage
+    if lineage:
+        cap = read_max_team_depth()
+        if depth > cap:
+            raise TeamLaunchError(
+                f"depth cap: this launch would be depth {depth}; "
+                f"subagents.max_team_depth is {cap}"
+            )
+    return LaunchTarget(
+        role=role,
+        team=team,
+        team_lineage=lineage,
+        depth=depth,
+        reports_to=_parent_reports_to(parent_session),
+        is_team_launch=bool(sub_name),
+    )
+
+
+def _lineage_names(session: "Session", lineage: tuple[str, ...]) -> list[str]:
+    """Team names for a lineage of ids, for an error a reader can act on."""
+    registry = getattr(session, "team_registry", None)
+    names: list[str] = []
+    for team_id in lineage:
+        name = team_id
+        try:
+            if registry is not None:
+                name = str(registry.get_team(team_id).name)
+        except Exception:  # noqa: BLE001 — the id is still a usable name
+            logger.debug("could not name lineage team %r", team_id, exc_info=True)
+        names.append(name)
+    return names
+
+
 def run_subagent(
     label: str,
     prompt: str,
@@ -641,6 +912,7 @@ def run_subagent(
     effort: str | None = None,
     restricted: bool = False,
     inherited_model: ModelSpec | None = None,
+    target: LaunchTarget | None = None,
 ) -> str:
     """Register one child-session run as a background job; return the job id.
 
@@ -677,7 +949,17 @@ def run_subagent(
     failure is not described as a pinned model's. ``None`` means the child
     inherits ``parent_session``'s own model, as on every launch.
     """
-    effective_prompt, profile = _effective_prompt(prompt, agent, parent_session)
+    if target is None:
+        # Every launch resolves its team and depth, including a direct caller
+        # that did not: an unresolved ``team:`` launch must raise here rather
+        # than degrade into a generic child (BEN-1 N3).
+        target = resolve_launch_target(agent, parent_session)
+    if target.is_team_launch and target.team is not None:
+        # Recorded as ``team:<name>`` whatever spelling launched it (a bare
+        # roster name, a different case), so the row says what it is and a
+        # resume re-enters the team path (BEN-7-D2).
+        agent = f"{TEAM_LAUNCH_PREFIX}{target.team.name}"
+    effective_prompt, profile = _effective_prompt(prompt, agent, parent_session, target)
     queued = jobs_manager.at_capacity()
     job_id = jobs_manager.register(
         "task",
@@ -693,6 +975,7 @@ def run_subagent(
             profile=profile,
             restricted=restricted,
             inherited_model=inherited_model,
+            target=target,
         ),
         queued=queued,
     )
@@ -750,6 +1033,9 @@ def run_subagent(
             launch_message_id=launch_message_id,
             agent_role=agent,
             effort=effort or "",
+            team_name=str(getattr(target.team, "name", "") or ""),
+            team_lineage=target.team_lineage,
+            depth=target.depth,
         )
     if queued:
         logger.info("subagent job %s (%s) queued: manager at capacity", job_id, label)
@@ -757,24 +1043,58 @@ def run_subagent(
 
 
 def _effective_prompt(
-    prompt: str, agent: str, parent_session: "Session"
+    prompt: str,
+    agent: str,
+    parent_session: "Session",
+    target: LaunchTarget | None = None,
 ) -> tuple[str, "AgentProfile | None"]:
-    """The exact launch message after reusable and team instruction layers."""
-    profile = _resolve_role(agent, parent_session)
+    """The exact launch message after reusable and team instruction layers.
+
+    ``target is None``, and a plain member launch at depth 1, keep the
+    original bytes exactly: that path is BEN-1 N0's baseline, pinned by a
+    golden test. Only a ``team:`` launch or a launch at depth >= 2 inside a
+    team lineage gains text (BEN-7-D2/D4).
+    """
+    role = target.role if target is not None else agent
+    profile = _resolve_role(role, parent_session)
     if profile is not None:
         effective_prompt = profile.preamble + prompt
-    elif agent == "scout":
+    elif role == "scout":
         effective_prompt = SCOUT_PREAMBLE + prompt
     else:
-        specialist_prompt = _specialist_instructions(agent, parent_session)
+        specialist_prompt = _specialist_instructions(role, parent_session)
         effective_prompt = specialist_prompt + "\n\n" + prompt if specialist_prompt else prompt
-    team = getattr(parent_session, "active_team", None)
+    if target is None:
+        team = getattr(parent_session, "active_team", None)
+    else:
+        team = target.team
+    nested = target is not None and (
+        target.is_team_launch or (target.depth >= 2 and bool(target.team_lineage))
+    )
+    if not nested:
+        if team is not None:
+            try:
+                effective_prompt = team.member_preamble(agent) + effective_prompt
+            except Exception:  # noqa: BLE001 — a bad brief must not lose the child
+                logger.warning("could not stamp team preamble for %r", agent, exc_info=True)
+        return effective_prompt, profile
+    assert target is not None
+    from local_operator.teams import escalation_preamble
+
+    # Team text first, then the chain of command, then the role: the order
+    # depth-1 member stamping already uses, and the head the N1/N3 scorers
+    # read (D2). NOT ``attach_team``'s profile-first order.
+    head = ""
     if team is not None:
         try:
-            effective_prompt = team.member_preamble(agent) + effective_prompt
+            head = (
+                team.manager_preamble()
+                if target.is_team_launch
+                else team.member_preamble(target.role)
+            )
         except Exception:  # noqa: BLE001 — a bad brief must not lose the child
             logger.warning("could not stamp team preamble for %r", agent, exc_info=True)
-    return effective_prompt, profile
+    return head + escalation_preamble(target.reports_to) + effective_prompt, profile
 
 
 def _make_runner(
@@ -789,6 +1109,7 @@ def _make_runner(
     profile: "AgentProfile | None" = None,
     restricted: bool = False,
     inherited_model: ModelSpec | None = None,
+    target: LaunchTarget | None = None,
 ) -> Callable[[str, Any, Callable[[str], None]], Awaitable[str | None]]:
     """Build the JobRunFn for one child run (closure over its launch args)."""
     # The parent seam is private-attribute access on purpose: this module is
@@ -824,6 +1145,7 @@ def _make_runner(
                 agent=agent,
                 profile=profile,
                 restricted=restricted,
+                target=target,
             )
             if job is not None:
                 # Off the CHILD, not the parent: ``model_spec`` may have put
@@ -1860,6 +2182,7 @@ async def _build_child_session(
     agent: str = "task",
     profile: "AgentProfile | None" = None,
     restricted: bool = False,
+    target: LaunchTarget | None = None,
 ) -> "Session":
     """Transfer child resource ownership only after construction succeeds.
 
@@ -1879,6 +2202,7 @@ async def _build_child_session(
             agent=agent,
             profile=profile,
             restricted=restricted,
+            target=target,
             cleanup=cleanup,
         )
     except BaseException:
@@ -2101,6 +2425,7 @@ async def _construct_child_session(
     profile: "AgentProfile | None",
     restricted: bool,
     cleanup: contextlib.AsyncExitStack,
+    target: LaunchTarget | None = None,
 ) -> "Session":
     """Compose the child Session directly (see module docstring for why the
     factory is not reused, and for the full inherit/do-not-inherit list).
@@ -2239,11 +2564,13 @@ async def _construct_child_session(
     # removes what the merge ADDED, and ``hub`` was already present.
     #
     # So the load-bearing invariant is not this line but the merge-time
-    # context: ``Session._build_tool_context`` passes ``job_id``, and
-    # ``is_child(job_id)`` is what makes the replacement the CHILD shape
-    # (message your parent) rather than the parent shape (address, steer,
-    # stop and resume your children). If ``job_id`` ever stopped reaching
-    # that context, a child would silently be handed its parent's tool.
+    # context: ``Session._build_tool_context`` passes ``job_id`` and
+    # ``may_delegate``. ``is_child(job_id)`` without ``may_delegate`` is what
+    # makes the replacement the CHILD shape (message your parent); a child
+    # that holds ``task`` gets the parent shape scoped to its own subtree
+    # (BEN-7-D5, rebuilt after the prune below). If ``job_id`` ever stopped
+    # reaching that context, a child would silently be handed its parent's
+    # UNSCOPED tool.
     tool_context = ToolContext(
         cwd=cwd,
         session_id=transcript.directory.name,
@@ -2634,6 +2961,14 @@ async def _construct_child_session(
     if _can_background(tools):
         drop = drop - {"jobs", "wait"}
     child.refresh_tools([tool for tool in child._tools if tool.name not in drop])
+    if any(tool.name == "task" for tool in child._tools):
+        # A child that KEPT ``task`` (a pod lead) rebuilds ``hub`` now that its
+        # inventory says it may delegate: ``build_hub_tool`` hands it the
+        # parent shape, scoped to its own subtree (BEN-7-D5). The constructor's
+        # merge ran before the prune, while no ``task`` was held yet, so it
+        # built the message-only shape. ``hub`` alone, so nothing pruned above
+        # comes back.
+        child._merge_capability_tools(("hub",))
     # A DECLARED parent inventory carries down, or a bounded session could reach
     # an excluded tool by delegating to a child that never heard of the bound.
     # One hop is enough to make the declaration meaningful and is also all the
@@ -2665,6 +3000,16 @@ async def _construct_child_session(
     # the stamp depend on whether MCP happened to be wired here would let the
     # boundary evaporate on exactly the path that reintroduces the surface.
     setattr(child, MCP_DENIED_ATTR, restricted)
+    if target is not None:
+        # Stamped facts, beside the denial and for the same reason: they are
+        # properties of the LINEAGE that the child's own role cannot express,
+        # and its grandchildren resolve their team and depth off them
+        # (BEN-7-D1). ``active_team`` is set directly, never via
+        # ``attach_team``: that writes ``team_brief`` into the child's system
+        # tail and journals a sidecar per child (D1 (a), (c)).
+        child.active_team = target.team
+        child._team_lineage = tuple(target.team_lineage)
+        child._delegation_depth = target.depth
     if mcp is not None:
         mcp.attach(child)
         # Diagnostics only, and BORROWED: unlike attach_mcp_dispose this adds no

@@ -113,6 +113,55 @@ def _row(wake_id: str = "w1", *, due: int | None = None, **extra: object) -> dic
     return row
 
 
+def _patience_row(wake_id: str = "patience-1", *, due: int | None = None) -> dict[str, Any]:
+    """A hidden patience wait, the shape ``WakeSchedule`` now carries to the index."""
+    return {
+        "id": wake_id,
+        "message": "",
+        "next_due_at": FUTURE if due is None else due,
+        "every_ms": None,
+        "until_at": None,
+        "limit": None,
+        "fired_count": 0,
+        "created_at": 1,
+        "kind": "patience",
+        "hidden": True,
+        "episode_id": wake_id,
+        "attempt": 1,
+        "armed_at": 1,
+        "armed_after": "",
+        "note": "internal timer",
+    }
+
+
+@pytest.mark.asyncio
+async def test_hidden_patience_rows_are_never_listed(desktop) -> None:
+    """Patience waits are filtered from the listing, and only they are.
+
+    Three sessions: one with both kinds of row (scheduled survives), one with
+    ONLY a patience row (it does not become a wake-carrying session — no row
+    and no zero-schedules entry), and the third is the plain control.
+    """
+    client, root = desktop
+    _session(root, "aaaaaaaaaaaa")
+    _session(root, "bbbbbbbbbbbb")
+    _session(root, "cccccccccccc")
+    _entry(
+        root,
+        "aaaaaaaaaaaa",
+        rows=[_row("w1", due=FUTURE + 60_000), _patience_row()],
+    )
+    _entry(root, "bbbbbbbbbbbb", rows=[_patience_row("patience-2")])
+    _entry(root, "cccccccccccc", rows=[_row("w2", due=FUTURE + 120_000)])
+
+    listing = await _list(client)
+
+    ids = [entry["session_id"] for entry in listing["entries"]]
+    assert ids == ["aaaaaaaaaaaa", "cccccccccccc"]
+    assert [row["id"] for row in listing["entries"][0]["schedules"]] == ["w1"]
+    assert listing["total"] == 2
+
+
 async def _list(client: AsyncClient, **params: str | int) -> dict[str, Any]:
     response = await client.get("/v1/desktop/wakes", params=params or None)
     assert response.status_code == 200, response.text

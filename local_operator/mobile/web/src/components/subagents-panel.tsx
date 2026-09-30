@@ -147,11 +147,29 @@ export function AgentRoster({
 			   every coordinating session. */
 			defaultOpen={false}
 			forceClosed={forceCollapsed}
+			/* THE HINT STANDS DOWN below the width the row needs to keep its label
+			   READABLE (mobile UX batch 2, 320x568; retuned in round 1: design D2,
+			   D6, agent-review NIT 2). This row's fixed parts — chevron 16 + gaps
+			   12 + `1/5 running` 79.5 + `· 1 queued` 72.3 + `· 1 failed` 72.3 +
+			   the hint 72.9 — are ~330px, and the row is viewport - 24, so with
+			   the hint shown the LABEL takes what is left: measured at 360 it was
+			   6px wide (`s`), i.e. the middle phone read worse than the 320 one,
+			   where the old 352px stand-down kept 41px. The threshold is now 385:
+			   hidden below it, shown at it and above — measured with this class,
+			   the label is 30px at 385 (hint on), 63px at 384 (hint hidden), 41px
+			   at 320; and 390 keeps both. The tasks row carries the SAME
+			   threshold even though its own phrase fits everywhere — the design
+			   round flagged the two adjacent held-shut rows disagreeing at 320
+			   (one hint, one none), and one rule for the pair is what makes them
+			   read as one state; see `todos-panel.tsx`. */
+			hintClassName="max-[385px]:hidden"
 			className={cn(
 				"border-t border-hairline",
-				/* `min-h-0` so this panel can give space back to the column
-				   instead of pushing a sibling past its clipped foot (D1). */
-				"min-h-0",
+				/* `min-h-11`, not `min-h-0` — see the todos panel's fuller note:
+				   the collapsed header is the floor, because a container squeezed
+				   below its 44px row made the row overflow onto the pending card
+				   at 320x568 (mobile UX batch 2, D1). The card yields instead. */
+				"min-h-11",
 				embedded ? "pt-1" : "px-3",
 			)}
 			header={
