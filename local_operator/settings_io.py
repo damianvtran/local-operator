@@ -1663,6 +1663,41 @@ SETTINGS: tuple[Setting, ...] = (
         default={},
         help="Ordered provider/model hops tried when a call keeps failing.",
     ),
+    Setting(
+        key="retry.pinnedFallback",
+        path=("retry", "pinnedFallback"),
+        section="failover",
+        label="Pinned child fallback",
+        # ENUM: the value space is two words this module owns, and the runtime
+        # degrades any other shape to the default (see `RetrySettings.
+        # from_settings`), so the page should offer exactly the two.
+        kind=Kind.ENUM,
+        # The literal is deliberate, like every default in this file; the code
+        # constant is `DEFAULT_PINNED_FALLBACK` in providers/failover.py, and
+        # `_consumer_defaults()` in tests/unit/test_settings_io.py pins the
+        # pair to each other.
+        default="same-family",
+        help=(
+            "What a subagent launched on a pinned model may fall back to when "
+            "its own vendor cannot serve: same-family hops only, or any vendor "
+            "(announced)."
+        ),
+        choices=(
+            Choice(
+                "same-family",
+                "same family only",
+                "Refuse cross-vendor fallbacks for pinned children; the child "
+                "fails visibly instead of silently running on another vendor.",
+            ),
+            Choice(
+                "cross-family",
+                "allow cross-vendor",
+                "Let a pinned child descend onto another vendor's model as a "
+                "last resort; the descent is still ordered family-first and "
+                "announced.",
+            ),
+        ),
+    ),
     # -- appearance ---------------------------------------------------------
     Setting(
         key="tui.theme",
