@@ -205,6 +205,22 @@ class ProjectsViewJumpRequested(Message):
         self.sessions = sessions
 
 
+class ProjectsViewAttachmentOpened(Message):
+    """``↵`` on an attachment row: hand the copied file to the OS (spec §7.4).
+
+    Carries the path and the display name so the host can open it and say what
+    happened — the page never spawns a process, exactly as it never touches
+    session machinery. A path that is gone is answered by the host with the
+    honest sentence rather than a silent no-op.
+    """
+
+    def __init__(self, *, path: str, name: str, project_name: str) -> None:
+        super().__init__()
+        self.path = path
+        self.name = name
+        self.project_name = project_name
+
+
 class ProjectsView(Vertical):
     """The page: a title, a rule, the scrollable canvas, the detail footer, hints.
 
@@ -1606,6 +1622,10 @@ class ProjectsView(Vertical):
         # hint arming reads the settled scroll geometry — the same deferred
         # pair every repaint schedules.
         self.call_after_refresh(self._paint_chrome)
+        # And the row cursor's reveal, again: `show` revealed while the page
+        # was still hidden (its rows had no regions), so at narrow widths the
+        # selection landed a row below the fold (measured at 60x24).
+        self.call_after_refresh(self._detail_page.reveal_selected)
         try:
             self._detail_page.focus()
         except Exception:
@@ -1710,6 +1730,18 @@ class ProjectsView(Vertical):
                     project_id=project_id,
                     name=name,
                     completed=not bool(row.get("completed_at")),
+                    project_name=self._detail_page.project_name,
+                )
+            )
+            return
+        if kind == "attachment":
+            # The attachment's own row, not the page's provenance: the file is
+            # the thing being opened, and the message carries it by path.
+            path = str(row.get("path") or "")
+            self.post_message(
+                ProjectsViewAttachmentOpened(
+                    path=path,
+                    name=str(row.get("name") or "(unnamed)"),
                     project_name=self._detail_page.project_name,
                 )
             )
