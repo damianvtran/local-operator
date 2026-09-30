@@ -884,6 +884,45 @@ Editor .text-area--at-reference {
     text-style: bold;
 }
 
+/* ── $skill syntax highlighting ──────────────────────────────────────────
+ *
+ * The `$name` member of the same family as `/command` and `@path`, and it
+ * takes the same two rulings. RESOLVED takes `signal` + bold, exactly
+ * `slash-command`'s rule: the ink asserts "this token WILL fire", which is
+ * what the submit-side resolver's case-insensitive exact-membership test
+ * decides, and — unlike the unknown arm below — it is painted even while the
+ * skill list is open, because a full name is an answer, not a prefix in
+ * progress. `string` would be wrong here: that is the resolved-ARGUMENT role
+ * (`slash-argument`), while a leading `$skill` is a structured TOKEN, and
+ * `accent` stays reserved for "a turn is live". The same hue as the chip and
+ * the reference token is not a collision — they are the same sentence
+ * ("structure that will not be sent as message text") about different
+ * objects, and the family reads as one vocabulary rather than three colours.
+ *
+ * UNKNOWN is the slash-unknown treatment again — `dim`, the typo register,
+ * and the same ~2.9:1-below-prose degrade — for the ONE shape whose sentence
+ * ("inert text that will be sent as prose") is exactly true: a leading,
+ * whole-draft, settled, unresolved `$word` with lowercase evidence (see
+ * `Editor._compute_skill_runs`). Below AA on this ground, as `slash-unknown`
+ * already is and as the design round re-measures — it is a de-emphasis, not
+ * body text.
+ *
+ * Foreground-only, so both compose with the cursor's inverse and the
+ * selection ground instead of fighting them — the property
+ * `Editor._paint_skill` relies on. */
+Editor .text-area--skill {
+    color: $lo-signal;
+    text-style: bold;
+}
+
+/* A leading `$word` that doesn't name a discovered skill: dimmed so the user
+ * sees it is inert text that WILL be sent, not an invocation. Suppressed
+ * while the skill list is still choosing the word — a prefix under an open
+ * list is in progress, not wrong (see `Editor._compute_skill_runs`). */
+Editor .text-area--skill-unknown {
+    color: $lo-dim;
+}
+
 /* ── startup toast ───────────────────────────────────────────────────────
  *
  * Top-right transient overlay. The host HUGS its card (`width: auto`) and both
