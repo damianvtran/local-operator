@@ -2232,8 +2232,29 @@ stylesheet change at all.
 
 An SVG is not something to eyeball as markup, and the reader does not render one
 (it decodes raster images only). Render it and view it — open the `file://` URL of
-the printed path in a browser tool and screenshot it, or render it to a PNG in the
-scratchpad and read that back: a human or a vision-capable agent **sees the frame**.
+the printed path in a browser tool and screenshot it, or rasterise it to a PNG in
+the scratchpad and read that back: a human or a vision-capable agent **sees the frame**.
+
+**Rasterise with `rsvg-convert`; never `qlmanage`.** When the browser host
+refuses a `file://` render (cmux has), the sanctioned conversion is the one
+`scripts/visual_gallery.py` uses and `docs/VISUAL_CAPTURE.md` documents
+(Homebrew `librsvg`; the gallery fails clearly if it is absent):
+
+```sh
+rsvg-convert "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/before.svg" \
+  -o "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/before.png"
+```
+
+`qlmanage` must not be used from a rig, in **any** form: every invocation —
+`-t` thumbnails included — checks its QuickLook app bundle in with
+LaunchServices as a **foreground** app (`CHECKEDIN: … foreground=1` in the
+unified log; measured 2026-09-30), so each run flashes a Dock tile, and a `-p`
+preview parks one in the Dock until the panel is dismissed. That is UI on the
+operator's screen, exactly what "headless" must exclude. `rsvg-convert` links
+no LaunchServices app — verified silent against the unified log on the same
+host — and it consumes the SVG `save_capture` already wrote, so it sidesteps
+the `file://` refusal entirely. `sips` and `open`-based previews are not
+substitutes; `rsvg-convert` is the one path.
 
 ### 3. Always capture before AND after
 
