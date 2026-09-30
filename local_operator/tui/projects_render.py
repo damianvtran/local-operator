@@ -1860,19 +1860,23 @@ def detail_ruler(
 
 
 def today_iso(now: float | None = None) -> str:
-    """Today as ISO, from the same clock ``age_text`` reads.
+    """Today as ISO, on the SAME basis the store stamps ``completed_at`` from.
 
-    ``now=None`` uses the UTC date — the same basis ``projects._utc_today``
-    stamps milestone completion from — so "overdue" and "done today" cannot
-    disagree about which day it is.
+    Delegates to :func:`local_operator.projects._local_today` — the operator's
+    LOCAL day — so the footer's ``[overdue]``/``[completed]`` and the page
+    rows, the tool receipt and the stored stamp cannot disagree about which
+    day it is (agent review round 5: this was the last UTC reader, and an
+    evening probe had the footer call a milestone overdue while the rows and
+    the tool called it upcoming). ``now`` is a POSIX timestamp, kept for the
+    freshness callers; it is converted on the same local basis.
     """
-    if now is None:
-        import datetime as _datetime
-
-        return _datetime.datetime.now(tz=_datetime.timezone.utc).date().isoformat()
     import datetime as _datetime
 
-    return _datetime.datetime.fromtimestamp(now, tz=_datetime.timezone.utc).date().isoformat()
+    from local_operator.projects import _local_today
+
+    if now is None:
+        return _local_today().isoformat()
+    return _datetime.datetime.fromtimestamp(now).date().isoformat()
 
 
 def milestone_state(milestone: dict[str, Any], *, today: str | None = None) -> str:
