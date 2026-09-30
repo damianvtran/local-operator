@@ -1552,6 +1552,30 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "wakes/spooled/<id>.json FILE",
     ),
+    # The wake-trigger layer is the supervisor's FOURTH state family
+    # (`local_operator/wakes/triggers/`), beside the index, the ledger and the
+    # spool, and with the same shape: every path is `<config>/wakes/triggers/`
+    # plus a FIXED suffix (`state.json`, `settings.json`,
+    # `pending/<target-id>.json`), built from the config dir the caller passes,
+    # and a target id reaches it only as a filename, so it can carry no
+    # separator. Nothing in the package walks, renames or removes a directory,
+    # under `sessions/` or anywhere else; the two `unlink`s drop ONE record
+    # FILE each (the consumed record, and the TTL-expired one).
+    (
+        "local_operator/wakes/triggers/__init__.py::_write_json",
+        "os.replace",
+        "temp FILE -> wakes/triggers/<name>.json",
+    ),
+    (
+        "local_operator/wakes/triggers/__init__.py::settle",
+        "<path>.unlink",
+        "wakes/triggers/pending/<target-id>.json FILE",
+    ),
+    (
+        "local_operator/wakes/triggers/__init__.py::reconcile",
+        "<path>.unlink",
+        "wakes/triggers/pending/<target-id>.json FILE (expired record)",
+    ),
     ("local_operator/web_fetch/service.py::_prune_cache", "<path>.unlink", "fetch cache FILEs"),
     # -- container/in-memory .remove()/.replace(), not the filesystem --------
     (

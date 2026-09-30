@@ -37,6 +37,7 @@ from local_operator.projects import (
     milestone_status,
     progress_is_stale,
     scan_runtime_states,
+    stale_after_s,
     validate_project_name,
 )
 
@@ -650,6 +651,47 @@ def test_the_staleness_window_is_four_hours(store) -> None:
     # ONE constant is what the boundary is measured against.
     assert not progress_is_stale(row, now=stamp + PROJECT_PROGRESS_STALE_S)
     assert PROJECT_PROGRESS_STALE_S == 4 * 3600
+
+
+def test_the_staleness_window_reads_the_configured_hours(
+    store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``projects.stale_after_hours`` moves the boundary the rule measures."""
+    import yaml
+
+    root = tmp_path / "cfg"
+    home = tmp_path / "home"
+    root.mkdir()
+    home.mkdir()
+    (root / "config.yml").write_text(
+        yaml.safe_dump({"values": {"projects": {"stale_after_hours": 2}}})
+    )
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    monkeypatch.setenv("HOME", str(home))
+
+    project = create(store, progress="still true")
+    row = store.get_project(project.id)
+    stamp = row.progress_updated_at
+    assert stamp is not None
+    assert not progress_is_stale(row, now=stamp + 2 * 3600 - 60)
+    assert progress_is_stale(row, now=stamp + 2 * 3600 + 60)
+
+    # Removing the key restores the default through the same resolver.
+    (root / "config.yml").write_text("")
+    assert not progress_is_stale(row, now=stamp + 2 * 3600 + 60)
+    assert progress_is_stale(row, now=stamp + 4 * 3600 + 60)
+
+
+def test_stale_after_s_falls_back_without_a_config_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An install whose config was never written pays the default, no raise."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "never-written"))
+    monkeypatch.setenv("HOME", str(home))
+
+    assert stale_after_s() == PROJECT_PROGRESS_STALE_S
 
 
 def test_settled_records_never_read_stale(store) -> None:

@@ -1894,6 +1894,30 @@ class AgentLoop:
                         # event below because the markers must agree with it:
                         # same verdict line, one reading.
                         aborted = stop_reason == "aborted" or bool(signal and signal.aborted)
+                        # Q-1 (round 1): the terminal left by an exhausted
+                        # continuation budget must name its own history. The
+                        # notices streamed the budget being spent while the run
+                        # was live, but the frame a record keeps —
+                        # ``agent_end.error`` — held only the provider's
+                        # diagnostic, so a reader seeing just the terminal could
+                        # not tell that three resumptions had already been made
+                        # and failed. Appended, never prepended: classifiers read
+                        # the provider's words first. ``aborted`` is already false
+                        # whenever ``turn_connectivity_loss`` is set (that flag
+                        # only rides ``stop_reason == "error"`` turns); the check
+                        # is kept so the two terminal shapes can never share a
+                        # message.
+                        if (
+                            turn_connectivity_loss
+                            and not aborted
+                            and connectivity_continuations >= MAX_CONNECTIVITY_CONTINUATIONS
+                        ):
+                            stream_error = (
+                                f"{stream_error} — the response stream was cut "
+                                f"mid-answer and the continuation budget is spent "
+                                f"({connectivity_continuations}/"
+                                f"{MAX_CONNECTIVITY_CONTINUATIONS} attempts made)"
+                            )
                         placeholder_details = {FAULT_KEY: FAULT_ABORTED} if aborted else None
                         placeholders = [
                             self._synthetic_result(

@@ -18,6 +18,15 @@ fireable with no session process running:
   and visible (``lop wake status`` reports it). It describes delivery
   attempts, never schedules — the transcript is still the only source of truth
   for what a schedule is.
+- :mod:`.triggers` — the generic wake-trigger layer (``wakes/triggers/``):
+  named SOURCES that periodically evaluate a condition over local state
+  (project staleness first) and, when it holds, record a pending check-in
+  under ``<config_dir>/wakes/triggers/pending/`` for a target session
+  (default: Aida). The supervisor treats a pending record as owed work — the
+  same way it treats a spooled turn — and the TARGET's own engine consumes it
+  into one ordinary wake row, so triggers add no second firing path, no
+  second writer and no second daemon (the evaluation pass rides the
+  supervisor's loop on a throttle). Stdlib-only like its siblings.
 - :mod:`.install` — the install-on-demand hook for the supervisor that reads
   that index and engages a runtime when a cold session's wake comes due. A
   no-op stub until the supervisor lands.

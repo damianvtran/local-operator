@@ -18,6 +18,10 @@ makes:
   ``sdk.open_session`` with the action server declared, the session's live
   inventory holds the harness's own tools (``task``/``hub``/``team`` among
   them) alongside the minted action tool.
+* **A failed execute never wedges the bridge** (arm 1796's F1): one committed
+  read-back failure re-binds through a bounded re-read, or the episode ends
+  ``failed`` / ``bridge-wedged`` with its turn stopped -- never a spin to
+  ``agent_stop``.
 """
 
 from __future__ import annotations
@@ -26,8 +30,11 @@ import asyncio
 import base64
 import hashlib
 import json
+import shutil
 import sys
+import tempfile
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -47,6 +54,8 @@ from local_operator.evaluation.adapters.api import (
     ExecutionReceipt,
     observation_content_id,
 )
+from local_operator.evaluation.adapters.rpc import RpcErrorDetail, RpcRemoteError
+from local_operator.evaluation.evidence.models import ScoreArtifact
 from local_operator.evaluation.protocol import (
     ArtifactRef,
     FrameGeometry,
@@ -55,6 +64,8 @@ from local_operator.evaluation.protocol import (
     Observation,
 )
 from local_operator.evaluation.session_arm import (
+    BRIDGE_WEDGED_TERMINAL,
+    RECOVERY_AFTER_READBACK_LOSS,
     ActionBridge,
     ObservationRenderer,
     SessionArmError,
@@ -62,6 +73,7 @@ from local_operator.evaluation.session_arm import (
     declare_action_server,
     open_episode_session,
     prose_claims_completion,
+    run_session_episode,
     session_tool_names,
     split_prompt_content,
 )
@@ -77,6 +89,12 @@ from local_operator.harness.types import (
 )
 from local_operator.mcp.manager import McpManager
 from local_operator.session.spec import ApprovalPolicy, SessionRoots, SessionSpec
+from tests.unit.evaluation.runner.conftest import (
+    FakeAdapter,
+    build_config,
+    build_spec,
+    selector,
+)
 
 
 def _roots_free() -> SessionRoots:
@@ -96,6 +114,25 @@ class _AsyncContext:
 
     async def __aexit__(self, *exc: Any) -> None:  # pragma: no cover
         return None
+
+
+@pytest.fixture
+def short_scratch() -> Iterator[Path]:
+    """A socket-capable scratch directory short enough for ``sun_path``.
+
+    The action bridge binds a UNIX socket under the episode scratch, and its
+    path is bounded (~104 bytes on macOS). Under xdist the ``tmp_path`` layer
+    plus a descriptive test name goes over that bound (measured), so the
+    run-level tests stage the session scratch here and keep the RECORD under
+    ``tmp_path`` -- the same constraint ``test_record_sink``'s fixture and the
+    repro harness document.
+    """
+
+    path = Path(tempfile.mkdtemp(prefix="lo-arm-t-"))
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 #: A REAL image: the frame reader validates media (`verify_artifact`), so a
@@ -154,6 +191,7 @@ def _bridge(
     *,
     observation: Observation | None = None,
     execute: Any = None,
+    recover: Any = None,
     max_steps: int = 8,
     record: Any = None,
     instruction: str = "the task as stated",
@@ -173,6 +211,7 @@ def _bridge(
         surface=ActionSurface(),
         render=lambda observation: [TextContent(text=f"seen {observation.sequence}")],
         execute=execute or default_execute,
+        recover=recover,
         max_steps=max_steps,
         record=record,
         instruction=instruction,
@@ -182,6 +221,40 @@ def _bridge(
     )
     bridge.arm(obs0)
     return bridge
+
+
+def _observation_phase_error() -> RpcRemoteError:
+    """The wire error a worker answers with after a batch COMMITTED and only
+    the read-back was lost -- the F1 shape (arm 1796, tasks 001/013)."""
+
+    return RpcRemoteError(
+        "adapter_error",
+        "adapter operation failed",
+        RpcErrorDetail(
+            exception_type="ObservationPhaseError",
+            message="environment returned no screenshot frame",
+            method="execute",
+            operation_id="exec-0",
+            phase="observation",
+        ),
+    )
+
+
+def _deadline_error() -> RpcRemoteError:
+    """The ambiguous class: the failure declares nothing about the batch, so
+    no re-read is safe."""
+
+    return RpcRemoteError(
+        "adapter_error",
+        "adapter operation failed",
+        RpcErrorDetail(
+            exception_type="TimeoutError",
+            message="deadline exceeded",
+            method="execute",
+            operation_id="exec-0",
+            phase="unknown",
+        ),
+    )
 
 
 class TestDeclaration:
@@ -1263,3 +1336,488 @@ class TestWireReadLimits:
         assert reply.get("is_error") is False
         assert bridge.steps == 1
         assert len(executed) == 1
+
+
+class TestFailedExecuteRecovery:
+    """The F1 wedge (arm 1796, tasks 001/013): one failed execute must not make
+    the episode terminally unable to bind a batch -- including ``finish``.
+
+    The pre-fix shape: the token is consumed before the batch runs, a raise
+    from ``execute`` left it consumed with nothing in flight, and every later
+    call was refused "no action batch was run" until the model gave up as
+    ``agent_stop``. These tests pin the two endings the re-bind seam makes
+    possible: continue on the environment's re-read observation, or end
+    legibly-wedged -- never a spin.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_committed_failure_re_binds_and_the_episode_continues(
+        self, tmp_path: Path
+    ) -> None:
+        obs0 = _observation()
+        obs1 = _observation(sequence=1, text="screen B")
+        executed: list[Any] = []
+        re_reads: list[int] = []
+
+        async def execute(batch: Any) -> ExecuteResult:
+            executed.append(batch)
+            if len(executed) == 1:
+                raise _observation_phase_error()
+            return _result(input_observation=obs0, output_observation=obs1)
+
+        async def recover() -> Observation:
+            re_reads.append(1)
+            return obs0
+
+        bridge = _bridge(tmp_path, observation=obs0, execute=execute, recover=recover)
+        wait = {"actions": [{"kind": "wait", "duration_ms": 50}]}
+
+        first = await bridge.call(wait)
+        # The call itself is an error -- its own result WAS lost -- but the
+        # episode is not lost with it.
+        assert first["is_error"] is True
+        assert first["details"]["recovered"] is True
+        assert len(first["content"]) == 1
+        assert first["content"][0].text == RECOVERY_AFTER_READBACK_LOSS
+        assert len(executed) == 1 and len(re_reads) == 1
+        assert bridge.end_requested is None
+        assert bridge.steps == 0  # the failed batch never ran as a step
+
+        # Held in flight, exactly like a batch result: the same turn cannot
+        # bind a second batch, and the turn boundary arms the recovered screen.
+        same_turn = await bridge.call(wait)
+        assert same_turn["details"]["rejection_class"] == "second-batch"
+        bridge.fold(TurnEndEvent())
+
+        after = await bridge.call(wait)
+        assert after["is_error"] is False
+        assert bridge.steps == 1
+        assert len(executed) == 2
+        assert len(re_reads) == 1  # one re-bind per failed batch, not a loop
+
+    @pytest.mark.asyncio
+    async def test_a_recovered_screen_not_already_shown_is_rendered(self, tmp_path: Path) -> None:
+        obs1 = _observation(sequence=1, text="screen B")
+
+        async def execute(batch: Any) -> ExecuteResult:
+            del batch
+            raise _observation_phase_error()
+
+        async def recover() -> Observation:
+            return obs1  # newer than the screen the model last saw
+
+        bridge = _bridge(tmp_path, execute=execute, recover=recover)
+        reply = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+        # The sentence, then the one renderer's blocks for the recovered screen.
+        assert reply["content"][0].text == RECOVERY_AFTER_READBACK_LOSS
+        assert reply["content"][1].text == "seen 1"
+        assert bridge.end_requested is None
+
+        # The recovered screen is now the state a later challenge re-attaches.
+        assert bridge._last_observation is not None
+        assert bridge._last_observation.observation_id == obs1.observation_id
+
+    @pytest.mark.asyncio
+    async def test_recovery_is_attempted_once_per_failed_batch(self, tmp_path: Path) -> None:
+        re_reads: list[int] = []
+
+        async def execute(batch: Any) -> ExecuteResult:
+            del batch
+            raise _observation_phase_error()
+
+        async def recover() -> Observation:
+            re_reads.append(1)
+            raise _observation_phase_error()  # the environment is still down
+
+        bridge = _bridge(tmp_path, execute=execute, recover=recover)
+        wait = {"actions": [{"kind": "wait", "duration_ms": 50}]}
+        first = await bridge.call(wait)
+        assert first["details"]["terminal"] == BRIDGE_WEDGED_TERMINAL
+        assert len(re_reads) == 1
+        bridge.fold(TurnEndEvent())
+        # A later call finds the token closed: refused, no second attempt.
+        again = await bridge.call(wait)
+        assert again["is_error"] is True
+        assert len(re_reads) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_failure_that_did_not_declare_the_commit_is_never_re_read(
+        self, tmp_path: Path
+    ) -> None:
+        re_reads: list[int] = []
+
+        async def execute(batch: Any) -> ExecuteResult:
+            del batch
+            raise _deadline_error()
+
+        async def recover() -> Observation:
+            re_reads.append(1)
+            return _observation()
+
+        bridge = _bridge(tmp_path, execute=execute, recover=recover)
+        reply = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+        assert reply["details"]["terminal"] == BRIDGE_WEDGED_TERMINAL
+        assert re_reads == []
+        assert bridge.end_diagnostic is not None
+        assert "ambiguous" in bridge.end_diagnostic
+
+    @pytest.mark.asyncio
+    async def test_without_a_re_bind_seam_the_failure_is_still_legible(
+        self, tmp_path: Path
+    ) -> None:
+        async def execute(batch: Any) -> ExecuteResult:
+            del batch
+            raise _observation_phase_error()
+
+        bridge = _bridge(tmp_path, execute=execute)  # no recover seam
+        reply = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+        assert reply["details"]["terminal"] == BRIDGE_WEDGED_TERMINAL
+        assert bridge.end_diagnostic is not None
+        assert "no re-read path is wired" in bridge.end_diagnostic
+
+    @pytest.mark.asyncio
+    async def test_an_unrecoverable_failure_ends_legibly_and_never_spins(
+        self, tmp_path: Path
+    ) -> None:
+        executed: list[Any] = []
+        recorded: list[tuple[str, dict[str, Any]]] = []
+
+        async def execute(batch: Any) -> ExecuteResult:
+            executed.append(batch)
+            raise _observation_phase_error()
+
+        async def recover() -> Observation:
+            raise _observation_phase_error()
+
+        bridge = _bridge(
+            tmp_path,
+            execute=execute,
+            recover=recover,
+            record=lambda kind, payload: recorded.append((kind, payload)),
+        )
+        reply = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+
+        # The sentence names the transport failure and what was attempted.
+        assert reply["is_error"] is True
+        assert reply["details"]["terminal"] == BRIDGE_WEDGED_TERMINAL
+        assert bridge.end_requested == BRIDGE_WEDGED_TERMINAL
+        assert bridge.end_diagnostic is not None
+        assert "bridge wedged by a transport error" in bridge.end_diagnostic
+        assert "RpcRemoteError" in bridge.end_diagnostic
+        assert "re-read of the environment's current observation failed too" in (
+            bridge.end_diagnostic
+        )
+        assert bridge.terminal is True
+
+        # THE DIAGNOSIS' SECOND QUESTION, PINNED: even the terminal action
+        # cannot bind -- no screen exists to bind it to -- and it must NOT
+        # execute. The wedge is why "the bridge cannot accept a finish" is a
+        # defect and not a policy: the harness ends the episode, so no finish
+        # is ever needed from a wedged bridge.
+        bridge.fold(TurnEndEvent())
+        finish = await bridge.call(
+            {"actions": [{"kind": "finish", "status": "done", "reason": "done"}]}
+        )
+        assert finish["is_error"] is True
+        assert finish["details"]["rejection_class"] == "second-batch"
+        assert len(executed) == 1
+        assert bridge.steps == 0
+
+        # Both endings are journalled, so a bundle can tell a degraded
+        # environment from a clean run.
+        assert [kind for kind, _ in recorded] == ["bridge_wedged"]
+        payload = recorded[0][1]
+        assert payload["recovery_attempted"] is True
+        assert payload["transport_error"].startswith("RpcRemoteError")
+        assert payload["recover_error"].startswith("RpcRemoteError")
+
+    @pytest.mark.asyncio
+    async def test_a_successful_re_bind_is_journalled(self, tmp_path: Path) -> None:
+        obs0 = _observation()
+        recorded: list[tuple[str, dict[str, Any]]] = []
+
+        async def execute(batch: Any) -> ExecuteResult:
+            del batch
+            raise _observation_phase_error()
+
+        async def recover() -> Observation:
+            return obs0
+
+        bridge = _bridge(
+            tmp_path,
+            observation=obs0,
+            execute=execute,
+            recover=recover,
+            record=lambda kind, payload: recorded.append((kind, payload)),
+        )
+        await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+        assert [kind for kind, _ in recorded] == ["recovered"]
+        assert recorded[0][1]["observation_id"] == obs0.observation_id
+        assert recorded[0][1]["transport_error"].startswith("RpcRemoteError")
+
+
+# ---------------------------------------------------------------------------
+# The wedge as the DRIVER sees it: the outcome it reports, the turn it stops
+# ---------------------------------------------------------------------------
+
+
+class _OpenContext:
+    """The session opener's context: hands the scripted session to the arm."""
+
+    def __init__(self, session: Any) -> None:
+        self._session = session
+
+    async def __aenter__(self) -> Any:
+        return self._session
+
+    async def __aexit__(self, *exc: Any) -> bool:
+        del exc
+        return False
+
+
+class _ScriptedSession:
+    """The session surface ``run_session_episode`` drives, acting as BOTH the
+    model and the engine's loop: every action batch is spoken over the REAL
+    bridge socket (so each reply is produced by the production call path),
+    and the loop stops the way the real one stops -- at the post-tool
+    boundary, after the driver has asked for a graceful cancel."""
+
+    def __init__(self, scratch_root: Path, script: list[list[dict[str, Any]]]) -> None:
+        self._scratch_root = Path(scratch_root)
+        self._script = list(script)
+        self._sinks: list[Any] = []
+        self._tools = [SimpleNamespace(name="mcp__episode_actions_apply_actions")]
+        self.mcp_startup = None
+        self.mcp_manager = None
+        self.replies: list[dict[str, Any]] = []
+        self.cancels: list[str] = []
+        self.aborts: list[str] = []
+
+    def subscribe(self, sink: Any) -> Any:
+        self._sinks.append(sink)
+        return lambda: None
+
+    def set_tool_confinement(self, root: Any) -> None:
+        del root
+
+    def request_graceful_cancel(self, reason: str = "cancelled") -> None:
+        self.cancels.append(reason)
+
+    def abort(self, reason: str = "interrupted") -> None:
+        self.aborts.append(reason)
+
+    async def prompt(
+        self, text: str, *, images: Any = None, harness_injected: bool = False
+    ) -> None:
+        del text, images, harness_injected
+        endpoint = next(iter(sorted(self._scratch_root.glob("b-*.sock"))))
+        while self._script:
+            reply = await self._call(endpoint, self._script.pop(0))
+            self.replies.append(reply)
+            self._emit(TurnEndEvent())
+            if self.cancels:
+                break  # the post-tool boundary the real loop stops at
+            if (reply.get("details") or {}).get("terminal") == BRIDGE_WEDGED_TERMINAL:
+                break
+
+    async def _call(self, endpoint: Path, actions: list[dict[str, Any]]) -> dict[str, Any]:
+        reader, writer = await asyncio.open_unix_connection(str(endpoint))
+        try:
+            writer.write(encode_call({"actions": actions}))
+            await writer.drain()
+            return decode_response(await reader.readline())
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    def _emit(self, event: Any) -> None:
+        for sink in self._sinks:
+            sink(event)
+
+
+class _WedgeAdapter(FakeAdapter):
+    """FakeAdapter with the session arm's required capability, plus a scripted
+    F1 failure: the first ``fail_executes`` executes raise the
+    committed-but-lost-read class, and a later read (the recovery) is answered
+    only when ``recoverable`` -- i.e. the environment came back."""
+
+    def __init__(self, *args: Any, fail_executes: int, recoverable: bool, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.fail_executes = fail_executes
+        self.recoverable = recoverable
+        self.executes = 0
+        self.observes = 0
+
+    async def handshake(self, *, timeout: float = 10.0) -> Any:
+        base = await super().handshake(timeout=timeout)
+        capabilities = base.metadata.capabilities.model_copy(
+            update={"ask_user_answer_owner": "adapter"}
+        )
+        return base.model_copy(
+            update={"metadata": base.metadata.model_copy(update={"capabilities": capabilities})}
+        )
+
+    async def _call_raw(self, method: Any, params: Any, result_type: Any, **kwargs: Any) -> Any:
+        if method == "execute":
+            self.executes += 1
+            if self.executes <= self.fail_executes:
+                raise _observation_phase_error()
+        if method == "observe":
+            self.observes += 1
+            # Observation zero is reset_start's own read; every later read is
+            # the recovery's.
+            if not self.recoverable and self.observes > 1:
+                raise _observation_phase_error()
+        return await super()._call_raw(method, params, result_type, **kwargs)
+
+
+class TestBridgeWedgeOutcome:
+    """The wedge through ``run_session_episode``: an outcome that says what
+    happened, and a turn the driver stops instead of letting the model spin."""
+
+    def _fixture(
+        self,
+        *,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        scratch_root: Path,
+        script: list[list[dict[str, Any]]],
+        fail_executes: int,
+        recoverable: bool,
+    ) -> tuple[Any, _ScriptedSession, _WedgeAdapter]:
+        home = scratch_root / "home"
+        config_dir = home / ".local-operator"
+        agent_home = home / "local-operator-home"
+        work = home / "work"
+        for path in (config_dir, agent_home, work):
+            path.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+        monkeypatch.setenv("LOCAL_OPERATOR_HOME", str(agent_home))
+        roots = SessionRoots(
+            config_dir=config_dir, agent_home=agent_home, cwd=work, allow_volatile=True
+        )
+        spec = build_spec("ep-wedge")
+        config = build_config(tmp_path, observation_retry_delay=0.0)
+        adapter = _WedgeAdapter(
+            tmp_path,
+            spec.episode_id,
+            fail_executes=fail_executes,
+            recoverable=recoverable,
+            score=ScoreArtifact(status="scored", binary=0),
+        )
+        session = _ScriptedSession(scratch_root, script)
+        session_spec = SessionSpec(
+            hosting="test", model="mock", approvals=ApprovalPolicy.auto(), name="arm-wedge"
+        )
+
+        async def rescue(descriptor: Any, **kwargs: Any) -> Any:
+            del descriptor, kwargs
+            return SimpleNamespace(complete=True, receipts=(), rescue_required=False)
+
+        def launch(selected: Any) -> Any:
+            del selected
+            return adapter
+
+        def opener(selected: Any, *, roots: Any, mode: Any = None) -> Any:
+            del selected, roots, mode
+            return _OpenContext(session)
+
+        async def run() -> Any:
+            return await run_session_episode(
+                spec=spec,
+                config=config,
+                selector=selector(tmp_path),
+                roots=roots,
+                scratch_root=scratch_root,
+                session_spec=session_spec,
+                secrets=(),
+                launch=launch,
+                rescue=rescue,
+                session_opener=opener,
+            )
+
+        return run, session, adapter
+
+    @pytest.mark.asyncio
+    async def test_an_unrecoverable_failure_ends_failed_with_the_wedge_reason(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        # The script models a model that would keep trying; the driver must
+        # stop it before the second call, and the outcome must say why.
+        run, session, adapter = self._fixture(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            scratch_root=short_scratch,
+            script=[
+                [{"kind": "wait", "duration_ms": 50}],
+                [{"kind": "wait", "duration_ms": 50}],
+            ],
+            fail_executes=4,
+            recoverable=False,
+        )
+        outcome = await run()
+
+        # Not agent_stop: the run died of the transport, and says so.
+        assert outcome.status == "failed"
+        assert outcome.terminal_reason == BRIDGE_WEDGED_TERMINAL
+        assert outcome.diagnostic is not None
+        assert "bridge wedged by a transport error" in outcome.diagnostic
+        assert "re-read of the environment's current observation failed too" in outcome.diagnostic
+        # The score failure this wedge CAUSED (the failed re-read poisons the
+        # session) rides along rather than replacing the root cause.
+        assert "Scoring the state reached also failed" in outcome.diagnostic
+
+        # The stop: requested once, and the next batch never went out.
+        assert len(session.cancels) == 1
+        assert "bridge wedged" in session.cancels[0]
+        assert len(session.replies) == 1
+        assert session.replies[0]["is_error"] is True
+        assert adapter.executes == 4  # initial + the three read-back retries
+        # A poisoned session demands rescue, and the outcome discloses it.
+        assert outcome.rescue_required is True
+        # The sealed record carries the terminal event this outcome names,
+        # the same way its recovered sibling carries ``action_recovered``.
+        events = (outcome.record_root / "events.jsonl").read_text(encoding="utf-8")
+        assert "action_bridge_wedged" in events
+
+    @pytest.mark.asyncio
+    async def test_a_recovered_failure_lets_the_episode_complete(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        run, session, adapter = self._fixture(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            scratch_root=short_scratch,
+            script=[
+                [{"kind": "wait", "duration_ms": 50}],
+                [{"kind": "wait", "duration_ms": 50}],
+                [{"kind": "finish", "status": "done", "reason": "recovered"}],
+                [{"kind": "finish", "status": "done", "reason": "recovered"}],
+            ],
+            fail_executes=4,
+            recoverable=True,
+        )
+        outcome = await run()
+
+        assert outcome.status == "completed"
+        assert outcome.terminal_reason == "finish"
+        assert session.cancels == []
+        assert len(session.replies) == 4
+        # The first reply is the recovery: an error that says the episode is
+        # NOT lost, and no re-render of the screen the model already has.
+        first = session.replies[0]
+        assert first["is_error"] is True
+        assert first["details"]["recovered"] is True
+        assert len(first["content"]) == 1
+        assert first["content"][0]["text"] == RECOVERY_AFTER_READBACK_LOSS
+        # The recovery ran, the model's next batch executed once, and the
+        # read-back retried -- the episode cost four failed executes, not four
+        # batches and not a lost episode.
+        assert adapter.executes == 5  # 4 failing + the next wait batch
+        assert adapter.observes == 2  # reset's read + the recovery's
+        assert outcome.steps == 1
+        # The record carries the recovery ("the environment degraded and the
+        # harness bridged it"), not a suspiciously clean run.
+        events = (outcome.record_root / "events.jsonl").read_text(encoding="utf-8")
+        assert "action_recovered" in events

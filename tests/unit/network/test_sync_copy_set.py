@@ -417,6 +417,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/wakes/store.py": (1, "``wakes`` under the store root"),
     "local_operator/wakes/deliveries.py": (1, "``deliveries`` under ``wakes/``"),
     "local_operator/wakes/spooled.py": (1, "``spooled`` under ``wakes/``"),
+    "local_operator/wakes/triggers/__init__.py": (
+        4,
+        "``triggers``/``pending``/``state.json``/``settings.json``: the trigger "
+        "store under ``wakes/``",
+    ),
+    "local_operator/wakes/triggers/sources/project_staleness.py": (
+        1,
+        "``NAME``: the source's registry name, not a path",
+    ),
     "local_operator/monitors/store.py": (
         1,
         "``monitors`` under the store root: the derived index, the ``wakes`` twin",

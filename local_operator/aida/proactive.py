@@ -129,6 +129,31 @@ DEFAULT_EXTRA_MESSAGE = (
     "something still needs the operator's action."
 )
 
+#: The id prefix of trigger check-in rows: ``aida-trigger-<8 hex>``, the hex
+#: deterministic in the consumed record's sorted fingerprints so a re-consume
+#: re-arms the SAME row (idempotent) and the engine can diff it against the
+#: resident list. Owned by this engine like every other ``aida-*`` row: the
+#: wake-trigger layer records a PENDING record
+#: (``local_operator.wakes.triggers``); arming and dropping the row stays here.
+TRIGGER_ID_PREFIX = "aida-trigger-"
+
+#: Transcript custom-entry type for a consumed trigger receipt: the record's
+#: target + instance fingerprints, journaled after a successful persist — the
+#: durable receipt the trigger design asks for (§1.7). Context-invisible like
+#: :data:`CUSTOM_ENTRY_TYPE`, so it is for whoever reads the transcript next.
+TRIGGER_CUSTOM_ENTRY_TYPE = "aida_trigger"
+
+#: Display label for trigger rows on the human receipt surfaces, on the same
+#: lazy-map rule as the other engine rows.
+TRIGGER_DISPLAY_LABEL_TEMPLATE = "{name}'s check-in"
+
+#: How many instances render into one wake message before "and N more"
+#: summarises the rest, and the per-line clip. The record itself caps at 20
+#: (``wakes.triggers``'s INSTANCE_CAP); the wake engine's own message bound is
+#: the hard stop above this.
+_TRIGGER_MESSAGE_MAX_INSTANCES = 20
+_TRIGGER_LINE_MAX_CHARS = 200
+
 
 @dataclass(frozen=True)
 class CadencePolicy:
@@ -378,11 +403,19 @@ class ReconcileResult:
     the design's "observable, not silent" bound. ``changed`` is True when the
     list differs from the input, so a caller can skip a write (and the
     transcript append it would cost) when nothing moved.
+
+    ``settle`` is the consumed trigger record's compare-and-delete token
+    (``(target, ((source, key), ...), expected_updated_at_ms)``), or ``None``
+    when no trigger record was consumed. It leaves the engine ONLY so the
+    caller can settle after persisting the returned list — a record deleted
+    before its row is durable is a check-in nobody will ever deliver (design
+    §3.2's crash windows all hang off that ordering).
     """
 
     schedules: list[WakeSchedule]
     notes: list[str]
     changed: bool
+    settle: tuple[str, tuple[tuple[str, str], ...], int] | None = None
 
 
 def _extras_today(config_dir: Path | str, now_ms: int) -> tuple[dict[str, Any], int]:
@@ -497,6 +530,13 @@ def reconcile(
     original = list(schedules)
     if not state.is_aida_session(config_dir, session_id):
         return ReconcileResult(schedules=original, notes=[], changed=False)
+
+    # RE-PUBLISH THE TRIGGER SNAPSHOT on every one of her reconciles: boot,
+    # the daily fire, after-turn and every config-watch tick pass through
+    # here, and the published settings must not lag a hand-edited config.yml
+    # beyond that (the design's stated residual). Best-effort, and
+    # ``publish_settings`` skips the write when the values did not move.
+    publish_trigger_settings(config_dir)
 
     pol = policy(config_dir)
     notes: list[str] = []
@@ -629,7 +669,21 @@ def reconcile(
             # stamp a later reconcile (the row retired after firing) would find
             # no greeting row and arm a second one.
             _onboarding.mark_greeted(config_dir, now)
-    return ReconcileResult(schedules=kept, notes=notes, changed=kept != original)
+
+    # -- wake triggers -------------------------------------------------------
+    # Consumed LAST, so an appended check-in row is part of the same list the
+    # caller persists (the engine stays the ONE writer of her schedule list).
+    # The settle token rides the result: the CALLER deletes the record only
+    # after the list is durable. Unreachable on a hold — the disabled/paused/
+    # reactive branch above returned first, leaving the record pending for a
+    # resume or the next active pass (the engine's half of the suppression
+    # matrix; creation-side gates are the supervisor's half).
+    consume = consume_triggers(kept, config_dir=config_dir, session_id=session_id, now_ms=now)
+    kept = consume.schedules
+    notes.extend(consume.notes)
+    return ReconcileResult(
+        schedules=kept, notes=notes, changed=kept != original, settle=consume.settle
+    )
 
 
 def _cadence_due(rows: Sequence[WakeSchedule], pol: CadencePolicy, now_ms: int) -> int | None:
@@ -664,6 +718,283 @@ async def append_notes(transcript: Any, notes: Sequence[str]) -> None:
             await transcript.append_custom(CUSTOM_ENTRY_TYPE, {"note": text})
         except Exception:  # noqa: BLE001 — observation never costs the write
             logger.warning("aida: could not journal a proactive note", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Wake triggers — consuming a pending check-in into ONE row
+# ---------------------------------------------------------------------------
+
+
+def publish_trigger_settings(config_dir: Path | str) -> None:
+    """Re-publish the wake-trigger settings snapshot. Best-effort, sync.
+
+    Called from her reconcile (so boot, the daily fire, after-turn and every
+    config-watch tick re-publish), from :func:`ensure_armed` and from the
+    bootstrap's ensure — the design's writers (b)/(c), which keep the snapshot
+    within a day of a hand-edited ``config.yml`` even with no settings write
+    anywhere. The publish itself skips the file write when the values did not
+    move.
+    """
+    try:
+        from local_operator.wakes import triggers as wake_triggers
+
+        wake_triggers.publish_settings(config_dir)
+    except Exception:  # noqa: BLE001 — a snapshot never costs a reconcile
+        logger.warning("aida: could not publish the trigger settings snapshot", exc_info=True)
+
+
+@dataclass
+class TriggerConsume:
+    """What a consume produced: the list, notes, and the settle token.
+
+    ``settle`` is ``(target, ((source, key), ...), expected_updated_at_ms)`` —
+    the compare-and-delete token for the consumed record. The caller settles
+    ONLY after the returned list is durable: a record deleted before its row
+    is persisted is a check-in nobody will ever deliver.
+    """
+
+    schedules: list[WakeSchedule]
+    notes: list[str]
+    changed: bool
+    settle: tuple[str, tuple[tuple[str, str], ...], int] | None = None
+
+
+def has_pending_triggers(config_dir: Path | str, session_id: str) -> bool:
+    """Whether ``session_id`` has a pending trigger record. One stat.
+
+    The cheap gate for the after-turn drain: without it the drain would run a
+    full reconcile on every turn of hers, instead of exactly when a check-in
+    (or the escalation tray) actually wants the engine.
+    """
+    try:
+        from local_operator.wakes import triggers as wake_triggers
+
+        return wake_triggers.has_pending(Path(config_dir), session_id)
+    except Exception:  # noqa: BLE001 — a gate must answer, not raise
+        return False
+
+
+def consume_triggers(
+    schedules: Sequence[WakeSchedule],
+    *,
+    config_dir: Path | str,
+    session_id: str,
+    now_ms: int | None = None,
+) -> TriggerConsume:
+    """Turn a pending trigger record into AT MOST ONE ``aida-trigger-*`` row.
+
+    THE CONSUME PROTOCOL (design §3.2), in order:
+
+    0. The shared decline gate (``triggers.declines``) — master switch, env,
+       and the belt-and-braces aida states — must be clear; a gated record is
+       LEFT, never settled (review round 1, R2).
+    1. Read ``<config>/wakes/triggers/pending/<session_id>.json``; none ⇒
+       no-op. This is only reachable from the engine's ACTIVE branch, so the
+       hold/reactive re-check has already happened authoritatively.
+    2. Re-verify every KNOWN instance against the authoritative rule
+       (``projects.progress_is_stale`` over the live row): a refresh that
+       landed between record and consume drops the instance; a source this
+       engine cannot verify is left in the record for its own consumer.
+    3. If anything survives and the deterministic row id (sha1 over the sorted
+       fingerprints) is absent from the list, build ONE one-shot row due NOW.
+       If the id IS present, skip and settle — a re-consume can never arm a
+       second row (the crash windows of §3.2). If the schedule list is at the
+       engine's cap, skip with a note and do NOT settle: the record is not
+       lost, and a later consume with room arms it.
+    """
+    from local_operator.wakes import triggers as wake_triggers
+
+    current = list(schedules)
+    root = Path(config_dir)
+    record = wake_triggers.read_pending_record(root, session_id)
+    if record is None:
+        return TriggerConsume(schedules=current, notes=[], changed=False)
+
+    # THE SAME GATE THE PASS AND THE SUPERVISOR USE (review round 1, R2): the
+    # master switch is creation-AND-consumption, so a record that PREDATES a
+    # switch-off must not arm a check-in either. The record is LEFT — nothing
+    # settles — so re-enabling within its TTL reconsiders it and the TTL drops
+    # it otherwise; the engine's own declines (disable/pause/reactive/env) are
+    # already authoritative above (the ACTIVE branch returned first), and
+    # sharing the gate keeps every lever on ONE reader.
+    if wake_triggers.declines(root, session_id) is not None:
+        return TriggerConsume(schedules=current, notes=[], changed=False)
+
+    moment = int(time.time() * 1000) if now_ms is None else int(now_ms)
+    updated = record.get("updated_at_ms")
+    expected = int(updated) if isinstance(updated, int) and not isinstance(updated, bool) else 0
+
+    kept: list[dict[str, Any]] = []
+    keys: list[tuple[str, str]] = []
+    for raw in record.get("instances") or []:
+        if not isinstance(raw, Mapping):
+            continue
+        source = str(raw.get("source") or "")
+        key = str(raw.get("key") or "")
+        if not source or not key:
+            continue
+        if source != "project_staleness":
+            # Not a source this engine can verify: leave it untouched, so a
+            # future consumer (or a newer engine) still finds it.
+            continue
+        keys.append((source, key))
+        if _trigger_project_still_stale(root, key):
+            kept.append(dict(raw))
+    token: tuple[str, tuple[tuple[str, str], ...], int] = (session_id, tuple(keys), expected)
+
+    if not kept:
+        # Everything settled since the record was written (or nothing was
+        # verifiable): nothing to say; settle the record, leave the list alone.
+        return TriggerConsume(schedules=current, notes=[], changed=False, settle=token)
+
+    row_id = wake_triggers.trigger_row_id(kept)
+    if any(row.id == row_id for row in current):
+        # ALREADY ARMED — a re-consume after a crash between persist and
+        # settle. Skip and settle: never a second row, never a duplicate
+        # check-in.
+        return TriggerConsume(schedules=current, notes=[], changed=False, settle=token)
+
+    if len(current) >= MAX_WAKE_SCHEDULES:
+        # Observable, not silent (design §3.2): the note is journaled and the
+        # record stays pending — a later consume with room arms it.
+        return TriggerConsume(
+            schedules=current,
+            notes=["trigger check-in skipped: the schedule list is full."],
+            changed=False,
+        )
+
+    row = WakeSchedule(
+        id=row_id,
+        message=compose_trigger_message(kept, overflow=int(record.get("overflow") or 0)),
+        next_due_at=moment,
+        every_ms=None,
+        created_at=moment,
+    )
+    return TriggerConsume(schedules=[*current, row], notes=[], changed=True, settle=token)
+
+
+def settle_triggers(
+    config_dir: Path | str,
+    session_id: str,
+    settle: tuple[str, tuple[tuple[str, str], ...], int] | None,
+) -> bool:
+    """Compare-and-delete the consumed trigger record. Called AFTER the persist.
+
+    The token rides :class:`ReconcileResult` out of :func:`reconcile` precisely
+    so this cannot run before the armed row is durable — the crash window in
+    which a record is deleted and its row never persisted is the one this
+    ordering exists to close (design §3.2). Best-effort: a failure leaves the
+    record, and the next consume (row present ⇒ skip and settle) retries.
+    """
+    if not settle:
+        return False
+    target, keys, expected = settle
+    if target != session_id or not keys:
+        return False
+    try:
+        from local_operator.wakes import triggers as wake_triggers
+
+        return wake_triggers.settle(
+            Path(config_dir), target, list(keys), expected_updated_at_ms=expected
+        )
+    except Exception:  # noqa: BLE001 — a settle failure just retries later
+        logger.warning("aida: could not settle the trigger record", exc_info=True)
+        return False
+
+
+def _trigger_project_still_stale(root: Path, project_id: str) -> bool:
+    """The AUTHORITATIVE staleness re-check at consume (design §2.2's belt).
+
+    ``projects.progress_is_stale`` is the rule; a missing/unreadable row
+    answers False — the instance is dropped, because the record is about a
+    project that no longer needs the check-in and an unreadable row is the
+    store's problem to repair, never a reason to wake. Never raises.
+    """
+    try:
+        from local_operator.projects import ProjectRegistry, progress_is_stale
+
+        return progress_is_stale(ProjectRegistry(root).get_project(project_id))
+    except Exception:  # noqa: BLE001 — a verify failure drops the instance
+        logger.debug("aida: could not re-verify project %s", project_id, exc_info=True)
+        return False
+
+
+def compose_trigger_message(instances: Sequence[Mapping[str, Any]], *, overflow: int = 0) -> str:
+    """The wake message for one armed check-in, from structured fields only.
+
+    Every rendered field is clipped (project names/titles are user data and a
+    pathological one must not push the instruction out of the message), the
+    sessions are summarised, and instances beyond the record's own cap are
+    one line — "and N more". The wake engine's ``MAX_WAKE_MESSAGE_CHARS``
+    bound is the hard stop; this stays well under it for the common case.
+
+    The contract text is the design's (§2.4 and §3): message, don't do — she
+    never writes a progress line on a session's behalf; one bounded resume is
+    allowed for a dead/stalled session; a project with no live session is
+    surfaced, not spawned.
+    """
+    lines = [
+        "Project check-in. These tracked projects have stale records (no progress "
+        "beyond the configured staleness window):",
+        "",
+    ]
+    for entry in list(instances)[:_TRIGGER_MESSAGE_MAX_INSTANCES]:
+        payload = entry.get("payload")
+        payload = payload if isinstance(payload, Mapping) else {}
+        name = _clip(str(payload.get("display_name") or entry.get("key") or "unknown"))
+        status = _clip(str(payload.get("status") or "unknown"), 40)
+        age = _age_label(payload.get("progress_age_s"))
+        sessions = payload.get("sessions")
+        sessions = sessions if isinstance(sessions, list) else []
+        parts: list[str] = []
+        for session in sessions[:4]:
+            if not isinstance(session, Mapping):
+                continue
+            sid = _clip(str(session.get("id") or ""), 20)
+            live = _clip(str(session.get("live") or "cold"), 12)
+            idle = _age_label(session.get("last_activity_age_s"))
+            parts.append(f"{sid} ({live}, idle {idle})" if idle != "unknown" else f"{sid} ({live})")
+        if len(sessions) > 4:
+            parts.append(f"+{len(sessions) - 4} more")
+        where = ", ".join(parts) if parts else "none"
+        lines.append(
+            f"- {_clip(str(entry.get('key') or 'unknown'), 60)} — \"{name}\", "
+            f"status {status}, last progress {age}; linked sessions: {where}"
+        )
+    if overflow > 0:
+        lines.append(f"- and {overflow} more stale project(s).")
+    lines.extend(
+        [
+            "",
+            "Wake to check in on them: message each linked session (or the project's "
+            "manager) asking for a status update and a `project` progress refresh — "
+            "do not update the records yourself. For a session that looks dead or "
+            "stalled, one bounded resume/restart attempt is allowed; if a project "
+            "has no live session at all, surface it to the operator with a "
+            "recommendation. Then reply briefly with what needs the operator's action.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _clip(text: str, limit: int = _TRIGGER_LINE_MAX_CHARS) -> str:
+    """Whitespace-collapsed and bounded — user data rendered into a message."""
+    collapsed = " ".join(str(text).split())
+    return collapsed if len(collapsed) <= limit else collapsed[: limit - 1] + "…"
+
+
+def _age_label(age_s: Any) -> str:
+    """``2h``/``45m``/``30s`` — or ``unknown`` for anything not a number."""
+    if isinstance(age_s, bool) or not isinstance(age_s, (int, float)) or age_s < 0:
+        return "unknown"
+    seconds = int(age_s)
+    if seconds >= 86400:
+        return f"{seconds // 86400}d"
+    if seconds >= 3600:
+        return f"{seconds // 3600}h"
+    if seconds >= 60:
+        return f"{seconds // 60}m"
+    return f"{seconds}s"
 
 
 # ---------------------------------------------------------------------------
@@ -725,6 +1056,8 @@ def wake_display_label(wake_id: str) -> str:
         template = WAKE_DISPLAY_LABEL_TEMPLATES[wake_id]
     elif wake_id.startswith(EXTRA_ID_PREFIX):
         template = EXTRA_DISPLAY_LABEL_TEMPLATE
+    elif wake_id.startswith(TRIGGER_ID_PREFIX):
+        template = TRIGGER_DISPLAY_LABEL_TEMPLATE
     else:
         return wake_id
     # Lazy, like this module's other cross-imports: a label must never be the
@@ -829,6 +1162,10 @@ async def ensure_armed(
         # back to that state): nothing on disk to arm against, and the next
         # ``ensure_session`` arms the cadence itself.
         return "no-session"
+    # Boot is one of the trigger snapshot's publish points (writers (b)): the
+    # supervisor may evaluate long before her first reconcile, and the
+    # snapshot must describe THIS config, not a stale one.
+    publish_trigger_settings(root)
     if class_reactive is None:
         class_reactive = session_class_reactive(root, session_id)
     try:
@@ -998,6 +1335,12 @@ def mark_held(config_dir: Path | str, session_id: str, *, now_ms: int | None = N
     keeps it (the rebuild clears only ``stopped_at``). Best-effort by
     contract — the config key is the authority and the guards above do not
     consult this file — so every failure is logged and answered ``False``.
+
+    A ROWLESS entry cannot be stamped: ``wake_store.write_entry`` treats an
+    empty schedule list as "remove the entry", and a pause must never delete
+    one. That shape is covered by the published ``aida.cadence.paused`` bit
+    the pause writes through the settings facade (``triggers.declines``), so
+    the supervisor's record plumbing stops all the same (review round 1, R1).
     """
     from local_operator.wakes import store as wake_store
 
@@ -1024,7 +1367,13 @@ def mark_held(config_dir: Path | str, session_id: str, *, now_ms: int | None = N
 
 
 def clear_held(config_dir: Path | str, session_id: str) -> bool:
-    """Drop ``held_at`` from her wake-index entry. Best-effort, like :func:`mark_held`."""
+    """Drop ``held_at`` from her wake-index entry. Best-effort, like :func:`mark_held`.
+
+    Symmetric with :func:`mark_held`, including the rowless no-op: an entry
+    with no schedules carries no marker to clear (and rewriting it would
+    delete it), and the config-published pause bit is what gate paths read
+    for that shape.
+    """
     from local_operator.wakes import store as wake_store
 
     root = Path(config_dir)
