@@ -781,6 +781,15 @@ class ServingSessionHandle(SessionHandle):
         # often 429s on a dead primary BEFORE the turn pins a fallback; the
         # route edge re-fires this opener once a serving model exists.
         self._pending_name_text = ""
+        # Opener of an attempt that ended in the Tier 3 opener fallback (or in
+        # nothing). A fallback title is a STORE, so every other retry latch
+        # releases (the title is no longer empty, the once-only latch stays
+        # spent) and the session would wear an opener quote forever. This is
+        # the one-shot self-heal: handed the opener, it re-runs the acceptance
+        # pipeline ONCE at the next completed turn — a model that had a bad
+        # moment gets a second chance to answer properly. Never re-armed by the
+        # heal itself, so a persistent leak stops instead of looping.
+        self._name_heal_text = ""
         # Strong references to detached background tasks (the naming errand),
         # so the event loop cannot garbage-collect one mid-flight and drop the
         # title silently. Each task removes itself on completion.
@@ -3545,13 +3554,21 @@ class ServingSessionHandle(SessionHandle):
             except Exception:  # noqa: BLE001 — analytics is best-effort
                 logger.debug("analytics: provisional name mirror failed", exc_info=True)
         self._name_requested = True
-        # Hold a strong reference until the task settles: a bare ensure_future
-        # is only weakly held by the loop and can be collected before it runs.
-        task = asyncio.ensure_future(self._name_conversation_worker(text))
+        self._spawn_name_worker(text)
+
+    def _spawn_name_worker(self, text: str, *, heal: bool = False) -> None:
+        """Run one naming attempt as a detached task, strongly referenced.
+
+        Shared by the first-name path and the Tier 3 self-heal because both
+        owe the same lifecycle: a bare ``ensure_future`` is only weakly held by
+        the loop and can be collected before it runs, so the handle holds the
+        task until it settles.
+        """
+        task = asyncio.ensure_future(self._name_conversation_worker(text, heal=heal))
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
-    async def _name_conversation_worker(self, text: str) -> None:
+    async def _name_conversation_worker(self, text: str, *, heal: bool = False) -> None:
         """Ask the model for a title once, cheaply, off the turn's lock.
 
         ``session.complete_once`` is the same isolated, cheap completion the
@@ -3560,25 +3577,89 @@ class ServingSessionHandle(SessionHandle):
         ``generate_title`` and cannot touch the turn. On success the title is
         stored on the session (which persists it), then the projection is
         refreshed and pushed so the phone's header and list update live.
+
+        The acceptance cascade runs INSIDE the naming call
+        (``naming.generate_title_acceptance``): a wrapped or otherwise dirty
+        reply never reaches the store, a rejected sample buys one corrective
+        resample, and an attempt that exhausts every sample answers with the
+        Tier 3 opener fallback — which, being a stored title, would leave no
+        retry path at all. That is what ``_name_heal_text`` exists for: the
+        fallback arms it, and ``_maybe_heal_name`` spends it at the next
+        completed turn. ``heal=True`` is that one spent retry: it may replace
+        the standing fallback (that is its whole purpose — a normal landing
+        never displaces a stored title) and never re-arms itself.
         """
         from local_operator.session import naming
 
         try:
-            title = await naming.generate_title(text, self._session.complete_once)
+            acceptance = await naming.generate_title_acceptance(
+                text,
+                self._session.complete_once,
+                # Owner-only seam, read per attempt: a reduced host without the
+                # classification layer has no attribute and the cascade hedges
+                # instead of asking. See ``naming.title_fit_check``.
+                fit_check=getattr(self._session, "title_fit_check", None),
+            )
         except Exception:  # noqa: BLE001 — naming is decoration; never fail a turn
             logger.debug("mobile conversation naming failed", exc_info=True)
             return
-        if not title or getattr(self._session, "conversation_name", ""):
-            # No title, or a user/restore named it while we were in flight:
-            # allow a later substantive prompt to retry only when still unnamed.
-            if not getattr(self._session, "conversation_name", ""):
-                self._name_requested = False
-                self._pending_name_text = text
+        title = acceptance.title
+        existing = getattr(self._session, "conversation_name", "")
+        if not title or (existing and not heal):
+            # No title, or a user/restore named it while we were in flight.
+            # A heal run is exempt from that second arm: its whole job is to
+            # REPLACE the standing Tier 3 fallback, which is a stored title.
+            if not existing and not heal:
+                if acceptance.heal:
+                    # The model answered and every sample was refused: keep the
+                    # once-only latch spent and hand the retry to the next
+                    # completed turn's heal instead of a future prompt.
+                    self._name_heal_text = text
+                else:
+                    # A failed/absent call (429, cancel, sentinel): allow a
+                    # later substantive prompt to retry while still unnamed.
+                    self._name_requested = False
+                    self._pending_name_text = text
             return
+        if acceptance.heal and not heal:
+            # This store IS the Tier 3 fallback: the session is about to be
+            # named, so every other retry latch releases and only the heal can
+            # still upgrade the opener quote to a generated title.
+            self._name_heal_text = text
         self._pending_name_text = ""
         self._session.set_conversation_name(title, user_set=False)
         self._refresh_state()
         self._notify()
+
+    def _maybe_heal_name(self) -> None:
+        """Spend the one-shot Tier 3 self-heal at a completed turn, if armed.
+
+        Called from ``_on_turn_settled`` — the session's single turn-boundary
+        hook, which fires for EVERY turn (prompt-queue turns, peer wakes,
+        scheduled wakes, resume catch-up). The prompt-drain observer was the
+        other candidate named when this was designed; it covers only turns
+        that ran through the prompt queue, so the turn-boundary hook is the
+        superset and is where "the next completed turn" actually exists for
+        all openers.
+
+        SINGLE-SHOT by construction: the latch is consumed (cleared) before
+        anything can fail, and the heal run itself never re-arms it, so a
+        model that keeps leaking markup costs at most one extra acceptance
+        attempt per session — the bounded contract, not a polling loop.
+        """
+        text = self._name_heal_text
+        if not text:
+            return
+        self._name_heal_text = ""
+        if self._disposing:
+            return
+        state = getattr(self._session, "conversation_name_state", None)
+        if state is not None and getattr(state, "user_set", False):
+            # A human renamed this conversation: generated titles have lost
+            # permanently, and asking again would spend a call to be refused.
+            return
+        logger.debug("spending the one-shot title self-heal")
+        self._spawn_name_worker(text, heal=True)
 
     async def _await_turn_lock_free(self) -> None:
         """Wait out a turn this queue did not open before handing it the head.
@@ -4979,6 +5060,13 @@ class ServingSessionHandle(SessionHandle):
         "the row is still open" mean "this turn never ended": every terminal
         path of a turn reaches this hook, so a row that is still open afterwards
         can only have been left by a process that stopped without getting here.
+
+        The title SELF-HEAL is the fourth: it fires here because this is the
+        one hook that actually means "a completed turn" for every opener, which
+        is what the heal is allowed to wait for (see ``_maybe_heal_name``). It
+        is a no-op unless a naming attempt armed the latch, and it spawns a
+        detached task rather than doing work on this path — the hook runs
+        inside the turn pipeline's ``finally``.
         """
         writer = self._turn_journal
         if writer is not None:
@@ -4988,6 +5076,7 @@ class ServingSessionHandle(SessionHandle):
                 logger.debug("turn journal close failed", exc_info=True)
         self._publish_busy_soon()
         self._schedule_completion_announce()
+        self._maybe_heal_name()
 
     def _schedule_completion_announce(self, *, attempt: int = 0) -> None:
         """Run :meth:`_announce_completion` off the event loop, and retry it.

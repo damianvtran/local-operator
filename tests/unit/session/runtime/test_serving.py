@@ -25,7 +25,11 @@ from local_operator.harness.types import (
 )
 from local_operator.session.frontend_state import SlashResult as _SlashResult
 from local_operator.session.mcp_status import McpStartupOutcome
-from local_operator.session.naming import ConversationName
+from local_operator.session.naming import (
+    TITLE_CORRECTIVE_ADDENDUM,
+    ConversationName,
+    fallback_from_opener,
+)
 from local_operator.session.protocol import RuntimeLocality
 from local_operator.session.runtime import serving as serving_mod
 from local_operator.session.runtime.serving import ServingSessionHandle
@@ -96,6 +100,11 @@ class FakeSession:
         # Tagged or a short untagged title both parse; the default stays
         # tagged so these tests stay independent of the untagged heuristics.
         self.title_reply = "<title>A Neat Title</title>"
+        #: Per-call replies, consumed in order BEFORE ``title_reply``. The
+        #: acceptance cascade spends up to two samples per attempt (sample +
+        #: corrective/hedged resample), so a test that wants a wrapped FIRST
+        #: sample needs the second reply spelled out — see the cascade tests.
+        self.title_replies: list[str] = []
         from local_operator.harness.jobs import AsyncJobManager
 
         self.jobs = AsyncJobManager()
@@ -108,6 +117,8 @@ class FakeSession:
 
     async def complete_once(self, system: str, prompt: str) -> str:
         self._complete_calls.append((system, prompt))
+        if self.title_replies:
+            return self.title_replies.pop(0)
         return self.title_reply
 
     # -- gate registration -----------------------------------------------------
@@ -1124,6 +1135,144 @@ async def test_a_failed_name_retries_once_a_fallback_pins() -> None:
     assert session.conversation_name == "Mobile title sync"
     assert handle._pending_name_text == ""
     assert handle._fold.projection.model_label == "xai/grok-4.6"
+
+
+@pytest.mark.asyncio
+async def test_a_wrapped_reply_is_corrected_before_it_reaches_the_store() -> None:
+    """The operator's defect at the runtime worker: the wrapped reply must not
+    be stored, and the corrective resample's clean answer must be."""
+    handle, session = make_handle()
+    session.title_replies = ["<PROBE#1>Probe session title", "Probe title recovered"]
+
+    handle._maybe_name_conversation("recover the stale PR work")
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+    assert session._named == [("Probe title recovered", False)]
+    assert session.conversation_name == "Probe title recovered"
+    assert len(session._complete_calls) == 2
+    assert TITLE_CORRECTIVE_ADDENDUM in session._complete_calls[1][0]
+    assert handle._name_heal_text == ""
+
+
+@pytest.mark.asyncio
+async def test_an_exhausted_attempt_stores_the_fallback_and_arms_the_heal_once() -> None:
+    """Both samples wrapped -> the opener lands (never the markup), and the
+    one-shot heal is armed with the opener for the next completed turn."""
+    handle, session = make_handle()
+    opener = "recover the stale PR work"
+    session.title_replies = ["<PROBE#1>Probe session title", "<PROBE#2>Probe session title"]
+
+    handle._maybe_name_conversation(opener)
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+    assert session.conversation_name == fallback_from_opener(opener)
+    assert "<" not in session.conversation_name
+    assert handle._name_heal_text == opener
+    assert len(session._complete_calls) == 2, "the attempt is bounded at two samples"
+
+
+@pytest.mark.asyncio
+async def test_the_heal_upgrades_the_fallback_once_and_never_loops() -> None:
+    handle, session = make_handle()
+    opener = "recover the stale PR work"
+    session.title_replies = ["<first wrapped>", "<second wrapped>"]
+
+    handle._maybe_name_conversation(opener)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert session.conversation_name == fallback_from_opener(opener)
+    assert handle._name_heal_text == opener
+
+    # The heal: one more acceptance attempt, whose clean sample replaces the
+    # opener quote. (Two replies: the sample plus its classifier-less hedge.)
+    session.title_replies = ["Probe acceptance landed", "Probe acceptance landed"]
+    handle._maybe_heal_name()
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert session.conversation_name == "Probe acceptance landed"
+    assert handle._name_heal_text == ""
+    assert len(session._complete_calls) == 4
+
+    # SINGLE-SHOT: a later completed turn spends nothing, even though the
+    # model is still leaking markup.
+    session.title_replies = ["<again>", "<again again>"]
+    handle._maybe_heal_name()
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert session.conversation_name == "Probe acceptance landed"
+    assert len(session._complete_calls) == 4
+
+
+@pytest.mark.asyncio
+async def test_the_turn_boundary_hook_spends_the_armed_heal() -> None:
+    """``_on_turn_settled`` is where "the next completed turn" exists for every
+    opener; the chaining is pinned here with its sibling consumers stubbed."""
+    handle, session = make_handle()
+    opener = "recover the stale PR work"
+    session.title_replies = [
+        "<first wrapped>",
+        "<second wrapped>",
+        "Probe acceptance landed",
+        "Probe acceptance landed",
+    ]
+    handle._maybe_name_conversation(opener)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert handle._name_heal_text == opener
+
+    handle._publish_busy_soon = lambda: None  # type: ignore[method-assign]
+    handle._schedule_completion_announce = lambda **_: None  # type: ignore[method-assign]
+    handle._on_turn_settled()
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+    assert session.conversation_name == "Probe acceptance landed"
+    assert handle._name_heal_text == ""
+
+
+@pytest.mark.asyncio
+async def test_the_heal_spends_no_call_after_a_human_rename() -> None:
+    handle, session = make_handle()
+    opener = "recover the stale PR work"
+    session.title_replies = ["<first wrapped>", "<second wrapped>"]
+    handle._maybe_name_conversation(opener)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert handle._name_heal_text == opener
+
+    state = ConversationName()
+    state.set("Ledger reconciliation", user_set=True)
+    session.conversation_name_state = state  # type: ignore[attr-defined]
+    session.title_replies = ["never spent"]
+    handle._maybe_heal_name()
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+    assert handle._name_heal_text == "", "the latch is consumed either way"
+    assert len(session._complete_calls) == 2, "the rename spend no further call"
+
+
+@pytest.mark.asyncio
+async def test_an_unusable_opener_arms_the_heal_with_an_empty_store() -> None:
+    """Tier 3 with nothing usable to fall back to: nothing is stored, and the
+    one-shot latch STILL arms with the opener — the retry the next completed
+    turn spends is exactly what an unnamed session has left (the once-only
+    latch stays spent on this path, and no fallback store released it).
+    """
+    handle, session = make_handle()
+    opener = "<\u56d7>"
+    session.title_replies = ["<first wrapped>", "<second wrapped>"]
+
+    handle._maybe_name_conversation(opener)
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+    assert session.conversation_name == "", "nothing usable -> nothing stored"
+    assert session._named == []
+    assert handle._name_heal_text == opener, "the heal survives an empty fallback"
+    assert len(session._complete_calls) == 2
 
 
 @pytest.mark.asyncio

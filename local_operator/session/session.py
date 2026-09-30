@@ -227,6 +227,7 @@ from local_operator.session.naming import (
     CONVERSATION_NAME_CUSTOM_TYPE,
     MAX_TITLE_CHARS,
     ConversationName,
+    TitleFitCheck,
 )
 from local_operator.session.protocol import (
     CompactionOutcome,
@@ -2456,6 +2457,17 @@ class Session:
         #: ``None`` on a session built without one (tests, embedders): the gate
         #: then never calls anything and every change is delivered.
         monitor_classify: MonitorClassify | None = None,
+        #: The naming errand's Tier-1 fit check (``naming.title_fit_check``):
+        #: bounded state → verdict, or ``None`` = "no classifier". A second
+        #: adapter over the SAME shared ``ClassificationService`` as the two
+        #: callables above — one cascade, one breaker, one credential memo —
+        #: rather than a service of its own. ``None`` is a supported state
+        #: (every session built without the classification layer, and every
+        #: reduced host): the acceptance cascade then hedges with an
+        #: independent second naming sample instead of asking. Read per call by
+        #: the naming owners; a captured answer would pin a seam hosts and tests
+        #: swap after construction.
+        title_fit_check: TitleFitCheck | None = None,
         # Called each turn with the session's live ``model_label`` so the env
         # block names the running model; accepts it positionally (``...``) and
         # may return sync or async. A provider that ignores the argument is
@@ -3541,6 +3553,16 @@ class Session:
             index_writable=lambda: not self._monitor_index_write_failed,
             classify=monitor_classify,
         )
+        #: Stored, not merely consumed: the naming OWNERS (the TUI's naming
+        #: workers and the runtime's) reach the fit check through the session
+        #: they are naming, because that is the only object both of them hold
+        #: (`self._session` on the runtime handle, the app's current session).
+        #: The read is a `getattr(..., None)` probe on the owner side rather
+        #: than a hard access: a reduced session built by a test or an embedder
+        #: without the classification layer is a supported state, and the
+        #: cascade hedges rather than asking. See
+        #: ``tests/unit/session/test_viewer_protocol.py``'s owner-only probe set.
+        self.title_fit_check = title_fit_check
         #: Whether this session is AIDA's (``local_operator.aida``), resolved
         #: once per open by :meth:`_aida_is_hers` — one stat of
         #: ``<config>/aida/state.json`` on every session that is not hers, and

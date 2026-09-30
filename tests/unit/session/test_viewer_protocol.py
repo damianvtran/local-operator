@@ -325,6 +325,14 @@ _OWNER_ONLY_CAPABILITY_PROBES = frozenset(
         "preflight_usage",
         "refresh_frontend_usage",
         "routing_settings",
+        # The naming errand's Tier-1 fit check: an OWNER-only provider seam,
+        # composed by the session factory over the shared classification
+        # service (``session.naming.title_fit_check``). A viewer never names —
+        # its ``complete_once`` raises — so the facade rightly has none, and
+        # the naming owners read it with the 3-arg getattr probe this set
+        # exists for: absent means "no classifier", which the acceptance
+        # cascade supports by hedging with a second independent sample.
+        "title_fit_check",
         "variables",
         "wears_inherited_title",
     }
