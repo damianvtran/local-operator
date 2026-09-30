@@ -107,7 +107,11 @@ a user who has not learned the chord, and the one that needs no keyboard mode.
 It runs the same flip `Ctrl+A` runs and holds the same discipline: per-session,
 and **never a write to `tui.sidebar_show_subagents`**, for the same fan-out
 reason. Hovering the chip underlines it; the count itself is never replaced or
-moved. The chord and the pointer are two ways to one flip, never two flips.
+moved. The chip is the ladder's last rung, so its column moves when the footer's
+shape changes — a flip that pages the list can shift it a few cells, and a press
+aimed where it used to sit is inert; the underline returns on the next hover,
+wherever the chip now sits. The chord and the pointer are two ways to one flip,
+never two flips.
 
 Turning the layer on costs screen space before it shows a single row. Each
 section spends a heading plus the blank line beneath it, and every heading after
