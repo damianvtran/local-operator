@@ -364,6 +364,15 @@ _MID_STREAM_TRANSPORT_LOSS_NAMES = (
 #: second, provenance-shaped piece of evidence — is left exactly as it was,
 #: because "the gateway 500ed" with no evidence about WHAT failed is not a routing
 #: failure we are entitled to replay.
+#:
+#: A second recorded wording of the same class is the gateway's IDLE TIMER:
+#: OpenRouter answers an in-band 504 ``Upstream idle timeout exceeded`` when a
+#: chosen upstream host stalls mid-generation (the field's F2 arm, control-repeat
+#: episode task 010 run c1, ``runs/a1796-c1-task_010-20260930-034755`` — the run
+#: died holding a partial answer). The gateway's own words name the UPSTREAM as
+#: the thing that failed, which is routing evidence about the gateway's side of
+#: the hop, not a verdict on our request — so a re-issue is served by another of
+#: its hosts, exactly like the shapes above.
 _AGGREGATOR_UPSTREAM_STREAM_FAILURE_MARKERS = (
     "provider_unavailable",
     "upstream error from",
@@ -371,6 +380,7 @@ _AGGREGATOR_UPSTREAM_STREAM_FAILURE_MARKERS = (
     "h2 protocol error",
     "network connection lost",
     "json error injected into sse stream",
+    "upstream idle timeout",
 )
 
 #: The only stream events that may be forwarded WITHOUT making an attempt

@@ -3995,6 +3995,14 @@ _AGGREGATOR_UPSTREAM_CUT = (
     "h2 protocol error: error reading a body from connection"
 )
 
+#: The F2 arm's recorded wording of the same class: OpenRouter's idle timer
+#: killing the stream after a chosen upstream host stalls mid-generation
+#: (control-repeat episode task 010 run c1,
+#: ``runs/a1796-c1-task_010-20260930-034755``). Same class as the sentinel
+#: pass's 502 above — the gateway reporting its upstream host failed — a
+#: different wording, which is why the marker list had to learn it.
+_AGGREGATOR_IDLE_TIMEOUT_CUT = "Upstream idle timeout exceeded"
+
 
 class _AggregatorAuth:
     """Minimal ``FailoverAuthStore``: one bearer, no siblings to rotate to."""
@@ -4051,6 +4059,11 @@ class _AggregatorGateway:
 def _aggregator_cut() -> ProviderError:
     """The recorded in-band upstream failure, as OpenRouter delivers it."""
     return ProviderError(502, _AGGREGATOR_UPSTREAM_CUT, retryable=True)
+
+
+def _idle_timeout_cut() -> ProviderError:
+    """The F2 arm's recorded 504, as OpenRouter delivers it in band."""
+    return ProviderError(504, _AGGREGATOR_IDLE_TIMEOUT_CUT, retryable=True)
 
 
 def _aggregator_harness(
@@ -4122,6 +4135,41 @@ async def test_aggregator_upstream_cut_mid_call_continues_the_turn() -> None:
     assert gateway.calls == 2
     # The truncated call never ran: it is dropped rather than executed, which the
     # sibling test above locks down. Here the point is that the turn lives.
+    assert executed == []
+
+
+@pytest.mark.asyncio
+async def test_aggregator_idle_timeout_mid_call_continues_the_turn() -> None:
+    """THE F2 ARM'S RECORDED 504: a stalled upstream host must not end the pass.
+
+    The control-repeat episode died holding a partial answer — OpenRouter's idle
+    timer killed the stream mid-generation and the loop ended the run with
+    ``stop_reason="error"`` — because the driver's aggregator-upstream
+    classifier knew every wording but this one. Driven through the real driver,
+    like its 502 sibling above.
+    """
+    executed: list[str] = []
+    stream_fn, gateway, _sent = _aggregator_harness([_idle_timeout_cut(), None])
+
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")],
+        LoopContext(tools=[echo_tool(executed)]),
+        make_config(stream_fn, model=_AGGREGATOR_MODEL),
+        None,
+    ):
+        events.append(event)
+
+    ends = [e for e in events if isinstance(e, AgentEndEvent)]
+    assert len(ends) == 1
+    assert ends[0].error is None, "a stalled upstream host must not end the pass"
+    assert ends[0].aborted is False
+
+    # What the user read, exactly once: the partial answer and its continuation.
+    on_screen = "".join(e.delta for e in events if e.type == "message_update")
+    assert on_screen == "Let me write that down. done"
+    # The gateway was asked a second time — the re-route the incident needed.
+    assert gateway.calls == 2
     assert executed == []
 
 
