@@ -26713,21 +26713,25 @@ class OperatorApp(App[None]):
         branch's `! interrupted` — a carried, not-yet-dispatched run was
         cancelled, so `aborted` is True — and the closure supersedes it).
 
-        BOTH KINDS, and the kind must MATCH. This used to accept only
-        `interrupted`, on the reasoning that an `error` outcome "is a different
-        fact" whose live row says something else — true, but it left the live
-        error row and the poller's `Stopped with an error` both standing, so
-        every turn that ended with a provider error painted the failure TWICE.
-        The duplicate is not a new defect of the cut-off work: it is the same
-        one-interruption-two-rows shape the aborted branch already fixed, on the
-        branch that never got the fix (`_own_interrupt_notice` was only ever
-        set in the aborted branch). Adopting an error row is correct for the
-        same reason it is correct for an interruption: one outcome, one row.
+        FOUR KINDS ADOPT (`interrupted`, `error`, `retired`, `closed`), and
+        every mismatch must still REFUSE — except the two correspondences the
+        arms above own: `error` → `retired` and `interrupted` → `closed`. This
+        used to accept only `interrupted`, on the reasoning that an `error`
+        outcome "is a different fact" whose live row says something else —
+        true, but it left the live error row and the poller's `Stopped with an
+        error` both standing, so every turn that ended with a provider error
+        painted the failure TWICE. The duplicate is not a new defect of the
+        cut-off work: it is the same one-interruption-two-rows shape the
+        aborted branch already fixed, on the branch that never got the fix
+        (`_own_interrupt_notice` was only ever set in the aborted branch).
+        Adopting an error row is correct for the same reason it is correct for
+        an interruption: one outcome, one row.
 
         The kind guard stays, because a MISMATCH is a real disagreement — a held
         `interrupted` row must not be stamped with an error's anchor, or the
         poller's error notice would be suppressed in favour of a row that says
-        something else.
+        something else; the two correspondences above are the exemptions, each
+        carried with its reason by the guard itself.
 
         The row must still be MOUNTED. A `/clear` or a session swap removes it
         while this reference survives to the next tick, and stamping an anchor
