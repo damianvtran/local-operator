@@ -177,6 +177,68 @@ def test_the_registry_is_bounded_and_keeps_the_most_recent(tmp_path: Path) -> No
     assert str(uuid.UUID(int=1)) not in kept, "the least-recently-seen goes first"
 
 
+def test_prune_drops_exactly_the_excess_even_with_a_duplicated_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M2 probe: duplicates must cost one slot each, not take a survivor down.
+
+    No in-band path can mint a duplicate ``device_id``, so the shape is built on
+    disk; the bug it caught removed every record sharing a doomed id, so a
+    duplicate pair spanning the prune boundary lost both twins for one slot.
+    """
+    monkeypatch.setattr(push_devices, "MAX_DEVICE_ENTRIES", 4)
+    root = tmp_path
+    shared = "b" * 32
+    records = [
+        {
+            **_VALID_RECORD,
+            "device_id": "a" * 32,
+            "install_id": str(uuid.UUID(int=1)),
+            "registered_at": 100,
+            "last_seen_at": 100,
+        },
+        {
+            **_VALID_RECORD,
+            "device_id": shared,
+            "install_id": str(uuid.UUID(int=2)),
+            "registered_at": 101,
+            "last_seen_at": 101,
+        },
+        {
+            **_VALID_RECORD,
+            "device_id": shared,
+            "install_id": str(uuid.UUID(int=3)),
+            "registered_at": 102,
+            "last_seen_at": 102,
+        },
+        {
+            **_VALID_RECORD,
+            "device_id": "c" * 32,
+            "install_id": str(uuid.UUID(int=4)),
+            "registered_at": 200,
+            "last_seen_at": 200,
+        },
+        {
+            **_VALID_RECORD,
+            "device_id": "d" * 32,
+            "install_id": str(uuid.UUID(int=5)),
+            "registered_at": 201,
+            "last_seen_at": 201,
+        },
+    ]
+    root.joinpath(PUSH_DEVICES_STORE_NAME).write_text(
+        json.dumps({"devices": records}), encoding="utf-8"
+    )
+    push_devices.register(root, {**PAYLOAD, "install_id": str(uuid.UUID(int=6))}, now=999.0)
+    stored = json.loads(root.joinpath(PUSH_DEVICES_STORE_NAME).read_text(encoding="utf-8"))[
+        "devices"
+    ]
+    assert len(stored) == 4, "exactly `excess` records leave"
+    assert [record["device_id"] for record in stored].count(
+        shared
+    ) == 1, "the surviving twin stays: eviction is positional, never by id value"
+
+
 def test_a_different_install_id_or_platform_is_a_new_device() -> None:
     client = _client()
     original = client.post("/api/push/register", json=PAYLOAD)
@@ -192,7 +254,7 @@ def test_a_different_install_id_or_platform_is_a_new_device() -> None:
 
 
 def test_install_id_is_stored_as_a_canonical_uuid() -> None:
-    """A case variant of one UUID must not fork the device identity (review M1).
+    """One UUID, however the caller spells it, is one device identity (M1).
 
     iOS mints and keeps uppercase UUIDs; storing the caller's spelling verbatim
     would let the same phone register as two devices depending on how the app
@@ -204,9 +266,56 @@ def test_install_id_is_stored_as_a_canonical_uuid() -> None:
     )
     assert upper.status_code == 200, upper.text
     assert _stored_records()[0]["install_id"] == PAYLOAD["install_id"].lower()
-    again = client.post("/api/push/register", json=PAYLOAD)
-    assert again.json()["device_id"] == upper.json()["device_id"], "one UUID, one device"
+    device_id = upper.json()["device_id"]
+    for spelling in (
+        PAYLOAD["install_id"],  # canonical
+        PAYLOAD["install_id"].replace("-", ""),  # hyphenless hex
+        "urn:uuid:" + PAYLOAD["install_id"].upper(),  # urn prefix + case
+        "{" + PAYLOAD["install_id"].upper() + "}",  # brace form + case
+    ):
+        again = client.post("/api/push/register", json={**PAYLOAD, "install_id": spelling})
+        assert again.status_code == 200, (spelling, again.text)
+        assert again.json()["device_id"] == device_id, f"one UUID, one device ({spelling})"
     assert len(_stored_records()) == 1
+
+
+def test_a_variant_spelling_written_by_an_older_build_does_not_fork() -> None:
+    """QA-Q1 / review M1: matching must be by parsed identity, not spelling.
+
+    The head before the canonicalisation landed stored whatever spelling the
+    caller sent (verbatim, so iOS's default uppercase is a real on-disk shape).
+    A register carrying another spelling of that same UUID must fold into the
+    existing record — one phone listed once — not mint a second device_id.
+    """
+    client = _client()
+    legacy_device_id = "5" * 32
+    _store_path().parent.mkdir(parents=True, exist_ok=True)
+    _store_path().write_text(
+        json.dumps(
+            {
+                "devices": [
+                    {
+                        "device_id": legacy_device_id,
+                        "platform": "ios",
+                        "environment": "production",
+                        "app_version": "0.9.0",
+                        "install_id": PAYLOAD["install_id"].upper(),
+                        "registered_at": 1_799_000_000,
+                        "last_seen_at": 1_799_000_000,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    response = client.post("/api/push/register", json=PAYLOAD)
+    assert response.status_code == 200, response.text
+    assert (
+        response.json()["device_id"] == legacy_device_id
+    ), "the variant-spelling record IS this device"
+    assert len(_stored_records()) == 1, "one phone, one row — a spelling must not fork it"
+    listed = client.get("/api/push/devices").json()["devices"]
+    assert [device["device_id"] for device in listed] == [legacy_device_id]
 
 
 def test_deregister_removes_and_repeating_it_stays_ok() -> None:
@@ -384,6 +493,16 @@ def test_refusals_name_their_actual_problem() -> None:
     not_uuid = client.post("/api/push/register", json={**PAYLOAD, "install_id": "not-a-uuid"})
     assert not_uuid.status_code == 422
     assert not_uuid.json() == {"error": "install_id must be a UUID"}
+
+    giant = "K" * 5000
+    echo = client.post("/api/push/register", json={**PAYLOAD, giant: "x"})
+    assert echo.status_code == 422
+    sentence = echo.json()["error"]
+    assert sentence.startswith("unknown field(s): ")
+    assert len(sentence) <= len("unknown field(s): ") + push_devices.MAX_FIELD_CHARS, (
+        "the echoed key names are capped (review round 2's N1 / QA's Q2, which "
+        "measured a 5030-byte body before the cap)"
+    )
     assert not _store_path().exists(), "no refusal may create the store"
 
 
