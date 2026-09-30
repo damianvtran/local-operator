@@ -34,6 +34,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -85,6 +87,40 @@ def _seed_env(mode: str) -> None:
         raise SystemExit(f"unknown mode {mode!r}; want 'nerd' or 'plain'")
 
 
+def _warn_if_no_nerd_font(mode: str) -> None:
+    """One line when the nerd frame cannot show its own glyphs.
+
+    The frame is rasterized by librsvg against the host's fontconfig; a host
+    with no Nerd face paints every Font Awesome codepoint as tofu, so the
+    still cannot evidence the glyph pick even though the row, summaries and
+    spacing in it are real (design round 1, TUI D2). The check is against the
+    font LIST rather than the capture profile's resolved face: the PUA glyph
+    would be drawn by whatever fallback owns the codepoint, so what matters is
+    whether any installed face carries it — and in practice that is a family
+    whose NAME says "Nerd" (a bare "Symbols" match is not enough: macOS's own
+    ``.CJK Symbols Fallback`` families match it and carry no FA glyphs).
+    """
+    if mode != "nerd":
+        return
+    lister = shutil.which("fc-list")
+    installed = ""
+    if lister is not None:
+        try:
+            installed = subprocess.run(
+                [lister], capture_output=True, text=True, timeout=10, check=False
+            ).stdout
+        except (OSError, subprocess.SubprocessError):
+            installed = ""
+    if "nerd" in installed.casefold():
+        return
+    print(
+        "warning: no Nerd font resolves on this host (fc-list): every nerd "
+        "glyph in this frame will render as a replacement box — judge the "
+        "glyph on a specimen, not on this frame (design round 1, TUI D2).",
+        file=sys.stderr,
+    )
+
+
 #: (tool_name, args) rows. The two neighbours above the sessions block are the
 #: collision witnesses: `task` owns nf-fa-users, `send` owns nf-fa-paper_plane,
 #: and a sessions glyph that leaned on either would read as a duplicate in the
@@ -116,6 +152,7 @@ async def main() -> None:
     out = sys.argv[1]
     mode = sys.argv[2] if len(sys.argv) > 2 else "nerd"
     _seed_env(mode)
+    _warn_if_no_nerd_font(mode)
 
     size = (100, 24)
     settled = False

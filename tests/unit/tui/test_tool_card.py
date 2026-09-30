@@ -2793,6 +2793,19 @@ def test_sessions_peek_rows_keep_the_window_rightmost() -> None:
     row = ToolCard("t", "sessions", {"op": "peek", "target": "release-crew"})._build_row(100).plain
     assert "peek · release-crew" in row
     assert "last" not in row and "first" not in row
+    # R1 (round 1): a query WITH a sized window rides as `search <needle> ·
+    # N around` — the tool's own validation keeps `steps` as the size of the
+    # match window, so `last N` here named a tail read the call never makes.
+    row = (
+        ToolCard(
+            "t",
+            "sessions",
+            {"op": "peek", "target": "release-crew", "query": "needle", "steps": 6},
+        )
+        ._build_row(100)
+        .plain
+    )
+    assert "peek · release-crew · search needle · 6 around" in row
 
 
 def test_sessions_list_rows_say_what_the_list_asks_for() -> None:

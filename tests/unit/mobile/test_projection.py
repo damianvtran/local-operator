@@ -2080,6 +2080,20 @@ def test_summarize_args_sessions_rows_are_the_shared_decision() -> None:
         _summarize_args("sessions", {"op": "peek", "target": "release-crew", "steps": 12})
         == "peek · release-crew · last 12"
     )
+    # R1 (round 1): `query` is the discriminator that survives beside a
+    # window — `query` + `steps=N` is the tool's own "N around the match"
+    # (its validation keeps `steps` as the size of the match window), so a
+    # row painting "last 6" claimed a tail read this call never makes.
+    assert (
+        _summarize_args(
+            "sessions", {"op": "peek", "target": "release-crew", "query": "needle", "steps": 6}
+        )
+        == "peek · release-crew · search needle · 6 around"
+    )
+    assert (
+        _summarize_args("sessions", {"op": "peek", "target": "release-crew", "query": "needle"})
+        == "peek · release-crew · search needle"
+    )
     assert (
         _summarize_args("sessions", {"op": "list", "include_stored": True, "query": "flaky shard"})
         == "list · stored · flaky shard"
@@ -2087,6 +2101,12 @@ def test_summarize_args_sessions_rows_are_the_shared_decision() -> None:
     assert _summarize_args("sessions", {"op": "list"}) == "list"
     assert _summarize_args("sessions", {"op": "stop"}) == "stop · ?"
     assert _summarize_args("sessions", {"op": "frobnicate"}) == "frobnicate"
+    # R2 (round 1): a degenerate call stands on the tool name, exactly as the
+    # TUI's row does — `sessions_row_summary` returns "" when even the op is
+    # unreadable, and the substitution back to the name is the contract both
+    # hosts document (a bare `sessions` beats a blank summary cell).
+    assert _summarize_args("sessions", {}) == "sessions"
+    assert _summarize_args("sessions", {"op": None}) == "sessions"
     # This module's uniform cap still bounds the row: a long name cannot make
     # a projection repaint carry an unbounded string.
     bounded = _summarize_args("sessions", {"op": "spawn", "name": "x" * 300})

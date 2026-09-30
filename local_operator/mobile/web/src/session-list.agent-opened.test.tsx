@@ -64,6 +64,8 @@ describe("SessionCard agent-opened rung", () => {
 		render(<SessionListScreen />);
 		const card = cardByName("Release cutter");
 		expect(within(card).getByText("agent")).toBeTruthy();
+		/* The prefix lives in the chip itself (asserted below by accessible
+		   name); the visible word is found by its own text node. */
 	});
 
 	it("marks a row even when every member of the opener is null", () => {
@@ -80,6 +82,22 @@ describe("SessionCard agent-opened rung", () => {
 		render(<SessionListScreen />);
 		const card = cardByName("Anonymous workstream");
 		expect(within(card).getByText("agent")).toBeTruthy();
+	});
+
+	it("announces the mark as an origin, not an identity (design round 1, D1)", () => {
+		/* The VISIBLE word stays `agent` (the measured 40 px chip budget),
+		   but the accessible name must read "opened by agent": a bare noun
+		   trailing the title can be heard as the session's identity rather
+		   than its origin, the same confusion the mark exists to end. */
+		sessionList = [
+			summary({
+				session_id: "ws9",
+				conversation_name: "Release cutter",
+				opened_by: { agent: null, label: null, session: null },
+			}),
+		];
+		render(<SessionListScreen />);
+		expect(screen.getByRole("button", { name: /opened by agent/ })).toBeTruthy();
 	});
 
 	it("leaves the operator's own conversations unmarked", () => {

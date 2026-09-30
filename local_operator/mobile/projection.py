@@ -358,8 +358,12 @@ def _summarize_args(tool_name: str, args: dict[str, Any]) -> str:
         # like every other summary here. The op leads on both because both
         # rows shed from the right, and the generic `op=…` fallback this
         # replaces dropped the op entirely — a `stop` and a `peek` on one
-        # session painted identical rows.
-        return _compact(sessions_row_summary(args), 80)
+        # session painted identical rows. A degenerate call (no readable op)
+        # falls back to the tool NAME, the substitution the shared contract
+        # documents and the TUI's row performs — without the `or tool_name`
+        # the phone painted a blank summary cell while the terminal painted
+        # `sessions` for the same call (round-1 review, R2).
+        return _compact(sessions_row_summary(args), 80) or tool_name
     for key in ("path", "file_path", "file", "command", "pattern", "query", "url"):
         value = args.get(key)
         if isinstance(value, str) and value:
