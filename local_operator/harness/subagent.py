@@ -158,6 +158,7 @@ from local_operator.harness.types import (
     Usage,
 )
 from local_operator.mcp.config import server_own_turn_only
+from local_operator.model.naming import model_label as model_label_forms
 from local_operator.paths import config_dir
 from local_operator.resume import ORIGIN_SUBAGENT, mark_session_origin
 
@@ -1603,6 +1604,18 @@ async def _publish_terminal_outcome(
     return resolved_status, resolved_error, resolved_result
 
 
+def _display_model_name(selector: str) -> str:
+    """The product's own vocabulary for one ``provider/model_id`` selector.
+
+    ``model/naming.py``'s honesty rule decides: a display name only where one
+    names this model and no other, else the selector itself. Shared by the two
+    halves of the notice pair so neither can be spelled in a vocabulary the
+    other does not speak.
+    """
+    provider, _, model_id = selector.partition("/")
+    return model_label_forms(provider, model_id).full
+
+
 def _pinned_fallback_notice(
     label: str, role: str, requested: str, effective: str, reason: str
 ) -> str:
@@ -1616,13 +1629,24 @@ def _pinned_fallback_notice(
     the descent point, where the classification already exists) reaches this
     surface unchanged; an absent reason leaves the sentence without a cause
     clause rather than inventing one.
+
+    The two models are stated in the PRODUCT's vocabulary — resolved display
+    names where naming can vouch for one, else the selector — and as an
+    ``A → B`` pair, the same relation spelling the band's badge uses, rather
+    than words the badge does not (design D4 / UX U3). The pair is joined with
+    non-breaking spaces INSIDE each display name too — the names carry spaces
+    of their own — because the notice's own wrap breaks on ASCII spaces only
+    (``transcript.wrap_cells``): with a plain-space join the pair still split
+    (`…Sonnet 5.5 →` / `DeepSeek Flash…`) at exactly the widths this fix
+    exists for. The pair reads identically in every renderer and copies as
+    visible spaces; the rest of the sentence wraps as prose.
     """
     role_clause = f" ({role})" if role else ""
     cause = f" — {reason.strip()}" if reason.strip() else ""
-    return (
-        f"subagent '{label}'{role_clause} pinned to {requested} "
-        f"is running on {effective}{cause}."
-    )
+    pin = _display_model_name(requested).replace(" ", "\u00a0")
+    running = _display_model_name(effective).replace(" ", "\u00a0")
+    pair = f"{pin}\u00a0→\u00a0{running}"
+    return f"subagent '{label}'{role_clause} pinned {pair}{cause}."
 
 
 def _make_relay(

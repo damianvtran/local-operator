@@ -13,11 +13,19 @@ The writer under test is the relay's ``ModelChangeEvent`` branch
 
 * the JOB ROW keeps the requested label forever and carries the fallback
   marker + reason while the substitution stands (and clears them on recovery);
-* the PARENT STREAM gets one notice per fallback episode with all four facts;
+* the PARENT STREAM gets one notice per fallback episode with all four facts —
+  the two models in the product's vocabulary, joined as an atomic `A → B` pair;
 * the ROSTER ROW (the sidecar projection) carries the pin label so a restored
   row still renders the badge after a restart;
 * ``wait``'s ``_job_summary`` names both models;
-* the band's model segment and the mobile projection render the badge.
+* the band's model segment renders the badge — the full pair while the row can
+  hold it, the shed `⚠ <effective>` form below that, and the same suffix on the
+  irreducible rung — because the pair must never evict cwd or the context
+  reading the base row kept (D1/U2);
+* the DURABLE COMPLETION row states the pin — the surface the walk-away flow
+  ends on, which no replay of the live notice reaches (U1);
+* the mobile projection carries the badge AND its boolean, so the phone's
+  roster row can paint the substitution without parsing prose.
 
 The NEGATIVE ARM is as load-bearing as the positive one: a child with no pin
 (``owns_model`` False/None — every reviewer/qa-tester/coder launched without an
@@ -35,7 +43,12 @@ from typing import Any, cast
 import pytest
 from textual.widgets import Static
 
-from local_operator.harness.jobs import AsyncJob, AsyncJobManager, model_fallback_badge
+from local_operator.harness.jobs import (
+    AsyncJob,
+    AsyncJobManager,
+    is_model_fallback,
+    model_fallback_badge,
+)
 from local_operator.harness.subagent import _make_relay
 from local_operator.harness.types import ModelChangeEvent, NoticeEvent
 from local_operator.tui.widgets.subagent_panel import job_stats
@@ -120,7 +133,7 @@ def test_a_fallback_edge_marks_the_pinned_job_and_keeps_the_pin() -> None:
     assert job.requested_model_label == PIN
     assert job.model_label == EFFECTIVE
     assert model_fallback_badge(job.requested_model_label, job.model_label) == (
-        f"{PIN} → {EFFECTIVE} ⚠ fallback"
+        f"{PIN} → DeepSeek Flash ⚠ fallback"
     )
 
 
@@ -197,8 +210,19 @@ def test_the_notice_carries_the_four_facts() -> None:
     text = notice.text
     assert "round1-designer" in text  # the child's label
     assert "(designer)" in text  # its role, spelled as the role clause
-    assert PIN in text  # what the launch asked for
-    assert EFFECTIVE in text  # what is serving
+    # The two models in the product's own vocabulary (UX U3), joined as an
+    # `A → B` pair — the same relation spelling the band's badge uses (D4).
+    assert "Claude Sonnet 5.5 → DeepSeek Flash" in text.replace("\u00a0", " ")
+    # And the pair is ONE wrap token: `wrap_cells` splits on ASCII spaces
+    # only, so it can never be broken between requested and effective.
+    from local_operator.tui.widgets.transcript import wrap_cells
+
+    assert "\u00a0→\u00a0" in text
+    for width in (110, 74, 60):
+        rows = wrap_cells(text, width)
+        assert any(
+            "Claude\u00a0Sonnet\u00a05.5\u00a0→\u00a0DeepSeek\u00a0Flash" in row for row in rows
+        ), (width, rows)
     assert "anthropic" in text and "rate limit" in text  # the refusing cause
     # The toast glance names the child and the target rather than slicing prose.
     assert "round1-designer" in notice.headline
@@ -237,7 +261,9 @@ def test_the_notice_builder_states_the_role_only_when_recorded() -> None:
     from local_operator.harness.subagent import _pinned_fallback_notice
 
     text = _pinned_fallback_notice("a", "", PIN, EFFECTIVE, "cause")
-    assert text == f"subagent 'a' pinned to {PIN} is running on {EFFECTIVE} — cause."
+    assert text == (
+        "subagent 'a' pinned Claude\u00a0Sonnet\u00a05.5\u00a0→\u00a0DeepSeek\u00a0Flash — cause."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -281,39 +307,129 @@ def test_the_pin_label_survives_the_roster_round_trip() -> None:
 
 
 def test_the_badge_renders_only_while_the_pin_is_off() -> None:
-    assert model_fallback_badge(PIN, EFFECTIVE) == f"{PIN} → {EFFECTIVE} ⚠ fallback"
+    """One rule, three spellings: the full pair, the effective half only when
+    the row cannot hold the pair, and nothing at all while the pin serves."""
+    assert model_fallback_badge(PIN, EFFECTIVE) == f"{PIN} → DeepSeek Flash ⚠ fallback"
     # Serving the pin, no pin, or nothing to compare: no badge.
     assert model_fallback_badge(PIN, PIN) == ""
     assert model_fallback_badge(None, EFFECTIVE) == ""
     assert model_fallback_badge(PIN, None) == ""
     assert model_fallback_badge("", "") == ""
+    # The SAME predicate every pin-integrity surface keys on (the dock's
+    # marker, the projection's boolean, the completion row's clause):
+    # divergence of the two labels, never the runtime-only flag.
+    assert is_model_fallback(PIN, EFFECTIVE) is True
+    assert is_model_fallback(PIN, PIN) is False
+    assert is_model_fallback(None, EFFECTIVE) is False
+    assert is_model_fallback("", "") is False
+    # Naming's honesty rule bounds the effective half: an unresolvable model
+    # keeps its selector rather than acquiring a fictional name.
+    assert model_fallback_badge("a/x", "unknown/vendor-model") == (
+        "a/x → unknown/vendor-model ⚠ fallback"
+    )
 
 
 def test_the_band_paints_the_badge_for_a_pinned_child_off_its_model() -> None:
     """The TUI surface ``job_stats``' model reaches: while the child's page is
     open the band must show the substitution instead of the bare effective
-    name."""
+    name — in the form the width can afford, never at the expense of the
+    ordinary readings (design D1 / UX U2: at 80x24 the 64-cell pair used to
+    take cwd and the context reading with it, leaving the band LESS
+    informative than the base row it replaced).
+    """
     from local_operator.tui.widgets.status_line import StatusLine, SubagentBand
     from tests.unit.tui.test_subagent_stats import _Dock
 
-    status = StatusLine(cast(Static, _Dock(120)))
-    status.update(model_label="test/parent", context_tokens=1, context_window=10)
+    status = StatusLine(cast(Static, _Dock(150)))
+    status.update(
+        model_label=EFFECTIVE, context_tokens=1, context_window=10, cwd="/Users/tester/wt"
+    )
     status.set_subagent(
         SubagentBand(
             model_label=EFFECTIVE,
             requested_model_label=PIN,
             label="round1-designer",
+            context_tokens=44_000,
+            context_window=160_000,
+            cost="$0.041",
+            effort="hi",
         )
     )
-    child = status.render_text(120).plain
-    assert f"{PIN} → {EFFECTIVE} ⚠ fallback" in child, child
+
+    # Wide: the full pair, with the EFFECTIVE half resolved to its display
+    # name (D5) while the requested half stays the pin's recorded selector.
+    wide = status.render_text(150).plain
+    assert f"{PIN} → DeepSeek Flash ⚠ fallback" in wide, wide
+
+    # A 80-column terminal's band (75-76 cells): the pair sheds to the marker
+    # plus the effective half's short display form, and EVERYTHING the base
+    # row carried at this width survives.
+    narrow = status.render_text(76).plain
+    assert "⚠ DeepSeek Flash" in narrow, narrow
+    assert "→" not in narrow, narrow
+    assert "⌂ wt" in narrow, narrow
+    assert "27.5%/160k" in narrow, narrow
+
+    # Below the ladder the irreducible rung carries the same marker under the
+    # child's name — the design round's proposed shape.
+    tiny = status.render_text(30).plain
+    assert "⚠ DeepSeek Flash" in tiny, tiny
+    assert "round1-des" in tiny, tiny
+
+    # The ⚠ takes the app's `warning` semantic as an ADDITIVE cue (D3): the
+    # text cues (→, ⚠, fallback) do not move, and NO_COLOR loses none of them.
+    from local_operator.tui import theme as theme_mod
+
+    ink = {
+        wide[span.start : span.end].strip(): getattr(span.style, "color", None)
+        for span in status.render_text(150).spans
+    }
+    marker_ink = ink.get("⚠")
+    assert marker_ink is not None
+    assert marker_ink.name == theme_mod.semantic_color("warning")
 
     # The negative arm: a child on its pin paints the resolved display name as
     # before, and a consumer that carries no pin (every band built before this
     # field existed) is unaffected.
     status.set_subagent(SubagentBand(model_label=PIN, requested_model_label=PIN))
-    on_pin = status.render_text(120).plain
-    assert "⚠ fallback" not in on_pin, on_pin
+    on_pin = status.render_text(150).plain
+    assert "⚠" not in on_pin, on_pin
+
+
+def test_the_completion_row_states_the_pin_the_walk_away_reader_needs() -> None:
+    """UX round 1, U1: the walk-away flow ends on the completion delivery.
+
+    The transcript notice is a LIVE row — it scrolls and no replay carries
+    it — and the roster distinguishes a completed pinned-fallback child only
+    via the dock marker, so the durable row itself must say the pin was
+    abandoned. Selectors, because this row is handed to the MODEL as well as
+    shown, and the ``wait`` receipt beside it speaks the same spelling; the
+    route edge's cause rides along when the live row still carries one.
+    """
+    from local_operator.session.session import Session
+
+    job = _pinned_job()
+    job.model_label = EFFECTIVE
+    job.model_fallback_reason = "provider failure"
+    text = Session._job_result_message("designer1", "the review findings", job).details["text"]
+    assert text.startswith("background job 'round1-designer' completed")
+    assert f"(pinned {PIN}, ran on {EFFECTIVE} — provider failure)" in text
+
+    # No cause recorded (a restart, or an un-enriched edge): the clause keeps
+    # the two labels and drops only the phrase it does not have.
+    job.model_fallback_reason = ""
+    bare = Session._job_result_message("designer1", "x", job).details["text"]
+    assert f"(pinned {PIN}, ran on {EFFECTIVE})" in bare
+
+    # Recovered or unpinned: the row is byte-identical to the one it always
+    # read.
+    job.model_label = PIN
+    recovered = Session._job_result_message("designer1", "x", job).details["text"]
+    assert "(pinned" not in recovered
+    unpinned = _pinned_job()
+    unpinned.requested_model_label = None
+    plain = Session._job_result_message("designer1", "x", unpinned).details["text"]
+    assert "(pinned" not in plain
 
 
 def test_job_stats_reads_the_registration_stamp_off_the_job() -> None:

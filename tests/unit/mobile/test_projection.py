@@ -3653,8 +3653,10 @@ def test_the_projection_carries_the_pin_badge_for_a_fallen_back_child() -> None:
     The wire carries the same string the TUI band paints (see
     ``jobs.model_fallback_badge``), composed where the row is built so every
     client that renders a child's model shows the substitution without its own
-    copy of the rule; a row whose job has no pin (or is back on it) keeps the
-    bare effective label, byte-identical to before.
+    copy of the rule, plus the boolean a client uses to MARK the row without
+    parsing that string; a row whose job has no pin (or is back on it) keeps
+    the bare effective label and ``model_fallback`` False, byte-identical to
+    before.
     """
 
     class Jobs:
@@ -3693,10 +3695,13 @@ def test_the_projection_carries_the_pin_badge_for_a_fallen_back_child() -> None:
     fold.set_subagent_details(comms)
 
     rows = {row.job_id: row for row in fold.projection.subagents}
-    assert rows["pinned"].model_label == (
-        "anthropic/claude-sonnet-5-5 → deepseek/deepseek-flash ⚠ fallback"
-    )
+    assert rows["pinned"].model_label == ("anthropic/claude-sonnet-5-5 → DeepSeek Flash ⚠ fallback")
+    assert rows["pinned"].model_fallback is True
     assert rows["plain"].model_label == "test/model"
+    # The boolean the phone's roster row paints its fallback line from: the
+    # SAME comparison the badge string is composed from, so a client never
+    # has to parse the badge's prose back out (and the two cannot disagree).
+    assert rows["plain"].model_fallback is False
 
 
 @pytest.mark.parametrize("size", [1, 7, 20, 50, 100])
