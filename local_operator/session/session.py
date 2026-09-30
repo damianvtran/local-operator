@@ -3655,6 +3655,13 @@ class Session:
         # display spec from the pin, and the derivation's input is the target,
         # not the previous derivation.
         self._active_route: tuple[str, str | None] | None = None
+        # WHY the route last moved — the settle reason the stream fn reported
+        # ("provider failure: quota HTTP 429", a recovery text, ...). Persisted
+        # beside the pin in the ``active_model_route`` row so a later reader
+        # can answer "why is this session on another model": the row used to
+        # record only WHICH model served, and the pin-integrity investigation
+        # could not reconstruct the why from a transcript at all.
+        self._active_route_reason: str | None = None
         # AFTER the wake/name restores, same transcript, same reason: a
         # resumed session must come back on the model that was really
         # answering when it closed, not silently re-route the first prompt to
@@ -5552,6 +5559,7 @@ class Session:
         """
         self._active_fallback = None
         self._active_route = None
+        self._active_route_reason = None
         self._spawn_background(self._persist_active_route(primary))
         self._spawn_model_change(primary, reason)
 
@@ -10836,6 +10844,7 @@ class Session:
         if target is None:
             self._active_fallback = None
             self._active_route = None
+            self._active_route_reason = None
             await self._persist_active_route(self._model)
             await self._emit(
                 ModelChangeEvent(
@@ -10866,6 +10875,7 @@ class Session:
             return
         self._active_fallback = spec
         self._active_route = (selector, target_effort)
+        self._active_route_reason = reason
         await self._persist_active_route(self._model)
         await self._emit(
             ModelChangeEvent(
@@ -12485,11 +12495,38 @@ class Session:
         """
         wanted = effort
         if wanted is None and agent and agent != "task":
-            try:
-                from local_operator.agent_profiles import resolve_profile
+            from local_operator.agent_profiles import resolve_profile
 
-                profile = resolve_profile(agent, registry=self.agent_registry)
-            except Exception:  # noqa: BLE001 - tier lookup must not fail a spawn
+            registry = self.agent_registry
+            try:
+                # FRESH at spawn/resume: the registry's cached view is up to
+                # ``AgentRegistry._refresh_interval`` stale, and a role PIN
+                # written after this session started must reach the NEXT
+                # spawn — the resolution requirement this read exists to
+                # honour.
+                refresh = getattr(registry, "refresh_now", None)
+                if callable(refresh):
+                    refresh()
+                profile = resolve_profile(agent, registry=registry, strict_registry=True)
+            except Exception as exc:  # noqa: BLE001
+                # An unreadable registry is NOT "no role of that name": the
+                # old swallow sent this down the seed path (a packaged seed
+                # carries no operator pin) and then inherited the session
+                # model with no trace — precisely the silent substitution the
+                # strict tier path refuses one layer up. Surface it instead.
+                if strict:
+                    raise SubagentModelUnavailable(
+                        agent,
+                        f"the agent registry could not be read ({exc}); refusing to "
+                        "inherit the session model for a role whose pin cannot be "
+                        "resolved",
+                    ) from exc
+                logger.warning(
+                    "agent registry could not be read while resolving role %r (%s); "
+                    "using the session model",
+                    agent,
+                    exc,
+                )
                 profile = None
             if profile is not None:
                 wanted = profile.effort
@@ -18130,6 +18167,10 @@ class Session:
             {
                 "primary": f"{primary.provider}/{primary.model_id}",
                 "active": (None if route is None else {"selector": route[0], "effort": route[1]}),
+                # ADDITIVE key, deliberately: the route's settle reason. Older
+                # rows lack it and older readers ignore it; a reader that
+                # wants to say why the session moved can now answer.
+                "reason": self._active_route_reason,
             },
         )
 
@@ -18385,6 +18426,11 @@ class Session:
             return
         raw_effort = active.get("effort")
         effort = str(raw_effort) if isinstance(raw_effort, str) and raw_effort else None
+        raw_reason = details.get("reason")
+        if isinstance(raw_reason, str) and raw_reason:
+            # Older rows predate the key; a restored session keeps the reason
+            # for the next rewrite of the same row.
+            self._active_route_reason = raw_reason
         spec = self._spec_for_route(selector, effort)
         if spec is None:
             logger.warning("dropping unresolvable persisted fallback route: %r", selector)

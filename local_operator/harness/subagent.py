@@ -2782,6 +2782,17 @@ async def _construct_child_session(
         # Register before Session.__init__, which can itself fail. close() is
         # idempotent: this fallback also runs if a later child dispose hook fails.
         cleanup.push_async_callback(child_stream.close)
+        if model_spec is not None:
+            # PIN the child's routing to the model the launch resolved (a role
+            # tier, or a resumed child's recorded tier). Marked on the CHILD's
+            # stream only — inside this guard, never on ``parent_stream``,
+            # whose routing must stay untouched — and only when the launch
+            # resolved an explicit spec: an inherit-child runs the parent's
+            # model with no pin, and the failover policies are all gated on
+            # the marker (see ``local_operator/providers/failover.py``).
+            mark_pin = getattr(child_stream, "mark_launch_pin", None)
+            if callable(mark_pin):
+                mark_pin(f"{model_spec.provider}/{model_spec.model_id}")
     child = Session(
         model=model_spec if model_spec is not None else parent_session.model,
         # A child's model was chosen HERE (tier or parent), never by the

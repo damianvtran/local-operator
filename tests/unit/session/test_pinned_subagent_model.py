@@ -622,3 +622,90 @@ async def test_a_launch_line_without_a_job_manager_says_nothing_about_models(tmp
     text = "".join(block.text for block in result.content if isinstance(block, TextContent))
     assert "- x (task): job job-x" in text
     assert "on " not in text
+
+
+# ---------------------------------------------------------------------------
+# the resolution read is FRESH and never silently substitutes
+# ---------------------------------------------------------------------------
+
+
+def test_a_role_pin_written_after_the_session_starts_reaches_the_next_spawn(tmp_path, monkeypatch):
+    """R1: the launch read is FRESH, not up to a refresh interval stale.
+
+    The write lands through a SECOND registry — the shape the requirement is
+    about (another lop process, an import, a sync): a write through the
+    SESSION's own registry primes its memory by contract, so the
+    discriminating case is the cross-process one, where the session's cached
+    view would serve the pre-write world until the interval elapsed.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.tools.agent_tool import AgentParams, write_profile
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_tiers(tmp_path / "config", hi="anthropic/claude-opus-5")
+    registry = AgentRegistry(tmp_path / "agents")
+    session = make_session(tmp_path)
+    session.agent_registry = registry
+
+    # No designer row yet: the packaged seed (which pins nothing by design)
+    # resolves and the child inherits — the documented default keeps working.
+    assert session._resolve_subagent_model("designer", None, strict=True) is None
+
+    # Another process pins the role NOW, through the real writer.
+    other_process = AgentRegistry(tmp_path / "agents")
+    write_profile(
+        other_process,
+        AgentParams(
+            op="create",
+            name="designer",
+            description="Designs",
+            instructions="Design it.",
+            effort="hi",
+        ),
+        creating=True,
+    )
+
+    spec = session._resolve_subagent_model("designer", None, strict=True)
+    assert spec is not None
+    assert (spec.provider, spec.model_id) == ("anthropic", "claude-opus-5")
+
+
+def test_an_unreadable_registry_refuses_the_launch_instead_of_silently_inheriting(
+    tmp_path, monkeypatch
+):
+    """R1: "the registry could not be read" is NOT "no role of that name".
+
+    The old swallow sent this down the seed path (a seed carries no operator
+    pin) and the child inherited the session model with no trace — the silent
+    substitution the strict tier path refuses one layer up. Both read layers
+    are covered: the completeness gate and a lookup that dies after it.
+    """
+    from local_operator.session.errors import ProfileRegistryUnavailable
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+
+    class _CompletenessGateFails:
+        def require_complete_metadata(self):
+            raise ProfileRegistryUnavailable()
+
+        def get_agent_by_name(self, name):  # pragma: no cover - must not be reached
+            raise AssertionError("lookup must not run under a failed gate")
+
+    class _LookupDiesAfterTheGate:
+        def require_complete_metadata(self):
+            return None
+
+        def get_agent_by_name(self, name):
+            raise OSError("interrupted mount")
+
+    for unreadable in (_CompletenessGateFails(), _LookupDiesAfterTheGate()):
+        session = make_session(tmp_path)
+        session.agent_registry = unreadable
+
+        with pytest.raises(SubagentModelUnavailable) as caught:
+            session._resolve_subagent_model("reviewer", None, strict=True)
+        assert "agent registry could not be read" in caught.value.reason
+        # And the LAUNCH goes through the same refusal with no job row.
+        with pytest.raises(SubagentModelUnavailable):
+            session._launch_subagent(label="review", prompt="review it", agent="reviewer")
+        assert not session.jobs.list()
