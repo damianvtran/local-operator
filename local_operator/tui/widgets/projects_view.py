@@ -173,11 +173,14 @@ class ProjectsViewMilestoneToggled(Message):
     silent no-op (spec §10.5).
     """
 
-    def __init__(self, project_id: str, name: str, completed: bool) -> None:
+    def __init__(
+        self, project_id: str, name: str, completed: bool, *, project_name: str = ""
+    ) -> None:
         super().__init__()
         self.project_id = project_id
         self.name = name
         self.completed = completed
+        self.project_name = project_name
 
 
 class ProjectsViewJumpRequested(Message):
@@ -300,6 +303,8 @@ class ProjectsView(Vertical):
         self._tier_manual: bool = False
         self._manual_span: tuple[str, str] | None = None
         self._updated_at: float | None = None
+        #: The footer's one-sentence notice (refusals, pops) — UX round 1.
+        self._notice: str | None = None
         #: Last render, kept for the geometry probes and rendered_rows().
         self._last: RenderResult | None = None
         self._title = Static(classes="projects-view-title")
@@ -365,6 +370,9 @@ class ProjectsView(Vertical):
         used by the detail page's `◆`/`own session` labels; sticky, so a
         refresh load may omit it.
         """
+        # A recompose answers whatever the last notice said; `_resync_detail`
+        # below may set its own (the vanished-project pop, UX round 1, U5).
+        self._notice = None
         self._views = list(views)
         if own_session is not None:
             self._own_session = own_session
@@ -432,6 +440,9 @@ class ProjectsView(Vertical):
             if isinstance(project, dict) and str(project.get("id")) == str(project_id):
                 self._view = "list"
                 self._cursor = max(0, min(index, max(self._painted_count() - 1, 0)))
+                # A retarget is a fresh intent: whatever the last notice said
+                # belonged to the project being left (UX round 1).
+                self._notice = None
                 if self._mode == "detail":
                     # A named show is a CANVAS retarget, obeying the same rule
                     # `load` states for an explicit canvas request: the reader
@@ -535,6 +546,27 @@ class ProjectsView(Vertical):
         self.call_after_refresh(self._paint_chrome)
         self.call_after_refresh(self._sync_scroll_hint)
 
+    def show_notice(self, text: str) -> None:
+        """One sentence in the footer until the state changes (UX round 1).
+
+        The mode's OWN line for refusals and pops: while a page is up the
+        transcript it hides is no surface at all, so a sentence posted there
+        reached nobody (U1) — and the footer is the pinned one-row chrome, so
+        nothing moves when the line appears. Cleared by the next ``load``, a
+        fresh detail entry, or leaving the detail by hand.
+        """
+        self._notice = text
+        self._paint_chrome()
+
+    def _notice_text(self) -> Text:
+        """The footer's notice line, warning ink, ellipsized to the row."""
+        return Text(
+            self._notice or "",
+            style=Style(color=theme_mod.semantic_color("warning")),
+            no_wrap=True,
+            overflow="ellipsis",
+        )
+
     def _paint_chrome(self) -> None:
         if self._mode == "detail":
             self._paint_detail_chrome()
@@ -592,7 +624,9 @@ class ProjectsView(Vertical):
         # ladder sheds whole segments instead of the container cutting a
         # clause mid-token (design review round 1, D5).
         footer_width = self._detail.size.width or width
-        if self._view == "list" and self._views:
+        if self._notice is not None:
+            self._detail.update(self._notice_text())
+        elif self._view == "list" and self._views:
             index = max(0, min(self._cursor, max(self._painted_count() - 1, 0)))
             self._detail.update(
                 detail_footer(self._views[index], style_for=_style_resolver(), width=footer_width)
@@ -658,9 +692,12 @@ class ProjectsView(Vertical):
         self._paint_rule(width)
 
         footer_width = self._detail.size.width or width
-        self._detail.update(
-            detail_progress_line(view_row, width=footer_width, style_for=_style_resolver())
-        )
+        if self._notice is not None:
+            self._detail.update(self._notice_text())
+        else:
+            self._detail.update(
+                detail_progress_line(view_row, width=footer_width, style_for=_style_resolver())
+            )
         self._paint_hints()
 
     def _paint_rule(self, width: int | None = None) -> None:
@@ -903,15 +940,20 @@ class ProjectsView(Vertical):
             return (row, esc_label)
 
         context = self._detail_page.selected_action_label()
+        verb = self._detail_page.selected_action_verb()
         move = (self._move_hint, " move", False)
         page = (self._page_hint, " page", True)
         open_hint = (self._open_hint, f" {context}" if context else " open", True)
+        # The bare verb is a LOW rung: a long target name sheds before the key
+        # does (UX round 1, U3 — the name informs, the key acts).
+        open_bare = (self._open_hint, f" {verb}" if verb else " open", True)
         refresh = (self._refresh_hint, " refresh", True)
         return [
             rung([move, page, open_hint, refresh], "back"),
             rung([move, page, open_hint], "back"),
             rung([move, open_hint], "back"),
             rung([move, open_hint], ""),
+            rung([move, open_bare], ""),
             rung([move], ""),
             rung([], ""),
         ]
@@ -1504,6 +1546,9 @@ class ProjectsView(Vertical):
         """``esc``: pop ONE level — detail → canvas keeps view and cursor —
         and only the canvas exits the mode (spec §1: the shipped contract)."""
         if self._mode == "detail":
+            # Leaving by hand drops any refusal/pop sentence with the page it
+            # belonged to (UX round 1, U1/U5).
+            self._notice = None
             self._exit_detail()
             return
         self._leave()
@@ -1511,6 +1556,9 @@ class ProjectsView(Vertical):
     def _leave_or_pop(self) -> None:
         """The `esc` HINT's action: the button must do what the key does."""
         if self._mode == "detail":
+            # Leaving by hand drops any refusal/pop sentence with the page it
+            # belonged to (UX round 1, U1/U5).
+            self._notice = None
             self._exit_detail()
             return
         self._leave()
@@ -1529,8 +1577,9 @@ class ProjectsView(Vertical):
         project_value = view_row.get("project")
         project = project_value if isinstance(project_value, dict) else {}
         self._detail_project_id = str(project.get("id") or "") or None
+        self._notice = None
         self._mode = "detail"
-        self._detail_page.show(view_row, own_session=self._own_session)
+        self._detail_page.show(view_row, own_session=self._own_session, style_for=_style_resolver())
         self._body.display = False
         self._detail_page.display = True
         self._paint_chrome()
@@ -1570,6 +1619,10 @@ class ProjectsView(Vertical):
                 index = position
                 break
         if index is None:
+            name = self._detail_page.project_name or "that project"
+            # The pop says WHY — the reader pressed `r` on a page whose
+            # project left the store underneath it (UX round 1, U5).
+            self._notice = f"'{name}' is no longer in the store — back to the canvas."
             self._exit_detail()
             return
         self._cursor = index
@@ -1577,6 +1630,7 @@ class ProjectsView(Vertical):
             self._views[index],
             own_session=self._own_session,
             selected=self._detail_page.selected_index,
+            style_for=_style_resolver(),
         )
 
     def _focus_detail_page(self) -> None:
@@ -1637,6 +1691,7 @@ class ProjectsView(Vertical):
                     project_id=project_id,
                     name=name,
                     completed=not bool(row.get("completed_at")),
+                    project_name=self._detail_page.project_name,
                 )
             )
 

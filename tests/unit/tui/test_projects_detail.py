@@ -29,13 +29,13 @@ from local_operator.tui.projects_render import (
     detail_todo_lines,
     format_short_date,
 )
+from local_operator.tui.widgets.subagent_view import HintButton
 from local_operator.tui.widgets.transcript import GAP_CLASS
 from tests.unit.tui.test_projects_view import (
     SESSION_ID,
     _boot,
     _factory,
     _grouped_registry,
-    _notices,
     _open,
     _ProjectSession,
     _registry,
@@ -274,8 +274,9 @@ async def test_the_detail_cursor_walks_selectables_and_the_hint_names_the_verb(
         await pilot.pause()
         page = view._detail_page
         assert page.selectable_count == 4  # three milestones + the session link
-        assert page.selected_index == 0 and page.selected_action_label() == "toggle"
-        assert view._open_hint._label == " toggle"  # the context hint, in the ↵ slot
+        # The label NAMES the row it would toggle (UX round 1, U3).
+        assert page.selected_index == 0 and page.selected_action_label() == "toggle groundwork"
+        assert view._open_hint._label == " toggle groundwork"  # the context slot
         for _ in range(3):
             await pilot.press("down")
         await pilot.pause()
@@ -318,7 +319,7 @@ async def test_enter_toggles_a_milestone_through_the_store(tmp_path: Path) -> No
         assert any("◆ groundwork" in row and "completed" in row for row in painted)
 
 
-async def test_enter_on_a_session_row_takes_the_shipped_conversation_ladder(
+async def test_enter_on_a_dead_session_row_keeps_the_page_and_says_so(
     tmp_path: Path,
 ) -> None:
     session = _ProjectSession()
@@ -326,17 +327,20 @@ async def test_enter_on_a_session_row_takes_the_shipped_conversation_ladder(
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
         await _boot(pilot, app)
-        await _open(pilot, app, "parity-spec")
+        view = await _open(pilot, app, "parity-spec")
         await pilot.press("d")
         await pilot.pause()
         for _ in range(3):
             await pilot.press("down")  # onto the session row
         await pilot.press("enter")
         await pilot.pause()
-        # The ladder found nothing live: the mode closes and the honest
-        # sentence lands in the transcript it was hiding.
-        assert app._projects_view is None
-        assert any("parity-spec" in notice for notice in _notices(app))
+        await pilot.pause()
+        # The ladder found nothing live: the page KEEPS the reader and the
+        # honest sentence lands on ITS OWN footer (UX round 1, U4 — it used
+        # to close the mode and post into the transcript it was hiding).
+        assert app._projects_view is view
+        assert view._mode == "detail"
+        assert "no live session to open for 'parity-spec'" in view.rendered_rows()[-1]
 
 
 async def test_refresh_keeps_the_detail_open_and_its_row_cursor(tmp_path: Path) -> None:
@@ -389,7 +393,7 @@ async def test_detail_section_jumps_move_the_row_cursor_to_the_neighbour(
         assert view._detail_page.selected_action_label() == "open"
         await pilot.press("shift+up")
         await pilot.pause()
-        assert view._detail_page.selected_action_label() == "toggle"
+        assert view._detail_page.selected_action_label() == "toggle groundwork"
 
 
 def _dom_top_section(page: Any) -> str | None:
@@ -552,6 +556,184 @@ async def test_a_named_show_leaves_the_detail_and_the_page_keeps_its_own_project
         assert parity is not None and board is not None
         assert any(m.name == "step 01" for m in parity.milestones)
         assert not any(m.name == "step 01" for m in board.milestones)
+
+
+async def test_a_refused_toggle_says_so_on_the_page_and_names_the_project(
+    tmp_path: Path,
+) -> None:
+    """UX round 1, U1: the "no" lands where the reader pressed.
+
+    The page is a re-read-only reader, so a project deleted underneath it
+    keeps its rows; `↵` must then say so IN PLACE — naming the project, never
+    the store's raw id — instead of leaving every painted row identical while
+    the sentence hides in the transcript this mode covers.
+    """
+    session = _ProjectSession()
+    registry = _rich_registry(tmp_path)
+    session.project_registry = registry
+    project = registry.get_project_by_name("parity-spec")
+    assert project is not None
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        registry.delete_project(project.id)  # another session; the page stays up
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert view._mode == "detail"  # the page stays; the sentence is ON it
+        footer = view.rendered_rows()[-1]
+        assert "no longer in the store" in footer
+        assert "parity-spec" in footer
+        assert project.id not in "".join(view.rendered_rows())
+
+
+async def test_a_dead_session_link_keeps_the_page_and_says_so(tmp_path: Path) -> None:
+    """UX round 1, U4: the row says `open`, the outcome must not cost the page.
+
+    A dead link now answers ON the page (the shipped sentence) instead of
+    closing the mode and losing the reader's place.
+    """
+    session = _ProjectSession()
+    session.project_registry = _rich_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        for _ in range(3):  # three milestones down to the session row
+            await pilot.press("down")
+            await pilot.pause()
+        assert view._detail_page.selected_action_label() == "open"
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert view._mode == "detail"  # the page KEEPS the reader
+        assert view._detail_page.display
+        assert "no live session to open for 'parity-spec'" in view.rendered_rows()[-1]
+
+
+async def test_a_vanished_project_pops_with_a_sentence(tmp_path: Path) -> None:
+    """UX round 1, U5: the pop says WHY instead of just happening."""
+    session = _ProjectSession()
+    registry = _rich_registry(tmp_path)
+    session.project_registry = registry
+    project = registry.get_project_by_name("parity-spec")
+    assert project is not None
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        registry.delete_project(project.id)
+        await pilot.press("r")
+        await pilot.pause()
+        await pilot.pause()
+        assert view._mode == "canvas"
+        assert not view._detail_page.display
+        footer = view.rendered_rows()[-1]
+        assert "no longer in the store" in footer
+        assert "parity-spec" in footer
+
+
+async def test_painted_rows_include_the_markdown_description(tmp_path: Path) -> None:
+    """UX round 1, U6: the readback sees the headline feature.
+
+    The description row holds a rich ``Markdown`` renderable, so the page's
+    own readback returned ``""`` for it — a regression in the headline
+    feature would have looked like a passing test.
+    """
+    session = _ProjectSession()
+    session.project_registry = _rich_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        rows = view._detail_page.painted_rows()
+        assert any("## Goal" in row for row in rows)
+        assert any("TUI parity spec." in row for row in rows)
+        # The empty case still reads its honest sentence through the plain
+        # ``Text`` path (``readback()`` answers None there).
+        await _open(pilot, app, "board-entry")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        assert any("no description yet" in row for row in view._detail_page.painted_rows())
+
+
+async def test_the_toggle_hint_names_the_row_it_will_toggle(tmp_path: Path) -> None:
+    """UX round 1, U3: `↵ toggle groundwork`, not a bare `toggle`.
+
+    The cursor can sit off-screen (pgdn scrolls without moving it); the named
+    hint is what tells the reader what the press will change.
+    """
+    session = _ProjectSession()
+    session.project_registry = _rich_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        assert view._detail_page.selected_action_label() == "toggle groundwork"
+        assert view._detail_page.selected_action_verb() == "toggle"
+        painted = [
+            hint.rendered()
+            for hint in view._hints.children
+            if isinstance(hint, HintButton) and hint.display
+        ]
+        assert any("toggle groundwork" in text for text in painted)
+
+
+async def test_the_detail_page_re_resolves_styles_on_every_show(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """UX round 1, U2: the resolver is built AT SHOW TIME, not at construction.
+
+    A theme switch under an open page must repaint in the new palette on the
+    next re-show — the sibling surfaces' rule, which the constructor-only
+    capture defeated. Pinned at the seam: the page's bound resolver is a NEW
+    object after a recompose, and each one was built during this run.
+    """
+    from local_operator.tui.widgets import projects_view as pv
+
+    resolvers: list[object] = []
+    real = pv._style_resolver
+
+    def recording():
+        resolver = real()
+        resolvers.append(resolver)
+        return resolver
+
+    monkeypatch.setattr(pv, "_style_resolver", recording)
+    session = _ProjectSession()
+    session.project_registry = _rich_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        before = view._detail_page._style_for
+        assert before in resolvers
+        await pilot.press("r")
+        await pilot.pause()
+        await pilot.pause()
+        after = view._detail_page._style_for
+        assert after is not before
+        assert after in resolvers
 
 
 async def test_the_canvas_ladder_advertises_d_detail_and_keeps_the_60_snapshot(
