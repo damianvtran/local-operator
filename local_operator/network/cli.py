@@ -1495,10 +1495,11 @@ def _shareable_providers(self_device: str) -> list[dict[str, Any]]:
     own Radient org account among them — had no row on any surface until
     ``credential share`` refused. One row per ENABLED provider login in this device's
     store, read through the same open-first guard the share verb's refusal uses
-    (``_open_local_store``: never constructs a store, never creates one), joined with
-    any placement entry this device holds so an already-shared login says where.
-    ``kind``/``identity_label`` come from ``_shape_from_rows``, the same classifier
-    the share records with, so the two cannot disagree.
+    (``credentials.offers.open_store``: never constructs a store, never creates one),
+    joined with any placement entry this device holds so an already-shared login says
+    where. ``kind``/``identity_label`` come from ``credentials.offers.shape_from_rows``,
+    the same classifier the share verb and the join-time offer use, so the three
+    cannot disagree.
 
     EXCLUDED, deliberately: the MCP rows (``mcp-oauth`` — the server rows above are
     their ledger) and device-bound logins (``DEVICE_BOUND_PROVIDERS``, i.e. kimi): a
@@ -1507,10 +1508,11 @@ def _shareable_providers(self_device: str) -> list[dict[str, Any]]:
     remedy is the command the operator would run next, with ``<device>`` standing
     where a target device goes (the ledger cannot know which one).
     """
+    from local_operator.network.credentials import offers
     from local_operator.network.credentials import placement as placement_mod
     from local_operator.network.credentials.types import DEVICE_BOUND_PROVIDERS
 
-    store = _open_local_store(_config_dir())
+    store = offers.open_store(_config_dir())
     if store is None:
         # No store at all: nothing to enumerate, and creating one to say so would
         # make the ledger a writer (the read-only promise above).
@@ -1520,7 +1522,7 @@ def _shareable_providers(self_device: str) -> list[dict[str, Any]]:
     except Exception:  # noqa: BLE001 — an unreadable store has no provider logins to show
         return []
     finally:
-        _close_quietly(store)
+        offers.close_quietly(store)
 
     by_provider: dict[str, list[Any]] = {}
     for credential in credentials:
@@ -1531,7 +1533,7 @@ def _shareable_providers(self_device: str) -> list[dict[str, Any]]:
 
     rows: list[dict[str, Any]] = []
     for provider in sorted(by_provider):
-        kind, _name, label = _shape_from_rows(provider, by_provider[provider])
+        kind, _name, label = offers.shape_from_rows(provider, by_provider[provider])
         shared_with: list[dict[str, str]] = []
         found = placement_mod.placement_entries_for(provider=provider, root=_config_dir())
         if found is not None:
@@ -1572,6 +1574,7 @@ def _cmd_credential(args: argparse.Namespace) -> int:
     capability rather than the share — so the two are written in one command and the
     payload reports both.
     """
+    from local_operator.network.credentials import offers
     from local_operator.network.credentials import placement as placement_mod
     from local_operator.network.identity import load as load_identity
     from local_operator.network.types import MeshRefusal
@@ -1596,7 +1599,7 @@ def _cmd_credential(args: argparse.Namespace) -> int:
         )
 
     if verb == "share":
-        kind, provider, label = _credential_shape(key)
+        kind, provider, label = offers.shape_for_key(key, _config_dir())
         _require_local_credential(key, provider)
     else:
         kind, provider, label = "", "", ""
@@ -1701,62 +1704,6 @@ def _cmd_credential(args: argparse.Namespace) -> int:
     return _emit(args, payload, lines)
 
 
-def _credential_shape(key: str) -> tuple[str, str, str]:
-    """``(placement kind, provider, identity label)`` for a key.
-
-    Read from the OWNER's own store, so the document records what is actually signed
-    in rather than what the operator typed: a ``kind`` that disagreed with the row
-    would make the broker's narrowing rule and the operator's expectation diverge.
-
-    THE OAUTH ROW WINS over an older pasted key (Radient org projection): a provider
-    can hold BOTH a ``radient-key`` login and the org OAuth login under one provider
-    (``radient-key`` aliases into ``"radient"``), and org calls are served from the
-    OAuth row. Reading the oldest row — ``list_credentials`` is ``ORDER BY id`` —
-    recorded ``api-key-static``/``""`` for a store whose org calls are OAuth, so a
-    share looked narrower than the login actually is. The aliased MIXED buckets
-    today are ``radient``, ``xai`` and ``zai``; the OAuth row wins in all of
-    them.
-    """
-    from local_operator.network.credentials.types import is_mcp_key, mcp_url_from_key
-
-    config = _config_dir()
-    if is_mcp_key(key):
-        url = mcp_url_from_key(key)
-        # OPEN FIRST, CONSTRUCT ONLY WHEN A STORE CAME BACK (review round 1,
-        # MINOR; QA round 1, Q1): the ambient ``McpTokenStorage(url)`` built an
-        # ``AuthStore`` that CREATES its database, so this read made a store
-        # appear on a device that never signed in.
-        store = _open_local_store(config)
-        if store is not None:
-            try:
-                from local_operator.mcp.auth import McpTokenStorage
-
-                if McpTokenStorage(url, store=store).has_stored_row():
-                    return "mcp-rotating", "mcp-oauth", ""
-            except Exception:  # noqa: BLE001 — an unreadable store is "not signed in"
-                pass
-            finally:
-                _close_quietly(store)
-        return "mcp-rotating", "mcp-oauth", ""
-    return _shape_from_rows(key, _provider_rows(key, config))
-
-
-def _shape_from_rows(key: str, rows: list[Any]) -> tuple[str, str, str]:
-    """``(kind, key, identity label)`` from a provider's enabled store rows.
-
-    One spelling for the share verb (``_credential_shape``) and the ledger
-    (``_shareable_providers``), so the kind a share records and the kind the ledger
-    shows cannot drift. An OAuth row is preferred over an older static row (see
-    ``_credential_shape``); ``key`` is what the no-rows case names.
-    """
-    if not rows:
-        return "oauth-rotating", key, ""
-    row = next((candidate for candidate in rows if candidate.credential_type == "oauth"), rows[0])
-    label = str(row.data.get("email") or row.data.get("account_id") or "")
-    kind = "oauth-rotating" if row.credential_type == "oauth" else "api-key-static"
-    return kind, key, label
-
-
 def _require_local_credential(key: str, provider: str) -> None:
     """Refuse to share something this device does not hold.
 
@@ -1764,80 +1711,30 @@ def _require_local_credential(key: str, provider: str) -> None:
     device's document whose owner cannot serve it — the borrow would fail at
     ``no_local_credential`` with a sentence telling the operator to sign in on the
     device they just shared FROM, which is the confusing half of a lazy check.
+
+    THE CHECK IS THE SHARED ONE (``credentials.offers.credential_here``): the same
+    read-only store guard (open-first: never constructs a store, never creates
+    one) the join-time admission re-check runs, so "this device holds it" cannot
+    mean two things.
     """
     from local_operator.network import readiness as readiness_mod
+    from local_operator.network.credentials import offers
     from local_operator.network.credentials.types import is_mcp_key, mcp_url_from_key
     from local_operator.network.types import MeshRefusal
 
+    if offers.credential_here(key, _config_dir()):
+        return
     if is_mcp_key(key):
         url = mcp_url_from_key(key)
-        # OPEN FIRST, CONSTRUCT ONLY WHEN A STORE CAME BACK (review round 1,
-        # MINOR; QA round 1, Q1): the refusal below must stay read-only even on
-        # a device that never signed in.
-        store = _open_local_store(_config_dir())
-        if store is not None:
-            try:
-                from local_operator.mcp.auth import McpTokenStorage
-
-                if McpTokenStorage(url, store=store).has_stored_row():
-                    return
-            except Exception:  # noqa: BLE001
-                pass
-            finally:
-                _close_quietly(store)
         raise MeshRefusal(
             "no_local_credential",
             f"this device has no MCP login for {url}; {readiness_mod.mcp_login_remedy(url)}",
         )
-    rows = _provider_rows(provider, _config_dir())
-    if not rows:
-        raise MeshRefusal(
-            "no_local_credential",
-            f"this device has no credential for {provider!r}; run 'lop login {provider}' "
-            "here first — a share is only meaningful on the device that holds the login",
-        )
-
-
-def _open_local_store(config: Any) -> Any | None:
-    """This device's credential store, or ``None`` when none can be read.
-
-    TWO ABSENCES, ONE ANSWER, deliberately: no database at all (the store's
-    absence — ``readiness._open_store`` refuses to create one; review round 1,
-    MINOR; QA round 1, Q1) and a database that EXISTS but cannot be opened
-    (corrupt bytes, a ``000`` mode — ``AuthStore.__init__`` connects eagerly)
-    both answer ``None`` here (convergence round 2, MAJOR). Every caller below
-    already renders ``None`` as its own degrade — the default shape, the
-    no-local-credential refusal, no rows — which is what the pre-open-first code
-    answered from inside its per-call ``try``.
-    """
-    from local_operator.network import readiness as readiness_mod
-
-    try:
-        return readiness_mod._open_store(config)  # noqa: SLF001 — the one read-only store guard
-    except Exception:  # noqa: BLE001 — an unopenable store answers None, never raises
-        return None
-
-
-def _close_quietly(store: Any) -> None:
-    """Close a store without letting a close failure change the answer."""
-    try:
-        store.close()
-    except Exception:  # noqa: BLE001 — closing is best-effort
-        pass
-
-
-def _provider_rows(provider: str, config: Any) -> list[Any]:
-    """This device's rows for a provider, or ``[]``. Never raises, never writes."""
-    try:
-        store = _open_local_store(config)
-        if store is None:
-            return []
-        try:
-            return list(store.list_credentials(provider))
-        finally:
-            _close_quietly(store)
-    except Exception:  # noqa: BLE001 — an unreadable store is "no credential here"
-        return []
+    raise MeshRefusal(
+        "no_local_credential",
+        f"this device has no credential for {provider!r}; run 'lop login {provider}' "
+        "here first — a share is only meaningful on the device that holds the login",
+    )
 
 
 def _config_dir() -> Any:
