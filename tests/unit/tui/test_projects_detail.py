@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from rich.cells import cell_len
 
 from local_operator.projects import (
     MilestoneEdit,
@@ -734,6 +735,38 @@ async def test_the_detail_page_re_resolves_styles_on_every_show(
         after = view._detail_page._style_for
         assert after is not before
         assert after in resolvers
+
+
+async def test_a_long_refusal_notice_fits_a_narrow_footer(tmp_path: Path) -> None:
+    """UX round 1, U8: the refusal sentence must obey a 50x18 footer.
+
+    Measured pre-fix: 72 cells into a 46-cell box, chopped mid-token with no
+    ellipsis (Rich's ``overflow="ellipsis"`` is inert on a Static). The
+    sentence now leads with its cause and the fit is done against the
+    measured box — cell-accurate, ellipsis included.
+    """
+    session = _ProjectSession()
+    registry = _rich_registry(tmp_path)
+    session.project_registry = registry
+    project = registry.get_project_by_name("parity-spec")
+    assert project is not None
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(50, 18)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        registry.delete_project(project.id)
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        footer = view.rendered_rows()[-1]
+        box = view._detail.size.width
+        assert box > 0
+        assert cell_len(footer) <= box
+        assert footer.endswith("…")
+        assert "no longer in the store" in footer
 
 
 async def test_the_canvas_ladder_advertises_d_detail_and_keeps_the_60_snapshot(
