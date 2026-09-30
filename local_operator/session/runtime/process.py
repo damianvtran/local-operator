@@ -2074,7 +2074,13 @@ async def _reconcile_owed_asks(handle: object) -> None:
     if not callable(reconcile):
         return
     try:
-        result = reconcile()
+        # ``load_time=True`` because THIS is the reopen: it is the one caller that
+        # arms the "lapsed while the session was stopped" annotation, and the
+        # design scopes that sentence to the load-time reconcile (review round 2,
+        # M1) — the deadline tick, the wake fire and every turn start run against
+        # a session that is up, so a deadline lapsing there did not lapse while
+        # anything was stopped.
+        result = reconcile(load_time=True)
         if inspect.isawaitable(result):
             await result
     except Exception:  # noqa: BLE001 — a boot must not fail on a delivery

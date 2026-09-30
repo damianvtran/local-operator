@@ -9,6 +9,7 @@ is exactly those three things. Everything else it needs it takes from the log.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -604,25 +605,110 @@ def test_a_declined_secret_is_not_reported_as_lost(tmp_path: Path):
     assert session.batches[0][0].details["secret_lost"] is False
 
 
+def _stop_marker(session_dir: Path, at_ms: int, **extra: Any) -> None:
+    """Write the durable stop marker a deliberate stop leaves behind.
+
+    ``session_id`` is not decoration: the classification reader applies a
+    run-covers check to this file (``attention._stop_marker_covers_run``) and the
+    ask queue now applies the same conversation clause, so a marker written
+    without one is evidence about nobody.
+    """
+    payload = {"deliberate": True, "session_id": "s1", "at": at_ms / 1000.0}
+    payload.update(extra)
+    (session_dir / "runtime-stop.json").write_text(json.dumps(payload))
+
+
 def test_a_deadline_that_passed_while_stopped_says_so(tmp_path: Path):
-    """QA Q2/§2.2: the stop rule's copy half. The notice is owed either way —
-    without the sentence the user who stopped the session is told the agent moved
-    on as though they had been watching."""
+    """QA Q2/§2.2: the stop rule's copy half, on the REOPEN.
+
+    The notice is owed either way — without the sentence the user who stopped the
+    session is told the agent moved on as though they had been watching. It is
+    delivered by the load-time reconcile, which is the caller that passes
+    ``load_time=True``.
+    """
     session = FakeSession()
     session_dir = store.session_dir(tmp_path, "s1")
     session_dir.mkdir(parents=True, exist_ok=True)
     # A DELIBERATE stop, stamped between the ask and its deadline.
-    (session_dir / "runtime-stop.json").write_text(
-        '{"deliberate": true, "at": %f}' % ((BASE + 60_000) / 1000.0)
-    )
+    _stop_marker(session_dir, BASE + 60_000)
+    queue = _queue(tmp_path, session, now=BASE + 200_000)
+    queue._now = lambda: BASE
+    queue.enqueue(_questions(), 120)
+    queue._now = lambda: BASE + 200_000
+    _run(queue.reconcile(load_time=True))
+    details = session.batches[0][0].details
+    assert details["lapsed_while_stopped"] is True
+    assert "lapsed while the session was stopped" in details["text"]
+
+
+def test_a_live_deadline_lapse_is_not_annotated(tmp_path: Path):
+    """M1 (review round 2): the sentence belongs to the REOPEN, not to the timing.
+
+    The reachable false positive, verbatim: stop with an ask open, reopen BEFORE
+    the deadline, let the deadline elapse while running. Every window end holds —
+    the marker is inside the ask's own window — so the ask's window alone cannot
+    decide it, and annotating here would be false in both halves: nothing lapsed
+    because of the stop, and no notice was withheld by it.
+    """
+    session = FakeSession()
+    session_dir = store.session_dir(tmp_path, "s1")
+    session_dir.mkdir(parents=True, exist_ok=True)
+    _stop_marker(session_dir, BASE + 60_000)
+    queue = _queue(tmp_path, session, now=BASE)
+    queue._now = lambda: BASE
+    ask_id = queue.enqueue(_questions(), 120)["details"]["ask_id"]
+    # The reopen, still before the deadline: nothing is owed yet.
+    queue._now = lambda: BASE + 90_000
+    assert _run(queue.reconcile(load_time=True)) == []
+    # ...and now the deadline elapses with the session RUNNING: the live tick.
+    queue._now = lambda: BASE + 200_000
+    assert _run(queue.reconcile()) == [store.timeout_row_id(ask_id)]
+    details = session.batches[0][0].details
+    assert details["lapsed_while_stopped"] is False
+    assert "lapsed while" not in details["text"]
+
+
+def test_the_live_tick_never_annotates_even_when_the_marker_is_in_the_window(
+    tmp_path: Path,
+):
+    """The gate is the CALLER, not the clock: the same marker, the same ask, the
+    same deadline — only ``load_time`` differs, and it is what arms the sentence."""
+    session = FakeSession()
+    session_dir = store.session_dir(tmp_path, "s1")
+    session_dir.mkdir(parents=True, exist_ok=True)
+    _stop_marker(session_dir, BASE + 60_000)
     queue = _queue(tmp_path, session, now=BASE + 200_000)
     queue._now = lambda: BASE
     queue.enqueue(_questions(), 120)
     queue._now = lambda: BASE + 200_000
     _run(queue.reconcile())
-    details = session.batches[0][0].details
-    assert details["lapsed_while_stopped"] is True
-    assert "lapsed while the session was stopped" in details["text"]
+    assert session.batches[0][0].details["lapsed_while_stopped"] is False
+    # The SAME delivery through the reopen reconcile is annotated, and "the
+    # same" is literal here: a fresh queue over the same directories is what a
+    # reopen is, and the row is re-armed by dropping it from the fake transcript,
+    # which is the only delivery marker there is.
+    session.transcript.ids.clear()
+    reopened = _queue(tmp_path, session, now=BASE + 200_000)
+    reopened._now = lambda: BASE + 200_000
+    _run(reopened.reconcile(load_time=True))
+    assert session.batches[1][0].id == session.batches[0][0].id
+    assert session.batches[1][0].details["lapsed_while_stopped"] is True
+
+
+def test_a_marker_for_another_conversation_is_not_credited(tmp_path: Path):
+    """The run-covers clause the classification reader applies: a marker is keyed
+    to a conversation, so one naming a different session must never narrate this
+    one's ask — the file is read from a directory the queue was merely handed."""
+    session = FakeSession()
+    session_dir = store.session_dir(tmp_path, "s1")
+    session_dir.mkdir(parents=True, exist_ok=True)
+    _stop_marker(session_dir, BASE + 60_000, session_id="somewhere-else")
+    queue = _queue(tmp_path, session, now=BASE + 200_000)
+    queue._now = lambda: BASE
+    queue.enqueue(_questions(), 120)
+    queue._now = lambda: BASE + 200_000
+    _run(queue.reconcile(load_time=True))
+    assert session.batches[0][0].details["lapsed_while_stopped"] is False
 
 
 def test_an_involuntary_death_does_not_claim_the_session_was_stopped(tmp_path: Path):
@@ -632,14 +718,12 @@ def test_an_involuntary_death_does_not_claim_the_session_was_stopped(tmp_path: P
     session = FakeSession()
     session_dir = store.session_dir(tmp_path, "s1")
     session_dir.mkdir(parents=True, exist_ok=True)
-    (session_dir / "runtime-stop.json").write_text(
-        '{"deliberate": false, "at": %f, "mechanism": "reap"}' % ((BASE + 60_000) / 1000.0)
-    )
+    _stop_marker(session_dir, BASE + 60_000, deliberate=False, mechanism="reap")
     queue = _queue(tmp_path, session, now=BASE + 200_000)
     queue._now = lambda: BASE
     queue.enqueue(_questions(), 120)
     queue._now = lambda: BASE + 200_000
-    _run(queue.reconcile())
+    _run(queue.reconcile(load_time=True))
     details = session.batches[0][0].details
     assert details["lapsed_while_stopped"] is False
     assert "lapsed while" not in details["text"]
@@ -652,14 +736,12 @@ def test_a_stop_outside_the_asks_own_window_is_not_annotated(tmp_path: Path):
     session_dir = store.session_dir(tmp_path, "s1")
     session_dir.mkdir(parents=True, exist_ok=True)
     # The stop happened BEFORE this ask existed.
-    (session_dir / "runtime-stop.json").write_text(
-        '{"deliberate": true, "at": %f}' % ((BASE - 600_000) / 1000.0)
-    )
+    _stop_marker(session_dir, BASE - 600_000)
     queue = _queue(tmp_path, session, now=BASE + 200_000)
     queue._now = lambda: BASE
     queue.enqueue(_questions(), 120)
     queue._now = lambda: BASE + 200_000
-    _run(queue.reconcile())
+    _run(queue.reconcile(load_time=True))
     assert session.batches[0][0].details["lapsed_while_stopped"] is False
 
 
