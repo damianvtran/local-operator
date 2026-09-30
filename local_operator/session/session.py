@@ -260,6 +260,7 @@ from local_operator.session.spend import (
     price_rows,
 )
 from local_operator.session.spend import recall as recall_spend
+from local_operator.session.runtime.types import PeerReceiveDetail
 from local_operator.session.spend import serving_identity, writer_stamp
 from local_operator.session.transcript import (
     CUSTOM_KIND_CUSTOM,
@@ -3422,6 +3423,22 @@ class Session:
         #: leftover spool can never become the opening row of the history (see
         #: ``_drain_spooled_peer_inbox``).
         self._peer_inbox_drained = False
+        #: Ids of peer messages INSIDE ``receive_peer_message`` right now.
+        #:
+        #: The durable half of the duplicate gate is the transcript index
+        #: (``transcript.has_entry``), and it is not enough on its own: two
+        #: deliveries of one sender-minted id can interleave across an ``await``
+        #: before either row is persisted -- the busy-steer path queues the row in
+        #: memory and the idle-wake path hands it to a spawned task, so a re-send
+        #: arriving in that window would pass the ``has_entry`` test and write the
+        #: message TWICE. Membership here is held from entry to the end of the
+        #: first ``await``-free stretch, and released in a ``finally``.
+        #:
+        #: Peer-row ids only. The user-row admission rail
+        #: (``CommandReservations``/``_admitted_command_ids``) is deliberately
+        #: untouched: different id space, different rows, and the ask lane's
+        #: exactly-once guard depends on it (design note C/E).
+        self._peer_inflight_ids: set[str] = set()
         self._abort_requested = False  # sticky across the continuation gap
         # Turns dropped back-to-back because they were born pre-aborted. Reset
         # by any turn that actually runs, so the honest "I am dropping these"
@@ -8007,7 +8024,9 @@ class Session:
             self.refresh_frontend_state()
         return found
 
-    def _peer_custom_message(self, text: str, sender: dict[str, Any]) -> CustomMessage:
+    def _peer_custom_message(
+        self, text: str, sender: dict[str, Any], *, entry_id: str = ""
+    ) -> CustomMessage:
         """Build the transcript entry for one inbound cross-session message.
 
         ``details["text"]`` is what the MODEL reads: it is wrapped in a
@@ -8018,6 +8037,15 @@ class Session:
         ``details["sender"]`` carries the advisory identity for the indicator
         label. ``attribution="user"`` routes it through the same allow-listed
         user-turn path as a wake/hub delivery (see ``build_llm_history``).
+
+        ``entry_id`` is the SENDER-minted id, and it is used as the transcript
+        entry id when it has already been validated
+        (:func:`~local_operator.mobile.peer_send.valid_peer_message_id`). It is
+        what lets the sender ask "did my message land?" of the transcript at all
+        -- the id was previously minted HERE, so a sender could not name the row
+        it was waiting on -- and what makes a re-send a duplicate rather than a
+        second row. Empty means the receiver mints its own, which is what every
+        pre-field sender gets.
         """
         pid = sender.get("pid")
         conversation = sender.get("conversation_name", "")
@@ -8034,6 +8062,7 @@ class Session:
             custom_type=PEER_MESSAGE_MESSAGE_TYPE,
             attribution="user",
             details={"text": wrapped, "body": text, "sender": sender},
+            **({"id": entry_id} if entry_id else {}),
         )
 
     async def _drain_spooled_peer_inbox(self) -> None:
@@ -8127,6 +8156,13 @@ class Session:
                         mode="mailbox",
                         wake=bool(getattr(line, "wake", False)),
                         sender=line.sender,
+                        # The SENDER's own id, so a row that reached the spool
+                        # twice (a crash between the write and the ack, or a
+                        # successor that drained it once already) is answered as
+                        # a duplicate instead of delivered twice. Absent on rows
+                        # an older build wrote, which read as ``""`` and deliver
+                        # exactly as before.
+                        message_id=getattr(line, "message_id", "") or None,
                     )
             except Exception:  # noqa: BLE001 — one bad row is not the others' problem
                 logger.warning("spooled peer message could not be delivered", exc_info=True)
@@ -8184,7 +8220,8 @@ class Session:
         mode: str = "mailbox",
         wake: bool = False,
         sender: dict[str, Any] | None = None,
-    ) -> str:
+        message_id: str | None = None,
+    ) -> PeerReceiveDetail:
         """Deliver a message from ANOTHER local lop session into this one.
 
         This is the receive half of ``lop send``. No existing method both
@@ -8208,8 +8245,63 @@ class Session:
           turn exactly like mailbox+wake idle (dropping it would violate the
           guarantee that the message MUST appear in history).
 
-        Returns a short human-readable detail string for the sender's ack.
+        Returns a :class:`PeerReceiveDetail` for the sender's ack: the same
+        short human-readable string every caller already printed, carrying the
+        :attr:`~PeerReceiveDetail.delivery` dict the ack frame forwards
+        (``{message_id, committed, queued, duplicate}``) so the sender can
+        classify the outcome without re-deriving it from prose.
+
+        ``message_id`` is the SENDER's minted identity for this message
+        (``peer-<32hex>``). When it is present and valid it becomes this row's
+        transcript entry id, and that is what makes the receive side
+        IDEMPOTENT: a re-send of an id this session already owns -- durable or
+        merely in flight -- is answered as a duplicate instead of appending the
+        message a second time. A malformed, foreign or absent id is ignored and
+        the receiver mints its own, which is exactly pre-field behaviour.
         """
+        # THE SINGLE CONVERGENCE POINT for the duplicate gate (design note C):
+        # every persist path below passes through here, so one check covers the
+        # durable append, the in-memory steering queue and the spawned turn
+        # alike. The two halves are the transcript index (a row already on disk)
+        # and ``_peer_inflight_ids`` (a re-send that arrived across an ``await``
+        # inside an earlier delivery, before its row was durable).
+        #
+        # Imported in-function for the same reason ``resolve_sender_identity``
+        # below is: this module must not grow a module-level dependency on the
+        # mobile package.
+        from local_operator.mobile.peer_send import valid_peer_message_id
+
+        incoming = message_id if valid_peer_message_id(message_id) else None
+        if incoming is not None:
+            committed = self._transcript.has_entry(incoming)
+            if committed or incoming in self._peer_inflight_ids:
+                return PeerReceiveDetail(
+                    "duplicate — this message is already delivered",
+                    {
+                        "message_id": incoming,
+                        "committed": committed,
+                        "queued": False,
+                        "duplicate": True,
+                    },
+                )
+            self._peer_inflight_ids.add(incoming)
+        try:
+            return await self._deliver_peer_message(
+                text, incoming=incoming, mode=mode, wake=wake, sender=sender
+            )
+        finally:
+            if incoming is not None:
+                self._peer_inflight_ids.discard(incoming)
+
+    async def _deliver_peer_message(
+        self,
+        text: str,
+        *,
+        incoming: str | None,
+        mode: str,
+        wake: bool,
+        sender: dict[str, Any] | None,
+    ) -> PeerReceiveDetail:
         # Resolve the sender against the LOCAL registry before anything renders
         # or persists. The identity arrives over the wire as the sender's own
         # self-report and can be empty or pid-only (a `lop send` whose ancestry
@@ -8234,7 +8326,27 @@ class Session:
         from local_operator.mobile.peer_send import resolve_sender_identity
 
         sender = resolve_sender_identity(sender)
-        message = self._peer_custom_message(text, sender)
+        message = self._peer_custom_message(text, sender, entry_id=incoming or "")
+
+        def receipt(detail: str, *, queued: bool = False) -> PeerReceiveDetail:
+            """This branch's ack: the receipt sentence plus what the receiver owns.
+
+            ``committed`` is True on every branch that actually TOOK the message
+            -- the row is durable, or the queue/spawned turn that will persist it
+            is this session's own. Only the queued arm (a busy terminal whose
+            hop to the session had not run when the ack was written, see
+            ``TuiSessionHandle``) reports ``committed=False``, because only there
+            has nothing been accepted yet.
+            """
+            return PeerReceiveDetail(
+                detail,
+                {
+                    "message_id": incoming or "",
+                    "committed": not queued,
+                    "queued": queued,
+                    "duplicate": False,
+                },
+            )
         busy = self._is_streaming
         if mode == "steer":
             if busy:
@@ -8260,7 +8372,7 @@ class Session:
                 self.refresh_frontend_state()
                 await self._emit_peer_receipt(message, sender)
                 self._peer_arrival.mark()
-                return "delivered mid-turn (steered)"
+                return receipt("delivered mid-turn (steered)")
             # Idle steer has nothing to interrupt: open a turn so the message is
             # still delivered and read. _prompt_messages persists the row once.
             await self._emit_peer_receipt(message, sender)
@@ -8269,7 +8381,7 @@ class Session:
             # prompt provenance, so a cut-off of it is an error even before a
             # provider round-trip (see ``_attention_run_has_evidence``).
             self._spawn_background(self._prompt_messages([message], carried_prompt=True))
-            return "delivered (opened a turn)"
+            return receipt("delivered (opened a turn)")
         # mode == "mailbox"
         if wake and not busy:
             # _prompt_messages persists the row through the pipeline — a
@@ -8278,7 +8390,7 @@ class Session:
             self._peer_arrival.mark()
             # Same provenance as the idle-steer arm above: a person's words.
             self._spawn_background(self._prompt_messages([message], carried_prompt=True))
-            return "delivered and woke the session"
+            return receipt("delivered and woke the session")
         # Record-only (idle without wake, or busy): persist durably NOW so the
         # human sees it and a crash cannot lose it, and make it visible to the
         # model on its next turn. The transcript write is immediate; the live
@@ -8307,7 +8419,7 @@ class Session:
         # at the post-batch boundary, which is what keeps the splice hazard
         # documented above from being reintroduced here.
         self._peer_arrival.mark()
-        return "delivered to the mailbox (will be read on the next turn)"
+        return receipt("delivered to the mailbox (will be read on the next turn)")
 
     async def _emit_peer_receipt(self, message: CustomMessage, sender: dict[str, Any]) -> None:
         """Fire the live receipt so the attached TUI paints the indicator now.

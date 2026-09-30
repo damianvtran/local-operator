@@ -197,6 +197,13 @@ class InboxLine:
     source: str = SOURCE_PEER
     command_id: str = ""
     harness_injected: bool = False
+    #: The PEER sender's minted message identity (``peer-<32hex>``), carried so
+    #: the successor's delivery is idempotent against a row that reached the
+    #: spool twice (a crash between the write and the ack). Additive and
+    #: defaulted: a row an older build wrote has no key, reads as ``""``, and
+    #: the drain then delivers it exactly as it always did. It only ever rides a
+    #: peer row — the owner-prompt paths own no message id.
+    message_id: str = ""
 
     @classmethod
     def from_json(cls, payload: dict[str, Any]) -> "InboxLine":
@@ -221,6 +228,7 @@ class InboxLine:
             source=_known_source(payload.get("source")),
             command_id=str(payload.get("command_id", "") or ""),
             harness_injected=bool(payload.get("harness_injected", False)),
+            message_id=str(payload.get("message_id", "") or ""),
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -233,6 +241,7 @@ class InboxLine:
             "source": self.source,
             "command_id": self.command_id,
             "harness_injected": self.harness_injected,
+            "message_id": self.message_id,
         }
 
 

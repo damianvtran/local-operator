@@ -102,6 +102,7 @@ from local_operator.session.runtime.types import (
     HEARTBEAT_INTERVAL_S,
     INPUT_MODE_CAPABILITY,
     OPERATOR_SIGNATURE_CAPABILITY,
+    PEER_MESSAGE_ID_CAPABILITY,
     RUNTIME_RECORD_KIND,
     ClientKind,
     ClientLocality,
@@ -1203,6 +1204,29 @@ def _takes_input_mode(handle: Any) -> bool:
     return True
 
 
+def _receives_message_id(handle: Any) -> bool:
+    """Whether ``handle``'s ``receive_peer_message`` takes a ``message_id``.
+
+    ONE helper for both sites that must agree: the dispatch (which only passes
+    the keyword when the literal parameter is present) and the record's
+    capability advertisement (which claims the receiver can name its row with
+    that id and dedupe a re-send). A ``**kwargs``-only method answers no here for
+    ``_takes_input_mode``'s reason -- VAR_KEYWORD would silently swallow the id,
+    and a sender that believed the capability would duplicate its retry.
+
+    A handle with no ``receive_peer_message`` at all answers no; the dispatch
+    refuses that session with its own sentence before this matters.
+    """
+    method = getattr(handle, "receive_peer_message", None)
+    if method is None:
+        return False
+    try:
+        parameters = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return False
+    return "message_id" in parameters
+
+
 @dataclass(frozen=True)
 class _ConnectionAuthority:
     """The two connection FACTS a dispatch may need, without the connection.
@@ -1282,6 +1306,20 @@ class AckDetail:
 
     detail: str
     attention: dict[str, Any]
+    #: Extra keys merged into the ack FRAME beside ``detail`` (design note A.2).
+    #:
+    #: ``attention`` is the receipt op's one state today; this is the general slot
+    #: for the next caller that has to verify something the ack itself must
+    #: report. It is ADDITIVE and defaulted, so every existing ``AckDetail``
+    #: construction and every handle that returns a bare ``str`` keeps working
+    #: byte-identically -- the peer-message rail is the first user, carrying
+    #: ``{"delivery": {...}}`` for the sender's outcome classification.
+    #:
+    #: A handle from before this field answers with a plain string, which the
+    #: dispatch treats as "no extra state" rather than as a failure: the sender's
+    #: contract with such a receiver is unchanged (it commits the row before it
+    #: acks), so an absent ``delivery`` object still proves delivery.
+    fields: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -1909,6 +1947,12 @@ class RuntimeServer:
                 # asks both methods — see ``_takes_input_mode``, which mirrors
                 # the dispatch's own check exactly.
                 + ([INPUT_MODE_CAPABILITY] if _takes_input_mode(handle) else [])
+                # SENDER-MINTED MESSAGE IDENTITY, on the same fail-closed
+                # argument as the carriage above: the string is the sender's
+                # licence to RETRY a send, and a receiver that would silently
+                # drop the id cannot dedupe that retry -- so an owner that does
+                # not take the keyword must not advertise it.
+                + ([PEER_MESSAGE_ID_CAPABILITY] if _receives_message_id(handle) else [])
                 # ADVERTISED UNCONDITIONALLY (revision 2, §2.3). The runtime can
                 # always VERIFY an operator or device signature: the anchor is a
                 # file it reads, and the public half is all verification needs.
@@ -5885,7 +5929,7 @@ class RuntimeServer:
                     # has to verify what that op did and its own projection is
                     # delivered by a different writer.
                     detail, extra = (
-                        (outcome.detail, {"attention": outcome.attention})
+                        (outcome.detail, {"attention": outcome.attention, **outcome.fields})
                         if isinstance(outcome, AckDetail)
                         else (outcome, {})
                     )
@@ -6662,13 +6706,21 @@ class RuntimeServer:
             receive = getattr(h, "receive_peer_message", None)
             if not callable(receive):
                 raise ValueError("this session cannot receive peer messages")
-            typed_receive = cast(Callable[..., Awaitable[str]], receive)
-            return await typed_receive(
-                frame["text"],
-                mode=str(frame.get("mode", "mailbox")),
-                wake=bool(frame.get("wake", False)),
-                sender=frame.get("sender") or {},
-            )
+            typed_receive = cast(Callable[..., Awaitable[Any]], receive)
+            fields = {
+                "text": frame["text"],
+                "mode": str(frame.get("mode", "mailbox")),
+                "wake": bool(frame.get("wake", False)),
+                "sender": frame.get("sender") or {},
+            }
+            # SENDER-MINTED MESSAGE IDENTITY, probed exactly like ``command_id``
+            # above: a handle from before the carriage never receives a keyword
+            # it would drop (which would silently lose the receiver's ability to
+            # dedupe a re-send), and a frame from an older sender omits the key
+            # entirely, leaving this op byte-identical.
+            if _receives_message_id(receive):
+                fields["message_id"] = frame.get("message_id")
+            return await typed_receive(**fields)
         if op == "peer_set_model":
             # Another local session switching THIS one's model (design D1). The
             # same two gates as ``peer_message`` directly above, for the same

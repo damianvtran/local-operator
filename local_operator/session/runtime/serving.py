@@ -90,7 +90,7 @@ from local_operator.mobile.types import (
 # one window and start one toward the literal goal `--stop` in another.
 from local_operator.session.goal_loop import LOOP_CLEAR_ARGS, LOOP_STOP_ARGS
 from local_operator.session.runtime.inbox import SOURCE_PEER, SOURCE_USER
-from local_operator.session.runtime.server import SessionHandle
+from local_operator.session.runtime.server import AckDetail, SessionHandle
 from local_operator.session.runtime.server import audio_blocks as _audio_blocks
 from local_operator.session.runtime.server import (
     image_blocks_in_thread as _image_blocks_async,
@@ -2227,6 +2227,7 @@ class ServingSessionHandle(SessionHandle):
         source: str = SOURCE_PEER,
         command_id: str = "",
         harness_injected: bool = False,
+        message_id: str = "",
     ) -> str:
         """Spool one message for the successor runtime, and receipt it.
 
@@ -2309,6 +2310,11 @@ class ServingSessionHandle(SessionHandle):
                     source=source,
                     command_id=command_id,
                     harness_injected=harness_injected,
+                    # The peer sender's identity, carried across the handover so
+                    # the successor's delivery is idempotent against a row that
+                    # was spooled twice (see ``inbox.InboxLine.message_id``).
+                    # Empty on the owner-prompt paths, which own none.
+                    message_id=message_id,
                 ),
             )
         except Exception:  # noqa: BLE001 — a broken spool is a refusal, not a crash
@@ -4110,6 +4116,7 @@ class ServingSessionHandle(SessionHandle):
         mode: str = "mailbox",
         wake: bool = False,
         sender: dict[str, Any] | None = None,
+        message_id: str | None = None,
     ) -> str:
         # This handle owns an in-process Session on the registrant's own loop,
         # so the coroutine can be awaited directly (unlike the TUI handle, which
@@ -4136,16 +4143,46 @@ class ServingSessionHandle(SessionHandle):
         # is latched — the announce and the latch come after it.
         if (self._retiring_cause or self._updating) and (wake or mode != "mailbox"):
             if self._updating or (self._draining and not self._exit_committed):
-                return await self._spool_for_successor(
-                    text, mode=mode, wake=wake, sender=sender or {}
+                receipt = await self._spool_for_successor(
+                    text, mode=mode, wake=wake, sender=sender or {}, message_id=message_id or ""
+                )
+                # The row is DURABLE the moment this returns (it raises instead
+                # when it cannot be written), so the sender may report it as
+                # delivered and must not be told to retry.
+                return AckDetail(
+                    receipt,
+                    {},
+                    {
+                        "delivery": {
+                            "message_id": message_id or "",
+                            "committed": True,
+                            "queued": False,
+                            "duplicate": False,
+                        }
+                    },
                 )
             raise self._retiring_refusal()
-        detail = await self._session.receive_peer_message(
-            text, mode=mode, wake=wake, sender=sender or {}
+        result = await self._session.receive_peer_message(
+            text, mode=mode, wake=wake, sender=sender or {}, message_id=message_id
         )
         self._fold.note_peer_message(text, sender=sender or {})
         self._notify()
-        return detail
+        return AckDetail(
+            str(result),
+            {},
+            {"delivery": getattr(result, "delivery", None) or self._peer_delivery_absent()},
+        )
+
+    @staticmethod
+    def _peer_delivery_absent() -> dict[str, Any]:
+        """The delivery dict for a session that answered a plain string.
+
+        A REDUCED or older Session returns the receipt alone. The honest reading
+        is unchanged from the pre-field contract -- such a receiver commits the
+        row before it acks -- so the sender is told the message is committed
+        rather than being handed a ``None`` it would have to interpret.
+        """
+        return {"message_id": "", "committed": True, "queued": False, "duplicate": False}
 
     @_on_session_loop
     async def abort(self) -> str:

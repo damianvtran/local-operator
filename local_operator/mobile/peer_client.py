@@ -101,6 +101,31 @@ class _FrameReader:
             self._buf.extend(chunk)
 
 
+class PeerAck(str):
+    """A control ack's sentence, PLUS whatever state rode the same frame.
+
+    A ``str`` SUBCLASS, and that is the whole design: every existing consumer of
+    ``send_peer_message``/``send_control_op`` — the CLI's print, the tool's
+    receipt, ``launch._deliver``, and the tests that compare against a receipt
+    sentence — treats the answer as a string and keeps compiling and passing
+    unchanged. Only a caller that needs the delivery classification (the send
+    outcome builder) reaches for :attr:`delivery`.
+
+    ``delivery`` is the receiver's own report of what it did with the message
+    (``{"message_id", "committed", "queued", "duplicate"}``), or ``None`` for a
+    frame that carried none — an older receiver, or any op other than
+    ``peer_message``. ``None`` is NOT "not delivered": it means the receiver did
+    not say, which the sender must classify from the transport fact alone.
+    """
+
+    __slots__ = ("delivery",)
+
+    def __new__(cls, detail: str, delivery: dict[str, Any] | None = None) -> "PeerAck":
+        ack = super().__new__(cls, detail)
+        ack.delivery = delivery
+        return ack
+
+
 async def send_peer_message(
     record: SessionRecord,
     *,
@@ -108,12 +133,19 @@ async def send_peer_message(
     mode: str,
     wake: bool,
     sender: dict[str, Any],
+    message_id: str | None = None,
     deadline_s: float = 5.0,
-) -> str:
-    """Deliver one message to ``record``'s session and return the ack detail.
+) -> PeerAck:
+    """Deliver one message to ``record``'s session and return the ack.
 
     A thin wrapper over :func:`send_control_op` with the ``peer_message`` op, so
     the message sender and the model switch read the SAME frames the same way.
+
+    ``message_id`` is the SENDER-minted transcript-entry id (``peer-<32hex>``),
+    riding the request so the receiver can name its row with it and answer a
+    re-send as a duplicate instead of appending a second one. It is omitted
+    entirely when ``None``, which is what keeps this frame byte-identical for a
+    caller that has no id to offer (and for an old receiver, which ignores it).
 
     Raises ``RuntimeError`` on an ``error`` reply (e.g. an older registrant
     that does not know the op, or a handle that cannot receive), and
@@ -121,10 +153,13 @@ async def send_peer_message(
     failures the CLI surfaces as a human-readable message with a non-zero exit,
     never a traceback.
     """
+    fields: dict[str, Any] = {"text": text, "mode": mode, "wake": wake, "sender": sender}
+    if message_id is not None:
+        fields["message_id"] = message_id
     return await send_control_op(
         record,
         "peer_message",
-        {"text": text, "mode": mode, "wake": wake, "sender": sender},
+        fields,
         deadline_s=deadline_s,
         default_detail="delivered",
         default_error="delivery failed",
@@ -148,7 +183,7 @@ async def send_control_op(
     deadline_s: float = 5.0,
     default_detail: str = "ok",
     default_error: str = "request failed",
-) -> str:
+) -> PeerAck:
     """Send ONE control op to ``record``'s session and return its ack detail.
 
     Dials as a daemon-class connection: a daemon-class dial receives an
@@ -197,7 +232,11 @@ async def send_control_op(
             if frame.get("req") == req and frame.get("op") in ("ack", "error"):
                 if frame["op"] == "error":
                     raise RuntimeError(str(frame.get("message", default_error)))
-                return str(frame.get("detail", default_detail))
+                delivery = frame.get("delivery")
+                return PeerAck(
+                    str(frame.get("detail", default_detail)),
+                    delivery if isinstance(delivery, dict) else None,
+                )
     finally:
         writer.close()
         try:

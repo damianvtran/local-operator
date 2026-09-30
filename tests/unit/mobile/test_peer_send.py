@@ -1165,7 +1165,16 @@ async def test_a_started_session_still_dials_the_socket(monkeypatch) -> None:
     record = _unstarted_record()
     record.started = True
 
-    async def _dial(rec: Any, *, text: str, mode: str, wake: bool, sender: Any) -> str:
+    async def _dial(
+        rec: Any,
+        *,
+        text: str,
+        mode: str,
+        wake: bool,
+        sender: Any,
+        message_id: str | None = None,
+        deadline_s: float | None = None,
+    ) -> str:
         assert rec is record
         return "delivered and woke the session" if wake else "delivered to the mailbox"
 

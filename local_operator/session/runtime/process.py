@@ -3642,6 +3642,24 @@ async def _drain_for_signal(
     stop.set()
 
 
+def _accepts_message_id(method: object) -> bool:
+    """Whether a handle's ``receive_peer_message`` takes the ``message_id`` keyword.
+
+    The boot drain delivers rows written by OTHER builds, so it must not assume
+    the carriage exists: an older handle would raise a ``TypeError`` on an
+    unexpected keyword and the row would be re-spooled forever. Deliberately not
+    a ``**kwargs``-permissive test — a VAR_KEYWORD method would swallow the id
+    silently, and a swallowed id means the dedupe this carriage exists for never
+    happens. Mirrors ``server._receives_message_id``, which gates the same
+    capability advertisement.
+    """
+    try:
+        parameters = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return False
+    return "message_id" in parameters
+
+
 async def _drain_inbox_into(handle: object) -> int:
     """Deliver every message spooled while this session was cold. Count sent.
 
@@ -3770,12 +3788,17 @@ async def _drain_inbox_into(handle: object) -> int:
             if owner_row:
                 await _run_owner_prompt(handle, line, seen=seen_owner_ids)
             elif callable(probed):
-                await receive(
-                    line.text,
-                    mode="mailbox",
-                    wake=bool(getattr(line, "wake", False)),
-                    sender=line.sender,
-                )
+                fields: dict[str, Any] = {
+                    "mode": "mailbox",
+                    "wake": bool(getattr(line, "wake", False)),
+                    "sender": line.sender,
+                }
+                # THE PEER PATH'S IDENTITY, which this file's own note below used
+                # to say did not exist. A handle from before the carriage does
+                # not take the keyword and keeps today's at-least-once behaviour.
+                if _accepts_message_id(probed):
+                    fields["message_id"] = getattr(line, "message_id", "") or None
+                await receive(line.text, **fields)
             else:
                 raise RuntimeError("this handle cannot receive a spooled peer message")
             delivered += 1
@@ -3789,15 +3812,14 @@ async def _drain_inbox_into(handle: object) -> int:
             # repeat because delivery is idempotent by the durable command index
             # (``_run_owner_prompt``) and ``inbox``'s contract is at-least-once.
             #
-            # FOR A PEER ROW IT IS AT-LEAST-ONCE WITHOUT THAT SEAM (agent review round 2,
-            # NIT B). ``inbox.InboxLine.command_id`` only ever rides a ``SOURCE_USER`` row,
-            # and ``receive_peer_message`` has no equivalent dedupe: a peer row whose
-            # delivery PERSISTED and then raised is appended a second time, and what the
-            # peer sees is a duplicate ``peer_message`` card for one send. That is the
-            # direction this file already chooses deliberately (a duplicated note is
-            # visible and harmless, a dropped one is neither), and closing it properly
-            # means an identity on the peer path — a change of its own, with its own
-            # review, rather than a second half-seam here.
+            # FOR A PEER ROW THE IDENTITY IS NOW ON THE WIRE (agent review round 2,
+            # NIT B closed here): ``InboxLine.message_id`` carries the sender's own
+            # id, the handle forwards it, and ``receive_peer_message`` dedupes on
+            # it — so a peer row whose delivery PERSISTED and then raised is
+            # answered as a duplicate instead of appearing a second time. Rows
+            # written by an older build have no id and still deliver at-least-once,
+            # which remains the deliberate direction (a duplicated note is visible
+            # and harmless, a dropped one is neither).
             if not append_inbox(directory, line):
                 logger.error(
                     "could not re-spool an undelivered inbox row (command_id=%s); it is lost",
