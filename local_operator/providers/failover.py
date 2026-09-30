@@ -364,6 +364,15 @@ _MID_STREAM_TRANSPORT_LOSS_NAMES = (
 #: second, provenance-shaped piece of evidence — is left exactly as it was,
 #: because "the gateway 500ed" with no evidence about WHAT failed is not a routing
 #: failure we are entitled to replay.
+#:
+#: A second recorded wording of the same class is the gateway's IDLE TIMER:
+#: OpenRouter answers an in-band 504 ``Upstream idle timeout exceeded`` when a
+#: chosen upstream host stalls mid-generation (the field's F2 arm, control-repeat
+#: episode task 010 run c1, ``runs/a1796-c1-task_010-20260930-034755`` — the run
+#: died holding a partial answer). The gateway's own words name the UPSTREAM as
+#: the thing that failed, which is routing evidence about the gateway's side of
+#: the hop, not a verdict on our request — so a re-issue is served by another of
+#: its hosts, exactly like the shapes above.
 _AGGREGATOR_UPSTREAM_STREAM_FAILURE_MARKERS = (
     "provider_unavailable",
     "upstream error from",
@@ -371,6 +380,7 @@ _AGGREGATOR_UPSTREAM_STREAM_FAILURE_MARKERS = (
     "h2 protocol error",
     "network connection lost",
     "json error injected into sse stream",
+    "upstream idle timeout",
 )
 
 #: The only stream events that may be forwarded WITHOUT making an attempt
@@ -538,6 +548,38 @@ _INPUT_REFUSAL_NOTE_MARKER = "the provider refused the request's input as inappr
 #: adds one bounded sentence, and this keeps the total bounded even if a
 #: future relay sends a longer body.
 _MAX_INPUT_REFUSAL_MESSAGE_CHARS = 900
+
+#: Bounded IDENTICAL re-asks a provider MEDIA-DOWNLOAD failure earns on the
+#: SAME target and credential before the walk surfaces it legibly.
+#:
+#: The class (see :func:`is_media_download_failure`) is the provider's OWN
+#: pre-processing failing to obtain a media item the request carried: the
+#: request was never processed, so an attempt costs one send and nothing was
+#: executed or shown. The provider documents the causes as fetch-side and its
+#: published client-side remedy — serve the media inline — is already what this
+#: harness does, so a re-ask is the one remedy left that can succeed and no
+#: change to OUR bytes can help it. Two, not more: each re-ask is a full
+#: request, the documented causes are transient, and a request that fails the
+#: class deterministically must reach the legible terminal rather than burn
+#: budget on the same bytes a third time.
+MAX_MEDIA_DOWNLOAD_RETRIES = 2
+
+#: Flat wait before a media-download re-ask, with no ramp: the failure is about
+#: the provider's fetch attempt, not a resource that recovers on a schedule,
+#: and the documented timeout variants are seconds-scale. Sized like the
+#: model-flap re-ask's settle delay rather than derived from a measurement.
+MEDIA_DOWNLOAD_RETRY_DELAY_MS = 2_000
+
+#: The clause :func:`_legible_media_download_failure` appends to the provider's
+#: own words when a media-download failure turns terminal. It doubles as the
+#: idempotence header, the same way the input-refusal note's marker does.
+_MEDIA_DOWNLOAD_NOTE_MARKER = (
+    "the provider's data inspection could not download a media item the request carried"
+)
+
+#: Ceiling for the composed terminal message, matching the input-refusal
+#: note's bound and for the same reason.
+_MAX_MEDIA_DOWNLOAD_MESSAGE_CHARS = 900
 
 #: ``provider/model-id`` selectors that have served at least one request in
 #: THIS process. The evidence that turns an unknown-model 4xx from "your id
@@ -1109,6 +1151,119 @@ def is_input_refusal(error: BaseException | str) -> bool:
     return False
 
 
+#: Wordings for "the provider's pre-processing could not obtain a media item
+#: the request carried", as the provider's own error table publishes the family
+#: under HTTP 400 ``invalid_parameter_error``:
+#:
+#: * ``Failed to download multimodal content`` (the captured message), and
+#: * ``Download the media resource timed out during the data inspection
+#:   process`` / ``Unable to download the media resource during the data
+#:   inspection process`` — both of which contain the second phrase.
+#:
+#: Deliberately a separate tuple from :data:`_INPUT_REFUSAL_MARKERS` and
+#: :data:`_IMAGE_REJECTION_MARKERS`, because this class is neither: nothing
+#: judged the request, and nothing about the bytes is wrong to fix — the media
+#: fetch failed on the provider's side of the hop (their documented causes are
+#: connectivity, latency, service instability, a blocked fetch user agent).
+#: Re-sending identical bytes is therefore a legitimate recovery here, where
+#: the refusal class's entire premise is that it is not.
+#:
+#: Anchored on the full phrases rather than the words "download" or
+#: "multimodal" alone, so an unrelated 400 that merely mentions media (a
+#: malformed field, an oversize image) keeps the ordinary terminal request
+#: path.
+_MEDIA_DOWNLOAD_FAILURE_MARKERS = (
+    "failed to download multimodal content",
+    "download the media resource",
+)
+
+
+def _rendered_http_status(rendered_error: str) -> int | None:
+    """The HTTP status a rendered ``ProviderError`` carries, when one is visible.
+
+    ``__str__`` renders ``<label> (HTTP <status>[, retry in <wait>]): <words>``,
+    so the status — when the error had one — sits in the label's parenthetical,
+    BEFORE the message. Only the head before the first colon is read, so a
+    figure inside the provider's own words can never be mistaken for the
+    status. ``None`` means no status is visible: the error had none, or only a
+    retry wait was rendered — callers treat that exactly like the exception
+    form's ``status is None``, i.e. not this class.
+    """
+    head = rendered_error.partition(":")[0]
+    marker = " (http "
+    at = head.lower().find(marker)
+    if at == -1:
+        return None
+    digits = ""
+    for char in head[at + len(marker) :]:
+        if not char.isdigit():
+            break
+        digits += char
+    return int(digits) if digits else None
+
+
+def is_media_download_failure(error: BaseException | str) -> bool:
+    """Did the provider fail to OBTAIN media the request carried?
+
+    The class Alibaba reports as HTTP 400 ``invalid_parameter_error`` with
+    "Failed to download multimodal content": its data-inspection step could
+    not download a media resource out of the request, so the request was never
+    processed by the model. The provider documents the causes as fetch-side —
+    download timeouts, cross-region latency, source-service instability, a
+    security policy blocking its fetch user agent — and its own published
+    remedy for the URL-carried case is to serve the media inline; this harness
+    already does that (every image block goes on the wire as a base64 data
+    URL), so nothing on OUR side of the request can be changed to make the
+    fetch succeed. What remains is a bounded IDENTICAL re-ask (see
+    ``MAX_MEDIA_DOWNLOAD_RETRIES``), not the input-refusal degrade ladder:
+    that ladder exists because the refusal's premise is "the same bytes get
+    the same answer", which is exactly the premise this class does not have.
+
+    Accepts the exception or its rendered form, like the sibling predicates,
+    and reads the SAME gates off either shape: the rendered form's label
+    states the kind and its parenthetical states the HTTP status, so a 5xx
+    that merely carries the wording is rejected in both forms. The KIND gate
+    deliberately spans two kinds rather than one: the provider documents this
+    family under two wordings, and the one that says the download "timed out"
+    is read by the classifier's own timeout markers as ``kind == "timeout"``
+    while the same class without that word is ``kind == "request"``. Both are
+    a 4xx the provider answered — the request was never processed either way —
+    so the recovery must not split on which wording a given relay used. A 5xx
+    mentioning a download is the provider failing on its own side and keeps
+    the ordinary retry ladder; the status range, not the kind, draws that
+    line (the kind can read "timeout" for a 400 whose message says so).
+    """
+    if isinstance(error, ProviderError):
+        if error.status is None or not 400 <= error.status < 500:
+            return False
+        if error.kind not in ("request", "timeout"):
+            return False
+        haystack = error.message.lower()
+    else:
+        text = error if isinstance(error, str) else str(error)
+        haystack = text.lower()
+        # The rendered form carries BOTH facts the exception form gates on, so
+        # both gates are mirrored: the label states the kind ("invalid request"
+        # / "provider timeout" are the two kinds this class spans), and the
+        # label's parenthetical states the HTTP status whenever the error had
+        # one ("provider timeout (HTTP 504): …"). The status half is what used
+        # to be missing: without it the rendered form accepted a 5xx that
+        # merely carries the wording — "provider timeout" is a label a 504
+        # wears too — where the exception form rejected it, so the two forms
+        # disagreed on exactly that input (review R1-n3 / QA Q-2). A rendered
+        # form with no status is the render of an error whose status is None,
+        # which the exception form rejects too.
+        if not (
+            haystack.startswith(_KIND_LABELS["request"])
+            or haystack.startswith(_KIND_LABELS["timeout"])
+        ):
+            return False
+        status = _rendered_http_status(text)
+        if status is None or not 400 <= status < 500:
+            return False
+    return any(marker in haystack for marker in _MEDIA_DOWNLOAD_FAILURE_MARKERS)
+
+
 def _request_without_images(request: ChatRequest) -> ChatRequest | None:
     """``request`` with every image block replaced by a placeholder, or None.
 
@@ -1269,6 +1424,47 @@ def _legible_input_refusal(
     )
     if len(message) > _MAX_INPUT_REFUSAL_MESSAGE_CHARS:
         message = message[: _MAX_INPUT_REFUSAL_MESSAGE_CHARS - 1] + "…"
+    wrapped = ProviderError(
+        error.status,
+        message,
+        retryable=error.retryable,
+        retry_after_ms=error.retry_after_ms,
+        auth_error=error.auth_error,
+        kind=error.kind,
+    )
+    wrapped.__cause__ = error
+    return wrapped
+
+
+def _legible_media_download_failure(
+    error: ProviderError, *, attempts: int, policy_declined: bool = False
+) -> ProviderError:
+    """``error`` with the recovery outcome appended, as the terminal message.
+
+    The raw frame for this class is a 400 body that reads like a malformed
+    request; it does not say that the provider's own media fetch failed before
+    any model saw the request. The note keeps the provider's own words in FRONT
+    (classifiers read the message) and appends the facts the record was
+    missing: the request was never processed, and whether it was re-asked.
+
+    Idempotent on ``_MEDIA_DOWNLOAD_NOTE_MARKER`` and bounded by
+    ``_MAX_MEDIA_DOWNLOAD_MESSAGE_CHARS``, the same contract as
+    ``_legible_input_refusal`` and for the same reasons.
+    """
+    if _MEDIA_DOWNLOAD_NOTE_MARKER in error.message:
+        return error
+    if attempts:
+        tail = f"A bounded re-ask ({attempts}) also failed, so it was not re-sent further."
+    elif policy_declined:
+        tail = "This call's retry policy declined a bounded re-ask, so it was not re-sent."
+    else:
+        tail = "No bounded re-ask was attempted, so it was not re-sent further."
+    message = (
+        f"{error.message} — {_MEDIA_DOWNLOAD_NOTE_MARKER}; "
+        f"the request was never processed by the model. {tail}"
+    )
+    if len(message) > _MAX_MEDIA_DOWNLOAD_MESSAGE_CHARS:
+        message = message[: _MAX_MEDIA_DOWNLOAD_MESSAGE_CHARS - 1] + "…"
     wrapped = ProviderError(
         error.status,
         message,
@@ -3691,6 +3887,12 @@ async def stream_with_failover(
     # same allowance instead of opening a fresh ladder per target.
     input_refusal_retries = 0
     input_refusal_degradations: list[str] = []
+    # Identical re-asks a provider MEDIA-DOWNLOAD failure has spent ON THIS
+    # CALL (see `is_media_download_failure`). Call-scoped like the refusal
+    # allowance above, for the same shape of reason: the allowance describes
+    # the REQUEST, not a target -- once it is spent the walk raises rather
+    # than hopping, so no hop can inherit or reset it.
+    media_download_retries = 0
     while pending:
         target = pending.pop(0)
         selector = target.selector
@@ -4188,6 +4390,51 @@ async def stream_with_failover(
                         attempts=input_refusal_retries,
                         degradations=input_refusal_degradations,
                         policy_declined=degraded is not None and not retry.enabled,
+                    )
+                    record(exc, primary=is_primary)
+                    raise exc
+                if is_media_download_failure(exc):
+                    # A provider refused a request carrying media because its
+                    # OWN pre-processing could not download a media item — the
+                    # request was never processed (see
+                    # `is_media_download_failure`). The predicate owns the
+                    # gates (a 4xx status, and a kind that spans "request" and
+                    # the "timed out" wording's "timeout") — a second kind check
+                    # here would silently drop the timeout variant back onto
+                    # the ordinary ladder, which HOPS the chain with the same
+                    # bytes. Unlike a content verdict,
+                    # nothing is wrong with the bytes: every image goes out
+                    # inline, the provider's own published remedy for the
+                    # URL-carried case, and the documented causes are fetch-side
+                    # weather. So the recovery is a bounded IDENTICAL re-ask on
+                    # the same target and credential — no request change (there
+                    # is nothing to change) and no hop (a different provider
+                    # would serve a different model's answer, the substitution
+                    # red line). Once the budget is spent the failure is
+                    # TERMINAL for the walk and goes up carrying its diagnosis.
+                    #
+                    # BEFORE `record()`, like the flap and refusal re-asks
+                    # above: a recovery being attempted must not occupy the
+                    # reported-error slot.
+                    if retry.enabled and media_download_retries < MAX_MEDIA_DOWNLOAD_RETRIES:
+                        media_download_retries += 1
+                        logger.warning(
+                            "provider's data inspection could not download media the "
+                            "request carried (%s/%s, HTTP %s); re-asking in %dms (%d/%d)",
+                            spec.provider,
+                            spec.model_id,
+                            exc.status,
+                            MEDIA_DOWNLOAD_RETRY_DELAY_MS,
+                            media_download_retries,
+                            MAX_MEDIA_DOWNLOAD_RETRIES,
+                        )
+                        await _abortable_sleep(MEDIA_DOWNLOAD_RETRY_DELAY_MS, signal)
+                        retry_same_key = True
+                        continue
+                    exc = _legible_media_download_failure(
+                        exc,
+                        attempts=media_download_retries,
+                        policy_declined=not retry.enabled,
                     )
                     record(exc, primary=is_primary)
                     raise exc
