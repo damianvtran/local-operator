@@ -7768,8 +7768,16 @@ def ask_wire(session: Any) -> tuple[list[dict[str, Any]] | None, int | None]:
         return None, None
     if queue is None:
         return None, None
+    # ``queue`` came from a duck-typed factory, so its own surface is probed the
+    # same way: a host whose queue cannot fold is "nothing to say" rather than an
+    # AttributeError on a per-frame path.
+    folder = getattr(queue, "projection", None)
+    if not callable(folder):
+        return None, None
     try:
-        rows = [dict(row) for row in queue.projection()]
+        # ``folder`` is a getattr result, so its return type is not statically
+        # known to be iterable; the codebase's spelling for that is a cast.
+        rows = [dict(row) for row in cast("Any", folder())]
     except Exception:  # noqa: BLE001 — the same rule: absence, never a false zero
         logger.debug("ask: could not fold the queue for the wire", exc_info=True)
         return None, None
