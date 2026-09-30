@@ -483,11 +483,13 @@ class CredentialBindingRecorder:
     def _local_binding(self, provider: str, credential_id: int | None) -> CredentialBinding | None:
         """The candidate row for a local serve, or ``None`` when there is none.
 
-        The identity label is left empty in this slice: for a local serve it
-        would come from the placement entry or the credential row itself, and
-        its first consumer is the account-change notice (a later slice), which
-        resolves it where the row is already in hand. The field is optional by
-        schema, so the omission is honest rather than lossy.
+        The identity label is left empty, and slice B did NOT change that: the
+        account-change notice reads labels off the rows themselves (a borrow's
+        row carries the grant's identity; a local row carries none), so nothing
+        resolves a local side's label today — the notice names the device
+        instead. The field is optional by schema, so the omission is honest
+        rather than lossy, and a future reader that needs the label (a usage
+        surface, say) must resolve it where the credential row is in hand.
         """
         if credential_id is None or isinstance(credential_id, bool):
             return None

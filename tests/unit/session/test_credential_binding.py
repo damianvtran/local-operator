@@ -727,6 +727,87 @@ async def test_u4_local_first_still_wins(tmp_path: Path) -> None:
         store.close()
 
 
+def _oauth_local(root: Path) -> AuthStore:
+    """A store holding one usable local OAuth login (the OAuth half's fixture).
+
+    Non-expired on purpose: the plain resolve returns it without touching the
+    refresh path, so what the cells below measure is the CONSULT, not a token
+    exchange.
+    """
+    auth = AuthStore(db_path=root / "auth.db", config_dir=root)
+    auth.upsert_credential(
+        PROVIDER,
+        {
+            "type": "oauth",
+            "access": "local-access-token",
+            "expires": int(time.time() * 1000) + 3_600_000,
+            "refresh": "local-refresh-token",
+            "email": "local@example.test",
+        },
+    )
+    return auth
+
+
+@pytest.mark.asyncio
+async def test_u4_oauth_owner_policy_brokers_even_though_local_would_answer(
+    tmp_path: Path,
+) -> None:
+    """U4-mirror (review round 1, R1): the OAuth entry point's consult, pinned.
+
+    THE HOLE THIS CLOSES: both entry points carry the carve-out and both are
+    declared never to disagree about which account serves, but only
+    ``get_api_key`` had a cell — a mutation dropping the OAuth half
+    (``store.py``: ``if access is not None and not self._owner_policy_skips_local(...)``
+    → ``if access is not None:``) kept the whole slice green. A local OAuth
+    login is installed, the row says ``policy: owner``, and the borrow must
+    win.
+    """
+    root = tmp_path / "root"
+    root.mkdir()
+    transcript = Transcript(tmp_path / "sess")
+    recorder = _recorder(transcript)
+    auth = _oauth_local(root)
+    grant = _grant(credential_id=42)
+    mesh = _StubMesh([grant])
+    store = MeshAwareAuthStore(auth, mesh=mesh, config_dir=root)
+    store.set_serve_sink(recorder.observe_serve)
+    store.set_binding_reader(recorder.recall_for)
+    try:
+        await record(transcript, _binding(policy=POLICY_OWNER))
+        access = await store.get_oauth_access(PROVIDER, SESSION)
+        await recorder.drain()
+        assert access is not None, "the carve-out dialled the broker and got nothing"
+        assert (
+            access.access_token == grant.access_token
+        ), "the carve-out must not return the local OAuth access"
+        assert access.access_token != "local-access-token"
+        assert mesh.grant_calls == 1
+        # Same account still serving: the borrow appends nothing.
+        assert len(_rows(transcript)) == 1
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_u4_oauth_owner_policy_has_no_local_fallback(tmp_path: Path) -> None:
+    """U4-mirror (failure half): unbrokerable under ``owner`` → ``None``, never local."""
+    root = tmp_path / "root"
+    root.mkdir()
+    transcript = Transcript(tmp_path / "sess")
+    recorder = _recorder(transcript)
+    auth = _oauth_local(root)
+    mesh = _RefusingMesh([_grant(credential_id=42)])
+    store = MeshAwareAuthStore(auth, mesh=mesh, config_dir=root)
+    store.set_serve_sink(recorder.observe_serve)
+    store.set_binding_reader(recorder.recall_for)
+    try:
+        await record(transcript, _binding(policy=POLICY_OWNER))
+        assert await store.get_oauth_access(PROVIDER, SESSION) is None
+        assert mesh.grant_calls == 0, "not a holder: the rung refuses before dialling"
+    finally:
+        store.close()
+
+
 # -- U5: the account-change notice -------------------------------------------
 
 
@@ -771,8 +852,11 @@ async def test_u5_local_capture_writes_the_new_row_and_one_notice_signal(
         assert new is not None and previous is not None
         assert previous.owner_device == OWNER and new.owner_device == SELF
         notice = render_binding_change_notice(new, previous, self_device=SELF)
-        assert "your login on this device" in notice
+        # The capture sentence (design round 1: past-tense, device named, no
+        # deictics — the row persists, replays, and moves).
+        assert "moved onto my-laptop's own openai login" in notice
         assert LABEL in notice, "the account it came FROM is the operator-usable half"
+        assert "this device" not in notice and "this turn" not in notice
 
         # A third identical resolve is not news: no row, no signal.
         assert await store.get_api_key(PROVIDER, SESSION) == "sk-local"
@@ -794,7 +878,9 @@ async def test_u5b_the_notice_row_persists_operator_only_and_journals_once(
     folds paint — it is replayed by ``build_llm_history`` like its MCP and
     redaction siblings), and it must be DROPPED by the model-context
     conversion, which is the exclusion that matters. A change with nothing to
-    say (a label-only refinement) must journal nothing.
+    say (a label-only refinement) must journal nothing. The recorder→session
+    CHAIN (including the first-serve suppression) is driven for real in
+    :func:`test_n1_first_serve_journals_no_notice_and_a_change_journals_one`.
     """
     from local_operator.harness.message_types import SESSION_BINDING_NOTICE_MESSAGE_TYPE
     from local_operator.harness.render import _default_convert_to_llm
@@ -819,7 +905,8 @@ async def test_u5b_the_notice_row_persists_operator_only_and_journals_once(
         ]
         assert len(notices) == 1
         details = notices[0]["payload"]["details"]
-        assert "your login on this device" in details["text"]
+        assert "moved onto my-laptop's own openai login" in details["text"]
+        assert "this device" not in details["text"]
         assert details["owner_device"] == SELF
         assert details["credential_id"] == 7
 
@@ -848,6 +935,102 @@ async def test_u5b_the_notice_row_persists_operator_only_and_journals_once(
         after = session.transcript.path.read_text().splitlines()
         assert len(after) == len(rows)
     finally:
+        await session.dispose()
+
+
+async def _drain_background(session: Any) -> None:
+    """Run every task ``_spawn_background`` has outstanding to completion.
+
+    Same shape as ``test_background_journal_splice``'s helper: the notice is
+    journaled by a spawned task, and driving it here makes the cell
+    deterministic rather than scheduler-dependent. Looped because a drained
+    task can spawn another; bounded so a self-respawning task fails the test
+    instead of hanging it.
+    """
+    for _ in range(10):
+        pending = [
+            task
+            for task in list(session._background_tasks)  # noqa: SLF001 — the production wiring
+            if not task.done()
+        ]
+        if not pending:
+            return
+        await asyncio.gather(*pending, return_exceptions=True)
+    raise AssertionError("background tasks never settled")
+
+
+@pytest.mark.asyncio
+async def test_n1_first_serve_journals_no_notice_and_a_change_journals_one(
+    tmp_path: Path,
+) -> None:
+    """N1 (review round 1): the recorder→session chain, first serve included.
+
+    The recorder fires ``on_change(new, None)`` on the FIRST serve and the
+    production handler suppresses it (``previous is None`` → nothing is due);
+    that suppression was code-only until this cell. It drives the real chain —
+    recorder seam → ``Session._on_credential_binding_change`` (device-bound,
+    exactly as ``attach_credential_binding`` wires it) → the journal — for a
+    first serve (binding row, NO notice row) and then a capture (exactly one
+    notice row), so a refactor that starts journalling on first serve reds
+    here rather than in the wild.
+    """
+    import functools
+
+    from local_operator.harness.message_types import SESSION_BINDING_NOTICE_MESSAGE_TYPE
+    from local_operator.harness.types import StreamEndEvent
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    root = tmp_path / "root"
+    root.mkdir()
+    session = make_session(tmp_path, ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
+    recorder = _recorder(session.transcript)
+    recorder.set_change_handler(
+        functools.partial(
+            session._on_credential_binding_change,  # noqa: SLF001 — the production wiring
+            device_id=SELF,
+        )
+    )
+    auth = AuthStore(db_path=root / "auth.db", config_dir=root)
+    grant = _grant(credential_id=42)
+    mesh = _StubMesh([grant])
+    store = MeshAwareAuthStore(auth, mesh=mesh, config_dir=root)
+    store.set_serve_sink(recorder.observe_serve)
+    store.set_binding_reader(recorder.recall_for)
+
+    def _types() -> list[Any]:
+        # The RAW journal rows: ``_rows`` deliberately filters to binding rows
+        # only, so it cannot witness a notice (or its absence).
+        return [
+            json.loads(line)["payload"].get("custom_type")
+            for line in session.transcript.path.read_text().splitlines()
+        ]
+
+    try:
+        # FIRST serve: the row lands, the signal fires (previous=None) — and
+        # no notice is journalled for it.
+        await store.get_api_key(PROVIDER, SESSION)
+        await recorder.drain()
+        await _drain_background(session)
+        assert _types() == [SESSION_BINDING_CUSTOM_TYPE], "a first serve is not an account change"
+
+        # The capture: a real change — one more row, one notice.
+        auth.upsert_credential(PROVIDER, {"type": "api_key", "key": "sk-local"})
+        assert await store.get_api_key(PROVIDER, SESSION) == "sk-local"
+        await recorder.drain()
+        await _drain_background(session)
+        after = [json.loads(line) for line in session.transcript.path.read_text().splitlines()]
+        notices = [
+            row
+            for row in after
+            if row["payload"].get("custom_type") == SESSION_BINDING_NOTICE_MESSAGE_TYPE
+        ]
+        assert len(notices) == 1
+        assert "moved onto my-laptop's own openai login" in notices[0]["payload"]["details"]["text"]
+        assert [row["payload"].get("custom_type") for row in after].count(
+            SESSION_BINDING_CUSTOM_TYPE
+        ) == 2
+    finally:
+        store.close()
         await session.dispose()
 
 
