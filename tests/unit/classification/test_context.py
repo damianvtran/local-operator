@@ -587,6 +587,143 @@ def test_a_roster_over_the_cap_keeps_the_relevant_rows() -> None:
     assert names == [name for name in (row.name for row in rows) if name in set(names)]
 
 
+# ---------------------------------------------------------------------------
+# Plural normalisation: the ground-truth misses this scorer must keep fixed
+# ---------------------------------------------------------------------------
+
+
+def test_a_plural_name_reaches_its_singular_word_in_the_message() -> None:
+    """Ground truth (2026-09-30): "restart a peer session" must reach guide://sessions.
+
+    The shipped miss: the message says "session", the guide's NAME says
+    "sessions", and its description says neither — no raw substring, no shared
+    token, score 0.0 — and a zero score keeps the alphabetically early fill
+    order instead. Nothing but the fold can save this fixture's row: the
+    description shares NO word with the message, and the row sits LAST in
+    discovery order, so at 0.0 it drops while the twelve fillers stay.
+    """
+    rows = tuple(
+        [
+            candidate(f"fleet-{index:03d}", kind="guide", description="Fleet automation")
+            for index in range(12)
+        ]
+        + [
+            candidate(
+                "sessions",
+                kind="guide",
+                description=(
+                    "Inspect, spawn, resume, stop, or peek at other local lop conversations"
+                ),
+            )
+        ]
+    )
+
+    picked = shortlist(rows, "restart a peer session", DEFAULT_MAX_CANDIDATES)
+    names = [row.name for row in picked]
+
+    assert "sessions" in names
+    # The cap still binds — one filler loses its place, the cap itself does not move.
+    assert len(names) == 12
+    assert "fleet-011" not in names
+
+
+def test_a_plural_description_word_matches_a_singular_message_word() -> None:
+    """The same miss on the DESCRIPTION side: a message "skill" vs a blurb "skills".
+
+    "how do I install a skill in this harness?" never surfaced the extensions
+    guide, whose blurb says "skills". Here the plural is the only shared word:
+    the name ("harness-authoring") contributes nothing — "author" does not fold
+    to "authoring" — and the row is last again, so the fill order would lose it
+    at a zero score.
+    """
+    rows = tuple(
+        [candidate(f"fleet-{index:03d}", description="Fleet automation") for index in range(12)]
+        + [
+            candidate(
+                "harness-authoring",
+                description="Authoring skills and references for the harness",
+            )
+        ]
+    )
+
+    picked = shortlist(rows, "how do I author a skill?", DEFAULT_MAX_CANDIDATES)
+    names = [row.name for row in picked]
+
+    assert "harness-authoring" in names
+    assert len(names) == 12
+
+
+def test_a_plural_name_token_matches_a_singular_word() -> None:
+    """A compound name the raw substring never covers: "minerva-credentials".
+
+    The message says "credential" (singular); the NAME's token is "credentials".
+    Nothing raw connects them — the substring can't cover a hyphenated compound,
+    and the description shares no word — so without the fold the row scores 0.0
+    and, placed last, drops in the fill order.
+    """
+    rows = tuple(
+        [candidate(f"fleet-{index:03d}", description="Fleet automation") for index in range(12)]
+        + [
+            candidate(
+                "minerva-credentials",
+                description="Secret-backed access for a named person",
+            )
+        ]
+    )
+
+    picked = shortlist(rows, "where does the AWS credential live?", DEFAULT_MAX_CANDIDATES)
+    names = [row.name for row in picked]
+
+    assert "minerva-credentials" in names
+    assert len(names) == 12
+
+
+def test_a_message_with_no_signal_keeps_the_fill_order_deterministic() -> None:
+    """All-zero scores: the first ``cap`` rows travel, and the choice is stable.
+
+    Scoring is a CHOICE among rows the message says nothing about, so the
+    tie-break is the whole story: discovery order, identical across two calls
+    (the session cache key rides on that — see the determinism test below).
+    Normalising the tokens must not reach into this path: with no signal the
+    survivor set is the first ``cap`` rows, full stop.
+    """
+    rows = tuple(
+        candidate(f"fleet-{index:03d}", description="Fleet automation") for index in range(14)
+    )
+
+    first = shortlist(rows, "please help", DEFAULT_MAX_CANDIDATES)
+    again = shortlist(rows, "please help", DEFAULT_MAX_CANDIDATES)
+
+    assert [row.name for row in first] == [f"fleet-{index:03d}" for index in range(12)]
+    assert first == again
+
+
+def test_the_raw_substring_name_bonus_still_fires_inside_a_longer_word() -> None:
+    """Ground truth row 5, pinned: "agents" keeps riding inside "subagents".
+
+    The audit calls this match "accidental help" — the folded tokens do NOT
+    connect the two ("agent" vs "subagent") — and it is what surfaces
+    guide://agents for "delegate the work to two subagents in parallel". This
+    round ADDS the folded name-token rule beside the raw substring; it
+    deliberately does not tighten the substring, so this row must not move.
+    """
+    rows = tuple(
+        [
+            candidate(f"fleet-{index:03d}", kind="guide", description="Fleet automation")
+            for index in range(12)
+        ]
+        + [candidate("agents", kind="guide", description="Coordinating helper runs")]
+    )
+
+    picked = shortlist(
+        rows, "delegate the work to two subagents in parallel", DEFAULT_MAX_CANDIDATES
+    )
+    names = [row.name for row in picked]
+
+    assert "agents" in names
+    assert len(names) == 12
+
+
 def test_the_shortlist_is_deterministic() -> None:
     """Two identical messages must not churn the request, or the cache key churns."""
     rows = tuple(roster(count=40))
