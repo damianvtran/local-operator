@@ -1551,7 +1551,7 @@ def test_oversized_control_frames_report_the_rate_not_each_frame(caplog, monkeyp
         assert "first oversized control frame from pid 9911" in caplog.text
 
 
-def test_the_phone_list_carries_the_drain_so_its_row_can_say_it() -> None:
+def test_the_phone_list_carries_the_drain_so_its_row_can_say_it(tmp_path, monkeypatch) -> None:
     """UX round 2, U8: a signalled runtime also STREAMS, so the list said "busy".
 
     The phone's row ladder is driven by ``streaming``, which is true of a
@@ -1561,8 +1561,20 @@ def test_the_phone_list_carries_the_drain_so_its_row_can_say_it() -> None:
     own additive field; a client that does not know it renders exactly as
     before, which is what makes this safe to ship before the card's own
     treatment of it.
+
+    The live halves below are registry rows for sessions whose directories
+    exist — a runtime materialises one before it publishes — and the merge
+    checks exactly that (review round 1, MAJOR-1: a live-only id answers the
+    same user-facing predicate the scan applies, and a conversation with no
+    directory is not a row). An EMPTY directory is enough: with no marker the
+    session reads as the user's own.
     """
     from local_operator.session.runtime.types import LEAVING_ON_SIGNAL, SessionRecord
+
+    cfg = tmp_path / "config"
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    for session_id in ("s-drain", "s-plain", "s-old"):
+        (cfg / "sessions" / session_id).mkdir(parents=True, exist_ok=True)
 
     def record(session_id: str = "s-drain", pid: int = 4321, **extra: Any) -> SessionRecord:
         return SessionRecord(
@@ -1600,7 +1612,7 @@ def test_the_phone_list_carries_the_drain_so_its_row_can_say_it() -> None:
     assert rows[0]["leaving"] == "", rows[0]
 
 
-def test_the_phone_list_carries_the_delegated_work_from_the_record() -> None:
+def test_the_phone_list_carries_the_delegated_work_from_the_record(tmp_path, monkeypatch) -> None:
     """The phone's count is the RECORD's, and a missing one is not a zero.
 
     Two definitions of one number used to be in play. This list counted
@@ -1616,8 +1628,18 @@ def test_the_phone_list_carries_the_delegated_work_from_the_record() -> None:
     the client as ``null``. Rendering either as ``0`` would tell the operator
     there are no subagents on a session the phone could not ask about, which is
     the same class of lie as an empty list standing in for an unreadable store.
+
+    The live halves carry real session directories (a runtime materialises one
+    before publishing; the merge's live-only filter is the same predicate the
+    scan applies — review round 1, MAJOR-1). Empty directories are enough: no
+    marker reads as the user's own.
     """
     from local_operator.session.runtime.types import SessionRecord
+
+    cfg = tmp_path / "config"
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    for session_id in ("s-parent", "s-parked", "s-older"):
+        (cfg / "sessions" / session_id).mkdir(parents=True, exist_ok=True)
 
     def record(session_id: str = "s-parent", pid: int = 4321, **extra: Any) -> SessionRecord:
         return SessionRecord(
@@ -1715,7 +1737,7 @@ def test_the_phone_list_carries_the_workstream_opener() -> None:
     assert merged[0]["opened_by"] is None, merged[0]
 
 
-def test_the_phone_list_withholds_counts_the_daemon_cannot_vouch_for() -> None:
+def test_the_phone_list_withholds_counts_the_daemon_cannot_vouch_for(tmp_path, monkeypatch) -> None:
     """U1: the phone must not advertise children the terminal calls "Leaving…".
 
     The summary carries no status CODE, so a client drawing a mark from the
@@ -1729,6 +1751,10 @@ def test_the_phone_list_withholds_counts_the_daemon_cannot_vouch_for() -> None:
     so a passing assertion is about the one condition it names: a DEGRADED dial
     (the relay cannot confirm anything), a STOPPED heartbeat (the constant the
     catalogue's own ``wedged`` verdict uses), and a runtime that is LEAVING.
+
+    The entry's directory is real (the merge's live-only filter is the same
+    predicate the scan applies — review round 1, MAJOR-1); empty reads as the
+    user's own.
     """
     import time
 
@@ -1736,6 +1762,10 @@ def test_the_phone_list_withholds_counts_the_daemon_cannot_vouch_for() -> None:
         HEARTBEAT_TIMEOUT_S,
         LEAVING_ON_SIGNAL,
     )
+
+    cfg = tmp_path / "config"
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    (cfg / "sessions" / "s-fresh").mkdir(parents=True, exist_ok=True)
 
     def record(session_id: str = "s-fresh", pid: int = 4401) -> Any:
         return SessionRecord(
