@@ -36,6 +36,7 @@ from local_operator.harness.types import (
 )
 from local_operator.projects import (
     _SESSION_ID_RE,
+    DESCRIPTION_MAX,
     HISTORY_DEFAULT_TAIL,
     MILESTONES_MAX,
     PROJECT_STATUSES,
@@ -92,7 +93,7 @@ class ProjectParams(BaseModel):
         description=(
             "create/update: markdown prose describing the workstream — multiple "
             "paragraphs, headings, lists and code; rendered, not dumped "
-            "(<= 240 chars)."
+            f"(<= {DESCRIPTION_MAX} chars)."
         ),
     )
     owner: str | None = Field(
@@ -383,7 +384,20 @@ def _project_edit(params: ProjectParams, *, creating: bool) -> ProjectEdit:
     ``model_fields_set`` is the whole point: an update must not clobber a field
     the caller never mentioned, and an explicit ``""``/``None`` must stay
     distinguishable from an absent one (the clear-vs-untouched vocabulary).
+
+    An over-cap description is refused HERE, before the store's own
+    ``max_length`` backstop can answer with the bare pydantic sentence
+    ("String should have at most 2000 characters") — the refusal that cost a
+    reporter two blind retries (issue #1815). This one names the field, the
+    submitted size, the exact limit and the remedy.
     """
+    description = params.description
+    if description is not None and len(description) > DESCRIPTION_MAX:
+        raise ValueError(
+            f"project 'description' is {len(description)} characters; the cap is "
+            f"{DESCRIPTION_MAX} characters — shorten it, or keep the long detail "
+            "in progress lines (op='update'), which the history keeps."
+        )
     payload: dict[str, Any] = {}
     # The params only THIS op dispatches on; everything else is a row field the
     # edit vocabulary owns.

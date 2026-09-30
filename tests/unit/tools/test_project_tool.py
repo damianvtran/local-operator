@@ -16,8 +16,13 @@ from typing import Any
 import pytest
 
 from local_operator.harness.types import ToolContext
-from local_operator.projects import PROJECT_PROGRESS_STALE_S, ProjectRegistry
+from local_operator.projects import (
+    DESCRIPTION_MAX,
+    PROJECT_PROGRESS_STALE_S,
+    ProjectRegistry,
+)
 from local_operator.tools.project_tool import (
+    ProjectParams,
     build_project_delete_tool,
     build_project_tool,
     execute_project,
@@ -97,6 +102,61 @@ async def test_create_refuses_a_taken_name_and_names_update(context) -> None:
     await call(context, op="create", name="alpha")
     body = await call(context, op="create", name="ALPHA")
     assert "already exists" in body and "op='update'" in body
+
+
+@pytest.mark.asyncio
+async def test_create_accepts_multi_paragraph_markdown_descriptions(context, registry) -> None:
+    """Issue #1815: the schema's promise — paragraphs, headings, lists — is the
+    contract; the old 240 cap refused exactly the prose it advertised."""
+    description = (
+        "# Scope\n\n"
+        "Cutover plan for the payments migration.\n\n"
+        "## Steps\n\n"
+        "- parity on staging\n"
+        "- window 2026-10-02\n\n"
+        "## Risks\n\n" + "Legacy writes must be drained before the switch. " * 10
+    )
+    assert len(description) > 500
+    body = await call(context, op="create", name="markdown-ok", description=description)
+    assert "created project 'markdown-ok'" in body
+    stored = registry.get_project_by_name("markdown-ok")
+    assert stored is not None and stored.description == description.strip()
+    # The boundary the schema text names: exactly at the cap is accepted.
+    at_cap = await call(context, op="create", name="at-cap", description="e" * 2000)
+    assert "created project 'at-cap'" in at_cap
+
+
+@pytest.mark.asyncio
+async def test_an_over_cap_description_is_refused_with_the_remedy(context) -> None:
+    """Issue #1815: no bare pydantic sentence — field, submitted size, exact
+    cap and the remedy, so the next call is not a blind retry."""
+    result = await execute_project(
+        "tc", {"op": "create", "name": "too-long", "description": "D" * 4000}, None, None, context
+    )
+    assert result.is_error
+    assert "project 'description' is 4000 characters" in result.text
+    assert "cap is 2000 characters" in result.text
+    assert "progress lines (op='update')" in result.text
+    assert "String should have at most" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_update_refuses_an_over_cap_description_with_the_remedy(context) -> None:
+    await call(context, op="create", name="alpha")
+    result = await execute_project(
+        "tc", {"op": "update", "name": "alpha", "description": "D" * 2001}, None, None, context
+    )
+    assert result.is_error
+    assert "project 'description' is 2001 characters" in result.text
+    assert "cap is 2000 characters" in result.text
+
+
+def test_the_schema_text_names_the_cap_the_refusal_enforces() -> None:
+    """Schema, guide and enforcement move together (issue #1815): the field
+    text is built FROM the constant, so a future cap change cannot leave the
+    advertised limit behind (the drift this issue was made of)."""
+    text = str(ProjectParams.model_fields["description"].description)
+    assert f"(<= {DESCRIPTION_MAX} chars)" in text
 
 
 @pytest.mark.asyncio

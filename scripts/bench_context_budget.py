@@ -941,6 +941,25 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: The peel-off a future reduction can act on: dropping the two fields from
 #: the schema should take this ceiling back down ~241 billed.
 BUDGET_BILLED_TOKENS = 37_756
+#:
+#: UPDATED (NO RAISE), 2026-09-30 — issue #1815: the ``project`` tool's
+#: ``description`` field text now ends "(<= 2000 chars)." where it said
+#: "(<= 240 chars)."; the schema's markdown promise is the contract, the old
+#: cap refused the prose it advertised, and the fix raises DESCRIPTION_MAX to
+#: 2000 with a remedy-bearing refusal. Neither the guide nor the refusal text
+#: rides the prefix, so the field rename is the whole measured delta.
+#: Measured with THIS script, same machine, one tree after the other:
+#:
+#:   base (origin/main 302a061e5)     103,960 chars = ~37,396 billed
+#:   head (this branch)               103,961 chars = ~37,396 billed
+#:     = +1 char = +0.4 billed — the 240 -> 2000 rename, nothing else.
+#:
+#: NO RAISE: a one-character edit cannot be why the permanent per-call ceiling
+#: moves, and it does not breach the binding reading — by the recorded
+#: ~762-char platform gap that lives in ``tool_schemas``, CI's head is ~37,122
+#: against the 37,164 ceiling (~42 billed of headroom). The local reading
+#: sitting above the ceiling by the SAME 232 billed on both sides is the
+#: pre-existing recorded gap, not this change.
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

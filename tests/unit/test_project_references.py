@@ -396,6 +396,47 @@ async def test_the_element_is_capped_with_a_progress_marker(store, tmp_path) -> 
 
 
 @pytest.mark.asyncio
+async def test_a_full_length_description_is_capped_with_a_marker(store, tmp_path) -> None:
+    """Issue #1815: the description cap moved 240 -> 2000, so a long
+    description can overflow the element on its own; it takes the same marked
+    cut the progress snippet gets, and the element stays within its cap."""
+    long_name = "capping-example-with-a-quite-long-name-padded-out-0123456789"
+    store.create_project(
+        ProjectEdit(name=long_name, description="D" * 2000),
+        progress_reported_by="operator",
+    )
+
+    result = await expand_references(f"@project:{long_name}", str(tmp_path))
+
+    element = _project_element(result.sent)
+    assert len(element) <= PROJECT_REFERENCE_LIMIT_CHARS
+    assert " [description truncated]" in element
+    assert "D" * 2000 not in element  # the trim is real, not a no-op
+    assert "description: D" in element  # ...and a marked prefix survives
+    assert f"name: {long_name}" in element
+    assert element.endswith("</reference>")
+
+
+@pytest.mark.asyncio
+async def test_progress_then_description_each_take_a_marked_cut(store, tmp_path) -> None:
+    """The cut order is pinned: progress is the named truncation target and is
+    cut first; the description is cut only once progress is exhausted, and
+    both cuts are marked rather than silent (issue #1815)."""
+    long_name = "capping-example-with-a-quite-long-name-padded-out-0123456789"
+    store.create_project(
+        ProjectEdit(name=long_name, description="D" * 2000, progress="P" * 990),
+        progress_reported_by="operator",
+    )
+
+    result = await expand_references(f"@project:{long_name}", str(tmp_path))
+
+    element = _project_element(result.sent)
+    assert len(element) <= PROJECT_REFERENCE_LIMIT_CHARS
+    assert " [progress truncated]" in element
+    assert " [description truncated]" in element
+
+
+@pytest.mark.asyncio
 async def test_the_overflow_notice_is_not_charged_when_the_block_still_fits(
     store, tmp_path, monkeypatch
 ) -> None:

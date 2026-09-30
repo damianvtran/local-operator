@@ -136,6 +136,21 @@ async def test_a_taken_name_is_a_409_and_invalid_values_are_422(api) -> None:
     assert shape.status_code == 422
 
 
+async def test_the_description_cap_is_2000_on_the_wire(api) -> None:
+    """Issue #1815: the wire model enforces the SAME raised cap as the tool —
+    at the cap accepted, one past it refused naming the limit."""
+    client, _root = api
+    at_cap = await client.post(
+        "/v1/desktop/projects", json={"name": "at-cap", "description": "d" * 2000}
+    )
+    assert at_cap.status_code == 200
+    over = await client.post(
+        "/v1/desktop/projects", json={"name": "over-cap", "description": "d" * 2001}
+    )
+    assert over.status_code == 422
+    assert "2000 characters" in json.dumps(over.json())
+
+
 async def test_milestone_routes_report_derived_status_and_refuse_unknowns(api) -> None:
     client, _root = api
     created = await client.post("/v1/desktop/projects", json={"name": "alpha"})
