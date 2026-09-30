@@ -306,6 +306,13 @@ def apply_check(
             # never re-derives "needs the login" from the credential or the tenant.
             item["error_class"], item["last_error"] = "no-credential", None
             item["error_subclass"] = None
+            # It also RETIRES the schedule the class it replaced had armed (agent review
+            # round 4, M2): an apply this item could not do is not worth retrying, and a
+            # stale ``next_retry_at`` would keep answering "due" for a merge that cannot
+            # run. We do not touch ``auto_retry`` or ``attempts``: the class is uncounted
+            # and a successful fetch restores everything through ``settle_applied`` /
+            # the up-to-date arm.
+            item["next_retry_at"] = None
         else:
             record_failure(
                 item, reason or "hub-error", detail, now=now, keep_state=reason == "hub-error"

@@ -1234,8 +1234,11 @@ Feature flag: `features.py:54` gains `"hub_updates": 1`; the UI gates on
 }
 ```
 
-Only items with `state != "up-to-date"` are listed plus a `counts` roll-up (the
-sidebar polls this constantly; keep it small). Names are the profile/team
+Only items with `state != "up-to-date"` are listed, PLUS any item carrying the
+`no-credential` class — an org-linked row the local session has no login for never
+becomes `available`, and that class is the one fact the sidebar's sign-in sentence
+is drawn from (UX round 2, U11) — plus a `counts` roll-up (the sidebar polls this
+constantly; keep it small). Names are the profile/team
 **names** because they are the UI's attachment keys ("Names deliberately remain
 the runtime's attachment keys", `server/utils/desktop_profiles.py:1-6`).
 `auto_will_apply` = `auto_update.<kind> && state=="available" &&
