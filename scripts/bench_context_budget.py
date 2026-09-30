@@ -757,7 +757,27 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: 37,154 vs 36,935 after, a 219 overshoot against a 217 one), so a local
 #: run's overshoot here is this recorded gap, not this change — CI remains
 #: the binding reading. The tighten band below (1,200) is not in play.
-BUDGET_BILLED_TOKENS = 36_935
+#:
+#: RAISED 36,935 -> 37,164 for the ``sessions`` tool's ``peek`` surface
+#: (design ``docs/design/sessions-tool.md`` §8; PR B of the sessions-tool
+#: workstream), stated with the arithmetic because the guard exists to make
+#: schema growth an explicit decision. Measured with THIS script on both trees
+#: of the stack, same machine: the base (PR A's merged state, ``00774a36`` on
+#: ``origin/main``; its predecessors ``65f686a08``/``d91a208bd`` read
+#: identically, so neither A's review remediations nor the merge moved any
+#: context component) reads 103,288 chars = ~37,154 billed — the 219-token
+#: local overshoot its entry above records — and this head reads 103,924
+#: chars = ~37,383 billed, so the delta is +636 chars = +229 billed and it is
+#: the peek surface and nothing else: six window fields on the ONE schema
+#: (``steps``/``head``/``before_id``/``around_id``/``regex``/``digest``),
+#: where four tools would have been four permanent schemas. On CI (where this
+#: gate runs) the stack's base read 102,526 = ~36,880, so this head is
+#: 103,162 chars = ~37,109 and the ceiling is the CI
+#: head + 55, the band this file keeps. A local run still reads above it by the
+#: same recorded 762-char platform gap, so CI remains the binding reading. The
+#: peel-off a future reduction can act on: dropping the peek fields from the
+#: schema should take this ceiling back down ~229 billed.
+BUDGET_BILLED_TOKENS = 37_164
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
