@@ -71,6 +71,7 @@ from local_operator.harness.types import (
     turn_output_budget,
 )
 from local_operator.providers.failover import (
+    MAX_MEDIA_DOWNLOAD_RETRIES,
     ProviderError,
     _mark_mid_stream_connectivity,
     stream_with_failover,
@@ -3939,6 +3940,13 @@ async def test_connectivity_continuation_budget_surfaces_a_bounded_error() -> No
         f"response stream cut mid-answer — resuming the turn ({n}/{MAX_CONNECTIVITY_CONTINUATIONS})"
         for n in range(1, MAX_CONNECTIVITY_CONTINUATIONS + 1)
     ]
+    # The terminal names its own history too (round-1 Q-1): attempts made and
+    # the spent budget are readable off `agent_end.error` alone, not only off
+    # the notices.
+    assert (
+        f"the continuation budget is spent ({MAX_CONNECTIVITY_CONTINUATIONS}/"
+        f"{MAX_CONNECTIVITY_CONTINUATIONS} attempts made)" in ends[0].error
+    )
 
 
 @pytest.mark.asyncio
@@ -3994,6 +4002,14 @@ _AGGREGATOR_UPSTREAM_CUT = (
     "provider_unavailable: Upstream error from Together: Stream error: "
     "h2 protocol error: error reading a body from connection"
 )
+
+#: The F2 arm's recorded wording of the same class: OpenRouter's idle timer
+#: killing the stream after a chosen upstream host stalls mid-generation
+#: (control-repeat episode task 010 run c1,
+#: ``runs/a1796-c1-task_010-20260930-034755``). Same class as the sentinel
+#: pass's 502 above — the gateway reporting its upstream host failed — a
+#: different wording, which is why the marker list had to learn it.
+_AGGREGATOR_IDLE_TIMEOUT_CUT = "Upstream idle timeout exceeded"
 
 
 class _AggregatorAuth:
@@ -4051,6 +4067,11 @@ class _AggregatorGateway:
 def _aggregator_cut() -> ProviderError:
     """The recorded in-band upstream failure, as OpenRouter delivers it."""
     return ProviderError(502, _AGGREGATOR_UPSTREAM_CUT, retryable=True)
+
+
+def _idle_timeout_cut() -> ProviderError:
+    """The F2 arm's recorded 504, as OpenRouter delivers it in band."""
+    return ProviderError(504, _AGGREGATOR_IDLE_TIMEOUT_CUT, retryable=True)
 
 
 def _aggregator_harness(
@@ -4122,6 +4143,41 @@ async def test_aggregator_upstream_cut_mid_call_continues_the_turn() -> None:
     assert gateway.calls == 2
     # The truncated call never ran: it is dropped rather than executed, which the
     # sibling test above locks down. Here the point is that the turn lives.
+    assert executed == []
+
+
+@pytest.mark.asyncio
+async def test_aggregator_idle_timeout_mid_call_continues_the_turn() -> None:
+    """THE F2 ARM'S RECORDED 504: a stalled upstream host must not end the pass.
+
+    The control-repeat episode died holding a partial answer — OpenRouter's idle
+    timer killed the stream mid-generation and the loop ended the run with
+    ``stop_reason="error"`` — because the driver's aggregator-upstream
+    classifier knew every wording but this one. Driven through the real driver,
+    like its 502 sibling above.
+    """
+    executed: list[str] = []
+    stream_fn, gateway, _sent = _aggregator_harness([_idle_timeout_cut(), None])
+
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")],
+        LoopContext(tools=[echo_tool(executed)]),
+        make_config(stream_fn, model=_AGGREGATOR_MODEL),
+        None,
+    ):
+        events.append(event)
+
+    ends = [e for e in events if isinstance(e, AgentEndEvent)]
+    assert len(ends) == 1
+    assert ends[0].error is None, "a stalled upstream host must not end the pass"
+    assert ends[0].aborted is False
+
+    # What the user read, exactly once: the partial answer and its continuation.
+    on_screen = "".join(e.delta for e in events if e.type == "message_update")
+    assert on_screen == "Let me write that down. done"
+    # The gateway was asked a second time — the re-route the incident needed.
+    assert gateway.calls == 2
     assert executed == []
 
 
@@ -4218,6 +4274,90 @@ async def test_aggregator_upstream_cut_budget_surfaces_a_bounded_error() -> None
     assert "Upstream error from Together" in ends[0].error
     # Bounded: the initial attempt plus exactly the continuation budget.
     assert gateway.calls == MAX_CONNECTIVITY_CONTINUATIONS + 1
+    # And the terminal names its own history (round-1 Q-1): attempts made and
+    # the spent budget are readable off `agent_end.error` alone.
+    assert (
+        f"the continuation budget is spent ({MAX_CONNECTIVITY_CONTINUATIONS}/"
+        f"{MAX_CONNECTIVITY_CONTINUATIONS} attempts made)" in ends[0].error
+    )
+
+
+#: The F2 arm's recorded request-time class, verbatim apart from the relay id:
+#: what the provider's data inspection answers when it cannot download media
+#: the request carried (``runs/a1796-w3-task_009-20260930-001343``). Nothing
+#: was forwarded before it — no model ever processed the request — which is
+#: the only raise shape that reaches the walk's media branch.
+_MEDIA_DOWNLOAD_FIELD_MESSAGE = (
+    'data: {"error":{"code":"invalid_parameter_error","param":null,'
+    '"message":"Failed to download multimodal content",'
+    '"type":"invalid_request_error"},'
+    '"id":"chatcmpl-92b0db86-abb3-91a7-8810-bebad3940f29"}'
+)
+
+
+class _MediaDownloadGateway:
+    """A provider whose data inspection cannot download media the request carried.
+
+    Request-time, like the field record's: the exception is raised before
+    anything is forwarded, the only shape that reaches the walk's media branch
+    (once output has been forwarded the mid-stream raise site owns the error).
+    Shaped like the provider tests' ``ScriptedClient``: an async generator
+    seeded with an exception, whose first iteration raises it.
+    """
+
+    def __init__(self, error: BaseException) -> None:
+        self.error: BaseException | None = error
+        self.calls = 0
+
+    async def stream(self, request: ChatRequest, api_key: str | None, oauth_access: Any = None):
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+        yield StreamEndEvent(stop_reason="stop")
+
+
+@pytest.mark.asyncio
+async def test_media_download_failure_surfaces_a_legible_terminal(monkeypatch) -> None:
+    """R1-m2: class 2's terminal is pinned at the FRAME, like class 1's.
+
+    The walk-level tests pin the re-ask mechanics; this drives the persistent
+    failure through the real driver all the way to ``AgentEndEvent.error`` —
+    the surface a tranche record reads — and asserts the terminal names the
+    class (the provider's words in front, "never processed by the model", and
+    the spent re-ask budget) instead of the raw relay body.
+    """
+    monkeypatch.setattr("local_operator.providers.failover.MEDIA_DOWNLOAD_RETRY_DELAY_MS", 1)
+    gateway = _MediaDownloadGateway(ProviderError(400, _MEDIA_DOWNLOAD_FIELD_MESSAGE))
+    auth = _AggregatorAuth({"openrouter": ["k"]})
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return gateway
+
+    def stream_fn(request: ChatRequest, signal: AbortSignal | None):
+        return stream_with_failover(request, auth, {"retry": {"baseDelayMs": 1}}, client_for)
+
+    events = []
+    async for event in AgentLoop().run(
+        [Message.user("go")], LoopContext(), make_config(stream_fn, model=_AGGREGATOR_MODEL), None
+    ):
+        events.append(event)
+
+    ends = [e for e in events if isinstance(e, AgentEndEvent)]
+    assert len(ends) == 1
+    assert ends[0].aborted is False
+    assert ends[0].error is not None
+
+    # The terminal is legible: the provider's own words stay in front...
+    assert "Failed to download multimodal content" in ends[0].error
+    # ...and the note names the class, the never-processed fact, and the spent
+    # budget, so a record reader can tell it apart from a malformed request.
+    assert "the provider's data inspection could not download a media item" in ends[0].error
+    assert "the request was never processed by the model" in ends[0].error
+    assert "A bounded re-ask (2) also failed" in ends[0].error
+
+    # Bounded, and never a hop: one attempt plus exactly the re-ask budget,
+    # all on the pinned route.
+    assert gateway.calls == 1 + MAX_MEDIA_DOWNLOAD_RETRIES
 
 
 @pytest.mark.asyncio
