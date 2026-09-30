@@ -49,16 +49,29 @@ and no display form ever changes it.
 A team can also carry a display **label** (free text, spaces allowed) and extra
 **aliases** (more TUI-safe keys resolving to the same team):
 
-- The label is painted FIRST by every listing — `/team`, the org chart, the
-  picker, the settings pane, the status band — with the key beside it when they
-  differ (`Feature Release (feature-release)`), so you can still type the key.
+- Every surface paints ONE shared display form, so the `/team` listing, the
+  picker, the settings pane, the status band, the org chart, the CLI and the
+  `team` tool cannot disagree about how a team reads:
+  - no label → the raw name;
+  - the label is only the derived Title-Case default of the name and casefolds
+    to it → the raw name (`lopdev` stays `lopdev`: title case nobody chose is
+    noise);
+  - a derived default whose spelling really differs → the label alone
+    (`data-quality` → `Data Quality`);
+  - a chosen label → `label (name)`, so the key you type stays visible
+    (`Platform Reliability (ops)`), unless the label casefolds to the name
+    (`OPS` for `ops`).
   It is LOCAL display metadata: it never rides the hub push document and
   hub-sync merges never touch it.
 - A team with no label renders a derived Title-Case default
-  (`data-quality` → `Data Quality`), which is persisted on the team's next write.
+  (`data-quality` → `Data Quality`), which is persisted on the team's next write
+  and re-derived when the name changes. Six common initialisms stay upper-case
+  (`qa-tester` → `QA Tester`, `pergamon-ai` → `Pergamon AI`).
 - Each alias is another key for the same team (`--alias`, or `aliases=` on the
   `team` tool). Up to 8, each obeying the name rule; no alias may collide
-  (case-insensitively) with any team's name or another team's alias.
+  (case-insensitively) with any team's name or another team's alias. Aliases
+  complete in the `/team` picker like a name, and `teams show` / the `team`
+  tool's `show` list them.
 - Set them with the `team` tool (`label=` / `aliases=`), the CLI
   (`lop teams create feature-release --label "Feature Release" --alias fr`), or
   the desktop API. On `update`, `label=""` resets to the derived default

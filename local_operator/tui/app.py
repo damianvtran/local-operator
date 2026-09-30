@@ -18521,72 +18521,74 @@ class OperatorApp(App[None]):
         return getattr(session, "team_registry", None) if session is not None else None
 
     @staticmethod
-    def _team_display_label(team: Any) -> str:
-        """The display label a picker or band row shows for ``team``, best-effort.
+    def _team_name_label(team: Any) -> tuple[str, str]:
+        """``(name, label)`` off any Team-or-double, best-effort.
 
-        Defensive like the rest of the picker builder: a reduced double
-        without ``display_label`` degrades to its stored ``label``, and one
-        with neither to "" -- which every caller renders as "no custom
-        label" rather than as an empty string.
+        Defensive like the rest of the picker builder: this list is built from
+        whatever the session's registry yields, and a reduced double must
+        degrade to a row rather than break a keystroke.
         """
-        display = getattr(team, "display_label", None)
-        if callable(display):
-            try:
-                return str(display() or "")
-            except Exception:  # noqa: BLE001 — a row must never break the picker
-                return ""
-        return str(getattr(team, "label", "") or "")
+        return (
+            str(getattr(team, "name", "") or ""),
+            str(getattr(team, "label", "") or ""),
+        )
 
     @classmethod
-    def _team_display_with_key(cls, team: Any) -> str:
-        """``label (name)`` when the two differ, else the plain name.
+    def _team_display_form(cls, team: Any) -> str:
+        """The shared display rule's form for any Team-or-double (D2).
 
-        ONE reader for the display form the listings and wire rows paint, so
-        two surfaces cannot disagree about how a labelled team reads. The key
-        stays visible beside a custom label because it is the only string that
-        ADDRESSES the team (``/team <key> <request>``); a reduced double falls
-        back to its stored label, then to the name.
+        ONE reader for every surface in this app, so two of them cannot
+        disagree about how a team reads -- the rule itself, and why each of
+        its four cases exists, lives in
+        :func:`local_operator.teams.display_form`.
         """
-        name = str(getattr(team, "name", "") or "")
-        display = getattr(team, "display_with_key", None)
-        if callable(display):
-            try:
-                return str(display() or name)
-            except Exception:  # noqa: BLE001 — a row must never break a listing
-                pass
-        label = cls._team_display_label(team)
-        return f"{label} ({name})" if label and label != name else name
+        from local_operator.teams import display_form
+
+        return display_form(*cls._team_name_label(team))
+
+    @classmethod
+    def _team_listing_form(cls, team: Any) -> str:
+        """The BOUNDED display form the listing family paints (N1).
+
+        ``teams.bounded_display_form`` caps the composed form so an over-long
+        custom label ellipsizes instead of wrapping the key onto a second
+        line; the local block and the wire's first slot both call it here, so
+        both terminals paint the same bytes.
+        """
+        from local_operator.teams import bounded_display_form
+
+        return bounded_display_form(*cls._team_name_label(team))
 
     def _team_band_text(self, name: str) -> str:
-        """The band's active-team text: the team's display label, name fallback.
+        """The band's active-team text, through the shared display rule (D2/D4).
 
         The segment's value is whatever the SESSION carries -- a key -- while
-        the band is a display, so the label it resolves to is what the user
-        should read (``Data Quality``, or the derived default of a legacy
-        row). Resolution is best-effort and cheap: the session's own attached
-        Team first (no I/O), then the same metadata snapshot the picker reads,
-        then the raw key -- exactly what the band showed before labels
-        existed. Never raises: a broken registry must not take the band down.
+        the band is a display, so it paints the shared form: ``Data Quality``
+        for a label that adds information, the raw key for a derived default
+        that adds none. Resolution is best-effort and cheap: the session's own
+        attached Team first (no I/O), then the same metadata snapshot the
+        picker reads, then the raw key. Never raises: a broken registry must
+        not take the band down.
         """
         if not name:
             return ""
+        from local_operator.teams import display_form
+
+        label = ""
         attached = getattr(self._session, "active_team", None)
         if attached is not None and str(getattr(attached, "name", "") or "") == name:
-            label = self._team_display_label(attached)
-            if label:
-                return label
-        registry = self._team_registry()
-        if registry is not None and hasattr(registry, "list_teams"):
-            try:
-                for row in registry.list_teams():
-                    if str(getattr(row, "name", "") or "").casefold() == name.casefold():
-                        label = self._team_display_label(row)
-                        if label:
-                            return label
-                        break
-            except Exception:  # noqa: BLE001 — a broken registry must not break the band
-                logger.debug("team band: registry lookup failed", exc_info=True)
-        return name
+            label = str(getattr(attached, "label", "") or "")
+        if not label:
+            registry = self._team_registry()
+            if registry is not None and hasattr(registry, "list_teams"):
+                try:
+                    for row in registry.list_teams():
+                        if str(getattr(row, "name", "") or "").casefold() == name.casefold():
+                            label = str(getattr(row, "label", "") or "")
+                            break
+                except Exception:  # noqa: BLE001 — a broken registry must not break the band
+                    logger.debug("team band: registry lookup failed", exc_info=True)
+        return display_form(name, label)
 
     def _team_choices(self) -> list[ArgumentChoice]:
         """Teams the ``/team`` argument list offers, one row per name."""
@@ -18617,15 +18619,27 @@ class OperatorApp(App[None]):
             counter = getattr(team, "member_count", None)
             slots = counter() if callable(counter) else len(getattr(team, "members", ()) or ())
             description = (getattr(team, "description", "") or "").strip() or "no description"
-            # The label leads the DESCRIPTION, not the name column: ``name`` is
-            # what Tab completes, so it stays byte for byte, and the label
-            # rides the slot answering "which team is this". NOT the detail
-            # column -- detail is reserved and the description is what gets
-            # dropped first, and widening detail is what silenced descriptions
-            # between 76 and 123 columns (see the D1 note below).
-            label = self._team_display_label(team)
-            if label and label != team.name:
+            # FROZEN display rule (D2): only a CHOSEN-and-different label earns
+            # the description prefix (``enrichment_label``) -- a derived
+            # default restating the name column, or a label casefolding to it,
+            # is noise in the one slot answering "which team is this". NOT the
+            # detail column, either: detail is reserved and the description is
+            # what gets dropped first, and widening detail is what silenced
+            # descriptions between 76 and 123 columns (see the D1 note below).
+            from local_operator.teams import enrichment_label
+
+            label = enrichment_label(str(team.name), str(getattr(team, "label", "") or ""))
+            if label:
                 description = f"{label} · {description}"
+            # D5: an alias is an addressing key, and this picker MATCHES on it
+            # (``ArgumentChoice.names`` carries the tuple and ``match_choices``
+            # scores every name), so the row must say the team answers to one
+            # -- until now no TUI surface named them at all. Painted whenever
+            # a team HAS aliases, so the row reads the same whether it was
+            # found by name or by alias.
+            aliases = tuple(str(alias) for alias in (getattr(team, "aliases", ()) or ()))
+            if aliases:
+                description = f"{description} (alias: {', '.join(aliases)})"
             choices.append(
                 ArgumentChoice(
                     team.name,
@@ -18653,6 +18667,7 @@ class OperatorApp(App[None]):
                     # ordinary terminal sits in. The manager is one keystroke
                     # away in the listing and the chart; the description is the
                     # only thing telling the user which team this IS.
+                    aliases=aliases,
                     detail=f"{slots} {'member' if slots == 1 else 'members'}",
                 )
             )
@@ -19044,9 +19059,11 @@ class OperatorApp(App[None]):
             # and a multi-count slot was collapsed to one. The listing, the
             # picker and the org chart must agree.
             slots = team.member_count()
-            # Label first with the KEY visible: `/team <name>` and the footer
-            # both address by the key, so the row must show what to type.
-            display = self._team_display_with_key(team)
+            # The shared display rule, bounded for this row (N1): a long
+            # custom label ellipsizes so the KEY keeps its place on the line
+            # -- `/team <name>` and the footer both address by the key, so the
+            # row must show what to type.
+            display = self._team_listing_form(team)
             rows.append(Padding(Text(display, style=heading), (0, 0, 0, 2)))
             # "members", matching the number (R6) — see the picker's note. This
             # row names the manager separately ("Led by <manager> · N
@@ -19488,7 +19505,10 @@ class OperatorApp(App[None]):
         self._sync_team_band()
         if not request:
             notice(
-                f"team {team.name} is ready. {team.manager} leads it. "
+                # The prose names the team as every surface paints it (D4);
+                # the addressing instruction keeps the raw NAME -- it is what
+                # the user types.
+                f"team {self._team_display_form(team)} is ready. {team.manager} leads it. "
                 f"Send a request with /team {team.name} <message>."
             )
             return
@@ -19502,7 +19522,7 @@ class OperatorApp(App[None]):
         # and sends them — the marker sits in the request tail the user typed
         # around, so a pasted screenshot reaches the manager as pixels, not a
         # dead ``[Image #N]`` marker.
-        notice(f"sending to {team.name}. {team.manager} is coordinating.")
+        notice(f"sending to {self._team_display_form(team)}. {team.manager} is coordinating.")
         self._submit_command_prompt(request, attachments)
 
     def _cmd_team_chart(self, name: str, registry: Any, notice: NoticeFn) -> None:
@@ -32562,33 +32582,41 @@ class OperatorApp(App[None]):
         registry renders as an empty pane, and a settings page that crashed on
         a broken team file would be unreachable exactly when it is needed.
 
-        The first line is the label-first DISPLAY form (``label (name)``, or
-        the plain name when they agree): the pane is the roster a reader may
-        act on next, so it must show both what the team is called and what
-        addresses it. The choices carry no label field, so the display comes
-        from the same registry snapshot the choices come from -- metadata
-        only, the read the picker already makes -- and an unreadable registry
-        degrades to the choices' own names rather than dropping rows.
+        The first line is the shared display form (D2). The summary is the
+        team's OWN description, raw (D1/R1-2): the first line already carries
+        whatever display form the team earns, so reusing the picker's
+        label-prefixed description here would spend a 34-cell row restating
+        it -- measured, the prefix left 11 of ~18 description cells, and a
+        team with no description read \"Org · no description\" under \"Org\".
+        Aliases join the FACTS line (D5): the pane is where a reader checks
+        what a team answers to, and no other TUI surface named them.
         """
         rows: list[tuple[str, str, str]] = []
         try:
-            displays: dict[str, str] = {}
+            from local_operator.teams import display_form
+
+            details: dict[str, tuple[str, str, str]] = {}
             registry = self._team_registry()
             if registry is not None and hasattr(registry, "list_teams"):
                 try:
                     for row in registry.list_teams():
                         name = str(getattr(row, "name", "") or "")
-                        displays[name.casefold()] = self._team_display_with_key(row)
+                        aliases = tuple(str(alias) for alias in (getattr(row, "aliases", ()) or ()))
+                        details[name.casefold()] = (
+                            display_form(name, str(getattr(row, "label", "") or "")),
+                            (getattr(row, "description", "") or "").strip() or "no description",
+                            f"alias: {', '.join(aliases)}" if aliases else "",
+                        )
                 except Exception:  # noqa: BLE001 — labels are optional, rows are not
                     logger.debug("settings: team labels unavailable", exc_info=True)
             for team in self._team_choices():
-                rows.append(
-                    (
-                        displays.get(team.name.casefold(), team.name),
-                        team.detail or "team",
-                        team.description or "",
-                    )
+                display, summary, alias_fact = details.get(
+                    team.name.casefold(), (team.name, team.description or "", "")
                 )
+                facts = team.detail or "team"
+                if alias_fact:
+                    facts = f"{facts} · {alias_fact}"
+                rows.append((display, facts, summary))
         except Exception:  # noqa: BLE001 — a bad registry must not break the page
             logger.debug("settings: team rows unavailable", exc_info=True)
         return rows
@@ -46976,13 +47004,13 @@ class OperatorApp(App[None]):
             # is keyed to the number actually shown, which `len(members) == 0`
             # was not.
             # The first slot is painted VERBATIM by ``_team_listing_block`` on
-            # the viewer, so it carries the same display form the local
-            # listing paints -- label first with the key beside it -- or the
-            # two terminals would disagree about how one team reads (the D2
-            # rule, applied to names).
+            # the viewer, so it carries the same BOUNDED display form the
+            # local listing paints (``_team_listing_form``): one rule, one
+            # cap, or the two terminals would disagree about how one team
+            # reads (the D2 rule and the N1 cap, applied to the row).
             items = [
                 (
-                    self._team_display_with_key(team),
+                    self._team_listing_form(team),
                     f"Led by {team.manager} · {team.member_count()} "
                     f"{'member' if team.member_count() == 1 else 'members'}",
                     (team.description or "").strip(),
@@ -47068,10 +47096,13 @@ class OperatorApp(App[None]):
         return SlashResult(
             kind="notice",
             text=(
-                f"team {team.name} is ready. {team.manager} leads it. "
+                # The prose uses the shared display form (D4); the addressing
+                # instruction and the receipt `data` keep the raw NAME.
+                f"team {self._team_display_form(team)} is ready. {team.manager} leads it. "
                 f"Send a request with /team {team.name} <message>."
                 if not request
-                else f"sending to {team.name}. {team.manager} is coordinating."
+                else f"sending to {self._team_display_form(team)}. "
+                f"{team.manager} is coordinating."
             ),
             style="info",
             data={

@@ -127,7 +127,7 @@ def test_ghost_and_cycle_markers(tmp_path: Path) -> None:
     # The cycle marker names the team by its DISPLAY label (the derived
     # default here); the ghost keeps the raw slot reference, which by
     # definition has no team row to label.
-    assert "↩ A" in result.text.plain
+    assert "↩ a" in result.text.plain
     assert "? missing" in result.text.plain
 
 

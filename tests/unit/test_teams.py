@@ -2990,8 +2990,7 @@ def test_create_persists_the_derived_label_and_normalizes_a_custom_one(
     # Whitespace collapses to the stored shape; everything else is preserved.
     assert custom.label == "Rad One"
     assert custom.aliases == ["Rad", "r1"]
-    assert custom.display_label() == "Rad One"
-    assert custom.display_with_key() == "Rad One (rad-1)"
+    assert teams_module.display_form(custom.name, custom.label) == "Rad One (rad-1)"
 
 
 def test_label_refuses_over_cap_and_control_characters(tmp_path: Path) -> None:
@@ -3111,7 +3110,7 @@ def test_lookup_prefers_a_name_over_a_hand_edited_alias_collision(tmp_path: Path
 def test_legacy_team_yml_without_label_loads_and_persists_the_derived_one(
     tmp_path: Path,
 ) -> None:
-    """Old rows load unchanged, render the derived default, and persist it on write."""
+    """Old rows load unchanged, render the raw name, and persist a default on write."""
     row_id = "11111111-2222-3333-4444-555555555555"
     row = tmp_path / "teams" / row_id
     row.mkdir(parents=True)
@@ -3123,8 +3122,9 @@ def test_legacy_team_yml_without_label_loads_and_persists_the_derived_one(
     team = registry.get_team_by_name("lopdev")
     assert team is not None
     assert team.label == "" and team.aliases == []
-    assert team.display_label() == "Lopdev"
-    assert team.display_with_key() == "Lopdev (lopdev)"
+    # The shared rule paints the raw name while the label is only the (absent)
+    # derived default; the derived value is still what PERSISTS on the write.
+    assert teams_module.display_form(team.name, team.label) == "lopdev"
 
     registry.update_team(team.id, TeamEditFields(description="touched"))
     assert registry.get_team(team.id).label == "Lopdev"
@@ -3176,7 +3176,11 @@ def test_import_hub_team_labels_the_published_spelling_when_it_mapped(
     )
     assert outcome.team.name == "Feature-Release-Crew"
     assert outcome.team.label == "Feature Release Crew"
-    assert outcome.team.display_with_key() == "Feature Release Crew (Feature-Release-Crew)"
+    # The shared rule: the label is the published name's spaces for the name's
+    # hyphens, so it paints alone -- no restated key in parentheses.
+    assert teams_module.display_form(outcome.team.name, outcome.team.label) == (
+        "Feature Release Crew"
+    )
 
 
 def test_import_hub_team_labels_a_collision_suffix(tmp_path: Path) -> None:
@@ -3220,12 +3224,17 @@ def test_cli_list_and_show_render_label_first_with_the_key(tmp_path: Path) -> No
 
     listed = _run_teams_cli(config_dir, "list")
     assert listed.returncode == 0, listed.stderr
-    assert "Data Quality (data-quality)" in listed.stdout
+    # The shared rule: the derived default paints alone (it carries the
+    # space-vs-hyphen information), so no key in parentheses on this row.
+    assert "Data Quality" in listed.stdout
+    assert "(data-quality)" not in listed.stdout
 
-    # Addressed by the ALIAS; the header still paints label (key).
+    # Addressed by the ALIAS: the header paints the shared form and the
+    # aliases line names the key that was used (D5).
     shown = _run_teams_cli(config_dir, "show", "dq")
     assert shown.returncode == 0, shown.stderr
-    assert "╭─ Team Data Quality (data-quality)" in shown.stdout
+    assert "╭─ Team Data Quality" in shown.stdout
+    assert "Aliases: dq" in shown.stdout
 
 
 def test_cli_create_carries_label_and_repeatable_alias(tmp_path: Path) -> None:
@@ -3246,3 +3255,92 @@ def test_cli_create_carries_label_and_repeatable_alias(tmp_path: Path) -> None:
     assert team is not None
     assert team.label == "Feature Release"
     assert team.aliases == ["fr", "fr-v2"]
+
+
+# --- The shared display rule (D2) and its companions --------------------------------
+
+
+def test_display_form_covers_the_four_frozen_cases() -> None:
+    """name / label / ``label (name)``, the casefold carve-outs included."""
+    form = teams_module.display_form
+    assert form("lopdev", "") == "lopdev"  # legacy row: nothing over the key
+    assert form("lopdev", "Lopdev") == "lopdev"  # derived AND casefolds: noise
+    assert form("org", "Org") == "org"
+    assert form("data-quality", "Data Quality") == "Data Quality"  # derived, informative
+    assert form("ops", "Platform Reliability") == "Platform Reliability (ops)"
+    assert form("ops", "OPS") == "OPS"  # chosen but casefolds: the key adds nothing
+
+
+def test_enrichment_label_only_for_a_chosen_different_label() -> None:
+    """A description column prefixes nothing a name column already says (D2)."""
+    enrich = teams_module.enrichment_label
+    assert enrich("data-quality", "Data Quality") == ""  # derived: the name says it
+    assert enrich("lopdev", "Lopdev") == ""
+    assert enrich("ops", "OPS") == ""
+    assert enrich("ops", "") == ""
+    assert enrich("ops", "Platform Reliability") == "Platform Reliability"
+
+
+def test_default_label_upcases_the_initialism_allowlist() -> None:
+    """D3: six common initialisms keep their upper-case spelling."""
+    assert teams_module._default_label("qa-tester") == "QA Tester"
+    assert teams_module._default_label("pergamon-ai") == "Pergamon AI"
+    assert teams_module._default_label("api") == "API"
+    assert teams_module._default_label("ux-reviewer") == "UX Reviewer"
+    assert teams_module._default_label("tui.ui") == "TUI UI"
+    # ... and stays Title Case everywhere else: the allowlist is exactly six
+    # tokens, so a plausible-looking neighbour is NOT upcased by default.
+    assert teams_module._default_label("it-ops") == "It Ops"
+
+
+def test_rename_re_derives_a_derived_label_and_keeps_a_custom_one(tmp_path: Path) -> None:
+    """D3b: a stored label that is only the OLD name's default follows the rename."""
+    registry = TeamRegistry(tmp_path)
+    derived = registry.create_team(TeamEditFields(name="lopdev"))
+    assert derived.label == "Lopdev"  # persisted by the create's save
+    renamed = registry.update_team(derived.id, TeamEditFields(name="lop-dev"))
+    assert renamed.name == "lop-dev"
+    assert renamed.label == "Lop Dev"
+
+    custom = registry.create_team(TeamEditFields(name="ops", label="Platform Reliability"))
+    kept = registry.update_team(custom.id, TeamEditFields(name="ops-v2"))
+    assert kept.label == "Platform Reliability"
+    # An explicit label in the same write still wins over the re-derive.
+    again = registry.update_team(renamed.id, TeamEditFields(name="lop-v3", label="Chosen"))
+    assert again.label == "Chosen"
+
+
+def test_import_hub_team_drops_a_carried_label_that_cannot_fit(tmp_path: Path) -> None:
+    """R1-1: the carried spelling is a display decoration; a long one must not
+    refuse the pull -- the row imports and the derived default paints."""
+    registry = TeamRegistry(tmp_path)
+    unspaced = registry.import_hub_team(
+        {"name": "q" * 100, "members": [], "instructions": "You ship."}
+    )
+    # The name truncates to the local cap; the 100-char published spelling
+    # fits no label, so the row keeps the derived default instead.
+    assert len(unspaced.team.name) == 64
+    assert unspaced.team.label == teams_module._default_label(unspaced.team.name)
+    assert unspaced.renamed_from == "q" * 100
+
+    spaced = registry.import_hub_team(
+        {"name": "Feature " * 12, "members": [], "instructions": "You ship."}
+    )
+    assert spaced.team.label == teams_module._default_label(spaced.team.name)
+
+
+def test_bounded_display_form_keeps_the_key_on_the_line() -> None:
+    """N1: an over-cap composed form truncates the LABEL, never the key."""
+    long_label = "Platform Reliability and Quality Assurance Organisation for Operations"
+    form = teams_module.bounded_display_form("ops", long_label)
+    assert len(form) <= teams_module._TEAM_LISTING_CAP
+    assert form.endswith(" (ops)")
+    assert "…" in form
+    # Forms without a keyed tail pass through: a long NAME is what you type,
+    # and ellipsizing it would hide the addressable string itself.
+    name = "q" * 60
+    assert teams_module.bounded_display_form(name, "") == name
+    assert (
+        teams_module.bounded_display_form("ops", "Platform Reliability")
+        == "Platform Reliability (ops)"
+    )

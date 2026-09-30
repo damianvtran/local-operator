@@ -105,6 +105,17 @@ _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 #: name, so both shapes fit the same surfaces.
 _TEAM_LABEL_MAX_CHARS = 80
 
+#: Tokens whose display form is upper-case rather than Title Case (D3): six
+#: common initialisms whose Title-Cased spelling reads as a bug (``qa-tester``
+#: -> ``QA Tester``). Case-insensitive; deliberately small -- every entry is a
+#: bet on how a token reads, and Title Case stays the rule.
+_DEFAULT_LABEL_INITIALISMS = frozenset({"qa", "ai", "api", "tui", "ux", "ui"})
+
+#: Cap on a LISTING row's composed display form (see ``bounded_display_form``,
+#: N1). 48 cells leaves room for the row's indentation and border at 80x24,
+#: the narrow terminal the wrap was measured in.
+_TEAM_LISTING_CAP = 48
+
 #: Cap on a team's alias list (see ``_validate_aliases``). Aliases are EXTRA
 #: addressing keys; eight is far past what any real roster of names needs and
 #: keeps a hand-edited list from turning key resolution into a scan.
@@ -273,14 +284,15 @@ class Team(BaseModel):
     description: str = ""
     manager: str = "manager"
     members: list[TeamMember] = Field(default_factory=list)
-    #: The display LABEL: free text (spaces allowed), shown label-first by
-    #: every listing while ``name`` stays the addressable key. LOCAL display
-    #: metadata by design: it never rides the hub publish wire (agent-server
-    #: refuses unknown fields) and is not part of hub-sync three-way merges --
-    #: a sync apply must leave it alone, which ``TeamEditFields``' None rule
-    #: gives for free. Empty = "no custom label": :meth:`display_label` derives
-    #: a Title-Case default, and the next write persists it
-    #: (``_save_team_locked``). Optional with a default so every old
+    #: The display LABEL: free text (spaces allowed), painted through the ONE
+    #: shared display rule (see :func:`display_form`) while ``name`` stays the
+    #: addressable key. LOCAL display metadata by design: it never rides the
+    #: hub publish wire (agent-server refuses unknown fields) and is not part
+    #: of hub-sync three-way merges -- a sync apply must leave it alone, which
+    #: ``TeamEditFields``' None rule gives for free. Empty = "no custom
+    #: label": the derived Title-Case default stands in, and the next write
+    #: persists it (``_save_team_locked``) -- including a re-derive when the
+    #: name changes (``update_team``). Optional with a default so every old
     #: ``team.yml`` loads unchanged; additive so a new one still loads on
     #: older code.
     label: str = ""
@@ -384,28 +396,6 @@ class Team(BaseModel):
             if name not in names:
                 names.append(name)
         return names
-
-    def display_label(self) -> str:
-        """The label every surface SHOWS: the stored value, else the derived default.
-
-        The derived half is what makes a legacy row (written before labels
-        existed) render like a labelled one; the value is persisted on the
-        next write, so "no custom label" describes only rows not yet written.
-        """
-        return self.label or _default_label(self.name)
-
-    def display_with_key(self) -> str:
-        """The label with its addressable KEY when they differ, else the key alone.
-
-        A listing must keep the key visible beside a custom label: the key is
-        the only string that ADDRESSES the team (``/team <key> <request>``,
-        ``--team``, ``/team chart <key>``), so a row painting ``Data Quality``
-        alone would hide what the reader has to type. The parenthesised form
-        is skipped when the two are identical, so a row whose label IS its
-        name keeps its plain form.
-        """
-        label = self.display_label()
-        return f"{label} ({self.name})" if label != self.name else self.name
 
     def manager_preamble(self) -> str:
         """Standing brief stamped into a manager session's instructions.
@@ -516,12 +506,85 @@ def _default_label(name: str) -> str:
     human-readable form of the same tokens: split on the separators the name
     rule allows, uppercase each token's first character and keep the rest
     (``data-quality`` -> ``Data Quality``; ``radient-net`` -> ``Radient Net``;
-    a token that starts with a digit or symbol passes through). The value is
-    persisted on the next write, so a legacy row's rendering is stable once it
-    has been written.
+    a token that starts with a digit or symbol passes through). Six common
+    INITIALISMS stay upper-cased instead (:data:`_DEFAULT_LABEL_INITIALISMS`)
+    -- ``qa-tester`` reading ``Qa Tester`` is the defect the allowlist closes;
+    it stays deliberately small because every entry is a bet on how a token
+    reads, and Title Case remains the rule. The value is persisted on the next
+    write, so a legacy row's rendering is stable once it has been written.
     """
     tokens = [token for token in re.split(r"[._-]+", name) if token]
-    return " ".join(token[0].upper() + token[1:] for token in tokens)
+    return " ".join(_render_label_token(token) for token in tokens)
+
+
+def _render_label_token(token: str) -> str:
+    """One name token as its display form: initialism upper-case, else Title Case."""
+    if token.casefold() in _DEFAULT_LABEL_INITIALISMS:
+        return token.upper()
+    return token[0].upper() + token[1:]
+
+
+def display_form(name: str, label: str) -> str:
+    """The display form EVERY render site paints for ``(name, label)``.
+
+    ONE shared rule (design review D2, frozen in remediation round 1), so the
+    TUI listing, the picker, the settings pane, the status band, the org
+    chart, the CLI and the team tool cannot disagree:
+
+    * no label -> the raw name (a legacy row before its first write);
+    * the label is exactly the DERIVED default (:func:`_default_label`) and
+      casefolds to the name -> the raw name (\"lopdev\" / \"Lopdev\" paints
+      \"lopdev\": title case no human chose is noise);
+    * a derived default whose casefold DIFFERS from the name -> the label
+      alone (\"data-quality\" / \"Data Quality\": the space-vs-separator is
+      information the key cannot carry);
+    * any other (chosen) label -> \"label (name)\", because the key is the only
+      string that ADDRESSES the team; the parenthesised key is dropped when
+      the chosen label casefolds to the name (\"OPS\" for \"ops\"), where it
+      would add nothing.
+    """
+    if not label:
+        return name
+    if label == _default_label(name):
+        return name if label.casefold() == name.casefold() else label
+    return label if label.casefold() == name.casefold() else f"{label} ({name})"
+
+
+def enrichment_label(name: str, label: str) -> str:
+    """The label a DESCRIPTION column may prefix, or \"\" when it adds nothing.
+
+    A description slot sits beside a name column that already paints the key,
+    so a derived default restating it (\"lopdev\" -> \"Lopdev · \" or
+    \"data-quality\" -> \"Data Quality · \") or a label that casefolds to the
+    name is noise: only a CHOSEN-and-different label earns the prefix (D2).
+    """
+    if not label or label == _default_label(name) or label.casefold() == name.casefold():
+        return ""
+    return label
+
+
+def bounded_display_form(name: str, label: str, *, cap: int = _TEAM_LISTING_CAP) -> str:
+    """``display_form`` bounded for a LISTING row: the key never wraps away (N1).
+
+    An over-cap custom label wraps the row and pushes ``(name)`` onto a second
+    line, so the reader loses the string that addresses the team (measured: an
+    80-character label at 80x24). The composed form is truncated on the LABEL
+    side -- the key is the part that must survive -- with a single-character
+    ellipsis. Forms that do not end in `` (name)`` pass through untouched:
+    they are bounded by the name/label caps already, and ellipsizing a NAME
+    would hide the very string a reader types.
+
+    Deliberately a listing-only concern: the other sites bound themselves (the
+    band truncates, chart boxes clamp) and both sides of the listing family --
+    the local block and the wire's first slot -- must agree byte for byte.
+    """
+    form = display_form(name, label)
+    keyed = f" ({name})"
+    if len(form) <= cap or not form.endswith(keyed):
+        return form
+    room = cap - len(keyed) - 1
+    truncated = form[:room].rstrip()
+    return f"{truncated}…{keyed}" if truncated else form
 
 
 def _normalize_label(value: str) -> str:
@@ -1771,7 +1834,17 @@ class TeamRegistry:
 
             updates = fields.model_dump(exclude_unset=True)
             if "name" in updates and updates["name"] is not None:
-                candidate.name = validate_team_name(updates["name"])
+                new_name = validate_team_name(updates["name"])
+                if new_name != candidate.name and candidate.label == _default_label(candidate.name):
+                    # D3b: a stored label equal to the OLD name's derived
+                    # default is a value the persist-on-write filled in, not
+                    # one the operator chose -- carrying it across a rename
+                    # would freeze "Lopdev" onto "lop-dev" and read as a
+                    # chosen label nobody typed. Re-derive it; a CUSTOM label
+                    # (or an explicit label in this very update, applied
+                    # below) is left alone.
+                    candidate.label = _default_label(new_name)
+                candidate.name = new_name
             if "label" in updates and updates["label"] is not None:
                 # An explicit "" (or whitespace-only) is a RESET to the derived
                 # default, which ``_save_team_locked`` fills in: label is
@@ -2149,7 +2222,6 @@ class TeamRegistry:
         # The probe is ALIAS-aware: `create_team` refuses a name that collides
         # with any local team's alias exactly as it refuses a taken name, so a
         # names-only loop would re-raise where a suffix can fix it.
-        published_display = published.strip()
         candidate = local_name
         suffix = 2
         while self._find_cached_team_by_key(candidate) is not None:
@@ -2161,7 +2233,17 @@ class TeamRegistry:
             # the final local name differs from it; an unchanged name leaves
             # the label empty for the derived default. Computed per attempt
             # because the retry below can take a new candidate.
-            label = published_display if published_display != candidate else ""
+            #
+            # R1-1: this carry is a DISPLAY decoration and must never refuse
+            # the import. The hub's name rule allows up to 128 characters
+            # (``MAX_AGENT_NAME_CHARS``, which the preflight mirrors) while a
+            # label caps at 80, so a long published spelling simply does not
+            # fit any label: it is dropped, the derived default paints, and
+            # the row still imports -- failing the pull over a subtitle the
+            # puller never supplied is the defect this guards.
+            normalized_display = _normalize_label(published)
+            fits_label = len(normalized_display) <= _TEAM_LABEL_MAX_CHARS
+            label = normalized_display if fits_label and normalized_display != candidate else ""
             try:
                 team = self.create_team(
                     TeamEditFields(
