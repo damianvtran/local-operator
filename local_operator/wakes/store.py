@@ -173,9 +173,41 @@ def is_patience_row(row: Any) -> bool:
     return str(kind or "") == "patience"
 
 
+def is_ask_timeout_row(row: Any) -> bool:
+    """Whether ``row`` is a HIDDEN queued-ask deadline (model or dumped dict).
+
+    The queue's timer rides this same engine deliberately (design D10: a second
+    timer substrate beside the wake supervisor is the defect class this
+    subsystem exists to avoid), so it appears in the same ``schedules`` lists
+    every wake surface reads — and it must be invisible to all of them for the
+    same reason a patience wait is: it is a mechanism, not a reminder the user
+    or the model set.
+    """
+    kind = row.get("kind") if isinstance(row, Mapping) else getattr(row, "kind", None)
+    return str(kind or "") == "ask_timeout"
+
+
+def is_internal_wake_row(row: Any) -> bool:
+    """Whether ``row`` is one of the HIDDEN internal timers (patience ∪
+    ask_timeout).
+
+    ONE predicate for every HUMAN-SURFACE subtraction — the picker's armed-wake
+    count, the CLI listing, the desktop listing and feed, the wake tool's own
+    list op, the visible catch-up fold — so that adding a third internal kind
+    later cannot leak a row through one surface that forgot to learn its name
+    (the review finding that produced ``is_patience_row``).
+
+    The narrow predicate is still the right one where the code is ABOUT
+    patience: its own cap, its cancel path and its watermark delivery read
+    ``is_patience_row`` directly. Only the question "may a human see this?"
+    takes the union.
+    """
+    return is_patience_row(row) or is_ask_timeout_row(row)
+
+
 def scheduled_rows(rows: Sequence[Any]) -> list[Any]:
-    """The rows a human surface may show: everything except patience waits."""
-    return [row for row in rows or () if not is_patience_row(row)]
+    """The rows a human surface may show: everything except the internal timers."""
+    return [row for row in rows or () if not is_internal_wake_row(row)]
 
 
 def read_index_report(config_dir: Path) -> tuple[dict[str, dict[str, Any]], bool]:

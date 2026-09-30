@@ -66,6 +66,9 @@ from local_operator.harness.wake_types import MAX_WAKE_MESSAGE_CHARS, MAX_WAKE_S
 #: the store (which stays stdlib-only so every index reader can carry them).
 #: Re-exported through this module's public names for its internal callers;
 #: there is no second implementation to drift (agent review round 1, R3).
+from local_operator.wakes.store import (
+    is_internal_wake_row as _store_is_internal_wake_row,
+)
 from local_operator.wakes.store import is_patience_row as _store_is_patience_row
 from local_operator.wakes.store import scheduled_rows as _store_scheduled_rows
 
@@ -177,6 +180,18 @@ def is_patience_row(row: Any) -> bool:
     rows (agent review round 1, R3).
     """
     return _store_is_patience_row(row)
+
+
+def is_internal_wake_row(row: Any) -> bool:
+    """Whether a schedule is one of the hidden internal timers (R3's union).
+
+    Re-exported from :mod:`local_operator.wakes.store`, beside
+    :func:`is_patience_row` and for the same reason: every HUMAN-SURFACE
+    subtraction (a queue-timer row joined patience in that set) must ask the
+    same question, and a second spelling is how one of them starts counting an
+    internal row again.
+    """
+    return _store_is_internal_wake_row(row)
 
 
 def patience_rows(rows: Iterable[Any]) -> list[Any]:

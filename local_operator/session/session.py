@@ -91,6 +91,8 @@ from local_operator.harness.loop import AgentLoop, LoopContext, _materialize_asi
 # module, so the vocabulary cannot be defined here or in the modules that own
 # it (``harness/message_types.py`` carries the full reasoning).
 from local_operator.harness.message_types import (
+    ASK_RESPONSE_MESSAGE_TYPE,
+    ASK_TIMEOUT_MESSAGE_TYPE,
     HUB_MESSAGE_TYPE,
     PEER_MESSAGE_MESSAGE_TYPE,
     PROJECT_REMINDER_MESSAGE_TYPE,
@@ -553,7 +555,20 @@ _PRE_ABORT_DROP_NOTICE_AT = 3
 #: which is exactly why they are the ones that must not clear a stop. A caller
 #: that needs everything to stop regardless has the stronger rung: the ``abort``
 #: control op cancels the children, and ``lop stop`` ends the process.
-_STOPPED_WORK_RESIDUE_TYPES = frozenset({HUB_MESSAGE_TYPE, JOB_RESULT_MESSAGE_TYPE})
+_STOPPED_WORK_RESIDUE_TYPES = frozenset(
+    {
+        HUB_MESSAGE_TYPE,
+        JOB_RESULT_MESSAGE_TYPE,
+        # A queued ask's DEADLINE NOTICE is not human intent, so it must not clear
+        # a sticky abort: a stop means "buy no more paid turns", and a timer the
+        # session set for itself firing afterwards is exactly the thing that rule
+        # exists to catch (design docs/design/ask-nonblocking.md §2.3). The
+        # RESPONSE type deliberately stays OUT of this set: an answer, a late
+        # answer and even a decline are all a person deciding, which is fresh
+        # intent and clears the abort exactly like a typed prompt.
+        ASK_TIMEOUT_MESSAGE_TYPE,
+    }
+)
 
 #: Event families a provider stream produces at TOKEN rate. An unobserved
 #: subagent does not fold these into its own frontend store (see ``_emit``):
@@ -1163,6 +1178,18 @@ _PERSISTABLE_CUSTOM_TYPES: frozenset[str] = frozenset(
         # servers this feature is about — the replay asserts tools that are not
         # there. The live tool inventory and ``mcp://`` status tell the truth at
         # resume time; the harness must not replay a claim it cannot re-verify.
+        #
+        # THE QUEUED-ASK PAIR (design docs/design/ask-nonblocking.md §2.3). Both
+        # are REAL ACTIVITY and must survive a resume: an ``ask_response`` is a
+        # person's answer, and an ``ask_timeout`` is the record of a deadline the
+        # agent acted on — a transcript that dropped it would replay a turn whose
+        # model half is missing (the model was told to proceed without the
+        # answer, and the replay would show it deciding for no stated reason).
+        # NOTE they are deliberately NOT in ``transcript.BOOKKEEPING_CUSTOM_TYPES``
+        # for the same reason: bookkeeping does not move the activity clock, and
+        # a human answering is activity by any reading.
+        ASK_RESPONSE_MESSAGE_TYPE,
+        ASK_TIMEOUT_MESSAGE_TYPE,
     }
 )
 
@@ -1181,6 +1208,21 @@ ASIDE_TOOL_CALL_REFUSAL = (
     "call was rejected and nothing ran. Answer the user's question in plain text "
     "or markdown."
 )
+
+
+def _ask_refusal_copy(record: Mapping[str, Any] | None) -> str:
+    """Why an answer was refused, in the QUEUE's words (design §2.2).
+
+    A thin hop so the session can refuse without importing the text module at
+    module scope (``asks/render.py`` reaches into the tool layer for the answer
+    report, and that import belongs on the answer path, not on every session's
+    construction). One copy of the sentence per state, enforced by there being
+    one function — a second phrasing here is how the TUI, the desktop app and
+    the phone would start telling the user different stories about the same tap.
+    """
+    from local_operator.asks.render import refusal_copy
+
+    return refusal_copy(record)
 
 
 def _collect_tool_call_delta(state: dict[int, dict[str, Any]], event: Any) -> None:
@@ -3606,6 +3648,15 @@ class Session:
             ),
         )
         self._wake_deliver_hook: Callable[[DueWake], Awaitable[None]] = self._deliver_wake
+        #: The queued-ask engine (design docs/design/ask-nonblocking.md). Built
+        #: LAZILY and only while ``asks.policy.NONBLOCKING_ASK`` is on: with the
+        #: flag off a session has no queue, no timer and no log, so every existing
+        #: path stays byte-for-byte today's (§5 invariant). ``_ask_reach`` is the
+        #: host's presentation probe (a Session cannot see the attach state), and
+        #: ``_ask_cwd`` is carried into the derived index so the aggregate
+        #: "all my open asks" view can name a session without opening it.
+        self._ask_queue: Any = None
+        self._ask_reach: Callable[[], Any] | None = None
         # The monitor scheduler is the wake scheduler's twin (design
         # monitor-tool.md §5.1): in-process, one timer, a persist callback and
         # a deliver callback — plus the check runner, which executes the
@@ -8242,6 +8293,72 @@ class Session:
         """
         self._request_approval = handler
 
+    async def deliver_ask_messages(self, messages: list[CustomMessage]) -> None:
+        """Hand queued-ask response/timeout rows to this session (design §2.3).
+
+        Modelled on :meth:`_deliver_wake`, because the delivery shapes are the
+        same and a second transport for the live case is what the design
+        forbids. A BUSY turn takes the rows at its next successful boundary as
+        COURTESY messages — the batch is already written by ``reconcile`` and
+        nothing in flight is cancelled — and an IDLE session runs ONE turn
+        carrying the whole batch, so N asks settling together cost one paid turn
+        rather than N.
+
+        The wake-a-parked-``wait`` mark goes in AFTER the queue puts, for the
+        lost-wakeup reason ``_deliver_wake`` records: the woken tool returns into
+        a drain, and the drain has to find the messages already queued.
+        """
+        if not messages or self._disposed:
+            return
+        if self._is_streaming:
+            for message in messages:
+                self._courtesy_wake_count += 1
+                self._steering_queue.put_nowait(message)
+            self._peer_arrival.mark(messages[-1].custom_type)
+            return
+        self._spawn_background(self._prompt_messages(list(messages)))
+
+    async def reconcile_asks(self, now_ms: int | None = None) -> None:
+        """Level-triggered: deliver whatever the ask log says is owed.
+
+        Called at runtime boot (beside ``process._drain_inbox_into``), at turn
+        start (beside :meth:`_drain_spooled_peer_inbox`), from the queue's own
+        deadline tick, and on every answer/decline/dismiss op. Idempotent by
+        construction — the transcript row IS the delivery marker — so calling it
+        an extra time costs one log read and nothing else.
+        """
+        queue = self.ask_queue()
+        if queue is None:
+            return
+        await queue.reconcile(now_ms)
+
+    def arm_ask_wake(self, row: Any) -> None:
+        """Add or replace one internal ``ask_timeout`` row and re-arm wakes.
+
+        The session owns ``_wake`` and its persist-and-re-arm path, so the write
+        lives here rather than in the queue; the queue only mints the row. Best
+        effort by the same contract every wake writer has: a failed index write
+        must never take down the ask it describes, and the in-runtime timer still
+        covers the deadline.
+        """
+        try:
+            rows = [r for r in self._wake.schedules if getattr(r, "id", "") != row.id]
+            rows.append(row)
+            self._spawn_background(self._wake.update(rows))
+        except Exception:  # noqa: BLE001 — degrade to the in-runtime timer
+            logger.warning("ask: could not arm the deadline wake row", exc_info=True)
+
+    def retire_ask_wake(self, row_id: str) -> None:
+        """Drop an internal ``ask_timeout`` row once its ask is terminal."""
+        try:
+            current = list(self._wake.schedules)
+            rows = [r for r in current if getattr(r, "id", "") != row_id]
+            if len(rows) == len(current):
+                return
+            self._spawn_background(self._wake.update(rows))
+        except Exception:  # noqa: BLE001 — best-effort, like every wake-index writer
+            logger.warning("ask: could not retire the deadline wake row", exc_info=True)
+
     def set_ask_handler(self, handler: AskUserFn | None) -> None:
         """Install the host's interactive-question surface (see SessionProtocol).
 
@@ -8277,10 +8394,148 @@ class Session:
         the model calls it.
         """
         self._ask_user = handler
+        if handler is None and self._ask_queue is not None:
+            # The capability went away, so the queue must not outlive it: a
+            # deadline timer with nothing able to show the ask would keep
+            # waking the session for a question no surface can present.
+            self._ask_queue.dispose()
+            self._ask_queue = None
         if handler is not None:
             self._merge_capability_tools(("ask",))
         elif any(tool.name == "ask" for tool in self._tools):
             self.refresh_tools([tool for tool in self._tools if tool.name != "ask"])
+
+    # -- queued asks (design docs/design/ask-nonblocking.md) -----------------
+
+    def set_ask_reach(self, probe: Callable[[], Any] | None) -> None:
+        """Install the host's presentation probe for an ask RECEIPT (design §2.1).
+
+        The receipt claims PRESENTATION and never notice-delivery, and only the
+        host that owns the transport can answer that — a Session cannot see the
+        attach state. The probe returns a surface name (or a sequence of them)
+        when something is attached and a falsy value otherwise; ``None`` means
+        "this host cannot say", which renders as the unreachable wording rather
+        than guessing that someone was told.
+        """
+        self._ask_reach = probe
+
+    def ask_reach(self) -> str | None:
+        """The surface name a receipt may name, or ``None`` for "nobody"."""
+        probe = self._ask_reach
+        if probe is None:
+            return None
+        try:
+            value = probe()
+        except Exception:  # noqa: BLE001 — an unreadable probe is "unreachable"
+            logger.debug("ask: reach probe failed", exc_info=True)
+            return None
+        if not value:
+            return None
+        if isinstance(value, (list, tuple, set, frozenset)):
+            names = [str(item) for item in value if str(item)]
+            return ", ".join(names) if names else None
+        return str(value)
+
+    def ask_queue(self) -> Any:
+        """The session's ask queue, or ``None`` while the feature is DARK.
+
+        Two conditions, and both are the ones that already decide whether ``ask``
+        exists at all: the flag (``asks.policy.NONBLOCKING_ASK``) and the host
+        hook. With either missing this returns ``None`` and nothing in this file
+        constructs a log, a timer or a transcript row — which is what makes the
+        PR's flag-off invariant a property of the code rather than a promise.
+        """
+        from local_operator.asks import policy
+
+        if not policy.enabled() or self._ask_user is None:
+            return None
+        if self._ask_queue is None:
+            from local_operator.asks.queue import AskQueue
+            from local_operator.paths import config_dir as _resolve_config_dir
+
+            self._ask_queue = AskQueue(
+                self,
+                config_dir=_resolve_config_dir(),
+                session_id=self._session_id,
+                cwd=self._cwd,
+            )
+        return self._ask_queue
+
+    def _ask_enqueue_callable(self) -> Callable[..., Any] | None:
+        """The tool's queued-ask door, or ``None`` on the blocking path.
+
+        Bound per turn (like every other field of the tool context), and ``None``
+        whenever :meth:`ask_queue` would return ``None`` — so the tool decides by
+        the presence of THIS callable, one fact, rather than by reading the flag
+        in two places.
+        """
+        if self.ask_queue() is None:
+            return None
+        return self._enqueue_ask
+
+    def _enqueue_ask(self, questions: list[Any], timeout: Any = None) -> dict[str, Any]:
+        """Queue one ask and return the tool's receipt (or a refusal).
+
+        Thin by design: the caps, the log write, the index and the deadline row
+        all live in ``AskQueue.enqueue``, and the tool layer never learns about
+        any of them.
+        """
+        queue = self.ask_queue()
+        if queue is None:  # pragma: no cover — the tool only calls this when set
+            return {"ok": False, "error": "this session has no queued-ask engine"}
+        return queue.enqueue(questions, timeout)
+
+    def respond_ask(
+        self, ask_id: str, answers: Mapping[str, Sequence[str]], *, by: str = "unknown"
+    ) -> dict[str, Any]:
+        """Answer a queued ask (design §2.4), storing any secret values first.
+
+        **The ORDER is the security property.** A secret value is written to the
+        session's memory-only credential store BEFORE the answer row is appended,
+        and the row carries the KEY NAME — never the value — because that row is
+        durable, replayed to the provider and shown on every card. The value
+        therefore never reaches ``asks.jsonl``, the index, the transcript, an
+        event or a notification, which is what the sentinel-grep test asserts.
+        """
+        queue = self.ask_queue()
+        if queue is None:
+            return {"ok": False, "error": "this session's runtime predates queued asks"}
+        record = queue.find(ask_id)
+        if record is None:
+            return {"ok": False, "error": _ask_refusal_copy(None)}
+        refusal = _ask_refusal_copy(record)
+        if refusal:
+            return {"ok": False, "error": refusal}
+        merged = {str(k): [str(v) for v in (vals or ())] for k, vals in answers.items()}
+        if any(q.get("secret") for q in (record.get("questions") or ())):
+            # The same hop the blocking path used: it keeps the raw bytes out of
+            # the model's context by substituting the key name, announces the new
+            # key to later turns, and reports a refused store as NOT PROVIDED.
+            from local_operator.asks.render import apply_secret_answers
+
+            merged.update(
+                apply_secret_answers(
+                    record.get("questions") or (),
+                    answers,
+                    variables=self._variables,
+                    journal_credential=self.journal_credential_change,
+                )
+            )
+        return queue.respond(ask_id, merged, by=by)
+
+    def decline_ask(self, ask_id: str, *, by: str = "unknown") -> dict[str, Any]:
+        """Decline a queued ask — today's Esc, made explicit (design D5)."""
+        queue = self.ask_queue()
+        if queue is None:
+            return {"ok": False, "error": "this session's runtime predates queued asks"}
+        return queue.decline(ask_id, by=by)
+
+    def dismiss_ask(self, ask_id: str, *, by: str = "unknown") -> dict[str, Any]:
+        """Remove a timed-out ask from the view. Injects nothing, ever."""
+        queue = self.ask_queue()
+        if queue is None:
+            return {"ok": False, "error": "this session's runtime predates queued asks"}
+        return queue.dismiss(ask_id, by=by)
 
     def abort(self, reason: str = "interrupted") -> None:
         """Abort the running turn; the engine emits an aborted agent_end.
@@ -11746,6 +12001,12 @@ class Session:
             # ``--wake`` asks for attention, and it gets the attention of the
             # turn already running.
             await self._drain_spooled_peer_inbox()
+            # Anything the ask log owes is delivered at the same boundary and for
+            # the same reason: a row written while this session was cold (an
+            # answer that arrived with no runtime, or a deadline that passed) must
+            # land before the turn's own message so the model reads it in order.
+            # A no-op with the flag off — ``ask_queue()`` is ``None``.
+            await self.reconcile_asks()
 
             # Inventory changes deferred from a `web_*.enabled` edit land HERE,
             # before the tool context and the loop config are built for this
@@ -12463,6 +12724,11 @@ class Session:
             resolve_internal_url=self._skill_resolver,
             request_approval=self._tool_approval_gate(),
             ask_user=self._ask_user,
+            # THE QUEUED-ASK DOOR (design §2.1). ``None`` on the blocking path
+            # (the flag is off, or no host installed an ask surface), which is
+            # how ``execute_ask`` decides: a callable here means enqueue-and-
+            # receipt, an absent one means today's await.
+            enqueue_ask=self._ask_enqueue_callable(),
             # The BOUND METHOD, not its value: this context is a snapshot taken
             # once per turn, so a stored boolean would freeze the answer for the
             # whole turn and a re-read per call is what the browser flow needs
@@ -17751,9 +18017,9 @@ class Session:
         # catch-up prompt would render it. Their rows stay re-armed by load()
         # to now + LOAD_GRACE_MS, so within TTL they follow the normal hidden
         # grace path, and a stale one is retired by the delivery checks.
-        from local_operator.wakes.store import is_patience_row
+        from local_operator.wakes.store import is_internal_wake_row
 
-        missed = [entry for entry in missed if not is_patience_row(entry["schedule"])]
+        missed = [entry for entry in missed if not is_internal_wake_row(entry["schedule"])]
         if not missed:
             return
         now = int(time.time() * 1000)
@@ -18759,7 +19025,19 @@ class Session:
         this one's schedule list; the load-time filter and the supervisor skip
         cover the other two paths.
         """
-        from local_operator.wakes.store import is_patience_row
+        from local_operator.wakes.store import is_ask_timeout_row, is_patience_row
+
+        if is_ask_timeout_row(due.schedule):
+            # A queued ask's DEADLINE. The fire carries no payload on purpose
+            # (design §2.2/§2.3, the ``WakeErrand`` rule applied to this kind):
+            # the row exists to make a runtime EXIST for the deadline, and the
+            # reconcile below is what delivers — a notice goes out only if the
+            # ask is still unanswered, so a fire for an ask that was settled in
+            # the meantime is a no-op (the patience watermark rule, with no
+            # cross-process row deletion needed).
+            if self._ask_queue is not None:
+                await self._ask_queue.reconcile()
+            return
 
         if is_patience_row(due.schedule):
             # A patience fire is a DIFFERENT delivery: hidden, watermark-checked,
@@ -19907,6 +20185,12 @@ class Session:
         # A courtesy wake still queued here was never delivered, so its count
         # must not survive to misclassify a later enqueue on a reused Session.
         self._courtesy_wake_count = 0
+        # The ask deadline timer is a task that would otherwise outlive the
+        # session and fire a reconcile against a disposed transcript. The LOG is
+        # untouched: durability is the point, and the next runtime's boot
+        # reconcile picks up whatever is still owed.
+        if self._ask_queue is not None:
+            self._ask_queue.dispose()
         # Same reasoning for a run of pre-aborted drops in progress: the run
         # ends with the session, so neither the count nor its notice latch may
         # carry into a reused Session and suppress (or fabricate) a notice for

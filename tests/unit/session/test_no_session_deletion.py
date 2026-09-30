@@ -1001,6 +1001,33 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.replace",
         "temp FILE -> pane marker",
     ),
+    # -- the queued-ask index (design docs/design/ask-nonblocking.md §2.2) ----
+    # Every path here is built from ``config_dir()/asks/`` plus a session id the
+    # caller already holds, ending in ``<session_id>.json`` — a FILE, never a
+    # directory, and never inside ``sessions/`` (the index deliberately lives
+    # outside the session directory so a cross-session read is O(sessions with
+    # asks); see ``asks/store.py``'s module docstring). ``read_index``'s unlink
+    # is the TTL sweep of exactly those stale entry FILES.
+    (
+        "local_operator/asks/store.py::write_entry",
+        "os.replace",
+        "temp FILE -> asks/<session_id>.json (index lives outside sessions/)",
+    ),
+    (
+        "local_operator/asks/store.py::write_entry",
+        "os.unlink",
+        "temp FILE -> asks/<session_id>.json",
+    ),
+    (
+        "local_operator/asks/store.py::remove_entry",
+        "<path>.unlink",
+        "asks/<session_id>.json FILE (the one cleanup calls beside the rmtree)",
+    ),
+    (
+        "local_operator/asks/store.py::read_index",
+        "<path>.unlink",
+        "stale asks/<session_id>.json FILE, swept from the same directory scan",
+    ),
     (
         "local_operator/skills/index.py::SkillIndex._persist_cache",
         "os.replace",
