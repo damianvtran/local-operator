@@ -811,3 +811,54 @@ async def test_a_target_with_a_selector_never_spools_to_the_selector(monkeypatch
     assert "not both" in result.text, result.text
     assert "held for the next runtime" not in result.text, result.text
     assert not (session_dir / "inbox.jsonl").exists()
+
+
+@pytest.mark.asyncio
+async def test_an_amber_send_offers_the_notice_hook_and_a_clean_one_does_not(monkeypatch) -> None:
+    """The tool's second-surface seam (design note B): the hook is offered the
+    settled state, the message id and the target for the two amber states, and
+    is NOT called for a delivery that went through — one row per unanswered
+    send, never a row per send."""
+    registrant, _alias, _handle = await _start_peer()
+    calls: list[dict[str, Any]] = []
+
+    async def _journal(**kwargs: Any) -> None:
+        calls.append(kwargs)
+
+    context = _context()
+    context.journal_send_notice = _journal
+    try:
+        import local_operator.mobile.peer_client as peer_client_mod
+
+        async def _timeout(*args, **kwargs):
+            raise TimeoutError
+
+        monkeypatch.setattr(peer_client_mod, "send_peer_message", _timeout)
+        result = await execute_send(
+            "slow", {"target": "peer-target", "message": "did this land?"}, None, None, context
+        )
+        assert result.is_error is False
+        assert len(calls) == 1, calls
+        call = calls[0]
+        assert call["state"] == "unconfirmed"
+        assert call["message_id"] == result.details["delivery"]["message_id"]
+        assert call["message_id"].startswith("peer-")
+        assert "peer-target" in call["target"]
+        assert call["force"] is False
+        assert "do not resend" in call["text"] and call["message_id"] in call["text"]
+
+        # A delivered send offers nothing: the result IS the receipt.
+        calls.clear()
+
+        async def _deliver(*args, **kwargs):
+            return "delivered and woke the session"
+
+        monkeypatch.setattr(peer_client_mod, "send_peer_message", _deliver)
+        result = await execute_send(
+            "ok", {"target": "peer-target", "message": "hello"}, None, None, context
+        )
+        assert result.is_error is False
+        assert result.details["delivery"]["state"] == "delivered"
+        assert calls == []
+    finally:
+        registrant.close()

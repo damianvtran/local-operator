@@ -1210,9 +1210,11 @@ def _receives_message_id(handle: Any) -> bool:
     ONE helper for both sites that must agree: the dispatch (which only passes
     the keyword when the literal parameter is present) and the record's
     capability advertisement (which claims the receiver can name its row with
-    that id and dedupe a re-send). A ``**kwargs``-only method answers no here for
-    ``_takes_input_mode``'s reason -- VAR_KEYWORD would silently swallow the id,
-    and a sender that believed the capability would duplicate its retry.
+    that id and dedupe a re-send). It takes the HANDLE, not the bound method, so
+    both call sites spell the same question. A ``**kwargs``-only method answers
+    no here for ``_takes_input_mode``'s reason -- VAR_KEYWORD would silently
+    swallow the id, and a sender that believed the capability would duplicate
+    its retry.
 
     A handle with no ``receive_peer_message`` at all answers no; the dispatch
     refuses that session with its own sentence before this matters.
@@ -6718,7 +6720,7 @@ class RuntimeServer:
             # it would drop (which would silently lose the receiver's ability to
             # dedupe a re-send), and a frame from an older sender omits the key
             # entirely, leaving this op byte-identical.
-            if _receives_message_id(receive):
+            if _receives_message_id(h):
                 fields["message_id"] = frame.get("message_id")
             return await typed_receive(**fields)
         if op == "peer_set_model":

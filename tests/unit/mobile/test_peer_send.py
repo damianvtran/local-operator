@@ -8,6 +8,7 @@ caught once for both callers.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -1268,3 +1269,438 @@ def test_the_cold_gate_accepts_only_forms_where_nothing_owns_the_session() -> No
         assert peer_send.session_id_unowned(error) is True, error
     for error in refused:
         assert peer_send.session_id_unowned(error) is False, error
+
+
+# -- the delivery outcome (design note A.3) ------------------------------------
+#
+# Everything below drives ``deliver_peer_message_outcome`` against a REAL
+# loopback control server, with the retry bounds monkeypatched down so a 5 s
+# production deadline costs milliseconds here (the timing rules in AGENTS.md:
+# never spend the real budget in a test). What is under test is the
+# CLASSIFICATION -- which observation produces which state -- and the one rule
+# the incident turned on: a send that got no answer is never reported as failed.
+
+
+def _fast_retry(monkeypatch: pytest.MonkeyPatch, *, deadline: float = 0.15) -> None:
+    """Shrink the retry bounds; the loop's SHAPE is what these tests exercise."""
+    monkeypatch.setattr(peer_send, "PEER_SEND_DEADLINE_S", deadline)
+    monkeypatch.setattr(peer_send, "PEER_SEND_RETRY_SLEEPS", (0.0, 0.0))
+
+
+def _capable(record: _Record) -> _Record:
+    record.capabilities = [peer_send.PEER_MESSAGE_ID_CAPABILITY]
+    return record
+
+
+class _FakeControlPeer:
+    """A loopback control server that answers one op per connection.
+
+    ``on_op`` gets the parsed op frame and the writer, and decides everything:
+    write the row into the target's transcript, sleep past the sender's
+    deadline, reply with an ack, an error frame, or nothing at all.
+    """
+
+    def __init__(self, on_op: Any) -> None:
+        self._on_op = on_op
+        self.connections = 0
+        self.frames: list[dict[str, Any]] = []
+        self._tasks: list[asyncio.Task[Any]] = []
+
+    async def __aenter__(self) -> "_FakeControlPeer":
+        self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+        port = self._server.sockets[0].getsockname()[1]
+        self.record = _Record(
+            os.getpid(), session_id="probe-target", conversation_name="probe-target"
+        )
+        self.record.control_port = port
+        self.record.control_key = "k"
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        self._server.close()
+        await self._server.wait_closed()
+        for task in self._tasks:
+            task.cancel()
+
+    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        self.connections += 1
+        try:
+            await reader.readline()  # the bare-key auth frame
+            frame = json.loads(await reader.readline())
+            self.frames.append(frame)
+            reply = await self._on_op(frame, writer)
+            if reply is not None:
+                writer.write(json.dumps(reply).encode() + b"\n")
+                await writer.drain()
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except (OSError, ConnectionError):
+                pass
+
+
+def _append_row(root: Path, session_id: str, message_id: str) -> None:
+    """Append the row a receiver would write for ``message_id`` to the spool.
+
+    Written as raw JSONL, the shape the sender's disk probe scans for: the id is
+    the transcript entry id and the probe looks for that literal.
+    """
+    directory = root / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / TRANSCRIPT_FILENAME).open("a", encoding="utf-8") as handle:
+        row = json.dumps({"id": message_id, "ts": 1, "type": "message", "payload": {}})
+        handle.write(row + "\n")
+
+
+@pytest.mark.asyncio
+async def test_the_incident_shape_settles_as_mailbox_with_one_row(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The reported incident, at the classification layer: the receiver commits
+    the row and its ack arrives after the sender's read deadline.
+
+    The message LANDED. The verdict must say so -- ``mailbox``, ``is_error``
+    False, the amber ``partial_result`` flag -- and it must be settled by the
+    DISK PROBE on the first attempt rather than by spending the whole retry
+    budget, which is what keeps the sender's latency where it always was.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _fast_retry(monkeypatch)
+
+    async def on_op(frame: dict[str, Any], writer: Any) -> dict[str, Any]:
+        _append_row(tmp_path, "probe-target", frame["message_id"])
+        await asyncio.sleep(0.4)  # longer than the sender's read deadline
+        return {"op": "ack", "req": frame["req"], "detail": "delivered and woke the session"}
+
+    async with _FakeControlPeer(on_op) as peer:
+        outcome = await peer_send.deliver_peer_message_outcome(
+            _capable(peer.record),
+            session_id="probe-target",
+            text="did this land?",
+            mode="mailbox",
+            wake=True,
+            sender={"pid": 1},
+        )
+        # ONE attempt: the probe found the row between attempts and stopped the
+        # loop, which is the whole reason it runs before the sleep.
+        assert outcome.attempts == 1, outcome
+        assert peer.connections == 1
+
+    assert outcome.state == peer_send.DELIVERY_MAILBOX, outcome
+    assert outcome.is_error is False
+    assert outcome.partial is True
+    assert outcome.wake == peer_send.WAKE_UNCONFIRMED
+    assert outcome.cause == "no_answer"
+    assert outcome.route == "live"
+    assert "delivered to its mailbox" in outcome.text
+    assert outcome.message_id in outcome.text
+    assert "do not send it again" in outcome.text
+    # The identity the sender minted is the one it put on the wire, and it is
+    # what the receiver's row is named by.
+    assert peer.frames[0]["message_id"] == outcome.message_id
+    rows = (tmp_path / "sessions" / "probe-target" / TRANSCRIPT_FILENAME).read_text().splitlines()
+    assert [json.loads(row)["id"] for row in rows] == [outcome.message_id]
+
+
+@pytest.mark.asyncio
+async def test_a_silent_receiver_is_unconfirmed_never_failed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No ack and no evidence on disk after every attempt is the HONEST
+    residual: the message may still arrive, so the sender may not claim it did
+    not. Exactly ``PEER_SEND_ATTEMPTS`` tries against a capable receiver."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _fast_retry(monkeypatch)
+
+    async def on_op(frame: dict[str, Any], writer: Any) -> None:
+        await asyncio.sleep(5.0)  # never answers inside the test's lifetime
+        return None
+
+    async with _FakeControlPeer(on_op) as peer:
+        outcome = await peer_send.deliver_peer_message_outcome(
+            _capable(peer.record),
+            session_id="probe-target",
+            text="anyone home?",
+            mode="mailbox",
+            wake=True,
+            sender={"pid": 1},
+        )
+        assert peer.connections == peer_send.PEER_SEND_ATTEMPTS
+
+    assert outcome.state == peer_send.DELIVERY_UNCONFIRMED, outcome
+    assert outcome.is_error is False
+    assert outcome.partial is True
+    assert outcome.attempts == peer_send.PEER_SEND_ATTEMPTS
+    assert outcome.cause == "no_answer"
+    assert "delivery UNCONFIRMED" in outcome.text
+    assert "may still arrive" in outcome.text
+    # The copy is pluralised for the number of tries that really happened.
+    assert f"after {peer_send.PEER_SEND_ATTEMPTS} attempts" in outcome.text
+
+
+@pytest.mark.asyncio
+async def test_a_refused_dial_is_the_one_proven_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A socket that never opened wrote nothing, so this is the arm allowed to
+    say nothing was delivered -- and it says it with the id and the retry."""
+    _fast_retry(monkeypatch)
+    record = _capable(_Record(os.getpid(), session_id="gone"))
+    # A port nothing is listening on: ``open_connection`` raises at once, which
+    # is the ControlDialFailed class rather than the ambiguous transport one.
+    record.control_port = 1
+
+    outcome = await peer_send.deliver_peer_message_outcome(
+        record, session_id="gone", text="hello?", mode="mailbox", wake=True, sender={"pid": 1}
+    )
+
+    assert outcome.state == peer_send.DELIVERY_FAILED, outcome
+    assert outcome.is_error is True
+    assert outcome.partial is False
+    assert outcome.cause == "dial_refused"
+    assert outcome.attempts == peer_send.PEER_SEND_ATTEMPTS
+    assert "Nothing was delivered" in outcome.text
+    assert outcome.message_id in outcome.text
+    assert "retry the send" in outcome.text
+
+
+@pytest.mark.asyncio
+async def test_a_peer_error_frame_is_a_refusal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The peer ANSWERED no (an older registrant, a handle that cannot
+    receive): nothing landed, and the peer's own sentence is the reason."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _fast_retry(monkeypatch)
+
+    async def on_op(frame: dict[str, Any], writer: Any) -> dict[str, Any]:
+        return {
+            "op": "error",
+            "req": frame["req"],
+            "message": "this session cannot receive peer messages",
+        }
+
+    async with _FakeControlPeer(on_op) as peer:
+        outcome = await peer_send.deliver_peer_message_outcome(
+            _capable(peer.record),
+            session_id="probe-target",
+            text="hello",
+            mode="mailbox",
+            wake=False,
+            sender={"pid": 1},
+        )
+        assert peer.connections == 1
+
+    assert outcome.state == peer_send.DELIVERY_FAILED, outcome
+    assert outcome.cause == "peer_refused"
+    assert "this session cannot receive peer messages" in outcome.text
+    assert "Nothing was delivered" in outcome.text
+
+
+@pytest.mark.asyncio
+async def test_a_lost_ack_on_a_quiet_send_is_delivered(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Q3: a QUIET send has no wake to be unconfirmed, so once the probe finds
+    the row the outcome is a plain delivery -- with the cause recorded, because
+    the receipt really was lost."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _fast_retry(monkeypatch)
+
+    async def on_op(frame: dict[str, Any], writer: Any) -> dict[str, Any]:
+        _append_row(tmp_path, "probe-target", frame["message_id"])
+        await asyncio.sleep(0.4)
+        return {"op": "ack", "req": frame["req"], "detail": "delivered to the mailbox"}
+
+    async with _FakeControlPeer(on_op) as peer:
+        outcome = await peer_send.deliver_peer_message_outcome(
+            _capable(peer.record),
+            session_id="probe-target",
+            text="fyi",
+            mode="mailbox",
+            wake=False,
+            sender={"pid": 1},
+        )
+
+    assert outcome.state == peer_send.DELIVERY_DELIVERED, outcome
+    assert outcome.is_error is False
+    assert outcome.partial is False
+    assert outcome.wake == peer_send.WAKE_NOT_REQUESTED
+    assert outcome.cause == "ack_lost"
+    assert "its receipt was lost" in outcome.text
+
+
+@pytest.mark.asyncio
+async def test_a_receiver_without_the_capability_gets_one_attempt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The back-compat gate (design note C). An OLD receiver has no dedupe, so a
+    retry would write the message TWICE -- the sender therefore makes one
+    attempt, never probes, and a timeout is still UNC0NFIRMED rather than
+    failed."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _fast_retry(monkeypatch)
+
+    async def on_op(frame: dict[str, Any], writer: Any) -> None:
+        await asyncio.sleep(5.0)
+        return None
+
+    async with _FakeControlPeer(on_op) as peer:
+        assert peer_send.peer_message_id_capable(peer.record) is False
+        outcome = await peer_send.deliver_peer_message_outcome(
+            peer.record,  # capabilities deliberately empty: an older build
+            session_id="probe-target",
+            text="anyone home?",
+            mode="mailbox",
+            wake=True,
+            sender={"pid": 1},
+        )
+        assert peer.connections == 1
+
+    assert outcome.state == peer_send.DELIVERY_UNCONFIRMED, outcome
+    assert outcome.attempts == 1
+    assert outcome.is_error is False
+    assert "after 1 attempt" in outcome.text
+
+
+@pytest.mark.asyncio
+async def test_a_duplicate_ack_makes_a_wake_send_a_mailbox(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A prior attempt's ack was the lost one, and the receiver proves it by
+    answering the re-send with the id it already owns. The row is durable; what
+    the sender cannot know is whether the wake that shared the lost ack ran."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _fast_retry(monkeypatch)
+    seen = {"n": 0}
+
+    async def on_op(frame: dict[str, Any], writer: Any) -> dict[str, Any]:
+        seen["n"] += 1
+        if seen["n"] == 1:
+            await asyncio.sleep(5.0)  # the first ack never arrives
+            return None
+        return {
+            "op": "ack",
+            "req": frame["req"],
+            "detail": "duplicate — this message is already delivered",
+            "delivery": {
+                "message_id": frame["message_id"],
+                "committed": True,
+                "queued": False,
+                "duplicate": True,
+            },
+        }
+
+    async with _FakeControlPeer(on_op) as peer:
+        outcome = await peer_send.deliver_peer_message_outcome(
+            _capable(peer.record),
+            session_id="probe-target",
+            text="gates are green",
+            mode="mailbox",
+            wake=True,
+            sender={"pid": 1},
+        )
+
+    assert outcome.state == peer_send.DELIVERY_MAILBOX, outcome
+    assert outcome.wake == peer_send.WAKE_UNCONFIRMED
+    assert outcome.cause == "ack_lost"
+    assert outcome.is_error is False
+
+
+@pytest.mark.asyncio
+async def test_the_receipt_line_is_unchanged_for_a_plain_delivery(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The common path stays byte-stable: an ack is the receipt, and the target
+    prefix is the one every send has always used."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _fast_retry(monkeypatch)
+
+    async def on_op(frame: dict[str, Any], writer: Any) -> dict[str, Any]:
+        return {
+            "op": "ack",
+            "req": frame["req"],
+            "detail": "delivered and woke the session",
+            "delivery": {
+                "message_id": frame["message_id"],
+                "committed": True,
+                "queued": False,
+                "duplicate": False,
+            },
+        }
+
+    async with _FakeControlPeer(on_op) as peer:
+        outcome = await peer_send.deliver_peer_message_outcome(
+            _capable(peer.record),
+            session_id="probe-target",
+            text="gates are green",
+            mode="mailbox",
+            wake=True,
+            sender={"pid": 1},
+        )
+
+    assert outcome.state == peer_send.DELIVERY_DELIVERED, outcome
+    assert outcome.wake == peer_send.WAKE_ACKED
+    assert outcome.cause == ""
+    assert outcome.is_error is False
+    assert outcome.partial is False
+    assert outcome.text == (
+        f"→ probe-target (pid {os.getpid()}): delivered and woke the session"
+    )
+
+
+def test_the_delivered_line_is_the_receipt_and_the_failed_line_is_the_only_claim() -> None:
+    """The two text shapes, asserted on the builder's own output: every state
+    but ``failed`` keeps the arrow receipt, and only ``failed`` may say nothing
+    was delivered."""
+    delivered = peer_send.DeliveryOutcome(
+        peer_send.DELIVERY_DELIVERED,
+        "ack",
+        "peer-0",
+        peer_send.WAKE_ACKED,
+        1,
+        "",
+        "live",
+        "p (pid 1)",
+    )
+    failed = peer_send.DeliveryOutcome(
+        peer_send.DELIVERY_FAILED,
+        "pid 1 refused the connection",
+        "peer-0",
+        peer_send.WAKE_UNCONFIRMED,
+        3,
+        "dial_refused",
+        "live",
+        "p (pid 1)",
+    )
+    assert delivered.text == "→ p (pid 1): ack"
+    assert delivered.is_error is False and delivered.partial is False
+    assert failed.text.startswith("could not deliver to p (pid 1): pid 1 refused the connection.")
+    assert "Nothing was delivered (id peer-0)" in failed.text
+    assert "retry" in failed.text
+    assert failed.is_error is True
+    # The persisted payload and the live one are the SAME dict shape.
+    assert set(failed.details()) == {
+        "state",
+        "message_id",
+        "wake",
+        "attempts",
+        "cause",
+        "route",
+    }
+
+
+def test_probe_transcript_for_reads_a_bounded_tail(tmp_path: Path) -> None:
+    """The probe's bound is real: an id older than the tail is reported ABSENT,
+    which reads as unknown, never as failed."""
+    directory = tmp_path / "sessions" / "s"
+    directory.mkdir(parents=True)
+    path = directory / TRANSCRIPT_FILENAME
+    path.write_text(json.dumps({"id": "peer-" + "a" * 32}) + "\n")
+    assert peer_send.probe_transcript_for("peer-" + "a" * 32, "s", root=tmp_path) is True
+    assert peer_send.probe_transcript_for("peer-" + "b" * 32, "s", root=tmp_path) is False
+    missing = peer_send.probe_transcript_for("peer-" + "a" * 32, "no-such-session", root=tmp_path)
+    assert missing is False
+    # Past the bound the old row is out of the window.
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(("x" * 1024 + "\n") * (peer_send.PEER_SEND_PROBE_TAIL_BYTES // 1024 + 2))
+    assert peer_send.probe_transcript_for("peer-" + "a" * 32, "s", root=tmp_path) is False

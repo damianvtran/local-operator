@@ -760,3 +760,192 @@ async def test_the_first_real_turn_consumes_a_leftover_spool(tmp_path):
     await wait_for(lambda: len(stream.requests) == 2)
     assert [line.text for line in drain_inbox(directory)] == ["later note"]
     await session.dispose()
+
+
+# -- sender-minted identity and the duplicate gate -----------------------------
+
+
+def _entry_ids(session) -> list[str]:
+    return [e.id for e in session._transcript.entries()]
+
+
+@pytest.mark.asyncio
+async def test_a_re_send_of_the_same_message_id_appends_nothing(tmp_path):
+    """The idempotence the sender's retry depends on (design note C).
+
+    The second delivery of one ``peer-…`` id is answered as a duplicate: no
+    second transcript row, no second in-context copy, and the ack says which of
+    the two it was so the sender can classify a lost first acknowledgment.
+    """
+    stream = ScriptedStream([])
+    session = make_session(tmp_path, stream)
+    message_id = "peer-" + "a" * 32
+
+    first = await session.receive_peer_message(
+        "one send", mode="mailbox", wake=False, sender={"pid": 1}, message_id=message_id
+    )
+    second = await session.receive_peer_message(
+        "one send", mode="mailbox", wake=False, sender={"pid": 1}, message_id=message_id
+    )
+
+    assert len(_peer_rows(session)) == 1
+    assert first.delivery == {
+        "message_id": message_id,
+        "committed": True,
+        "queued": False,
+        "duplicate": False,
+    }
+    assert second.delivery == {
+        "message_id": message_id,
+        "committed": True,
+        "queued": False,
+        "duplicate": True,
+    }
+    assert message_id in _entry_ids(session), _entry_ids(session)
+
+
+@pytest.mark.asyncio
+async def test_an_inflight_id_is_a_duplicate_before_its_row_is_durable(tmp_path):
+    """The window the transcript index cannot see.
+
+    A row can be QUEUED (a busy steer, a spawned turn) rather than persisted when
+    a re-send arrives. ``_peer_inflight_ids`` is what covers that gap, and this
+    pins the gate against a hand-held membership rather than trying to schedule
+    the interleave.
+    """
+    stream = ScriptedStream([])
+    session = make_session(tmp_path, stream)
+    message_id = "peer-" + "b" * 32
+    session._peer_inflight_ids.add(message_id)
+
+    result = await session.receive_peer_message(
+        "racing", mode="mailbox", wake=False, sender={"pid": 1}, message_id=message_id
+    )
+
+    assert result.delivery["duplicate"] is True
+    assert result.delivery["committed"] is False
+    assert _peer_rows(session) == []
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_or_missing_id_leaves_the_receiver_minting_its_own(tmp_path):
+    """An old sender, or a hand-built frame: the id is not honoured as an entry
+    id, and the row is written exactly as it was before the carriage."""
+    stream = ScriptedStream([])
+    session = make_session(tmp_path, stream)
+
+    result = await session.receive_peer_message(
+        "no id", mode="mailbox", wake=False, sender={"pid": 1}, message_id="not-a-peer-id"
+    )
+
+    assert result.delivery["message_id"] == ""
+    assert result.delivery["duplicate"] is False
+    rows = _peer_rows(session)
+    assert len(rows) == 1
+    assert rows[0].id != "not-a-peer-id"
+    assert not result.delivery["message_id"]
+
+
+@pytest.mark.asyncio
+async def test_the_inflight_marker_is_released_after_a_delivery(tmp_path):
+    """Membership is held only for the delivery itself: a later, unrelated send
+    must not be shadowed by a stale marker."""
+    stream = ScriptedStream([])
+    session = make_session(tmp_path, stream)
+    message_id = "peer-" + "c" * 32
+
+    await session.receive_peer_message(
+        "hello", mode="mailbox", wake=False, sender={"pid": 1}, message_id=message_id
+    )
+
+    assert session._peer_inflight_ids == set()
+
+
+def test_the_spool_row_carries_the_message_id_across_a_round_trip() -> None:
+    """``InboxLine.message_id`` is additive: it survives the spool's JSON, and a
+    row an older build wrote reads as an empty id (which delivers exactly as
+    before)."""
+    from local_operator.session.runtime.inbox import InboxLine
+
+    line = InboxLine(text="hi", sender={"pid": 1}, message_id="peer-" + "d" * 32)
+    round_tripped = InboxLine.from_json(json.loads(json.dumps(line.to_json())))
+    assert round_tripped.message_id == "peer-" + "d" * 32
+    legacy = InboxLine.from_json({"text": "hi", "sender": {"pid": 1}})
+    assert legacy.message_id == ""
+
+
+# -- the optional durable notice (design note B) -------------------------------
+
+
+def _notice_rows(session) -> list[Any]:
+    from local_operator.harness.message_types import SESSION_SEND_NOTICE_MESSAGE_TYPE
+
+    return [
+        e
+        for e in session._transcript.entries()
+        if e.type == "message"
+        and e.payload.get("kind") == "custom"
+        and e.payload.get("custom_type") == SESSION_SEND_NOTICE_MESSAGE_TYPE
+    ]
+
+
+@pytest.mark.asyncio
+async def test_the_send_notice_is_written_once_and_only_when_enabled(
+    tmp_path, monkeypatch
+) -> None:
+    """``send.journal_unconfirmed`` is read HERE, and the row id is derived from
+    the send's own message id -- so a retried tool call collides instead of
+    filing a second notice."""
+    from local_operator.mobile import peer_send as peer_send_mod
+
+    session = make_session(tmp_path, ScriptedStream([]))
+    message_id = "peer-" + "9" * 32
+    kwargs = dict(
+        text="delivery to peer (pid 1) is mailbox (id x); do not resend",
+        message_id=message_id,
+        state="mailbox",
+        target="peer (pid 1)",
+    )
+
+    # OFF is the shipped default: nothing is filed.
+    monkeypatch.setattr(peer_send_mod, "journal_unconfirmed_enabled", lambda: False)
+    await session.journal_send_notice(**kwargs)
+    assert _notice_rows(session) == []
+
+    monkeypatch.setattr(peer_send_mod, "journal_unconfirmed_enabled", lambda: True)
+    await session.journal_send_notice(**kwargs)
+    rows = _notice_rows(session)
+    assert len(rows) == 1
+    assert rows[0].id == f"send-notice-{message_id}"
+    payload = rows[0].payload["details"]
+    assert payload["message_id"] == message_id
+    assert payload["state"] == "mailbox"
+    # The text is carried whole, so a resumed session re-reads the advice.
+    assert "do not resend" in payload["text"]
+
+    # A second call for the same send is a no-op, not a second row.
+    await session.journal_send_notice(**kwargs)
+    assert len(_notice_rows(session)) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_aborted_send_files_the_notice_regardless_of_the_setting(
+    tmp_path, monkeypatch
+) -> None:
+    """``force`` is the one case the setting must not silence: an aborted call's
+    result may never reach the model, leaving this row as the only record that a
+    message may have landed."""
+    from local_operator.mobile import peer_send as peer_send_mod
+
+    session = make_session(tmp_path, ScriptedStream([]))
+    monkeypatch.setattr(peer_send_mod, "journal_unconfirmed_enabled", lambda: False)
+
+    await session.journal_send_notice(
+        text="unconfirmed",
+        message_id="peer-" + "8" * 32,
+        state="unconfirmed",
+        target="peer (pid 1)",
+        force=True,
+    )
+
+    assert len(_notice_rows(session)) == 1

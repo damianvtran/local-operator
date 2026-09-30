@@ -1150,7 +1150,11 @@ def _probe_found_outcome(
         message_id,
         WAKE_NOT_REQUESTED,
         attempts,
-        "ack_lost" if attempts > 1 else "no_answer",
+        # The copy for this branch IS the lost-receipt sentence (design note
+        # A.3's quiet row), so the cause names the same fact: the row landed and
+        # the acknowledgment did not. The mailbox arm above keeps ``no_answer``,
+        # which is the fact that failed THERE (the wake).
+        "ack_lost",
         route,
         target,
     )

@@ -4183,3 +4183,51 @@ def test_a_reset_flag_without_the_notice_line_names_the_state() -> None:
         for line in lines[1:]
     )
     assert "result: 2" in "\n".join(lines)
+
+
+def test_settled_send_rows_lead_with_their_delivery_state() -> None:
+    """The amber states get a word in the marker slot, and delivered does not.
+
+    A mailbox/unconfirmed send is NOT a failure, so it must not paint the error
+    ground; it also must not keep claiming the mode marker as though nothing had
+    gone unanswered. The word leads for the same reason the marker does -- the
+    row sheds from the right, so the discriminator has to be painted first.
+    """
+    card = ToolCard("t", "send", {"target": "release-owner", "message": "gates are green"})
+    card.mark_done("receipt", {"delivery": {"state": "mailbox"}, "partial_result": True})
+    row = card._build_row(100).plain
+    assert "wake unconfirmed · release-owner" in row
+    assert "wake · " not in row
+
+    card = ToolCard("t", "send", {"pid": 1, "message": "hi", "now": True})
+    card.mark_done("receipt", {"delivery": {"state": "unconfirmed"}, "partial_result": True})
+    assert "unconfirmed · " in card._build_row(100).plain
+
+    # A delivered send keeps the mode marker: that is the sender's own
+    # instruction, and "delivered" is what the row already implies.
+    card = ToolCard("t", "send", {"target": "peer", "message": "hi"})
+    card.mark_done("receipt", {"delivery": {"state": "delivered"}})
+    assert "wake · peer" in card._build_row(100).plain
+
+    # An unknown or absent state (an older core, a future value) keeps the
+    # argument row exactly as it was.
+    for details in ({}, {"delivery": {"state": "mystery"}}, {"delivery": "not a mapping"}):
+        card = ToolCard("t", "send", {"target": "peer", "message": "hi"})
+        card.mark_done("receipt", details)
+        assert "wake · peer" in card._build_row(100).plain, details
+
+
+def test_the_amber_states_do_not_stack_a_second_outcome_word() -> None:
+    """The no-double-word rule covers the new words: a mailbox row already says
+    ``wake unconfirmed``, so the partial arm must not append ``Partial`` under
+    it. The glyph carries the warning instead."""
+    from local_operator.tui.widgets.tool_card import ICON_PARTIAL, ICON_SUCCESS
+
+    card = ToolCard("t", "send", {"target": "peer", "message": "hi"})
+    card.mark_done("receipt", {"delivery": {"state": "mailbox"}, "partial_result": True})
+    row = card._build_row(100).plain
+    assert ICON_PARTIAL in row and ICON_SUCCESS not in row
+    assert "Partial" not in row
+    # Settling twice (a replay over a live row) does not stack the word either.
+    card.mark_done("receipt", {"delivery": {"state": "mailbox"}, "partial_result": True})
+    assert card._build_row(100).plain.count("wake unconfirmed") == 1
