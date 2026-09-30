@@ -698,3 +698,24 @@ def test_a_non_positive_wait_is_a_usage_error() -> None:
     # A positive one is accepted, and the documented default is the one used.
     assert parser.parse_args(["services", "restart", "--wait", "0.5"]).wait == 0.5
     assert parser.parse_args(["services", "restart"]).wait is None
+
+
+def test_restart_services_carries_the_daemon_statuses_through(monkeypatch) -> None:
+    """The supervised-daemons half's machine statuses ride this return.
+
+    ``update._services_stage`` builds the process's report line from this list;
+    without the pass-through it would have to compose the same repairs a second
+    time. The serve reload's own entries carry no daemon statuses.
+    """
+    from local_operator import update as update_mod
+
+    statuses = (update_mod.DaemonStatus("tunnel", "refreshed"),)
+    monkeypatch.setattr(
+        update_mod,
+        "refresh_daemons_after_upgrade",
+        lambda: [update_mod.DaemonRefresh("service daemons", statuses=statuses)],
+    )
+    monkeypatch.setattr(services, "reload_serve_daemons", lambda *, wait_s: [])
+    refreshes = services.restart_services()
+    assert refreshes[0].statuses == statuses
+    assert refreshes[0].name == "service daemons"
