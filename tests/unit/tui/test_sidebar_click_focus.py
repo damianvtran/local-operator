@@ -311,7 +311,7 @@ async def test_a_press_on_the_pin_cell_pins_and_never_opens_the_row(
         assert sidebar.has_focus, "the pin cell did not give the list the keyboard"
 
 
-# -- typing-home: the list never swallows text -----------------------------------
+# -- typing-home: the list hands text to the composer ------------------------------
 
 
 @pytest.mark.asyncio
@@ -486,7 +486,9 @@ async def test_a_press_with_a_live_approval_moves_no_keyboard() -> None:
 
     F4 measured the opposite on main: the press on the attached row ran the
     unguarded ``self._editor().focus()`` and the approval lost the keyboard
-    mid-question.
+    mid-question. Both halves of T13 are asserted: the keyboard moves nowhere,
+    AND the press still acts on the row it lands on (the cursor moves and the
+    switch it would start still starts) — the refusal is the keyboard's alone.
     """
     app = _app()
     async with app.run_test(size=(120, 40)) as pilot:
@@ -507,6 +509,7 @@ async def test_a_press_with_a_live_approval_moves_no_keyboard() -> None:
         assert app._focus_is_claimed() is True, "premise: the predicate says claimed"
 
         rows = _rows(app, sidebar)
+        # The attached row first: the F4 defect's own gesture.
         await pilot.click(offset=(_row_body_x(sidebar), rows["sess"]))
         for _ in range(4):
             await pilot.pause()
@@ -514,6 +517,28 @@ async def test_a_press_with_a_live_approval_moves_no_keyboard() -> None:
         assert app.focused is prompt, "a list press stole the keyboard from a live approval (F4)"
         assert not sidebar.has_focus, "the press took the keyboard for the list"
         assert not editor.has_focus, "the no-op branch handed the approval's keys to the composer"
+
+        # T13's other half, on the row that WOULD switch: the press still acts
+        # on it (cursor + the switch it starts), and only the keyboard is held.
+        started: list[str] = []
+        real_select = app._sidebar_navigation.select
+
+        def _record(session_id: str) -> Any:
+            started.append(session_id)
+            return None
+
+        app._sidebar_navigation.select = _record  # type: ignore[method-assign]
+        try:
+            await pilot.click(offset=(_row_body_x(sidebar), rows["sess-b"]))
+            for _ in range(4):
+                await pilot.pause()
+        finally:
+            app._sidebar_navigation.select = real_select  # type: ignore[method-assign]
+
+        assert sidebar.cursor_id == "sess-b", "the press no longer acts on the row"
+        assert started == ["sess-b"], "the press no longer starts the switch it lands on"
+        assert app.focused is prompt, "a press moved the keyboard off the live claim"
+        assert not sidebar.has_focus and not editor.has_focus
 
 
 @pytest.mark.asyncio
@@ -566,6 +591,41 @@ async def test_a_drawer_press_closes_the_panel_and_returns_to_the_composer() -> 
             f"{type(app.focused).__name__ if app.focused is not None else None}"
         )
         assert editor.has_focus, "the composer did not take the keyboard back"
+
+
+# -- the focused footer rung ------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(100, 30), (150, 40)])
+async def test_a_pressed_panel_shows_the_focused_footer_rung(size: tuple[int, int]) -> None:
+    """§5 intent 17: the focus-aware ladder flips with the keyboard.
+
+    Rung-for-rung at both decided sizes: resting teaches the way IN (`f9
+    focus`), the pressed panel teaches the way OUT and the pin (`esc return ·
+    f10 pin`). The design round verified both render without clipping at a
+    29-cell and a 43-cell content width; this pins the strings themselves so a
+    ladder change cannot move them silently.
+    """
+    app = _app()
+    async with app.run_test(size=size) as pilot:
+        await _boot(pilot, app)
+        sidebar = await _open_list(pilot, app, "sess", "sess-b")
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+
+        resting = sidebar.render().plain.splitlines()[-1]
+        assert "f9 focus" in resting, f"premise: the resting ladder shows the way in: {resting!r}"
+
+        rows = _rows(app, sidebar)
+        await pilot.click(offset=(_row_body_x(sidebar), rows["sess"]))
+        for _ in range(4):
+            await pilot.pause()
+        assert sidebar.has_focus, "premise: the press focused the list"
+
+        focused = sidebar.render().plain.splitlines()[-1]
+        assert focused.strip() == "esc return · f10 pin", focused
 
 
 # -- Esc and F9 keep their shipped meanings --------------------------------------
