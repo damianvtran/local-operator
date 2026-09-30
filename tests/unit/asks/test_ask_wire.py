@@ -629,3 +629,48 @@ def _record() -> Any:
         control_port=0,
         control_key="",
     )
+
+
+# ---------------------------------------------------------------------------
+# the desktop answer body (§4: the additive fields on POST .../answers)
+# ---------------------------------------------------------------------------
+
+
+def test_the_answers_body_accepts_all_three_shapes() -> None:
+    """The gate shapes are unchanged; the queued-ask shape needs no epoch."""
+    from local_operator.server.routes.desktop_sessions import Answer
+
+    approval = Answer(epoch="e1", request_id="r1", approved=True)
+    assert approval.approved is True and approval.ask_id is None
+
+    picker = Answer(epoch="e1", request_id="r1", value="yes", question_index=0)
+    assert picker.value == "yes" and picker.question_index == 0
+
+    # No epoch: an ask outlives the owner that queued it, so its answer cannot
+    # be required to name one.
+    queued = Answer(ask_id="a-1", answers={"q0": ["yes"]})
+    assert queued.epoch == "" and queued.answers == {"q0": ["yes"]}
+
+    declined = Answer(ask_id="a-1", decline=True)
+    assert declined.decline is True
+
+
+def test_the_answers_body_refuses_the_shapes_that_mix_rules() -> None:
+    from pydantic import ValidationError
+    from local_operator.server.routes.desktop_sessions import Answer
+
+    # A gate answer still needs both identity fields: the queued-ask shape
+    # loosened nothing about the two blocking ones.
+    for body in (
+        {"request_id": "r1", "approved": True},
+        {"epoch": "e1", "approved": True},
+        {"epoch": "e1", "request_id": "r1"},
+        {"epoch": "e1", "request_id": "r1", "value": "x"},
+        {"epoch": "e1", "request_id": "r1", "approved": True, "question_index": 0},
+        {"ask_id": "a-1"},
+        {"ask_id": "a-1", "answers": {}},
+        {"ask_id": "a-1", "answers": {"q0": "yes"}},
+        {"ask_id": "a-1", "answers": {"q0": ["yes"]}, "decline": True},
+    ):
+        with pytest.raises(ValidationError):
+            Answer(**body)
