@@ -1,4 +1,4 @@
-"""Skill discovery: scan ``<root>/<child>/SKILL.md`` directories into ``Skill`` records.
+"""Skill discovery: scan skill directories under each root into ``Skill`` records.
 
 On-disk format is identical to the wider Agent Skills ecosystem:
 a skill is a directory containing a ``SKILL.md`` whose YAML frontmatter
@@ -15,12 +15,24 @@ Deliberate divergences from that ecosystem (see docs/REWRITE.md §C):
   description is the *routing signal* rather than guaranteed context.
 - Roots are just the walk-up ``.local-operator/skills`` dirs plus the home
   root (see :func:`local_operator.skills.api.default_skill_roots`).
+- Each root is walked to a BOUNDED depth (default 3, see
+  :func:`skill_max_depth`), so a grouped library
+  (``<root>/<group>/<skill>/SKILL.md``) is discovered. The walk treats a
+  directory that contains a ``SKILL.md`` as a BOUNDARY: it is registered and
+  never descended into, so a skill's own ``references/``, ``scripts/``,
+  ``assets/`` or a vendored source tree can never leak further ``SKILL.md``
+  files in as independent skills (the failure mode reported against Codex in
+  openai/codex#22275). :func:`scan_skills_dir` and :func:`roots_fingerprint`
+  share one walk primitive (:func:`_walk_skill_dirs`), so what the scanner
+  sees and what the cache-invalidation fingerprint watches cannot drift.
 
 Invariants maintained for prompt-cache stability:
 
 - Output order is deterministic: ``(name.lower(), name, file_path)``.
 - Name collisions resolve to the EARLIEST root; losers are dropped with a
-  warning rather than silently shadowed.
+  warning rather than silently shadowed. Within ONE root the shallower skill
+  directory wins, and equal depths fall back to walk order (the walk is
+  breadth-first with each directory's children sorted by name).
 - The same physical ``SKILL.md`` is never loaded twice, even when two roots
   or symlinks point at it (realpath dedupe).
 """
@@ -28,7 +40,8 @@ Invariants maintained for prompt-cache stability:
 from __future__ import annotations
 
 import os
-from collections.abc import Sequence
+import stat as stat_module
+from collections.abc import Iterator, Sequence
 from pathlib import Path, PureWindowsPath
 from typing import Literal
 
@@ -152,16 +165,141 @@ def _parse_globs(raw: object) -> tuple[str, ...]:
     return tuple(item.strip() for item in items if isinstance(item, str) and item.strip())
 
 
+#: Environment override for how many path segments below a root a skill
+#: directory may sit (``1`` = today's flat ``<root>/<skill>/SKILL.md`` only).
+#: Read at CALL time rather than import time so a running session and tests
+#: see edits, and so a bad value can never break an import. This is an env var
+#: and not a ``/settings`` key on purpose: it follows the precedent of
+#: ``LOCAL_OPERATOR_SKILL_EXTRA_ROOTS`` (the subsystem's established knob), and
+#: a walk-shape switch that almost nobody needs is not worth a config schema.
+SKILL_MAX_DEPTH_ENV = "LOCAL_OPERATOR_SKILL_MAX_DEPTH"
+
+#: ``root/group/skill`` plus one further grouping level: generous enough for
+#: real libraries (vendor/product/skill) while keeping the walk -- which the
+#: fingerprint repeats on EVERY resolver miss -- cheap and the blast radius of
+#: a stray vendored tree small.
+_DEFAULT_MAX_DEPTH = 3
+
+#: Clamp range. The floor of 1 is today's flat behaviour. The ceiling exists
+#: because each extra level multiplies the directories a miss must stat, and
+#: because the deeper a ``SKILL.md`` sits below a root the likelier it is
+#: vendored noise rather than an authored skill; 5 is already far past any
+#: layout observed in the wider ecosystem.
+_MIN_MAX_DEPTH = 1
+_MAX_MAX_DEPTH = 5
+
+_SKILL_FILE = "SKILL.md"
+
+
+def skill_max_depth() -> int:
+    """The active depth cap: env override clamped to [1, 5], else the default.
+
+    Never raises: a blank, non-numeric or otherwise invalid value degrades to
+    the default rather than costing the operator skill discovery over a typo.
+    """
+    raw = os.environ.get(SKILL_MAX_DEPTH_ENV)
+    if raw is None or not raw.strip():
+        return _DEFAULT_MAX_DEPTH
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        return _DEFAULT_MAX_DEPTH
+    return max(_MIN_MAX_DEPTH, min(_MAX_MAX_DEPTH, value))
+
+
+def _walk_skill_dirs(
+    root: str | os.PathLike[str], max_depth: int
+) -> Iterator[tuple[str, os.stat_result]]:
+    """Yield ``(skill_dir, SKILL.md stat)`` for every skill directory under ``root``.
+
+    THE one walk both :func:`scan_skills_dir` and :func:`roots_fingerprint`
+    consume, so the scanner and the cache-invalidation gate cannot disagree
+    about which directories are skills; the fingerprint reuses the stat the
+    walk already paid for.
+
+    Rules, in the order they matter:
+
+    * **A directory containing ``SKILL.md`` is a boundary.** It is yielded (when
+      the file is a regular file) and NEVER descended into, whether or not the
+      skill later loads -- a skill dropped for a blank description is still a
+      boundary, otherwise its ``references/`` would leak skills the moment its
+      frontmatter broke. A ``SKILL.md`` that exists but cannot be stat'd
+      (dangling symlink, permissions) is likewise a boundary that is not
+      yielded, for the same reason.
+    * A directory WITHOUT one is a grouping folder and is descended into while
+      a skill inside it could still fall within ``max_depth``.
+    * A skill's depth is its path segments below ``root`` (direct child = 1).
+    * Dot-prefixed entries are skipped at every level; symlinked directories
+      are followed. Following symlinks is what makes ``max_depth`` (not
+      realpath tracking) the cycle guard: a loop is cut off at the cap.
+    * Breadth-first, each directory's children sorted by name. That order is
+      the within-root collision precedence: shallower first, then walk order.
+    * Never raises. A directory that vanishes or cannot be listed simply
+      contributes nothing, matching what the scanner always tolerated.
+    """
+    level: list[str] = [os.fspath(root)]
+    for depth in range(1, max_depth + 1):
+        next_level: list[str] = []
+        for parent in level:
+            try:
+                with os.scandir(parent) as it:
+                    children = sorted(it, key=lambda entry: entry.name)
+            except OSError:
+                continue
+            for child in children:
+                if child.name.startswith("."):
+                    continue
+                try:
+                    if not child.is_dir():
+                        continue
+                except OSError:
+                    continue
+                skill_md = os.path.join(child.path, _SKILL_FILE)
+                try:
+                    st = os.stat(skill_md)
+                except FileNotFoundError:
+                    # Absent -> grouping folder. A DANGLING symlink named
+                    # SKILL.md also lands here; it is a claim to be a skill dir,
+                    # so it stays a boundary.
+                    if os.path.lexists(skill_md):
+                        continue
+                    if depth < max_depth:
+                        next_level.append(child.path)
+                    continue
+                except OSError:
+                    continue
+                if stat_module.S_ISREG(st.st_mode):
+                    yield child.path, st
+                elif depth < max_depth:
+                    # A directory that merely happens to be named SKILL.md is
+                    # not a skill file, so this folder is still just a group.
+                    next_level.append(child.path)
+        level = next_level
+        if not level:
+            return
+
+
 def scan_skills_dir(
     dir: Path,
     source: str,
     include_self: bool = False,
     seen: set[str] | None = None,
 ) -> list[Skill]:
-    """Scan one root non-recursively: ``<dir>/<child>/SKILL.md``.
+    """Scan one root to a bounded depth: ``<dir>[/<group>...]/<skill>/SKILL.md``.
 
-    Dot-prefixed entries are skipped; symlinked child dirs are followed but
-    deduped through ``seen`` (a set of realpaths shared across roots by
+    The depth cap is :func:`skill_max_depth` (default 3; ``1`` restores the
+    flat ``<dir>/<child>/SKILL.md`` layout). A directory holding a ``SKILL.md``
+    is registered and never descended into -- see :func:`_walk_skill_dirs` --
+    so a skill's ``references/`` or vendored trees cannot register as skills.
+
+    Result order is the walk order: shallower skills first, equal depths by
+    breadth-first name order. That is also the within-root collision
+    precedence, since :func:`discover_skills` lets the first of two same-named
+    skills win. A flat root therefore comes back exactly as the one-level scan
+    always produced it.
+
+    Dot-prefixed entries are skipped; symlinked dirs are followed but deduped
+    through ``seen`` (a set of realpaths shared across roots by
     :func:`discover_skills`) so one physical file is never loaded twice.
     ``include_self`` additionally accepts ``<dir>/SKILL.md`` (the wider
     ecosystem only uses this for Claude-plugin manifests; kept for parity).
@@ -184,23 +322,13 @@ def scan_skills_dir(
         skills.append(skill)
 
     if include_self:
-        self_md = dir / "SKILL.md"
+        self_md = dir / _SKILL_FILE
         if self_md.is_file():
             add(self_md, dir)
 
-    try:
-        children = sorted(dir.iterdir(), key=lambda p: p.name)
-    except OSError:
-        return skills
-
-    for child in children:
-        if child.name.startswith("."):
-            continue
-        if not child.is_dir():
-            continue
-        skill_md = child / "SKILL.md"
-        if skill_md.is_file():
-            add(skill_md, child)
+    for skill_dir, _ in _walk_skill_dirs(dir, skill_max_depth()):
+        base_dir = Path(skill_dir)
+        add(base_dir / _SKILL_FILE, base_dir)
 
     return skills
 
@@ -252,9 +380,13 @@ def discover_skills(roots: Sequence[Path]) -> tuple[list[Skill], list[str]]:
 def roots_fingerprint(roots: Sequence[Path]) -> tuple[object, ...]:
     """Cheap change-detector for the skill tree, used to gate a full rescan.
 
-    Mirrors :func:`scan_skills_dir`'s one-level walk ON PURPOSE: a fingerprint
-    that walked differently from the scanner would miss changes the scanner
-    would have seen, and the entire value of this function is that an unchanged
+    Walks together with :func:`scan_skills_dir` BY CONSTRUCTION: both consume
+    :func:`_walk_skill_dirs` at :func:`skill_max_depth`, so nested skills the
+    scanner registers (and only those -- trees beyond the depth cap and
+    anything under a skill boundary are outside both) are exactly the files
+    whose ``(mtime_ns, size)`` this watches. A fingerprint that walked
+    differently from the scanner would miss changes the scanner would have
+    seen, and the entire value of this function is that an unchanged
     fingerprint is a trustworthy "do not bother scanning".
 
     Root-directory mtime alone is NOT sufficient, and that was measured rather
@@ -264,7 +396,12 @@ def roots_fingerprint(roots: Sequence[Path]) -> tuple[object, ...]:
     case, not a hypothetical -- a skill dropped at discovery for a blank
     ``description`` is absent from the mapping, so repairing its frontmatter in
     place is precisely a miss that root and child mtimes both fail to notice.
-    Hence per-file ``(mtime_ns, size)``.
+    Hence per-file ``(mtime_ns, size)``. Under a grouped library the same holds
+    one level down: a grouping folder's own mtime is deliberately NOT recorded
+    (a flat root's tuples must stay byte-identical), and does not need to be --
+    every event that changes what the scanner registers (a skill added,
+    removed, or a ``SKILL.md`` edited or created inside a group) changes some
+    watched skill file's presence, mtime or size.
 
     Never raises, and its ``OSError`` tolerance deliberately matches the
     scanner's: a directory vanishing mid-walk or a symlink loop yields a
@@ -276,6 +413,7 @@ def roots_fingerprint(roots: Sequence[Path]) -> tuple[object, ...]:
     scan it decides whether to run.
     """
     entries: list[object] = []
+    max_depth = skill_max_depth()
     for raw_root in roots:
         root = Path(raw_root).expanduser()
         try:
@@ -286,20 +424,8 @@ def roots_fingerprint(roots: Sequence[Path]) -> tuple[object, ...]:
             entries.append((str(root), None))
             continue
         entries.append((str(root), root_stat.st_mtime_ns))
-        try:
-            children = sorted(os.scandir(root), key=lambda entry: entry.name)
-        except OSError:
-            continue
-        for child in children:
-            if child.name.startswith("."):
-                continue
-            try:
-                if not child.is_dir():
-                    continue
-                skill_stat = os.stat(os.path.join(child.path, "SKILL.md"))
-            except OSError:
-                continue
-            entries.append((child.path, skill_stat.st_mtime_ns, skill_stat.st_size))
+        for skill_dir, skill_stat in _walk_skill_dirs(root, max_depth):
+            entries.append((skill_dir, skill_stat.st_mtime_ns, skill_stat.st_size))
     return tuple(entries)
 
 
@@ -369,10 +495,14 @@ _DRIVE_RESETS_JOIN = os.name == "nt"
 def is_plain_skill_name(name: str) -> bool:
     """Whether ``name`` is a single plain segment safe to join onto a root.
 
-    The shape this admits is the DIRECT child of a root that
-    :func:`scan_skills_dir` produces (it walks exactly one level), so anything
-    carrying a separator, a traversal token or a path anchor can never name
-    such a directory and must not be joined onto a root at all.
+    The shape this admits is a skill NAME as :func:`scan_skills_dir` produces
+    it: the frontmatter ``name:`` or the skill's own directory name, always a
+    single segment. The bounded-depth walk finds skills in grouping folders
+    (``<root>/<group>/<skill>``) but does not widen this grammar -- identity
+    is the frontmatter name or the leaf directory name, never the group path
+    -- so ``skill://<name>`` stays depth-independent and anything carrying a
+    separator, a traversal token or a path anchor can never name a skill
+    directory and must not be joined onto a root at all.
 
     NOT every registered skill name has this shape. :func:`_skill_from_file`
     prefers the frontmatter ``name:`` over the directory name, so a skill
@@ -392,7 +522,10 @@ def is_plain_skill_name(name: str) -> bool:
     discovery. Once the name is a single plain segment, ``root / name`` is a
     direct child of ``root`` by construction and there is nothing left to
     escape with -- the check is complete without resolving anything, which is
-    also what keeps an unsafe URL from spending filesystem work.
+    also what keeps an unsafe URL from spending filesystem work. Nested
+    candidates are never built by joining the name anywhere: the diagnostic
+    finds them by WALKING the roots and comparing each skill directory's leaf
+    name to ``name``, so the name never becomes part of a path below the root.
 
     The concrete leaks this closes: ``skill://..`` parses the traversal token
     as the URL's netloc, sailing past the guards that only inspect the PATH
@@ -516,19 +649,38 @@ def diagnose_missing_skill(name: str, roots: Sequence[Path]) -> str | None:
         # name no scan could ever have produced -- and, equally deliberately,
         # spends no probe on a malformed URL (design §3).
         return None
+    max_depth = skill_max_depth()
     found: list[tuple[Path, Path]] = []
     for raw_root in roots:
         root = Path(raw_root).expanduser()
         candidate = root / name
+        no_skill_md: str | None = None
         try:
-            if not candidate.is_dir():
-                continue
-            skill_md = candidate / "SKILL.md"
-            if not skill_md.is_file():
-                return f"A directory '{name}' exists at {root} but has no SKILL.md."
+            if candidate.is_dir():
+                skill_md = candidate / _SKILL_FILE
+                if skill_md.is_file():
+                    found.append((root, skill_md))
+                else:
+                    no_skill_md = f"A directory '{name}' exists at {root} but has no SKILL.md."
         except OSError:
-            continue
-        found.append((root, skill_md))
+            pass
+        # Nested candidates: a grouped library keeps the skill below a grouping
+        # folder, where the join above cannot reach. Find them by walking the
+        # same bounded tree discovery scans (shallow before deep, so the one an
+        # author most likely means comes first) and matching the LEAF directory
+        # name. Only directories that hold a SKILL.md are candidates: a grouping
+        # folder that happens to share the name is not a broken skill, so it
+        # earns no "has no SKILL.md" complaint -- that message stays reserved
+        # for a direct child of a root, exactly as before, and is only given
+        # when no nested skill of that name turned up in the same root.
+        nested = [
+            (root, Path(skill_dir) / _SKILL_FILE)
+            for skill_dir, _ in _walk_skill_dirs(root, max_depth)
+            if os.path.basename(skill_dir) == name and Path(skill_dir) != candidate
+        ]
+        if no_skill_md is not None and not nested:
+            return no_skill_md
+        found.extend(nested)
 
     if not found:
         return None

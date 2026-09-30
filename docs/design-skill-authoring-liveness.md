@@ -185,9 +185,10 @@ Including `(mtime_ns, size)` of each `SKILL.md` closes it and is what the 0.29 m
 figure already measures. Use that fingerprint:
 
 ```python
-# skills/discovery.py — mirrors scan_skills_dir's one-level walk on purpose:
-# a fingerprint that walked differently from the scanner would miss changes
-# the scanner would have seen.
+# skills/discovery.py — walks together with scan_skills_dir by construction
+# (both consume one shared bounded-depth walk; originally a one-level walk kept
+# in step by hand): a fingerprint that walked differently from the scanner
+# would miss changes the scanner would have seen.
 def roots_fingerprint(roots: Sequence[Path]) -> tuple: ...
 ```
 
@@ -474,11 +475,13 @@ is the reported defect and it is the one that has to be shown working.
    class. If it ever bites, gate the probe on something stat-based (a root-level
    mtime pre-check), never on a clock: a clock is what made a just-written skill
    unreadable in round 1.
-4. **Symlinks and mid-walk mutation.** `scan_skills_dir` is one level deep,
-   realpath-dedupes and swallows `OSError` (`discovery.py:173-202`), so a symlink
-   loop or a directory vanishing mid-walk yields a shorter list, never an
-   exception. The fingerprint must walk one level with the same `OSError`
-   tolerance; do not make it stricter than the scanner it gates.
+4. **Symlinks and mid-walk mutation.** `scan_skills_dir` is depth-bounded
+   (originally one level; now `LOCAL_OPERATOR_SKILL_MAX_DEPTH`, default 3, the
+   depth cap being what cuts a symlink loop off), realpath-dedupes and swallows
+   `OSError`, so a symlink loop or a directory vanishing mid-walk yields a
+   shorter list, never an exception. The fingerprint uses the same walk and so
+   the same `OSError` tolerance; do not make it stricter than the scanner it
+   gates.
 5. **Concurrent refresh from two children.** The lock serialises the refresh,
    but serialising is not sufficient on its own: the thread that loses the race
    must still RE-LOOK-UP the name after the lock releases, because the winner
