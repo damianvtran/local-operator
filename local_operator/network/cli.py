@@ -2617,6 +2617,7 @@ def _finish_pairing(
         )
     if not answer.get("admit"):
         raise MeshRefusal("not_admitted", "the other device did not admit this machine")
+    shares = [str(key) for key in (answer.get("shares") or [])]
     record = _persist_join(
         answer,
         envelope,
@@ -2626,12 +2627,33 @@ def _finish_pairing(
         peer_endpoints=handshake.peer_endpoints,
         advertised=advertised,
     )
+    lines = [
+        f"joined {record.name} ({record.network_id}) at epoch {record.epoch}",
+        f"members: {len(record.active_members())}",
+        "next: lop network peers   ·   lop sessions --all-peers",
+    ]
+    if shares:
+        lines.insert(1, f"serving here: {', '.join(shares)}")
+    # WHAT WAS OFFERED BUT NOT SERVED GETS A LINE AND A REMEDY (§5.3's dropped-key
+    # sentence). The receipt is the joiner's only view of the final set, so a key
+    # the offer promised and the result does not carry - dropped because it went
+    # missing on the owner, or reduced by the owner's person - must not just
+    # vanish between the two screens.
+    from local_operator.network.credentials import offers as offers_mod
+
+    offered = (
+        offers_mod.served_keys(list(offer_view["items"]))
+        if offer_view.get("state") == offers_mod.OFFER_LISTED
+        else []
+    )
+    missing = [key for key in offered if key not in shares]
+    if missing:
+        lines.append(
+            f"not served: {', '.join(missing)} — ask the other device to run "
+            "`lop network credential share <key> --with <device>` to lend it after the join"
+        )
     return (
-        [
-            f"joined {record.name} ({record.network_id}) at epoch {record.epoch}",
-            f"members: {len(record.active_members())}",
-            "next: lop network peers   ·   lop sessions --all-peers",
-        ],
+        lines,
         {
             "network_id": record.network_id,
             "name": record.name,
@@ -2641,6 +2663,8 @@ def _finish_pairing(
             "inviter": envelope.inviter_device_id,
             "role": record.self_role,
             "fingerprint": fingerprint,
+            # The final granted set, exactly what the receipt line above names.
+            "shares": shares,
         },
     )
 
@@ -2661,6 +2685,15 @@ def _finish_pairing(
 # (``relay._await_pairing_decision``). These are the joining device's mirror of that
 # pair of records, and the poll interval and the window are the same two numbers.
 
+
+#: §4.5's skew check: a relay that does not ECHO the ``shares`` the CLI sent is
+#: older than the CLI, and the share choices just confirmed were not applied by
+#: it. Printed (never a refusal): the admission still lands, and the operator needs
+#: to know why the receipt shows no grants, with the remedy in the line.
+_STALE_RELAY_SHARES_SENTENCE = (
+    "the running relay is an older build; restart it (`lop network serve`/launchd unit) "
+    "to apply share choices"
+)
 
 #: What phase one says when nobody answered in time. One owner, because the JSON
 #: caller, the terminal caller and the phase-two invocation all have to say it.
@@ -3211,6 +3244,7 @@ def _persist_join(
     # device's log stayed empty — no `audit.jsonl` was even created — while the
     # inviter had the full pairing history, so an incident review on the joiner
     # had nothing to read (QA round 1, F-3).
+    shares = [str(key) for key in (answer.get("shares") or [])]
     _audit(
         "member_admitted",
         network_id=record.network_id,
@@ -3221,8 +3255,15 @@ def _persist_join(
         # THE SAME DETAIL SHAPE THE INVITER WRITES for the same event, and only the
         # keys the audit writer's per-event whitelist keeps — a key the whitelist
         # does not know is dropped by the writer, so passing one here would claim a
-        # record the file never gets.
-        detail={"role": record.self_role, "member_kind": "device", "epoch": record.epoch},
+        # record the file never gets. ``grants`` is the granted count the owner's
+        # own ``member_admitted`` carries beside it: the two sides of one ceremony
+        # read the same number even when their sentences differ.
+        detail={
+            "role": record.self_role,
+            "member_kind": "device",
+            "epoch": record.epoch,
+            "grants": len(shares),
+        },
     )
     return record
 
@@ -4973,14 +5014,16 @@ def _cmd_confirm(args: argparse.Namespace) -> int:
 
     invite_id = str(chosen.get("invite_id") or "")
     admit = False
+    shares: list[str] = []
     if not args.decline:
         print(str(chosen.get("prompt") or ""))
         print(
             f"YOUR screen shows {wire.sas_display(str(chosen.get('sas') or ''))}; the other "
             f"device should show the same six digits."
         )
-        answer = _read_confirmation(args)
+        answer, shares = _read_confirmation(args, chosen)
         admit = answer == "yes"
+    chosen_shares = sorted(shares) if admit else []
     live = _relay_call(
         "net_pair_confirm",
         invite_id=invite_id,
@@ -4988,6 +5031,11 @@ def _cmd_confirm(args: argparse.Namespace) -> int:
         matched=admit,
         reason="" if admit else "declined",
         answered_by=_answered_by(args),
+        # THE SHARE CHOICES TRAVEL WITH THE ANSWER (§3.3). A relay new enough to
+        # have sent an offer understands them; one that does not answers without
+        # the echo below, and this CLI says so by name instead of quietly
+        # admitting more than the operator chose.
+        shares=chosen_shares,
         allow_no_answer=True,
     )
     if live is None:
@@ -4999,6 +5047,7 @@ def _cmd_confirm(args: argparse.Namespace) -> int:
             decision="admit" if admit else "decline",
             matched=admit,
             reason="" if admit else "declined",
+            shares=chosen_shares,
         )
         store.save_pair_decision(decision, None)
         _audit(
@@ -5012,8 +5061,16 @@ def _cmd_confirm(args: argparse.Namespace) -> int:
             "decision": decision.decision,
             "matched": admit,
             "joiner_device_id": chosen.get("joiner_device_id"),
+            "shares": list(chosen_shares),
             "relay": "not running: the answer is recorded for when it is",
         }
+    elif chosen_shares and "shares" not in live:
+        # §4.5, the one silent-loss case: the relay that answered did not report
+        # the share choices, so it is older than this CLI and the shares were not
+        # applied by it. The admission still lands — warn, never refuse; the
+        # remedy is the relay restart plus the share verb (the receipt here shows
+        # no grants, and this line is why).
+        print(_STALE_RELAY_SHARES_SENTENCE, file=sys.stderr)
     return _emit(
         args,
         {"ok": True, **live},
@@ -5039,12 +5096,27 @@ def _pending_pairings() -> list[dict[str, Any]]:
     return [pending.to_json() for pending in store.pending_pairings()]
 
 
-def _read_confirmation(args: argparse.Namespace) -> str:
-    """The human's answer, or a refusal explaining how to give one."""
+def _read_confirmation(args: argparse.Namespace, chosen: dict[str, Any]) -> tuple[str, list[str]]:
+    """The human's answer, or a refusal explaining how to give one.
+
+    Returns ``(answer, shares)``: ``answer`` is ``"yes"``/``"no"``, and
+    ``shares`` is the set to serve when the answer is yes — the offered set by
+    default (a y/N-only flow admits what the screen showed), reducible in an
+    interactive ``t`` step (§3.3's reduce-only toggles) and NEVER extendable: an
+    edit that names anything else is refused by sentence before anything is
+    written anywhere.
+    """
     import os
 
     from local_operator.network import types
+    from local_operator.network.credentials import offers as offers_mod
 
+    items = [item for item in (chosen.get("offer") or []) if isinstance(item, dict)]
+    default_shares = (
+        offers_mod.owner_default_shares(items)
+        if str(chosen.get("offer_state") or "") == offers_mod.OWNER_SENT
+        else []
+    )
     if args.sas_stdin:
         if os.environ.get(TEST_MODE_ENV) != "1":
             raise types.MeshRefusal(
@@ -5054,7 +5126,7 @@ def _read_confirmation(args: argparse.Namespace) -> str:
                 "check, and answering it from a script makes it a formality.",
             )
         typed = sys.stdin.readline().strip().lower()
-        return "yes" if typed in ("y", "yes") else "no"
+        return ("yes" if typed in ("y", "yes") else "no"), list(default_shares)
     if not _has_terminal():
         raise types.MeshRefusal(
             "confirm_needs_tty",
@@ -5063,11 +5135,51 @@ def _read_confirmation(args: argparse.Namespace) -> str:
             "terminal, or run the relay in the foreground with `lop network serve` so "
             "its own prompt appears there.",
         )
-    try:
-        typed = input("do the two devices show the same code? [y/N] ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        typed = ""
-    return "yes" if typed in ("y", "yes") else "no"
+    servable = {str(item.get("key")) for item in items if item.get("share")}
+    hint = " (t to change what will be served)" if servable else ""
+    shares = list(default_shares)
+    while True:
+        try:
+            typed = input(f"do the two devices show the same code? [y/N]{hint} ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return "no", []
+        if typed == "t" and servable:
+            shares = _edit_share_list(items, shares, chosen)
+            continue
+        break
+    return ("yes" if typed in ("y", "yes") else "no"), shares
+
+
+def _edit_share_list(
+    items: list[dict[str, Any]], shares: list[str], chosen: dict[str, Any]
+) -> list[str]:
+    """One reduce-only edit of the served set (§3.3: ``[t]`` unchecks; nothing adds).
+
+    The refusal names the key and the remedy at the one point a person can be told
+    about it: an addition — or any key not currently being served — is refused by
+    SENTENCE, before anything is written, and the ceremony stays open for a retry.
+    """
+    from local_operator.network import types
+
+    servable = {str(item.get("key")) for item in items if item.get("share")}
+    current = [key for key in shares if key in servable]
+    typed = input(
+        "type the keys to stop serving, space-separated (blank keeps all)"
+        f" [{', '.join(current) or 'none'}]: "
+    ).strip()
+    if not typed:
+        return shares
+    for key in typed.split():
+        if key not in current:
+            raise types.MeshRefusal(
+                "shares_not_offered",
+                f"{key!r} is not currently being served, and only served items can be "
+                "removed here — nothing can be added in this ceremony. To serve it, run "
+                f"`lop network credential share {key} --with "
+                f"{chosen.get('joiner_device_id')}` on this device after the join.",
+            )
+        current.remove(key)
+    return current
 
 
 def _answered_by(args: argparse.Namespace) -> str:

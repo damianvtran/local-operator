@@ -1137,7 +1137,7 @@ class PendingPairing:
     #: or ``""`` for a record from before this field — read as "no list to show".
     offer: list[dict[str, Any]] = field(default_factory=list)
     offer_state: str = ""
-    schema: int = 1
+    schema: int = 2
 
     def seconds_left(self, now: float | None = None) -> float:
         return max(0.0, self.expires_at - (time.time() if now is None else now))
@@ -1169,7 +1169,15 @@ class PairDecision:
     reason: str = ""
     answered_by: str = "human"
     answered_at: float = field(default_factory=time.time)
-    schema: int = 1
+    #: The keys the owner chose to SERVE, as a REDUCTION of the offered list on the
+    #: pending record (§3.3): the default is every ``share: true`` row, so a
+    #: y/N-only flow (the inline prompt, an older CLI) behaves as "accept what was
+    #: offered", and only removal is ever accepted — additions are refused where
+    #: this is written (``_ctl_pair_confirm``, ``_cmd_confirm``). Admission reads
+    #: this and INTERSECTS it with the offer actually sent, so an out-of-band write
+    #: cannot widen the ceremony either.
+    shares: list[str] = field(default_factory=list)
+    schema: int = 2
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -1249,7 +1257,7 @@ class PendingJoin:
     offer_state: str = ""
     error_code: str = ""
     message: str = ""
-    schema: int = 1
+    schema: int = 2
 
     def seconds_left(self, now: float | None = None) -> float:
         return max(0.0, self.expires_at - (time.time() if now is None else now))
