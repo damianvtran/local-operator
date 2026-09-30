@@ -965,7 +965,19 @@ def test_the_remote_park_copy_is_pinned() -> None:
         "on a phone paired with it. If nothing there can check a signature: run "
         "`lop operator install` on demo-laptop (one privileged step) — `lop network ready "
         "--peer demo-laptop` shows the operator_authority row (a peer too old to report "
-        "it answers `peer_too_old`, and needs `lop-update` first)."
+        "that row answers `peer_too_old`, and needs `lop-update` first)."
+    )
+    # The attached reader (the F-A shape): the lead swaps so the card does not
+    # send this reader to open the session it is looking at (design round 1,
+    # D1); everything else is the SAME sentences, not a second copy.
+    assert remote_park_card("demo-laptop", "approval", attached=True) == (
+        "Waiting for approval on demo-laptop\n"
+        "Its gate card has not reached this view — deny it here once it does. "
+        "Allowing it happens on demo-laptop (Touch ID) or on a phone paired with it. "
+        "If nothing there can check a signature: run `lop operator install` on "
+        "demo-laptop (one privileged step) — `lop network ready --peer demo-laptop` "
+        "shows the operator_authority row (a peer too old to report that row answers "
+        "`peer_too_old`, and needs `lop-update` first)."
     )
     assert remote_park_card("demo-laptop", "approval", name="Backfill the audit log") == (
         "Backfill the audit log\n" + remote_park_card("demo-laptop", "approval")
@@ -997,6 +1009,7 @@ def test_the_remote_park_banner_stays_inside_its_delivery_budget() -> None:
 def test_no_remote_park_string_offers_an_allow_from_here() -> None:
     """The one thing the copy must never imply (§8's checkable constraint)."""
     strings = [remote_park_card("demo-laptop", kind) for kind in ("approval", "ask")]
+    strings += [remote_park_card("demo-laptop", "approval", attached=True)]
     strings += [remote_park_banner("demo-laptop", kind) for kind in ("approval", "ask")]
     strings += list(remote_park_hints("demo-laptop", "approval"))
     strings += list(remote_park_hints("demo-laptop", "ask"))
