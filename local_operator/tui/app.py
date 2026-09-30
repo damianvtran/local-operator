@@ -25677,8 +25677,10 @@ class OperatorApp(App[None]):
             self._answer_live_approval_as_allowed()
         else:
             # Also clears the turn-scoped deny latch: this command's whole
-            # promise is "tools will prompt again", and a latch left armed
-            # would make that statement false for the rest of the run.
+            # promise is "write and command tools prompt before running", and a
+            # latch left armed would make that statement false for the rest of
+            # the run. (Quoted from the receipt this branch prints; the phrase
+            # was "tools will prompt again" until round 2 unified the two hosts.)
             self._allow_approvals_again()
         saved_to = ""
         problem = ""
