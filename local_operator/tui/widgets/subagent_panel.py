@@ -538,6 +538,14 @@ class JobStats:
     #: takes a ``model_spec`` override, and a child on a different model is
     #: the case these stats exist to make visible.
     model_label: str = ""
+    #: The pin the child's launch resolved, when one did (``""`` for a child
+    #: that owns no model, or a host that does not carry the stamp). Kept RAW
+    #: beside ``model_label`` rather than pre-joined: the band renders the
+    #: ``requested → effective`` badge from the pair when they disagree (see
+    #: ``model_fallback_badge``), which is the surface a silently substituted
+    #: review child has to reach, and the pair is also what a restored row has
+    #: when the runtime-only ``model_fallback`` flag is gone.
+    requested_model_label: str = ""
     context_tokens: int = 0
     context_window: int = 0
     cost: float | None = None
@@ -588,6 +596,7 @@ def job_stats(job: Any, *, default_model_label: str = "") -> JobStats:
     percentage, which is the honest degradation.
     """
     model_label = default_model_label or ""
+    requested_model_label = ""
     tokens = 0
     window = 0
     cost: float | None = None
@@ -595,6 +604,7 @@ def job_stats(job: Any, *, default_model_label: str = "") -> JobStats:
     partial = False
     try:
         model_label = str(getattr(job, "model_label", "") or default_model_label or "")
+        requested_model_label = str(getattr(job, "requested_model_label", "") or "")
         usage = getattr(job, "usage", None)
         billed = usage is not None
         if billed:
@@ -620,6 +630,7 @@ def job_stats(job: Any, *, default_model_label: str = "") -> JobStats:
         pass
     return JobStats(
         model_label=model_label,
+        requested_model_label=requested_model_label,
         context_tokens=max(tokens, 0),
         context_window=max(window, 0),
         cost=cost,
