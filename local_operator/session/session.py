@@ -2775,7 +2775,7 @@ class Session:
         #: Declared by a ONE-SHOT host at entry
         #: (``Session.declare_one_shot_exit``, called from ``run_print_mode``;
         #: v3, 2026-09-30). The session then arms the departure pair itself in
-        #: ``_run_turn_pipeline``'s ``finally`` — inside the turn lock and
+        #: ``_run_turn``'s ``finally`` — inside the turn lock and
         #: BEFORE the deferred batch is delivered — so a lock-waiter that would
         #: otherwise be admitted at the release and cut by the following
         #: disposal is held durably instead. Never set for a ``--loop``/goal
@@ -13847,7 +13847,7 @@ class Session:
         shown (nine exec sessions on 0.64.8/0.64.9). The disposal classifies
         that run now (``Session.dispose``'s post-completion arm); this
         declaration PREVENTS it: the session arms its own departure pair in
-        ``_run_turn_pipeline``'s ``finally``, inside the lock and before the
+        ``_run_turn``'s ``finally``, inside the lock and before the
         deferred batch is delivered, so the waiter is held durably instead of
         opening a doomed turn. The host-side arming stays as the belt.
 
@@ -19969,8 +19969,12 @@ class Session:
                     self.note_cut_off("disposed")
                 # THE ONE INSTRUMENT (v3, C): the next recurrence of this class
                 # self-diagnoses from the arm taken and the inputs it read,
-                # instead of needing transcript forensics.
-                logger.debug(
+                # instead of needing transcript forensics. INFO rather than
+                # DEBUG on purpose: exec/CLI logging runs at INFO and the
+                # server at WARNING (agent review round 1, MINOR-1 — a DEBUG
+                # record here measured zero lines in the exec job logs, which
+                # is the log this instrument exists for).
+                logger.info(
                     "dispose: token=%s arm=%s settled=%s dispatched=%s carried=%s "
                     "after_settled_success=%s produced=%s",
                     self._attention_run_token,
