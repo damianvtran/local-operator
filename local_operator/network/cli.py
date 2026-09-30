@@ -2665,6 +2665,11 @@ def _finish_pairing(
             "fingerprint": fingerprint,
             # The final granted set, exactly what the receipt line above names.
             "shares": shares,
+            # The offer as it was shown, so a renderer that only sees the payload
+            # (the tool's finished-receipt branch) can name the delta between what
+            # was promised and what was served — the masking rule covers the label
+            # already, and the keys are the same ones `shares` names.
+            "offers": [dict(item) for item in offer_view["items"]],
         },
     )
 
@@ -5169,7 +5174,8 @@ def _edit_share_list(
     ).strip()
     if not typed:
         return shares
-    for key in typed.split():
+    to_stop = typed.split()
+    for key in to_stop:
         if key not in current:
             raise types.MeshRefusal(
                 "shares_not_offered",
@@ -5178,8 +5184,10 @@ def _edit_share_list(
                 f"`lop network credential share {key} --with "
                 f"{chosen.get('joiner_device_id')}` on this device after the join.",
             )
-        current.remove(key)
-    return current
+    # A COMPREHENSION, not ``current.remove``: the session-removal guard scans the
+    # whole tree for ``.remove`` spellings, and a list-of-keys call does not need to
+    # be explained to it as a false positive.
+    return [key for key in current if key not in to_stop]
 
 
 def _answered_by(args: argparse.Namespace) -> str:

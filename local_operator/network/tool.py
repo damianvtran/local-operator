@@ -879,6 +879,23 @@ def _render(action: str, payload: dict[str, Any]) -> list[str]:
             f"{payload.get('members')} member(s)",
             f"fingerprint {payload.get('fingerprint')}",
         ]
+        shares = [str(key) for key in payload.get("shares") or []]
+        if shares:
+            lines.insert(1, f"serving here: {', '.join(shares)}")
+        offered = [
+            str(item.get("key"))
+            for item in payload.get("offers") or []
+            if isinstance(item, dict) and item.get("share")
+        ]
+        missing = [key for key in offered if key not in shares]
+        if missing:
+            # The receipt's own dropped-key sentence, mounted on the renderer that
+            # has the final set AND the offer: the joiner's only view of the delta.
+            lines.append(
+                f"not served: {', '.join(missing)} — ask the other device to run "
+                "`lop network credential share <key> --with <device>` to lend it "
+                "after the join"
+            )
         return lines
     if action == "sessions":
         rows = payload.get("sessions")
