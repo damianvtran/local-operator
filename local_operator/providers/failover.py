@@ -3017,6 +3017,7 @@ def _pinned_exhaustion_error(
     pin_selector: str,
     reported: ProviderError | None,
     blocked: Sequence[str],
+    same_family_available: bool,
 ) -> ProviderError:
     """The legible refusal a STRICT pinned route raises when it is exhausted.
 
@@ -3028,23 +3029,31 @@ def _pinned_exhaustion_error(
     is explicit: the text quotes a provider message, and letting the
     classifier re-derive a kind from that quote could dress the refusal as the
     provider's own quota error.
+
+    ``same_family_available`` distinguishes the three exhaustion shapes so
+    the note never lies about what was configured: same-family targets tried
+    and spent, cross-vendor targets refused by policy, or neither configured.
     """
     if reported is None:
         cause = "every route that could serve it failed"
     else:
         status = f" HTTP {reported.status}" if reported.status else ""
         cause = f"{reported.kind or 'failure'}{status}: {reported.message}"
+    notes: list[str] = []
+    if same_family_available:
+        notes.append("Every configured same-family fallback was tried and could not serve it.")
     if blocked:
-        remedy_note = (
-            f" A cross-vendor fallback ({', '.join(blocked)}) is configured but"
-            " refused by retry.pinnedFallback=same-family."
+        notes.append(
+            f"A cross-vendor fallback ({', '.join(blocked)})"
+            " is configured but refused by retry.pinnedFallback=same-family."
         )
-    else:
-        remedy_note = " No same-family fallback target is configured."
+    if not notes:
+        notes.append("No same-family fallback target is configured.")
     return ProviderError(
         None,
         f"pinned model {pin_selector} could not stay on its pin: {cause}."
-        f"{remedy_note} Add a same-family target to retry.fallbackChains, or set"
+        f" {' '.join(notes)}"
+        " Add a same-family target to retry.fallbackChains, or set"
         " retry.pinnedFallback: cross-family to allow a cross-vendor fallback"
         " for pinned children.",
         retryable=False,
@@ -3505,6 +3514,7 @@ async def stream_with_failover(
     # policy-forced failure as a bare provider error.
     pinned_strict = False
     pinned_blocked: list[str] = []
+    pinned_family_available = False
     if retry.enabled and retry.model_fallback:
         chain = resolve_chain(primary_selector, retry.fallback_chains)
         if chain:
@@ -3520,6 +3530,10 @@ async def stream_with_failover(
                 # and the message boundary cannot form two opinions about
                 # which targets may serve a pinned child.
                 pinned_strict = retry.pinned_fallback != PINNED_FALLBACK_CROSS_FAMILY
+                pinned_family_available = any(
+                    pinned_family_rank(pin_selector, candidate.selector) < PIN_FAMILY_CROSS_VENDOR
+                    for candidate in candidates
+                )
                 if pinned_strict:
                     pinned_blocked = [
                         candidate.selector
@@ -4449,7 +4463,9 @@ async def stream_with_failover(
         # target: the child fails VISIBLY on its pin instead of silently
         # running on another vendor's model. The refusal names the pin, the
         # cause and both remedies (see `_pinned_exhaustion_error`).
-        error = _pinned_exhaustion_error(pin_selector, reported, pinned_blocked)
+        error = _pinned_exhaustion_error(
+            pin_selector, reported, pinned_blocked, pinned_family_available
+        )
         if reported is not None:
             raise error from reported
         raise error
