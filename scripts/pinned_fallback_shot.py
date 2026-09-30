@@ -29,8 +29,9 @@ fallback notice the relay emits, built by the production helper when the tree
 has it (the pre-fix tree does not, so only the after side exists for that
 frame).
 
-Pinned so a pair differs only where the code does: ``time.time``, the spinner
-frame, and the update probe, exactly as ``busy_roster_shot.py`` pins them.
+Pinned so a pair differs only where the code does: ``time.time``, the dock's
+and the title's spinner frames, and the update probe, exactly as
+``busy_roster_shot.py`` pins them.
 """
 
 from __future__ import annotations
@@ -289,14 +290,20 @@ async def main(out: str, size: tuple[int, int], *, notice: bool, dock: bool) -> 
         band = app.query_one("#band")
         width = int(app.size.width)
         band_text = app._status.render_text(width).plain if app._status is not None else ""
+        screen = app.screen
         mode = "notice" if notice else ("dock" if dock else "page")
         print(
             json.dumps(
                 {
                     "tree": local_operator.__file__,
                     "mode": mode,
+                    "grid": [int(app.size.width), int(app.size.height)],
                     "band_region": list(band.region),
                     "band_text": band_text,
+                    "band_cells": len(band_text),
+                    "screen_size": list(screen.size),
+                    "screen_virtual_size": list(screen.virtual_size),
+                    "vscrollbar": bool(screen.show_vertical_scrollbar),
                     "subagent_panel": list(panel.region) if panel is not None else None,
                     "panel_rows": panel.predicted_rows() if panel is not None else None,
                     "summary": panel.summary_text() if panel is not None else None,
