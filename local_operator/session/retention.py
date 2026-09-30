@@ -114,6 +114,14 @@ _SIDECAR_NAMES = frozenset(
         # remembers. It is NOT an activity file: its writes ride a turn the
         # transcript has already stamped.
         "turn-journal.json",
+        # The queued-ask event log (``asks/store.py``, design §2.2). It is
+        # BOOKKEEPING for the activity clock and the size budget — the clock is
+        # moved by the transcript, and an ask log only ever grows in step with
+        # the asks the TRANSCRIPT already records as tool calls. It is
+        # deliberately not what keeps a session alive: ``cleanup._has_open_asks``
+        # is the guard for that, and it asks about the asks rather than about the
+        # file, so a session whose asks are all settled can still be swept.
+        "asks.jsonl",
     }
 )
 

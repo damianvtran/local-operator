@@ -333,6 +333,25 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
             raise ValueError("request_id must be a non-empty string")
         if not isinstance(frame.get("value"), str):
             raise ValueError("value must be a string")
+    elif op in ("ask_respond", "ask_decline", "ask_dismiss"):
+        # THE QUEUED-ASK FAMILY (design docs/design/ask-nonblocking.md §2.4).
+        # Validated here so a malformed body is refused at the wire rather than
+        # half-applied at the dispatch: `ask_respond` is ATOMIC per ask (one
+        # answer for all its questions), which is what removes the per-question
+        # race the blocking path had, so a partial map must not get through.
+        if not isinstance(frame.get("ask_id"), str) or not frame["ask_id"]:
+            raise ValueError("ask_id must be a non-empty string")
+        if "by" in frame and not isinstance(frame.get("by"), str):
+            raise ValueError("by must be a string")
+        if op == "ask_respond":
+            answers = frame.get("answers")
+            if not isinstance(answers, dict):
+                raise ValueError("answers must be a map of question id to a list of strings")
+            for key, value in answers.items():
+                if not isinstance(key, str):
+                    raise ValueError("answers keys must be strings")
+                if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+                    raise ValueError("answers values must be lists of strings")
     elif op in ("slash", "slash_result"):
         if not isinstance(frame.get("command"), str) or not frame["command"]:
             raise ValueError("command must be a non-empty string")
@@ -449,6 +468,15 @@ ControlOp = Literal[
     "resume_session",  # {session_id} — rebind the runtime to another transcript
     "approval_answer",  # {request_id, approved, remember}
     "ask_answer",  # {request_id, value}
+    # The QUEUED-ASK family (design §2.4). Additive, so NO ``PROTOCOL_VERSION``
+    # bump for the same reason ``peer_message`` gives: an OLD registrant answers
+    # ``error: unknown op`` gracefully, which the surfaces render as "this
+    # session's runtime predates queued asks". ``ask_respond`` is atomic per ask
+    # (whole-ask answers), ``ask_decline`` is the explicit no/decide-yourself,
+    # and ``ask_dismiss`` is a view-only removal that injects nothing.
+    "ask_respond",  # {ask_id, answers: {qid: [str]}, by?}
+    "ask_decline",  # {ask_id, by?}
+    "ask_dismiss",  # {ask_id, by?}
     "snapshot",  # {} — ask for a fresh welcome-equivalent projection
     "ping",  # {} — liveness probe; answered with {"op": "ack", ...}
     # v2 (attach + reaping): phone SSE subscriber transitions, daemon ->

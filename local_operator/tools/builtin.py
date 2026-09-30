@@ -24143,6 +24143,28 @@ class AskParams(BaseModel):
         description="The questions to ask, put to the user one screen at a time.",
     )
 
+    # The `timeout` field ships with the queued-ask engine (design
+    # docs/design/ask-nonblocking.md §2.1) and its FULL calibration copy — the
+    # "1 h routine / 5-10 min urgent / up to 24 h" table and the reasoning — is
+    # deliberately NOT here: §9 puts the description rewrite in the flip PR, in
+    # the same change that makes the deadline live. What is advertised is what is
+    # true on both sides of the flip: the unit, the bounds and the default.
+    #
+    # An out-of-range value is REJECTED, never clamped (see `_bounds_error`): the
+    # model calibrates from the rejection, and a silent clamp teaches it nothing
+    # while it keeps asking for an hour where it meant five minutes.
+    timeout: int | str | None = Field(
+        default=None,
+        description=(
+            "How long the question stays open: an integer number of SECONDS, or a "
+            'duration string such as "30m" or "2h". Default 3600 (1 hour). '
+            "Minimum 120 (2 minutes); maximum 86400 (24 hours). A shorter window "
+            "(300-900 s) says an answer is wanted soon; a longer one says the "
+            "question is genuinely non-urgent. Values outside the bounds are "
+            "rejected rather than clamped."
+        ),
+    )
+
 
 #: What the tool reports when the user closed the picker without choosing.
 #: Deliberately NOT an error result: refusing to answer is a decision, and a
@@ -24404,6 +24426,45 @@ async def execute_ask(
             "wired into this session, so this process cannot put one in front of the "
             "operator. A delegated child's route to them is `hub` to its parent; "
             "otherwise decide without them.",
+        )
+    # THE QUEUED-ASK DOOR (design docs/design/ask-nonblocking.md §2.1).
+    #
+    # ``enqueue_ask`` is bound by the session only while the flag is on AND a
+    # host installed an ask surface, so its presence IS the mode: present means
+    # the ask is recorded durably and answered later (a RECEIPT comes back, and
+    # the tool returns at once); absent means today's blocking await, unchanged.
+    #
+    # THE TIMEOUT IS VALIDATED ON BOTH PATHS, above the branch, so the model
+    # gets the same bounds error whichever mode the host is in — a calibration
+    # it learns now is still true after the flip.
+    from local_operator.asks import policy as _ask_policy
+
+    bounds_error = (
+        _ask_policy.parse_timeout_param(params.timeout)[1] if params.timeout is not None else None
+    )
+    if bounds_error is not None:
+        return _error(tool_call_id, "ask", bounds_error)
+    enqueue: Any = getattr(context, "enqueue_ask", None) if context is not None else None
+    if callable(enqueue):
+        # ``Any`` is deliberate: ``callable()`` narrows an untyped callable to
+        # ``Callable[..., object]``, which would make every ``outcome.get`` below
+        # a type error on a value whose real shape is a mapping.
+        outcome: Any = enqueue(params.questions, params.timeout)
+        if not outcome.get("ok"):
+            return _error(
+                tool_call_id,
+                "ask",
+                str(outcome.get("error") or "this ask could not be queued."),
+            )
+        # NO QUESTION REPETITION: the model has just written them, and echoing
+        # them back buys nothing but tokens. What the receipt must carry is the
+        # part the model cannot know — that the answer arrives LATER, that a
+        # receipt is not permission to act, and when the deadline falls.
+        return _text(
+            tool_call_id,
+            "ask",
+            str(outcome.get("text") or ""),
+            details=dict(outcome.get("details") or {}),
         )
     answers = await ask_user(params.questions)
     if not answers or not any(any(text.strip() for text in chosen) for chosen in answers.values()):

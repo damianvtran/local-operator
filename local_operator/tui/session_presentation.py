@@ -993,6 +993,12 @@ def project_settled_rows(
     # drift from the type the writer stamps on the row.
     from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE
     from local_operator.harness.message_types import (
+        ASK_RESPONSE_MESSAGE_TYPE as ASK_RESPONSE_CUSTOM_TYPE,
+    )
+    from local_operator.harness.message_types import (
+        ASK_TIMEOUT_MESSAGE_TYPE as ASK_TIMEOUT_CUSTOM_TYPE,
+    )
+    from local_operator.harness.message_types import (
         PEER_MESSAGE_MESSAGE_TYPE,
         SESSION_BINDING_NOTICE_MESSAGE_TYPE,
         SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
@@ -1005,6 +1011,8 @@ def project_settled_rows(
     # found was a decision one surface made and the other missed
     # (docs/design/history-fold-convergence.md §3).
     from local_operator.harness.rows import (
+        ask_response_notice,
+        ask_timeout_notice,
         assistant_row_text,
         assistant_stop_notice,
         compaction_refused_notice,
@@ -1236,6 +1244,25 @@ def project_settled_rows(
             # not a receipt they can skip: a tool was denied, and denied by
             # expiry rather than by their decision — which is the same
             # distinction the transcript row itself exists to preserve.
+            if getattr(message, "custom_type", None) in (
+                ASK_TIMEOUT_CUSTOM_TYPE,
+                ASK_RESPONSE_CUSTOM_TYPE,
+            ):
+                # A queued ask settling (design docs/design/ask-nonblocking.md
+                # §2.3/§2.5). Both rows render, for the reason the gate row below
+                # exists: a custom message with no branch falls through every
+                # branch and past the role handling, so the row renders NOWHERE.
+                # The ANSWER is `notice` ink — it is a receipt — while the
+                # DEADLINE is `warning`: the user must know the agent stopped
+                # waiting, and that their silence cost a decision.
+                details = getattr(message, "details", None) or {}
+                if getattr(message, "custom_type", None) == ASK_TIMEOUT_CUSTOM_TYPE:
+                    text, kind = ask_timeout_notice(details)
+                else:
+                    text, kind = ask_response_notice(details)
+                self._append_block(NoticeBlock(text, kind=kind, fold_width=fold_width))
+                appended = True
+                continue
             if getattr(message, "custom_type", None) == GATE_TIMEOUT_CUSTOM_TYPE:
                 details = getattr(message, "details", None) or {}
                 self._append_block(
