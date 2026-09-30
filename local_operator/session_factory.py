@@ -1186,24 +1186,48 @@ def apply_config_run_shape(session: Any) -> bool:
     identically without anything having to remember to pass a flag. It is the
     same read ``retention.read_desktop_purpose`` serves the origin stamp with.
 
+    THE DURABLE ORIGIN IS THE SECOND WITNESS, and it is what makes this FAIL
+    CLOSED. ``read_desktop_purpose`` is deliberately tolerant (an unreadable or
+    hand-edited marker answers "no purpose"), which on its own makes a damaged
+    marker indistinguishable from an ordinary conversation -- and the one thing
+    that must never happen is a session that every listing still HIDES (its
+    ``origin.json`` is untouched) booting UNBOUNDED, with nothing anywhere saying
+    so. So the two records are read together: a purpose this build knows, OR an
+    origin of ``agent-config``, means the run's shape applies. The origin is
+    written FIRST by the create path precisely because it is the durable record,
+    and every other half of this feature (``is_user_session``, the door,
+    ``active_config_run``) already keys on it.
+
     Returns whether it applied anything, which is what the tests assert on --
     the alternative is a test that inspects private state to find out whether a
     public path ran.
 
-    NO-OP FOR EVERY OTHER SESSION, which includes every session whose marker is
-    absent, unreadable, or carries a purpose this build does not know: the
-    narrowest possible blast radius for a rule about one origin.
+    NO-OP FOR EVERY OTHER SESSION: a session with neither the purpose nor the
+    origin is an ordinary conversation, and this touches nothing.
     """
     directory = getattr(getattr(session, "transcript", None), "directory", None)
     if not directory:
         return False
+    from local_operator.resume import ORIGIN_AGENT_CONFIG, session_origin
     from local_operator.session.retention import (
         AGENTS_CONFIG_PURPOSE,
         read_desktop_purpose,
     )
 
-    if read_desktop_purpose(Path(directory)) != AGENTS_CONFIG_PURPOSE:
-        return False
+    session_dir = Path(directory)
+    recorded = read_desktop_purpose(session_dir)
+    if recorded != AGENTS_CONFIG_PURPOSE:
+        if session_origin(session_dir) != ORIGIN_AGENT_CONFIG:
+            return False
+        # The origin says run, the marker does not carry (or no longer parses to)
+        # the purpose. Shapes the run anyway, and says so: the alternative is the
+        # fail-OPEN direction, where the same damage silently hands the run the
+        # full builtin inventory while it stays hidden from every list.
+        logger.warning(
+            "a configuration run (%s) carries no usable purpose in its marker; "
+            "shaping it from its origin instead",
+            session_dir.name,
+        )
     session.set_run_preamble(AGENTS_CONFIG_PREAMBLE)
     session.set_tool_inventory(AGENTS_CONFIG_TOOLS, ops=AGENTS_CONFIG_TOOL_OPS)
     return True
