@@ -1128,6 +1128,15 @@ class PendingPairing:
     #: confirm`, `--json`) shows the SAME words. Rendering it twice is how two
     #: prompts drift apart.
     prompt: str = ""
+    #: The share list this relay SENT this joiner (the ``net_pair_offer`` items),
+    #: so the confirm screen, `--json` and the inline prompt all render the list
+    #: the joiner was shown rather than re-enumerating a store that may have
+    #: drifted. ``offer_state`` says which case this record is (see
+    #: ``credentials.offers``): ``"sent"`` (the list below is authoritative),
+    #: ``"skipped_peer_unsupported"`` (the joiner's build cannot be shown one),
+    #: or ``""`` for a record from before this field — read as "no list to show".
+    offer: list[dict[str, Any]] = field(default_factory=list)
+    offer_state: str = ""
     schema: int = 1
 
     def seconds_left(self, now: float | None = None) -> float:
@@ -1231,6 +1240,13 @@ class PendingJoin:
     result: dict[str, Any] = field(default_factory=dict)
     #: The same payload's human lines, so one rendering is not invented twice.
     result_lines: list[str] = field(default_factory=list)
+    #: The share list the owner sent (the offer frame's items), stashed by phase
+    #: one so phase two and any later reader see the same list the human saw.
+    #: ``offer_state`` is the joiner's vocabulary from ``credentials.offers``:
+    #: ``"listed"``/``"empty"`` when the owner advertised the capability,
+    #: ``"absent"`` when it did not, ``""`` for a record from before the field.
+    offers: list[dict[str, Any]] = field(default_factory=list)
+    offer_state: str = ""
     error_code: str = ""
     message: str = ""
     schema: int = 1

@@ -54,6 +54,7 @@ from local_operator.network.types import (
     HandshakeRefusal,
     HandshakeResult,
     LinkPhase,
+    MeshRefusal,
     PairingRefusal,
 )
 from local_operator.network.wire import (
@@ -89,6 +90,16 @@ TRANSCRIPT_PREFIX = b"lop-mesh-v1\x00"
 #: How long both humans have to compare and confirm. Bounded also by the
 #: invite's own ``ttl_s``; whichever fires first consumes the invite.
 PAIR_CONFIRM_TIMEOUT_S = 180.0
+
+#: How long the JOINER waits for the share list before it shows its screens
+#: without one (``handshake.pair_offer_frame``). The owner sends the offer
+#: immediately after ``welcome``, with NO human step in between, so this is a
+#: rendezvous bound rather than a person's budget — and it is deliberately small:
+#: a new owner that fails to send promptly would otherwise make every new joiner
+#: pay the bound. A frame that arrives after it is still tolerated by the joining
+#: side's first-result read, so a slow sender costs the list on screen, never the
+#: ceremony. Never extended by anything the peer says.
+PAIR_OFFER_WAIT_S = 2.0
 
 Mode = Literal["member", "join"]
 
@@ -970,6 +981,51 @@ def pair_result_frame(
     else:
         frame["reason"] = reason
     return frame
+
+
+def pair_offer_frame(*, items: list[dict[str, Any]], digest: str) -> dict[str, Any]:
+    """The owner's share list — the FIRST sealed record after ``welcome``.
+
+    Sent before anything waits on a human, so both ends can show the same list
+    before the joiner types: the owner needs it to decide what to lend, and the
+    joiner needs it to see what it will borrow. The ``digest`` is sha256 over
+    ``wire.canonical_json(items)`` (``credentials.offers.digest_of``): a checksum
+    that pins the two screens to one list, NOT a signature — the record's AEAD
+    under the pair link keys is the integrity (the frame never existed pre-auth,
+    and a tamper without those keys fails the AEAD, which is a hard refusal).
+
+    ``items`` is display data in the design's shape (``credentials/offers.py``
+    validates it on both ends): ``{key, kind, label, share}`` per row, labels
+    masked by the builder.
+    """
+    return {"op": "net_pair_offer", "items": [dict(item) for item in items], "digest": digest}
+
+
+def parse_pair_offer(frame: dict[str, Any]) -> list[dict[str, Any]]:
+    """Validate a ``net_pair_offer`` and return its items, or refuse the pairing.
+
+    STRICT, never tolerant: this is a sealed frame from a peer that proved the
+    invite, and a frame this side cannot use is a protocol fact — a silent
+    downgrade to "no offer" would erase the difference between an old peer (which
+    cannot have sent this) and a broken one. The digest is recomputed from the
+    bytes as received; a mismatch means the two ends disagree about the list,
+    which is exactly what the digest exists to catch.
+    """
+    from local_operator.network.credentials import offers
+
+    try:
+        items = offers.validate_items(frame.get("items"))
+    except ValueError as exc:
+        raise MeshRefusal(
+            "protocol_error", f"the other device's share list is not usable: {exc}"
+        ) from exc
+    digest = str(frame.get("digest") or "")
+    if not digest or digest != offers.digest_of(items):
+        raise MeshRefusal(
+            "protocol_error",
+            "the other device's share list failed its digest check; the pairing is refused",
+        )
+    return items
 
 
 def sas_matches(derived: str, typed: str) -> bool:
