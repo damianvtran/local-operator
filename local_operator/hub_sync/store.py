@@ -296,8 +296,16 @@ def apply_check(
         item["remote_fingerprint"] = remote_fp
     if verdict == "unavailable":
         if reason == "no-credential":
-            # Informational, not a failure: leave whatever state the item had, say nothing.
-            item["error_class"], item["last_error"] = None, None
+            # Not a failure (no attempt is counted, no retry is scheduled, the state is
+            # left as it was) but it IS a fact the person can act on: this item cannot be
+            # reached until they sign in. It is recorded as the item's ``error_class`` so
+            # the snapshot can carry it - including for an item whose state is
+            # ``up-to-date``, which is exactly the org-linked user with no login and would
+            # otherwise be dropped from the list with no way to learn why nothing
+            # updates (UX round 2, U11). ONE derivation: the UI reads this field and
+            # never re-derives "needs the login" from the credential or the tenant.
+            item["error_class"], item["last_error"] = "no-credential", None
+            item["error_subclass"] = None
         else:
             record_failure(
                 item, reason or "hub-error", detail, now=now, keep_state=reason == "hub-error"
@@ -323,7 +331,8 @@ def apply_check(
     else:
         item.update(state="available", classification=classification, baseline=baseline)
         item["first_seen_available_at"] = item.get("first_seen_available_at") or _iso(now)
-        if item.get("error_class") == "hub-item-missing":
+        # A successful fetch retires the two classes a fetch can leave behind.
+        if item.get("error_class") in ("hub-item-missing", "no-credential"):
             item["error_class"], item["last_error"] = None, None
     items[key] = item
     return item
@@ -419,6 +428,22 @@ def record_failure(
     if item.get("attempts", 0) >= MAX_ATTEMPTS and cls not in UNCOUNTED:
         item["auto_retry"], delay = False, None
     item["next_retry_at"] = _iso(now + timedelta(seconds=delay)) if delay is not None else None
+
+
+def clear_failure(item: dict[str, Any]) -> None:
+    """A manual retry proved the update can be computed: retire the stale failure.
+
+    Without this a manual-mode item that failed while the hub was down stayed
+    ``available`` + ``hub-error`` forever: the retry answered "ready to update"
+    (a dry run - manual mode never writes on a retry) but left the failure on the
+    row, so the UI kept offering Retry and the update itself was unreachable
+    (UX round 2, U10). The state moves to ``available`` (the item IS available: the
+    check just fetched it) so the row offers the update instead.
+    """
+
+    item.update(error_class=None, error_subclass=None, last_error=None, next_retry_at=None)
+    if item.get("state") == "failed":
+        item["state"] = "available"
 
 
 def clear_retry(item: dict[str, Any]) -> None:

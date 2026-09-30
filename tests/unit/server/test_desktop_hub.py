@@ -183,6 +183,43 @@ async def test_apply_all_and_retry(api) -> None:
     assert retried.status_code == 200
 
 
+async def test_a_manual_retry_leaves_the_row_ready_to_update_not_retryable_again(
+    api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """U10: the retry's own answer says "press it again to update" - so the row must offer it.
+
+    Manual mode makes a retry a DRY RUN: it proves the update computes and writes
+    nothing. Before this, the ``hub-error`` the item failed with stayed on the row,
+    so the mark kept saying Retry and the update was unreachable from the row.
+    """
+
+    client, root, hub = api
+    _seed(root, hub)
+    ConfigManager(root).set_config_value("hub", {"auto_update": {"agents": False}})
+    # The hub went down after the item was found (one failed check), then came back.
+    checked = await client.post("/v1/desktop/hub/updates/check", json=mutation())
+    assert checked.json()["result"]["status"]["items"][0]["state"] == "available"
+
+    def boom(_client: Any, _hub_id: str, **_kw: Any) -> tuple[str, str]:
+        raise RuntimeError("500 Server Error")
+
+    monkeypatch.setattr("local_operator.agents._fetch_hub_profile", boom)
+    failed = await client.post("/v1/desktop/hub/updates/check", json=mutation())
+    (item,) = failed.json()["result"]["status"]["items"]
+    assert item["error_class"] == "hub-error" and item["state"] == "available"
+
+    monkeypatch.setattr(
+        "local_operator.agents._fetch_hub_profile", lambda _c, h, **_k: hub.agents[h]
+    )
+    retried = await client.post(
+        "/v1/desktop/hub/updates/retry", json=mutation(kind="agent", name="coder")
+    )
+    body = retried.json()["result"]
+    assert body["reports"][0]["outcome"] == "would-merge"
+    (after,) = body["status"]["items"]
+    assert after["error_class"] is None and after["state"] == "available"
+
+
 async def test_a_conflict_is_needs_review_over_the_wire_and_prefer_settles_it(api) -> None:
     client, root, hub = api
     agents, row = _seed(root, hub)
