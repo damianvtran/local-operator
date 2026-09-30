@@ -29,17 +29,25 @@ no token material is ever stored here.
 TWO DEFAULTS THIS BUILD CARRIES (manager-decided, pending the operator's
 objection; both must stay visible in review):
 
-* **D1** — any account change is RECORDED, and (once notices ship) surfaced by
-  one operator-visible notice; the switch itself stays allowed exactly where the
-  shipped local-first invariant permits it. Never silent, but never blocked.
-* **D2** — a row with ``policy: owner`` is HONOURED by readers when present, but
-  no set-verb emits one in v1: the writer carries an existing row's policy
-  forward and defaults to ``local-first``, so this build can only ever write the
-  default.
+* **D1** — any account change is RECORDED and surfaced by ONE operator-visible
+  notice; the switch itself stays allowed exactly where the shipped local-first
+  invariant permits it. Never silent, but never blocked. As built (slice B) the
+  notice rides this recorder's ``on_change`` seam through
+  ``Session.journal_credential_binding_change``, which persists one
+  ``session_credential_binding_notice.v1`` row per change — operator-facing,
+  never model context — with its sentence rendered in
+  ``network/credentials/messages.py`` (the credential copy home).
+* **D2** — a row with ``policy: owner`` is HONOURED by readers when present
+  (``store.py``'s consult skips local for it), but no set-verb emits one in
+  v1: the writer carries an existing row's policy forward and defaults to
+  ``local-first``, so this build can only ever write the default.
 
-WHAT THIS MODULE IS NOT (this slice): it does not consult rows at resolution
-time, and it emits no user-visible copy. It is the inert row — the recorder and
-its feeds — and the enforcement/notice surface is a follow-up slice. Read the
+THE CONSULT READS THROUGH THIS MODULE (slice B, design Q3.1): ``store.py``
+installs :meth:`CredentialBindingRecorder.recall_for` as its reader — after the
+local tiers miss, and to honour ``policy: owner`` — and the factory wires the
+notice seam at attach time. The copy is NOT here: sentences are rendered in
+``network/credentials/messages.py`` and the notice row is journaled by the
+Session, so this module stays what it was — the row and its recorder. Read the
 version gate as the forward-compat story: an unknown ``version`` is treated as
 "no row" (never a defaulted value, never an error), and no reader or writer may
 ever rewrite a row's bytes — sync digests compare transcript bytes, so a
@@ -371,9 +379,12 @@ class CredentialBindingRecorder:
         #: How a LOCAL serve names the owning device (owner + name fields).
         self.device_id = device_id
         self.device_name = device_name
-        #: The seam the account-change NOTICE rides (a later slice): called
-        #: with ``(new, previous)`` after each appended row, exactly once per
-        #: append, and never allowed to fail the write that produced it.
+        #: The account-change NOTICE seam: called with ``(new, previous)``
+        #: after each appended row, exactly once per append, and never allowed
+        #: to fail the write that produced it. The factory installs the
+        #: session's journaling hook after construction
+        #: (:meth:`set_change_handler`); ``None`` — every other construction
+        #: site — journals nothing.
         self._on_change = on_change
         #: The newest candidate per provider, waiting for the flush.
         self._observed: dict[str, CredentialBinding] = {}
@@ -383,6 +394,31 @@ class CredentialBindingRecorder:
         self._rows: dict[str, CredentialBinding | None] = {}
         self._task: asyncio.Task[None] | None = None
         self._dirty = False
+
+    def set_change_handler(
+        self,
+        handler: Callable[[CredentialBinding, "CredentialBinding | None"], None] | None,
+    ) -> None:
+        """Install (or clear) the account-change notice seam after construction.
+
+        The factory builds the recorder BEFORE the Session exists, so the
+        notice handler is bound at attach time (``attach_credential_binding``);
+        tests that only exercise the write rule leave it unset and journal
+        nothing. Same best-effort contract as the constructor's ``on_change``.
+        """
+        self._on_change = handler
+
+    def recall_for(self, provider: str) -> CredentialBinding | None:
+        """The newest row this session carries for ``provider``, read FRESH.
+
+        THE CONSULT READ (installed as ``store.set_binding_reader``). Fresh
+        rather than served from ``self._rows``: the transcript is the
+        authority, and it is also the one surface carrying rows this process
+        did not write — a moved session's destination reads the row the source
+        recorded. The walk is over the in-memory entry list and stops at the
+        first match for the provider, so a resolve adds no I/O.
+        """
+        return recall_for(self._transcript, provider)
 
     # -- the two feeds ------------------------------------------------------
 

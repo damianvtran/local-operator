@@ -53,6 +53,14 @@ from local_operator.network.credentials.types import (
 
 logger = logging.getLogger(__name__)
 
+#: The row's ``policy`` value meaning "broker to this owner even though local
+#: would answer" (``session.credential_binding.POLICY_OWNER``). Spelled as a
+#: literal on purpose: this module must not import the session package at module
+#: scope (the same duck-typed-seam rule the serve sink states), and the value is
+#: WIRE FORMAT — compared against bytes a mixed fleet wrote — so treating it as a
+#: refactorable name here would be the wrong kind of coupling.
+_OWNER_POLICY = "owner"
+
 
 class CredentialSource(Protocol):
     """The broker seam this store consumes, stated as a Protocol.
@@ -167,6 +175,10 @@ class MeshAwareAuthStore:
         #: :meth:`set_serve_sink`). ``None`` — every other construction site —
         #: keeps the store byte-identical: no sink, no added work on any path.
         self._serve_sink: Callable[..., None] | None = None
+        #: Optional reader the resolution consult sites call, installed by the
+        #: session factory (see :meth:`set_binding_reader`). ``None`` — every
+        #: other construction site — reads as "no row", the pre-slice behaviour.
+        self._binding_reader: Callable[[str], Any] | None = None
 
     # -- the serve sink (the durable credential binding's feed) --------------
 
@@ -187,6 +199,70 @@ class MeshAwareAuthStore:
         byte-identical.
         """
         self._serve_sink = sink
+
+    # -- the binding reader (the consult sites, the build's slice B) ---------
+
+    def set_binding_reader(self, reader: Callable[[str], Any] | None) -> None:
+        """Install the reader the resolution consult sites call, or clear it.
+
+        THE CONSULT SEAM (memo Q3.1). After the local tiers miss — and, when the
+        newest row for a provider carries ``policy: owner`` and names another
+        device, when they did NOT miss — resolution reads the session's newest
+        ``mesh_credential_binding.v1`` row for the provider through this
+        callable. Installed beside the serve sink and for the same reason it is
+        optional and set after construction: ``build_auth_store`` is also the
+        exec-preflight and Radient construction site, whose callers have no
+        session transcript; with no reader every resolve is byte-identical to
+        the pre-slice store.
+
+        The contract is "the newest row for this provider, or ``None``". This
+        level caches nothing: the transcript the reader walks is the one thing
+        that already knows (a moved session's row arrives with it), and the
+        session's own recorder is the one writer. A raising reader is
+        debug-logged and read as "no row" — a bookkeeping read must never fail
+        a resolve.
+        """
+        self._binding_reader = reader
+
+    def _binding_for(self, provider: str) -> Any | None:
+        """The newest binding row for ``provider``, or ``None``. Never raises."""
+        reader = self._binding_reader
+        if reader is None:
+            return None
+        try:
+            return reader(provider)
+        except Exception:  # noqa: BLE001 — a bookkeeping read must not fail a resolve
+            logger.debug("credential binding read failed", exc_info=True)
+            return None
+
+    def _owner_policy_skips_local(self, binding: Any | None) -> bool:
+        """Whether the row says ``owner`` and so brokers although local would answer.
+
+        THE ONE DELIBERATE CARVE-OUT OF "LOCAL-FIRST IS NOT NEGOTIABLE" (design
+        §2.4, memo D2): a row carrying ``policy: owner`` records a choice made
+        once — "run this session on my account" — and the choice is honoured
+        afterwards, so this resolve skips the local answer and dials the broker
+        instead. The switch it implies is the point of the row; what changes is
+        that the choice is recorded rather than re-decided per call. The
+        carve-out is limited to a row that names ANOTHER device: an owner that
+        is this device IS this device's own account, and there is nothing to
+        broker to.
+
+        No builder in this slice can WRITE ``owner`` (D2: the writer carries an
+        existing row's policy forward and defaults to ``local-first``), so this
+        branch is reachable only from a future or mixed build's row — live now
+        so such a row is honoured rather than silently downgraded.
+        """
+        if binding is None:
+            return False
+        if str(getattr(binding, "policy", "")) != _OWNER_POLICY:
+            return False
+        owner = str(getattr(binding, "owner_device", "") or "")
+        return bool(owner) and owner != self._self_device()
+
+    def _self_device(self) -> str:
+        """This device's id as the placement document spells it (``""`` if unknown)."""
+        return str(getattr(self._mesh, "self_device", "") or "")
 
     def _note_borrow_serve(self, provider: str, grant: Grant) -> None:
         """Report a borrow's serve to the sink, from the ref itself (no added work).
@@ -239,7 +315,15 @@ class MeshAwareAuthStore:
         exclude_keys: Collection[str] | None = None,
         exclude_credential_ids: Collection[int] | None = None,
     ) -> str | None:
-        """LOCAL FIRST, then the broker. Returns ``None`` exactly as before."""
+        """Local first, the session's binding, then the broker. ``None`` as before.
+
+        The binding is consulted AFTER the local tiers (design §2.4) with one
+        carve-out: a row carrying ``policy: owner`` and naming another device
+        skips the local answer and brokers even so — and on failure returns
+        ``None`` rather than falling back to local, because the recorded choice
+        is being honoured, not re-litigated (see
+        :meth:`_owner_policy_skips_local`).
+        """
         key = await self._local.get_api_key(
             provider,
             session_id,
@@ -249,11 +333,21 @@ class MeshAwareAuthStore:
             exclude_keys=exclude_keys,
             exclude_credential_ids=exclude_credential_ids,
         )
-        if key:
+        binding = self._binding_for(provider)
+        if key and not self._owner_policy_skips_local(binding):
             # LOCAL-FIRST IS NOT NEGOTIABLE, and it is also what keeps a device that
-            # has its own login from quietly spending someone else's account.
+            # has its own login from quietly spending someone else's account. The
+            # carve-out above is the one recorded exception (design §2.4): the row
+            # says this session was bound to another device's account by choice.
             self._note_local_serve(provider, session_id)
             return key
+        # Local produced nothing, or the row's policy skipped it: broker. When
+        # the row names a remote owner, THAT owner is who this session resolves
+        # to — the row is not re-picked per call; the borrow rung dials the
+        # owner the placement document names, which is the same device on every
+        # path except a placement ceremony, where the new owner's serve re-binds
+        # the row rather than this resolve guessing. With no row this is the
+        # unchanged relay/placement ask (design §2.4 steps 4-5).
         grant = await self._borrow(
             key_for(provider=provider),
             provider=provider,
@@ -277,7 +371,13 @@ class MeshAwareAuthStore:
         exclude_keys: Collection[str] | None = None,
         exclude_credential_ids: Collection[int] | None = None,
     ) -> Any:
-        """Local access, else a borrowed one as an ``OAuthAccess``."""
+        """Local access, the session's binding, else a borrowed ``OAuthAccess``.
+
+        The consult mirrors :meth:`get_api_key` exactly — local tiers first, the
+        ``policy: owner`` carve-out, then the borrow rung whose target is the
+        owner of record — because a provider reaches this entry point for its
+        OAuth flows and the two must not disagree about which account serves.
+        """
         access = await self._local.get_oauth_access(
             provider,
             session_id,
@@ -287,7 +387,8 @@ class MeshAwareAuthStore:
             exclude_keys=exclude_keys,
             exclude_credential_ids=exclude_credential_ids,
         )
-        if access is not None:
+        binding = self._binding_for(provider)
+        if access is not None and not self._owner_policy_skips_local(binding):
             self._note_local_serve(provider, session_id)
             return access
         grant = await self._borrow(

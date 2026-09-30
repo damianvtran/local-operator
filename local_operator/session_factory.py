@@ -4953,7 +4953,17 @@ def attach_credential_binding(
     that serves it, off the same sticky read the boundary already takes.
     ``auth_store`` is typed loosely on purpose: on borrow-capable roots it is
     the ``MeshAwareAuthStore`` wrapper, which is not an ``AuthStore`` subclass,
-    and the seam installed is the optional ``set_serve_sink``.
+    and the seams installed are the optional ``set_serve_sink`` and
+    ``set_binding_reader``.
+
+    Slice B adds the other two directions of the same object: the store's
+    reader — resolution consults the newest row after the local tiers miss, and
+    to honour ``policy: owner`` (``store.set_binding_reader``) — and the
+    notice seam, where an account change journals ONE operator-visible row
+    through the session. The device id is bound here because it is the one fact
+    the rendering needs that neither row carries ("it is now using your login
+    on this device" vs "the owner moved"); the handler is optional for fake
+    sessions in tests.
 
     A ``None`` recorder — every root without a placement document or without an
     identity — wires nothing, so those sessions run byte-identical. Bound AFTER
@@ -4966,9 +4976,18 @@ def attach_credential_binding(
     sink = getattr(auth_store, "set_serve_sink", None)
     if callable(sink):
         sink(recorder.observe_serve)
+    reader = getattr(auth_store, "set_binding_reader", None)
+    if callable(reader):
+        reader(recorder.recall_for)
     install = getattr(stream_fn, "set_credential_binding", None)
     if callable(install):
         install(recorder)
+    notice = getattr(session, "_on_credential_binding_change", None)
+    if callable(notice):
+        # ``device_id`` is keyword-bound: the recorder's handler contract is
+        # ``(new, previous)`` — pinned by slice A's cells — and the recorder is
+        # the only object that knows which device "this device" is.
+        recorder.set_change_handler(functools.partial(notice, device_id=recorder.device_id))
     session.add_dispose_hook(recorder.drain)
 
 

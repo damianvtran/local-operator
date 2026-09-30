@@ -245,6 +245,36 @@ SESSION_MCP_RECOVERY_MESSAGE_TYPE = "session_mcp_recovery"
 #: stale "available" would send the model at tools that are not there.
 SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE = "session_mcp_unavailable"
 
+#: Custom-message type journaled by the session when the account SERVING it
+#: changes — the operator-facing half of the durable credential binding
+#: (``session/credential_binding.py``; design §2.4, slice B). One row per
+#: change, written by ``Session.journal_credential_binding_change`` from the
+#: recorder's ``on_change`` seam: a borrow that lands on a different login of
+#: the same owner, a device that gains its own login mid-session, or an
+#: ownership move. The sentence is rendered in
+#: ``network/credentials/messages.py`` (the credential copy home) and carried
+#: in ``details["text"]``, exactly like the MCP and shape notices.
+#:
+#: OPERATOR-FACING, AND THE EXCLUSION IS THE FEATURE: ``harness/render.py``'s
+#: allow-list deliberately does not name this type, so the row reaches the
+#: transcript, the TUI's notice fold and replay, and stops there. Two reasons it
+#: must not become a model turn: the notice exists because a session must not
+#: SILENTLY change accounts (the operator is the reader who can act on it), and
+#: its sentence may carry the account label, which §2.1 keeps operator-facing
+#: only. It is its own type rather than a ``session_incident`` for the reason
+#: the MCP pair states: nothing failed, no turn died, and the incident shape's
+#: "This is why the previous turn ended" tail would be a lie. It is not a
+#: ``session_credential`` either — that type is about a stored env-var
+#: credential, and is model-visible by design.
+#:
+#: PERSISTED like the MCP-unavailable warning: the row is a historical fact of
+#: the transcript — which account served, and when that changed — and the
+#: durable question ("was this session switched, and when?") is exactly what a
+#: resume must still answer. Appended with ``preserve_mtime=True`` and
+#: bookkeeping-exempt (see ``transcript.BOOKKEEPING_CUSTOM_TYPES``), so the
+#: notice never restamps the session's activity clock.
+SESSION_BINDING_NOTICE_MESSAGE_TYPE = "session_credential_binding_notice.v1"
+
 #: ``CustomMessage.custom_type`` of a peer (cross-session) message. It MUST be
 #: added to the LLM-visible custom-type allow-list in ``session.py`` (beside
 #: ``HUB_MESSAGE_TYPE``) or the human sees the transcript row but the model
