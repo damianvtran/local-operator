@@ -26704,12 +26704,14 @@ class OperatorApp(App[None]):
         wording (the live `interrupted`/error sentence): it is the live,
         turn-scoped statement and restating it as the poller's dimmer
         `Interrupted`/`Stopped with an error` would rewrite a row the user has
-        already read for no gain. The ONE exception is `retired` (2026-09-29):
-        it restates the row it adopts, because the live cut row carries the
-        classified sentence rather than the canonical receipt — already in the
-        warning tier since design round 2 D2, so the restate swaps the WORDING
-        to `RETIRED_NOTICE_TEXT` and adds the anchor (see the tail of this
-        method).
+        already read for no gain. TWO exceptions restate instead, because the
+        live row carries something the outcome supersedes: `retired`
+        (2026-09-29) swaps in `RETIRED_NOTICE_TEXT` in the warning tier (the
+        live cut row is the classified sentence from the error branch), and
+        `closed` (design D1 on #1829, 2026-09-30) swaps in
+        `CLOSED_NOTICE_TEXT` in the info tier (the live row is the aborted
+        branch's `! interrupted` — a carried, not-yet-dispatched run was
+        cancelled, so `aborted` is True — and the closure supersedes it).
 
         BOTH KINDS, and the kind must MATCH. This used to accept only
         `interrupted`, on the reasoning that an `error` outcome "is a different
@@ -26741,18 +26743,26 @@ class OperatorApp(App[None]):
         outcome was on screen the whole time.
         """
         block = self._own_interrupt_notice
-        if kind not in {"interrupted", "error", "retired"} or block is None:
+        if kind not in {"interrupted", "error", "retired", "closed"} or block is None:
             return False
         if self._own_interrupt_kind and self._own_interrupt_kind != kind:
-            # THE RETIRE-FOR-BUILD ARM'S ONE CORRESPONDENCE (2026-09-29): the
-            # live row for a cut turn is painted by the error branch — the
-            # classified end arrives as `aborted=False, error=<cut sentence>`,
-            # its tier flipped to warning for the retired token (design round
-            # 2, D2) — so a `retired` outcome must adopt THAT row. Refusing
-            # here (the pre-arm behaviour for unknown kinds) would append the
-            # poller's warning row beside the live cut row, two rows for one
-            # cut.
-            if not (kind == "retired" and self._own_interrupt_kind == "error"):
+            # TWO CORRESPONDENCES, EACH THE ARM'S OWN (2026-09-29/30). The
+            # live row for a bound-cut turn is painted by the error branch —
+            # the classified end arrives as `aborted=False, error=<cut
+            # sentence>`, its tier flipped to warning for the retired token
+            # (design round 2, D2) — so a `retired` outcome must adopt THAT
+            # row. And the live row for a carried run cancelled in the one-shot
+            # handoff is the aborted branch's `interrupted` (that end arrived
+            # `aborted=True`), which a `closed` outcome supersedes; v2's
+            # captures missed the pairing by checking `aborted=False`, so the
+            # poller appended `· Completed — runtime retired/disposed` under
+            # the live `! interrupted` — two rows for one cut (design D1 on
+            # PR #1829). Refusing either correspondence would restore that
+            # duplicate.
+            if not (
+                (kind == "retired" and self._own_interrupt_kind == "error")
+                or (kind == "closed" and self._own_interrupt_kind == "interrupted")
+            ):
                 return False
         if block not in self._transcript_view().blocks():
             # NOT consumed. Clearing the reference before this test burnt it on
@@ -26768,15 +26778,22 @@ class OperatorApp(App[None]):
         # adoption, and a later publication must get its own row.
         self._own_interrupt_notice = None
         self._own_interrupt_kind = ""
-        # RETIRED RESTATES ITS ADOPTED ROW, the one exception to the docstring's
-        # rule that an adopted row keeps its own wording. The live cut row IS
-        # the classified sentence in the error tier; adopting it unchanged
-        # would keep exactly the failure framing this arm removes. `restate`
-        # re-freezes the block in place, so one cut stays one row.
+        # ADOPTED ROWS THAT ARE RESTATED (the docstring's two exceptions).
+        # `retired`: the live cut row IS the classified sentence in the error
+        # tier; adopting it unchanged would keep exactly the failure framing
+        # this arm removes. `closed`: the live row is `! interrupted`, and the
+        # closure's whole point is that this cut is a RECEIPT, not an
+        # interruption — leaving the abort wording (or appending beside it)
+        # would re-read the handoff as a failure. `restate` re-freezes each
+        # block in place, so one cut stays one row.
         if kind == "retired":
             from local_operator.harness.rows import RETIRED_NOTICE_TEXT
 
             block.restate(RETIRED_NOTICE_TEXT, "warning")
+        elif kind == "closed":
+            from local_operator.harness.rows import CLOSED_NOTICE_TEXT
+
+            block.restate(CLOSED_NOTICE_TEXT, "info")
         block.completion_anchor_id = anchor
         return True
 
@@ -27658,8 +27675,11 @@ class OperatorApp(App[None]):
                 # closure must still paint a row when its conversation is
                 # reopened. The words AND the info tier come from
                 # ``completion_notice``'s own closed arm — nothing here may
-                # upgrade it to danger, and `_adopt_own_interrupt_notice`
-                # refuses the kind so this branch appends rather than adopts.
+                # upgrade it to danger — and since design D1 on #1829
+                # (2026-09-30) ``_adopt_own_interrupt_notice`` ADOPTS a live
+                # cut row for it (the aborted branch's `! interrupted`), so
+                # the carried case paints ONE row, not two; this append
+                # remains for the away case, where no live row was painted.
                 # ``retired`` joins too (retire-for-build arm, 2026-09-29): a
                 # bound-cut turn must paint its warning row on reopen, from
                 # ``completion_notice``'s retired arm, and its OWN adopt arm
