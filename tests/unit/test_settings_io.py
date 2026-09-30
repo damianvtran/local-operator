@@ -465,6 +465,9 @@ _NO_SINGLE_VALUE_CONSUMER: dict[str, str] = {
         "tui/settings.py derives its defaults from this registry"
     ),
     "display.dock": "tui/settings.py derives its defaults from this registry",
+    "display.turn_answer_rail": (
+        "read only by the desktop app; the TUI has no answer mark, so no code here consumes it"
+    ),
     "display.composer.band": "tui/settings.py derives its defaults from this registry",
     "display.composer.chevron": "tui/settings.py derives its defaults from this registry",
     "display.composer.model": "tui/settings.py derives its defaults from this registry",
@@ -564,6 +567,7 @@ def test_display_keys_are_flat_dotted() -> None:
         "display.notifications",
         "display.dock",
         "display.hide_cross_session",
+        "display.turn_answer_rail",
     }
 
 
@@ -629,6 +633,34 @@ def test_the_hide_cross_session_flag_round_trips_through_the_reader(
     # And back off — the same round trip, not a separate mechanism.
     settings_io.write_setting(manager, settings_io.BY_KEY["display.hide_cross_session"], False)
     assert cross_session_hidden() is False
+
+
+def test_the_turn_answer_rail_flag_defaults_off_and_round_trips(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Opt-in desktop mark: absent reads False, written flat, read back both ways.
+
+    Default OFF is the contract (the rail looked heavy, so it ships opt-in);
+    the desktop app reads this key through the settings read/write path, so the
+    key must land flat-dotted at the top level of ``values`` like its siblings.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    from local_operator.tui.settings import settings_get, settings_reload
+
+    settings_reload()
+    manager = ConfigManager(tmp_path)
+    setting = settings_io.BY_KEY["display.turn_answer_rail"]
+    assert setting.default is False
+    assert settings_get("display.turn_answer_rail") is False
+
+    settings_io.write_setting(manager, setting, True)
+    stored = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
+    assert stored["display.turn_answer_rail"] is True
+    assert "display" not in stored, "wrote a nested mapping nothing reads"
+    assert settings_get("display.turn_answer_rail") is True
+
+    settings_io.write_setting(manager, setting, False)
+    assert settings_get("display.turn_answer_rail") is False
 
 
 def test_the_narration_key_is_flat_dotted() -> None:
