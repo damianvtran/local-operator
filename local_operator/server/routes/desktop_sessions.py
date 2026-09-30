@@ -1194,6 +1194,11 @@ class Answer(Input):
                 raise ValueError("ask_id must be a non-empty string")
             if self.decline is None and self.answers is None:
                 raise ValueError("A queued-ask answer needs answers or decline")
+            if self.decline is True and self.answers is not None:
+                # Contradictory rather than merely redundant: "here are the
+                # answers" and "no answer, decide yourself" cannot both settle
+                # one ask, and the log records whichever arrives first.
+                raise ValueError("Supply either answers or decline")
             if self.answers is not None:
                 if not self.answers:
                     raise ValueError("answers must name at least one question")
