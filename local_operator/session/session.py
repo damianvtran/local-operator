@@ -2088,6 +2088,24 @@ def _without_uncarryable_audio(messages: list[Message], model: ModelSpec) -> lis
     return out
 
 
+def _arms_attention_run_output(message: AgentMessage) -> bool:
+    """Whether ``message`` is output a READER would see (v3, 2026-09-30).
+
+    The disposal's post-completion arm settles a run NEUTRALLY only while the
+    run produced nothing (see ``Session.dispose``'s
+    ``_attention_run_after_settled_success`` branch), so this predicate is the
+    ONE definition of "produced" and the two cannot drift. An assistant
+    message counts when it carries content or tool calls — the tail a run
+    cancelled before anything writes is assistant with an EMPTY content list
+    and no calls, and must NOT count. Any tool message counts: a result is
+    output however small. User messages are inputs, never output.
+    """
+    role = getattr(message, "role", None)
+    if role == "assistant":
+        return bool(getattr(message, "content", None)) or bool(getattr(message, "tool_calls", None))
+    return role == "tool"
+
+
 def _pruned_ids(messages: Sequence[AgentMessage]) -> set[str]:
     """Ids of messages already carrying the pruning pass's ``pruned`` marker.
 
@@ -2640,6 +2658,27 @@ class Session:
         #: itself evidence for a cut-off verdict, even before the first
         #: round-trip is spent.
         self._attention_run_carried_prompt: bool = False
+        #: True when the CURRENT run was admitted AFTER the conversation's newest
+        #: SETTLED success (v3, 2026-09-30). Snapshot at the pipeline head,
+        #: BEFORE this run's own ``attention_started`` (so the newest marker the
+        #: read can see is the PREVIOUS settlement's), and only
+        #: ``kind == "complete"`` arms it. The class it answers: a one-shot exec
+        #: teardown admits a lock-waiter 6-14 ms after the final completion
+        #: (``session.prompt()`` releasing ``_turn_lock``), and the disposal
+        #: that follows cuts it before it produces anything — publishing
+        #: ``error|disposed`` over the completion the reader was just shown
+        #: (nine exec sessions, 0.64.8/0.64.9). See :meth:`Session.dispose`.
+        self._attention_run_after_settled_success: bool = False
+        #: True once the CURRENT run produced anything a READER would see — an
+        #: assistant message with content or tool calls, or a tool result.
+        #: Armed ONLY at the persistence choke point
+        #: (``_persist_new_messages`` via ``_arms_attention_run_output``): the
+        #: run's own admission marker is a custom entry and the cancelled run's
+        #: empty ``stop_reason="aborted"`` tail carries no content and no
+        #: calls, so neither arms it — which is what lets the disposal tell
+        #: "cut before doing anything" (neutral, v3) from "work was cut"
+        #: (error, unchanged).
+        self._attention_run_produced: bool = False
         #: The run's NEUTRAL CLOSURE, armed by :meth:`Session.dispose` when it
         #: meets a live run that spent no provider round-trip yet CARRIED a
         #: person's or peer's prompt: the exit cuts a real run whose ask was
@@ -2733,6 +2772,15 @@ class Session:
         #: disposal that follows it. Released by ``end_drain``'s abandon arm,
         #: which keeps serving the same runtime.
         self._leaving_deliveries = False
+        #: Declared by a ONE-SHOT host at entry
+        #: (``Session.declare_one_shot_exit``, called from ``run_print_mode``;
+        #: v3, 2026-09-30). The session then arms the departure pair itself in
+        #: ``_run_turn_pipeline``'s ``finally`` — inside the turn lock and
+        #: BEFORE the deferred batch is delivered — so a lock-waiter that would
+        #: otherwise be admitted at the release and cut by the following
+        #: disposal is held durably instead. Never set for a ``--loop``/goal
+        #: run (``continuation is not None``): its turns are the run's work.
+        self._one_shot_exit = False
         self._job_label = job_label
         #: The role a subagent was launched as (``task(agent=...)``), for the
         #: ``agent_type`` field forwarded hooks receive. Empty on a top-level
@@ -11379,6 +11427,18 @@ class Session:
         self._attention_run_carried_prompt = carried_prompt
         self._attention_run_settle_intent = False
         self._attention_run_closed_cause = None
+        # The POST-COMPLETION snapshot (v3, 2026-09-30) is read BEFORE this
+        # run's own ``attention_started`` below — the newest marker visible
+        # here is the PREVIOUS settlement's. Only ``complete`` arms it: a cut
+        # receipt is not the claim this arm protects, and widening the set
+        # would silence a run that follows a real failure.
+        self._attention_run_produced = False
+        from local_operator.session.attention import ATTENTION_CUSTOM_TYPE
+
+        previous = self._transcript.latest_custom(ATTENTION_CUSTOM_TYPE)
+        self._attention_run_after_settled_success = bool(
+            isinstance(previous, dict) and previous.get("kind") == "complete"
+        )
         # §14.3: the trigger record, reset per run beside the outcome and the
         # token. Populated from the opening messages here ("at admission") and
         # by ``_drain_steering`` as delivery/steer messages fold in; consumed
@@ -11980,6 +12040,20 @@ class Session:
             self._discard_queued_notices()
             self._signal = None
             self._is_streaming = False
+            # A ONE-SHOT HOST'S HOLD, armed one host-hop earlier (v3,
+            # 2026-09-30): ``run_print_mode`` will dispose this session the
+            # moment its prompt returns, and its own arming of the departure
+            # pair lands ~100-160 ms AFTER this ``finally`` — too late for a
+            # waiter queued on ``_turn_lock`` at the release (admitted 6-14 ms
+            # after the final completion; nine exec sessions). Arming HERE,
+            # inside the lock and BEFORE the deferred batch below, makes the
+            # release itself safe: an arrival re-checked at admission sees the
+            # latch and is held durably, and the deferred batch flushes into
+            # the held arm instead of opening the doomed, cancelled run. The
+            # host-side arming stays as the belt.
+            if self._one_shot_exit:
+                self.retire_job_deliveries_to_transcript()
+                self.retire_wakes_to_inbox()
             # Awaited, and that is load-bearing on the leaving arm: the durability
             # write of a HELD batch has to land before the turn releases the lock and
             # this process can decide it is finished -- a spawned write is precisely
@@ -13761,6 +13835,27 @@ class Session:
                 exc_info=True,
             )
 
+    def declare_one_shot_exit(self) -> None:
+        """Declare this session's host a ONE-SHOT process (v3, 2026-09-30).
+
+        ``run_print_mode`` disposes its session the moment its prompt returns;
+        between the final completion and the host's own latch arming there is
+        a 6-14 ms window in which an arrival or a turn-end batch queued on
+        ``_turn_lock`` is admitted, dispatches a provider request and is
+        cancelled in flight by the disposal — which v2 could only read as
+        ``error|disposed``, masking the completion the reader had just been
+        shown (nine exec sessions on 0.64.8/0.64.9). The disposal classifies
+        that run now (``Session.dispose``'s post-completion arm); this
+        declaration PREVENTS it: the session arms its own departure pair in
+        ``_run_turn_pipeline``'s ``finally``, inside the lock and before the
+        deferred batch is delivered, so the waiter is held durably instead of
+        opening a doomed turn. The host-side arming stays as the belt.
+
+        Never armed for a ``--loop``/goal run (``continuation is not None``):
+        its turns are the run's own work, not teardown leftovers.
+        """
+        self._one_shot_exit = True
+
     def retire_job_deliveries_to_transcript(self) -> None:
         """From now on, a settled job's result is durable and opens NO turn.
 
@@ -14285,6 +14380,16 @@ class Session:
             for message in messages
             if _is_persistable_message(message) and not self._transcript.has_entry(message.id)
         ]
+        # ARM THE RUN'S "PRODUCED SOMETHING" MARK (v3, 2026-09-30) on what is
+        # about to become durable. The disposal's post-completion arm settles a
+        # run neutrally only while this mark is unarmed, so it must record
+        # exactly what a reader would see — and the cancelled run's empty
+        # ``stop_reason="aborted"`` tail, which persists through HERE too (the
+        # ``_run_turn`` finally's ``_persist_progress``), must not arm it.
+        if fresh and not self._attention_run_produced:
+            self._attention_run_produced = any(
+                _arms_attention_run_output(message) for message in fresh
+            )
         # This list is a paired prefix at mid-turn gates and a closed run at
         # settlement. One durable commit preserves the same admission/fork
         # boundary while avoiding an fsync for every already-paired result.
@@ -19811,11 +19916,33 @@ class Session:
                         # asymmetry this round was raised on, and
                         # ``test_a_deliberate_stop_of_a_non_carried_zero_work_run_is_still_an_interruption``
                         # pins the third shape.
-                        pass
+                        arm = "deliberate-stop"
+                    elif (
+                        self._attention_run_after_settled_success
+                        and not self._attention_run_produced
+                    ):
+                        # POST-COMPLETION TEARDOWN ADMISSION (v3, 2026-09-30;
+                        # session da0d927a7986 and its eight siblings): the run
+                        # was admitted after the conversation's newest settled
+                        # ``complete`` — a lock-waiter released by the final
+                        # turn, admitted 6-14 ms later — and produced NOTHING
+                        # before this exit cut it. The ``dispatched`` arm below
+                        # must not decide here: the watchdog-cancelled request
+                        # that follows every one-shot teardown IS a dispatch,
+                        # and v2 read it as a real cut, publishing
+                        # ``error|disposed`` over the completion the reader had
+                        # just been shown. A run that produced anything belongs
+                        # to the arms below; so does an admission with no
+                        # settled success before it.
+                        arm = "post-completion-unproductive"
+                        if self._attention_run_carried_prompt:
+                            self._attention_run_closed_cause = self._cut_off_cause or "disposed"
+                        self._attention_run_settle_intent = True
                     elif self._attention_run_request_dispatched:
                         # EVIDENCE: work reached the provider, so a cut is a
                         # real cut and keeps the honest verdict.
                         self.note_cut_off("disposed")
+                        arm = "dispatched-cut"
                     elif self._attention_run_carried_prompt:
                         # NEUTRAL CLOSURE (operator directive, 2026-09-29;
                         # session 23fc556c3799): the ask was real — a person
@@ -19833,10 +19960,27 @@ class Session:
                         # itself when nobody did.
                         self._attention_run_closed_cause = self._cut_off_cause or "disposed"
                         self._attention_run_settle_intent = True
+                        arm = "carried-closure"
                     else:
                         self._attention_run_settle_intent = True
+                        arm = "zero-evidence-settle"
                 else:
+                    arm = "nothing-owed"
                     self.note_cut_off("disposed")
+                # THE ONE INSTRUMENT (v3, C): the next recurrence of this class
+                # self-diagnoses from the arm taken and the inputs it read,
+                # instead of needing transcript forensics.
+                logger.debug(
+                    "dispose: token=%s arm=%s settled=%s dispatched=%s carried=%s "
+                    "after_settled_success=%s produced=%s",
+                    self._attention_run_token,
+                    arm,
+                    self._attention_run_settled,
+                    self._attention_run_request_dispatched,
+                    self._attention_run_carried_prompt,
+                    self._attention_run_after_settled_success,
+                    self._attention_run_produced,
+                )
                 self.abort("session disposed")
                 try:
                     await asyncio.wait_for(asyncio.shield(turn), timeout=5.0)
