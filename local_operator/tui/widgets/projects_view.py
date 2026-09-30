@@ -558,13 +558,32 @@ class ProjectsView(Vertical):
         self._notice = text
         self._paint_chrome()
 
-    def _notice_text(self) -> Text:
-        """The footer's notice line, warning ink, ellipsized to the row."""
+    def _notice_text(self, width: int) -> Text:
+        """The footer's notice line: warning ink, fitted to the MEASURED box.
+
+        Rich's ``overflow="ellipsis"`` is inert on a Static (the title's
+        recorded lesson), so the cut is done HERE — cell-accurate, with an
+        ellipsis — instead of letting the box clip mid-token (UX round 1,
+        U8: at 50x18 the refusal sentence ran 72 cells into a 46-cell box).
+        """
+        from rich.cells import cell_len
+
+        sentence = self._notice or ""
+        if cell_len(sentence) > width:
+            budget = max(width - 1, 1)  # one cell for the ellipsis
+            kept: list[str] = []
+            used = 0
+            for char in sentence:
+                size = cell_len(char)
+                if used + size > budget:
+                    break
+                kept.append(char)
+                used += size
+            sentence = "".join(kept).rstrip() + "…"
         return Text(
-            self._notice or "",
+            sentence,
             style=Style(color=theme_mod.semantic_color("warning")),
             no_wrap=True,
-            overflow="ellipsis",
         )
 
     def _paint_chrome(self) -> None:
@@ -625,7 +644,7 @@ class ProjectsView(Vertical):
         # clause mid-token (design review round 1, D5).
         footer_width = self._detail.size.width or width
         if self._notice is not None:
-            self._detail.update(self._notice_text())
+            self._detail.update(self._notice_text(footer_width))
         elif self._view == "list" and self._views:
             index = max(0, min(self._cursor, max(self._painted_count() - 1, 0)))
             self._detail.update(
@@ -693,7 +712,7 @@ class ProjectsView(Vertical):
 
         footer_width = self._detail.size.width or width
         if self._notice is not None:
-            self._detail.update(self._notice_text())
+            self._detail.update(self._notice_text(footer_width))
         else:
             self._detail.update(
                 detail_progress_line(view_row, width=footer_width, style_for=_style_resolver())

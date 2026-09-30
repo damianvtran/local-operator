@@ -32388,7 +32388,7 @@ class OperatorApp(App[None]):
                 # raw store message carries a UUID (UX round 1, U1).
                 name = message.project_name or "that project"
                 view.show_notice(
-                    f"could not update the milestone — '{name}' is no longer in the store"
+                    f"'{name}' is no longer in the store — the milestone was not updated"
                 )
             else:
                 view.show_notice(f"could not update the milestone: {store_error_text(exc)}")
