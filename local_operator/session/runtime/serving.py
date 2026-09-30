@@ -3389,6 +3389,37 @@ class ServingSessionHandle(SessionHandle):
         task.add_done_callback(self._background_tasks.discard)
 
     @_on_session_loop
+    async def aida_reconcile_on_serve(self) -> None:
+        """Serving-start trigger drain: consume a pending check-in before idle.
+
+        The wake supervisor engages her runtime BECAUSE a trigger record is
+        pending, and the record is consumed by her engine — but the engine's
+        in-session seams (persist, config change, after-turn) can all be later
+        than this boot, and a live-idle runtime is exactly the case the
+        supervisor does not engage (the trigger design §3.1). ONE reconcile
+        here closes that gap: the armed ``aida-trigger-*`` row lands while the
+        runtime the record caused is still booting, so the check-in fires
+        inside the same engagement.
+
+        Cheap and safe for every session: the reconcile is gated on the
+        session being hers, so every other session returns after the stats
+        that gate already pays. Probed by ``runtime/server.py`` with
+        ``getattr``, so a reduced host without this method simply skips it.
+        """
+        session = self._session
+        if not getattr(session, "_aida_duty", False):
+            return
+        # Annotated explicitly: ``getattr`` with a default reads as ``Any``, and
+        # a bare ``await reconcile()`` on it is a pyright error ("object is not
+        # awaitable") even though the guard above proves callability.
+        reconcile: Callable[[], Awaitable[None]] | None = getattr(
+            session, "_aida_reconcile_now", None
+        )
+        if not callable(reconcile):
+            return
+        await reconcile()
+
+    @_on_session_loop
     async def run_headless_prompt(self, text: str) -> bool:
         """Submit through the owner queue so live viewers cannot race exec.
 

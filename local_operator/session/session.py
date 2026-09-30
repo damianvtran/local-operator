@@ -17441,6 +17441,10 @@ class Session:
             from local_operator.aida import proactive
             from local_operator.paths import config_dir
 
+            # The stash is cleared BEFORE the reconcile: a token may only ever
+            # describe the consume that is about to run, or a crash-window
+            # settle could delete a record whose row this pass never armed.
+            self._aida_pending_trigger_settle = None
             result = proactive.reconcile(
                 schedules,
                 config_dir=config_dir(),
@@ -17449,6 +17453,10 @@ class Session:
             )
             if result.notes:
                 await proactive.append_notes(self._transcript, result.notes)
+            # A consumed trigger record's settle token is stashed, not acted on
+            # here: it may be deleted only AFTER the caller's persist lands
+            # (see ``_aida_settle_triggers_after_persist``).
+            self._aida_pending_trigger_settle = result.settle
             return result.schedules
         except Exception:  # noqa: BLE001 — the schedule write outranks the engine
             logger.warning("aida: reconcile failed; leaving the list as given", exc_info=True)
@@ -17456,13 +17464,25 @@ class Session:
 
     async def _aida_reconcile_now(self) -> None:
         """Reconcile the LIVE list and persist only when something moved."""
+        outcome = "unchanged"
         try:
             current = list(self._wake.schedules)
             updated = await self._aida_reconcile_rows(current)
             if updated != current:
                 await self.set_wake_schedules(updated)
+                outcome = "persisted"
         except Exception:  # noqa: BLE001 — best-effort by contract
+            outcome = "failed"
             logger.warning("aida: live reconcile failed", exc_info=True)
+        # SETTLE ORDERING: a record consumed by the reconcile above may be
+        # deleted only once the armed row is durable. When something moved,
+        # the persist seam (``_persist_wake_schedules``) settles it; a failed
+        # persist therefore settles NOTHING and leaves the stash for the next
+        # seam; when nothing needed persisting there is no later seam, so the
+        # record (consumed into an already-armed skip, or fully settled away)
+        # is settled here.
+        if outcome == "unchanged":
+            await self._aida_settle_triggers_after_persist()
         # HER DISPLAY NAME rides the same live-config seam: ``aida.name`` is
         # canonical (see local_operator.aida.naming), so a rename issued
         # anywhere — a /settings edit, /aida rename in another terminal, the
@@ -17480,22 +17500,63 @@ class Session:
         except Exception:  # noqa: BLE001 — an instrument never fails a turn
             logger.warning("aida: could not apply the configured name", exc_info=True)
 
-    async def _aida_after_turn(self) -> None:
-        """Turn-end drain of her escalation tray. One stat when idle.
+    async def _aida_settle_triggers_after_persist(self) -> None:
+        """Receipt + compare-and-delete for a consumed trigger record.
 
-        The tray is written BY Aida during a turn, so the end of that turn is
-        the earliest honest moment to act on it; without this the request
-        would wait for the next unrelated persist (potentially a day), which
-        is exactly the lag the tray exists to avoid.
+        Runs ONLY on a seam that follows a durable persist (or where none was
+        needed): the record is deleted only after the armed row exists in the
+        transcript and index, which is exactly the ordering the trigger
+        design's crash windows hang off. The ``aida_trigger`` receipt is
+        journaled first — context-invisible, the durable record of what was
+        consumed. Both halves are best-effort: a failure leaves the record,
+        and the next consume finds its row already armed, skips it and
+        re-settles (a second receipt in that window is the design's disclosed
+        duplicate; never a second wake).
+        """
+        settle = getattr(self, "_aida_pending_trigger_settle", None)
+        if not settle:
+            return
+        self._aida_pending_trigger_settle = None
+        target, keys, expected = settle
+        from local_operator.aida import proactive
+        from local_operator.paths import config_dir
+
+        try:
+            await self._transcript.append_custom(
+                proactive.TRIGGER_CUSTOM_ENTRY_TYPE,
+                {
+                    "target": target,
+                    "instances": [list(key) for key in keys],
+                    "expected_updated_at_ms": expected,
+                },
+            )
+        except Exception:  # noqa: BLE001 — a receipt never costs the settle
+            logger.warning("aida: could not journal the trigger receipt", exc_info=True)
+        try:
+            proactive.settle_triggers(config_dir(), self._session_id, settle)
+        except Exception:  # noqa: BLE001 — the next consume retries
+            logger.warning("aida: could not settle the trigger record", exc_info=True)
+
+    async def _aida_after_turn(self) -> None:
+        """Turn-end drain of her escalation tray — or of a pending trigger check-in.
+
+        Both are reasons the NEXT unrelated persist is too late: the tray is
+        written BY Aida during a turn (the earliest honest moment to act on it
+        is the end of that turn), and a trigger record consumed here is a
+        check-in the operator asked her to make, not bookkeeping. Two stats
+        when idle (the tray and the pending record).
         """
         try:
-            from local_operator.aida import state
+            from local_operator.aida import proactive, state
             from local_operator.paths import config_dir
 
             root = config_dir()
             if not state.is_aida_session(root, self._session_id):
                 return
-            if not state.escalate_path(root).exists():
+            if not (
+                state.escalate_path(root).exists()
+                or proactive.has_pending_triggers(root, self._session_id)
+            ):
                 return
             await self._aida_reconcile_now()
         except Exception:  # noqa: BLE001 — an instrument never fails a turn
@@ -17941,6 +18002,11 @@ class Session:
         self._write_wake_index_entry(schedules, clear=(), stamp=stamp)
         if schedules:
             self._ensure_wake_supervisor()
+        # A trigger record consumed by the reconcile above may be settled only
+        # NOW: the row it produced exists in the transcript and the index both
+        # written above, so deleting the record cannot lose the check-in.
+        if getattr(self, "_aida_duty", False):
+            await self._aida_settle_triggers_after_persist()
 
     def _rebuild_wake_index_entry(self) -> None:
         """Open-time rewrite of the index entry from the scheduler's adopted

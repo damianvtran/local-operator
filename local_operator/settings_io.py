@@ -652,6 +652,32 @@ SECTIONS: tuple[Section, ...] = (
         "The name applies everywhere at once; edits are read at her next "
         "action, and /aida pause|resume act immediately.",
     ),
+    # The projects store's own knobs. LIVE because the staleness window is
+    # resolved at each staleness computation (the badge, the tool rows, the
+    # completion check and the wake-trigger snapshot all read through
+    # ``projects.stale_after_s``), so an edit lands on the next computation —
+    # for a running session that is its next listing or turn-end.
+    Section(
+        "projects",
+        "Projects",
+        Scope.LIVE,
+        "Project records: how long a tracked project may go without a progress "
+        "line before it reads stale and is worth a check-in. Read at the next "
+        "staleness computation.",
+    ),
+    # The generic wake-trigger mechanism (``local_operator/wakes/triggers/``).
+    # LIVE: the evaluation pass re-reads the published snapshot every ~5
+    # minutes while the supervisor is up, and the budget/gap are read at the
+    # next evaluation; nothing here needs a relaunch or a /new.
+    Section(
+        "wakes",
+        "Wake triggers",
+        Scope.LIVE,
+        "When a watched condition goes stale, the assistant is woken to check "
+        "in rather than left to wait for the daily cadence: the master switch, "
+        "the per-day budget and spacing, and which sources may fire. Read at "
+        "the next evaluation pass.",
+    ),
     # The proactive CLASS's own bounds (R29–R38). Scope LIVE is the honest
     # label here for once: every key is read at the moment a patience wait
     # fires or re-arms — a delivery-time read by construction — so an edit
@@ -3859,6 +3885,78 @@ SETTINGS: tuple[Setting, ...] = (
             "the onboarding slice."
         ),
     ),
+    # -- projects -------------------------------------------------------------
+    # The staleness window. Default is a LITERAL like the aida block's (this
+    # module is loaded on every CLI start); `_consumer_defaults()` in
+    # tests/unit/test_settings_io.py pins it to the constant in
+    # ``local_operator/projects.py`` that the resolver falls back to, so a
+    # drift between this table and the computation is a red test.
+    Setting(
+        key="projects.stale_after_hours",
+        path=("projects", "stale_after_hours"),
+        section="projects",
+        label="Stale after (hours)",
+        kind=Kind.INT,
+        default=4,
+        minimum=1,
+        maximum=168,
+        help=(
+            "A project whose progress is older than this reads stale and is "
+            "worth a check-in. 1–168 hours."
+        ),
+    ),
+    # -- wake triggers --------------------------------------------------------
+    # Defaults are LITERALS here too; `_consumer_defaults()` imports the
+    # constants the trigger layer itself falls back to (``wakes/triggers/``)
+    # and pins these rows against them.
+    Setting(
+        key="wakes.triggers.enabled",
+        path=("wakes", "triggers", "enabled"),
+        section="wakes",
+        label="Enabled",
+        kind=Kind.BOOL,
+        default=True,
+        choices=_bool_choices("enabled", "disabled"),
+        help="Master switch for trigger wakes; off means no check-in is ever created.",
+    ),
+    Setting(
+        key="wakes.triggers.max_per_day",
+        path=("wakes", "triggers", "max_per_day"),
+        section="wakes",
+        label="Max check-in wakes per day",
+        kind=Kind.INT,
+        default=6,
+        minimum=0,
+        maximum=48,
+        help=(
+            "Per-target rolling 24 h budget for trigger wakes. 0 disables "
+            "trigger wakes without touching the switch above."
+        ),
+    ),
+    Setting(
+        key="wakes.triggers.min_gap_minutes",
+        path=("wakes", "triggers", "min_gap_minutes"),
+        section="wakes",
+        label="Minimum gap (minutes)",
+        kind=Kind.INT,
+        default=60,
+        minimum=10,
+        maximum=1440,
+        help="Minimum spacing between trigger wakes to the same target.",
+    ),
+    Setting(
+        key="wakes.triggers.project_staleness.enabled",
+        path=("wakes", "triggers", "project_staleness", "enabled"),
+        section="wakes",
+        label="Project staleness trigger",
+        kind=Kind.BOOL,
+        default=True,
+        choices=_bool_choices("watching", "off"),
+        help=(
+            "Wake to check in on projects whose progress went stale. Settled (done/paused/"
+            "archived) projects are never watched."
+        ),
+    ),
     # -- proactive class ------------------------------------------------------
     # Defaults are LITERALS here, not imports, for the same reason the aida
     # block's are: this module is loaded on every CLI start. The consumer
@@ -4359,6 +4457,8 @@ def write_setting(manager: "ConfigManager", setting: Setting, value: Any) -> Non
     _store(manager, setting.path, value)
     _invalidate_caches()
     _notify_watcher(manager)
+    _publish_trigger_settings(manager, setting)
+    _sync_aida_hold_marker(manager, setting)
 
 
 def reset_setting(manager: "ConfigManager", setting: Setting) -> None:
@@ -4376,6 +4476,8 @@ def reset_setting(manager: "ConfigManager", setting: Setting) -> None:
     _delete(manager, setting.path)
     _invalidate_caches()
     _notify_watcher(manager)
+    _publish_trigger_settings(manager, setting)
+    _sync_aida_hold_marker(manager, setting)
 
 
 def _reload_before_write(manager: "ConfigManager") -> None:
@@ -4585,6 +4687,33 @@ def _notify_watcher(manager: "ConfigManager") -> None:
         pass
 
 
+def _publish_trigger_settings(manager: "ConfigManager", setting: Setting) -> None:
+    """Re-publish the wake-trigger settings snapshot after a write or reset.
+
+    The wake supervisor cannot read ``config.yml`` (it is stdlib-only, no
+    YAML), so the trigger evaluation pass reads a published snapshot
+    (``<config>/wakes/triggers/settings.json``) instead — and THIS hook, on
+    the one facade pair every settings edit funnels through, is what makes a
+    TUI/UI/CLI edit land at the next evaluation pass (the Wake triggers
+    section's LIVE promise). Aida's boot/ensure/reconcile publish too, so a
+    hand-edit of ``config.yml`` converges without a settings write.
+
+    GATED ON THE SNAPSHOT'S OWN KEYS: an edit of an unrelated key cannot move
+    any snapshot value, so it must not create the ``wakes/triggers/``
+    directory either (the publisher's value-equality skip would only make it a
+    no-op write once the file exists). Best-effort — a failure must never fail
+    the settings write that already landed.
+    """
+    try:
+        from local_operator.wakes import triggers
+
+        if setting.key not in triggers.SNAPSHOT_KEYS:
+            return
+        triggers.publish_settings(getattr(manager, "config_dir", None), manager=manager)
+    except Exception:  # noqa: BLE001 — a cache publish never fails a settings write
+        logger.warning("could not publish the trigger settings snapshot", exc_info=True)
+
+
 # ---------------------------------------------------------------------------
 # The failover cascade
 # ---------------------------------------------------------------------------
@@ -4593,6 +4722,45 @@ def _notify_watcher(manager: "ConfigManager") -> None:
 # "provider/model" string or a `{provider, model, effort}` mapping. The page
 # edits it as two levels (chains, then hops within one chain), so the helpers
 # below are the only place that shape is known outside `providers/failover.py`.
+
+
+def _sync_aida_hold_marker(manager: "ConfigManager", setting: Setting) -> None:
+    """Mirror an ``aida.cadence.paused`` write onto her wake-index entry.
+
+    ``/aida pause`` stamps the derived ``held_at`` marker itself, but the SAME
+    key written through a settings surface — the /settings row, ``lop config``,
+    ``PATCH /v1/settings`` — never touched the entry, so the supervisor's INDEX
+    paths kept treating her armed rows as fireable while every settings
+    surface said she was paused (review round 1, R1). Routing the write
+    through the pause writer's own marker helpers makes both pause surfaces
+    produce the same on-disk state. Best-effort by contract: a failure must
+    never fail the settings write that already landed.
+
+    A ROWLESS entry is a deliberate no-op: ``store.write_entry`` treats an
+    empty schedule list as "remove the entry", so there is nothing there to
+    hold — the trigger layer's publish-gated ``triggers.declines`` covers that
+    shape instead, and the snapshot re-publish above carries the paused bit to
+    the supervisor regardless.
+    """
+    if setting.key != "aida.cadence.paused":
+        return
+    try:
+        from local_operator.aida import proactive
+        from local_operator.wakes import triggers
+
+        root = getattr(manager, "config_dir", None)
+        if root is None:
+            return
+        target = triggers.target_session_id(root)
+        if not target:
+            return
+        paused = strict_bool(read_setting(manager, setting), False)
+        if paused:
+            proactive.mark_held(root, target)
+        else:
+            proactive.clear_held(root, target)
+    except Exception:  # noqa: BLE001 — a derived marker never fails a settings write
+        logger.warning("could not sync aida's hold marker", exc_info=True)
 
 
 def read_chains(manager: "ConfigManager") -> dict[str, list[str]]:

@@ -188,6 +188,18 @@ async def ensure_session(
     if not config_enabled(root):
         return None
 
+    # PUBLISH THE TRIGGER SETTINGS SNAPSHOT AT BOOT (the design's writers (c)):
+    # the wake supervisor may evaluate long before her first reconcile, and the
+    # snapshot must describe THIS config, not a stale one. Best-effort by
+    # contract — a boot never fails on its account — and cheap when the values
+    # did not move (the publish then writes nothing).
+    try:
+        from local_operator.aida import proactive as _proactive
+
+        _proactive.publish_trigger_settings(root)
+    except Exception:  # noqa: BLE001 — a snapshot never fails a boot
+        logger.warning("aida: could not publish the trigger settings snapshot", exc_info=True)
+
     lock = state.wake_lock(root)
     try:
         await asyncio.to_thread(lock.acquire)

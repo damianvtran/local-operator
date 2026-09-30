@@ -44,6 +44,7 @@ from local_operator.model.configure import (
     _openai_use_max_context_window,
     _openrouter_provider_preferences,
 )
+from local_operator.projects import stale_after_s
 from local_operator.providers.failover import RetrySettings
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
@@ -629,6 +630,14 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     "proactive.patience.max_attempts": (7, lambda s, w: _patience_policy().max_attempts),
     "proactive.patience.episode_ttl_ms": (8_888_000, lambda s, w: _patience_policy().ttl_ms),
     "proactive.patience.max_pending": (2, lambda s, w: _patience_policy().max_pending),
+    # -- projects: the staleness window, resolved per use --------------------
+    # ``projects.stale_after_s()`` re-reads ``config.yml`` (mtime-checked) at
+    # every staleness computation — the badge, the tool rows, the completion
+    # check and the wake trigger's snapshot — so a write from another process
+    # lands on the NEXT computation, in this process or any other. The observer
+    # is that very resolver against the watched directory, in the setting's own
+    # units (hours).
+    "projects.stale_after_hours": (2, lambda s, w: stale_after_s() / 3600.0),
 }
 
 #: LIVE sections whose keys have no session-side apply because a HOST owns
@@ -699,6 +708,21 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
 #: and ``tests/unit/aida/test_aida_supervisor_hold.py`` pins the supervisor skip.
 #: The per-key scope caveat — pause acts at once, the rest are read when she next
 #: acts — is stated in the section description the page renders.
+#: ``wakes`` is host-owned in the ``runtime``/``desktop`` shape: its keys are
+#: read at USE time by the wake-trigger stack — the supervisor's evaluation
+#: pass (a different process from the ``Session`` this file drives) reads the
+#: published snapshot, and the sweep honours the master and per-source
+#: switches when it decides whether to create a record. Nothing in a
+#: ``Session`` watches an attribute, so a probe here could watch nothing move.
+#: The live halves are proven where they live: ``tests/unit/wakes/test_triggers.py``
+#: drives a settings-facade write (the shape every TUI/UI/CLI edit takes) into
+#: the published snapshot and pins the very next read and the switches'
+#: suppression of a sweep; ``tests/unit/wakes/test_supervisor.py``'s
+#: ``test_serve_once_evaluates_a_trigger_and_engages`` runs the whole evaluation
+#: path with the snapshot in play. Scope caveat, stated in the section
+#: description the page renders: a facade write lands at the next evaluation
+#: pass, and a hand-edited ``config.yml`` at the next publish point (her
+#: reconcile).
 HOST_OWNED_LIVE_SECTIONS = {
     "appearance",
     "runtime",
@@ -707,6 +731,7 @@ HOST_OWNED_LIVE_SECTIONS = {
     "desktop",
     "memory_guard",
     "aida",
+    "wakes",
 }
 
 

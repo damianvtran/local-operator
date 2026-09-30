@@ -326,6 +326,25 @@ def _consumer_defaults() -> dict[str, object]:
     consumers["aida.cadence.min_gap_minutes"] = aida_proactive.DEFAULT_MIN_GAP_MINUTES
     consumers["aida.onboarding.nudge_days"] = aida_onboarding.DEFAULT_NUDGE_DAYS
 
+    # The wake-trigger keys, asked of the layer that reads them
+    # (``local_operator/wakes/triggers/``). The registry rows carry literals
+    # because ``settings_io`` must stay off the trigger package's import path
+    # only in the sense that it never imports it at module scope; this block
+    # is the half that turns a drifted literal into a red test.
+    from local_operator.wakes import triggers as wake_triggers
+    from local_operator.wakes.triggers.sources import project_staleness
+
+    consumers["wakes.triggers.enabled"] = wake_triggers.DEFAULT_ENABLED
+    consumers["wakes.triggers.max_per_day"] = wake_triggers.DEFAULT_MAX_PER_DAY
+    consumers["wakes.triggers.min_gap_minutes"] = wake_triggers.DEFAULT_MIN_GAP_MINUTES
+    consumers["wakes.triggers.project_staleness.enabled"] = project_staleness.DEFAULT_ENABLED
+    # The staleness window is an INT in HOURS whose consumer constant lives in
+    # seconds beside the rule that reads it; derived so the two spellings
+    # cannot drift (and a non-integral constant floors red against the row).
+    from local_operator.projects import PROJECT_PROGRESS_STALE_S
+
+    consumers["projects.stale_after_hours"] = int(PROJECT_PROGRESS_STALE_S // 3600)
+
     # The proactive class's bounds come from the engine module that reads them
     # (``wakes/patience``) — the one place the delivery-time defaults exist.
     from local_operator.wakes import patience as patience_engine
