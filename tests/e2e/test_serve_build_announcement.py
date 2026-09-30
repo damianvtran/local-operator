@@ -24,11 +24,38 @@ NEWER = "3" * 40
 
 
 def wait_for(predicate, timeout=25):
+    """Poll ``predicate`` until it is true, tolerating a daemon that cannot yet be dialled.
+
+    THE HTTP PREDICATES RACE THE LISTEN, and the race is in the framework rather
+    than in this file: ``uvicorn``'s ``Server.startup`` runs ``lifespan.startup()``
+    BEFORE ``loop.create_server`` binds, and the serve record this test waits for
+    is published inside the lifespan (``local_operator/server/app.py``). So "the
+    record exists" and "the port accepts" are two different moments, and the test
+    steps from the first to the second with a ``client.get`` in between. On a
+    loaded runner the gap exceeds one attempt.
+
+    CATCHING EXACTLY ``httpx.TransportError`` is the narrow half of the fix: it
+    can only come from the HTTP predicates (the file-existence ones cannot raise
+    it), and during startup a refused connection is the very condition being
+    waited on. A refusal from a daemon that IS listening still fails the test,
+    because the predicate's *comparison* — not the call — is what decides.
+    """
+    last_error: httpx.TransportError | None = None
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if predicate():
-            return
+        try:
+            if predicate():
+                return
+        except httpx.TransportError as error:
+            # Not swallowed: kept so a genuine timeout reports the transport
+            # failure that was being retried instead of only "did not become true".
+            last_error = error
         time.sleep(0.1)
+    if last_error is not None:
+        raise AssertionError(
+            f"isolated daemon condition did not become true within {timeout}s "
+            f"(last transport error: {last_error!r})"
+        )
     raise AssertionError("isolated daemon condition did not become true")
 
 

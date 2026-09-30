@@ -39,6 +39,12 @@ from local_operator.harness.comms import extract_parent_message
 # from the type the writer stamps on the row.
 from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE, model_fallback_badge
 from local_operator.harness.message_types import (
+    ASK_RESPONSE_MESSAGE_TYPE as ASK_RESPONSE_CUSTOM_TYPE,
+)
+from local_operator.harness.message_types import (
+    ASK_TIMEOUT_MESSAGE_TYPE as ASK_TIMEOUT_CUSTOM_TYPE,
+)
+from local_operator.harness.message_types import (
     HUB_MESSAGE_TYPE,
     PEER_MESSAGE_MESSAGE_TYPE,
 )
@@ -48,6 +54,8 @@ from local_operator.harness.message_types import (
 # the convergence review found was a decision one surface made and the other
 # did not (docs/design/history-fold-convergence.md §3).
 from local_operator.harness.rows import (
+    ask_response_notice,
+    ask_timeout_notice,
     assistant_row_text,
     assistant_stop_notice,
     compaction_refused_notice,
@@ -1289,6 +1297,46 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                             details={"notice_kind": "wake"},
                         )
                     )
+                continue
+            if message.custom_type == ASK_TIMEOUT_CUSTOM_TYPE:
+                # A queued ask's deadline (design docs/design/ask-nonblocking.md
+                # §2.5). Its text comes prewritten because the SAME string reaches
+                # the model: the notice quotes the questions, or names a secret
+                # ask's key and never its prompt, and a phone that paraphrased it
+                # would be a second author of the only account of what expired.
+                # The row also carries the ask id so A2's card can address it.
+                text, severity = ask_timeout_notice(message.details or {})
+                entries.append(
+                    TranscriptEntry(
+                        id=message.id,
+                        kind="notice",
+                        text=_compact(text, 400),
+                        details={
+                            "severity": severity,
+                            "ask_id": str((message.details or {}).get("ask_id") or ""),
+                            "ask_status": "timed_out",
+                        },
+                    )
+                )
+                continue
+            if message.custom_type == ASK_RESPONSE_CUSTOM_TYPE:
+                # A queued ask's answer, late answer or decline — one type, three
+                # human readings, which is exactly the distinction the shared row
+                # copy makes (``harness/rows.py``). The model's text rides beside
+                # it so the phone never re-derives Q&A from a sentence.
+                text, severity = ask_response_notice(message.details or {})
+                entries.append(
+                    TranscriptEntry(
+                        id=message.id,
+                        kind="notice",
+                        text=_compact(text, 400),
+                        details={
+                            "severity": severity,
+                            "ask_id": str((message.details or {}).get("ask_id") or ""),
+                            "ask_status": str((message.details or {}).get("status") or "answered"),
+                        },
+                    )
+                )
                 continue
             if message.custom_type == GATE_TIMEOUT_CUSTOM_TYPE:
                 # A gate that timed out unattended is the most expensive event

@@ -305,6 +305,42 @@ def test_configure_import_does_not_load_requests(configure_modules: set[str]) ->
     )
 
 
+# --- The ask queue -----------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def ask_store_modules() -> set[str]:
+    """Modules loaded by importing the queued-ask log/index."""
+    return _imported_modules("local_operator.asks.store")
+
+
+def test_ask_store_import_is_stdlib_only(ask_store_modules: set[str]) -> None:
+    # ``local_operator.asks.store`` is read where the harness must not be
+    # loaded: the aggregate "all my open asks" view, and the cleanup sweep that
+    # drops an orphaned index entry while a junk reap runs. It is pinned for
+    # every reason ``wakes.store`` is, plus one of its own — the fold is the
+    # answer-vs-deadline arbiter, so it must be answerable from a cold process
+    # with no event loop and no session (a timeout notice is delivered by a
+    # runtime that booted for the row, and whether one is owed is a pure
+    # question about the log).
+    _assert_absent(ask_store_modules, "asyncio", "the fold is pure; only the queue has a timer")
+    _assert_absent(ask_store_modules, "pydantic", "questions are plain dicts on this side")
+    _assert_absent(ask_store_modules, "local_operator.session", "the store never opens a session")
+    _assert_absent(ask_store_modules, "local_operator.harness", "platform types only, lazily")
+    _assert_absent(ask_store_modules, "local_operator.mobile", "no runtime, no daemon")
+    _assert_absent(ask_store_modules, "local_operator.tui", "no front end")
+    _assert_absent(ask_store_modules, "local_operator.tools", "the tool layer reaches INTO this")
+    _assert_absent(ask_store_modules, "textual", "no front end")
+    _assert_absent(ask_store_modules, "httpx", "no provider layer")
+    _assert_absent(ask_store_modules, "requests", "no provider layer")
+    ours = sorted(m for m in ask_store_modules if m.startswith("local_operator"))
+    assert ours == [
+        "local_operator",
+        "local_operator.asks",
+        "local_operator.asks.store",
+    ], ours
+
+
 # --- The wake index ----------------------------------------------------------
 
 

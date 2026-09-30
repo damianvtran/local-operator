@@ -518,6 +518,18 @@ INNER_OP_CAPABILITY: dict[str, str] = {
     "prompt": "prompt",
     "approval_answer": "prompt",
     "ask_answer": "prompt",
+    # The QUEUED ask's three verbs (asks/, design ``docs/design/ask-nonblocking.md``
+    # §2.4). ``ask_respond`` is the blocking ``ask_answer`` verb under its new
+    # name — answering an ask is the same act either way. ``ask_decline`` and
+    # ``ask_dismiss`` are the same act's two refusals ("the agent is told" and
+    # "no reply was sent"), so they ride the identical capability: a relayed
+    # viewer able to answer an ask one way must not be refused the other two,
+    # or the op family is half-broken over the relay — which is exactly what
+    # happened while these three had no row and fell to the refuse-closed
+    # default (review round 1, BLOCKER 1).
+    "ask_respond": "prompt",
+    "ask_decline": "prompt",
+    "ask_dismiss": "prompt",
     "set_model": "prompt",
     "set_effort": "prompt",
     "new_conversation": "prompt",

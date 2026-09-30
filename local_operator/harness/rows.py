@@ -657,6 +657,48 @@ def gate_waited_text(details: Mapping[str, Any] | None) -> str:
     return f"{int(seconds // 86400)}d"
 
 
+def ask_response_notice(details: Mapping[str, Any] | None) -> tuple[str, NoticeSeverity]:
+    """The human one-liner for an ``ask_response`` row: ``(text, kind)``.
+
+    ONE implementation, two surfaces (the TUI fold and the phone fold), for the
+    reason every other row in this module is shared: a decision one host makes
+    and the other misses is how a row renders on one surface and nowhere on the
+    other (docs/design/history-fold-convergence.md §3).
+
+    The three statuses are deliberately distinguishable to a HUMAN even though
+    they ride one message type for the model — a person reading back a
+    conversation needs to know whether their answer landed in time, landed late,
+    or was a decline. ``kind`` is the ink: an answer is a receipt, a late answer
+    is a receipt the user should notice, and a decline is a plain state.
+    """
+    details = details or {}
+    status = str(details.get("status") or "answered")
+    ask_id = str(details.get("ask_id") or "")
+    if status == "declined":
+        return (f"Ask {ask_id} declined — the agent was told", "info")
+    if status == "late":
+        return (f"Answered late — the agent was told (ask {ask_id})", "warning")
+    return (f"Answered — delivering (ask {ask_id})", "info")
+
+
+def ask_timeout_notice(details: Mapping[str, Any] | None) -> tuple[str, NoticeSeverity]:
+    """The human one-liner for an ``ask_timeout`` row: ``(text, kind)``.
+
+    It says the agent MOVED ON and that the ask is still answerable, because
+    both halves are true and each is useless without the other: "timed out"
+    alone reads as finished, and "you can still answer" alone hides that the
+    agent stopped waiting. ``warning`` ink: this is the moment the user learns
+    their silence had a cost.
+    """
+    details = details or {}
+    ask_id = str(details.get("ask_id") or "")
+    waited = gate_waited_text(details)
+    return (
+        f"Timed out after {waited} — the agent moved on; you can still answer (ask {ask_id})",
+        "warning",
+    )
+
+
 def gate_timeout_notice(details: dict[str, Any]) -> str:
     """Say what expired, what it wanted, and that nobody chose it.
 

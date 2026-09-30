@@ -2053,6 +2053,38 @@ async def _keep_loaded_build(handle: object, runtime: object, pair: str, bound: 
         except Exception:  # noqa: BLE001 — an unpublished failure is not a reason to die
             logger.warning("could not publish the failed update", exc_info=True)
     await _drain_inbox_into(handle)
+    await _reconcile_owed_asks(handle)
+
+
+async def _reconcile_owed_asks(handle: object) -> None:
+    """Deliver what the ask log owes, at runtime boot (design §2.2/§2.3).
+
+    Called BESIDE :func:`_drain_inbox_into` at every boot that materialises a
+    session, because it answers the same class of question: something happened
+    while nothing was running. A queued ask can have been answered (or its
+    deadline can have passed) with no runtime alive, and the durability the
+    whole feature is built on is only real if a runtime that boots for ANY
+    reason delivers it — which is also why no errand carries a payload.
+
+    Best-effort, like the drain: a reconcile that faults must not stop a runtime
+    from starting, and the next boot boundary (or the queue's own timer) retries.
+    """
+    session = getattr(handle, "_session", None)
+    reconcile = getattr(session, "reconcile_asks", None)
+    if not callable(reconcile):
+        return
+    try:
+        # ``load_time=True`` because THIS is the reopen: it is the one caller that
+        # arms the "lapsed while the session was stopped" annotation, and the
+        # design scopes that sentence to the load-time reconcile (review round 2,
+        # M1) — the deadline tick, the wake fire and every turn start run against
+        # a session that is up, so a deadline lapsing there did not lapse while
+        # anything was stopped.
+        result = reconcile(load_time=True)
+        if inspect.isawaitable(result):
+            await result
+    except Exception:  # noqa: BLE001 — a boot must not fail on a delivery
+        logger.warning("ask: boot reconcile failed", exc_info=True)
 
 
 async def _abandon_update_window(handle: object, runtime: object, pair: str, bound: float) -> None:
@@ -2119,6 +2151,7 @@ async def _close_update_window(handle: object, *, drain_back: bool) -> None:
         return
     if drain_back:
         await _drain_inbox_into(handle)
+        await _reconcile_owed_asks(handle)
 
 
 async def _retract_update_window(handle: object, pair: str, bound: float) -> None:
@@ -4480,6 +4513,7 @@ async def amain(operator_cap: bytes | None = None) -> int:
     # engaging caller's own prompt and deliver a note written minutes ago after
     # one written just now.
     await _drain_inbox_into(handle)
+    await _reconcile_owed_asks(handle)
 
     # THE HANDOVER MARKER, consumed here for the same reason the drain is: this is
     # the successor's first act with a materialised session, and the fact it

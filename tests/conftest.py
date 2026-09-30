@@ -70,6 +70,13 @@ _AMBIENT_VARS = (
     # ``test_bash_long_sleep_guard.py`` asserts. Read off the command's own
     # assignments only, never the process environment.
     "LOCAL_OPERATOR_ALLOW_LONG_SLEEP",
+    # The queued-ask flag's escape hatch (``asks/policy.NONBLOCKING_ASK``, read
+    # from ``LOP_ASK_NONBLOCKING``). The same ESCAPE-HATCH class as the two
+    # above: an operator or a QA rig that exported it would silently switch
+    # every blocking-ask cell in the suite onto the queued path, and the cells
+    # that PIN today's behaviour would go green while asserting nothing. The
+    # e2e cells that want it on set it through ``monkeypatch`` explicitly.
+    "LOP_ASK_NONBLOCKING",
     # The org destination guard's escape hatch (``providers/radient_credentials``
     # ``ORG_ALLOW_NONCANONICAL_ENV``): the explicit, OFF-by-default opt-in that
     # lets the CLI send a signed-in account's bearer to a NON-canonical hub. An
