@@ -18,9 +18,11 @@ from typing import Any
 
 import pytest
 
+from local_operator.compaction.cutpoint import elision_notice_text
 from local_operator.harness.types import Message, TextContent
 from local_operator.session import transcript_index as ti
-from local_operator.session.transcript import Transcript
+from local_operator.session.goal_judge import goal_continuation_prompt
+from local_operator.session.transcript import Transcript, encode_message_payload
 
 SID = "aabbccddee01"
 
@@ -81,6 +83,33 @@ def inject(
         "type": "message",
         "payload": {"kind": "custom", "custom_type": custom_type, "details": {"text": text}},
     }
+
+
+#: The continuation text the goal judge persists every few minutes while a goal
+#: runs — built through the producer so this fixture cannot drift from it.
+GOAL_CONTINUATION = goal_continuation_prompt("make the fold hold")
+
+#: The recogniser's deliberate edge (``is_goal_continuation_instruction``): a
+#: message that merely OPENS with the template is the operator's own words.
+QUOTE_NEGATIVE = (
+    "Continue working toward this goal:\n\n"
+    "I know the harness phrases it like this \u2014 this one is me telling you: keep going."
+)
+
+
+def stamped_user(id_: str, ts: float, text: str) -> dict[str, Any]:
+    """A harness row as the renderer writes it: a ``Message`` carrying the stamp.
+
+    Built through ``encode_message_payload``, the journal's own writer, so this
+    is the row shape the scanner meets live (``provider_payload`` and all)
+    rather than a hand-drawn approximation of it.
+    """
+    message = Message(
+        role="user",
+        content=[TextContent(text=text)],
+        provider_payload={"harness_injected": True},
+    )
+    return {"id": id_, "ts": ts, "type": "message", "payload": encode_message_payload(message)}
 
 
 def start(id_: str, ts: float, token: str) -> dict[str, Any]:
@@ -180,6 +209,142 @@ def test_injected_rows_are_docs_not_checkpoints(tmp_path):
     assert docs["i1"].injected is True and docs["i1"].role == "user"
     assert docs["i1"].text == "peer says hi"
     assert docs["u1"].injected is False and docs["a1"].injected is False
+
+
+# ---------------------------------------------------------------------------
+# Harness provenance (F1 of local-operator-ui#670)
+# ---------------------------------------------------------------------------
+
+
+def test_harness_rows_are_skipped_whole_not_filed_as_the_operator(tmp_path):
+    """A continuation row is not the operator's message on ANY index product.
+
+    Both legs, one decision \u2014 the folds' own (``harness/rows.py``): the
+    structural stamp on rows this build minted, and the recognisers (chrome
+    prompt families, notice heads) on rows written before the stamp existed.
+    The row must vanish from BOTH products: no user checkpoint (the rail's
+    "Your message" hover filed it as the operator's) and no find doc (a hit
+    would reveal-jump to a row no human surface paints). And it must not open
+    a phantom turn: u1's span carries on through both continuations to its
+    real closing answer, a2.
+    """
+    write_rows(
+        tmp_path,
+        [
+            user("u1", 1.0, "do the thing"),
+            stamped_user("c1", 1.1, GOAL_CONTINUATION),
+            assistant("a1", 1.2, "worked on it"),
+            user("c2", 1.3, GOAL_CONTINUATION),  # a pre-stamp build's row: text-only evidence
+            assistant("a2", 1.4, "carried on"),
+            user("n1", 1.45, "[session warning] legacy notice row"),
+            user("q1", 1.5, QUOTE_NEGATIVE),
+            assistant("a3", 1.6, "understood"),
+        ],
+    )
+    index = refreshed(tmp_path)
+    # c1/c2/n1 are gone from checkpoints AND docs; the ordinary u1, the
+    # recogniser-negative q1, and every assistant row stay.
+    assert kinds(index) == [
+        ("user", "u1"),
+        ("completion", "a2"),
+        ("user", "q1"),
+        ("completion", "a3"),
+    ]
+    assert [(m.id, m.role, m.injected) for m in index.messages] == [
+        ("u1", "user", False),
+        ("a1", "assistant", False),
+        ("a2", "assistant", False),
+        ("q1", "user", False),
+        ("a3", "assistant", False),
+    ]
+
+
+def test_a_user_message_merely_opening_with_the_template_stays_the_operators(tmp_path):
+    """The negative control: the recogniser must not confiscate the operator's words."""
+    write_rows(tmp_path, [user("q1", 1.0, QUOTE_NEGATIVE), assistant("a1", 1.1, "ok")])
+    index = refreshed(tmp_path)
+    assert kinds(index) == [("user", "q1"), ("completion", "a1")]
+    assert [(m.id, m.injected) for m in index.messages] == [("q1", False), ("a1", False)]
+
+
+def test_an_appended_harness_row_mints_no_checkpoint_on_the_incremental_path(tmp_path, monkeypatch):
+    """The skip holds across the incremental seam, not just a full rescan."""
+    write_rows(tmp_path, [user("u1", 1.0, "one"), assistant("a1", 1.1, "answer")])
+    calls = _scanners(monkeypatch)
+    base = refreshed(tmp_path)
+    assert calls == {"full": 1, "incremental": 0}
+    assert kinds(base) == [("user", "u1"), ("completion", "a1")]
+
+    write_rows(tmp_path, [stamped_user("c1", 2.0, GOAL_CONTINUATION), assistant("a2", 2.1, "more")])
+    grown = refreshed(tmp_path)
+    assert calls == {"full": 1, "incremental": 1}
+    assert kinds(grown) == [("user", "u1"), ("completion", "a2")]
+    assert "c1" not in {m.id for m in grown.messages}
+
+
+def test_a_legacy_elision_notice_row_is_not_the_operators_words(tmp_path):
+    """A pre-#857 build journalled the elision notice as a turn; the index drops it.
+
+    The notice is render-time only in this revision, but
+    ``PRESERVED_TURN_ELISION_ID_PREFIX`` is retained precisely so transcripts
+    written by the previous revision still parse — the read path recognises
+    those rows by ID and drops them rather than replaying them as user turns.
+    The index reaches that leg only if the entry id rides in beside the
+    payload (QA round 1, Q-1); the notice's text matches no notice head, so
+    the id is the only catch.
+    """
+    notice = elision_notice_text(2, 3)
+    assert notice is not None
+    write_rows(
+        tmp_path,
+        [
+            user("u1", 1.0, "do the thing"),
+            {
+                "id": "compaction-elision-1",
+                "ts": 1.1,
+                "type": "message",
+                "payload": {"kind": "message", "role": "user", "content": [{"text": notice}]},
+            },
+            assistant("a1", 1.2, "ok"),
+        ],
+    )
+    index = refreshed(tmp_path)
+    assert kinds(index) == [("user", "u1"), ("completion", "a1")]
+    assert [m.id for m in index.messages] == ["u1", "a1"]
+
+
+def test_the_stamp_leg_stands_on_its_own_with_neutral_words(tmp_path):
+    """A stamped row whose words no recogniser claims must still be skipped.
+
+    Every other stamped fixture in these cells carries the continuation's own
+    text, which the chrome recogniser already claims — so this cell is the one
+    that fails if the stamp leg is lost (review round 1, F1). The unstamped
+    twin keeps it discriminating: the same neutral words on a row with no
+    stamp stay the operator's, proving the text legs alone cannot claim them.
+    """
+    write_rows(
+        tmp_path,
+        [
+            user("u1", 1.0, "do the thing"),
+            stamped_user("c3", 1.1, "neutral harness words"),
+            assistant("a1", 1.2, "ok"),
+            user("u2", 1.3, "neutral harness words"),
+            assistant("a2", 1.4, "done"),
+        ],
+    )
+    index = refreshed(tmp_path)
+    assert kinds(index) == [
+        ("user", "u1"),
+        ("completion", "a1"),
+        ("user", "u2"),
+        ("completion", "a2"),
+    ]
+    assert [(m.id, m.injected) for m in index.messages] == [
+        ("u1", False),
+        ("a1", False),
+        ("u2", False),
+        ("a2", False),
+    ]
 
 
 def test_completion_needs_span_content(tmp_path):
