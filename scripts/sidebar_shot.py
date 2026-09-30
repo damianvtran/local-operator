@@ -509,12 +509,14 @@ async def _forward_mouse(
 ) -> None:
     """Deliver pilot-shaped mouse events at a widget-relative ``offset``.
 
-    THE PILOT CANNOT REACH THE FOOTER. ``pilot.hover``/``pilot.click`` refuse
-    any target outside ``screen.size.region`` — a region that starts at the
-    screen's ORIGIN — and with the app's one-cell screen inset the sidebar's
-    footer (the widget's last content line) sits exactly one row below that
-    check region at every terminal size. The chip is therefore unreachable
-    through the pilot while a real terminal clicks it fine. These are the
+    FOR THE FULL-HEIGHT (DOCKED) SIDEBAR THE PILOT CANNOT REACH THE FOOTER.
+    ``pilot.hover``/``pilot.click`` refuse any target outside
+    ``screen.size.region`` — a region that starts at the screen's ORIGIN — and
+    with the app's one-cell screen inset the docked sidebar's footer (the
+    widget's last content line) sits exactly one row below that check region.
+    A real terminal clicks that row fine; the overlay drawer is height-clamped
+    above the input dock, so its footer sits INSIDE the region and the plain
+    pilot does reach it. The seam is used uniformly anyway — these are the
     same events pilot builds and the same delivery it performs
     (``app.mouse_position`` + ``screen._forward_event``, pilot.py
     ``_post_mouse_events``); only the bounds pre-check is skipped.

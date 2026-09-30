@@ -3132,15 +3132,18 @@ async def _footer_gesture(
 ) -> None:
     """Deliver pilot-shaped mouse events at a REGION-RELATIVE ``(x, y)``.
 
-    THE PILOT CANNOT REACH THE FOOTER. ``pilot.hover``/``pilot.click`` refuse
-    any target outside ``screen.size.region`` — a region that starts at the
-    screen's ORIGIN — and the app's one-cell screen inset leaves the sidebar's
-    footer (the widget's last content line) exactly one row below that region
-    at every terminal size. The chip is therefore unreachable through the
-    pilot even though a real terminal clicks it fine. These are the same
-    events pilot builds and the same delivery it performs
-    (``app.mouse_position`` + ``screen._forward_event``, pilot.py
-    ``_post_mouse_events``); only the bounds pre-check is skipped.
+    FOR THE FULL-HEIGHT (DOCKED) SIDEBAR THE PILOT CANNOT REACH THE FOOTER.
+    ``pilot.hover``/``pilot.click`` refuse any target outside
+    ``screen.size.region`` — a region that starts at the screen's ORIGIN — and
+    the app's one-cell screen inset leaves the docked sidebar's footer (the
+    widget's last content line) exactly one row below that region. The chip is
+    therefore unreachable through the pilot there even though a real terminal
+    clicks it fine; the overlay drawer is height-clamped above the input
+    dock, so its footer sits INSIDE the region and the plain pilot does reach
+    it. The seam is used uniformly anyway: these are the same events pilot
+    builds and the same delivery it performs (``app.mouse_position`` +
+    ``screen._forward_event``, pilot.py ``_post_mouse_events``); only the
+    bounds pre-check is skipped — a pre-check the terminal never makes.
     """
     from textual import events
     from textual.geometry import Offset
@@ -4862,6 +4865,91 @@ async def test_the_chip_hover_underlines_only_the_chip_and_changes_no_text(size,
         assert not [
             s for s in after.spans if getattr(s.style, "underline", None) is True
         ], "the underline followed the pointer off the chip"
+
+
+@pytest.mark.asyncio
+async def test_a_flip_that_lands_mid_poll_is_served_when_the_poll_completes(monkeypatch):
+    """UX round 1, U2: a press must not wait out the poll it collided with.
+
+    The in-flight poll read the store BEFORE the flip, so its answer cannot
+    carry the layer's rows; without the re-arm the ask was swallowed by the
+    `_sidebar_refresh_pending` guard and the rows waited for the 2 s timer.
+    Here the poll is parked mid-read, the press lands, and the completion
+    must serve the ask on its own — the timer stays paused throughout, so
+    the second read can only have come from the re-arm.
+    """
+    from local_operator.tui import session_catalog
+
+    entered = threading.Event()
+    release = threading.Event()
+    reads: list[bool] = []
+
+    def parked_load(root, *, include_subagents=False, pinned_hidden_ids=()):
+        reads.append(include_subagents)
+        entered.set()
+        release.wait(timeout=15)
+        rows = [_plain("mine")]
+        if include_subagents:
+            rows.append(_sub("run1", label="ship it", agent="coder"))
+        return rows
+
+    monkeypatch.setattr(session_catalog, "load_catalog", parked_load)
+    monkeypatch.setattr(session_catalog, "subagent_population", lambda root: 1)
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, [_plain("mine")], show_subagents=False, total=4)
+        base = app._sidebar_refresh_generation
+        app._refresh_sidebar()
+        assert app._sidebar_refresh_pending is True
+        await _pump_until(pilot, entered.is_set, what="the parked catalog read")
+        assert reads == [False], "premise: the parked poll read before the flip"
+
+        first, _end = _chip_span(sidebar)
+        await _click_footer_cell(pilot, app, sidebar, first)
+        await pilot.pause()
+        assert sidebar.show_subagents is True, "premise: the press flipped the layer"
+        assert app._sidebar_refresh_again is True, "the dropped ask was not remembered"
+        assert app._sidebar_refresh_generation == base + 1, "a poll started while one was in flight"
+
+        release.set()
+        await _pump_until(
+            pilot,
+            lambda: app._sidebar_refresh_generation >= base + 2
+            and not app._sidebar_refresh_pending,
+            what="the re-armed poll",
+        )
+        assert reads == [False, True], "the re-run did not re-read with the flip applied"
+        assert "⌥ Subagent Runs" in sidebar.render().plain, "the flip's rows never arrived"
+        # The re-arm serves ONE read — it settles rather than polling on.
+        for _ in range(30):
+            await pilot.pause()
+        assert app._sidebar_refresh_generation == base + 2
+        assert reads == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_routine_poll_stays_dropped():
+    """The re-arm is scoped to the toggle; routine asks must not stack up.
+
+    If a dropped poll re-armed itself, a catalog slower than the 2 s timer
+    would run back-to-back with no gap between a completion and the next
+    read; only the layer flip's ask is remembered (see
+    `_sidebar_refresh_again`).
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _sidebar_with(pilot, app, [_plain("a")], total=4)
+        app._sidebar_refresh_pending = True
+        try:
+            base = app._sidebar_refresh_generation
+            app._refresh_sidebar()
+            assert app._sidebar_refresh_generation == base, "a poll started while one was in flight"
+            assert app._sidebar_refresh_again is False
+        finally:
+            app._sidebar_refresh_pending = False
 
 
 @pytest.mark.asyncio

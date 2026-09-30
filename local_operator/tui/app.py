@@ -5800,6 +5800,15 @@ class OperatorApp(App[None]):
         self._startup_cleanup_timer: Timer | None = None
         self._sidebar_refresh_generation = 0
         self._sidebar_refresh_pending = False
+        #: A layer flip (``ctrl+a`` or a chip press) that landed while a poll
+        #: was in flight. That poll read the store BEFORE the flip, so its
+        #: answer cannot carry the flip, and the ask would otherwise sit until
+        #: the next 2 s timer tick (UX round 1, U2 — a pointer press reads as
+        #: instantaneous). Set ONLY by the toggle path: a routine dropped poll
+        #: must stay dropped, or a catalog slower than the timer would poll
+        #: back-to-back with no gap. Consumed by the refresh worker's
+        #: ``finally``.
+        self._sidebar_refresh_again = False
         #: Polls since the footer chip's population count was last read.
         #: `subagent_population` is a SECOND full `_scan_sessions` of the store
         #: (resume.py _scan_sessions, not memoized) — measured +2.36 ms, +21% on the 2 s
@@ -10777,6 +10786,12 @@ class OperatorApp(App[None]):
                 logger.debug("sidebar catalog refresh failed", exc_info=True)
             finally:
                 self._sidebar_refresh_pending = False
+                if self._sidebar_refresh_again:
+                    # A flip was dropped while this poll was in flight; its
+                    # ask is served the moment the poll lands (see
+                    # `_sidebar_refresh_again`).
+                    self._sidebar_refresh_again = False
+                    self._refresh_sidebar()
 
         self.run_worker(refresh(), group="sidebar-catalog")
 
@@ -10907,6 +10922,13 @@ class OperatorApp(App[None]):
         and flip another terminal's sidebar.
         """
         message.stop()
+        if self._sidebar_refresh_pending:
+            # The poll in flight read the store before this flip, so it cannot
+            # carry the layer's rows; remember the ask and let the poll's
+            # completion serve it instead of the next timer tick (see
+            # `_sidebar_refresh_again`).
+            self._sidebar_refresh_again = True
+            return
         self._refresh_sidebar()
 
     def on_session_sidebar_pin_toggled(self, message: SessionSidebar.PinToggled) -> None:

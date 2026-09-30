@@ -1663,6 +1663,13 @@ class SessionSidebar(Widget, can_focus=True):
         arithmetic may depend on — the gutter swaps sides with the dock and
         the overlay keeps the base left pad, so the resolved pad is what keeps
         this true in all three placements.
+
+        The row test carries the same vertical invariant `_entry_at` already
+        relies on: an event's y arrives relative to the outer box while
+        `size.height` counts the content box, so the last content line IS
+        `y == size.height - 1` only while `padding.top == 0` — true in every
+        placement today (the base tcss and `_sync_sidebar_layout` both keep
+        the top pad at 0); a top pad would make both resolve y first.
         """
         if y != self.size.height - 1:
             return False
