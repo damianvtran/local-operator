@@ -26,6 +26,7 @@ from starlette.testclient import TestClient
 
 from local_operator.mobile.daemon import MobileDaemon, build_app
 from local_operator.paths import config_dir
+from local_operator.projects import PROJECT_SCHEMA
 
 SESSION_A = "4e92693767fa"
 
@@ -85,7 +86,7 @@ def test_create_read_patch_delete_round_trip() -> None:
 
     # The row on disk is the store's, not a route cache.
     on_disk = json.loads((config_dir() / "projects" / f"{project_id}.json").read_text())
-    assert on_disk["name"] == "payments-migration" and on_disk["schema"] == 1
+    assert on_disk["name"] == "payments-migration" and on_disk["schema"] == PROJECT_SCHEMA
 
     by_name = client.get("/api/projects/Payments-Migration")
     assert by_name.status_code == 200
@@ -272,7 +273,7 @@ def test_a_row_from_a_newer_build_is_readable_but_refuses_mutation() -> None:
     project_id = client.post("/api/projects", json={"name": "alpha"}).json()["project"]["id"]
     path = config_dir() / "projects" / f"{project_id}.json"
     payload = json.loads(path.read_text())
-    payload["schema"] = 2
+    payload["schema"] = PROJECT_SCHEMA + 1
     payload["future_field"] = True
     payload["sessions"] = [SESSION_A]
     path.write_text(json.dumps(payload))
@@ -291,9 +292,9 @@ def test_a_row_from_a_newer_build_is_readable_but_refuses_mutation() -> None:
         assert response.status_code == 409, response.text
         assert response.json()["code"] == "project_schema_newer"
 
-    # ... and none of them wrote: the row still exists, still schema 2.
+    # ... and none of them wrote: the row still exists, still at the newer schema.
     still_there = json.loads(path.read_text())
-    assert still_there["schema"] == 2 and still_there["sessions"] == [SESSION_A]
+    assert still_there["schema"] == PROJECT_SCHEMA + 1 and still_there["sessions"] == [SESSION_A]
 
 
 def test_lock_contention_answers_503(monkeypatch: pytest.MonkeyPatch) -> None:

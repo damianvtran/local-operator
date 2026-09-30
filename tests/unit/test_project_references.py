@@ -110,7 +110,7 @@ async def test_a_project_token_expands_to_the_project_element(store, tmp_path) -
     assert "description: Payments migration across core + dashboard" in element
     assert "progress (reported " in element
     assert f"ago by session {SESSION_A}): dashboard cutover done; API parity on staging" in element
-    assert "sessions: 2 linked — 2 stopped" in element
+    assert "sessions: 2 working — 2 stopped" in element
 
 
 @pytest.mark.asyncio
@@ -464,7 +464,7 @@ async def test_the_liveness_line_counts_a_live_busy_record(store, tmp_path) -> N
     result = await expand_references("@project:alpha", str(tmp_path))
 
     assert result.expanded is True
-    assert "sessions: 2 linked — 1 live, busy, 1 stopped" in result.sent
+    assert "sessions: 2 working — 1 live, busy, 1 stopped" in result.sent
 
 
 def test_the_liveness_line_maps_runtime_states_to_a_fixed_vocabulary() -> None:
@@ -491,7 +491,7 @@ def test_the_liveness_line_maps_runtime_states_to_a_fixed_vocabulary() -> None:
 
     assert (
         _project_sessions_line(project, states)
-        == "sessions: 5 linked — 1 live, busy, 1 live, 1 wedged, 1 stale, 1 stopped"
+        == "sessions: 5 working — 1 live, busy, 1 live, 1 wedged, 1 stale, 1 stopped"
     )
     assert _project_sessions_line(SimpleNamespace(sessions=[]), {}) == "sessions: none linked"
 

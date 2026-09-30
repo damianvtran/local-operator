@@ -111,7 +111,7 @@ def test_list_row_carries_every_field_the_row_owns() -> None:
     result = render_project_list([view], cursor=0, now=NOW)
     assert result.height == 1
     assert result.text.plain == (
-        "▸ alpha [● active] · est 13pt · →2026-10-15 · M 1/2 · 1 session (1 live) "
+        "▸ alpha [● active] · est 13pt · →2026-10-15 · M 1/2 · 1 working (1 live) "
         '· progress 2h ago · "Payments migration"'
     )
 
@@ -697,18 +697,18 @@ def test_detail_footer_sheds_whole_clauses_to_fit() -> None:
     """UX U1: the footer fits its width by dropping clauses, never mid-word."""
     view = _long_footer_view()
     full = detail_footer(view, now=NOW)
-    assert "prototype" in full.plain and "sessions:" in full.plain
+    assert "prototype" in full.plain and "working:" in full.plain
     assert "\u2026" not in full.plain  # no "more exists" marker on the full rung
     # 148 cells: identity + milestones + rollup fit; the progress body sheds.
     fitted = detail_footer(view, now=NOW, width=148)
-    assert "sessions: fa11bacc0001 [live]" in fitted.plain
+    assert "working: fa11bacc0001 [live]" in fitted.plain
     assert "prototype [completed]" in fitted.plain
     assert "prototype landed" not in fitted.plain
     assert fitted.plain.endswith("\u2026")
     # 98 cells: milestones survive, the rollup sheds (its counts are on the row).
     narrow = detail_footer(view, now=NOW, width=98)
     assert "prototype [completed]" in narrow.plain
-    assert "sessions:" not in narrow.plain
+    assert "working:" not in narrow.plain
     assert not narrow.plain.endswith(" ")
     # Every rung is a whole-clause prefix: no word is cut mid-way.
     for fitted_text in (fitted, narrow):
@@ -825,7 +825,7 @@ def test_footer_does_not_paint_a_seam_for_an_empty_clause() -> None:
     # The phantom slot cannot flip the ladder: four cells narrower than the
     # composed row, the rollup still fits (it is shed only after the body).
     fitted = detail_footer(view, now=NOW, width=cell_len(text) - 4).plain
-    assert "sessions: fa11bacc0001 [live]" in fitted
+    assert "working: fa11bacc0001 [live]" in fitted
     assert fitted.endswith("…")
 
 
@@ -836,7 +836,7 @@ def test_footer_sheds_the_progress_body_before_the_session_rollup() -> None:
     view = _long_footer_view()
     full = detail_footer(view, now=NOW).plain
     fitted = detail_footer(view, now=NOW, width=cell_len(full) - 10).plain
-    assert "sessions: fa11bacc0001 [live]" in fitted
+    assert "working: fa11bacc0001 [live]" in fitted
     assert "prototype landed" not in fitted
     assert "prototype [completed]" in fitted
 

@@ -1,6 +1,6 @@
 ---
 name: aida
-version: 1.3.0
+version: 1.3.1
 # ``when_to_use`` is what `agent search` embeds, so it is written to match
 # DELEGATION and ORCHESTRATION requests specifically — an earlier wording
 # ("checking the state of projects and sessions") outranked `designer` on
@@ -47,10 +47,10 @@ bypass), or `--tools` (pre-approves what it names); without one, the run is
 read-only. Use `task` for quick sidecar checks (`scout` for reconnaissance,
 `reviewer` for a second opinion). Track multi-step work with the `project` tool
 — one per workstream, with a short `title`/`description`, linked to its
-session — and refresh `progress` on material change; never let a project go
-stale.
+session — update `progress` on material change (`op='refresh'` when checked);
+never let a project go stale.
 
-When the operator asks for something a team should own: create or refresh the
+When the operator asks for something a team should own: create or update the
 project, spawn the manager session with the brief, and let the manager drive
 it — checking in periodically. Say who owns it now, and when you will look again.
 

@@ -229,6 +229,43 @@ async def test_detail_ruler_names_the_section_at_the_viewport_top() -> None:
 # ---------------------------------------------------------------------------
 
 
+async def test_the_detail_page_splits_the_session_count_and_carries_the_refresh(
+    tmp_path: Path,
+) -> None:
+    """The page's own clauses on one working link plus one filing (schema 2):
+    the heading counts the split in the canvases' words, the filed row says
+    ``[filed]``, and the pinned footer carries the live refresh assertion."""
+    import json
+    import time as _time
+
+    session = _ProjectSession()
+    registry = _rich_registry(tmp_path)
+    project = registry.get_project_by_name("parity-spec")
+    assert project is not None
+    registry.link_session(project.id, "439818272d84", role="coordination")
+    path = tmp_path / "projects" / f"{project.id}.json"
+    payload = json.loads(path.read_text())
+    payload["progress"] = "one line"
+    payload["progress_updated_at"] = _time.time() - 5 * 3600
+    payload["progress_reported_by"] = SESSION_ID
+    payload["progress_refreshed_at"] = _time.time() - 3600
+    payload["progress_refreshed_by"] = "439818272d84"
+    path.write_text(json.dumps(payload))
+    session.project_registry = ProjectRegistry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(160, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        assert view._mode == "detail"
+        joined = "\n".join(view.rendered_rows())
+        assert "sessions (1 working · 1 filed)" in joined
+        assert "439818272d84 [filed]" in joined
+        assert "refreshed 60m ago by session 439818272d84 — no new content since" in joined
+
+
 async def test_d_opens_the_detail_and_esc_pops_one_level(tmp_path: Path) -> None:
     session = _ProjectSession()
     session.project_registry = _rich_registry(tmp_path)

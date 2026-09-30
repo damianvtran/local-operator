@@ -160,15 +160,17 @@ async def test_link_and_unlink_receipts_name_the_link_set(tmp_path: Path) -> Non
         await _boot(pilot, app)
         app._run_slash_command("/project link alpha")
         await pilot.pause()
-        assert _notices(app)[-1] == f"linked session {SESSION_ID} to 'alpha' (1 linked now)."
+        assert _notices(app)[-1] == (
+            f"linked session {SESSION_ID} to 'alpha' as a working session (1 working now)."
+        )
         app._run_slash_command("/project link alpha")
         await pilot.pause()
         assert _notices(app)[-1] == (
-            f"session {SESSION_ID} was already linked to 'alpha' (1 linked)."
+            f"session {SESSION_ID} was already linked to 'alpha' as a working session (1 working)."
         )
         app._run_slash_command("/project unlink alpha")
         await pilot.pause()
-        assert _notices(app)[-1] == f"unlinked session {SESSION_ID} from 'alpha' (0 linked now)."
+        assert _notices(app)[-1] == f"unlinked session {SESSION_ID} from 'alpha' (0 working now)."
         app._run_slash_command("/project unlink alpha")
         await pilot.pause()
         assert "is not linked to 'alpha'" in _notices(app)[-1]
@@ -979,3 +981,37 @@ async def test_the_open_hint_paints_its_word_once(tmp_path: Path) -> None:
         painted = view._open_hint.preview(" open", lead=True)
         assert painted.count("open") == 1, painted
         assert "↵  open" in painted  # key `↵`, then the label's two-space seam
+
+
+# -- the role split (schema 2, P1): the CoS files, she does not join ---------
+
+
+@pytest.mark.asyncio
+async def test_new_files_the_chief_of_staff_session_instead_of_joining_it(
+    tmp_path: Path,
+) -> None:
+    """`/project new` makes the same write-surface decision the tool does.
+
+    With aida state naming THIS session, the create-time link is recorded as
+    coordination: ``sessions`` stays empty (nothing to count as a worker,
+    nothing to nudge), ``coordination_sessions`` carries her id, and the
+    receipt names what happened instead of the plain \"linked this session\".
+    """
+    from local_operator.aida.state import write_state
+
+    write_state(tmp_path, {"session_id": SESSION_ID})
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await _boot(pilot, app)
+        app._run_slash_command("/project new filed-for-a-worker")
+        await pilot.pause()
+        assert _notices(app)[0] == (
+            "created project 'filed-for-a-worker' [active]; filed by this "
+            f"session ({SESSION_ID}) — a coordination link, not a working session."
+        )
+        project = session.project_registry.get_project_by_name("filed-for-a-worker")
+        assert project is not None
+        assert project.sessions == []
+        assert project.coordination_sessions == [SESSION_ID]
