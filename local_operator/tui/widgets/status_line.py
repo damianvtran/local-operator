@@ -38,6 +38,7 @@ from rich.style import Style
 from rich.text import Text
 from textual.widgets import Static
 
+from local_operator.harness.jobs import model_fallback_badge
 from local_operator.herdr.reporter import HerdrReporter, state_from_title
 from local_operator.model.naming import model_label as model_label_forms
 from local_operator.session.frontend_state import (
@@ -1110,6 +1111,13 @@ class SubagentBand:
     #: this class exists to keep straight. The name is the segment that never
     #: drops; the model yields to it, and only there.
     model_label: str = ""
+    #: The pin the child's launch resolved, when one did (``""`` = no pin, or a
+    #: consumer that predates the field). While it disagrees with
+    #: ``model_label`` the model segment renders the pin-integrity badge
+    #: (``jobs.model_fallback_badge``) instead of the resolved display name —
+    #: the ONE surface change that makes a silent substitution visible when
+    #: the operator drills into the child.
+    requested_model_label: str = ""
     #: The child's own name, which REPLACES the parent's running-agent counter
     #: while the overlay is up. Without it the band interleaves three owners
     #: with no mark — the model, context, cost and duration are the child's,
@@ -1785,6 +1793,28 @@ class StatusLine:
             return self._subagent.model_label
         return self._model_label
 
+    def _shown_model_display(self, *, short: bool) -> str:
+        """The model segment's text: the pin-fallback badge while off the pin.
+
+        The badge SHORT-CIRCUITS :func:`format_model_label` deliberately: its
+        text is TWO selectors joined by ``→ ⚠ fallback``, which the naming
+        resolver would parse as one provider and one runaway model id, and
+        any "resolved" name for that pair would be a fiction. The badge is
+        already the shortest honest spelling of the fact it carries (see
+        ``jobs.model_fallback_badge``); the effective label's own display name
+        remains the path for everything else, resolved exactly as before.
+        """
+        model_label = self._shown_model_label()
+        if not model_label:
+            return ""
+        if self._subagent is not None:
+            badge = model_fallback_badge(
+                self._subagent.requested_model_label, self._subagent.model_label
+            )
+            if badge:
+                return badge
+        return format_model_label(model_label, short=short, name=self._shown_model_name())
+
     def _shown_model_name(self) -> str:
         """The resolved name for whichever model the segment is describing.
 
@@ -2020,11 +2050,7 @@ class StatusLine:
             tail.truncate(width, overflow="ellipsis")
             return tail
         model_label = self._shown_model_label()
-        label = (
-            format_model_label(model_label, short=True, name=self._shown_model_name())
-            if model_label
-            else ""
-        )
+        label = self._shown_model_display(short=True) if model_label else ""
         # A hidden ``display.composer.model`` leaves this row too. This path
         # exists for widths no ladder row fits, and it re-admits the label
         # after every ladder row has shed it — a segment the user hid must not
@@ -2211,16 +2237,12 @@ class StatusLine:
         # every segment whose glyph is pure framing, and set only where the
         # glyph itself is the signal.
         parts: list[tuple[str, str, Style, Style | None]] = []
-        model_label = self._shown_model_label()
-        if model_label and "model" not in dropped:
+        model_text = self._shown_model_display(short="model" in short)
+        if model_text and "model" not in dropped:
             parts.append(
                 (
                     ICON_MODEL,
-                    format_model_label(
-                        model_label,
-                        short="model" in short,
-                        name=self._shown_model_name(),
-                    ),
+                    model_text,
                     Style(color=theme_mod.semantic_color("fg")),
                     None,
                 )

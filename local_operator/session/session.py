@@ -2124,6 +2124,14 @@ _ROSTER_ROW_FIELDS = frozenset(
         # uses ``registrant_id`` so the old key ages out with the sidecars.
         "registrant_id",
         "model_label",
+        # The pin the launch resolved, when one did — registration-stamped and
+        # never overwritten, so a row restored from the snapshot can still
+        # render the fallback badge from ``model_label !=
+        # requested_model_label``. The runtime-only ``model_fallback``/reason
+        # pair is deliberately NOT persisted beside it (see ``AsyncJob``): the
+        # reason is not re-derivable but IS replaceable by a comparison, and a
+        # strict reader that meets an unknown key drops the whole row.
+        "requested_model_label",
         "context_window",
         "usage",
         # Bounded by distinct provider/model/accounting-mode tuples, not child

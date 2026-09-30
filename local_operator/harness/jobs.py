@@ -433,6 +433,35 @@ class AsyncJob(BaseModel):
     # the child had inherited when a pin had in fact been accepted. ``None`` is
     # "not recorded" and the reader falls back to comparing labels.
     owns_model: bool | None = None
+    # The label the launch's PIN resolved to (a tier or role pin), stamped at
+    # REGISTRATION beside ``owns_model`` and NEVER overwritten — the mirror of
+    # the attribution stamp for the MODEL. ``model_label`` above is deliberately
+    # overwritten by the runner (the built child's effective model) and again by
+    # every route edge the relay sees, so after those writes the pin's own label
+    # survives NOWHERE, and "pinned to X, running on Y" — the one comparison a
+    # reader needs to spot a silently substituted child — becomes unrenderable.
+    # ``None`` is "no pin chose this child" (the inherit case), the same
+    # convention as ``owns_model``.
+    #
+    # In ``_ROSTER_ROW_FIELDS``: a small, bounded, registration-stamped string
+    # that a restored row needs to render the fallback badge from a comparison
+    # of the two labels (see :func:`model_fallback_badge`).
+    requested_model_label: str | None = None
+    #: True while a route edge has taken this PINNED child off its requested
+    #: model: the child is serving on a fallback while its pin stays visible on
+    #: ``requested_model_label``. ``model_fallback_reason`` carries the edge's
+    #: own cause phrase (today the failover driver's short token, enriched to
+    #: name the refusing provider once the mechanism does).
+    #:
+    #: RUNTIME-ONLY, deliberately ABSENT from ``_ROSTER_ROW_FIELDS``: the
+    #: sidecar's read models are strict (``extra="forbid"``, see the note on
+    #: ``cut_off_cause``), so persisting a field an older owner does not know
+    #: would make it drop the whole row at resume — a worse degradation than
+    #: losing a cause that is re-derivable. A restored row still renders the
+    #: badge by comparing ``model_label != requested_model_label``; only the
+    #: reason phrase is lost after a restart.
+    model_fallback: bool = False
+    model_fallback_reason: str = ""
     # Cumulative provider-reported usage for the child, summed over each
     # assistant ``message_end`` — not just the final one, because a tool-using
     # child spends most of its tokens in the earlier model calls of the same
@@ -516,6 +545,30 @@ class AsyncJob(BaseModel):
     # handles continue resolving to the newest attempt.
     logical_id: str | None = None
     attempt_aliases: list[str] = Field(default_factory=list)
+
+
+def model_fallback_badge(requested: str | None, effective: str | None) -> str:
+    """``requested → effective ⚠ fallback`` when a pin is not the model running.
+
+    The ONE renderer for the pin-integrity badge, shared by the TUI band, the
+    mobile projection and the wait/jobs summary so the three cannot drift in
+    what a substituted child looks like. Returns ``""`` when there is nothing
+    to say: no pin (an inheriting child), a missing label, or the pin serving —
+    the recovered case.
+
+    DIVERGENCE is the trigger rather than ``AsyncJob.model_fallback`` because
+    the flag is runtime-only: a row restored from the roster snapshot has
+    labels but no flag, and "was this the model the launch asked for" must
+    stay answerable after a restart. For a pinned child the only mechanism
+    that moves the effective label off the pin is a fallback, so the marker's
+    word is not an inference about a cause — the cause phrase is what the
+    flag's ``model_fallback_reason`` carries, and it is honestly absent here.
+    """
+    requested = str(requested or "")
+    running = str(effective or "")
+    if not requested or not running or requested == running:
+        return ""
+    return f"{requested} → {running} ⚠ fallback"
 
 
 class AsyncJobManager:
