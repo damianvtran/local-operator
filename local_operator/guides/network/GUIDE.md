@@ -72,8 +72,11 @@ rendering is not a contract.
    <inviter> will serve to this device:` with one row per credential — `will be
    served` / `not offered`), and the same rows on the inviter's confirm screen.
    The owner may only REMOVE rows (`[t]` at its prompt; nothing can be added in
-   a pairing), and the final set is what the joined receipt reports (`serving
-   here: …`; a promised key that could not be served is named with the remedy).
+   a pairing), the confirm screen re-renders the list after each edit so the
+   frame you answer `y` at matches the grant, and the final set is what the
+   joined receipt reports (`serving here: …`; a promised key the result does not
+   carry is named either as deliberately not shared or, if the grant failed,
+   with the remedy).
    An older build on EITHER end shows no list and the ceremony is exactly what
    it was before — the joiner's screen says the same, so an absence is never
    read as "nothing to share".
@@ -122,8 +125,9 @@ rendering is not a contract.
    ```
 
    The joined receipt also names the final set in words — `serving here: openai`,
-   plus a `not served:` line naming the remedy for anything the offer promised
-   and the grant dropped (the owner went offline for it, or removed it).
+   plus `not served:` lines beside it: a key the owner's person removed says so
+   ("the other device chose not to share it"), while a grant that failed names
+   the remedy.
 
    Hand them that command and the code, and let them run it. There is deliberately no
    flag on the `network` tool that completes a pairing: the digits both devices derive

@@ -359,7 +359,16 @@ in the offers module flips it;
 a documented fast-follow, not an accident;
 * a store with no join-capable candidates sends an EMPTY list rather than no
 record, so "nothing to share" and "older build" stay different sentences, and
-an unreadable store records `enumeration: "unreadable"` on the owner's audit;
+an unreadable store records `offer_enumeration: "unreadable"` (scalar
+`offer_sent` / `offer_digest` keys beside it) on the owner's audit;
+* the receipt says WHY a promised key is missing: a deliberate reduction gets
+`not served: … — the other device chose not to share it` (no remedy — the
+result frame carries `reduced` for exactly this), while a grant that failed
+keeps the share-verb remedy;
+* the row schema evolves ADDITIVELY: the digest is over the canonical
+projection (unknown per-row fields ride), unknown kinds display through the
+renderer's fallback and can never grant, and a change to an existing field's
+MEANING ships as `pair-offer-v2`;
 * the `pool`-kind line from §6 is not implemented yet (pool invites do not exist
 at this ref); when they do, the extra line belongs in the same renderer.
 * older builds on either end see and send nothing — the wire order is

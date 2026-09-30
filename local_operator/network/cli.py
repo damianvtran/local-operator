@@ -2632,26 +2632,27 @@ def _finish_pairing(
         f"members: {len(record.active_members())}",
         "next: lop network peers   ·   lop sessions --all-peers",
     ]
-    if shares:
-        lines.insert(1, f"serving here: {', '.join(shares)}")
-    # WHAT WAS OFFERED BUT NOT SERVED GETS A LINE AND A REMEDY (§5.3's dropped-key
-    # sentence). The receipt is the joiner's only view of the final set, so a key
-    # the offer promised and the result does not carry - dropped because it went
-    # missing on the owner, or reduced by the owner's person - must not just
-    # vanish between the two screens.
+    # WHAT WAS OFFERED BUT NOT SERVED GETS A LINE (§5.3's dropped-key sentence),
+    # and THE TWO CAUSES READ DIFFERENTLY (UX round 1, U2): a deliberate
+    # reduction is its own fact — no remedy, nothing to fix — while a grant that
+    # failed names the share verb. Both sit beside the serving line, right after
+    # "joined …", so the receipt's last line is never the one to act on (design
+    # round 1, D5). ``reduced`` is the relay's word for the keys the owner's
+    # person removed at the confirm screen; a relay that predates the key leaves
+    # the whole delta in the failed bucket, which is the pre-fix behaviour.
     from local_operator.network.credentials import offers as offers_mod
 
+    reduced = [str(key) for key in (answer.get("reduced") or [])]
     offered = (
         offers_mod.served_keys(list(offer_view["items"]))
         if offer_view.get("state") == offers_mod.OFFER_LISTED
         else []
     )
-    missing = [key for key in offered if key not in shares]
-    if missing:
-        lines.append(
-            f"not served: {', '.join(missing)} — ask the other device to run "
-            "`lop network credential share <key> --with <device>` to lend it after the join"
-        )
+    extras: list[str] = []
+    if shares:
+        extras.append(f"serving here: {', '.join(shares)}")
+    extras.extend(offers_mod.missing_share_lines(offered, shares, reduced))
+    lines[1:1] = extras
     return (
         lines,
         {
@@ -2665,6 +2666,10 @@ def _finish_pairing(
             "fingerprint": fingerprint,
             # The final granted set, exactly what the receipt line above names.
             "shares": shares,
+            # The deliberate half of the offer-to-final delta, so the tool's
+            # receipt branch can keep "the owner chose not to" apart from "the
+            # grant failed" the same way the CLI receipt does (U2).
+            "reduced": reduced,
             # The offer as it was shown, so a renderer that only sees the payload
             # (the tool's finished-receipt branch) can name the delta between what
             # was promised and what was served — the masking rule covers the label
@@ -4994,7 +4999,7 @@ def _cmd_confirm(args: argparse.Namespace) -> int:
     property the joiner's prompt enforces from the other side. ``--sas-stdin`` is
     the harness's seam and is refused outside ``LOP_NETWORK_TEST_MODE=1``.
     """
-    from local_operator.network import store, types, wire
+    from local_operator.network import store, types
 
     rows = _pending_pairings()
     if args.list_pending:
@@ -5022,10 +5027,11 @@ def _cmd_confirm(args: argparse.Namespace) -> int:
     shares: list[str] = []
     if not args.decline:
         print(str(chosen.get("prompt") or ""))
-        print(
-            f"YOUR screen shows {wire.sas_display(str(chosen.get('sas') or ''))}; the other "
-            f"device should show the same six digits."
-        )
+        # NO SECOND "YOUR screen shows" LINE HERE (design round 1, D6): the
+        # parked record's own prompt already prints it (`inviter_prompt_for`),
+        # and the CLI's duplicate read as a second, separate claim nine lines
+        # below the first — the new share block sitting between them is what
+        # made the pair glaring.
         answer, shares = _read_confirmation(args, chosen)
         admit = answer == "yes"
     chosen_shares = sorted(shares) if admit else []
@@ -5141,7 +5147,7 @@ def _read_confirmation(args: argparse.Namespace, chosen: dict[str, Any]) -> tupl
             "its own prompt appears there.",
         )
     servable = {str(item.get("key")) for item in items if item.get("share")}
-    hint = " (t to change what will be served)" if servable else ""
+    hint = " (t to remove what will be served)" if servable else ""
     shares = list(default_shares)
     while True:
         try:
@@ -5150,6 +5156,23 @@ def _read_confirmation(args: argparse.Namespace, chosen: dict[str, Any]) -> tupl
             return "no", []
         if typed == "t" and servable:
             shares = _edit_share_list(items, shares, chosen)
+            # THE SCREEN THE NEXT y/N LANDS ON MUST SHOW THE CURRENT SET (design
+            # round 1, D1 / UX round 1, U1): the block was printed once, before
+            # the loop, so the last frame before admission still promised every
+            # offered key. Re-render it from the CURRENT decision — the state is
+            # already tracked; this only shows it.
+            print()
+            print(
+                "\n".join(
+                    offers_mod.render_owner_block(
+                        items,
+                        joiner=str(
+                            chosen.get("joiner_name") or chosen.get("joiner_device_id") or ""
+                        ),
+                        decision=shares,
+                    )
+                )
+            )
             continue
         break
     return ("yes" if typed in ("y", "yes") else "no"), shares
@@ -5160,34 +5183,37 @@ def _edit_share_list(
 ) -> list[str]:
     """One reduce-only edit of the served set (§3.3: ``[t]`` unchecks; nothing adds).
 
-    The refusal names the key and the remedy at the one point a person can be told
-    about it: an addition — or any key not currently being served — is refused by
-    SENTENCE, before anything is written, and the ceremony stays open for a retry.
+    A key that is not currently being served is refused BY SENTENCE — naming the
+    key and the remedy — and the SAME question is asked again (design round 1,
+    D8): the refusal used to be raised, which exited the command even though the
+    parked pairing survives and nothing was lost except the screen. The relay's
+    own control op still refuses a widening that arrives in a frame; this loop is
+    the interactive half.
     """
-    from local_operator.network import types
-
     servable = {str(item.get("key")) for item in items if item.get("share")}
-    current = [key for key in shares if key in servable]
-    typed = input(
-        "type the keys to stop serving, space-separated (blank keeps all)"
-        f" [{', '.join(current) or 'none'}]: "
-    ).strip()
-    if not typed:
-        return shares
-    to_stop = typed.split()
-    for key in to_stop:
-        if key not in current:
-            raise types.MeshRefusal(
-                "shares_not_offered",
+    while True:
+        current = [key for key in shares if key in servable]
+        typed = input(
+            "type the keys to stop serving, space-separated (blank keeps all)"
+            f" [{', '.join(current) or 'none'}]: "
+        ).strip()
+        if not typed:
+            return shares
+        to_stop = typed.split()
+        unknown = [key for key in to_stop if key not in current]
+        if unknown:
+            key = unknown[0]
+            print(
                 f"{key!r} is not currently being served, and only served items can be "
                 "removed here — nothing can be added in this ceremony. To serve it, run "
                 f"`lop network credential share {key} --with "
-                f"{chosen.get('joiner_device_id')}` on this device after the join.",
+                f"{chosen.get('joiner_device_id')}` on this device after the join."
             )
-    # A COMPREHENSION, not ``current.remove``: the session-removal guard scans the
-    # whole tree for ``.remove`` spellings, and a list-of-keys call does not need to
-    # be explained to it as a false positive.
-    return [key for key in current if key not in to_stop]
+            continue
+        # A COMPREHENSION, not ``current.remove``: the session-removal guard scans the
+        # whole tree for ``.remove`` spellings, and a list-of-keys call does not need to
+        # be explained to it as a false positive.
+        return [key for key in current if key not in to_stop]
 
 
 def _answered_by(args: argparse.Namespace) -> str:

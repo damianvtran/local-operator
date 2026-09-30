@@ -956,6 +956,7 @@ def pair_result_frame(
     material: str = "",
     rotations: dict[str, str] | None = None,
     shares: list[str] | None = None,
+    reduced: list[str] | None = None,
     reason: str = "",
 ) -> dict[str, Any]:
     """The inviter's admission answer — and the ONLY frame that carries material.
@@ -975,6 +976,13 @@ def pair_result_frame(
     ("serving here: …") and the one fact that reconciles the two screens when a
     share was dropped. Old joiners read named keys only and ignore it; it is
     empty for mixed pairs, where no list ever travelled.
+
+    ``reduced`` names the keys the owner's PERSON removed at the confirm screen
+    (the deliberate half of the offer-to-final delta). The joiner needs it to
+    keep "the owner chose not to" apart from "the grant failed", which carry
+    different receipt sentences (UX round 1, U2). It is additive: an older
+    joiner ignores the key, and a relay that predates it sends nothing — both
+    then read the whole delta as failed, which is the pre-fix behaviour.
     """
     frame: dict[str, Any] = {"op": "net_pair_result", "req": req, "admit": admit}
     if admit:
@@ -985,6 +993,7 @@ def pair_result_frame(
         frame["secret"] = material
         frame["rotations"] = rotations or {}
         frame["shares"] = list(shares or [])
+        frame["reduced"] = list(reduced or [])
     else:
         frame["reason"] = reason
     return frame
@@ -995,8 +1004,9 @@ def pair_offer_frame(*, items: list[dict[str, Any]], digest: str) -> dict[str, A
 
     Sent before anything waits on a human, so both ends can show the same list
     before the joiner types: the owner needs it to decide what to lend, and the
-    joiner needs it to see what it will borrow. The ``digest`` is sha256 over
-    ``wire.canonical_json(items)`` (``credentials.offers.digest_of``): a checksum
+    joiner needs it to see what it will borrow. The ``digest`` is sha256 over the
+    CANONICAL PROJECTION of the items (``credentials.offers.digest_of``, whose
+    docstring owns the additive-evolution rule): a checksum
     that pins the two screens to one list, NOT a signature — the record's AEAD
     under the pair link keys is the integrity (the frame never existed pre-auth,
     and a tamper without those keys fails the AEAD, which is a hard refusal).
@@ -1050,20 +1060,16 @@ def sas_matches(derived: str, typed: str) -> bool:
 
 
 def sas_mismatch_sentence() -> str:
-    """What B prints when the codes disagreed. Named once because it is a promise.
+    """What B prints when the codes disagreed: the DIAGNOSIS only.
 
-    IT USED TO SAY "Do not retry: ask for a new invite." — which became a false promise
-    (and a wasted trip to the other device) once a mistype inside the forgiving budget
-    stopped spending the token (Q-XH-6). It now says what is true and what to do, and
-    it names the fallback for the case that genuinely is the last failure, so nobody is
-    sent round a loop by a sentence that only covers the common case.
+    THE REMEDY LIVES ONCE, in ``PAIRING_REMEDIES["sas_mismatch"]`` — the
+    caps-consistent "SAME token" advice, which is what the forgiving budget
+    (Q-XH-6) actually licenses. This sentence used to carry a second,
+    differently-worded copy of the same advice, so the composed refusal said it
+    twice in two voices (~470 cols; design/UX round 1, Q-R1-2). It now states
+    only what happened; ``refusal_from_pairing`` appends the one remedy.
     """
-    return (
-        "the codes did not match — the other device did not admit this machine. Run the "
-        "join again with the same token and compare the codes on both screens before "
-        "typing: repeated failures are what spend an invite, so if it is refused as "
-        "already used, ask for a new one."
-    )
+    return "the codes did not match — the other device did not admit this machine"
 
 
 def pair_timeout_seconds(remaining_s: float) -> float:
@@ -1141,7 +1147,7 @@ PAIRING_REMEDIES: dict[str, str] = {
         "the code on both devices before typing — an invite is spent only after repeated "
         "failures, so if it is refused as already used, mint a fresh one"
     ),
-    "declined_remote": "the other device declined: ask its operator",
+    "declined_remote": "ask its operator",
     "timeout": (
         "nobody typed the code in time: run it again with the SAME token — a delay does "
         "not spend an invite — and answer the prompt on both devices"

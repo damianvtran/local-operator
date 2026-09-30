@@ -196,7 +196,11 @@ def test_offer_bounded_sorted_digest_matches_canonical_items(
 
 
 def test_offer_validation_refuses_unusable_items() -> None:
-    """A frame the parser cannot trust is refused, never shown partially."""
+    """A frame the parser cannot trust is refused, never shown partially.
+
+    Note what is NOT in the refusal list: an unknown KIND. Tolerating it is the
+    row-schema rule (``canonical_rows``) and cell-pinned below.
+    """
     good = {"key": "openai", "kind": "oauth-rotating", "label": "d***@x", "share": True}
     assert offers.validate_items([good]) == [good]
 
@@ -204,7 +208,8 @@ def test_offer_validation_refuses_unusable_items() -> None:
         "not a list",
         [good] * (offers.MAX_OFFER_ITEMS + 1),
         [{"key": "", "kind": "oauth-rotating", "label": "", "share": True}],
-        [{"key": "x", "kind": "secret", "label": "", "share": True}],
+        [{"key": "x", "kind": "", "label": "", "share": True}],
+        [{"key": "x", "kind": "k" * (offers.MAX_OFFER_KIND + 1), "label": "", "share": True}],
         [{"key": "x", "kind": "oauth-rotating", "label": "", "share": "yes"}],
         [
             {
@@ -218,6 +223,47 @@ def test_offer_validation_refuses_unusable_items() -> None:
     ):
         with pytest.raises(ValueError):
             offers.validate_items(bad)
+
+
+def test_the_row_schema_evolves_additively_only() -> None:
+    """M1's rule, pinned: additive fields and kinds ride pair-offer-v1, and the
+    digest still catches REWRITES (so tampering fails even as additions pass).
+
+    The failure this prevents: a future add-a-field change holds a legitimate
+    ``pair-offer-v1``, and old joiners refuse EVERY pairing with it — while the
+    code reads as if the only risk were a classifier bug.
+    """
+    from local_operator.network.handshake import parse_pair_offer
+
+    good = {"key": "openai", "kind": "oauth-rotating", "label": "d***@x", "share": True}
+
+    # An additive per-row FIELD: same digest (the projection drops it), and the
+    # parser returns the canonical row rather than refusing the frame.
+    richer = dict(good, pool="team-a")
+    assert offers.digest_of([richer]) == offers.digest_of([good])
+    assert offers.validate_items([richer]) == [good]
+    frame = {"op": "net_pair_offer", "items": [richer], "digest": offers.digest_of([richer])}
+    assert parse_pair_offer(frame) == [good]
+
+    # An additive KIND: validated, displayed through the fallback, never able to
+    # grant (grants are the owner's, key-based, against its own store).
+    future = {"key": "newthing", "kind": "future-kind", "label": "", "share": True}
+    assert offers.validate_items([future]) == [future]
+    assert offers.kind_label("future-kind") == "future-kind"
+    rows = offers.render_rows([future])
+    assert any("future-kind" in row and "will be served" in row for row in rows)
+    frame = {"op": "net_pair_offer", "items": [future], "digest": offers.digest_of([future])}
+    assert parse_pair_offer(frame) == [future]
+
+    # But MEANING is frozen: a rewrite of an existing field fails the digest —
+    # that is the half that makes the tolerance above safe.
+    rewritten = [dict(good, share=False)]
+    assert offers.digest_of(rewritten) != offers.digest_of([good])
+    with pytest.raises(types.MeshRefusal) as rewritten_refusal:
+        parse_pair_offer(
+            {"op": "net_pair_offer", "items": rewritten, "digest": offers.digest_of([good])}
+        )
+    assert rewritten_refusal.value.code == "protocol_error"
 
 
 def test_offer_reads_degrade_by_absence_and_raise_by_unreadability(root: Path) -> None:
@@ -253,17 +299,30 @@ def test_offer_lines_and_states_are_one_contract() -> None:
     assert offers.render_joiner_block(items, inviter="damian-mbp") == [
         "Credentials damian-mbp will serve to this device:",
         "  openai (OAuth, d***@gmail.com)   will be served",
-        "  anthropic (API key)   not offered",
+        "  anthropic (API key)              not offered",
         "the inviter can remove items before admitting; nothing else will be served.",
     ]
     assert offers.render_owner_block(items, joiner="laptop") == [
         "Credentials this device will serve to laptop:",
         "  openai (OAuth, d***@gmail.com)   will be served",
-        "  anthropic (API key)   not offered",
+        "  anthropic (API key)              not offered",
         "the list can only shrink; nothing else will be served.",
     ]
+    # The confirm screen's re-render (D1/U1): same block, states from the CURRENT
+    # decision — a served key the person removed reads `no longer served`.
+    reprint = offers.render_rows(items, decision=[])
+    assert reprint[0] == "  openai (OAuth, d***@gmail.com)   no longer served"
+    assert reprint[1].endswith("(API key)" + " " * 14 + "not offered")
+    assert (
+        offers.render_rows(items, decision=["openai"])[0]
+        == "  openai (OAuth, d***@gmail.com)   will be served"
+    )
     assert offers.render_state_line(offers.OFFER_EMPTY) == "no credentials were offered"
-    assert "older build" in offers.render_state_line(offers.OFFER_ABSENT)
+    # §4.3 names the two causes the state actually covers — an older build, or an
+    # offer that did not arrive; "has none to share" is §4.4's fact (D4).
+    absent = offers.render_state_line(offers.OFFER_ABSENT)
+    assert "older build" in absent and "offer did not arrive" in absent
+    assert "has none to share" not in absent
 
     assert offers.served_keys(items) == ["openai"]
     assert offers.owner_default_shares(items) == ["openai"]
@@ -274,6 +333,31 @@ def test_offer_lines_and_states_are_one_contract() -> None:
     assert offers.sentence_clause(offers.OFFER_ABSENT, [], inviter="x").startswith(
         "The other device did not offer"
     )
+
+
+def test_the_receipt_delta_keeps_a_decision_apart_from_a_failure() -> None:
+    """U2's sentence contract, both halves — and the pronoun follows the count.
+
+    A deliberate reduction gets NO remedy: pointing the joiner at the share verb
+    would re-open a decision the owner already took. The failed path keeps the
+    verb, which is the one thing they can act on.
+    """
+    assert offers.missing_share_lines(["openai"], [], ["openai"]) == [
+        "not served: openai — the other device chose not to share it"
+    ]
+    assert offers.missing_share_lines(["a", "b"], [], ["a", "b"]) == [
+        "not served: a, b — the other device chose not to share them"
+    ]
+    assert offers.missing_share_lines(["openai"], [], []) == [
+        "not served: openai — ask the other device to run "
+        "`lop network credential share <key> --with <device>` to lend it after the join"
+    ]
+    # Both causes at once, deliberately first; nothing that WAS served is named.
+    assert offers.missing_share_lines(["a", "b", "c"], ["a"], ["c"]) == [
+        "not served: c — the other device chose not to share it",
+        "not served: b — ask the other device to run "
+        "`lop network credential share <key> --with <device>` to lend it after the join",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -774,8 +858,8 @@ def _pending_with_offer(
             "YOUR screen shows 481 926.\n\n"
             "Credentials this device will serve to laptop:\n"
             "  openai (OAuth, d***@example.com)   will be served\n"
-            "  anthropic (OAuth)   will be served\n"
-            "  legacy-key (API key)   not offered\n"
+            "  anthropic (OAuth)                  will be served\n"
+            "  legacy-key (API key)               not offered\n"
             "the list can only shrink; nothing else will be served.\n\n"
             "Do they match? Confirm only if the other device shows the same code."
         ),
@@ -805,29 +889,40 @@ def test_confirm_screen_shows_the_offer_and_a_reduction_lands_in_the_decision(
     assert net_cli._cmd_confirm(_confirm_args()) == 0  # noqa: SLF001
     out = capsys.readouterr().out
     assert "openai (OAuth, d***@example.com)   will be served" in out
-    assert any("t to change what will be served" in prompt for prompt in prompts)
+    assert any("t to remove what will be served" in prompt for prompt in prompts)
+    # The re-render (D1/U1): the block prints again from the CURRENT decision, so
+    # the frame the final `y` lands on shows openai as removed — not as served.
+    assert out.count("Credentials this device will serve") == 2
+    assert "openai (OAuth, d***@example.com)   no longer served" in out
+    assert "anthropic (OAuth)" + " " * 18 + "will be served" in out
     decision = store.pair_decision("i_offer1", root)
     assert decision is not None and decision.matched and decision.decision == "admit"
     assert decision.shares == ["anthropic"]
 
 
 def test_confirm_refuses_an_unoffered_addition_by_name(
-    root: Path, monkeypatch: pytest.MonkeyPatch
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """§3.3: nothing can be ADDED at confirm — the CLI refuses before writing
-    anything, and the relay refuses the same widening if it arrives in a frame."""
+    """§3.3 + design round 1, D8: nothing can be ADDED at confirm — the CLI refuses
+    the key BY NAME and RE-ASKS in place (the command is not exited, and nothing is
+    lost but the screen), while the relay still refuses a widening that arrives in a
+    frame (a frame is not a place to re-ask)."""
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
     _pending_with_offer(root)
     monkeypatch.setattr(net_cli, "_has_terminal", lambda: True)
-    answers = iter(["t", "ghost-key", "y"])
+    answers = iter(["t", "ghost-key", "openai", "y"])
     monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
-    with pytest.raises(types.MeshRefusal) as refused:
-        net_cli._cmd_confirm(_confirm_args())  # noqa: SLF001
-    assert refused.value.code == "shares_not_offered"
-    assert "ghost-key" in refused.value.sentence
-    assert store.pair_decision("i_offer1", root) is None, "a refused edit wrote a decision"
+    assert net_cli._cmd_confirm(_confirm_args()) == 0  # noqa: SLF001
+    out = capsys.readouterr().out
+    assert "'ghost-key' is not currently being served" in out
+    assert "nothing can be added in this ceremony" in out
+    decision = store.pair_decision("i_offer1", root)
+    assert decision is not None and decision.matched and decision.decision == "admit"
+    # The refusal re-asked; the SECOND edit attempt landed and wrote the reduction.
+    assert decision.shares == ["anthropic"]
 
-    # The daemon side refuses the same widening, with the same remedy.
+    # The daemon side refuses the same widening, with the same remedy, and writes
+    # nothing — a frame gets no interactive re-ask.
     server = relay.RelayServer(settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1"))
     try:
         with pytest.raises(types.MeshRefusal) as daemon_refusal:
@@ -841,7 +936,10 @@ def test_confirm_refuses_an_unoffered_addition_by_name(
             )
         assert daemon_refusal.value.code == "shares_not_offered"
         assert "ghost-key" in daemon_refusal.value.sentence
-        assert store.pair_decision("i_offer1", root) is None
+        untouched = store.pair_decision("i_offer1", root)
+        assert untouched is not None and untouched.shares == [
+            "anthropic"
+        ], "the refused widening frame rewrote the decision"
     finally:
         server.stop()
 
@@ -854,14 +952,21 @@ def test_confirm_refuses_an_unoffered_addition_by_name(
 def _pair_with_credential(
     devices: tuple[relay.RelayServer, relay.RelayServer, str, int],  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    seeds: list[tuple[str, dict[str, Any]]] | None = None,
+    answer_shares: list[str] | None = None,
 ) -> tuple[Any, list[str], dict[str, Any]]:
-    """A full ceremony where A holds one oauth login and answers as its person."""
+    """A full ceremony where A holds oauth logins and answers as its person.
+
+    ``seeds`` overrides the single-openai store; ``answer_shares`` drives the
+    reduce-only choice at the confirm seam (omitted = the y/N default, the whole
+    offered set — exactly what a person who types `y` sends).
+    """
     server_a, server_b, host, port = devices
-    _seed(
-        server_a.root,
-        "openai",
-        {"refresh": "r", "access": "a", "email": "damian@example.com"},
-    )
+    for provider, payload in seeds or [
+        ("openai", {"refresh": "r", "access": "a", "email": "damian@example.com"})
+    ]:
+        _seed(server_a.root, provider, payload)
     record = _init_network(server_a)
     state = store.load_secrets(record.network_id, server_a.root)
     minted = invite_mod.mint(record, state.secret, role="drive", ttl_s=600.0)
@@ -871,7 +976,8 @@ def _pair_with_credential(
     _type_the_code(monkeypatch)
     answered: dict[str, Any] = {}
     thread = threading.Thread(
-        target=lambda: answered.update(_answer_confirmation(server_a) or {}), daemon=True
+        target=lambda: answered.update(_answer_confirmation(server_a, shares=answer_shares) or {}),
+        daemon=True,
     )
     thread.start()
     try:
@@ -932,6 +1038,7 @@ def test_result_frame_carries_the_granted_shares_and_the_receipt_shows_them(
     and the payload key an agent reads."""
     _record, lines, payload = _pair_with_credential(devices, monkeypatch)
     assert payload["shares"] == ["openai"]
+    assert payload["reduced"] == []
     assert "serving here: openai" in lines
 
 
@@ -950,7 +1057,7 @@ def test_a_reduction_cannot_widen_at_admission(
         shares=["openai", "ghost-key"],
     )
     offer_items = [{"key": "openai", "kind": "oauth-rotating", "label": "", "share": True}]
-    granted = relay._grant_pair_shares(  # noqa: SLF001 — the admission helper itself
+    granted, reduced = relay._grant_pair_shares(  # noqa: SLF001 — the admission helper itself
         record,
         joiner_id=server_b.identity.device_id,
         decision=decision,
@@ -960,11 +1067,41 @@ def test_a_reduction_cannot_widen_at_admission(
         audit=server_a.audit,
     )
     assert granted == ["openai"]
+    assert reduced == []
     from local_operator.network.credentials import placement as placement_mod
 
     document = placement_mod.PlacementDocument.load(record.network_id, server_a.root)
     assert document.entry("openai") is not None
     assert document.entry("ghost-key") is None, "an out-of-band share reached the document"
+
+
+def test_a_deliberate_reduction_reaches_the_joiner_as_a_decision_not_a_failure(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UX round 1, U2, end to end: the owner removes `azon` at the confirm screen
+    and the joiner's receipt says the other device CHOSE NOT TO — not the remedy,
+    which would re-open a decision already taken. The result frame's ``reduced``
+    is what makes the two causes distinguishable on this side at all."""
+    _record, lines, payload = _pair_with_credential(
+        devices,
+        monkeypatch,
+        seeds=[
+            ("openai", {"refresh": "r", "access": "a", "email": "d@e"}),
+            ("azon", {"refresh": "r", "access": "a", "email": "a@e"}),
+        ],
+        answer_shares=["openai"],
+    )
+    assert payload["shares"] == ["openai"]
+    assert payload["reduced"] == ["azon"], "the deliberate half did not ride the result"
+    # Both delta lines sit beside the serving line, right after `joined …` (D5),
+    # and the deliberate one carries no remedy (U2).
+    assert lines[0].startswith("joined ")
+    assert lines[1] == "serving here: openai"
+    assert lines[2] == "not served: azon — the other device chose not to share it"
+    assert not any(
+        "credential share" in line for line in lines
+    ), "a deliberate reduction still points the joiner at the share verb"
 
 
 def test_empty_and_skipped_offers_render_their_lines() -> None:
@@ -1005,7 +1142,7 @@ def test_empty_and_skipped_offers_render_their_lines() -> None:
     )
     assert "Credentials this device will serve to laptop:" in rows
     assert "openai (OAuth, d***@example.com)   will be served" in rows
-    assert "legacy-key (API key)   not offered" in rows
+    assert "legacy-key (API key)               not offered" in rows
 
 
 # ---------------------------------------------------------------------------
@@ -1085,6 +1222,7 @@ def test_a_new_owner_sends_nothing_to_an_old_joiner(
         ), "an old joiner's first sealed record was not the result — the offer gate leaked"
         assert frame.get("admit") is True
         assert frame.get("shares") == [], "a mixed pair has nothing to report"
+        assert frame.get("reduced") == []
     finally:
         sock.close()
         thread.join(20)

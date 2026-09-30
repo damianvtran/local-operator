@@ -486,13 +486,16 @@ lop network join --confirm 481926 --json
 ```
 
 **`offers` is the both-ends share list** (the memo's `net_pair_offer` frame, §3.2's
-as-built contract): present as a — possibly empty — list **iff the owner advertised
-the capability**, absent for an older build. The `sentence` carries the same fact
+as-built contract): present as a — possibly empty — list **only when the other
+device sent one and the bounded drain read it**; absent for an older build, and
+absent when a sent offer did not arrive in time (the drain expires; the ceremony
+proceeds). The `sentence` carries the same fact
 in words (one clause: `… will serve: openai.` / `No credentials were offered.` /
 `The other device did not offer credentials …`), so an agent that only renders the
 sentence can still say what will be shared, and the finished payload's `shares` is
 the final granted set — the owner may only reduce it during confirm, and a promised
-key that could not be served is named with its remedy in the receipt.
+key the result does not carry is named in the receipt: deliberately not shared
+(the owner's person removed it) or, if the grant failed, with the remedy.
 
 **Exit `3` is what a park nobody answered returns** (`pairing_unanswered`), not
 what a phase one that needs a human returns: with the socket held, the question

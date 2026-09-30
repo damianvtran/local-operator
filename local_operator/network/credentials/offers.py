@@ -103,6 +103,12 @@ MAX_OFFER_ITEMS = 64
 #: masked in the UI, never in the audit).
 MAX_OFFER_LABEL = 64
 
+#: Bound for a row's ``kind`` string. Unknown kinds are TOLERATED (see
+#: ``validate_items`` and the evolution rule on ``canonical_rows``): the bound is
+#: what keeps an unknown kind from being a smuggling channel, not a membership
+#: test over today's labels.
+MAX_OFFER_KIND = 64
+
 
 class OfferEnumerationError(Exception):
     """A store that EXISTS but cannot be read.
@@ -376,16 +382,42 @@ def build_items(config: Path) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
+def canonical_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The row projection both ends digest and validate to.
+
+    THE ROW-SCHEMA EVOLUTION RULE (agent review round 1, M1): ADDITIVE evolution
+    of ``pair-offer-v1`` is tolerated. Unknown per-row FIELDS never enter the
+    digest — it is computed over THIS projection on both ends, so a newer sender
+    may add one without refusing every pairing with a not-yet-upgraded joiner —
+    and unknown KINDS render through ``kind_label``'s fallback and can never
+    grant (grants are owner-side and key-based; a joiner only displays). A change
+    that alters the MEANING of an existing field, or the frame's security
+    properties, ships as ``pair-offer-v2``: an old joiner would read it under the
+    old rules.
+    """
+    return [
+        {
+            "key": str(item["key"]),
+            "kind": str(item["kind"]),
+            "label": str(item["label"]),
+            "share": bool(item["share"]),
+        }
+        for item in items
+    ]
+
+
 def digest_of(items: list[dict[str, Any]]) -> str:
-    """The frame's ``digest``: sha256 over the canonical serialisation of ``items``.
+    """The frame's ``digest``: sha256 over the canonical projection of ``items``.
 
     A CHECKSUM, NOT A SIGNATURE — the record's AEAD already protects the frame,
     and this cannot add integrity the link keys do not have. What it pins is the
     two screens agreeing on ONE list: the builder and the parser both recompute
-    it, so a build that dropped, reordered or rewrote a row fails its own frame
-    rather than showing the joiner a list the owner never offered.
+    it over ``canonical_rows`` (so additive fields ride without breaking an old
+    peer, per the evolution rule there), and a build that dropped, reordered or
+    rewrote a row fails its own frame rather than showing the joiner a list the
+    owner never offered.
     """
-    return hashlib.sha256(wire.canonical_json(items)).hexdigest()
+    return hashlib.sha256(wire.canonical_json(canonical_rows(items))).hexdigest()
 
 
 def validate_items(value: Any) -> list[dict[str, Any]]:
@@ -394,6 +426,14 @@ def validate_items(value: Any) -> list[dict[str, Any]]:
     Raises rather than dropping: an item the parser cannot trust is a frame the
     ceremony must refuse (the caller maps this to ``protocol_error``), and a
     tolerant parse would show a list that does not match the digest anyway.
+
+    UNKNOWN KINDS ARE TOLERATED BY THE ROW-SCHEMA RULE (``canonical_rows``):
+    they are bounded, digested (so tampering still fails) and DISPLAYED through
+    ``kind_label``'s fallback — and they can never grant, because grants are the
+    owner's own, made against its own store, key by key. An unknown kind is what
+    a newer sender's additive row looks like; refusing it here would turn every
+    additive change into a whole-ceremony refusal on older joiners (agent review
+    round 1, M1).
     """
     if not isinstance(value, list):
         raise ValueError("the share list is not a list")
@@ -409,8 +449,8 @@ def validate_items(value: Any) -> list[dict[str, Any]]:
         share = raw.get("share")
         if not isinstance(key, str) or not key or len(key) > 256:
             raise ValueError(f"share list item {position} has no usable key")
-        if kind not in KIND_LABELS:
-            raise ValueError(f"share list item {position} has an unknown kind {kind!r}")
+        if not isinstance(kind, str) or not kind or len(kind) > MAX_OFFER_KIND:
+            raise ValueError(f"share list item {position} has an unusable kind")
         if not isinstance(label, str) or len(label) > MAX_OFFER_LABEL:
             raise ValueError(f"share list item {position} has an unusable label")
         if not isinstance(share, bool):
@@ -435,23 +475,52 @@ def owner_default_shares(items: list[dict[str, Any]]) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def render_rows(items: list[dict[str, Any]]) -> list[str]:
-    """The row block every surface shows, in the design's shape (§2.3/§3.1)."""
-    rows: list[str] = []
+def render_rows(items: list[dict[str, Any]], *, decision: list[str] | None = None) -> list[str]:
+    """The row block every surface shows, in the design's shape (§2.3/§3.1).
+
+    The ``(kind, label)`` cell is padded to the block's widest so the STATE
+    column lines up — the list exists to be scanned down that column (design
+    round 1, D2).
+
+    ``decision`` renders a CEREMONY IN PROGRESS instead of the wire's original
+    flags: keys still in the list read ``will be served``, offered keys the
+    person has removed read ``no longer served``, and unoffered ones stay ``not
+    offered``. The confirm screen re-renders from the current decision after each
+    edit, so the frame the final ``y`` lands on matches the grant (design round
+    1, D1 / UX round 1, U1).
+    """
+    cells: list[str] = []
     for item in items:
         inner = kind_label(str(item.get("kind") or ""))
         label = str(item.get("label") or "")
         if label:
             inner = f"{inner}, {label}"
-        state = "will be served" if item.get("share") else "not offered"
-        rows.append(f"  {item.get('key')} ({inner})   {state}")
+        cells.append(f"{item.get('key')} ({inner})")
+    width = max((len(cell) for cell in cells), default=0)
+    served = {str(key) for key in decision} if decision is not None else set()
+    rows: list[str] = []
+    for item, cell in zip(items, cells):
+        if decision is None:
+            state = "will be served" if item.get("share") else "not offered"
+        elif str(item.get("key")) in served:
+            state = "will be served"
+        elif item.get("share"):
+            state = "no longer served"
+        else:
+            state = "not offered"
+        rows.append(f"  {cell}{' ' * (width - len(cell))}   {state}")
     return rows
 
 
 JOINER_TAIL = "the inviter can remove items before admitting; nothing else will be served."
 OWNER_TAIL = "the list can only shrink; nothing else will be served."
+#: §4.3's sentence. The old clause "or has none to share" is §4.4's fact (a
+#: DIFFERENT sentence) and it was false for the drain-expiry corner, where the
+#: peer is a new build whose offer simply did not arrive — so the parenthetical
+#: names the two causes the state actually covers (design round 1, D4).
 NOT_OFFERED_LINE = (
-    "the other device did not offer credentials (it is an older build, or has none to share)"
+    "the other device did not offer credentials (it is an older build, or the offer "
+    "did not arrive)"
 )
 EMPTY_OFFER_LINE = "no credentials were offered"
 OWNER_EMPTY_LINE = "nothing will be served in this ceremony"
@@ -470,11 +539,17 @@ def render_joiner_block(items: list[dict[str, Any]], *, inviter: str) -> list[st
     ]
 
 
-def render_owner_block(items: list[dict[str, Any]], *, joiner: str) -> list[str]:
-    """The ownER's screen lines: what this device will serve to the joining one."""
+def render_owner_block(
+    items: list[dict[str, Any]], *, joiner: str, decision: list[str] | None = None
+) -> list[str]:
+    """The ownER's screen lines: what this device will serve to the joining one.
+
+    ``decision`` is the in-progress set the confirm screen re-renders from
+    (``render_rows``); the wire's original flags render when it is omitted.
+    """
     return [
         f"Credentials this device will serve to {joiner}:",
-        *render_rows(items),
+        *render_rows(items, decision=decision),
         OWNER_TAIL,
     ]
 
@@ -483,6 +558,34 @@ def render_state_line(state: str) -> str:
     """The one-line render for a list that is absent or empty (``OFFER_ABSENT``
     gets §4.3's sentence, ``OFFER_EMPTY`` §4.4's — they are different facts)."""
     return EMPTY_OFFER_LINE if state == OFFER_EMPTY else NOT_OFFERED_LINE
+
+
+def missing_share_lines(offered: list[str], shares: list[str], reduced: list[str]) -> list[str]:
+    """The receipt's delta lines: a deliberate reduction is its OWN fact.
+
+    ``reduced`` (from the result frame / the payload) names the keys the owner's
+    PERSON removed at the confirm screen; anything else that was promised and not
+    served failed on the owner's device and keeps the remedy sentence. The two
+    must not read the same (UX round 1, U2): pointing the joiner at the share
+    verb for a decision the owner already took re-opens that decision.
+    """
+    served = set(shares)
+    reduced_set = set(reduced)
+    deliberate = [key for key in offered if key not in served and key in reduced_set]
+    failed = [key for key in offered if key not in served and key not in reduced_set]
+    lines: list[str] = []
+    if deliberate:
+        pronoun = "it" if len(deliberate) == 1 else "them"
+        lines.append(
+            f"not served: {', '.join(deliberate)} — the other device chose not to share "
+            f"{pronoun}"
+        )
+    if failed:
+        lines.append(
+            f"not served: {', '.join(failed)} — ask the other device to run "
+            "`lop network credential share <key> --with <device>` to lend it after the join"
+        )
+    return lines
 
 
 def sentence_clause(state: str, items: list[dict[str, Any]], *, inviter: str) -> str:

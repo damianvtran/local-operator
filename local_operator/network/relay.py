@@ -7375,7 +7375,7 @@ class RelayServer:
         # silence gets a sentence rather than reading as "nothing to share".
         offer_state = (
             offers_mod.OWNER_SKIPPED
-            if str(offer_detail.get("offer") or "") == offers_mod.OWNER_SKIPPED
+            if str(offer_detail.get("offer_skip") or "") == offers_mod.OWNER_SKIPPED
             else offers_mod.OWNER_SENT
         )
         pending = PendingPairing(
@@ -7686,7 +7686,7 @@ class RelayServer:
                 # failure is DROPPED with an audit — never a rollback — because
                 # the two humans already confirmed and a vanished credential must
                 # not cost the admission.
-                granted_keys = _grant_pair_shares(
+                granted_keys, reduced_keys = _grant_pair_shares(
                     record,
                     joiner_id=joiner_id,
                     decision=decision,
@@ -7719,8 +7719,11 @@ class RelayServer:
                 # THE RECEIPT'S FINAL SET: what was actually served, drift and
                 # drops included. The joiner shows it ("serving here: …") and it
                 # is the only fact that reconciles the two screens when a share
-                # could not be applied.
+                # could not be applied. ``reduced`` names the keys the owner's
+                # person removed at confirm — the deliberate half of the delta,
+                # which the joiner's receipt says differently from a failure.
                 shares=granted_keys,
+                reduced=reduced_keys,
             )
             sock.sendall(codec.seal(frame))
             self.audit.record(
@@ -9981,25 +9984,35 @@ def _pair_offer_for(
     THE GATE IS THE JOINER'S OWN ADVERTISEMENT: a build that does not know
     ``pair-offer-v1`` never sees the frame (the both-sides rule caps exist for),
     which is what lets this ship without moving either protocol version. When the
-    gate is closed the audit says WHY (``skipped_peer_unsupported``) so the
-    owner's confirm screen can say it too — an absent frame from an old peer must
-    stay distinguishable from an empty list from a new one.
+    gate is closed the audit says WHY (``offer_skip`` = ``skipped_peer_unsupported``)
+    so the owner's confirm screen can say it too — an absent frame from an old peer
+    must stay distinguishable from an empty list from a new one.
 
     AN UNREADABLE STORE IS AN EMPTY OFFER, NEVER A SKIPPED FRAME: an absent frame
     is indistinguishable from an old peer's silence, so a store that cannot be
-    enumerated still SENDS (nothing), and the audit's ``enumeration`` key records
-    that the emptiness was a failure rather than a fact.
+    enumerated still SENDS (nothing), and the audit's ``offer_enumeration`` key
+    records that the emptiness was a failure rather than a fact.
+
+    THE DETAIL IS SCALARS (agent review round 1, N1): the audit writer's
+    ``_clean_value`` stringifies a nested dict, so the old ``{"offer": {...}}``
+    landed as a Python repr that matched neither the whitelist comment nor a
+    consumer. Three keys — ``offer_sent``, ``offer_digest``, ``offer_skip``
+    (plus ``offer_enumeration`` on the failure) — are machine-readable as written.
     """
     from local_operator.network.credentials import offers as offers_mod
 
     if wire.PAIR_OFFER_V1 not in handshake.peer_capabilities:
-        return False, [], {"offer": offers_mod.OWNER_SKIPPED}
+        return False, [], {"offer_skip": offers_mod.OWNER_SKIPPED}
     try:
         items = offers_mod.build_items(root)
     except offers_mod.OfferEnumerationError:
         empty = offers_mod.digest_of([])
-        return True, [], {"offer": {"sent": 0, "digest": empty, "enumeration": "unreadable"}}
-    return True, items, {"offer": {"sent": len(items), "digest": offers_mod.digest_of(items)}}
+        return (
+            True,
+            [],
+            {"offer_sent": 0, "offer_digest": empty, "offer_enumeration": "unreadable"},
+        )
+    return True, items, {"offer_sent": len(items), "offer_digest": offers_mod.digest_of(items)}
 
 
 def _grant_pair_shares(
@@ -10011,13 +10024,18 @@ def _grant_pair_shares(
     owner_name: str,
     root: Path,
     audit: Any,
-) -> list[str]:
-    """Admission's credential grants. The caller holds the record lock.
+) -> tuple[list[str], list[str]]:
+    """Admission's credential grants: ``(granted, reduced)``. Caller holds the lock.
 
     TWO REDUCE-ONLY GATES, on purpose: ``decision.shares`` was validated against
     the offer where it was written (``_ctl_pair_confirm`` / ``_cmd_confirm``), and
     this INTERSECTS it with the offer actually sent again — a decision file
     written out of band still cannot widen what the wire offered.
+
+    ``reduced`` is the deliberate half of the delta: the offered keys the
+    decision left out. The result frame carries it so the joiner's receipt can
+    distinguish "the owner chose not to share this" from "the grant failed"
+    instead of pointing both at the share verb (UX round 1, U2).
 
     ADMIT-THEN-GRANT, NEVER A ROLLBACK: the member row and the invite consumption
     are the ceremony's outcome, and a per-key failure (the credential vanished
@@ -10031,8 +10049,9 @@ def _grant_pair_shares(
 
     servable = offers_mod.served_keys(offer_items)
     wanted = [key for key in decision.shares if key in servable]
+    reduced = [key for key in servable if key not in set(wanted)]
     if not wanted:
-        return []
+        return [], reduced
     granted: list[str] = []
     with placement_mod.mutate(
         record.network_id, root, self_device=record.self_device_id
@@ -10069,7 +10088,7 @@ def _grant_pair_shares(
             # placements above stand — what is dropped here is the borrower's
             # ability to DIAL the broker, not the grant itself.
             _audit_pair_grant(audit, record, joiner_id, "", holders=0, skipped="capability_refused")
-    return granted
+    return granted, reduced
 
 
 def _audit_pair_grant(
