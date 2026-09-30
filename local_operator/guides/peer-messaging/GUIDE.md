@@ -1,6 +1,6 @@
 ---
 name: peer-messaging
-description: Message another local lop session — agents use the `send` tool (never a shelled `lop send`), humans use `lop send` — and list sessions with `lop sessions`. No cmux needed.
+description: "Message another local lop session: agents use the `send` tool for messages and `sessions` to list, inspect, spawn; humans use `lop send` / `lop sessions`. No cmux needed."
 ---
 
 # Peer messaging between lop sessions
@@ -45,7 +45,8 @@ receive side's own detail string.
 Parameters:
 
 - `target` — case-insensitive substring of the conversation name, session id,
-  or cwd basename (`lop sessions` lists what is running).
+  or cwd basename (`sessions` lists what is running; `lop sessions` is the CLI
+  fallback).
 - `pid` — exact pid (unambiguous; the disambiguation error lists these).
 - `session` — exact session id.
 - `message` — the body; it lands in the peer's transcript as an inbound
@@ -239,6 +240,12 @@ that fallback displaced. The card is record-only; it does
 not start a turn.
 
 ## `lop sessions` — what is running and what it costs
+
+From inside a session, use the `sessions` tool: `list` (what is running;
+`include_stored` and `query` widen it), `info` (one session in detail) and
+`peek` (a bounded transcript window). The CLI below is the human path — and
+the fallback where the tool is absent. Read `guide://sessions` for the tool's
+ops, windows and defaults.
 
 ```
 lop sessions

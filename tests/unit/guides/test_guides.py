@@ -42,6 +42,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "projects",
         "qwencloud",
         "scratchpad",
+        "sessions",
         "system-tools",
         "teams",
         "tunnel",
@@ -103,6 +104,10 @@ def test_guide_listing_never_contains_guide_body() -> None:
             "watch this thread and tell me when someone replies — a monitor "
             "that reports only changes",
             "monitor",
+        ),
+        (
+            "list the other lop sessions running on this machine",
+            "sessions",
         ),
     ],
 )
