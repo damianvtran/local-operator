@@ -341,8 +341,12 @@ class SessionSidebar(Widget, can_focus=True):
     #: property therefore moved to the widget: :meth:`on_key` and
     #: :meth:`on_paste` hand the first printable character (or paste) to the
     #: composer, and the composer takes the keyboard back — **however the
-    #: list's keyboard mode was entered** (press, `f9`, `/sidebar focus`). The
-    #: list can never swallow text.
+    #: list's keyboard mode was entered** (press, `f9`, `/sidebar focus`).
+    #: One exception: while a hard claimant holds the keyboard the key stays
+    #: with the claimant (the refusal in :meth:`on_key`) — reachable by `f9`
+    #: alone, since a press is refused at the walk — and the key there is
+    #: inert rather than typed. That corner is pre-existing and frozen by the
+    #: decision, not part of this contract.
     #:
     #: ``can_focus`` stays ``True`` and the list keeps its arrows/``enter``/
     #: cursor tint unchanged; `escape`/`f9` still leave the mode. The one
@@ -1787,11 +1791,15 @@ class SessionSidebar(Widget, can_focus=True):
         entered by a press, by `f9` or by `/sidebar focus` — is for this
         widget's OWN bindings (arrows, enter, escape, ctrl+a/ctrl+o). Any
         printable character it does not bind is handed to the composer, which
-        takes the keyboard back, so "typed input going nowhere" cannot happen
-        while the list owns the keys. Measured on main before this existed:
-        `f9` then `A` left `editor.text == ""` with focus still on the list —
-        the failure mode the old `FOCUS_ON_CLICK = False` rule was written to
-        stop, reachable all along on the deliberate path (F3).
+        takes the keyboard back — so "typed input going nowhere" cannot
+        happen while the list owns the keys, with ONE exception: a hard
+        claimant keeps its keys, and in that state (reachable by `f9`, never
+        by a press — the walk refuses) a key is left to the claimant and is
+        inert on the list. Pre-existing, frozen by the decision. Measured on
+        main before this existed: `f9` then `A` left `editor.text == ""` with
+        focus still on the list — the failure mode the old
+        `FOCUS_ON_CLICK = False` rule was written to stop, reachable all
+        along on the deliberate path (F3).
 
         A FRESH ``Key`` is posted to the editor rather than the original, and
         the editor is focused first, matching ``TranscriptView.on_key``: this
@@ -1802,17 +1810,23 @@ class SessionSidebar(Widget, can_focus=True):
         text path).
 
         Keys this widget binds itself are excluded via :meth:`_bound_keys`, so
-        a future printable binding (a filter field, say) is not shadowed by
-        this handler; ctrl+a and ctrl+o are two of them, which is also why
-        they can never be mistaken for text (G9). ``event.is_printable``
-        admits a printable character only — every control key and every arrow
-        stays with this widget's own bindings.
+        a future PRINTABLE binding (a filter field, say) is not shadowed by
+        this handler. Today's chords are kept by ``event.is_printable``
+        instead: it admits a printable character only, so every control key —
+        ctrl+a and ctrl+o included — and every arrow stays with this widget's
+        own bindings and can never be mistaken for text (G9).
 
         Refusal mirrors the guard the composer's own routes use: while the
         composer is read-only or a hard claimant holds the keyboard, the key
         is left UNSTOPPED so whatever owns it still receives it — a key is
         not ours to take (``composer_focus.composer_may_take_focus``).
         """
+        if not self.has_focus:
+            # Mirrors ``TranscriptView.on_key``: a key can reach a container by
+            # bubbling from a focused child. This widget mounts none today —
+            # the guard is what keeps a future focusable descendant (the
+            # filter field the decision names) owning its own printable keys.
+            return
         if event.key in self._bound_keys() or not event.is_printable:
             return
         from local_operator.tui.widgets.editor import Editor

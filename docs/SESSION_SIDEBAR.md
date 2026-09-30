@@ -4,8 +4,9 @@ The sidebar is an opt-in terminal view over existing session runtimes, not anoth
 runtime or a new scheduler. `Ctrl+B` and `/sidebar` toggle visibility without moving
 the editor caret. `F9` and `/sidebar focus` enter the list; F9 returns focus while
 leaving it open, and Escape dismisses it and returns to the last usable surface.
-A pointer press on the list enters it too, and typed text always lands in the
-composer — see "Click-to-focus and typing-home" below.
+A pointer press on the list enters it too; typed text lands in the composer
+while no hard claimant holds the keyboard — see "Click-to-focus and
+typing-home" below.
 `Ctrl+Shift+↑`/`Ctrl+Shift+↓` attach the previous/next conversation directly — the
 one-press form of F9-then-arrow-then-Enter — in the list's own ranking, wrapping
 at the ends and without moving the caret; with the list closed the catalog is read
@@ -28,10 +29,14 @@ printable key.
 The list never keeps the keyboard *for text*: any printable character, or a
 bracketed paste, delivered to it is handed to the composer and the composer takes
 the keyboard back. This holds however the list's keyboard mode was entered — a
-press, `F9` or `/sidebar focus` — so typed input can never go nowhere. The
-delivery goes through the composer's own handler (a fresh key/paste is posted to
-it after focus moves, the same forwarding the transcript uses), so the draft,
-caret, shell mode and paste machinery see exactly what a focused composer would.
+press, `F9` or `/sidebar focus`. The one exception is a hard claimant (below):
+its keys stay with it, and `F9` can still reach that state over a live question
+even though a press cannot — a key typed there is neither delivered nor an
+answer. That corner is pre-existing and frozen by the decision, not part of this
+contract. The delivery otherwise goes through the composer's own handler (a
+fresh key/paste is posted to it after focus moves, the same forwarding the
+transcript uses), so the draft, caret, shell mode and paste machinery see
+exactly what a focused composer would.
 
 Two guards bound the press:
 
@@ -42,7 +47,10 @@ Two guards bound the press:
   predicate the composer's own focus routes consult (`_focus_is_claimed()`), held
   from `Screen._forward_event`'s click-to-focus walk before any handler runs.
 * **A closed panel never holds the keyboard.** In the narrow drawer placement a
-  valid selection closes the drawer and the keyboard returns to the composer.
+  valid selection closes the drawer and the keyboard returns to the composer. A
+  press on a row the app cannot open (a stale row, a refused peer) is not a
+  valid selection: the drawer stays open and the list keeps the keyboard —
+  typing-home still delivers — until a valid selection or `esc` closes it.
 
 The one shipped behaviour this decision changes: pressing the *already-attached*
 session's row keeps the keyboard on the list rather than returning it to the
