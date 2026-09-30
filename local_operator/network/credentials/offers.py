@@ -568,6 +568,11 @@ def missing_share_lines(offered: list[str], shares: list[str], reduced: list[str
     served failed on the owner's device and keeps the remedy sentence. The two
     must not read the same (UX round 1, U2): pointing the joiner at the share
     verb for a decision the owner already took re-opens that decision.
+
+    THE SUBJECT IS THE JOINER'S, NOT THE OWNER'S (UX round 1, U5): these lines
+    read ``not available here:`` — on the joining device "serve" belongs to the
+    other end ("Credentials <inviter> will serve to this device"), so the receipt
+    says what became AVAILABLE HERE rather than flipping the verb's direction.
     """
     served = set(shares)
     reduced_set = set(reduced)
@@ -577,12 +582,12 @@ def missing_share_lines(offered: list[str], shares: list[str], reduced: list[str
     if deliberate:
         pronoun = "it" if len(deliberate) == 1 else "them"
         lines.append(
-            f"not served: {', '.join(deliberate)} — the other device chose not to share "
-            f"{pronoun}"
+            f"not available here: {', '.join(deliberate)} — the other device chose not to "
+            f"share {pronoun}"
         )
     if failed:
         lines.append(
-            f"not served: {', '.join(failed)} — ask the other device to run "
+            f"not available here: {', '.join(failed)} — ask the other device to run "
             "`lop network credential share <key> --with <device>` to lend it after the join"
         )
     return lines

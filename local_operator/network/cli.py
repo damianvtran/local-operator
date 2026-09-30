@@ -2640,6 +2640,9 @@ def _finish_pairing(
     # round 1, D5). ``reduced`` is the relay's word for the keys the owner's
     # person removed at the confirm screen; a relay that predates the key leaves
     # the whole delta in the failed bucket, which is the pre-fix behaviour.
+    # The SUBJECTS are the joiner's (UX round 1, U5 folded in round 2):
+    # "available here: …" / "not available here: …" — "serve" stays the
+    # owner's word (the block above reads "will serve to this device").
     from local_operator.network.credentials import offers as offers_mod
 
     reduced = [str(key) for key in (answer.get("reduced") or [])]
@@ -2650,7 +2653,7 @@ def _finish_pairing(
     )
     extras: list[str] = []
     if shares:
-        extras.append(f"serving here: {', '.join(shares)}")
+        extras.append(f"available here: {', '.join(shares)}")
     extras.extend(offers_mod.missing_share_lines(offered, shares, reduced))
     lines[1:1] = extras
     return (
@@ -5082,18 +5085,22 @@ def _cmd_confirm(args: argparse.Namespace) -> int:
         # remedy is the relay restart plus the share verb (the receipt here shows
         # no grants, and this line is why).
         print(_STALE_RELAY_SHARES_SENTENCE, file=sys.stderr)
-    return _emit(
-        args,
-        {"ok": True, **live},
-        [
-            (
-                f"admitted {chosen.get('joiner_device_id')} to {chosen.get('network_name')}"
-                if admit
-                else f"refused the pairing with {chosen.get('joiner_device_id')}; the "
-                "invite is burned"
-            )
-        ],
+    admitted = (
+        f"admitted {chosen.get('joiner_device_id')} to {chosen.get('network_name')}"
+        if admit
+        else f"refused the pairing with {chosen.get('joiner_device_id')}; the "
+        "invite is burned"
     )
+    # U6 (design-confirmed fold, round 2): the owner's own receipt names what it
+    # served, from the shares list the payload already carries — but ONLY when an
+    # offer was actually sent. A mixed/older-build ceremony has no share list and
+    # keeps the bare line; an offered ceremony reduced to nothing says so.
+    from local_operator.network.credentials import offers as offers_mod
+
+    if admit and str(chosen.get("offer_state") or "") == offers_mod.OWNER_SENT:
+        served = ", ".join(chosen_shares)
+        admitted += f" — serving: {served}" if served else " — serving nothing"
+    return _emit(args, {"ok": True, **live}, [admitted])
 
 
 def _pending_pairings() -> list[dict[str, Any]]:
@@ -5160,7 +5167,9 @@ def _read_confirmation(args: argparse.Namespace, chosen: dict[str, Any]) -> tupl
             # round 1, D1 / UX round 1, U1): the block was printed once, before
             # the loop, so the last frame before admission still promised every
             # offered key. Re-render it from the CURRENT decision — the state is
-            # already tracked; this only shows it.
+            # already tracked; this only shows it. The trailing blank keeps the
+            # re-asked question off the block's tail, matching the first frame
+            # (design round 2, D9).
             print()
             print(
                 "\n".join(
@@ -5173,9 +5182,17 @@ def _read_confirmation(args: argparse.Namespace, chosen: dict[str, Any]) -> tupl
                     )
                 )
             )
+            print()
             continue
         break
     return ("yes" if typed in ("y", "yes") else "no"), shares
+
+
+#: The words this prompt's OWN vocabulary puts one keystroke away (see
+#: ``_edit_share_list``): a person who answers the keys question with one of
+#: these is re-typing the question, not naming a credential, and must not be
+#: pointed at ``credential share <word>`` as if it were a key (U8).
+_SHARE_PROMPT_WORDS: frozenset[str] = frozenset({"t", "y", "n", "yes", "no"})
 
 
 def _edit_share_list(
@@ -5203,6 +5220,16 @@ def _edit_share_list(
         unknown = [key for key in to_stop if key not in current]
         if unknown:
             key = unknown[0]
+            if key in _SHARE_PROMPT_WORDS:
+                # U8 (UX round 1 nit, folded in round 2): a stray `t` answered at
+                # this prompt is the person re-typing the key from the question
+                # above, not naming a credential — do not advise `credential
+                # share t` as if `t` were a key.
+                print(
+                    f"{key!r} is not a known key here — type the keys to stop "
+                    "serving, space-separated (blank keeps all)."
+                )
+                continue
             print(
                 f"{key!r} is not currently being served, and only served items can be "
                 "removed here — nothing can be added in this ceremony. To serve it, run "

@@ -973,7 +973,7 @@ def pair_result_frame(
     which also means the joiner's persistence code is one path rather than two.
 
     ``shares`` is the FINAL granted set — the receipt the joiner shows its person
-    ("serving here: …") and the one fact that reconciles the two screens when a
+    ("available here: …") and the one fact that reconciles the two screens when a
     share was dropped. Old joiners read named keys only and ignore it; it is
     empty for mixed pairs, where no list ever travelled.
 
