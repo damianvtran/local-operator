@@ -4689,6 +4689,38 @@ async def test_a_press_on_footer_cells_outside_the_chip_is_inert():
 
 
 @pytest.mark.asyncio
+async def test_a_chip_press_interrupted_by_a_close_is_cancelled():
+    """A press in flight when the list closes must not stay primed.
+
+    The pin cell is protected by its row id being cleared with the close; the
+    chip has no row id, so the flag itself is cleared — otherwise the next
+    press anywhere (even dead space, whose own press records nothing) would
+    inherit the interrupted gesture and flip the layer on a click that never
+    touched the chip.
+    """
+    from textual import events
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True)], total=4)
+        app._refresh_sidebar = lambda: None  # type: ignore[method-assign]
+        first, _end = _chip_span(sidebar)
+        x = int(sidebar.styles.padding.left) + first
+        y = sidebar.size.height - 1
+        await _footer_gesture(pilot, app, sidebar, (events.MouseDown,), x, y)
+        assert sidebar._pressed_chip, "premise: the press is armed"
+        sidebar.set_open(False)
+        assert sidebar._pressed_chip is False, "the interrupted press stayed primed"
+        sidebar.set_open(True)
+        await pilot.pause()
+        # A click on the footer's dead space must not inherit the gesture.
+        await _click_footer_cell(pilot, app, sidebar, 0)
+        await pilot.pause()
+        assert sidebar.show_subagents is False
+
+
+@pytest.mark.asyncio
 async def test_the_chip_press_works_while_the_list_is_focused():
     """The pointer route is an ADDITION to the chord, never a replacement.
 
@@ -4804,7 +4836,7 @@ async def test_the_chip_hover_underlines_only_the_chip_and_changes_no_text(size,
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=size) as pilot:
         await pilot.pause()
-        sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True)], total=total)
+        sidebar = await _sidebar_with(pilot, app, [_plain("a")], total=total)
         resting = sidebar.render()
         first, end = _chip_span(sidebar)
         chip = resting.plain.splitlines()[-1][first:end]
