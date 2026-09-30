@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import hashlib
+import json
 import pathlib
 import time
 from typing import Annotated, Any, Literal
@@ -544,44 +546,93 @@ async def session_report(
     return reply({"data": await asyncio.to_thread(read_report)})
 
 
+async def _read_skills(roots: list[pathlib.Path], name: str | None) -> dict[str, Any]:
+    """One root set's catalogue: rows, warnings, ``version``, optional detail.
+
+    ONE SCAN PER REQUEST, no server-side cache: the body carries ``version``,
+    the runtime's own change-detector (``roots_fingerprint`` — the same gate a
+    session's own rescan uses) digested to 16 hex characters, so a caller can
+    cache the vocabulary per folder and refetch exactly when the tree the
+    version describes changes. The scan and the fingerprint run in ONE worker
+    thread because both stat the same tree.
+
+    ``name`` resolves through the runtime's closed ``skill://`` resolver, never
+    through a caller-supplied path.
+    """
+    from local_operator.skills import discover_skills
+    from local_operator.skills.api import resolve_skill_url, roots_fingerprint
+
+    def read() -> tuple[list[Any], list[str], str]:
+        discovered, warnings = discover_skills(roots)
+        fingerprint = roots_fingerprint(roots)
+        digest = hashlib.sha256(
+            json.dumps(list(fingerprint), separators=(",", ":")).encode("utf-8")
+        )
+        return discovered, warnings, digest.hexdigest()[:16]
+
+    discovered, warnings, version = await asyncio.to_thread(read)
+    detail = None
+    if name is not None:
+        by_name = {item.name: item for item in discovered}
+        if name not in by_name:
+            raise HTTPException(404, "Skill not found")
+        detail = await asyncio.to_thread(resolve_skill_url, "skill://" + name, by_name)
+    return {
+        "skills": [{"name": item.name, "description": item.description} for item in discovered],
+        "scope": "discoverable",
+        "detail": detail,
+        "warning_count": len(warnings),
+        "version": version,
+    }
+
+
 @router.get("/v1/desktop/skills", response_model=CRUDResponse[Report])
 async def skills(
     request: Request,
-    session_id: str = Query(pattern=r"^[a-f0-9]{12}$"),
+    session_id: str | None = Query(default=None, pattern=r"^[a-f0-9]{12}$"),
+    cwd: str | None = Query(default=None, max_length=4096),
     name: str | None = Query(default=None, pattern=r"^[A-Za-z0-9_.-]{1,128}$"),
 ):
-    from local_operator.skills import default_skill_roots, discover_skills
-    from local_operator.skills.api import resolve_skill_url
+    """The discoverable skills for a folder, with or without a session.
 
-    # READ: every row here comes from the session's cwd on DISK (the roots are
-    # discovered locally and resolved by the in-process resolver), so a silent
-    # owner must not 503 a GET whose answer does not depend on one. The cwd comes
-    # from the facade, which serves it from the durable checkpoint when cold.
+    THREE ARMS, one body. ``cwd`` answers for an explicit folder with no
+    session at all (a new-chat draft has no session record to name, and the
+    composer needs the vocabulary before one exists). ``session_id`` answers
+    for the session's own cwd — the form released clients and the ``/skills``
+    panel send, unchanged. Neither answers for home, the desktop's default
+    conversation folder. ``cwd`` WINS when both are sent: the explicit folder
+    beats the one implied by a conversation.
+    """
+    from local_operator.skills import default_skill_roots
+
+    # READ: every row here comes from a folder on DISK (the roots are discovered
+    # locally and resolved by the in-process resolver), so a silent owner must
+    # not 503 a GET whose answer does not depend on one. The session arm's cwd
+    # comes from the facade, which serves it from the durable checkpoint when
+    # cold; the sessionless arms take no bridge at all.
+    if cwd is not None or session_id is None:
+        from local_operator.server.mcp_host import resolve_cwd
+
+        # The sessionless MCP host's own resolver, reused verbatim so the two
+        # sessionless surfaces agree on what a folder is: the literal "~" the
+        # desktop stores expands, an absolute existing directory is required
+        # (else the 422 the client keys on), and None (or "") answers home.
+        try:
+            folder = resolve_cwd(cwd)
+        except ValueError as error:
+            raise HTTPException(422, {"code": "invalid_cwd", "message": str(error)}) from None
+        # EXPLICITLY a concrete folder: the None form walks up from the DAEMON
+        # process's cwd, so a sessionless read would silently discover whatever
+        # tree the server happened to be started in. This request's folder — home
+        # when it named none — is the only correct start (skills/api.py).
+        roots = default_skill_roots(pathlib.Path(folder))
+        return reply({"data": await _read_skills(roots, name)})
+
     async with errors(request), host(request).session(session_id, read=True) as bridge:
         assert bridge.remote is not None
         cwd = bridge.remote.frontend_state.cwd
-        discovered, warnings = await asyncio.to_thread(
-            discover_skills, default_skill_roots(pathlib.Path(cwd))
-        )
-        detail = None
-        if name is not None:
-            by_name = {item.name: item for item in discovered}
-            if name not in by_name:
-                raise HTTPException(404, "Skill not found")
-            detail = await asyncio.to_thread(resolve_skill_url, "skill://" + name, by_name)
-        # Details use the runtime's closed internal-URL resolver, not arbitrary paths.
-        return reply(
-            {
-                "data": {
-                    "skills": [
-                        {"name": item.name, "description": item.description} for item in discovered
-                    ],
-                    "scope": "discoverable",
-                    "detail": detail,
-                    "warning_count": len(warnings),
-                }
-            }
-        )
+        roots = default_skill_roots(pathlib.Path(cwd))
+        return reply({"data": await _read_skills(roots, name)})
 
 
 @router.get("/v1/desktop/sessions/{session_id}/failovers", response_model=CRUDResponse[Report])
