@@ -641,7 +641,7 @@ def _inject_text(details: Any) -> str:
     return ""
 
 
-def _is_harness_user_row(payload: dict[str, Any], text: str) -> bool:
+def _is_harness_user_row(entry_id: str, payload: dict[str, Any], text: str) -> bool:
     """Whether a role-user message row is harness chrome, not the operator's words.
 
     The SAME both-legs decision every display fold makes, asked from the one
@@ -650,6 +650,15 @@ def _is_harness_user_row(payload: dict[str, Any], text: str) -> bool:
     text recognisers — the chrome prompt families and the legacy notice heads —
     for rows written before the stamp existed. Lazy import, like the folds:
     ``harness.rows`` pulls ``compaction.cutpoint`` on first use.
+
+    The entry id rides IN beside the payload because the notice predicate's
+    third leg — the legacy elision-id check — reads it, and a message payload
+    carries no id (``encode_message_payload`` excludes it; the id is already
+    the entry's). Payload-only, that leg is silently unreachable — which is how
+    a pre-#857 ``compaction-elision-<count>`` row (journalled by the previous
+    revision; the retained ``PRESERVED_TURN_ELISION_ID_PREFIX`` exists so such
+    transcripts still parse) stayed filed as the operator's words (QA round 1,
+    Q-1).
 
     WHY THE INDEX ASKS (F1 of local-operator-ui#670): every index product is a
     human readout — the rail's hover card, find's snippets — and a harness row
@@ -665,7 +674,9 @@ def _is_harness_user_row(payload: dict[str, Any], text: str) -> bool:
     """
     from local_operator.harness.rows import is_harness_chrome, is_harness_notice_row
 
-    return is_harness_notice_row(payload) or is_harness_chrome(text)
+    # A row-shaped view: the predicate reads id, provider_payload and content,
+    # and the id lives on the entry rather than in the payload.
+    return is_harness_notice_row({**payload, "id": entry_id}) or is_harness_chrome(text)
 
 
 def _classify(
@@ -710,7 +721,7 @@ def _classify(
         role = payload.get("role")
         if role == "user" or role == "assistant":
             text = _content_text(payload)
-            if role == "user" and _is_harness_user_row(payload, text):
+            if role == "user" and _is_harness_user_row(id_, payload, text):
                 # Harness chrome, skipped whole: no user checkpoint (the rail
                 # would caption it "Your message"), no find doc, no turn content.
                 return _Row(
