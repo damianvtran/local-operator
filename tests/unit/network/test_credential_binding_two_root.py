@@ -384,8 +384,12 @@ async def test_e3_an_account_switch_mid_session_writes_the_row_and_one_notice(
         new, previous = changes[-1]
         assert new is not None and previous is not None
         notice = render_binding_change_notice(new, previous, self_device=cred_mesh.borrower)
-        assert "your login on this device" in notice
+        # The capture sentence: past-tense transition, the recording device
+        # NAMED from its own row (design round 1, D2 — no "this device" in a
+        # row that persists, replays and moves).
+        assert f"moved onto device-b's own {STUB_PROVIDER} login" in notice
         assert previous.identity_label == OWNER_EMAIL and OWNER_EMAIL in notice
+        assert "this device" not in notice and "this turn" not in notice
     finally:
         store_b.close()
 

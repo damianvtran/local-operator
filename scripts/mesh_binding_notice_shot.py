@@ -7,9 +7,9 @@ Usage::
 
 States:
 
-``sibling``   M3 — the owner's sibling pick: §4.9's own sentence.
-``capture``   M4 — a device using a loaned login gained its own; the "your
-              login on this device" shape.
+``sibling``   M3 — the owner's sibling pick (the fact of the rotation).
+``capture``   M4 — the recording device gained its own login.
+``mirror``    M4-mirror — the local login went away; the borrow answers.
 ``move``      M6 — the serving account moved between devices.
 ``stack``     all three in one conversation: the frame where the notice rows
               must read as notices between real turns.
@@ -77,6 +77,13 @@ SENTENCES = {
             owner_device=SELF, owner_device_name="my-laptop", credential_id=7, identity_label=""
         ),
         _binding(),
+        self_device=SELF,
+    ),
+    "mirror": render_binding_change_notice(
+        _binding(credential_id=44, identity_label="you@x.test"),
+        _binding(
+            owner_device=SELF, owner_device_name="my-laptop", credential_id=7, identity_label=""
+        ),
         self_device=SELF,
     ),
     "move": render_binding_change_notice(
