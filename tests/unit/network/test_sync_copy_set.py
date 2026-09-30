@@ -284,6 +284,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "from a filename",
     ),
     "local_operator/references.py": (1, "a THREAD name for reference reads"),
+    "local_operator/hub_sync/runner.py": (
+        1,
+        "``GRACE_FILE``: the first-run marker under ``<config>/hub/`` — the hub update "
+        "runner's own install-level state, beside ``sessions/``, never inside a session",
+    ),
     # Aida's own store lives at the CONFIG root (``<config>/aida/``), beside
     # ``sessions/`` rather than inside one: her state, onboarding stamp,
     # escalation tray and ensure lock are this INSTALL's records, and a session

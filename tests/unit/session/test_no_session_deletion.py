@@ -2169,6 +2169,65 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Clears a half-written seal.reserve under the record root before refusing",
     ),
+    # -- hub update state (hub_sync): <config_dir>/hub/, beside sessions/ --------
+    # Baselines, backups, status.json and the runner lease live under the hub
+    # root, which is a sibling of ``sessions/`` and is built from the config dir
+    # plus fixed names and validated uuids/ids; no session id reaches any path.
+    (
+        "local_operator/hub_sync/provenance.py::_atomic_write",
+        "os.replace",
+        "Atomic write of a baseline/backup record; temp and target are <config_dir>/hub paths",
+    ),
+    (
+        "local_operator/hub_sync/provenance.py::_atomic_write",
+        "os.unlink",
+        "Clears this call's own same-directory temp on the error path only",
+    ),
+    (
+        "local_operator/hub_sync/provenance.py::delete_baseline",
+        "<path>.unlink",
+        "Removes one <config_dir>/hub/baselines/<kind>-<id>.json FILE; no session path",
+    ),
+    (
+        "local_operator/hub_sync/provenance.py::write_backup",
+        "<path>.unlink",
+        "Trims the OLDEST files of this item's <config_dir>/hub/backups/<kind>-<id>/ history",
+    ),
+    (
+        "local_operator/hub_sync/provenance.py::prune",
+        "<path>.unlink",
+        "Removes a baseline FILE under <config_dir>/hub/baselines/ whose item is confirmed gone",
+    ),
+    (
+        "local_operator/hub_sync/store.py::StatusStore._quarantine",
+        "os.replace",
+        "Renames a corrupt <config_dir>/hub/status.json aside, in the same directory",
+    ),
+    (
+        "local_operator/hub_sync/store.py::StatusStore._write",
+        "os.replace",
+        "Atomic replace of <config_dir>/hub/status.json from a same-directory temp",
+    ),
+    (
+        "local_operator/hub_sync/store.py::StatusStore._write",
+        "os.unlink",
+        "Clears this call's own same-directory .status.*.tmp on the error path only",
+    ),
+    (
+        "local_operator/hub_sync/store.py::RunnerLease.renew",
+        "os.replace",
+        "Atomic rewrite of the <config_dir>/hub/.runner.lease expiry from a same-directory temp",
+    ),
+    (
+        "local_operator/hub_sync/store.py::RunnerLease.release",
+        "<path>.unlink",
+        "Removes the <config_dir>/hub/.runner.lease FILE this holder wrote",
+    ),
+    (
+        "local_operator/hub_sync/store.py::RunnerLease._try_acquire",
+        "<path>.unlink",
+        "Clears an EXPIRED <config_dir>/hub/.runner.lease file before retaking it",
+    ),
     # -- speech-to-text temp scratch (mobile STT) ---------------------------
     # The Radient leg writes the uploaded clip into a directory THIS call
     # minted one line above via ``tempfile.mkdtemp(prefix="lop-stt-")`` — a

@@ -582,6 +582,18 @@ def test_server_app_import_leaves_the_tool_layer_and_tunnel_gateway(
     _assert_absent(server_app_modules, "local_operator.providers.clients", "the wire clients")
 
 
+def test_server_app_import_leaves_the_hub_merge_stack_for_first_use(
+    server_app_modules: set[str],
+) -> None:
+    # The hub update routes and runner import `hub_sync.*` inside handlers and the
+    # lifespan; the model-calling resolver (and the merge core it needs) must not be
+    # on the import path of a boot that never merges anything (design B8.1).
+    _assert_absent(
+        server_app_modules, "local_operator.hub_sync.resolver", "model stack; merges only"
+    )
+    _assert_absent(server_app_modules, "local_operator.hub_sync.merge", "merge core; merges only")
+
+
 def test_the_lazy_provider_reexports_still_resolve() -> None:
     """The PEP 562 table must name every export the eager imports used to bind."""
     import local_operator.providers as providers

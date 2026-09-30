@@ -55,6 +55,11 @@ def _consumer_defaults() -> dict[str, object]:
         FORWARD_CODEX_DEFAULT,
         NATIVE_DEFAULT,
     )
+    from local_operator.hub_sync.settings import (
+        DEFAULT_AUTO_UPDATE_AGENTS,
+        DEFAULT_AUTO_UPDATE_TEAMS,
+        DEFAULT_CHECK_INTERVAL_MIN,
+    )
     from local_operator.memory_guard import (
         BASH_MEMORY_ENABLED_DEFAULT,
         BASH_MEMORY_LIMIT_MB_DEFAULT,
@@ -190,6 +195,9 @@ def _consumer_defaults() -> dict[str, object]:
         # guard `tui.theme` gets for the same reason.
         "desktop.launch_command": DESKTOP_LAUNCH_COMMAND_DEFAULT,
         "runtime.unattended_gate_timeout": DEFAULT_UNATTENDED_GATE_TIMEOUT_H,
+        "hub.auto_update.agents": DEFAULT_AUTO_UPDATE_AGENTS,
+        "hub.auto_update.teams": DEFAULT_AUTO_UPDATE_TEAMS,
+        "hub.check_interval_min": DEFAULT_CHECK_INTERVAL_MIN,
         "session.cleanup.enabled": DEFAULT_ENABLED,
         "session.cleanup.max_sessions": DEFAULT_MAX_SESSIONS,
         "session.cleanup.max_inactive_days": DEFAULT_MAX_INACTIVE_DAYS,
@@ -465,6 +473,7 @@ _NO_SINGLE_VALUE_CONSUMER: dict[str, str] = {
     "display.composer.rate": "tui/settings.py derives its defaults from this registry",
     "display.composer.cost": "tui/settings.py derives its defaults from this registry",
     "display.composer.duration": "tui/settings.py derives its defaults from this registry",
+    "hub.merge_model": "free text; empty means 'use the default model', no constant",
     "subagents.models.lo": "free text; empty means 'keep the parent's model', no constant",
     "subagents.models.med": "free text; empty means 'keep the parent's model', no constant",
     "subagents.models.hi": "free text; empty means 'keep the parent's model', no constant",

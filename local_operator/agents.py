@@ -2471,6 +2471,7 @@ class AgentRegistry:
         *,
         with_credential: bool = False,
         auth_store: Any | None = None,
+        tenant_id: str | None = None,
     ) -> "AgentImport":
         """
         Download an agent from the Radient Agent Hub and import it.
@@ -2515,10 +2516,33 @@ class AgentRegistry:
                 agent_id, zip_path, with_credential=with_credential
             )
             outcome = self.import_agent(zip_path, auth_store=auth_store)
+        stamped = self._stamp_hub_provenance(outcome.agent, agent_id)
+        self._record_hub_baseline(stamped, agent_id, tenant_id)
         return AgentImport(
-            agent=self._stamp_hub_provenance(outcome.agent, agent_id),
+            agent=stamped,
             renamed_from=outcome.renamed_from,
             model_notice=outcome.model_notice,
+        )
+
+    def _record_hub_baseline(self, agent: AgentData, hub_id: str, tenant_id: str | None) -> None:
+        """Write the TEXT baseline a later three-way merge diffs against.
+
+        Best-effort by contract: a pull must not fail over bookkeeping, and a row
+        without a record simply degrades to baseline-unknown (check-only). Lazy
+        import keeps ``hub_sync`` off the registry's import graph.
+        """
+
+        if hub_origin(agent) != hub_id:
+            return  # the stamp refused a non-conforming id; nothing truthful to record
+        from local_operator.hub_sync.provenance import record_agent_baseline
+
+        record_agent_baseline(
+            self.config_dir,
+            local_id=agent.id,
+            hub_id=hub_id,
+            instructions=self.get_agent_system_prompt(agent.id),
+            description=agent.description,
+            tenant_id=tenant_id,
         )
 
     def _stamp_hub_provenance(self, agent: AgentData, hub_id: str) -> AgentData:
@@ -3056,7 +3080,9 @@ def _read_hub_profile_from_zip(zip_path: Path) -> Tuple[str, str]:
     return instructions, description
 
 
-def _fetch_hub_profile(radient_client: Any, hub_id: str) -> Tuple[str, str]:
+def _fetch_hub_profile(
+    radient_client: Any, hub_id: str, *, with_credential: bool = False, timeout: float | None = None
+) -> Tuple[str, str]:
     """Download a marketplace listing into a temp file and read its text.
 
     ``hub_id`` is the validated marker value (``_HUB_ID_RE``), so it is safe as
@@ -3065,9 +3091,19 @@ def _fetch_hub_profile(radient_client: Any, hub_id: str) -> Tuple[str, str]:
     credential is present at all (see :func:`sync_hub_agents`).
     """
 
+    # Only forwarded when set: the background runner bounds each request (B3.3),
+    # every other caller keeps the client's historical behaviour.
+    extra: dict[str, Any] = {} if timeout is None else {"timeout": timeout}
     with tempfile.TemporaryDirectory() as temp_dir:
         zip_path = Path(temp_dir) / f"{hub_id}.zip"
-        radient_client.download_agent_from_marketplace(hub_id, zip_path)
+        if with_credential:
+            # An organization row answers 404 to anyone who cannot prove
+            # membership (design B0.6): its check must carry the person's bearer.
+            radient_client.download_agent_from_marketplace(
+                hub_id, zip_path, with_credential=True, **extra
+            )
+        else:
+            radient_client.download_agent_from_marketplace(hub_id, zip_path, **extra)
         return _read_hub_profile_from_zip(zip_path)
 
 
@@ -3077,8 +3113,16 @@ def _apply_hub_update(
     hub_id: str,
     instructions: str,
     description: str,
+    *,
+    baseline: Tuple[str, str] | None = None,
 ) -> "AgentData":
     """Write a fetched listing over a row, refreshing its pull fingerprint.
+
+    ``baseline`` is the ``(instructions, description)`` the ``hub_sha256:`` tag
+    should describe when it differs from what is written: a three-way merge
+    writes the MERGED text but the tag (and the baseline record beside it) must
+    describe the REMOTE text that was integrated, or the next check would read
+    the surviving local edits as "unchanged since the pull".
 
     The description is mirrored even when empty: the fingerprint covers it, so
     a description the publisher cleared is a change like any other, and leaving
@@ -3094,7 +3138,8 @@ def _apply_hub_update(
         and not str(tag).strip().lower().startswith(HUB_SHA256_PREFIX)
     ]
     tags.append(f"{HUB_ORIGIN_PREFIX}{hub_id}")
-    tags.append(f"{HUB_SHA256_PREFIX}{hub_fingerprint(instructions, description)}")
+    tagged = baseline if baseline is not None else (instructions, description)
+    tags.append(f"{HUB_SHA256_PREFIX}{hub_fingerprint(*tagged)}")
     return registry.update_agent(
         agent.id,
         AgentEditFields(
