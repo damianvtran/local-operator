@@ -188,11 +188,24 @@ async def test_cwd_wins_when_both_parameters_are_sent(env) -> None:
     assert "from-other" not in names
 
 
-async def test_the_home_arm_is_the_default_folder(env) -> None:
-    """No parameters at all: the home root — not the daemon's cwd, not a project."""
+async def test_the_home_arm_is_the_default_folder(env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No parameters at all: the home root — not the daemon's cwd, not a project.
+
+    THE DAEMON-CWD TRAP IS WHAT THIS CELL DISCRIMINATES, so the request runs
+    from a folder carrying its OWN project-local skill: ``default_skill_roots``
+    given ``None`` walks up from the serving process's cwd (skills/api.py:110),
+    which is this folder — an implementation that let ``None`` through would
+    discover ``projecty`` here and fail, which is the trap the contract calls
+    out ("never called with ``None``"). The correct arm passes an explicit
+    ``Path.home()`` and keeps the project skill out.
+    """
     _write_skill(env.home / ".local-operator" / "skills", "homey", "Home skill.")
     project = env.tmp / "proj"
     _write_skill(project / ".local-operator" / "skills", "projecty", "Project skill.")
+    # The walk-up a ``None`` form would take, pinned so the discrimination
+    # cannot be disarmed silently by a later edit that drops the chdir.
+    monkeypatch.chdir(project)
+    assert Path.cwd() == project.resolve()
 
     data = _data(await env.client.get("/v1/desktop/skills"))
 

@@ -2732,16 +2732,41 @@
           "Desktop catalogues"
         ],
         "summary": "Skills",
+        "description": "The discoverable skills for a folder, with or without a session.\n\nTHREE ARMS, one body. ``cwd`` answers for an explicit folder with no\nsession at all (a new-chat draft has no session record to name, and the\ncomposer needs the vocabulary before one exists). ``session_id`` answers\nfor the session's own cwd \u2014 the form released clients and the ``/skills``\npanel send, unchanged. Neither answers for home, the desktop's default\nconversation folder. ``cwd`` WINS when both are sent: the explicit folder\nbeats the one implied by a conversation.",
         "operationId": "skills_v1_desktop_skills_get",
         "parameters": [
           {
             "name": "session_id",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
-              "type": "string",
-              "pattern": "^[a-f0-9]{12}$",
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{12}$"
+                },
+                {
+                  "type": "null"
+                }
+              ],
               "title": "Session Id"
+            }
+          },
+          {
+            "name": "cwd",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cwd"
             }
           },
           {

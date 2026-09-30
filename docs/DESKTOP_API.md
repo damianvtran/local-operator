@@ -1143,6 +1143,12 @@ that takes a session — every mutation, every receipt, `/warm`, `/interrupt`,
 `/move` — keeps the control envelope, because none of those can be served
 without the owner that admitted them.
 
+`GET /v1/desktop/skills` splits by form the same way: its `cwd` arm (home when
+omitted) answers for a folder with NO session — no bridge is taken — while the
+`session_id` form in the list above keeps the read envelope, so that entry stays
+true for it. A composer reaches the sessionless form behind
+`features.skill_catalogue`.
+
 `GET /v1/desktop/mcp` is outside that list because it is outside the session: it
 answers the MCP catalog from the config files and the grant store for a folder, so
 there is no owner to wait for at all. Its optional `session_id` is an ENRICHMENT, not
