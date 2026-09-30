@@ -1502,6 +1502,12 @@ _PROJECT_LISTED_BODY = "not included — ask for it with the project tool if you
 #: spelled with the field's name so the marker cannot be mistaken for content.
 _PROJECT_PROGRESS_MARKER = " [progress truncated]"
 
+#: Appended to a description the element cap had to cut — the same contract as
+#: the progress marker above: named, not an ellipsis, so a reader can tell a
+#: truncated description from a short one. Added with the 240 -> 2000 cap raise
+#: (issue #1815): a long description can now be the field that overflows.
+_PROJECT_DESCRIPTION_MARKER = " [description truncated]"
+
 
 def _project_head(project: Any, tag: str, typed: str) -> str:
     """The single-line ``<reference|listed type="project" …>`` head.
@@ -1624,24 +1630,26 @@ def _project_sessions_line(project: Any, states: dict[str, dict[str, Any]]) -> s
 
 
 def _project_body(project: Any, states: dict[str, dict[str, Any]], budget: int) -> str:
-    """The element body, clamped to ``budget`` chars by truncating PROGRESS.
+    """The element body, clamped to ``budget`` chars by truncating PROGRESS, then DESCRIPTION.
 
-    Progress is cut first because it is the one unbounded-in-practice field
-    (≤ 1000 chars of tool-authored prose) and the one the design names as the
-    truncation target; the description (≤ 240) and the identity/liveness lines
-    survive wherever the budget allows. Both text fields are defused BEFORE the
-    length decisions: ``_defuse`` can lengthen a string by one cell per marker,
-    so clamping first and defusing after could push the element back over its
-    cap.
+    Progress is cut first because it is the one the design names as the
+    truncation target; the description takes the same one-cut-and-marker
+    treatment once progress is exhausted (issue #1815 raised its cap 240 ->
+    2000, so it can overflow the element on its own), and the
+    identity/liveness lines survive wherever the budget allows. Both text
+    fields are defused BEFORE the length decisions: ``_defuse`` can lengthen a
+    string by one cell per marker, so clamping first and defusing after could
+    push the element back over its cap.
 
-    The final slice is a BOUND OF LAST RESORT: with today's field caps it is
-    unreachable — head plus name/status, a marker-only progress line and the
-    liveness line sit well inside the element budget — and it exists so the
-    cap stays hard if a future field cap grows.
+    The final slice is a BOUND OF LAST RESORT: reachable only when both text
+    fields have nothing left to give (even a marker-only trim would leave the
+    body over) — it exists so the cap stays hard whatever a future field cap
+    does.
     """
     progress = _defuse(project.progress)
     description = _defuse(project.description)
     marker = _PROJECT_PROGRESS_MARKER
+    description_marker = _PROJECT_DESCRIPTION_MARKER
 
     def render() -> str:
         lines = [f"name: {project.name}", f"status: {project.status}"]
@@ -1662,6 +1670,16 @@ def _project_body(project: Any, states: dict[str, dict[str, Any]], budget: int) 
         keep = len(progress) - over - len(marker)
         progress = (progress[:keep] if keep > 0 else "") + marker
         body = render()
+    if len(body) > budget and description:
+        # The SECOND truncation target (issue #1815): a long description can
+        # overflow the element on its own; the same one-cut-and-marker idiom
+        # lands the body on budget exactly whenever even a marker-only trim
+        # fits. When it cannot, the last-resort slice below keeps the cap hard.
+        over = len(body) - budget
+        keep = len(description) - over - len(description_marker)
+        if keep >= 0:
+            description = description[:keep] + description_marker
+            body = render()
     if len(body) > budget:
         body = body[: max(0, budget)]
     return body

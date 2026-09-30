@@ -67,8 +67,12 @@ def test_name_grammar_matches_the_team_rule(bad: str) -> None:
 
 
 def test_caps_and_shapes_are_enforced_at_the_model(store: ProjectRegistry) -> None:
-    with pytest.raises(ValueError):
-        create(store, description="x" * 241)
+    # The description cap moved 240 -> 2000 (issue #1815): at the cap is a
+    # legal write, one past it is refused with the store's own limit named.
+    assert create(store, name="at-cap", description="x" * 2000).description == "x" * 2000
+    with pytest.raises(ValueError) as excinfo:
+        create(store, name="over-cap", description="x" * 2001)
+    assert "at most 2000 characters" in str(excinfo.value)
     with pytest.raises(ValueError):
         create(store, progress="x" * 1001)
     with pytest.raises(ValueError):
