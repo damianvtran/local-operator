@@ -1221,7 +1221,9 @@ class ActionBridge:
 
         THE BOUND AND ITS COST. One ``recover`` call per failed batch, and none
         at all on the healthy path; the call itself is bounded by the caller's
-        own step timeout (one RPC, 180 s worst case in the campaign config).
+        own step timeout plus the RPC layer's 1 s cancel grace (one RPC,
+        181 s worst case in the campaign config: the 180 s budget + the 1 s
+        grace).
         When it cannot yield an observation the episode ends HERE, terminally
         (:meth:`_end_wedged`). ``finish`` stays refused for a wedged bridge on
         purpose: no screen exists to bind it to, and the driver stops the turn
@@ -2202,9 +2204,10 @@ def _make_recover(
 
     THE BOUND AND ITS COST. Exactly one call per failed batch, none at all on
     the healthy path; the call carries the same ``step_timeout`` every other
-    environment call in this arm carries (180 s in the campaign's config), so
-    the added worst case is one step-timeout of wall on a run that would
-    otherwise have died anyway.
+    environment call in this arm carries, plus the RPC layer's 1 s cancel
+    grace (181 s of wall in the campaign's config: the 180 s budget + the 1 s
+    grace), so the added worst case is one step-timeout plus its cancel grace
+    on a run that would otherwise have died anyway.
     """
 
     async def recover() -> Observation:

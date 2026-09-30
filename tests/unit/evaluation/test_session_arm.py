@@ -1776,6 +1776,10 @@ class TestBridgeWedgeOutcome:
         assert adapter.executes == 4  # initial + the three read-back retries
         # A poisoned session demands rescue, and the outcome discloses it.
         assert outcome.rescue_required is True
+        # The sealed record carries the terminal event this outcome names,
+        # the same way its recovered sibling carries ``action_recovered``.
+        events = (outcome.record_root / "events.jsonl").read_text(encoding="utf-8")
+        assert "action_bridge_wedged" in events
 
     @pytest.mark.asyncio
     async def test_a_recovered_failure_lets_the_episode_complete(
