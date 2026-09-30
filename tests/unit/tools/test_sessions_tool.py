@@ -46,6 +46,7 @@ from local_operator.resume import (
     write_session_title,
 )
 from local_operator.scratchpad import SCRATCHPAD_PATH_ENV
+from local_operator.session.archived import set_archived
 from local_operator.session.runtime import control, registry
 from local_operator.session.runtime.types import SessionRecord
 from local_operator.tools.builtin import (
@@ -521,6 +522,42 @@ async def test_info_describes_a_stored_hidden_session_from_disk(root: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_info_names_the_archived_arm_instead_of_a_window(root: Path) -> None:
+    """R-5: an archived id is dropped before the activity read, at ANY
+    limit, so "past the newest-first window" is false for it. The sentence
+    must name the archive arm — and keep the resume-by-id hint, which the
+    archive docstring guarantees (an archived session still resolves by
+    explicit id)."""
+    _session(root, "archived0001", "filed away")
+    assert set_archived(root, "archived0001", True)
+    result = await execute_sessions(
+        "t", {"op": "info", "session": "archived0001"}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    assert "archived — not offered in listings" in result.text
+    assert "window" not in result.text
+    assert "resumed by its exact session id" in result.text
+
+
+@pytest.mark.asyncio
+async def test_info_names_the_no_activity_arm_instead_of_a_window(root: Path) -> None:
+    """R-5: a directory holding only created_at.json has no activity clock
+    (the clock is the transcript and the mail spool), is never a listing row,
+    and is not a resumable session — the sentence says that, and offers no
+    resume hint, because there is nothing to reopen."""
+    directory = root / "sessions" / "noactiv00001"
+    directory.mkdir(parents=True)
+    (directory / "created_at.json").write_text("{}\n", encoding="utf-8")
+    result = await execute_sessions(
+        "t", {"op": "info", "session": "noactiv00001"}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    assert "no recorded activity to list or resume it by" in result.text
+    assert "window" not in result.text
+    assert "resumed by its exact session id" not in result.text
+
+
+@pytest.mark.asyncio
 async def test_ambiguous_address_returns_the_shared_candidate_lines(root: Path) -> None:
     sleeper_a = _live_pid()
     sleeper_b = _live_pid()
@@ -804,6 +841,18 @@ def test_resume_receipt_spaces_the_id_once() -> None:
     assert 'reopened "held" (session a1b2c3d4e5f6, job j1)' in resume_text
     assert '"held"  (' not in resume_text
     assert "  " not in resume_text
+    unnamed_resume = _sessions_open_body(
+        SessionsParams(op="resume", session="a1", prompt="go"),
+        {
+            "op": "resume",
+            "session_id": "a1b2c3d4e5f6",
+            "origin": ORIGIN_AGENT_SHELL,
+            "sidebar_visibility": "hidden",
+        },
+    )
+    assert "reopened (session a1b2c3d4e5f6)" in unnamed_resume
+    assert "reopened  (" not in unnamed_resume
+    assert "  " not in unnamed_resume
     spawn_text = _sessions_open_body(
         SessionsParams(op="spawn", prompt="go"),
         {
