@@ -5091,6 +5091,12 @@ def refresh_mobile_after_upgrade(*, deadline: float | None = None) -> MobileRefr
     THEN bounces — the plist rewrite and the bounce are one actor, and one
     bounded retry sits around the bounce inside the child.
 
+    THE PLIST GUARD IS ASKED HERE, BEFORE THE SPAWN (round 1 review, finding 1):
+    a caller the guard refuses gets a silent ``skipped``, because the child's own
+    refusal would arrive as rc 0 and "nothing was touched" must not be mapped
+    onto "restarted". The child keeps the guard for direct runs of the hidden
+    flag.
+
     ``deadline`` is the concurrent stage's shared budget (see
     :func:`_bounded_timeout`); ``None`` — every other caller — keeps this
     half's own :data:`_MOBILE_RESTART_TIMEOUT_S`.
@@ -5101,6 +5107,17 @@ def refresh_mobile_after_upgrade(*, deadline: float | None = None) -> MobileRefr
         if not _mobile_plist_path().exists():
             if _mobile_healthz_answers():
                 return MobileRefresh(kind="unsupervised")
+            return MobileRefresh(kind="skipped")
+        refusal = _repair_refusal()
+        if refusal is not None:
+            # THE PARENT ASKS THE CHILD'S GUARD BEFORE SPAWNING (round 1 review,
+            # finding 1). The child keeps the guard for direct runs of the hidden
+            # flag, but a refusal THERE arrives as rc 0 — "nothing was touched" —
+            # and this half used to map rc 0 onto ``restarted``: a bounce claimed
+            # for a caller that was never allowed to make one (``lop services
+            # restart`` or ``lop update --no-services`` from a checkout, both
+            # reproduced by the reviewer). A refusal is now a SKIP: no spawn, no
+            # bounce, and no line or status claiming either.
             return MobileRefresh(kind="skipped")
         invocation = _mobile_restart_invocation()
         if invocation is None:
@@ -5385,9 +5402,25 @@ def _mobile_daemon_refresh(result: MobileRefresh) -> DaemonRefresh:
     return DaemonRefresh("mobile")
 
 
+def _bound_label(seconds: float) -> str:
+    """A bound, in the one spelling its reader can use.
+
+    Whole seconds for every real bound — a stage-shortened bound is a float
+    difference (``29.9999``), and a sentence is not the place to show that
+    arithmetic (round 1 review, finding 5) — while a sub-second bound (only
+    reachable from tests and synthetic deadlines) keeps two decimals so it does
+    not collapse to ``0s``. ``60.0`` renders ``60s``, byte-for-byte what these
+    sentences printed before the label became a function.
+    """
+    if seconds < 1.0:
+        trimmed = f"{seconds:.2f}".rstrip("0").rstrip(".")
+        return f"{trimmed}s"
+    return f"{seconds:.0f}s"
+
+
 def _stage_overrun_sentence(late: Sequence[str]) -> str:
     """The one warning a stage that blew its budget adds — with the remedy."""
-    bound = f"{_STAGE_DEADLINE_S:g}s"
+    bound = _bound_label(_STAGE_DEADLINE_S)
     names = f" — the {', '.join(late)} had not returned" if late else ""
     return (
         f"warning: the daemon refresh stage did not finish within {bound}{names}; "
@@ -5693,7 +5726,7 @@ def _bound_fired_sentence(*streams: object, bound: float | None = None) -> str:
     that a daemon is STOPPED, and 0.61.4's own reload failure already names one.
     """
     effective = _DAEMON_REFRESH_TIMEOUT_S if bound is None else bound
-    label = f"{effective:g}s"
+    label = _bound_label(effective)
     in_flight = _in_flight_daemons(*streams)
     if not in_flight:
         return (
@@ -5746,8 +5779,15 @@ def _plist_status(kind: str) -> DaemonStatusKind | None:
     return _PLIST_STATUS.get(kind)
 
 
-def _daemon_report_line(name: str, status: DaemonStatusKind) -> str:
-    """The child's per-daemon machine line — completion marker and report source."""
+def _daemon_report_line(name: str, status: str) -> str:
+    """The child's per-daemon machine line — completion marker and report source.
+
+    ``status`` is normally one of :data:`DaemonStatusKind`; the raw outcome kind
+    rides through for kinds the report vocabulary does not map (see
+    :func:`_plist_status`), where the line's job is the COMPLETION MARKER and the
+    status is deliberately declined by the parser rather than forced into a word
+    that would be wrong.
+    """
     payload = json.dumps({"name": name, "status": status}, separators=(",", ":"))
     return f"{_DAEMON_REPORT_PREFIX}{payload}"
 
@@ -5874,9 +5914,13 @@ def daemons_refresh_command() -> int:
             # The machine line is printed for EVERY step that completed — it is
             # the completion marker the parent's kill attribution reads, and the
             # report's per-daemon source. A kind the report vocabulary does not
-            # know prints nothing rather than a wrong word.
-            if status is not None:
-                print(_daemon_report_line(name, status), flush=True)
+            # know (a fifth ``PlistRefreshKind`` some future build adds) rides out
+            # with its RAW spelling: the report DECLINES it (non-claiming; the
+            # parser ignores unknown statuses), but the marker still proves the
+            # repair FINISHED — printing nothing would leave the parent
+            # synthesizing a false ``failed`` for a daemon that completed
+            # (round 1 review, finding 4).
+            print(_daemon_report_line(name, status or outcome.kind), flush=True)
 
     threads = [
         threading.Thread(target=run_step, args=step, name=f"lop-daemon-repair-{index}")
@@ -5946,8 +5990,9 @@ def mobile_refresh_command() -> int:
     whole child.
 
     A REFUSED REPAIR BOUNCES NOTHING — the same guard, asked in the same place,
-    as :func:`daemons_refresh_command`; without it the hidden flag would be a new
-    hand-reachable way to rewrite the operator's plist from a checkout.
+    as :func:`daemons_refresh_command`; the PARENT asks it too, before spawning
+    (so no product flow maps this child's refusal-rc-0 onto a claim), and this
+    guard is what covers a direct run of the hidden flag.
 
     Exit code: 0 when the refresh did not FAIL (a ``current``, ``repaired`` or
     ``not-addressable`` outcome) and the bounce succeeded; 1 when either half

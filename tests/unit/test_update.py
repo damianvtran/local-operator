@@ -40,6 +40,7 @@ from local_operator.update import (
 )
 
 _REAL_SERVICES_REFUSAL = update_mod._services_refusal
+_REAL_REPAIR_REFUSAL = update_mod._repair_refusal
 
 
 def _install_kind_double(kind: InstallKind):
@@ -89,6 +90,25 @@ def _owns_this_machines_services(monkeypatch: pytest.MonkeyPatch) -> None:
     `monkeypatch` runs after this fixture, so it wins.
     """
     monkeypatch.setattr(update_mod, "_services_refusal", lambda *a, **k: None)
+
+
+@pytest.fixture(autouse=True)
+def _may_touch_the_plists(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default to "this process may rewrite the plists" for every test in this module.
+
+    THE SAME SHAPE AND THE SAME REASON as the services fixture above: a pytest
+    process inside this worktree reports ``install_kind() == EDITABLE``, so the
+    real plist guard refuses every spawn — and since round 1's finding 1 the
+    mobile half ASKS that guard before spawning, so without this every test that
+    drives a bounce would be asserting against a refusal instead of against the
+    thing it was written for.
+
+    The guard has its own tests: the two refusal tests in
+    ``TestServiceDaemonRefresh`` restore ``_REAL_REPAIR_REFUSAL`` explicitly, and
+    the tests that pin a refusal patch over this fixture (a test's own monkeypatch
+    runs after it, so it wins).
+    """
+    monkeypatch.setattr(update_mod, "_repair_refusal", lambda *a, **k: None)
 
 
 def _pypi_transport(
@@ -1765,7 +1785,7 @@ class TestServiceDaemonRefresh:
         mobile.assert_not_called()
         assert capsys.readouterr().out == ""
 
-    def test_the_child_refuses_to_rewrite_from_a_checkout(self, capsys) -> None:
+    def test_the_child_refuses_to_rewrite_from_a_checkout(self, capsys, monkeypatch) -> None:
         """The rule the upgrade path already enforces, at the point that WRITES.
 
         A source checkout's interpreter is not the daemon's, so a repair from
@@ -1773,6 +1793,9 @@ class TestServiceDaemonRefresh:
         visible entry points cannot reach this (an editable install is refused
         before the refresh); the hidden flag can.
         """
+        # The module's autouse fixture hides the guard (this venv IS an editable
+        # checkout, which is exactly what the test needs to see), so restore it.
+        monkeypatch.setattr(update_mod, "_repair_refusal", _REAL_REPAIR_REFUSAL)
         with (
             patch.object(update_mod, "install_kind", return_value=InstallKind.EDITABLE),
             patch.object(update_mod, "installer_argv", side_effect=AssertionError("must not run")),
@@ -1782,7 +1805,9 @@ class TestServiceDaemonRefresh:
         assert captured.out == ""
         assert "source checkout" in captured.err
 
-    def test_the_child_refuses_to_rewrite_a_foreign_non_editable_install(self, capsys) -> None:
+    def test_the_child_refuses_to_rewrite_a_foreign_non_editable_install(
+        self, capsys, monkeypatch
+    ) -> None:
         """A hand-made venv may not repoint the operator's daemons at itself.
 
         THE INVARIANT: a repair may change how a daemon is NAMED, never WHICH
@@ -1795,6 +1820,7 @@ class TestServiceDaemonRefresh:
         """
         from local_operator import launchd
 
+        monkeypatch.setattr(update_mod, "_repair_refusal", _REAL_REPAIR_REFUSAL)
         plists = [Path("/Users/x/Library/LaunchAgents/com.local-operator.mobile.plist")]
         with (
             patch.object(update_mod, "install_kind", return_value=InstallKind.PIP),
@@ -1812,7 +1838,7 @@ class TestServiceDaemonRefresh:
         assert "another installation" in captured.err, captured.err
         assert "/opt/other-venv" in captured.err, captured.err
 
-    def test_the_child_repairs_a_pip_install_of_its_own_prefix(self, capsys) -> None:
+    def test_the_child_repairs_a_pip_install_of_its_own_prefix(self, capsys, monkeypatch) -> None:
         """The same guard, on the machine it must NOT block.
 
         Both plist shapes are exercised: the legacy ``ProgramArguments[0]``
@@ -1825,6 +1851,8 @@ class TestServiceDaemonRefresh:
         from local_operator.mobile import install as mobile_install
         from local_operator.tunnels import install as tunnel_install
         from local_operator.wakes import install as wakes_install
+
+        monkeypatch.setattr(update_mod, "_repair_refusal", _REAL_REPAIR_REFUSAL)
 
         plists = [
             Path("/Users/x/Library/LaunchAgents/com.local-operator.mobile.plist"),
@@ -2014,6 +2042,31 @@ class TestServiceDaemonRefresh:
         assert update_mod.mobile_refresh_command() == 0
         assert "a source checkout" in capsys.readouterr().err
 
+    def test_a_refused_mobile_half_claims_nothing(self, monkeypatch, capsys) -> None:
+        """A caller the plist guard refuses must not be TOLD the relay bounced.
+
+        REPRODUCED on the round-1 head (finding 1): the child exited 0 on its
+        refusal (nothing touched) and this half mapped rc 0 onto ``restarted``,
+        so ``lop services restart`` from a checkout claimed a bounce that never
+        happened — and the update report said ``refreshed``. The parent now asks
+        the same guard BEFORE spawning: a refusal is a silent skip, with no line,
+        no warning and no report status (the child keeps its own guard for direct
+        runs of the hidden flag).
+        """
+        with (
+            patch.object(update_mod, "_mobile_plist_path", return_value=_FakePlist(True)),
+            patch.object(update_mod, "_repair_refusal", return_value="a source checkout"),
+            patch("subprocess.run") as run,
+        ):
+            result = update_mod.refresh_mobile_after_upgrade()
+            run.assert_not_called()
+        assert result.kind == "skipped"
+        refresh = update_mod._mobile_daemon_refresh(result)
+        assert refresh.lines == ()
+        assert refresh.warnings == ()
+        assert refresh.statuses == ()
+        assert capsys.readouterr().out == ""
+
     def test_a_repaired_mobile_plist_reaches_the_summary_lines(self) -> None:
         """End to end: the child's line → ``MobileRefresh.lines`` → the summary.
 
@@ -2066,6 +2119,26 @@ def test_the_child_statuses_are_parsed_and_killed_daemons_are_marked_failed() ->
     )
 
 
+def test_unmapped_plist_kinds_still_complete_and_are_declined() -> None:
+    """The vocabulary pin AND the non-claiming path (round 1 review, finding 4).
+
+    Every kind the repair can return today maps to a report status — pinned as a
+    set so a fifth kind cannot ship unmapped silently. If one ever does, its
+    daemon must still be marked COMPLETE (or the parent's killed-child
+    attribution would synthesize a false ``failed`` for a repair that finished)
+    while the report declines to invent a verdict for it.
+    """
+    from typing import get_args
+
+    assert set(update_mod._PLIST_STATUS) == set(get_args(update_mod.launchd.PlistRefreshKind))
+    assert update_mod._plist_status("brand-new-kind") is None
+    stdout = (
+        "refreshing: tunnel :: lop tunnel install\n"
+        f"{update_mod._daemon_report_line('tunnel', 'brand-new-kind')}\n"
+    )
+    assert update_mod._child_daemon_statuses(stdout, "") == ()
+
+
 def test_the_update_report_is_one_line_with_the_frozen_keys(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -2112,6 +2185,34 @@ def test_the_update_report_is_one_line_with_the_frozen_keys(
     ]
 
 
+def test_the_snapshot_path_emits_the_report_line(capsys: pytest.CaptureFixture[str]) -> None:
+    """The THIRD exit the design names: ``--from-snapshot`` emits the line last.
+
+    The snapshot's own pyproject names the version being installed, so both
+    ``install_version`` and ``target`` are that version — the app-side flow's
+    blocking end (``install_version == target``) — and the emission is the last
+    thing the path prints (round 1 review, finding 3).
+    """
+    with (
+        patch.object(update_mod, "_print_current_generation"),
+        patch.object(update_mod, "prune_generations", return_value=[]),
+        patch.object(update_mod, "prune_notice_lines", return_value=[]),
+        patch.object(update_mod, "referenced_install_roots", return_value=[]),
+        patch.object(update_mod, "refresh_daemons_after_upgrade", return_value=[]),
+    ):
+        assert (
+            update_mod._generation_upgrade(
+                0, services=False, install_version="0.64.9", target="0.64.9"
+            )
+            == 0
+        )
+    lines = capsys.readouterr().out.strip().splitlines()
+    report = json.loads(lines[-1])["update_report"]
+    assert report["install_version"] == "0.64.9"
+    assert report["target"] == "0.64.9"
+    assert report["serve"] == []
+
+
 def test_plist_outcomes_map_onto_the_report_vocabulary() -> None:
     """The four-word vocabulary, per outcome kind (see ``_PLIST_STATUS``).
 
@@ -2131,6 +2232,22 @@ def test_plist_outcomes_map_onto_the_report_vocabulary() -> None:
     assert update_mod._plist_status("something-new") is None
 
 
+def test_the_bound_label_rounds_to_readable_seconds() -> None:
+    """A bound's label is whole seconds; only a sub-second bound keeps decimals.
+
+    Round 1 review, finding 5: a stage-shortened bound is a float difference, and
+    the killed-child sentence was rendering it raw (``29.9999s``; QA saw
+    ``within 1.99992s``). ``60.0`` must stay byte-for-byte what the sentence
+    printed before the label became a function.
+    """
+    assert update_mod._bound_label(60.0) == "60s"
+    assert update_mod._bound_label(30.0) == "30s"
+    assert update_mod._bound_label(29.9999) == "30s"
+    assert update_mod._bound_label(1.99992) == "2s"
+    assert update_mod._bound_label(0.2) == "0.2s"
+    assert update_mod._bound_label(0.0) == "0s"
+
+
 def test_the_stage_budget_never_replaces_a_units_own_bound() -> None:
     """``_bounded_timeout``: None keeps the standalone bound; a deadline caps it."""
     assert update_mod._bounded_timeout(60.0, None) == 60.0
@@ -2146,29 +2263,33 @@ def test_the_stage_budget_never_replaces_a_units_own_bound() -> None:
 def test_the_stage_deadline_words_an_overrun(monkeypatch: pytest.MonkeyPatch) -> None:
     """The stage deadline fires with the remedy text (2026-09-30 design).
 
-    Each unit receives the ONE shared deadline — the same instant for both — and
-    a stage that did not finish within its budget appends ONE warning naming the
-    remedy. The fraction of a second of real time here is the point: the
-    deadline is a wall-clock budget, and a test that never let one expire could
-    not see the firing at all. Both units are fake and released by event, so
-    nothing here measures machine speed.
+    STRUCTURAL, not a scheduling window (round 1 review, finding 2): the deadline
+    is patched to the PAST, so the stage's joins return immediately and both units
+    are provably still inside their bodies — they cannot return until the test
+    releases them, and the test releases them only after OBSERVING both inside.
+    Nothing here measures machine speed, and the straggler naming cannot race the
+    release. The exact sentence text is pinned separately by
+    ``test_the_stage_overrun_sentence_names_the_stragglers``.
     """
     import threading
 
     seen: list[float] = []
     release = threading.Event()
+    inside = {name: threading.Event() for name in ("services", "mobile")}
 
     def services(*, deadline: float) -> update_mod.DaemonRefresh:
         seen.append(deadline)
+        inside["services"].set()
         release.wait(timeout=5)
         return update_mod.DaemonRefresh("s")
 
     def mobile(*, deadline: float) -> update_mod.MobileRefresh:
         seen.append(deadline)
+        inside["mobile"].set()
         release.wait(timeout=5)
         return update_mod.MobileRefresh(kind="restarted")
 
-    monkeypatch.setattr(update_mod, "_STAGE_DEADLINE_S", 0.2)
+    monkeypatch.setattr(update_mod, "_STAGE_DEADLINE_S", 0.0)
     results: list[list[update_mod.DaemonRefresh]] = []
     with (
         patch.object(update_mod, "refresh_service_daemons_after_upgrade", side_effect=services),
@@ -2178,7 +2299,8 @@ def test_the_stage_deadline_words_an_overrun(monkeypatch: pytest.MonkeyPatch) ->
             target=lambda: results.append(update_mod.refresh_daemons_after_upgrade())
         )
         stage_thread.start()
-        time.sleep(0.5)  # > the patched deadline: the overrun is certain
+        assert inside["services"].wait(timeout=5)
+        assert inside["mobile"].wait(timeout=5)
         release.set()
         stage_thread.join(timeout=5)
     assert not stage_thread.is_alive()
@@ -2187,10 +2309,28 @@ def test_the_stage_deadline_words_an_overrun(monkeypatch: pytest.MonkeyPatch) ->
     assert [refresh.name for refresh in refreshes[:2]] == ["s", "mobile"]
     stage_entry = refreshes[2]
     assert stage_entry.name == "daemon refresh stage"
-    assert stage_entry.warnings == (
-        "warning: the daemon refresh stage did not finish within 0.2s — the services "
+    assert len(stage_entry.warnings) == 1
+    warning = stage_entry.warnings[0]
+    assert warning.startswith("warning: the daemon refresh stage did not finish within 0s")
+    assert "run `lop services status`" in warning
+
+
+def test_the_stage_overrun_sentence_names_the_stragglers() -> None:
+    """The naming text, pinned without a schedule (round 1 review, finding 2).
+
+    The overrun test above proves the warning FIRES; this pins what it SAYS —
+    the straggler units by name when there are any, and no name when there are
+    none (the stage can exceed its budget with everything already returned, e.g.
+    a join that drained just past the deadline).
+    """
+    assert update_mod._stage_overrun_sentence(["services child", "mobile half"]) == (
+        "warning: the daemon refresh stage did not finish within 30s — the services "
         "child, mobile half had not returned; run `lop services status` to see what "
-        "is still moving",
+        "is still moving"
+    )
+    assert update_mod._stage_overrun_sentence([]) == (
+        "warning: the daemon refresh stage did not finish within 30s; run `lop services "
+        "status` to see what is still moving"
     )
 
 

@@ -524,17 +524,17 @@ def test_a_guard_that_refuses_silences_every_promise(
     # which happens whatever this caller is (measured by bouncing the real daemon from
     # a checkout), nor about the serve half, which never consults the guard.
     monkeypatch.setattr(services, "_install_may_repoint_daemons", lambda: False)
-    # Only BROWSER is installed here, so nothing bounces: `refresh_mobile_after_upgrade`
-    # returns without a bounce when there is no mobile plist, and naming a bounce would
-    # over-warn about a daemon the reader does not have (round 13 R13-1, design D21).
+    # THE MOBILE CLAUSE IS RETIRED (round 1 review, finding 1): the bounce is no
+    # longer caller-independent — the mobile unit refreshes its own plist and
+    # consults the same guard — so a refused caller repoints nothing AND bounces
+    # nothing, and no mobile-specific promise may print whatever is installed.
     lines = services.status_lines()
     joined = " ".join(lines)
     assert "puts them on the current build" not in joined
     assert not any("bounces the mobile relay" in line for line in lines)
     assert any("repoints them only from the" in line for line in lines)
 
-    # With the mobile plist present the bounce DOES happen whatever this caller is
-    # (measured by bouncing the real daemon from a checkout), so the note says so.
+    # Present or absent, the mobile plist changes nothing about that narrowing.
     monkeypatch.setattr(
         services,
         "_supervised_daemon_plists",
@@ -544,8 +544,8 @@ def test_a_guard_that_refuses_silences_every_promise(
         ],
     )
     lines = services.status_lines()
-    assert any("still bounces the mobile relay" in line for line in lines)
-    assert any("repointed only by the install that owns them" in line for line in lines)
+    assert not any("bounces the mobile relay" in line for line in lines)
+    assert any("repoints them only from the" in line for line in lines)
 
     monkeypatch.setattr(services, "_install_may_repoint_daemons", lambda: True)
     permitted = " ".join(services.status_lines())
