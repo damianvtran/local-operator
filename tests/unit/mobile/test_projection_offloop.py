@@ -176,7 +176,15 @@ def test_wire_bytes_are_unchanged_for_the_same_projection() -> None:
 #: frame gained exactly its eight defaulted keys and nothing else, verified by
 #: dropping those keys from the new frame and reproducing the previous digest
 #: (``db0a3d83...``) byte for byte — +213 bytes on this fixture.
-_EXPECTED_DEGRADED_FRAME_DIGEST = "230f38e818e34ae3b36c00f057f3d5374721c1e6698548441696f2bf54f5ca8b"
+#:
+#: Re-pinned again, for the pin-integrity marker (PR #1817 round-1
+#: remediation): every roster row gained exactly one ``model_fallback``
+#: boolean — 60 keys across this fixture's rows — verified the same way:
+#: dropping those 60 keys reproduces ``230f38e8...`` byte for byte. The
+#: boolean is deliberately additive (an older client reads a missing key as
+#: "no substitution", the historical behaviour), which is what makes a re-pin
+#: the honest record here rather than a format break.
+_EXPECTED_DEGRADED_FRAME_DIGEST = "7208e264fc305cb69efdf2aa220f136b934bd7545bf3c037d35d3812c463e446"
 
 
 # ---------------------------------------------------------------------------
