@@ -1135,6 +1135,54 @@ async def test_expanding_an_entry_does_not_leak_into_another_project(tmp_path: P
         assert not any("line 11" in row for row in page.painted_rows())
 
 
+async def test_a_verbless_row_offers_no_open_hint_at_all(tmp_path: Path) -> None:
+    """UX review round 2, U6: no verb means no `↵` rung, not a dimmed one.
+
+    The ladder's `" open"` fallback was unreachable until design D1 and UX U3
+    made verb-less rows real; on a one-line entry it printed a dimmed `↵ open`
+    for a key that cannot act there.
+    """
+    import re
+
+    registry = ProjectRegistry(tmp_path)
+    project = registry.create_project(ProjectEdit(name="shorty", title="Shorty"))
+    registry.update_project(project.id, ProjectEdit(progress="one line only"), reporter="operator")
+    long_body = "\n".join(f"line {n}" for n in range(1, 12))
+    other = registry.create_project(ProjectEdit(name="longie", title="Longie"))
+    registry.update_project(other.id, ProjectEdit(progress=long_body), reporter="operator")
+
+    def painted(view: Any) -> str:
+        text = " ".join(
+            hint.rendered()
+            for hint in view._hints.children
+            if isinstance(hint, HintButton) and hint.display
+        )
+        return re.sub(r"\s+", " ", text)
+
+    session = _ProjectSession()
+    session.project_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "shorty")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        page = view._detail_page
+        assert page.selected_action_label() is None
+        hints = painted(view)
+        assert "↵" not in hints, hints
+        assert " move " in hints  # the ladder itself still offers what works
+        await pilot.press("escape")
+        await pilot.pause()
+        view = await _open(pilot, app, "longie")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        assert view._detail_page.selected_action_label() == "expand"
+        assert "↵ expand" in painted(view)
+
+
 async def test_clicking_a_feed_row_selects_and_a_second_click_acts(tmp_path: Path) -> None:
     """UX review round 1, U4: the new affordances are not keyboard-only.
 
