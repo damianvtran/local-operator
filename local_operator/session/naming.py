@@ -927,10 +927,12 @@ _DSML_TOKEN = "dsml"
 _REPLACEMENT_CHAR = "\ufffd"
 
 #: Decorative wrapper glyphs observed leading the leaked forms (囗 U+56D7,
-#: 囧 U+56E7, □ U+25A1). Rejected when they LEAD the title or sit directly
-#: against markup punctuation — the two placements the observed replies used —
-#: rather than banned everywhere: 囧 is a real word-initial character in
-#: Chinese text and a blanket ban would reject legitimate titles.
+#: 囧 U+56E7, □ U+25A1). The trade actually taken: a LEADING glyph is refused
+#: (the observed leak shape — `<囗>Composer …`, `囧>…`) and an interior
+#: occurrence is kept unless it sits directly against markup punctuation, so a
+#: title that merely uses the character mid-sentence survives. In practice the
+#: adjacency arm catches bracketed spellings (`[囧] …`), since bare angle
+#: brackets are rejected outright above.
 _DECORATIVE_GLYPHS = "\u56d7\u56e7\u25a1"
 _MARKUP_PUNCTUATION = "<>\uff1c\uff1e[]{}()\uff08\uff09\u3010\u3011"
 

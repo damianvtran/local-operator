@@ -349,8 +349,13 @@ async def test_a_cold_routed_team_command_is_not_retired_by_an_immediate_quit(
     directory = headless_tui_env / "sessions" / session_id
     directory.mkdir(parents=True)
     # A slow reply keeps the turn IN FLIGHT across the quit — the window the
-    # retirement decision must respect.
-    session, handle, server = await _runtime(directory, ["ack", "ack"])
+    # retirement decision must respect. THREE replies for the request form:
+    # the naming errand spends up to two samples (its acceptance cascade's
+    # bounded second sample; no classifier seam is wired here) BEFORE the
+    # submitted turn itself — with two scripted, the "ship it" turn runs off
+    # the end of the script and the stream reports the turn lost. The bare
+    # form never prompts, so its extra entries simply go unused.
+    session, handle, server = await _runtime(directory, ["ack", "ack", "ack"])
     session.team_registry = TeamRegistry(headless_tui_env)
     retire_details: list[str] = []
     real_retire = server._retire_if_pristine
