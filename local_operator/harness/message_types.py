@@ -243,6 +243,15 @@ SESSION_MCP_RECOVERY_MESSAGE_TYPE = "session_mcp_recovery"
 #: — a resumed session that reconnects has a tool inventory that contradicts
 #: "unavailable" (recoverable, and the recovery record clears it), where a
 #: stale "available" would send the model at tools that are not there.
+#:
+#: DEDUPED at the journal write: identical cards (same server, byte-identical
+#: rendered text) do not re-append while outstanding, and the guard re-arms on
+#: a changed reason, a live recovery, or the 24 h staleness reminder — so
+#: surfaces render ONE row per state change rather than one per boot/resume
+#: (measured: 96 identical rows for one expired grant over ~29 h,
+#: ``session/notice_guard.py``). The TYPE's contract is unchanged; only the
+#: repetition is, and the rule lives with the writer in
+#: ``Session.journal_mcp_unavailable``.
 SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE = "session_mcp_unavailable"
 
 #: Custom-message type journaled by the session when the account SERVING it
