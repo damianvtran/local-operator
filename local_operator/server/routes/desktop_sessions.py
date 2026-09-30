@@ -798,6 +798,28 @@ class CreateSession(Input):
     #: lost ids fall back to a freshly minted session with every ladder intact.
     draft_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{12}$")
 
+    #: What this session is FOR, when the caller is not the operator opening a
+    #: conversation. Omitted (``None``) means an ordinary create, and the body is
+    #: then byte-identical to the pre-feature one — the same additive rule
+    #: ``model`` and ``peer`` state above.
+    #:
+    #: ``"agents-config"`` is a CONFIGURATION RUN: the supervised session the
+    #: Agents/Teams page starts to author agents and teams by conversation. The
+    #: value is a closed ``Literal`` rather than a free string because everything
+    #: downstream reads it as an enumeration — the marker key, the session's hidden
+    #: origin and the server-owned tool declaration are three consequences of it —
+    #: and an open string would let a client name a purpose no code implements.
+    #:
+    #: A MARKER KEY, NOT A REQUEST PARAMETER (see ``DesktopSessions.create``): the
+    #: session it describes outlives this request, and a run resumed hours later is
+    #: shaped identically without anyone having to remember to pass a flag.
+    #:
+    #: RELEASE SKEW IS THE REASON THIS IS A KEY ON ``features`` (``agents_config``),
+    #: and the reason the refusal below exists rather than silent tolerance:
+    #: ``Input`` is ``extra="forbid"``, so an OLDER backend answers this field with
+    #: a 422 and the renderer must capability-gate before sending it.
+    purpose: Literal["agents-config"] | None = None
+
     @model_validator(mode="after")
     def _a_local_create_still_names_a_folder(self) -> "CreateSession":
         """Refuse an empty ``cwd`` for a LOCAL create, as a 422 like ``min_length=1``.
@@ -810,7 +832,16 @@ class CreateSession(Input):
         start a user's conversation somewhere nobody named — the failure this whole
         working-directory admission exists to prevent, arriving through the door the
         peer's "the peer decides" rule opens.
+
+        A CONFIGURATION RUN IS THE THIRD CASE, and it is the ``peer`` case over
+        again: the caller names no folder because the SERVER names one (the config
+        root the run edits — see ``_config_run_admissions``). Requiring the client
+        to spell a path it cannot verify would be the "directory the user never
+        named" failure turned inside out: a path the user never chose, invented by
+        a renderer, stored as authority.
         """
+        if self.purpose is not None:
+            return self
         if not self.peer and not self.cwd:
             raise ValueError("cwd is required: name the folder this conversation runs in")
         return self
@@ -2000,6 +2031,25 @@ async def search_sessions(
         )
 
 
+def _config_run_directory(pool: Any) -> str:
+    """The working directory a CONFIGURATION RUN is created in: the config root.
+
+    THE SERVER NAMES IT, and the alternative is the reason. The run has no file
+    tools (its declaration names ``agent`` and ``team``), so this directory is
+    never an input to a path a tool resolves — but it IS stored in the session's
+    marker and reported in diagnostics, and a renderer that supplied it would be
+    inventing a path it cannot verify exists: the "a directory the user never
+    named" failure the cwd admission exists to prevent, arrived at from the other
+    side. The config root is the one directory the run's own work reaches, so it
+    is also the honest answer for the reader who sees it in ``lop sessions``.
+
+    ``pool.root`` rather than ``paths.config_dir()``: the pool was built from one
+    root and every registry the run edits is derived from that same one, so
+    reading the global here would let a run edit one store and claim another.
+    """
+    return str(pool.root)
+
+
 @router.post("/v1/desktop/sessions", response_model=CRUDResponse[CreatedSession])
 async def create_session(body: CreateSession, request: Request):
     """Create a new conversation, optionally born on a chosen model and effort.
@@ -2136,7 +2186,15 @@ async def create_session(body: CreateSession, request: Request):
         pool = host(request)
         target = body.target.model_dump() if body.target else None
         session_id = await pool.create(
-            body.cwd,
+            # THE RUN'S DIRECTORY IS RESOLVED HERE, from the config root the run
+            # edits. A config run has no file tools at all (its declaration names
+            # `agent` and `team`), so its cwd is not authority — but it is still
+            # STORED in the marker and shown in diagnostics, and a renderer cannot
+            # be the party that names it: it would have to invent a path it cannot
+            # verify exists, which is the "a directory the user never named"
+            # failure this route's cwd admission exists to prevent, arrived at
+            # from the other side.
+            _config_run_directory(pool) if body.purpose is not None else body.cwd,
             target=target,
             # The NORMALISED triple, not the raw body: the marker is what a later
             # engage re-resolves, so it stores the pair the validation just
@@ -2156,6 +2214,7 @@ async def create_session(body: CreateSession, request: Request):
             # to a fresh id inside the pool; an id that already became a
             # conversation is refused there with its own typed answer.
             draft_id=body.draft_id,
+            purpose=body.purpose,
         )
         return {"session_id": session_id, "binding": await pool.binding(session_id)}
 
@@ -2192,7 +2251,83 @@ async def create_session(body: CreateSession, request: Request):
             # agent. Forwarding the target rather than refusing it is the whole point of
             # the definitions sync: this route used to answer 422 with "pick the target
             # after moving it home" because a name could not travel.
-            if body.peer:
+            if body.purpose is not None:
+                # A CONFIGURATION RUN IS ADMITTED BEFORE ANYTHING ELSE, and its
+                # three refusals are stated here rather than left to `create`
+                # for the reason every other admission on this route is: a
+                # refusal has to leave no pending receipt row behind, or the
+                # client's retry meets the indeterminate 409 the journal
+                # reserves for a crashed attempt.
+                #
+                # IT IS LOCAL-ONLY. The registries it edits are THIS device's, so
+                # a peer create would either write the peer's registries from a
+                # local run or write local ones from a peer's — and the mesh has
+                # no story for either. Refused by CODE rather than folded into the
+                # client-fields refusal below, because the two say different
+                # things: this one is "not on another device", that one is "the
+                # server, not you, chooses the run's shape".
+                if body.peer is not None:
+                    raise HTTPException(
+                        422,
+                        {
+                            "code": "agents_config_local_only",
+                            "message": (
+                                "A configuration run edits this device's agents and teams, "
+                                "so it cannot be started on another device."
+                            ),
+                        },
+                    )
+                # THE SERVER OWNS THE RUN'S SHAPE, so these four are refused rather
+                # than ignored. Silent tolerance would let a renderer believe it had
+                # chosen a model, a folder or a draft for a run that used none of
+                # them — and the model it named is a PAID turn, so the belief would
+                # cost money. ``cwd`` is included even though an empty one is the
+                # default: the field's own contract is "name the folder", and a
+                # run that names one is a caller that has not read the shape.
+                supplied = [
+                    field
+                    for field, value in (
+                        ("cwd", body.cwd),
+                        ("model", body.model),
+                        ("target", body.target),
+                        ("draft_id", body.draft_id),
+                    )
+                    if value is not None and value != ""
+                ]
+                if supplied:
+                    raise HTTPException(
+                        422,
+                        {
+                            "code": "agents_config_client_fields",
+                            "message": (
+                                "A configuration run chooses its own working directory "
+                                "and model, so " + ", ".join(supplied) + " cannot be sent "
+                                "with it."
+                            ),
+                        },
+                    )
+                # SINGLE FLIGHT, per config root. The registries are global to
+                # this machine and two runs racing on one row would be
+                # last-writer-wins on the file — each writing a VALID definition,
+                # the second silently replacing the first (the team registry's
+                # own lock protects file integrity, not intent). So a second
+                # create answers 409 WITH THE ACTIVE RUN'S ID, which is what a
+                # second window uses to join the run rather than start a rival.
+                # The same read is how a page that mounts mid-run finds it.
+                active = await asyncio.to_thread(pool.active_config_run)
+                if active is not None:
+                    raise HTTPException(
+                        409,
+                        {
+                            "code": "agents_config_running",
+                            "message": (
+                                "A configuration run is already going. Open it to follow "
+                                "it, or stop it first."
+                            ),
+                            "session_id": active,
+                        },
+                    )
+            elif body.peer:
                 if body.model is not None:
                     spec = await asyncio.to_thread(_draft_model_spec, body.model)
             else:
