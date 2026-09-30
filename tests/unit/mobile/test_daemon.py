@@ -269,6 +269,11 @@ def test_http_gate_and_login_flow() -> None:
 
     bad = client.post("/login", data={"password": "nope"})
     assert bad.status_code == 401
+    # U3 (batch 2): the refusal is a live region, so assistive tech hears the
+    # failed attempt — the field refocuses and clears, and before this the
+    # page said nothing.
+    assert 'role="alert"' in bad.text
+    assert "Wrong password." in bad.text
 
     good = client.post("/login", data={"password": "pw123"})
     assert good.status_code == 303

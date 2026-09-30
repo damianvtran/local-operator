@@ -53,9 +53,12 @@ export const neon: ThemeDefinition = {
 		warningWash: "#261E15",
 		warningBorder: "#90600B",
 
-		// The theme's cyberpunk pink, carried verbatim; it clears 4.5:1 on both
-		// grounds without a nudge.
-		danger: "#FF00A0",
+		// The theme's cyberpunk pink, lifted one step (D1, mobile UX batch 2
+		// round 1): carried verbatim it cleared every page ground but measured
+		// 4.43:1 on `elevated`, where the refusal strips now paint it as text;
+		// this value is 4.60:1 there and >= 5.1:1 on the grounds it already
+		// cleared, so the hue stays the scheme's saturated magenta.
+		danger: "#FF1AAA",
 		dangerWash: "#260B28",
 		dangerBorder: "#C00784",
 

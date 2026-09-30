@@ -377,26 +377,54 @@ function settlePinMarks(frame: SessionSummary[]): void {
 }
 
 /* ------------------------------------------------------------------ */
-/* Tab title aggregate                                                 */
+/* Tab title                                                           */
 /* ------------------------------------------------------------------ */
 
-/* The browser tab title is the one attention signal visible from the
-   phone's app switcher, so it must track the list even while a session
-   view (which renders nothing of the list) is on screen. A permanent
-   module subscription instead of a hook: a number in the chrome must not
-   re-render any component. n = sessions with unseen || needs_attention —
-   finished reading matter plus decisions, the two states that want the
-   user (spec §4). */
-function syncTabTitle(): void {
+/* Two writers decide the title, and they COMPOSE rather than race.
+
+   THE LIST owns the attention aggregate: n = sessions with unseen ||
+   needs_attention — finished reading matter plus decisions, the two states that
+   want the user (spec §4). It is computed from a module subscription instead of
+   a hook because a number in the chrome must not re-render any component.
+
+   A SESSION OR AGENT ROUTE owns its own context (U4, batch 2). A phone's task
+   switcher reads `document.title`, and a session route wearing the list's
+   `(3) local operator` described the wrong screen — the audit's exact finding.
+   The route writer sets `routeTitle`; the list writer keeps applying the count
+   whenever no route overrides it, so the count returns the moment the reader is
+   back on the list while a conversation route names the conversation. */
+let listTitle = "local operator";
+let routeTitle: string | null = null;
+
+function applyTabTitle(): void {
 	/* The store also loads in non-DOM contexts (the node-env unit suite). */
 	if (typeof document === "undefined") return;
-	const n = sessions.filter((s) => s.unseen || s.needs_attention).length;
-	const title = n > 0 ? `(${n}) local operator` : "local operator";
+	const title = routeTitle ?? listTitle;
 	if (document.title !== title) document.title = title;
+}
+
+function syncTabTitle(): void {
+	const n = sessions.filter((s) => s.unseen || s.needs_attention).length;
+	listTitle = n > 0 ? `(${n}) local operator` : "local operator";
+	applyTabTitle();
 }
 
 subscribe(syncTabTitle);
 syncTabTitle();
+
+/** The route's own title while it is mounted; `null` releases the list's.
+    A hook rather than a module call so unmount restores the list title without
+    the screen having to remember what it was. */
+export function useRouteTitle(title: string | null): void {
+	useEffect(() => {
+		routeTitle = title;
+		applyTabTitle();
+		return () => {
+			routeTitle = null;
+			applyTabTitle();
+		};
+	}, [title]);
+}
 
 /* ------------------------------------------------------------------ */
 /* Composer drafts, per pid, in localStorage                           */

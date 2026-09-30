@@ -35,10 +35,13 @@ export const ayuLight: ThemeDefinition = {
 		// Upstream editor.fg #5C6166 is 4.86:1 on `sunken`, under the 7:1
 		// floor; darkened on-hue.
 		ink: "#45494D",
-		// Upstream comment #787B80 is 3.30:1 on `sunken`.
-		inkMuted: "#62656A",
-		// Upstream ui.fg #828E9F is 2.58:1 on `sunken`.
-		inkDim: "#5B6676",
+		// Upstream comment #787B80 is 3.30:1 on `sunken`; darkened one step
+		// further so the accent wash clears as well (4.57:1 — the ask card's
+		// detail line reads on that wash; D3).
+		inkMuted: "#606368",
+		// Upstream ui.fg #828E9F is 2.58:1 on `sunken`; darkened one step
+		// further so both washes clear (4.55:1 on the accent wash; D3).
+		inkDim: "#596473",
 		inkDisabled: "#9AA3AF",
 
 		hairline: "#DCE3E8",

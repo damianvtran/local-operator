@@ -3,9 +3,11 @@
 // Tab-title aggregate (spec §4) and the optimistic half of the seen
 // handshake. The title is the one attention signal visible from the phone's
 // app switcher, so it must track the list store on every emit: n = sessions
-// with unseen || needs_attention.
+// with unseen || needs_attention — and while a session/agent route is mounted,
+// that route's own title composes over the count (U4, batch 2).
+import { renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { clearSessionUnseen, retainSessionListStream } from "./store";
+import { clearSessionUnseen, retainSessionListStream, useRouteTitle } from "./store";
 import type { SessionSummary } from "./types";
 
 class FakeEventSource {
@@ -91,5 +93,30 @@ describe("tab title aggregate", () => {
 		   store emission, title unchanged. */
 		clearSessionUnseen("a");
 		expect(document.title).toBe("local operator");
+	});
+
+	it("lets a route title compose over the count, and releases it on unmount (U4, batch 2)", () => {
+		vi.stubGlobal("EventSource", FakeEventSource);
+		release = retainSessionListStream();
+		emitSessions([summary({ session_id: "a", unseen: true })]);
+		expect(document.title).toBe("(1) local operator");
+
+		/* A session route claims the title while it is mounted — the task
+		   switcher was reading the list's aggregate about the wrong screen. */
+		const view = renderHook(({ title }) => useRouteTitle(title), {
+			initialProps: { title: "Ship the settings pane — local operator" },
+		});
+		expect(document.title).toBe("Ship the settings pane — local operator");
+
+		/* The list keeps counting underneath, without fighting the route... */
+		emitSessions([
+			summary({ session_id: "a", unseen: true }),
+			summary({ session_id: "b", unseen: true }),
+		]);
+		expect(document.title).toBe("Ship the settings pane — local operator");
+
+		/* ...and the count returns the moment the route releases the title. */
+		view.unmount();
+		expect(document.title).toBe("(2) local operator");
 	});
 });
