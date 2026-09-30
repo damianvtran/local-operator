@@ -2353,6 +2353,18 @@ def _join_one(
         result = handshake.establish()
         codec = handshake.codec()
         fingerprint = wire.transcript_fingerprint(bytes.fromhex(result.transcript_hash))
+        # THE SHARE LIST COMES FIRST (when the owner advertised it): one bounded
+        # read, before either prompt, so both humans see the same rows before the
+        # joiner types. Gated on the capability the owner advertised in its own
+        # challenge — an older owner sends and reads nothing, byte-identical to
+        # before — and a late frame is still tolerated by `_finish_pairing`.
+        offer_view: dict[str, Any] = {"state": "absent", "items": []}
+        offer_view["state"], offer_view["items"] = _drain_pair_offer(
+            handshake=handshake,
+            codec=codec,
+            reader=reader,
+            remaining_s=invite_mod.remaining_seconds(envelope),
+        )
         if args.emit_sas:
             print(json.dumps({"sas": result.sas, "fingerprint": fingerprint}))
             sys.stdout.flush()
@@ -2373,10 +2385,19 @@ def _join_one(
                 identity=identity,
                 advertised=advertised,
                 handshake=handshake,
+                offer_view=offer_view,
                 helpers=helpers,
             )
         else:
-            print(invite_mod.joiner_prompt(envelope, result.sas, fingerprint))
+            print(
+                invite_mod.joiner_prompt(
+                    envelope,
+                    result.sas,
+                    fingerprint,
+                    offer_state=str(offer_view["state"]),
+                    offer_items=list(offer_view["items"]),
+                )
+            )
             sys.stdout.flush()
         typed = _read_code(args, result.sas, fingerprint)
         if typed is None:
@@ -2394,6 +2415,7 @@ def _join_one(
             handshake=handshake,
             advertised=advertised,
             fingerprint=fingerprint,
+            offer_view=offer_view,
             helpers=helpers,
         )
     except HandshakeRefusal as refusal:
@@ -2466,6 +2488,59 @@ def _read_code(args: argparse.Namespace, derived: str, fingerprint: str) -> str 
     return typed
 
 
+def _drain_pair_offer(
+    *,
+    handshake: Any,
+    codec: Any,
+    reader: Any,
+    remaining_s: float,
+) -> tuple[str, list[dict[str, Any]]]:
+    """The one bounded read of the share list, right after ``welcome``.
+
+    Returns ``(state, items)``. ``"listed"``/``"empty"`` when the owner sent a
+    list; ``"absent"`` when this ceremony cannot have one: the owner never
+    advertised ``pair-offer-v1`` (an older build — no read and NO WAIT, the
+    legacy sequence is byte-identical), or the bounded wait ran out. The wait is
+    a RENDEZVOUS bound, not a human budget: the owner sends the offer immediately
+    after ``welcome`` with no human step in between, and a frame that arrives
+    late is still stashed by ``_finish_pairing`` — a slow sender costs the list
+    on screen, never the ceremony.
+
+    Anything else on this first record is a refusal (``net_pair_abort`` through
+    the one reason map) or a protocol error — NEVER a silent downgrade to "no
+    offer", because a corrupt or malformed frame is exactly the case the sealed
+    layer exists to surface.
+    """
+    from local_operator.network import wire
+    from local_operator.network.handshake import (
+        PAIR_OFFER_WAIT_S,
+        parse_pair_offer,
+        refusal_from_pairing,
+    )
+    from local_operator.network.types import MeshRefusal
+
+    if wire.PAIR_OFFER_V1 not in handshake.peer_capabilities:
+        return "absent", []
+    budget = min(PAIR_OFFER_WAIT_S, max(0.0, remaining_s))
+    try:
+        frame = codec.open(reader.read_record_payload(wire.deadline_in(budget)))
+    except TimeoutError:
+        return "absent", []
+    op = str(frame.get("op") or "")
+    if op == "net_pair_abort":
+        raise refusal_from_pairing(
+            str(frame.get("reason") or "aborted"), detail=str(frame.get("detail") or "")
+        )
+    if op != "net_pair_offer":
+        raise MeshRefusal(
+            "protocol_error",
+            "the other device sent something other than the share list before the "
+            "pairing was confirmed; nothing was admitted",
+        )
+    items = parse_pair_offer(frame)
+    return ("empty" if not items else "listed"), items
+
+
 def _finish_pairing(
     *,
     typed: str,
@@ -2479,6 +2554,7 @@ def _finish_pairing(
     handshake: Any,
     advertised: list[str],
     fingerprint: str,
+    offer_view: dict[str, Any],
     helpers: dict[str, Any],
 ) -> tuple[list[str], dict[str, Any]]:
     """Send the human's transcription and turn the answer into a receipt.
@@ -2491,7 +2567,11 @@ def _finish_pairing(
     prompt path does.
     """
     from local_operator.network import wire
-    from local_operator.network.handshake import pair_ready_frame, refusal_from_pairing
+    from local_operator.network.handshake import (
+        pair_ready_frame,
+        parse_pair_offer,
+        refusal_from_pairing,
+    )
     from local_operator.network.types import MeshRefusal
 
     invite_mod = helpers["invite_mod"]
@@ -2503,9 +2583,24 @@ def _finish_pairing(
     # of "what is left", so the promise and this wait cannot drift with the token's
     # age (agent review round 1, MAJOR 2).
     remaining = invite_mod.remaining_seconds(envelope)
-    answer = codec.open(
-        reader.read_record_payload(wire.deadline_in(helpers["pair_timeout_seconds"](remaining)))
-    )
+    deadline = wire.deadline_in(helpers["pair_timeout_seconds"](remaining))
+    answer = codec.open(reader.read_record_payload(deadline))
+    if answer.get("op") == "net_pair_offer":
+        # A LATE SHARE LIST IS TOLERATED ONCE (the race §6.6 names): the drain in
+        # `_join_one` may have timed out while the offer was still in flight, and
+        # a frame arriving after the human already typed must not fail the
+        # ceremony. A SECOND one is a protocol error: exactly one offer exists per
+        # ceremony, and a peer that sends another is driving a state machine this
+        # side does not have.
+        if offer_view.get("state") != "absent":
+            raise MeshRefusal(
+                "protocol_error",
+                "the other device sent a second share list; the pairing is refused",
+            )
+        items = parse_pair_offer(answer)
+        offer_view["state"] = "empty" if not items else "listed"
+        offer_view["items"] = items
+        answer = codec.open(reader.read_record_payload(deadline))
     if answer.get("op") == "net_pair_abort":
         # ``refusal_from_pairing`` OWNS the reason -> sentence map, and it lives
         # in ``handshake`` beside the frames it describes. This call used to go
@@ -2598,18 +2693,40 @@ def _process_alive(pid: int) -> bool:
 
 
 def _awaiting_payload(pending: Any) -> dict[str, Any]:
-    """Phase one's body: the code, and the sentence that says who must read it.
+    """Phase one's body: the code, the share list, and the sentence that says who
+    must read it.
 
     THE SENTENCE IS PART OF THE CONTRACT, which is why it is produced here rather
     than by whichever caller happens to render it (``mesh-ui.md`` §3.2): an agent
     that shows the user anything other than this sentence is paraphrasing the one
-    instruction that makes the ceremony a human step.
+    instruction that makes the ceremony a human step. The share-list fact rides the
+    sentence too — all three states gain exactly one clause — because an agent that
+    only reads the sentence must still be able to say what will be served.
+
+    ``offers`` IS PRESENT IFF THE OWNER ADVERTISED THE CAPABILITY: a list (possibly
+    empty) when it did, absent when it did not. That presence is the machine-readable
+    half of §4.3-vs-§4.4; the sentence says the same thing in words.
     """
     from local_operator.network import wire
+    from local_operator.network.credentials import offers as offers_mod
 
     shown = pending.fingerprint if pending.verify else wire.sas_display(pending.sas)
     what = "fingerprint" if pending.verify else "code"
-    return {
+    state = str(getattr(pending, "offer_state", "") or offers_mod.OFFER_ABSENT)
+    items = [dict(item) for item in getattr(pending, "offers", []) or []]
+    if state == offers_mod.OWNER_SENT:
+        # An owner-side state must never leak into a joiner payload: this record is
+        # a PendingJoin, whose states are the three below.
+        state = offers_mod.OFFER_EMPTY
+    sentence = (
+        f"Ask the user to read back the {what} {shown} from the other device, then "
+        f"confirm it with `lop network join --confirm <{what}>`."
+    )
+    clause = offers_mod.sentence_clause(
+        state, items, inviter=pending.inviter_name or pending.inviter_device_id
+    )
+    sentence = f"{sentence} {clause}"
+    payload: dict[str, Any] = {
         "ok": True,
         "status": "awaiting_confirmation",
         "sas": pending.sas,
@@ -2622,11 +2739,11 @@ def _awaiting_payload(pending: Any) -> dict[str, Any]:
         "invite_id": pending.invite_id,
         "expires_at": pending.expires_at,
         "seconds_left": round(pending.seconds_left(), 1),
-        "sentence": (
-            f"Ask the user to read back the {what} {shown} from the other device, then "
-            f"confirm it with `lop network join --confirm <{what}>`."
-        ),
+        "sentence": sentence,
     }
+    if state in (offers_mod.OFFER_LISTED, offers_mod.OFFER_EMPTY):
+        payload["offers"] = items
+    return payload
 
 
 def _await_join_answer(invite_id: str, window: float, store: Any) -> Any:
@@ -2689,6 +2806,7 @@ def _park_join(
     identity: Any,
     advertised: list[str],
     handshake: Any,
+    offer_view: dict[str, Any],
     helpers: dict[str, Any],
 ) -> tuple[list[str], dict[str, Any]]:
     """Phase one: hold the open ceremony and wait for a second invocation's answer.
@@ -2724,6 +2842,12 @@ def _park_join(
         verify=bool(getattr(args, "verify", False)),
         pid=os.getpid(),
         expires_at=time.time() + window,
+        # THE LIST THE HUMAN WILL BE TOLD TO READ (both directions: the non-JSON
+        # prompt below and the payload's ``offers``). Stored on the record so the
+        # phase-two invocation and any later reader see the same list that was
+        # printed, not a re-enumeration that could have drifted.
+        offers=[dict(item) for item in offer_view["items"]],
+        offer_state=str(offer_view["state"]),
     )
     # A leftover answer from an earlier ceremony would answer THIS one: the record is
     # keyed by invite, and one invite mints one ceremony. Cleared BEFORE the record is
@@ -2740,7 +2864,15 @@ def _park_join(
         print(json.dumps(_awaiting_payload(pending), indent=2, sort_keys=True, default=str))
         sys.stdout.flush()
     else:
-        print(invite_mod.joiner_prompt(envelope, result.sas, fingerprint))
+        print(
+            invite_mod.joiner_prompt(
+                envelope,
+                result.sas,
+                fingerprint,
+                offer_state=str(offer_view["state"]),
+                offer_items=list(offer_view["items"]),
+            )
+        )
         print(
             f"waiting up to {int(window)}s for the code from the other device: answer it with "
             "`lop network join --confirm <code>`, run wherever the person reading that "
@@ -2788,6 +2920,7 @@ def _park_join(
             handshake=handshake,
             advertised=advertised,
             fingerprint=fingerprint,
+            offer_view=offer_view,
             helpers=helpers,
         )
     except MeshRefusal as refusal:

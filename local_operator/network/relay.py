@@ -90,6 +90,7 @@ from local_operator.network.handshake import (
     Handshake,
     ListenerPolicy,
     pair_abort_frame,
+    pair_offer_frame,
     pair_result_frame,
     pair_timeout_seconds,
     sas_matches,
@@ -7344,6 +7345,8 @@ class RelayServer:
         joiner_name: str,
         transcribed: str,
         peer_addr: str,
+        offer: list[dict[str, Any]],
+        offer_detail: dict[str, Any],
     ) -> PairDecision:
         """Design §5.3's second half: a person on the INVITING device confirms the code.
 
@@ -7363,6 +7366,17 @@ class RelayServer:
         invite = record.invite(invite_id)
         role = (invite.role if invite is not None else "read") or "read"
         window = pair_timeout_seconds(_remaining_of(record, invite_id))
+        from local_operator.network.credentials import offers as offers_mod
+
+        # §4.2's state rides the record so EVERY surface (the relay's inline
+        # prompt, `lop network confirm`, `--json`) renders the same fact: a peer
+        # that never advertised the capability cannot be shown a list, and the
+        # silence gets a sentence rather than reading as "nothing to share".
+        offer_state = (
+            offers_mod.OWNER_SKIPPED
+            if str(offer_detail.get("offer") or "") == offers_mod.OWNER_SKIPPED
+            else offers_mod.OWNER_SENT
+        )
         pending = PendingPairing(
             invite_id=invite_id,
             network_id=record.network_id,
@@ -7381,7 +7395,11 @@ class RelayServer:
                 name=joiner_name,
                 transcribed=transcribed,
                 derived=result.sas,
+                offer_items=list(offer) if offer_state == offers_mod.OWNER_SENT else None,
+                offer_state=offer_state,
             ),
+            offer=list(offer),
+            offer_state=offer_state,
         )
         store.save_pending_pairing(pending, self.root)
         self.audit.record(
@@ -7395,6 +7413,7 @@ class RelayServer:
                     "subject": joiner_id,
                     "role": role,
                     "seconds_left": round(window, 1),
+                    **offer_detail,
                 },
             )
         )
@@ -7517,6 +7536,23 @@ class RelayServer:
         deadline = wire.deadline_in(pair_timeout_seconds(_remaining_of(record, invite_id)))
         member_row: MemberRecord | None = None
         try:
+            # THE SHARE LIST IS THE FIRST SEALED RECORD (§2.3): sent before anything
+            # waits on a human, so both ends can show the same list before either
+            # person commits. Inside this try on purpose — a socket that dies sending
+            # it takes the same refusal/consume path every other failure does, and the
+            # joiner's bounded drain plus its tolerant first-result read absorb a
+            # slow frame rather than failing the ceremony.
+            from local_operator.network.credentials import offers as offers_mod
+
+            send_offer, offer_items, offer_detail = _pair_offer_for(handshake, self.root)
+            if send_offer:
+                sock.sendall(
+                    codec.seal(
+                        pair_offer_frame(
+                            items=offer_items, digest=offers_mod.digest_of(offer_items)
+                        )
+                    )
+                )
             try:
                 ready = codec.open(reader.read_record_payload(deadline))
             except TimeoutError as exc:
@@ -7561,6 +7597,8 @@ class RelayServer:
                 joiner_name=joiner_name,
                 transcribed=typed,
                 peer_addr=peer_addr,
+                offer=offer_items,
+                offer_detail=offer_detail,
             )
             if not (decision.decision == "admit" and decision.matched):
                 # A timeout and a decline are both refusals: an unanswered question
@@ -9860,6 +9898,35 @@ def build_stamp() -> dict[str, str]:
     except Exception:  # noqa: BLE001
         ref = ""
     return {"version": number, "source_ref": ref}
+
+
+def _pair_offer_for(
+    handshake: Handshake, root: Path | None
+) -> tuple[bool, list[dict[str, Any]], dict[str, Any]]:
+    """``(send, items, audit detail)`` for the pair ceremony's share list.
+
+    THE GATE IS THE JOINER'S OWN ADVERTISEMENT: a build that does not know
+    ``pair-offer-v1`` never sees the frame (the both-sides rule caps exist for),
+    which is what lets this ship without moving either protocol version. When the
+    gate is closed the audit says WHY (``skipped_peer_unsupported``) so the
+    owner's confirm screen can say it too — an absent frame from an old peer must
+    stay distinguishable from an empty list from a new one.
+
+    AN UNREADABLE STORE IS AN EMPTY OFFER, NEVER A SKIPPED FRAME: an absent frame
+    is indistinguishable from an old peer's silence, so a store that cannot be
+    enumerated still SENDS (nothing), and the audit's ``enumeration`` key records
+    that the emptiness was a failure rather than a fact.
+    """
+    from local_operator.network.credentials import offers as offers_mod
+
+    if wire.PAIR_OFFER_V1 not in handshake.peer_capabilities:
+        return False, [], {"offer": offers_mod.OWNER_SKIPPED}
+    try:
+        items = offers_mod.build_items(root)
+    except offers_mod.OfferEnumerationError:
+        empty = offers_mod.digest_of([])
+        return True, [], {"offer": {"sent": 0, "digest": empty, "enumeration": "unreadable"}}
+    return True, items, {"offer": {"sent": len(items), "digest": offers_mod.digest_of(items)}}
 
 
 def _net_summary(record: NetworkRecord | None) -> dict[str, Any]:
