@@ -2238,7 +2238,8 @@ the scratchpad and read that back: a human or a vision-capable agent **sees the 
 **Rasterise with `rsvg-convert`; never `qlmanage`.** When the browser host
 refuses a `file://` render (cmux has), the sanctioned conversion is the one
 `scripts/visual_gallery.py` uses and `docs/VISUAL_CAPTURE.md` documents
-(librsvg's `rsvg-convert`; Homebrew on this host, resolved from PATH — the gallery fails clearly if it is absent):
+(librsvg's `rsvg-convert` — Homebrew on this host, resolved from PATH; the
+gallery fails clearly if it is absent):
 
 ```sh
 rsvg-convert "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/before.svg" \
