@@ -22,8 +22,20 @@ from local_operator.session.model_selection import (
     SELECTED_MODEL_CUSTOM_TYPE,
     SELECTION_VERSION,
     read_model_selection,
+    refused_decision_only_selection,
     selection_from_payloads,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clean_selection_memo():
+    """The selection memo is process-wide; no test may inherit another's entry."""
+    from local_operator.session import model_selection as module
+
+    module._reset_for_tests()
+    yield
+    module._reset_for_tests()
+
 
 PROVIDER_A = "test/conversation-a"
 PROVIDER_B = "test/default-b"
@@ -296,3 +308,177 @@ def test_a_byte_corrupt_journal_is_answered_rather_than_raising(tmp_path):
     saved = read_model_selection(directory)
     assert saved is not None and saved.selector == PROVIDER_A
     assert _forward_fold(directory) is None, "the fold no longer stops at the torn row"
+
+
+# ---------------------------------------------------------------------------
+# The stat-keyed memo (the 2026-09-30 open-cost audit): what it must NOT
+# re-read, what it must re-read, and that it never changes an answer
+# ---------------------------------------------------------------------------
+
+
+def test_an_unchanged_journal_is_not_re_walked_for_the_settle_path(tmp_path, monkeypatch):
+    """The whole point: a second read of an unchanged journal costs one stat.
+
+    Counted at the scan, not by wall clock — a clock bound here would be a bet
+    on machine load, and the scan is exactly what the memo exists to skip.
+    """
+    from local_operator.session import model_selection as module
+
+    directory = _journal(tmp_path / "sessions" / "memo-settle", [_selection_row(PROVIDER_A)])
+    calls: list[Path] = []
+    real = module._settled_selection
+
+    def counting(path):
+        calls.append(path)
+        return real(path)
+
+    monkeypatch.setattr(module, "_settled_selection", counting)
+    first = read_model_selection(directory)
+    second = read_model_selection(directory)
+    assert first is not None and first.selector == PROVIDER_A
+    assert second == first
+    assert calls == [directory], "the second call re-walked an unchanged journal"
+
+
+def test_the_fold_fallback_is_memoised_even_when_it_answers_none(tmp_path, monkeypatch):
+    """Both outcomes are cached, including the fold's ``None``.
+
+    The fold is the path most of the store's transcripts take; a journal whose
+    fold answers ``None`` must not re-walk on every open either.
+    """
+    from local_operator.session import model_selection as module
+
+    directory = _journal(
+        tmp_path / "sessions" / "memo-fold", [_selection_row(PROVIDER_A, version=None)]
+    )
+    calls: list[Path] = []
+    real = module._forward_payloads
+
+    def counting(path):
+        calls.append(path)
+        return real(path)
+
+    monkeypatch.setattr(module, "_forward_payloads", counting)
+    first = read_model_selection(directory)
+    second = read_model_selection(directory)
+    assert first is not None and first.selector == PROVIDER_A
+    assert second == first
+    assert calls == [directory]
+
+    empty = _journal(tmp_path / "sessions" / "memo-none", [_message_row("hello")])
+    assert read_model_selection(empty) is None
+    assert read_model_selection(empty) is None
+    assert calls == [directory, empty], "the None fold was re-walked"
+
+
+def test_an_append_recomputes_once_then_memoises_again(tmp_path, monkeypatch):
+    """A grown journal (size/mtime moved) is recomputed, and the new answer cached."""
+    from local_operator.session import model_selection as module
+
+    directory = _journal(tmp_path / "sessions" / "memo-append", [_selection_row(PROVIDER_A)])
+    calls: list[Path] = []
+    real = module._settled_selection
+
+    def counting(path):
+        calls.append(path)
+        return real(path)
+
+    monkeypatch.setattr(module, "_settled_selection", counting)
+    before = read_model_selection(directory)
+    assert before is not None and before.selector == PROVIDER_A
+
+    with (directory / "transcript.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(_selection_row(PROVIDER_B)) + "\n")
+
+    after = read_model_selection(directory)
+    again = read_model_selection(directory)
+    assert after is not None and after.selector == PROVIDER_B
+    assert again == after
+    assert calls == [directory, directory], "append: one recompute, then cached again"
+
+    module._reset_for_tests()
+    assert after == read_model_selection(directory)  # equals the uncached answer
+
+
+def test_a_replacement_at_identical_size_and_mtime_is_detected_by_inode(tmp_path):
+    """``os.replace`` can keep size and mtime; only ``st_ino`` moves — so the
+    memo must key on it (the same term ``transcript_index``'s scan signature
+    carries for exactly this case).
+    """
+    import os
+
+    directory = _journal(
+        tmp_path / "sessions" / "memo-swap", [_selection_row("test/conversation-a")]
+    )
+    path = directory / "transcript.jsonl"
+    first = read_model_selection(directory)
+    assert first is not None and first.selector == "test/conversation-a"
+    st = path.stat()
+
+    swap = directory / "swap.tmp"
+    swap.write_text(json.dumps(_selection_row("test/conversation-z")) + "\n", encoding="utf-8")
+    os.utime(swap, ns=(st.st_atime_ns, st.st_mtime_ns))
+    os.replace(swap, path)
+
+    replaced = path.stat()
+    assert replaced.st_ino != st.st_ino, "premise: os.replace gave a new inode"
+    assert replaced.st_size == st.st_size
+    assert replaced.st_mtime_ns == st.st_mtime_ns, "premise: only the inode moved"
+
+    second = read_model_selection(directory)
+    assert second is not None and second.selector == "test/conversation-z"
+
+
+@pytest.mark.parametrize("name", sorted(CASES))
+def test_a_memoised_answer_equals_an_uncached_one(tmp_path, name):
+    """The memo may change WHAT is read, never WHAT is answered."""
+    from local_operator.session import model_selection as module
+
+    directory = _journal(
+        tmp_path / "sessions" / "case", CASES[name], newline=name != "no trailing newline"
+    )
+    cached = read_model_selection(directory)
+    module._reset_for_tests()
+    assert cached == read_model_selection(directory)
+
+
+def test_the_refusal_reader_is_memoised_on_the_same_key(tmp_path, monkeypatch):
+    """The refusal walk rides the same memo — it is the same per-open cost."""
+    from local_operator.session import model_selection as module
+
+    directory = _journal(tmp_path / "sessions" / "memo-refusal", [_selection_row(PROVIDER_A)])
+    calls: list[int] = []
+    real = module._iter_complete_lines_backward
+
+    def counting(handle, end):
+        calls.append(end)
+        return real(handle, end)
+
+    monkeypatch.setattr(module, "_iter_complete_lines_backward", counting)
+    assert refused_decision_only_selection(directory) is None
+    assert refused_decision_only_selection(directory) is None
+    assert len(calls) == 1, "the second call re-walked the journal for a refusal"
+
+
+def test_the_memo_is_bounded_and_evicts_least_recently_used(tmp_path):
+    """128 entries, LRU: the hot session survives a sweep of one-off reads."""
+    from local_operator.session import model_selection as module
+
+    directories = []
+    for i in range(module._SELECTION_MEMO_MAX):
+        directory = _journal(tmp_path / "sessions" / f"memo-{i:03d}", [_selection_row(PROVIDER_A)])
+        directories.append(directory)
+        assert read_model_selection(directory) is not None
+    assert len(module._SELECTION_MEMO) == module._SELECTION_MEMO_MAX
+
+    # Re-open the OLDEST entry, then add one more: an LRU evicts the
+    # second-oldest; a FIFO would have dropped the re-opened one instead.
+    assert read_model_selection(directories[0]) is not None
+    newest = _journal(tmp_path / "sessions" / "memo-extra", [_selection_row(PROVIDER_A)])
+    assert read_model_selection(newest) is not None
+
+    keys = list(module._SELECTION_MEMO)
+    assert len(keys) == module._SELECTION_MEMO_MAX
+    assert str(directories[0] / "transcript.jsonl") in keys
+    assert str(directories[1] / "transcript.jsonl") not in keys
+    assert keys[-1] == str(newest / "transcript.jsonl")
