@@ -71,7 +71,7 @@ async def test_create_speech_http_exception(speech_request_data, mock_radient_cl
 
 
 @pytest.mark.asyncio
-async def test_create_speech_generic_exception(speech_request_data, mock_radient_client):
+async def test_create_speech_generic_exception(speech_request_data, mock_radient_client, caplog):
     """Test speech creation when Radient client raises a generic exception."""
     mock_radient_client.create_speech.side_effect = Exception("Something went wrong")
     speech_request = SpeechRequest(**speech_request_data)
@@ -81,6 +81,9 @@ async def test_create_speech_generic_exception(speech_request_data, mock_radient
 
     assert exc_info.value.status_code == 500
     assert "Failed to generate speech: Something went wrong" in exc_info.value.detail
+    # The one fault class that needs a stack gets one (review round 2, finding 1).
+    record = next(r for r in caplog.records if r.levelname == "ERROR")
+    assert record.exc_info is not None
 
 
 @pytest.mark.asyncio
@@ -115,17 +118,30 @@ async def test_create_speech_without_a_credential_answers_401(mock_radient_clien
         await create_speech(speech_request, mock_radient_client)
 
     assert exc_info.value.status_code == 401
-    assert exc_info.value.detail == "Sign in to Radient to use speaking aloud"
+    assert (
+        exc_info.value.detail == "Sign in to Radient in the settings page to enable text to speech."
+    )
     mock_radient_client.create_speech.assert_not_called()
 
 
 @pytest.mark.parametrize(
     ("status", "sentence"),
     [
-        (401, "Sign in to Radient to use speaking aloud"),
-        (402, "Your Radient credit balance is too low for speech. Add credits to continue."),
-        (429, "Speech is busy right now. Try again in a moment."),
-        (503, "Speech is temporarily unavailable."),
+        # An upstream 401 is the signed-in-but-broken state (the app's button
+        # gate never lets the absent-credential state reach a press), so it
+        # gets its own sentence; the daemon-local one is pinned in the
+        # no-credential tests.
+        (
+            401,
+            "Your Radient sign-in has stopped working. Sign in again in the settings page.",
+        ),
+        (
+            402,
+            "Your Radient credit balance is too low for speech. "
+            "Add credits in your Radient Console to continue.",
+        ),
+        (429, "Speech is unavailable right now. Try again in a moment."),
+        (503, "Speech is temporarily unavailable. Try again in a moment."),
     ],
 )
 @pytest.mark.asyncio
@@ -266,7 +282,7 @@ async def test_create_agent_speech_uses_the_elevenlabs_contract():
 
 
 @pytest.mark.asyncio
-async def test_create_agent_speech_404_for_an_unknown_agent(tmp_path):
+async def test_create_agent_speech_404_for_an_unknown_agent(tmp_path, caplog):
     """The 404 comes from the registry's real miss path, not a mocked fiction.
 
     ``AgentRegistry.get_agent`` raises ``KeyError`` for an id it does not hold;
@@ -288,8 +304,14 @@ async def test_create_agent_speech_404_for_an_unknown_agent(tmp_path):
         )
 
     assert exc_info.value.status_code == 404
-    assert exc_info.value.detail == "Agent with ID missing-agent not found"
+    assert exc_info.value.detail == "This conversation's agent is no longer available."
     radient_client.create_speech.assert_not_called()
+    # The raw id stays support-visible through the log line, not the copy
+    # (design round 1, D1).
+    assert any(
+        record.levelname == "WARNING" and "missing-agent" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 @pytest.mark.asyncio
@@ -316,7 +338,9 @@ async def test_create_agent_speech_requires_a_credential_before_any_work():
             )
 
     assert exc_info.value.status_code == 401
-    assert exc_info.value.detail == "Sign in to Radient to use speaking aloud"
+    assert (
+        exc_info.value.detail == "Sign in to Radient in the settings page to enable text to speech."
+    )
     configure_call.assert_not_called()
     voice_call.assert_not_called()
     radient_client.create_speech.assert_not_called()
@@ -353,8 +377,42 @@ async def test_create_agent_speech_passes_refusals_through():
 
     assert exc_info.value.status_code == 402
     assert exc_info.value.detail == (
-        "Your Radient credit balance is too low for speech. Add credits to continue."
+        "Your Radient credit balance is too low for speech. "
+        "Add credits in your Radient Console to continue."
     )
+
+
+@pytest.mark.asyncio
+async def test_create_agent_speech_500_logs_the_stack(caplog):
+    """The one fault class that needs a traceback gets it (review r2, f1)."""
+    radient_client = _credentialed_client()
+    radient_client.create_speech.side_effect = RuntimeError("boom")
+    agent_registry = MagicMock()
+    agent_registry.get_agent.return_value = _agent()
+
+    with (
+        patch("local_operator.server.routes.speech.configure_model", return_value=MagicMock()),
+        patch(
+            "local_operator.server.routes.speech.determine_voice",
+            new_callable=AsyncMock,
+            return_value="male",
+        ),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await create_agent_speech(
+                "test-agent",
+                _agent_speech_request(),
+                radient_client,
+                agent_registry,
+                MagicMock(),
+                MagicMock(),
+                MagicMock(),
+            )
+
+    assert exc_info.value.status_code == 500
+    assert "Failed to generate speech: boom" in exc_info.value.detail
+    record = next(r for r in caplog.records if r.levelname == "ERROR")
+    assert record.exc_info is not None
 
 
 @pytest.mark.parametrize("bad", ["EN", "En", "en-US", "e", "eng", "1a", " e", "éé"])

@@ -68,23 +68,44 @@ def _upstream_failure_detail(exc: APIError) -> str:
     return f"Speech generation failed upstream: {status}: {exc}"
 
 
-#: The refusal sentence for a missing (or refused) Radient credential. The
-#: remedy is the same on both speech routes, so it is spelled once.
-SPEECH_SIGN_IN_SENTENCE = "Sign in to Radient to use speaking aloud"
+#: The sentence for the daemon-local no-credential refusal (the resolver found
+#: nothing). It mirrors the app's own disabled-button tooltip -- "Sign in to
+#: Radient in the settings page to enable text to speech" -- so the toast and
+#: the tooltip that precedes it agree. This is NOT the state a press usually
+#: meets: the app disables the speak button without a credential, so a press
+#: that fails answers with the upstream 401 below instead (design round 1, D2).
+SPEECH_NO_CREDENTIAL_SENTENCE = "Sign in to Radient in the settings page to enable text to speech."
+
+#: The sentence for an agent id that no longer exists. The raw id is an internal
+#: identifier the user never chose, so it goes to the route's log line rather
+#: than the customer's toast (design round 1, D1).
+SPEECH_UNKNOWN_AGENT_SENTENCE = "This conversation's agent is no longer available."
 
 #: The fixed sentences for the upstream refusals a user can act on, keyed by
-#: the status agent-server passes through: 401 a refused/expired credential,
-#: 402 a balance the speech cannot be charged against, 429 a busy (or
-#: rate-limited) upstream, 503 the provider being temporarily unavailable --
-#: agent-server's own sentence for a vendor 401/402/5xx, which is why 503
-#: keeps that wording here. Fixed text on purpose: the hub's envelope is
-#: written for an operator ("insufficient credits for this request"), not for
-#: the toast the user reads.
+#: the status agent-server passes through:
+#:
+#: * 401 a credential the hub refused or that expired -- the signed-in-but-
+#:   broken state the app's button gate cannot catch -- so the sentence names
+#:   the fix rather than claiming the user never signed in (design round 1, D2);
+#: * 402 the hub's credit gate. Vendor 402s are absorbed into its 503 by
+#:   design, so a 402 reaching the daemon is genuinely the account's balance
+#:   (design round 1, D3), and it names where the top-up happens (D5);
+#: * 429 a rate-limited or saturated upstream -- states the condition without
+#:   attributing a mood to the service (N2);
+#: * 503 the provider being temporarily unavailable -- agent-server's own
+#:   sentence for a vendor 401/402/5xx, extended with its next step (D4).
+#:
+#: Fixed text on purpose: the hub's envelope is written for an operator
+#: ("insufficient credits for this request"), not for the toast the user reads.
+#: Every sentence ends with a full stop so the set reads alike in one toast (N1).
 _SPEECH_REFUSAL_SENTENCES: Dict[int, str] = {
-    401: SPEECH_SIGN_IN_SENTENCE,
-    402: "Your Radient credit balance is too low for speech. Add credits to continue.",
-    429: "Speech is busy right now. Try again in a moment.",
-    503: "Speech is temporarily unavailable.",
+    401: "Your Radient sign-in has stopped working. Sign in again in the settings page.",
+    402: (
+        "Your Radient credit balance is too low for speech. "
+        "Add credits in your Radient Console to continue."
+    ),
+    429: "Speech is unavailable right now. Try again in a moment.",
+    503: "Speech is temporarily unavailable. Try again in a moment.",
 }
 
 
@@ -98,7 +119,7 @@ def _require_radient_credential(radient_client: RadientClient) -> None:
     """
     if radient_client.api_key is not None and radient_client.api_key.get_secret_value():
         return
-    raise HTTPException(status_code=401, detail=SPEECH_SIGN_IN_SENTENCE)
+    raise HTTPException(status_code=401, detail=SPEECH_NO_CREDENTIAL_SENTENCE)
 
 
 def _speech_refusal(exc: APIError) -> HTTPException:
@@ -172,7 +193,9 @@ async def create_speech(
         )
         raise _speech_refusal(upstream_exc) from upstream_exc
     except Exception as e:
-        # Catch any other exceptions and return a 500 error
+        # The stack is logged, not just the message: an unexpected fault is the
+        # one class that needs it (review round 2, finding 1).
+        logger.exception("Failed to generate speech: %s", e)
         raise HTTPException(status_code=500, detail=f"Failed to generate speech: {str(e)}")
 
 
@@ -209,12 +232,11 @@ async def create_agent_speech(
             # ``AgentRegistry.get_agent`` raises ``KeyError`` for an unknown id
             # rather than answering None (its docstring is the contract), so
             # this is the 404 the route needs; without the catch the miss
-            # surfaced as a 500 wrapping the registry's own message.
-            raise HTTPException(
-                status_code=404, detail=f"Agent with ID {agent_id} not found"
-            ) from None
+            # surfaced as a 500 wrapping the registry's own message. The raw
+            # id stays in the log line, not the copy (design round 1, D1).
+            raise HTTPException(status_code=404, detail=SPEECH_UNKNOWN_AGENT_SENTENCE) from None
         if not agent:
-            raise HTTPException(status_code=404, detail=f"Agent with ID {agent_id} not found")
+            raise HTTPException(status_code=404, detail=SPEECH_UNKNOWN_AGENT_SENTENCE)
 
         _require_radient_credential(radient_client)
 
@@ -306,11 +328,12 @@ async def create_agent_speech(
         # Routine refusals -- the no-credential 401, the unknown-agent 404 --
         # are logged as one line without a traceback; a full stack for an
         # everyday state buries the faults that need one. Unmapped 5xx keep
-        # the traceback.
+        # the traceback. The agent id rides the warning (not the response
+        # copy) so a support reader can still correlate the refusal.
         if http_exc.status_code >= 500:
-            logger.exception(f"HTTPException: {http_exc}")
+            logger.exception("HTTPException: %s", http_exc)
         else:
-            logger.warning(f"Speech request refused: {http_exc}")
+            logger.warning("Speech request refused for agent %s: %s", agent_id, http_exc)
         raise http_exc
     except APIError as upstream_exc:
         # Same classification as the /v1/tools/speech route above: an error
@@ -323,5 +346,7 @@ async def create_agent_speech(
         )
         raise _speech_refusal(upstream_exc) from upstream_exc
     except Exception as e:
-        logger.error(f"Failed to generate speech: {str(e)}")
+        # The stack is logged, not just the message: an unexpected fault is the
+        # one class that needs it (review round 2, finding 1).
+        logger.exception("Failed to generate speech: %s", e)
         raise HTTPException(status_code=500, detail=f"Failed to generate speech: {str(e)}")
