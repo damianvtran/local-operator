@@ -3647,6 +3647,63 @@ def test_set_subagent_details_reads_ONE_pass_and_publishes_the_same_fields() -> 
     assert again["settled"].result_text == "review posted"
 
 
+def test_the_projection_carries_the_pin_badge_for_a_fallen_back_child() -> None:
+    """A pinned child's row on the phone says BOTH models.
+
+    The wire carries the same string the TUI band paints (see
+    ``jobs.model_fallback_badge``), composed where the row is built so every
+    client that renders a child's model shows the substitution without its own
+    copy of the rule, plus the boolean a client uses to MARK the row without
+    parsing that string; a row whose job has no pin (or is back on it) keeps
+    the bare effective label and ``model_fallback`` False, byte-identical to
+    before.
+    """
+
+    class Jobs:
+        def __init__(self) -> None:
+            self.rows = {
+                "pinned": SimpleNamespace(
+                    status="running",
+                    start_time=1_000.0,
+                    agent_role="designer",
+                    model_label="deepseek/deepseek-flash",
+                    requested_model_label="anthropic/claude-sonnet-5-5",
+                    latest_details={},
+                    result_text=None,
+                    error_text=None,
+                ),
+                "plain": SimpleNamespace(
+                    status="running",
+                    start_time=1_000.0,
+                    agent_role="task",
+                    model_label="test/model",
+                    latest_details={},
+                    result_text=None,
+                    error_text=None,
+                ),
+            }
+
+        def get(self, job_id: str) -> Any:
+            return self.rows.get(job_id)
+
+    session = SimpleNamespace(jobs=Jobs())
+    comms = SubagentComms(cast(Session, cast(Any, session)))
+    comms.record_launch("pinned", "designer-child", prompt="review the diff")
+    comms.record_launch("plain", "plain-child", prompt="work")
+
+    fold = make_fold()
+    fold.set_subagent_details(comms)
+
+    rows = {row.job_id: row for row in fold.projection.subagents}
+    assert rows["pinned"].model_label == ("anthropic/claude-sonnet-5-5 → DeepSeek Flash ⚠ fallback")
+    assert rows["pinned"].model_fallback is True
+    assert rows["plain"].model_label == "test/model"
+    # The boolean the phone's roster row paints its fallback line from: the
+    # SAME comparison the badge string is composed from, so a client never
+    # has to parse the badge's prose back out (and the two cannot disagree).
+    assert rows["plain"].model_fallback is False
+
+
 @pytest.mark.parametrize("size", [1, 7, 20, 50, 100])
 @pytest.mark.parametrize("shape", ["siblings", "chain"])
 def test_roster_job_snapshot_and_graph_counts_are_deterministic(size: int, shape: str) -> None:

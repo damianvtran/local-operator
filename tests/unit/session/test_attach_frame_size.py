@@ -658,6 +658,10 @@ _BOUNDED_JOB_FIELDS = {
     "usage": "folded by _fold_job_usage_in_place",
     "attempt_aliases": "one id per collapsed resume attempt",
     "cut_off_cause": "one cause token from the cut-off vocabulary",
+    "requested_model_label": (
+        "one model selector stamped at registration; omitted on the wire when "
+        "unset (see _elide_row_facts_in_place), never growing with use"
+    ),
 }
 
 #: Row fields bounded by THIS module, each of which the frame guard must

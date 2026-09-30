@@ -33073,7 +33073,13 @@ class OperatorApp(App[None]):
                     getattr(job, "model_label", "")
                     or getattr(self._session, "model_label", "")
                     or ""
-                )
+                ),
+                # The badge needs the pin beside the effective label; carried
+                # here for the same reason as the label itself — both are
+                # plain attribute reads, and a stale or absent stats reading
+                # must not strip the one comparison that makes a substitution
+                # visible.
+                requested_model_label=str(getattr(job, "requested_model_label", "") or ""),
             )
         # `job_cost` answers None both for "no price for this model" and for
         # "no usage recorded yet". The band distinguishes them: a child that
@@ -33091,6 +33097,7 @@ class OperatorApp(App[None]):
         self._status.set_subagent(
             SubagentBand(
                 model_label=stats.model_label,
+                requested_model_label=stats.requested_model_label,
                 label=strip_control_sequences(str(getattr(job, "label", "") or "")),
                 context_tokens=stats.context_tokens,
                 context_window=stats.context_window,
