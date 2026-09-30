@@ -1387,6 +1387,43 @@ async def test_peek_refuses_unknown_ids_and_a_missing_transcript(root: Path) -> 
     assert result.is_error and "has no transcript to peek at" in result.text
 
 
+@pytest.mark.asyncio
+async def test_peek_regex_query_is_compiled_stripped_like_the_needle(root: Path) -> None:
+    """R-6: the executor's pre-compiled pattern is the SAME stripped spelling
+    the needle path (and validation, and the footer) uses. Pre-R-5 the search
+    compiled the stripped needle itself, so a padded regex query used to match
+    what literal mode matches; the move to an executor-side compile must not
+    change that. Padded and unpadded regex stay in agreement, and literal mode
+    is the control they both answer to."""
+    rows = [_synth_row(i, text=f"row {i} " + "x" * 30) for i in range(1, 61)]
+    rows[29] = _synth_row(30, text="row 30 the flaky shard needs a retry budget")
+    _write_journal(root, "aaaa88889999", rows, title="padded regex")
+
+    padded = await _peek(
+        root,
+        {
+            "op": "peek",
+            "session": "aaaa88889999",
+            "query": "  flaky .*budget  ",
+            "regex": True,
+        },
+    )
+    assert not padded.is_error, padded.text
+    assert (padded.details or {})["match_id"] == f"{30:032x}"
+
+    control = await _peek(
+        root, {"op": "peek", "session": "aaaa88889999", "query": "flaky .*budget", "regex": True}
+    )
+    assert not control.is_error, control.text
+    assert (control.details or {})["match_id"] == f"{30:032x}"
+
+    literal = await _peek(
+        root, {"op": "peek", "session": "aaaa88889999", "query": "  flaky shard needs  "}
+    )
+    assert not literal.is_error, literal.text
+    assert (literal.details or {})["match_id"] == f"{30:032x}"
+
+
 def test_peek_scan_budget_matches_the_readers_cursor_window() -> None:
     """§8.1's "the same budget": the search's cap and the reader's own
     16 MiB cursor window are one number, pinned so they cannot drift apart."""

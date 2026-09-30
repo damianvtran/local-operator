@@ -14621,7 +14621,12 @@ async def _sessions_peek(
     )
     pattern: re.Pattern[str] | None = None
     if params.regex:
-        query = str(params.query or "")
+        # The STRIPPED spelling, deliberately: every other consumer strips —
+        # the needle (`_peek_read`), validation, the rendered footer — and
+        # pre-R-5 the search itself compiled the stripped needle, so a padded
+        # regex query must match exactly what literal mode matches (round-2
+        # review, R-6).
+        query = str(params.query or "").strip()
         try:
             pattern = re.compile(query)
         except re.error as exc:
