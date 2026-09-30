@@ -557,7 +557,8 @@ async def test_a_quiet_note_is_still_delivered_during_the_drain(tmp_path: Path) 
     turn, so refusing it would drop something the sender was told had landed."""
     host, session = _host(tmp_path)
     assert host.begin_drain("runtime-retired") is True
-    (await host.receive_peer_message("fyi")).detail == "delivered"
+    reply = await host.receive_peer_message("fyi")
+    assert reply.detail == "delivered"
     assert session.peer_calls == [("fyi", "mailbox", False)]
     assert peek_inbox(session.transcript.directory) == []
 
@@ -1270,7 +1271,8 @@ async def test_a_spooled_turn_raises_the_process_that_can_run_it(
     monkeypatch.setattr(install, "ensure_supervisor_installed", lambda root: calls.append(root))
     assert host.begin_drain("runtime-retired", "declined 3x") is True
 
-    (await host.receive_peer_message("run the census", wake=True)).detail == SPOOL_RECEIPT_WAKE
+    reply = await host.receive_peer_message("run the census", wake=True)
+    assert reply.detail == SPOOL_RECEIPT_WAKE
     assert calls == [config_dir], "a spooled wake must raise its reader"
 
     calls.clear()

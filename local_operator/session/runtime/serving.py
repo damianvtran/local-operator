@@ -4131,7 +4131,7 @@ class ServingSessionHandle(SessionHandle):
         wake: bool = False,
         sender: dict[str, Any] | None = None,
         message_id: str | None = None,
-    ) -> str:
+    ) -> AckDetail:
         # This handle owns an in-process Session on the registrant's own loop,
         # so the coroutine can be awaited directly (unlike the TUI handle, which
         # must hop to the owner loop). Session.receive_peer_message does its own

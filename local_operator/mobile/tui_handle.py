@@ -633,7 +633,7 @@ class TuiSessionHandle(SessionHandle):
         wake: bool = False,
         sender: dict[str, Any] | None = None,
         message_id: str | None = None,
-    ) -> Any:
+    ) -> AckDetail:
         # Session.receive_peer_message is a COROUTINE that must run on the host's
         # event loop (it touches _context.messages, the transcript, and may
         # spawn a turn). `_on_app` only runs SYNC callables on the Textual

@@ -8075,11 +8075,17 @@ class Session:
             f"{text}\n"
             "</peer-session-message>"
         )
+        peer_fields: dict[str, Any] = {}
+        if entry_id:
+            # The SENDER's identity, when it validated -- see the docstring.
+            # Spread rather than always passed so a pre-field sender's row is
+            # byte-identical to what this function built before the carriage.
+            peer_fields["id"] = entry_id
         return CustomMessage(
             custom_type=PEER_MESSAGE_MESSAGE_TYPE,
             attribution="user",
             details={"text": wrapped, "body": text, "sender": sender},
-            **({"id": entry_id} if entry_id else {}),
+            **peer_fields,
         )
 
     async def _drain_spooled_peer_inbox(self) -> None:

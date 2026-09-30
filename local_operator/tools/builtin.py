@@ -13243,7 +13243,10 @@ async def execute_send(
         # row as the only durable record that a message may have landed.
         journal = getattr(context, "journal_send_notice", None) if context is not None else None
         if callable(journal):
-            await journal(
+            # ``Any``: the hook is a host seam (a session method, or a test's
+            # awaitable), and ``callable`` narrowing would otherwise pin it to
+            # ``object`` and make the await unverifiable.
+            await cast(Any, journal)(
                 text=(
                     f"delivery to {outcome.target} is {outcome.state} "
                     f"(id {outcome.message_id}); do not resend — check with "

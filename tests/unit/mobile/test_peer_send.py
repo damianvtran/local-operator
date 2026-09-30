@@ -42,6 +42,9 @@ class _Record:
         self.control_port = 1
         self.control_key = "k"
         self.started = started
+        #: Records written before the peer-message-id capability existed carry
+        #: no string here, which is exactly what the retry gate reads.
+        self.capabilities: list[str] = []
         # The resolver refuses a record that has stopped reporting, and it words
         # that refusal with the measured age, so the double carries the stamp
         # every real record has. Four minutes is past ``HEARTBEAT_TIMEOUT_S``
@@ -1573,7 +1576,7 @@ async def test_a_duplicate_ack_makes_a_wake_send_a_mailbox(
     _fast_retry(monkeypatch)
     seen = {"n": 0}
 
-    async def on_op(frame: dict[str, Any], writer: Any) -> dict[str, Any]:
+    async def on_op(frame: dict[str, Any], writer: Any) -> dict[str, Any] | None:
         seen["n"] += 1
         if seen["n"] == 1:
             await asyncio.sleep(5.0)  # the first ack never arrives

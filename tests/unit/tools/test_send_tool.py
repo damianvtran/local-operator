@@ -838,6 +838,7 @@ async def test_an_amber_send_offers_the_notice_hook_and_a_clean_one_does_not(mon
             "slow", {"target": "peer-target", "message": "did this land?"}, None, None, context
         )
         assert result.is_error is False
+        assert result.details is not None
         assert len(calls) == 1, calls
         call = calls[0]
         assert call["state"] == "unconfirmed"
@@ -858,6 +859,7 @@ async def test_an_amber_send_offers_the_notice_hook_and_a_clean_one_does_not(mon
             "ok", {"target": "peer-target", "message": "hello"}, None, None, context
         )
         assert result.is_error is False
+        assert result.details is not None
         assert result.details["delivery"]["state"] == "delivered"
         assert calls == []
     finally:

@@ -898,7 +898,7 @@ async def test_the_send_notice_is_written_once_and_only_when_enabled(tmp_path, m
 
     session = make_session(tmp_path, ScriptedStream([]))
     message_id = "peer-" + "9" * 32
-    kwargs = dict(
+    kwargs: dict[str, Any] = dict(
         text="delivery to peer (pid 1) is mailbox (id x); do not resend",
         message_id=message_id,
         state="mailbox",

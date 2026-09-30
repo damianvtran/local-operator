@@ -3642,7 +3642,7 @@ async def _drain_for_signal(
     stop.set()
 
 
-def _accepts_message_id(method: object) -> bool:
+def _accepts_message_id(method: Any) -> bool:
     """Whether a handle's ``receive_peer_message`` takes the ``message_id`` keyword.
 
     The boot drain delivers rows written by OTHER builds, so it must not assume

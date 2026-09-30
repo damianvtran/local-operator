@@ -1397,7 +1397,22 @@ async def _engaged_outcome(
             ),
             config_dir=config_dir(),
         )
+    except ControlDialFailed:
+        return DeliveryOutcome(
+            DELIVERY_FAILED,
+            "no runtime accepted the message",
+            message_id,
+            _failed_wake(wake),
+            1,
+            "dial_refused",
+            "engaged",
+            target,
+        )
     except (TimeoutError, ConnectionError, OSError):
+        # THE DIAL-FAILED ARM IS FIRST: ``ControlDialFailed`` is a
+        # ``ConnectionError``, so a handler that swallowed the family before it
+        # would report "no runtime accepted the message" as the ambiguous
+        # residual instead of the proven non-delivery it is.
         if probe_transcript_for(message_id, session_id):
             return _probe_found_outcome(
                 message_id, target=target, wake=wake, attempts=1, route="engaged"
@@ -1409,17 +1424,6 @@ async def _engaged_outcome(
             WAKE_UNCONFIRMED if wake else WAKE_NOT_REQUESTED,
             1,
             "no_answer",
-            "engaged",
-            target,
-        )
-    except ControlDialFailed:
-        return DeliveryOutcome(
-            DELIVERY_FAILED,
-            "no runtime accepted the message",
-            message_id,
-            _failed_wake(wake),
-            1,
-            "dial_refused",
             "engaged",
             target,
         )

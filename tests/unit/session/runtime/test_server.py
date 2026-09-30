@@ -6062,7 +6062,7 @@ class DeliveryHandle(FakeHandle):
 
     async def receive_peer_message(  # noqa: ANN001, ANN202
         self, text, *, mode="mailbox", wake=False, sender=None, message_id=None
-    ):
+    ) -> Any:
         from local_operator.session.runtime.server import AckDetail
 
         self.calls.append(
