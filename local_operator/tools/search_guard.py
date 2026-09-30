@@ -28,21 +28,34 @@ hold, so the legitimate shapes pass untouched:
 
 1. its first word is a recursive-capable search binary
    (``grep egrep fgrep rg ripgrep ag ack find fd locate``) — ``git grep`` is
-   exempt because it is structured and honours .gitignore;
+   exempt because it is structured and honours .gitignore — or a walker that
+   needs no recursive flag at all (``du``, which descends by construction and
+   with no operand starts at ``.``);
 2. a recursive flag is present (``-r``/``-R``/bundled ``-rn``), or it is
    ``find``/``fd`` with a name/type/path predicate and no ``-maxdepth``;
 3. the search *root* is unbounded: no path operand at all, or a path that is
    ``.``/``./``/``..``/``/``/``~``, a bare glob, an unresolved ``$VAR``/``$(...)``,
-   or a known-heavy directory (``node_modules``, ``.git``, ``out``, ...).
+   a known-heavy directory (``node_modules``, ``.git``, ``out``, ...), the
+   SESSION STORE (``~/.local-operator`` and its ``sessions`` subtree), or a
+   REPOSITORY ROOT (a resolved directory holding ``.git`` or ``node_modules``
+   as a direct child).
 
 A single named file, a scoped directory (``grep -rn PATTERN src/``), a piped
 stage that reads stdin (``... | grep -v node_modules``, ``... | rg PATTERN``) and
 a quoted mention (``echo "grep -rn x ."``) all pass. So does ``find``/``fd``
 against a NAMED directory (``find ~/Downloads -name '*.png'``) — the author chose
-that scope, and only ``.``/``/``/``~``/a known-heavy dir counts as unbounded.
-Those are exactly the false-positive classes the tests pin, and the segment
-splitter is quote- and escape-aware so shell syntax the model writes never reads
-as a second command.
+that scope — and, at an unbounded/store/repo root, any ``find``/``fd`` that is
+SHALLOW or TIME-BOUNDED (``-maxdepth``, or ``-mmin``/``-mtime``/``-newer``):
+``find ~/.local-operator/sessions -maxdepth 2 -name transcript.jsonl -mmin -720``
+is the shape agents should write, so it passes. Those are exactly the
+false-positive classes the tests pin, and the segment splitter is quote- and
+escape-aware so shell syntax the model writes never reads as a second command.
+
+The two new root classes exist because "a named directory is the author's own
+scope" is true for ``~/Downloads`` and false for a checkout or the store: a walk
+of either is the multi-minute query this guard family exists to stop, and the
+store one has an API (the ``sessions`` tool, and the digest index behind
+``/resume``) that answers the same question in milliseconds.
 
 Escape hatch: prepend ``LOCAL_OPERATOR_ALLOW_UNBOUNDED_SEARCH=1`` to the command
 to run it as written. That is a per-call grant read off the command itself, so
@@ -53,6 +66,7 @@ from __future__ import annotations
 
 import os
 import re
+from dataclasses import dataclass
 
 #: The env var an agent sets inline to run an unbounded search as written.
 ALLOW_ENV = "LOCAL_OPERATOR_ALLOW_UNBOUNDED_SEARCH"
@@ -114,6 +128,40 @@ _IMPLICITLY_RECURSIVE = frozenset({"rg", "ripgrep", "ag", "ack"})
 #: pipe filter: `fd`/`locate` always walk. `find` is added to this reasoning by
 #: its own predicate branch rather than the flag scan.
 _ALWAYS_RECURSIVE = frozenset({"fd", "locate"})
+
+#: Programs that walk the tree BY CONSTRUCTION and have no recursive flag to
+#: scan for. `du` sums disk usage as it descends and, given no operand at all,
+#: starts at `.` exactly as `find` does — which is why it is a walker here and
+#: not a plain command. Kept OUT of ``SEARCH_PROGRAMS`` (whose members all have a
+#: recursion flag the classifier reads) and folded into :data:`ALL_PROGRAMS`
+#: instead, so the shared predicates that *are* flag-driven never see it.
+WALK_BY_CONSTRUCTION = frozenset({"du"})
+
+#: Every program this guard's ROOT rules apply to. A root class (store, repo,
+#: unbounded) is a property of the PATH, not of the program, so it is decided
+#: once and shared by the whole family.
+ALL_PROGRAMS = SEARCH_PROGRAMS | WALK_BY_CONSTRUCTION
+
+#: The other half of the find-family bound, beside ``_MAXDEPTH_RE``: a walk that
+#: only visits what changed recently is as scoped as one that only visits the top
+#: of the tree, and it is the shape that answers "what happened lately" without
+#: reading a whole checkout. ``-newer``/``-newermt`` compare against a file or a
+#: date, so they bound the walk the same way `-mmin` does.
+_TIME_FILTER_RE = re.compile(
+    r"(?<![\w-])-(?:mmin|mtime|newer|newermt|newerat|anewer|amin|atime|ctime|cmin)(?![\w-])"
+)
+
+#: The store's directory name and the env var that can relocate it. Deliberately
+#: a literal rather than an import of ``local_operator.paths``: this module is a
+#: leaf (stdlib only) so the guard can be reasoned about — and tested — without
+#: the config layer, and ``paths.config_dir()`` resolves exactly these two terms.
+STORE_DIRNAME = ".local-operator"
+CONFIG_DIR_ENV = "LOCAL_OPERATOR_CONFIG_DIR"
+#: A store root written as a shell would spell it: ``~/.local-operator``,
+#: ``$HOME/.local-operator`` or ``${HOME}/.local-operator``. Checked before the
+#: unresolved rule so the STORE nudge (which names the `sessions` tool) is what
+#: the model reads, instead of the generic unresolved-root one.
+_STORE_STR_RE = re.compile(r"(?:^|[/\s])(?:~|\$HOME|\$\{HOME\})/\.local-operator(?:/|$)")
 
 #: A heredoc opener: `<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"`.
 _HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
@@ -338,15 +386,30 @@ def _program(segment: str) -> str | None:
     return os.path.basename(_unquote(word))
 
 
-def _is_unbounded_root(path: str) -> bool:
-    """Is ``path`` a search root that reaches the whole tree rather than a part of it?
+def _is_file_like(path: str) -> bool:
+    """Does the final segment read as a FILENAME rather than a directory?
 
-    A single named FILE is never a tree walk, even under a heavy directory:
+    A single named file is never a tree walk, even under a heavy directory:
     ``grep -rn foo build/notes.txt`` and ``grep -rn foo .worktrees/wt/src/x.py``
     read one file, and the fleet reads worktrees by path every day (review M1).
-    A file is recognised by a filename suffix on the last segment, so a bare
-    directory name (``node_modules``) and a trailing slash (``node_modules/``)
-    still read as directories.
+    Recognised by a filename suffix on the last segment, so a bare directory name
+    (``node_modules``) and a trailing slash (``node_modules/``) still read as
+    directories, and a dotfile (``.gitignore``) does too.
+    """
+    p = _unquote(path).strip()
+    parts = [seg for seg in re.split(r"[/\\]", p) if seg and seg != "."]
+    if not parts:
+        return False
+    last = parts[-1]
+    return bool(re.search(r"\.[A-Za-z0-9]{1,6}$", last)) and not last.startswith(".")
+
+
+def _is_unbounded_root(path: str) -> bool:
+    """Is ``path`` a root that reaches the whole tree rather than a part of it?
+
+    This is the STRING rule only — the store and repository classes are decided
+    by :func:`_classify_root`, which calls this last so an existing verdict is
+    never lost to a probe.
     """
     p = _unquote(path).strip()
     if not p or _UNRESOLVED_RE.search(p):
@@ -360,18 +423,150 @@ def _is_unbounded_root(path: str) -> bool:
     parts = [seg for seg in re.split(r"[/\\]", p) if seg and seg != "."]
     if not parts:
         return True
-    # A filename (a dot in the final segment, and not a dotfile) is a FILE, so it
-    # is read rather than walked — never a tree walk regardless of its directory.
-    last = parts[-1]
-    if re.search(r"\.[A-Za-z0-9]{1,6}$", last) and not last.startswith("."):
+    # A filename is read, not walked — never a tree walk whatever it sits in.
+    if _is_file_like(p):
         return False
     return any(part in HEAVY_DIRS for part in parts)
 
 
-def _search_reason(segment: str) -> str | None:
+def _resolve(path: str) -> str | None:
+    """Best-effort absolute path for a CONCRETE operand, or ``None``.
+
+    ``$VAR``/``$(...)``/backtick roots return ``None`` so the unresolved rule
+    keeps them: expanding them here would guess at the shell's environment and
+    could classify a path the command will not actually walk. Nothing here
+    raises — a path this layer cannot even make absolute is simply not a
+    candidate for the filesystem probes below.
+    """
+    p = _unquote(path).strip()
+    if not p or _UNRESOLVED_RE.search(p):
+        return None
+    try:
+        return os.path.abspath(os.path.expanduser(p))
+    except Exception:  # noqa: BLE001 — a path this layer cannot read is not a block
+        return None
+
+
+def _store_roots() -> tuple[str, ...]:
+    """This machine's session-store roots, most specific first.
+
+    Resolved per call rather than cached: the env var is read from the
+    environment on every call by ``paths.config_dir()`` too, and a session can
+    set it inline — a cached root would then classify the store as bounded for
+    the rest of the process. ``STORE_DIRNAME`` mirrors ``paths.DEFAULT_CONFIG_DIRNAME``;
+    the two-term resolution (override, else ``$HOME``) mirrors ``paths.config_dir()``.
+    """
+    roots: list[str] = []
+    override = os.environ.get(CONFIG_DIR_ENV)
+    if override:
+        roots.append(os.path.abspath(os.path.expanduser(override)))
+    roots.append(os.path.join(os.path.expanduser("~"), STORE_DIRNAME))
+    return tuple(roots)
+
+
+def _is_store_root(path: str) -> bool:
+    """Does ``path`` name the session store, or anything inside it?
+
+    Two arms, because the two spellings a model writes need different handling:
+    the literal ``~/.local-operator/...`` and ``$HOME/.local-operator/...`` forms
+    are matched as STRINGS (the ``$HOME`` one would otherwise be "unresolved" and
+    get the generic nudge instead of the `sessions` tool), and any other operand
+    is resolved and compared against :func:`_store_roots`. A single named FILE
+    inside the store is not a tree walk and passes, exactly as it does under a
+    heavy directory.
+    """
+    p = _unquote(path).strip()
+    if not p or _is_file_like(p):
+        return False
+    if _STORE_STR_RE.search(p):
+        return True
+    resolved = _resolve(p)
+    if resolved is None:
+        return False
+    for root in _store_roots():
+        if resolved == root or resolved.startswith(root + os.sep):
+            return True
+    return False
+
+
+def _is_repo_root(path: str) -> bool:
+    """Does ``path`` resolve to a checkout whose walk hits vendored trees?
+
+    The probe is BEST-EFFORT and its failure mode is "not a repo", which is the
+    whole safety property: a path that is absent, is a file, or cannot be
+    stat'd falls back to the string rules and is never itself a reason to block.
+    A guard that refused a command because ``os.path.isdir`` raised would start
+    blocking legitimate searches on a host with an unreadable mount or a
+    dangling symlink, which is a worse failure than missing one repo root.
+    """
+    resolved = _resolve(path)
+    if resolved is None:
+        return False
+    try:
+        if not os.path.isdir(resolved):
+            return False
+        # `.git` is a DIRECTORY in a normal checkout and a FILE in a linked
+        # worktree, so it is tested with exists(); node_modules is a directory
+        # or it is not the tree the exclusion list is about.
+        return os.path.exists(os.path.join(resolved, ".git")) or os.path.isdir(
+            os.path.join(resolved, "node_modules")
+        )
+    except OSError:
+        return False
+
+
+def _classify_root(path: str) -> str | None:
+    """The class of an unbounded root (``store``/``repo``/``unbounded``), else None.
+
+    Order is deliberate. STORE first: it is the class whose nudge names a real
+    replacement API, and it is partly string-detectable, so it must not be
+    shadowed by the unresolved rule. Then REPO (a filesystem probe). Then the
+    existing string rules — last, so a probe can only ever ADD a class, never
+    lose a verdict the string rules already reached.
+    """
+    if _is_store_root(path):
+        return "store"
+    if _is_repo_root(path):
+        return "repo"
+    if _is_unbounded_root(path):
+        return "unbounded"
+    return None
+
+
+def _is_shallow_or_time_bounded(rest: str) -> bool:
+    """Is this find-family walk bounded by depth or by time?
+
+    The two bounds are interchangeable for the purpose the guard cares about:
+    neither one reads a whole checkout, so ``find ~/.local-operator/sessions
+    -maxdepth 2 -name transcript.jsonl -mmin -720`` — the shape an agent should
+    write — is not a query, while ``find . -name '*.ts'`` is.
+    """
+    return bool(_MAXDEPTH_RE.search(rest) or _TIME_FILTER_RE.search(rest))
+
+
+@dataclass(frozen=True)
+class _Reason:
+    """Why a segment is blocked, plus the advice that fits THAT class.
+
+    A dataclass rather than a bare string because the class decides the fix: a
+    repo-root grep wants the `grep` tool, a store-root walk wants the `sessions`
+    tool, and `du` wants `df`. One flat message would either say nothing useful
+    or name a tool that does not do the job (`grep` cannot replace `du`).
+    """
+
+    text: str
+    advice: tuple[str, ...]
+    allow_env: str = ALLOW_ENV
+
+
+def _search_reason(segment: str) -> _Reason | None:
     """The reason this segment is an unbounded search, or None if it is fine."""
     program = _program(segment)
-    if program is None or program not in SEARCH_PROGRAMS:
+    if program is None:
+        return None
+    if program in WALK_BY_CONSTRUCTION:
+        return _walker_reason(program, segment)
+    if program not in SEARCH_PROGRAMS:
         return None
 
     rest = segment
@@ -397,21 +592,137 @@ def _search_reason(segment: str) -> str | None:
     else:
         recursive = bool(_RECURSIVE_SHORT_RE.search(rest) or _RECURSIVE_LONG_RE.search(rest))
     is_find = program in ("find", "fd", "locate")
-    if not recursive:
-        if not (is_find and _FIND_PREDICATE_RE.search(rest) and not _MAXDEPTH_RE.search(rest)):
-            return None
+    if not recursive and not is_find:
+        return None
 
     # Operand tokens after the pattern: flags and their arguments are skipped.
     paths = _path_operands(rest, program)
-    unbounded = [p for p in paths if _is_unbounded_root(p)]
-    # A recursion with NO explicit path operand searches the cwd (`.`); for `fd`
-    # and `locate`, which default to a whole-disk / index scan, that is worse
-    # still, so the same substitution applies (QA Q3).
-    if not paths:
-        unbounded = ["."]
-    if not unbounded:
+
+    if is_find:
+        # The FIND FAMILY is judged on its roots first, because a depth or time
+        # bound makes an otherwise unbounded root acceptable — and that decision
+        # has to happen BEFORE the predicate rule below, or a time-bounded walk
+        # with no -maxdepth would still be refused.
+        roots = paths or ["."]
+        for root in roots:
+            cls = _classify_root(root)
+            if cls is None:
+                continue
+            if _is_shallow_or_time_bounded(rest):
+                return None
+            return _Reason(
+                text=_root_text(program, root, cls, walking=True), advice=_advice("find", cls)
+            )
+        # Every root is BOUNDED — the author named a scope, and at a named scope
+        # the existing predicate rule already said this is fine (`find ~/Downloads
+        # -name '*.png'` is a legitimate bounded search). No new block is added
+        # here: the shallow-or-time-bounded rule above only ever RELAXES what the
+        # root classes would otherwise refuse, it never refuses a named root.
         return None
-    return f"`{program}` recurses from an unbounded root ({', '.join(unbounded[:2])})"
+
+    if not recursive:
+        return None
+    # Every candidate root is classified, not just string-matched: the store and
+    # repository classes are decided by a probe, and a grep rooted at either is
+    # the walk this guard exists to stop.
+    for root in paths or ["."]:
+        cls = _classify_root(root)
+        if cls is None:
+            continue
+        return _Reason(
+            text=_root_text(program, root, cls, walking=False),
+            advice=_advice("grep", cls),
+        )
+    return None
+
+
+def _walker_reason(program: str, segment: str) -> _Reason | None:
+    """The du-shaped arm: a walker with no recursive flag and no depth escape.
+
+    ``du`` descends by construction, and given no operand at all it starts at
+    ``.`` exactly as ``find`` does — so the ROOT is the whole decision, and there
+    is no ``-maxdepth`` rule to apply because the tool's own ``-d``/``--max-depth``
+    is a reporting bound rather than a walk bound the string layer can vouch for.
+    """
+    remainder, _assigns = _strip_env_assignments(segment)
+    rest = remainder or segment
+    _, rest = _read_word(rest)  # consumes the program word
+    if not rest.strip():
+        # `du` with no operand: walks the cwd.
+        return _Reason(
+            text=_root_text(program, ".", "unbounded", walking=True), advice=_advice("du", None)
+        )
+    paths = _path_operands(rest, program) or ["."]
+    for root in paths:
+        cls = _classify_root(root)
+        if cls is None:
+            continue
+        return _Reason(text=_root_text(program, root, cls, walking=True), advice=_advice("du", cls))
+    return None
+
+
+#: How each root class reads in a refusal. `the session store` is spelled out
+#: rather than left as the raw path because the useful information is WHICH
+#: store the walk would read, not the string the model already typed.
+_ROOT_WORDS = {
+    "store": "the session store",
+    "repo": "a repository root",
+    "unbounded": "an unbounded root",
+}
+
+
+def _root_text(program: str, root: str, cls: str | None, *, walking: bool) -> str:
+    kind = _ROOT_WORDS.get(cls or "unbounded", "an unbounded root")
+    verb = "walks" if walking else "recurses from"
+    return f"`{program}` {verb} {kind} ({root})"
+
+
+#: The advice bullets, kept as named constants because the same sentence is
+#: quoted in tests and in the AGENTS.md inventory — a copy that drifted would be
+#: a second definition of what the escape hatch is called.
+_GREP_TOOL_BULLET = (
+    "use the `grep` tool — it is recursive, honours .gitignore, prunes those "
+    "trees, and is far faster (glob for filename patterns);"
+)
+_NARROW_BULLET = "narrow the path, e.g. `grep -rn PATTERN src/` instead of `.`;"
+_SESSIONS_BULLET = (
+    "search the stored conversations with the `sessions` tool (its stored-session "
+    "search and `peek`) or the `/resume` picker — both read a digest index, not "
+    "every transcript, so the answer arrives in milliseconds;"
+)
+_BOUND_BULLET = (
+    "bound the walk: `find ... -maxdepth N` or a time filter (`-mmin -60`), or use "
+    "the `glob` tool for a filename pattern;"
+)
+_DU_BULLET = (
+    "scope it, e.g. `du -sh <dir>` (add `-d 1` to keep the reporting shallow) "
+    "rather than a whole tree;"
+)
+_DF_BULLET = "use `df -h` for filesystem headroom — it answers that without walking anything."
+
+
+def _advice(family: str, cls: str | None) -> tuple[str, ...]:
+    """The actionable bullets for a refusal, by tool family and root class.
+
+    The STORE class leads with the `sessions` tool in every family: it is the
+    only advice that answers the question the walk was asked, and for `du` it is
+    the only one that is about conversations at all. The family then decides
+    what else is true — `grep`/`glob` for content search, `df` for sizes, and
+    never `grep` for `du`, which no search tool can replace.
+    """
+    store = cls == "store"
+    if family == "du":
+        return (_SESSIONS_BULLET, _DU_BULLET, _DF_BULLET) if store else (_DU_BULLET, _DF_BULLET)
+    if family == "find":
+        return (_SESSIONS_BULLET, _BOUND_BULLET) if store else (_BOUND_BULLET,)
+    return (
+        (_SESSIONS_BULLET, _GREP_TOOL_BULLET, _NARROW_BULLET)
+        if store
+        else (
+            _GREP_TOOL_BULLET,
+            _NARROW_BULLET,
+        )
+    )
 
 
 #: Short flags that take a value as the NEXT token; that token is not a path.
@@ -469,9 +780,12 @@ def _path_operands(rest: str, program: str) -> list[str]:
         return out
     # The pattern is the first non-flag word for grep-family and for `fd`/`locate`
     # (both take `PATTERN [PATH...]`), unless a pattern flag supplied it. `find`
-    # takes no pattern, so its first bare word is already a path.
+    # takes no pattern, so its first bare word is already a path — and `du` is
+    # the same shape as `find`: every bare word it takes is a PATH, so treating
+    # its first word as a pattern would swallow `du -sh src` and read it as
+    # "no operand, walks the cwd".
     skip_next = False
-    pattern_consumed = program == "find"
+    pattern_consumed = program in ("find", "du")
     for raw in words:
         if skip_next:
             skip_next = False
@@ -649,17 +963,22 @@ def _truthy(value: str | None) -> bool:
     return value is not None and value.strip().lower() not in ("", "0", "false", "no", "off")
 
 
-def _block_message(reason: str, command: str, *, blocked: bool) -> str:
-    """The refusal, stated so the model can act on it rather than guess."""
+def _block_message(reason: _Reason, command: str, *, blocked: bool) -> str:
+    """The refusal, stated so the model can act on it rather than guess.
+
+    ``command`` is accepted for the caller's symmetry and deliberately unused:
+    echoing the command back would put a credential the model typed into a second
+    place for no gain, and the model already knows what it asked for.
+    """
+    del command
     verb = "blocked" if blocked else "warning"
-    return (
-        f"{verb}: {reason} — a recursive search from the repository root walks "
-        "vendored and generated trees (node_modules, .git, out) that will not contain "
-        "the answer, and has taken tens of seconds where a scoped search takes "
-        "milliseconds.\n"
-        "Do one of:\n"
-        "  - use the `grep` tool — it is recursive, honours .gitignore, prunes those "
-        "trees, and is far faster (glob for filename patterns);\n"
-        "  - narrow the path, e.g. `grep -rn PATTERN src/` instead of `.`;\n"
-        f"  - to run it exactly as written, prefix it with `{ALLOW_ENV}=1`."
-    )
+    lines = [
+        f"{verb}: {reason.text} — a recursive search from the repository root "
+        "walks vendored and generated trees (node_modules, .git, out) that will "
+        "not contain the answer, and has taken tens of seconds where a scoped "
+        "search takes milliseconds.",
+        "Do one of:",
+    ]
+    lines.extend(f"  - {item}" for item in reason.advice)
+    lines.append(f"  - to run it exactly as written, prefix it with `{reason.allow_env}=1`.")
+    return "\n".join(lines)

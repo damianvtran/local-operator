@@ -126,6 +126,11 @@ def _consumer_defaults() -> dict[str, object]:
         SEARCH_INTERCEPTION_ENABLED_DEFAULT,
         SEARCH_INTERCEPTION_RG_CONFIG_DEFAULT,
     )
+    from local_operator.tools.query_budget import (
+        QUERY_BUDGET_ENABLED_DEFAULT,
+        QUERY_BUDGET_SECONDS_DEFAULT,
+        QUERY_BUDGET_STOP_DEFAULT,
+    )
     from local_operator.tui.resume_click import DESKTOP_LAUNCH_COMMAND_DEFAULT
     from local_operator.tui.session_catalog import (
         DEFAULT_SIDEBAR_POSITION,
@@ -184,6 +189,13 @@ def _consumer_defaults() -> dict[str, object]:
         "tools.search_interception.enabled": SEARCH_INTERCEPTION_ENABLED_DEFAULT,
         "tools.search_interception.block": SEARCH_INTERCEPTION_BLOCK_DEFAULT,
         "tools.search_interception.rg_excludes": SEARCH_INTERCEPTION_RG_CONFIG_DEFAULT,
+        # The three query_budget keys, whose consumer constants live in
+        # tools/query_budget.py beside the predicates that read them — the same
+        # arrangement, and for the same reason: a registry default that disagrees
+        # with the code would advertise a budget the guard does not apply.
+        "bash.query_budget.enabled": QUERY_BUDGET_ENABLED_DEFAULT,
+        "bash.query_budget.stop": QUERY_BUDGET_STOP_DEFAULT,
+        "bash.query_budget.seconds": QUERY_BUDGET_SECONDS_DEFAULT,
         "runtime.background_on_resume": DEFAULT_BACKGROUND_ON_RESUME,
         # The residency knobs, whose consumer constants sit beside the reaper
         # that reads them (``process._keep_alive_*``).
@@ -893,6 +905,41 @@ def test_search_interception_rows_share_the_consumer_paths(manager: ConfigManage
         mp.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(manager.config_dir))
         _enabled, block, _rg = _search_interception_config()
         assert block is False
+
+
+def test_query_budget_rows_share_the_consumer_paths(manager: ConfigManager) -> None:
+    """The three ``query_budget`` rows write exactly where the bash tool reads.
+
+    Pinned by test rather than import for the reason the rows above are:
+    ``settings_io`` must stay cheap for the CLI while the reader lives in
+    ``tools/builtin`` and the constants live in ``tools/query_budget``. A
+    registry writing ``bash.query_budget.*`` while ``_query_budget_config``
+    looked elsewhere would leave the budget stuck on its constants — silently
+    un-configurable from ``/settings`` — so the paths, the defaults and one real
+    read are all asserted.
+    """
+    from local_operator.tools.builtin import _query_budget_config
+    from local_operator.tools.query_budget import (
+        QUERY_BUDGET_ENABLED_PATH,
+        QUERY_BUDGET_SECONDS_DEFAULT,
+        QUERY_BUDGET_SECONDS_PATH,
+        QUERY_BUDGET_STOP_PATH,
+    )
+
+    assert settings_io.BY_KEY["bash.query_budget.enabled"].path == QUERY_BUDGET_ENABLED_PATH
+    assert settings_io.BY_KEY["bash.query_budget.stop"].path == QUERY_BUDGET_STOP_PATH
+    assert settings_io.BY_KEY["bash.query_budget.seconds"].path == QUERY_BUDGET_SECONDS_PATH
+    assert settings_io.BY_KEY["bash.query_budget.seconds"].default == QUERY_BUDGET_SECONDS_DEFAULT
+
+    settings_io.write_setting(
+        manager, settings_io.BY_KEY["bash.query_budget.seconds"], QUERY_BUDGET_SECONDS_DEFAULT + 5
+    )
+    stored = yaml.safe_load((manager.config_dir / "config.yml").read_text())["values"]
+    assert stored["bash"]["query_budget"]["seconds"] == QUERY_BUDGET_SECONDS_DEFAULT + 5
+    assert "bash.query_budget.seconds" not in stored
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(manager.config_dir))
+        assert _query_budget_config().seconds == QUERY_BUDGET_SECONDS_DEFAULT + 5
 
 
 def test_memory_guard_rows_share_the_consumer_paths(manager: ConfigManager) -> None:

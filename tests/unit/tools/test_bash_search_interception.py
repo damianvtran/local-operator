@@ -379,3 +379,164 @@ def test_segments_are_quote_and_escape_aware() -> None:
     assert C("echo a \\; grep -rn p .") is None
     # A real separator introduces a command that IS checked.
     assert C("echo start; grep -rn p .") is not None
+
+
+# ---------------------------------------------------------------------------
+# The root classes added after #1416: a REPOSITORY ROOT, the session STORE, and
+# `du` (which walks by construction). Each class gets a block and a pass twin,
+# because the failure this guard can cause is a refused legitimate command — the
+# pass twin is the half that matters.
+# ---------------------------------------------------------------------------
+
+#: Environment-independent pairs: the block twin names a root the string rules
+#: decide (`.`, no operand, a heavy dir), the pass twin a scope the author chose.
+DU_CASES = [
+    ("du -sh .", True),
+    ("du -sh", True),  # no operand: `du` walks the cwd, exactly as `find` would
+    ("du -sh /", True),
+    ("du -sh ~", True),
+    ("du -sh *", True),
+    ("du -sh node_modules", True),
+    ("du -h --max-depth=2 .", True),  # a reporting bound is not a walk bound
+    ("du -sh src/", False),
+    ("du -d 1 src", False),
+    ("du -sh ~/Downloads", False),  # the author's own named scope
+]
+
+
+@pytest.mark.parametrize(("command", "blocked"), DU_CASES)
+def test_du_walks_without_a_recursive_flag(command: str, blocked: bool) -> None:
+    assert (C(command) is not None) is blocked, command
+
+
+def test_the_du_nudge_names_df_and_not_the_grep_tool() -> None:
+    """A `du` refusal must not offer `grep`: no content tool answers a size
+    question, and advice that cannot be acted on is worse than none."""
+    msg = C("du -sh .")
+    assert msg is not None
+    assert "df" in msg
+    assert "`grep` tool" not in msg
+
+
+def test_a_repository_root_is_unbounded(tmp_path: object) -> None:
+    """A resolved directory holding `.git` (or `node_modules`) as a direct child
+    is a repository root, whatever the author typed — the string rules alone read
+    `~/some-checkout` as an ordinary named directory."""
+    from pathlib import Path
+
+    repo = Path(str(tmp_path)) / "repo"
+    (repo / ".git").mkdir(parents=True)
+    assert C(f"grep -rn p {repo}") is not None
+    assert C(f"find {repo} -name '*.py'") is not None
+    assert C(f"du -sh {repo}") is not None
+    # …while a directory INSIDE the checkout is the author's own scope.
+    inner = repo / "src"
+    inner.mkdir()
+    assert C(f"grep -rn p {inner}") is None
+
+    # `node_modules` marks a root too — the vendored tree is the reason the rule
+    # exists, and a checkout whose `.git` is missing is still that tree.
+    vendored = Path(str(tmp_path)) / "vendored"
+    (vendored / "node_modules").mkdir(parents=True)
+    assert C(f"grep -rn p {vendored}") is not None
+
+
+def test_a_probe_that_cannot_resolve_is_not_a_block(tmp_path: object) -> None:
+    """The probe's failure mode is "not a repo". A path that does not exist, and
+    a path that never resolves, must both fall back to the string rules — a guard
+    that blocked on a filesystem error would refuse legitimate commands on any
+    host with an unreadable mount."""
+    from pathlib import Path
+
+    absent = Path(str(tmp_path)) / "does-not-exist"
+    assert C(f"grep -rn p {absent}") is None
+    assert C("grep -rn p $UNSET_VAR_ROOT") is not None  # unresolved, not a probe
+    # An unresolved root that LOOKS like the store still gets the store nudge,
+    # because the string arm runs before the unresolved rule.
+    assert C("grep -rn p $HOME/.local-operator/sessions") is not None
+
+
+def test_a_store_root_is_unbounded(tmp_path: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The session store and its `sessions` subtree are never a content-search
+    root: the store has an API (the `sessions` tool; the digest index behind
+    `/resume`), and the nudge must name it."""
+    from pathlib import Path
+
+    home = Path(str(tmp_path))
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("LOCAL_OPERATOR_CONFIG_DIR", raising=False)
+    store = home / ".local-operator"
+    (store / "sessions").mkdir(parents=True)
+
+    assert C(f"grep -rn p {store}") is not None
+    assert C(f"grep -rn p {store / 'sessions'}") is not None
+    assert C(f"du -sh {store}") is not None
+    assert C("grep -rn p ~/.local-operator/sessions") is not None
+    assert C("grep -rn p $HOME/.local-operator/sessions") is not None
+
+    # A single named transcript is READ, not walked — the existing single-file
+    # rule, unchanged by the new class.
+    transcript = store / "sessions" / "abc123" / "transcript.jsonl"
+    transcript.parent.mkdir()
+    transcript.write_text("{}")
+    assert C(f"grep -n p {transcript}") is None
+
+    nudge = C(f"grep -rn p {store / 'sessions'}")
+    assert nudge is not None
+    assert "`sessions` tool" in nudge
+    assert "/resume" in nudge
+
+
+def test_the_configured_store_dir_is_the_store(
+    tmp_path: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``LOCAL_OPERATOR_CONFIG_DIR`` relocates the store, and the guard follows
+    it: a walk of the relocated store is the same walk."""
+    from pathlib import Path
+
+    home = Path(str(tmp_path)) / "home"
+    home.mkdir()
+    moved = Path(str(tmp_path)) / "elsewhere" / "store"
+    (moved / "sessions").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(moved))
+
+    assert C(f"grep -rn p {moved / 'sessions'}") is not None
+    assert C("grep -rn p $HOME/.local-operator/sessions") is not None
+
+
+def test_find_at_an_unbounded_root_must_be_shallow_or_time_bounded(tmp_path: object) -> None:
+    """The measured shape that must PASS: a depth- AND time-bounded `find` over
+    the store. Shallow or time-bounded is the good shape at an unbounded root,
+    regardless of predicate."""
+    from pathlib import Path
+
+    repo = Path(str(tmp_path)) / "repo"
+    (repo / ".git").mkdir(parents=True)
+    root = str(repo)
+
+    assert C(f"find {root} -name x") is not None
+    assert C(f"find {root} -name x -maxdepth 2") is None
+    assert C(f"find {root} -name x -mmin -720") is None
+    assert C(f"find {root} -mtime -1") is None
+    assert C(f"find {root} -newer /etc/hosts") is None
+
+    # `.` keeps the same rule, and the no-predicate walk is now covered too.
+    assert C("find .") is not None
+    assert C("find . -type f") is not None
+    assert C("find . -type f -maxdepth 3") is None
+    assert C("find . -type f -mmin -30") is None
+
+    # A NAMED root the author chose is untouched by this rule (the existing
+    # contract: `find ~/Downloads -name '*.png'` is legitimate).
+    assert C("find /tmp -name x") is None
+
+
+def test_the_measured_store_find_passes_static() -> None:
+    """The exact command from the live session's seven-minute loop, verbatim: it
+    is depth- and time-bounded, so the STATIC layer must let it through and leave
+    the aggregate to the soft budget (tools/query_budget.py). Refusing it here
+    would be a false positive on the shape we want agents to write."""
+    assert (
+        C("find ~/.local-operator/sessions -maxdepth 2 -name transcript.jsonl -mmin -720") is None
+    )

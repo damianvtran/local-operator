@@ -528,6 +528,53 @@ real tree's tests carry (not the resolver's output), and
 spelling above — collection and resolution — so a narrower regex, a stricter
 resolver or a lost edge fails a test rather than a CI job.
 
+### Shell-query guards: shallow first, and a soft budget for the rest
+
+The other inner-loop cost is the shell query an agent writes instead of using a
+tool: a recursive `grep` from a repo root, a whole-store `find` swept per file, a
+`du` walk at full CPU. The guards on that path are layered because each can only
+see its own slice:
+
+* **`tools/search_guard.py` — refuse the unbounded ROOT.** A `grep`/`rg`/`find`/
+  `fd`/`locate`/`du` whose root is `.`/`/`/`~`, a bare glob, an unresolved
+  `$VAR`/`$(...)`, a heavy directory (`node_modules`, `.git`, `out`, …), the
+  session STORE (`~/.local-operator` and its `sessions` subtree) or a REPOSITORY
+  ROOT (a resolved directory holding `.git` or `node_modules`) is refused with a
+  message and never rewritten. The same module also generates the ripgrep config
+  that prunes vendor/build trees for an `rg` it does not block; `git grep` stays
+  exempt. At an unbounded/store/repo root a `find`/`fd` is ACCEPTED when it is
+  shallow **or** time-bounded (`-maxdepth`, or `-mmin`/`-mtime`/`-newer`)
+  regardless of predicate — so `find ~/.local-operator/sessions -maxdepth 2 -name
+  transcript.jsonl -mmin -720` passes and `find ~/.local-operator/sessions -name
+  transcript.jsonl` does not. The store and repo classes are best-effort
+  filesystem probes whose failure mode is "not a repo": a probe that errors falls
+  back to the string rules rather than blocking. Escape hatch:
+  `LOCAL_OPERATOR_ALLOW_UNBOUNDED_SEARCH=1`, read per segment off the command.
+* **`tools/query_budget.py` — bound the AGGREGATE.** The root guard cannot see a
+  depth- and time-bounded `find` piped into a per-file `grep` loop, which is how
+  a live session spent seven minutes (37.8 s over 80 transcripts on re-measure).
+  A QUERY-SHAPED command — any non-piped segment whose command word is `grep
+  egrep fgrep rg ripgrep ag ack find fd locate du`, or a walk word inside a
+  `for`/`while` body or a `$(...)`/backtick substitution — gets ONE advisory at
+  **10 s** and a process-group KILL at the budget (default **60 s**) unless it
+  carries `LOCAL_OPERATOR_ALLOW_SLOW_QUERY=1` (advisory still shows, stop
+  skipped). Both are visible in the result and on the live card. A build, an
+  install and a test run are never query-shaped, and the tool's own `timeout`
+  semantics are unchanged. Keys: `bash.query_budget.enabled` / `.stop` /
+  `.seconds` (LIVE scope).
+* **`tools/sleep_guard.py`** refuses a foreground call that is mostly a long
+  literal `sleep`, routing it to `background: true` + `wait`.
+* **`memory_guard.py`** puts a per-command RAM ceiling on a command, so one
+  oversized one is killed instead of taking the device down.
+
+Tests: `tests/unit/tools/test_bash_search_interception.py` (the false-positive
+contract — every legitimate shape that must pass is pinned by name) and
+`tests/unit/tools/test_query_budget.py` (the classifier matrix, the pure
+thresholds, one integration case). The norm they encode, and the one to write
+from, is in `prompts_md/system.md`: **query shallow, then deepen on signals** —
+start at the narrowest scope that could hold the answer, and widen only when it
+shows nothing.
+
 ### Running the suite locally: what it costs, and how to read a stall
 
 **CI's five shards are the whole-tree gate. A local whole-tree run is not one, and
