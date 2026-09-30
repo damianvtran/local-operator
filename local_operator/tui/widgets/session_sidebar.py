@@ -389,7 +389,7 @@ class SessionSidebar(Widget, can_focus=True):
         pass
 
     class SubagentLayerToggled(Message):
-        """``ctrl+a`` flipped the ⌥ layer for this session.
+        """``ctrl+a`` — or a press on the footer chip — flipped the ⌥ layer.
 
         Carries the new value so the app can re-poll the catalog with the flag.
         The widget cannot load the catalog itself — that is worker-thread work
@@ -439,6 +439,10 @@ class SessionSidebar(Widget, can_focus=True):
         #: gesture freeze covers both) — `on_click` branches on it to toggle
         #: the pin instead of opening the row.
         self._pressed_pin = False
+        #: Whether the press in flight started on the footer chip instead. The
+        #: chip names no row, so `_pressed_id` stays empty for it — `on_click`
+        #: reads this alone to run the layer flip and nothing else.
+        self._pressed_chip = False
         self._deferred: tuple[CatalogEntry, ...] | None = None
         #: Row under the pointer, by identity rather than by row index: a
         #: catalog refresh reorders rows beneath a stationary pointer, and a
@@ -467,6 +471,17 @@ class SessionSidebar(Widget, can_focus=True):
         self.show_subagents: bool = False
         #: Hidden-population size for the footer chip, from `subagent_population`.
         self._subagent_total: int = 0
+        #: Whether the pointer rests on that chip. The chip is a CONTROL (issue
+        #: #1357 principle 5): the underline this lights is its affordance,
+        #: shown on the same hover event that reveals the pin cell's `☆`, and
+        #: the press that flips the layer fires from the same hit-test. It is
+        #: painted as a STYLE on the chip's cells — never new text — so the
+        #: count keeps its place in the ladder.
+        self._chip_hover: bool = False
+        #: The pointer's last position, kept so `set_entries` can re-derive
+        #: `_chip_hover` under a RESTING pointer: the ladder can move the
+        #: chip's cells when the count, the paging facts or focus change.
+        self._hover_x: int | None = None
         #: Monotonic deadline for a `ctrl+o` jump armed before its rows
         #: existed, or 0.0 for none. See `_land_pending_jump`.
         self._pending_jump_until: float = 0.0
@@ -1023,6 +1038,13 @@ class SessionSidebar(Widget, can_focus=True):
         # instead left the affordance and description dark until the user
         # jiggled the mouse.
         self._set_hover(self._hover_y)
+        # The footer chip re-resolves the same way: the ladder under a resting
+        # pointer can move the chip's cells (the count, the paging facts, the
+        # focus just changed). No repaint is forced here — the span moving is
+        # itself what repaints (a count change refreshes, a focus change
+        # refreshes, and the paint-state check below carries the flag) — but
+        # the flag must tell the truth about the NEXT painted frame.
+        self._set_chip_hover(self._hover_x, self._hover_y)
         self._sync_animation()
         # Polling must still adopt fresh summaries (including tooltip-only
         # status), but an unchanged frame must not invalidate Rich's content
@@ -1109,10 +1131,17 @@ class SessionSidebar(Widget, can_focus=True):
         self.refresh()
 
     def set_open(self, opened: bool) -> None:
-        if not opened and self._pressed_id is not None:
+        if not opened and (self._pressed_id is not None or self._pressed_chip):
+            # A gesture interrupted by the close is cancelled, not left primed:
+            # the pin cell is protected by its row id being cleared here, but
+            # the chip has no row id, so its own flag is cleared too — the next
+            # press anywhere (even dead space, whose press records nothing)
+            # must not inherit the interrupted gesture and flip the layer on a
+            # click that never touched the chip.
             self.release_mouse()
             self._pressed_id = None
             self._pressed_pin = False
+            self._pressed_chip = False
             if self._deferred is not None:
                 deferred, self._deferred = self._deferred, None
                 self.set_entries(deferred)
@@ -1194,10 +1223,13 @@ class SessionSidebar(Widget, can_focus=True):
             # in `entries`. Omit them and either the ctrl+a toggle does not
             # repaint, or `set_entries`' equality check passes on a frame whose
             # pins changed and the lift is invisible until something else
-            # invalidates.
+            # invalidates. `_chip_hover` rides the same rule: the chip's
+            # underline is paint, and a re-derive under a resting pointer must
+            # reach the frame.
             self._pins,
             self.show_subagents,
             self._subagent_total,
+            self._chip_hover,
         )
 
     def refresh(
@@ -1497,9 +1529,12 @@ class SessionSidebar(Widget, can_focus=True):
     def action_toggle_subagents(self) -> None:
         """Flip the ⌥ layer for THIS session. Never writes the setting.
 
-        A `write_setting` here would fan out through `ConfigWatcher` to every
-        running `lop` process and flip another terminal's sidebar. The same
-        rule `ctrl+g` follows for dock density.
+        The ONE flip both routes share: the `ctrl+a` chord and a pointer press
+        on the footer chip (`on_click`), which is the route that needs no F9.
+        Neither writes the setting: a `write_setting` here would fan out
+        through `ConfigWatcher` to every running `lop` process and flip
+        another terminal's sidebar. The same rule `ctrl+g` follows for dock
+        density.
         """
         self.show_subagents = not self.show_subagents
         self.refresh()
@@ -1611,11 +1646,54 @@ class SessionSidebar(Widget, can_focus=True):
         column = event.x - self.styles.padding.left
         return 0 <= column < PIN_CELL_WIDTH
 
+    def _chip_hit(self, x: int, y: int) -> bool:
+        """Whether a widget-relative pointer position lands on the footer chip.
+
+        The footer is the widget's LAST content line (`render` pads to it),
+        and the chip's cells come back from the same fitted ladder the paint
+        uses (`_footer_line`), so the press target can never drift from the
+        thing the user sees — the same reason `_entry_at` reads render's own
+        header rule. False whenever no chip is painted: the error/loading/
+        opening states, and any width where the ladder kept a chip-less
+        fallback.
+
+        Like `_pin_cell_pressed`, the column is resolved against the widget's
+        LEFT padding (events arrive relative to the outer box; the chip's
+        columns belong to the content box), which is the only thing the column
+        arithmetic may depend on — the gutter swaps sides with the dock and
+        the overlay keeps the base left pad, so the resolved pad is what keeps
+        this true in all three placements.
+
+        The row test carries the same vertical invariant `_entry_at` already
+        relies on: an event's y arrives relative to the outer box while
+        `size.height` counts the content box, so the last content line IS
+        `y == size.height - 1` only while `padding.top == 0` — true in every
+        placement today (the base tcss and `_sync_sidebar_layout` both keep
+        the top pad at 0); a top pad would make both resolve y first.
+        """
+        if y != self.size.height - 1:
+            return False
+        _text, span = self._footer_line(max(1, self.size.width))
+        if span is None:
+            return False
+        column = x - self.styles.padding.left
+        return span[0] <= column < span[1]
+
     def on_mouse_down(self, event: events.MouseDown) -> None:
         entry = self._entry_at(event.y)
         if entry is not None and event.button == 1:
             self._pressed_id = entry.id
             self._pressed_pin = self._pin_cell_pressed(event)
+            self._pressed_chip = False
+            self.capture_mouse()
+        elif event.button == 1 and self._chip_hit(event.x, event.y):
+            # A press on the footer chip. The flip fires on the CLICK, like the
+            # pin cell's, so a press dragged off the list is cancelled by
+            # `on_mouse_up` instead of toggling on the way out; and no row id
+            # is recorded — the chip belongs to no row, which is what keeps
+            # the click from opening, switching or pinning anything.
+            self._pressed_pin = False
+            self._pressed_chip = True
             self.capture_mouse()
         event.stop()
 
@@ -1624,6 +1702,7 @@ class SessionSidebar(Widget, can_focus=True):
         if not self.region.contains(event.screen_x, event.screen_y):
             self._pressed_id = None
             self._pressed_pin = False
+            self._pressed_chip = False
             if self._deferred is not None:
                 deferred, self._deferred = self._deferred, None
                 self.set_entries(deferred)
@@ -1637,9 +1716,21 @@ class SessionSidebar(Widget, can_focus=True):
         )
         target = (self._pressed_id or (entry.id if entry else "")) if entry is not None else ""
         pin_press = self._pressed_pin
+        chip_press = self._pressed_chip
         self._pressed_id = None
         self._pressed_pin = False
-        if target and pin_press:
+        self._pressed_chip = False
+        if chip_press:
+            # The chip's press runs the ONE flip `ctrl+a` runs, on the same
+            # per-session discipline: never a config write, because a write
+            # would fan out through the config watcher to every running `lop`
+            # process and flip another terminal's sidebar (`action_toggle_
+            # subagents` carries the rest). No `Selected` is posted and no
+            # cursor moves, so a press meant for the count can never open,
+            # switch or pin the row it was never aimed at (issue #1357
+            # principle 5).
+            self.action_toggle_subagents()
+        elif target and pin_press:
             # A press on the pin cell toggles the pin and NOTHING else: the
             # cursor does not move and no `Selected` is posted, so a click
             # meant for the star can never open or switch the row under it
@@ -1737,6 +1828,19 @@ class SessionSidebar(Widget, can_focus=True):
             self.tooltip = description
         return changed
 
+    def _set_chip_hover(self, x: int | None, y: int | None) -> bool:
+        """Point the chip affordance at the pointer, reporting any change.
+
+        A separate state from the row hover — the chip names no row — and
+        repainted the same byte-scoped way: the caller refreshes the footer
+        line alone, not the widget.
+        """
+        hovered = x is not None and y is not None and self._chip_hit(x, y)
+        if hovered == self._chip_hover:
+            return False
+        self._chip_hover = hovered
+        return True
+
     def _refresh_rows(self, *rows: int | None) -> None:
         """Repaint just these row lines, skipping any outside the widget.
 
@@ -1752,7 +1856,14 @@ class SessionSidebar(Widget, can_focus=True):
     def on_mouse_move(self, event: events.MouseMove) -> None:
         # The row being LEFT, captured before `_set_hover` overwrites it.
         left = self._hover_y
-        if self._set_hover(event.y):
+        self._hover_x = event.x
+        row_changed = self._set_hover(event.y)
+        # The chip lights under the pointer the way the pin cell's `☆` does:
+        # painted on the hover event, so it is seen before it is pressed — and
+        # only its own line is repainted, not the list.
+        if self._set_chip_hover(event.x, event.y):
+            self._refresh_rows(self.size.height - 1)
+        if row_changed:
             # Only the two rows whose ground changes, not all 38: a hover move
             # wrote 9,092 bytes of escape sequences to the terminal and now
             # writes 924. That output is CPU burned in the terminal emulator
@@ -1827,10 +1938,12 @@ class SessionSidebar(Widget, can_focus=True):
     def on_leave(self, event: events.Leave) -> None:
         # The pointer left the list: drop both the affordance and the
         # description rather than leaving a row lit under an absent cursor.
-        if self._hover_id or self._hover_y is not None:
+        if self._hover_id or self._hover_y is not None or self._chip_hover:
             self._hover_id = ""
             self._hover_y = None
+            self._hover_x = None
             self._hover_since = None
+            self._chip_hover = False
             self.tooltip = None
             self.refresh()
 
@@ -2088,6 +2201,37 @@ class SessionSidebar(Widget, can_focus=True):
             result.append("\n" + truncate_cells(text, width), style=theme_mod.semantic_color("dim"))
         while result.plain.count("\n") < self.size.height - 2:
             result.append("\n")
+        footer, chip_span = self._footer_line(width)
+        footer_style = theme_mod.semantic_color("warning" if self.error else "dim")
+        if chip_span is not None and self._chip_hover:
+            # The chip's affordance is a STYLE on its own cells, never new
+            # text: the count stays on the frame in every state — a hover must
+            # not steal it — and the ladder's arithmetic is untouched (`f9
+            # focus · ctrl+b hide · ⌥1k+` still measures 29). Underline rather
+            # than an ink step: the accent already means "a turn is live" and
+            # the focus ground sits at near-iso-luminance, so neither ink is
+            # the pointer's to spend. The resting path appends the SAME single
+            # span it always did, so an un-hovered frame's bytes are unchanged.
+            start, end = chip_span
+            result.append("\n" + footer[:start], style=footer_style)
+            result.append(
+                footer[start:end], style=Style(color=footer_style) + Style(underline=True)
+            )
+        else:
+            result.append("\n" + footer, style=footer_style)
+        return result
+
+    def _footer_line(self, width: int) -> tuple[str, tuple[int, int] | None]:
+        """The footer as painted, plus the `⌥N` chip's span within it, if any.
+
+        ONE implementation, shared by `render` (which paints the line) and
+        `_chip_hit` (which resolves the chip's press target) — for the same
+        reason `_entry_at` reads render's own header rule: a second copy of
+        this ladder would drift from the painted bytes, and the press target
+        would stop matching what the user sees. A `None` span means no chip is
+        on the line — the error/loading/opening states, or a width where the
+        ladder kept a chip-less fallback — so nothing is pressable.
+        """
         # TWO rules, one helper, and they are the same rule applied to the
         # two ends of the list's keyboard mode. D4: the counter may never be
         # the reason the EXIT hint disappears — it used to REPLACE the hint
@@ -2196,8 +2340,14 @@ class SessionSidebar(Widget, can_focus=True):
             base,
         )
         footer = "Refresh failed" if self.error else "Opening…" if self.requested_id else hint
-        result.append(
-            "\n" + truncate_cells(footer, width),
-            style=theme_mod.semantic_color("warning" if self.error else "dim"),
-        )
-        return result
+        painted = truncate_cells(footer, width)
+        # The chip is the ladder's SUFFIX whenever it is painted — every
+        # chip-carrying candidate ends with ` · ⌥N` — so its span is the last
+        # `len(chip)` characters of the truncated line; `None` otherwise.
+        # `len` is the cell count for every glyph this ladder can emit (`⌥`,
+        # `·`, digits, ASCII) — the single-cell property the width comments
+        # above already rest on.
+        span: tuple[int, int] | None = None
+        if chip and painted.endswith(chip):
+            span = (len(painted) - len(chip), len(painted))
+        return painted, span

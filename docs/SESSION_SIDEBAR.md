@@ -101,6 +101,18 @@ the flip applies to the session you pressed it in, and a write would fan out
 through the config watcher to every running `lop` process. A `/settings` change
 does apply live to an already-painted sidebar.
 
+The footer's `⌥N` chip is also a control, not only a marker: a pointer press on
+it flips the layer for the current session with no `F9` at all — the route for
+a user who has not learned the chord, and the one that needs no keyboard mode.
+It runs the same flip `Ctrl+A` runs and holds the same discipline: per-session,
+and **never a write to `tui.sidebar_show_subagents`**, for the same fan-out
+reason. Hovering the chip underlines it; the count itself is never replaced or
+moved. The chip is the ladder's last rung, so its column moves when the footer's
+shape changes — a flip that pages the list can shift it a few cells, and a press
+aimed where it used to sit is inert; the underline returns on the next hover,
+wherever the chip now sits. The chord and the pointer are two ways to one flip,
+never two flips.
+
 Turning the layer on costs screen space before it shows a single row. Each
 section spends a heading plus the blank line beneath it, and every heading after
 the first takes a separating blank as well, so going from two sections to four
@@ -176,6 +188,13 @@ height. The count is capped at `1k+` above 999 (`⌥999` still renders exactly) 
 the footer's width stays predictable, and it is refreshed every 15 polls (about
 30 s) plus whenever the sidebar is opened, rather than on every poll: reading it
 is a second full scan of the session store.
+
+It counts the store's hidden (subagent) population rather than "what the layer
+currently hides", so the chip remains on the line — same cells, same count —
+while the layer is shown: the control that raised the rows is the one that puts
+them away. It is also the toggle's press target (see §The ⌥ subagent layer):
+those cells, and only those, flip the layer on a press; the rest of the footer
+stays inert to the pointer, as it always was.
 
 ### One behaviour change to know about
 
