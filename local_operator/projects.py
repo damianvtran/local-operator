@@ -531,7 +531,7 @@ def milestone_status(
 ) -> Literal["completed", "overdue", "upcoming"]:
     """The milestone's status, DERIVED at render, never stored.
 
-    ``today`` exists for tests; left ``None`` the basis is :func:`_utc_today`
+    ``today`` exists for tests; left ``None`` the basis is :func:`_local_today`
     — the SAME date ``completed_at`` is stamped from — so "overdue" and "done
     today" cannot disagree about which day it is. The rule itself lives in
     :func:`milestone_state`, shared with the JSON-row readers.
