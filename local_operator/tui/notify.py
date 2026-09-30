@@ -315,12 +315,20 @@ BACKGROUND_FALLBACK_TITLE = "A session finished"
 # callers fall back to the device id exactly as the lifecycle router does, so
 # these functions take whatever label the caller resolved rather than looking
 # one up.
+#
+# The approval body's last clause ALSO names the old-peer answer (beat-2
+# F-D): a peer that predates readiness reporting answers ``peer_too_old`` on
+# the row the card points at, where the reader's next step is ``lop-update``.
+# The row said so and the card did not, so a reader following the card met a
+# different vocabulary at the exact step the card sent them to; the clause now
+# names both outcomes. The designer round owns the final phrasing.
 REMOTE_PARK_APPROVAL_TITLE = "Waiting for approval on {device}"
 REMOTE_PARK_APPROVAL_BODY = (
     "Open the session here to deny it. Allowing it happens on {device} (Touch ID) or "
     "on a phone paired with it. If nothing there can check a signature: run "
     "`lop operator install` on {device} (one privileged step) — `lop network ready "
-    "--peer {device}` shows the operator_authority row."
+    "--peer {device}` shows the operator_authority row (a peer too old to report "
+    "it answers `peer_too_old`, and needs `lop-update` first)."
 )
 REMOTE_PARK_ASK_TITLE = "Waiting for your answer on {device}"
 REMOTE_PARK_ASK_BODY = "Open the session here to answer it."
