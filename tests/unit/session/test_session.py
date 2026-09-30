@@ -6807,3 +6807,75 @@ def test_the_run_output_predicate_counts_readers_visible_output_only() -> None:
     assert _arms_attention_run_output(calling)
     assert _arms_attention_run_output(result)
     assert not _arms_attention_run_output(ask)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("predecessor_kind", "expected"),
+    [
+        # Only a SETTLED SUCCESS arms the post-completion arm: the masking
+        # problem is a disposal superseding a delivered completion.
+        ("complete", True),
+        # Every non-complete settlement is a cut receipt, not a success — and a
+        # run that follows one must keep the v2 verdicts (agent review round 1,
+        # MINOR-2: this pin was missing; the gate was exercised only through
+        # ``complete``).
+        ("error", False),
+        ("closed", False),
+        ("retired", False),
+    ],
+)
+async def test_the_after_settled_success_snapshot_reads_complete_only(
+    tmp_path: Path, predecessor_kind: str, expected: bool
+) -> None:
+    """The snapshot gate, read at the pipeline head where the arm reads it.
+
+    A ``completion_attention`` marker is seeded as the conversation's newest
+    settlement — the ``error|disposed`` predecessor is the case-3 shape's
+    honest sibling and the one a widening bug would mis-arm — and a run is then
+    started and parked in ``_prepare_system_blocks``. The head has already
+    appended this run's own ``attention_started``, so the read below is exactly
+    the one ``Session.dispose`` will later consume.
+    """
+    from local_operator.session.attention import (
+        ATTENTION_CUSTOM_TYPE,
+        conversation_identity,
+    )
+
+    directory = tmp_path / "sessions" / f"snapshot-{predecessor_kind}"
+    directory.mkdir(parents=True, exist_ok=True)
+    session = make_session(directory, ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
+    await session.async_init()
+    await session._transcript.append_custom(
+        ATTENTION_CUSTOM_TYPE,
+        {
+            "conversation_id": conversation_identity(session._transcript.directory),
+            "token": "predecessor-token",
+            "anchor": "predecessor-anchor",
+            "kind": predecessor_kind,
+            "cause": "disposed" if predecessor_kind in ("error", "closed", "retired") else "",
+            "reason": "",
+            "notify": False,
+        },
+    )
+    parked = asyncio.Event()
+    release = asyncio.Event()
+    original = session._prepare_system_blocks
+
+    async def gated(*args: Any, **kwargs: Any) -> Any:
+        parked.set()
+        await release.wait()
+        return await original(*args, **kwargs)
+
+    session._prepare_system_blocks = gated  # type: ignore[method-assign]
+    task = asyncio.ensure_future(session.prompt("a run that follows a settlement"))
+    await asyncio.wait_for(parked.wait(), timeout=10)
+    # READ LEVEL: the snapshot was taken at the head, before this run's own
+    # marker — see the cell's docstring for which marker is newest here.
+    assert session._attention_run_after_settled_success is expected
+    dispose_task = asyncio.ensure_future(session.dispose())
+    while not (session._signal is not None and session._signal.aborted):
+        await asyncio.sleep(0.005)
+    release.set()
+    await asyncio.wait_for(dispose_task, timeout=10)
+    await asyncio.wait_for(asyncio.shield(task), timeout=10)

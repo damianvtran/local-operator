@@ -546,8 +546,9 @@ async def run_print_mode(
     # queued on ``_turn_lock`` at the release, which was admitted 6-14 ms after
     # the final completion and cut, cancelled, by the disposal (nine exec
     # sessions on 0.64.8/0.64.9). The declaration lets the session arm the
-    # same latches inside the last turn's own ``finally``, one host-hop
-    # earlier; the arming below stays as the belt. ``--loop``/goal runs
+    # same latches inside the last turn's own ``finally`` (``Session._run_turn``,
+    # one host-hop earlier than this function's); the arming below stays as the
+    # belt. ``--loop``/goal runs
     # (``continuation`` set) are excluded: their turns are the run's own work,
     # not teardown leftovers.
     if continuation is None:
