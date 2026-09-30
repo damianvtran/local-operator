@@ -864,6 +864,63 @@ async def test_checkpoints_view_builds_in_background_then_settles(tmp_path, monk
 
 
 @pytest.mark.asyncio
+async def test_a_poll_joining_an_in_flight_build_skips_the_budget(tmp_path, monkeypatch):
+    """The joined-poll rule: ONLY the call that starts a build waits for it.
+
+    Every poll of a slow build used to re-await the in-flight task for the
+    whole first-paint budget (measured: 6 polls over one 3.0 s scan, ~220 ms
+    each — the rail polls while a build runs). Pinned STRUCTURALLY, not with a
+    clock: a spy records the timeout ``checkpoints_view`` passes to
+    ``asyncio.wait``, and the starting call must pass its budget while a poll
+    that joins the same build passes NONE at all.
+    """
+    write_rows(
+        tmp_path,
+        [start("s1", 1.0, "t1"), user("u1", 1.1), assistant("a1", 1.2), marker("m1", 1.3, "t1")],
+    )
+    entered, release = threading.Event(), threading.Event()
+    real = ti.refresh_index
+
+    def slow(config_dir, session_id):
+        entered.set()
+        assert release.wait(30), "test never released the build"
+        return real(config_dir, session_id)
+
+    monkeypatch.setattr(ti, "refresh_index", slow)
+
+    timeouts: list[float | None] = []
+    real_wait = asyncio.wait
+
+    async def spying_wait(fs, *, timeout=None, **kwargs):
+        # Delegates to the real wait — recording only, so any other caller of
+        # asyncio.wait in this test is unaffected by the spy.
+        timeouts.append(timeout)
+        return await real_wait(fs, timeout=timeout, **kwargs)
+
+    monkeypatch.setattr(asyncio, "wait", spying_wait)
+    try:
+        first = await ti.checkpoints_view(tmp_path, SID, wait_s=0.05)
+        assert first["index"]["state"] == "building"
+        assert timeouts == [0.05], "the starting call must wait its first-paint budget"
+        assert await asyncio.to_thread(entered.wait, 30)
+
+        joined = await ti.checkpoints_view(tmp_path, SID, wait_s=0.05)
+        assert joined["index"]["state"] == "building"
+        assert timeouts == [0.05], "a joined poll re-awaited the in-flight build"
+    finally:
+        release.set()
+
+    deadline = asyncio.get_running_loop().time() + 30.0
+    while True:
+        view = await ti.checkpoints_view(tmp_path, SID, wait_s=0.05)
+        if view["index"]["state"] == "ready":
+            break
+        assert asyncio.get_running_loop().time() < deadline, view
+        await asyncio.sleep(0.02)
+    assert [c["id"] for c in view["checkpoints"]] == ["u1", "a1"]
+
+
+@pytest.mark.asyncio
 async def test_checkpoints_view_cooldown_after_failure(tmp_path, monkeypatch):
     write_rows(tmp_path, [user("u1", 1.0)])
     calls = {"n": 0}
