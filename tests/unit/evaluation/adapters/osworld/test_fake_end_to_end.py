@@ -36,16 +36,23 @@ from local_operator.evaluation.adapters.api import (
     ADAPTER_SCHEMA_VERSION,
     AdapterMethod,
     AdapterSelector,
+    ExecuteParams,
     Handshake,
+    ObserveParams,
     PrepareParams,
     PythonRuntime,
     ResetStartParams,
     ScopedInfraValue,
 )
 from local_operator.evaluation.adapters.rpc import MAX_DETAIL_MESSAGE, RpcRemoteError
+from local_operator.evaluation.adapters.supervisor import (
+    HostVerifier,
+    VerifiedAdapterSession,
+)
 from local_operator.evaluation.adapters.worker import _error_detail
-from local_operator.evaluation.evidence.models import ErrorPayload
+from local_operator.evaluation.evidence.models import ErrorPayload, canonical_digest
 from local_operator.evaluation.evidence.verify import verify_bundle
+from local_operator.evaluation.protocol import PROTOCOL_VERSION, ActionBatch, TypeAction
 from local_operator.evaluation.runner.episode import EpisodeRunner
 from tests.unit.evaluation.adapters.osworld import fixtures, spawn_helpers
 from tests.unit.evaluation.runner.conftest import (
@@ -442,6 +449,118 @@ async def test_a_blind_guest_costs_a_re_read_not_the_episode(
 
     # The re-reads really happened: 1 reset + 2 failed + 2 successful.
     assert provider.observe_calls == 5
+
+
+# ---------------------------------------------------------------------------
+# The re-bind seam's cross-module precondition, pinned against the REAL adapter
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_recovery_seam_answers_the_last_accepted_snapshot(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """``session_arm._make_recover``'s precondition, with the real adapter.
+
+    The session arm's re-bind calls ``VerifiedAdapterSession.observe`` after an
+    execute failure the adapter declared committed (``phase ==
+    "observation"``). That recovery works only because two invariants hold
+    ACROSS modules, neither of which the arm's own recovery tests can see --
+    they all drive a fake adapter:
+
+    * the REAL worker's ``observe`` answers the LAST ACCEPTED observation, and
+      a failed read-back does not advance it (``OSWorldV2Adapter.execute``
+      moves its sequence only after a successful build); and
+    * ``HostVerifier.verify_current_snapshot`` accepts it -- the re-read must
+      EQUAL the parent's current observation, not merely resemble it.
+
+    An adapter that advanced its observation on a failed read-back, or that
+    answered ``observe`` with a live re-read, would silently turn every
+    recovery into ``bridge-wedged`` + rescue. This pins both halves against
+    the real adapter, blinded exactly on the execute read-back.
+    """
+
+    provider = FakeProvider(
+        scripted_score=1.0,
+        blind_observations=1,
+        blind_after_observe_calls=1,
+    )
+    adapter = _adapter(tmp_path, provider)
+    selector = _selector(tmp_path, adapter._workspace_root, adapter)
+    shim = _AdapterSupervisorShim(adapter, selector)
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir(parents=True, exist_ok=True)
+    verifier = HostVerifier("task_plain", episode_id, artifacts)
+    session = VerifiedAdapterSession(shim, verifier)  # type: ignore[arg-type]
+    session.mark_rescue_persisted("a" * 64)
+
+    # The production order: prepare is declarative; reset_start allocates and
+    # yields observation zero, read through the same ``observe`` the recovery
+    # re-uses.
+    await session.prepare(
+        PrepareParams(
+            operation_id="op-prepare",
+            episode_id=episode_id,
+            secret_refs=(),
+            infra_values=_INFRA_VALUES,
+        ),
+        timeout=10.0,
+    )
+    reset = await session.reset_start(
+        ResetStartParams(
+            operation_id="op-reset",
+            task_id="task_plain",
+            episode_id=episode_id,
+            artifact_root=str(artifacts),
+        ),
+        timeout=10.0,
+    )
+    initial = reset.observation
+    assert initial.sequence == 0
+
+    batch = ActionBatch(
+        protocol_version=PROTOCOL_VERSION,
+        task_id="task_plain",
+        episode_id=episode_id,
+        observation_id=initial.observation_id,
+        actions=(TypeAction(observation_id=initial.observation_id, text="x"),),
+    )
+    params = ExecuteParams(
+        operation_id="op-exec-1",
+        action_batch_id=canonical_digest("adapter-action-batch-v1", batch),
+        action_batch=batch,
+    )
+
+    # The committed failure the recovery answers: the guest really moved (one
+    # statement ran) and only the read-back died -- blindness starts at the
+    # execute read-back, after reset_start's honest frame.
+    with pytest.raises(RpcRemoteError) as failure:
+        await session.execute(params, timeout=10.0)
+    assert failure.value.detail is not None
+    assert failure.value.detail.phase == "observation"
+    assert len(provider.executed_statements) == 1
+    assert provider.observe_calls == 2  # reset + the failed read-back
+
+    # Half one: the recovery's own call answers the last accepted observation
+    # -- equal to what the verifier already holds -- and the parent's equality
+    # check ACCEPTS it (the call would raise otherwise). It is served from the
+    # worker's stored state: a live re-read could not equal the current
+    # observation, and would wedge every recovery.
+    recovered = await session.observe(ObserveParams(episode_id=episode_id), timeout=10.0)
+    assert recovered.observation == initial
+    assert recovered.observation.sequence == initial.sequence
+    assert provider.observe_calls == 2
+
+    # Half two: the failed read-back consumed NOTHING, so the next successful
+    # read comes back as the exact next sequence -- the no-skip property the
+    # resume path is built on.
+    resumed = await session.resume_observation(
+        params.model_copy(update={"operation_id": "op-exec-1-resume"}),
+        timeout=10.0,
+    )
+    assert resumed.observation.sequence == 1
+    assert verifier.current_observation == resumed.observation
+    assert provider.observe_calls == 3
 
 
 @pytest.mark.asyncio

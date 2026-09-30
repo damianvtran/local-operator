@@ -834,11 +834,15 @@ class VerifiedAdapterSession:
           journals carry equal action_batch and environment_step counts with
           the error immediately after the decision -- which is mutating, and
           retrying a possibly-applied mutation is unsafe.
-        * This method currently has NO caller in the episode runner. Every
-          observation reaches the runner as the RESULT of ``reset_start`` or
-          ``execute``, so relaxing this would rescue nothing today while
-          widening the window in which a snapshot the verifier already
-          rejected could be re-accepted.
+        * This method now has one caller on the episode path: the action
+          bridge's re-bind seam (``session_arm._make_recover``), which reads
+          the environment's current snapshot after an execute failure the
+          adapter declared committed. There the poison below is load-bearing
+          rather than incidental: a re-read that cannot answer is what marks
+          the session rescue-required and takes the run out of scoring, so a
+          wedge seals ``failed``/``bridge-wedged`` + ``rescue_required: true``
+          instead of an ambiguous outcome. Relaxing it would change that
+          ending rather than rescue anything.
 
         The mutating boundary itself is never negotiable: ``prepare``,
         ``reset_start``, ``execute``, ``ask_user_exchange``, ``score`` and
