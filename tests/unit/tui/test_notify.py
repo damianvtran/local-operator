@@ -964,7 +964,8 @@ def test_the_remote_park_copy_is_pinned() -> None:
         "Open the session here to deny it. Allowing it happens on demo-laptop (Touch ID) or "
         "on a phone paired with it. If nothing there can check a signature: run "
         "`lop operator install` on demo-laptop (one privileged step) — `lop network ready "
-        "--peer demo-laptop` shows the operator_authority row."
+        "--peer demo-laptop` shows the operator_authority row (a peer too old to report "
+        "it answers `peer_too_old`, and needs `lop-update` first)."
     )
     assert remote_park_card("demo-laptop", "approval", name="Backfill the audit log") == (
         "Backfill the audit log\n" + remote_park_card("demo-laptop", "approval")
