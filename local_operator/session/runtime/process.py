@@ -3642,24 +3642,6 @@ async def _drain_for_signal(
     stop.set()
 
 
-def _accepts_message_id(method: Any) -> bool:
-    """Whether a handle's ``receive_peer_message`` takes the ``message_id`` keyword.
-
-    The boot drain delivers rows written by OTHER builds, so it must not assume
-    the carriage exists: an older handle would raise a ``TypeError`` on an
-    unexpected keyword and the row would be re-spooled forever. Deliberately not
-    a ``**kwargs``-permissive test — a VAR_KEYWORD method would swallow the id
-    silently, and a swallowed id means the dedupe this carriage exists for never
-    happens. Mirrors ``server._receives_message_id``, which gates the same
-    capability advertisement.
-    """
-    try:
-        parameters = inspect.signature(method).parameters
-    except (TypeError, ValueError):
-        return False
-    return "message_id" in parameters
-
-
 async def _drain_inbox_into(handle: object) -> int:
     """Deliver every message spooled while this session was cold. Count sent.
 
@@ -3772,6 +3754,11 @@ async def _drain_inbox_into(handle: object) -> int:
     probed = getattr(handle, "receive_peer_message", None)
     if not lines:
         return 0
+    # Imported HERE, like the server import lower in this module: the server
+    # imports this file at module scope, so a top-level import would close a
+    # cycle (and the drain is the only caller).
+    from local_operator.session.runtime.server import receives_message_id
+
     receive = cast(Callable[..., Awaitable[str]], probed)
     delivered = 0
     # Rows of ONE batch carrying the same owner ``command_id``, which the
@@ -3796,7 +3783,10 @@ async def _drain_inbox_into(handle: object) -> int:
                 # THE PEER PATH'S IDENTITY, which this file's own note below used
                 # to say did not exist. A handle from before the carriage does
                 # not take the keyword and keeps today's at-least-once behaviour.
-                if _accepts_message_id(probed):
+                # The probe is the server's own helper, asked of the HANDLE, so
+                # the drain and the dispatch cannot drift on what "takes the
+                # keyword" means.
+                if receives_message_id(handle):
                     fields["message_id"] = getattr(line, "message_id", "") or None
                 await receive(line.text, **fields)
             else:

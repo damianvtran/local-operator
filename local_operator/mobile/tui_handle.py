@@ -63,6 +63,7 @@ from local_operator.session.runtime.server import (
     has_durable_history,
     image_blocks,
     image_blocks_in_thread,
+    receives_message_id,
 )
 from local_operator.session.runtime.types import RUNNING_SUBAGENT_STATUSES
 
@@ -646,11 +647,19 @@ class TuiSessionHandle(SessionHandle):
         def schedule() -> "Future[Any]":
             session = self._session()
             owner_loop = asyncio.get_running_loop()
+            # The keyword is probed on the SESSION OBJECT rather than assumed
+            # from this handle's own signature. The dispatch gates on the HANDLE
+            # (that is what the wire sees and what the record advertises), and a
+            # handle can outlive a session object that predates the carriage — a
+            # reduced double in a test, a session an older build made. Handing
+            # the keyword over blind raised a TypeError INSIDE this hop
+            # callback, where it surfaced as an empty card list instead of an
+            # error (QA round 1, Q2).
+            kwargs: dict[str, Any] = {"mode": mode, "wake": wake, "sender": sender}
+            if receives_message_id(session):
+                kwargs["message_id"] = message_id
             return asyncio.run_coroutine_threadsafe(
-                session.receive_peer_message(
-                    text, mode=mode, wake=wake, sender=sender, message_id=message_id
-                ),
-                owner_loop,
+                session.receive_peer_message(text, **kwargs), owner_loop
             )
 
         # A BUSY TERMINAL IS NOT A REFUSAL (design note A.2's hop-timeout fix).

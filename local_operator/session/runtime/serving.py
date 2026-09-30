@@ -95,6 +95,7 @@ from local_operator.session.runtime.server import audio_blocks as _audio_blocks
 from local_operator.session.runtime.server import (
     image_blocks_in_thread as _image_blocks_async,
 )
+from local_operator.session.runtime.server import receives_message_id
 from local_operator.session.runtime.types import (
     RUNNING_SUBAGENT_STATUSES,
     SIGNAL_DRAIN_CAUSE,
@@ -4176,9 +4177,16 @@ class ServingSessionHandle(SessionHandle):
                     },
                 )
             raise self._retiring_refusal()
-        result = await self._session.receive_peer_message(
-            text, mode=mode, wake=wake, sender=sender or {}, message_id=message_id
-        )
+        # The keyword is probed on the SESSION OBJECT, not assumed from this
+        # handle's own signature: the dispatch gates on the HANDLE (that is what
+        # the wire sees and what the record advertises), and a handle can wrap a
+        # session that predates the carriage -- a reduced double in a test, a
+        # session an older build made -- where the keyword raised a TypeError
+        # instead of delivering (QA round 1, Q2).
+        peer_kwargs: dict[str, Any] = {"mode": mode, "wake": wake, "sender": sender or {}}
+        if receives_message_id(self._session):
+            peer_kwargs["message_id"] = message_id
+        result = await self._session.receive_peer_message(text, **peer_kwargs)
         self._fold.note_peer_message(text, sender=sender or {})
         self._notify()
         return AckDetail(

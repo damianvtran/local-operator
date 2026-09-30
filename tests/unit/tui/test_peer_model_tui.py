@@ -27,6 +27,8 @@ class _SwitchableSession(FakeSession):
         self._label = "test/mock"
         self.applied: list[tuple[Any, bool]] = []
         self.peer_cards: list[tuple[str, dict[str, Any]]] = []
+        #: The message ids the handle handed this session, one per delivery.
+        self.peer_ids: list[Any] = []
 
     @property
     def model_label(self) -> str:
@@ -37,9 +39,13 @@ class _SwitchableSession(FakeSession):
         self._label = f"{model.provider}/{model.model_id}"
 
     async def receive_peer_message(
-        self, text, *, mode="mailbox", wake=False, sender=None
+        self, text, *, mode="mailbox", wake=False, sender=None, message_id=None
     ):  # noqa: ANN001
         assert (mode, wake) == ("mailbox", False), "the audit card must never open a turn"
+        # The carriage the handle probes for before handing it on (QA round 1, Q2):
+        # a double that lacks the keyword makes the handle's own guard the thing
+        # under test instead of the delivery it guards.
+        self.peer_ids.append(message_id)
         self.peer_cards.append((text, sender or {}))
         return "delivered to the mailbox (will be read on the next turn)"
 
