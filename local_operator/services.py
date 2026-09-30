@@ -336,6 +336,13 @@ class ServiceRefresh:
     name: str
     lines: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+    #: Machine-readable daemon outcomes passed through from the refresh step
+    #: (``update.DaemonRefresh.statuses``): opaque HERE — this module renders the
+    #: human sentences and never reads them — but they ride this list's return so
+    #: ``update._services_stage`` can build the process's report line without
+    #: composing the same repairs a second time. Empty on entries this module
+    #: builds itself (serve reloads).
+    statuses: tuple[Any, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1429,7 +1436,10 @@ def restart_services(*, wait_s: float = RELOAD_WAIT_S) -> list[ServiceRefresh]:
         for refresh in update.refresh_daemons_after_upgrade():
             refreshes.append(
                 ServiceRefresh(
-                    refresh.name, lines=tuple(refresh.lines), warnings=tuple(refresh.warnings)
+                    refresh.name,
+                    lines=tuple(refresh.lines),
+                    warnings=tuple(refresh.warnings),
+                    statuses=tuple(refresh.statuses),
                 )
             )
     except Exception:  # noqa: BLE001 — a failed repair must not fail the command
