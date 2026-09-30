@@ -1178,6 +1178,30 @@ _MEDIA_DOWNLOAD_FAILURE_MARKERS = (
 )
 
 
+def _rendered_http_status(rendered_error: str) -> int | None:
+    """The HTTP status a rendered ``ProviderError`` carries, when one is visible.
+
+    ``__str__`` renders ``<label> (HTTP <status>[, retry in <wait>]): <words>``,
+    so the status — when the error had one — sits in the label's parenthetical,
+    BEFORE the message. Only the head before the first colon is read, so a
+    figure inside the provider's own words can never be mistaken for the
+    status. ``None`` means no status is visible: the error had none, or only a
+    retry wait was rendered — callers treat that exactly like the exception
+    form's ``status is None``, i.e. not this class.
+    """
+    head = rendered_error.partition(":")[0]
+    marker = " (http "
+    at = head.lower().find(marker)
+    if at == -1:
+        return None
+    digits = ""
+    for char in head[at + len(marker) :]:
+        if not char.isdigit():
+            break
+        digits += char
+    return int(digits) if digits else None
+
+
 def is_media_download_failure(error: BaseException | str) -> bool:
     """Did the provider fail to OBTAIN media the request carried?
 
@@ -1195,8 +1219,10 @@ def is_media_download_failure(error: BaseException | str) -> bool:
     that ladder exists because the refusal's premise is "the same bytes get
     the same answer", which is exactly the premise this class does not have.
 
-    Accepts the exception or its rendered form, like the sibling predicates.
-    The gates are kind/status AND wording, both ways round, and the KIND gate
+    Accepts the exception or its rendered form, like the sibling predicates,
+    and reads the SAME gates off either shape: the rendered form's label
+    states the kind and its parenthetical states the HTTP status, so a 5xx
+    that merely carries the wording is rejected in both forms. The KIND gate
     deliberately spans two kinds rather than one: the provider documents this
     family under two wordings, and the one that says the download "timed out"
     is read by the classifier's own timeout markers as ``kind == "timeout"``
@@ -1216,15 +1242,24 @@ def is_media_download_failure(error: BaseException | str) -> bool:
     else:
         text = error if isinstance(error, str) else str(error)
         haystack = text.lower()
-        # The rendered form cannot see the status, so the label half of the
-        # gate is the kind's own statement: both labels below are 4xx-or-
-        # timeout answers, and the markers that follow are the provider's own
-        # class sentences, so a 5xx relay carrying one of them would still be
-        # describing this condition.
+        # The rendered form carries BOTH facts the exception form gates on, so
+        # both gates are mirrored: the label states the kind ("invalid request"
+        # / "provider timeout" are the two kinds this class spans), and the
+        # label's parenthetical states the HTTP status whenever the error had
+        # one ("provider timeout (HTTP 504): …"). The status half is what used
+        # to be missing: without it the rendered form accepted a 5xx that
+        # merely carries the wording — "provider timeout" is a label a 504
+        # wears too — where the exception form rejected it, so the two forms
+        # disagreed on exactly that input (review R1-n3 / QA Q-2). A rendered
+        # form with no status is the render of an error whose status is None,
+        # which the exception form rejects too.
         if not (
             haystack.startswith(_KIND_LABELS["request"])
             or haystack.startswith(_KIND_LABELS["timeout"])
         ):
+            return False
+        status = _rendered_http_status(text)
+        if status is None or not 400 <= status < 500:
             return False
     return any(marker in haystack for marker in _MEDIA_DOWNLOAD_FAILURE_MARKERS)
 

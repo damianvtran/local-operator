@@ -154,6 +154,45 @@ async def test_the_predicate_recognizes_the_field_message_and_only_the_class() -
     assert not is_input_refusal(_media_download())
 
 
+async def test_both_forms_of_the_predicate_agree_on_a_5xx_carrying_the_wording() -> None:
+    """R1-n3 / Q-2: the exception and rendered forms must not disagree.
+
+    A 5xx whose message carries the media wording is NOT this class — the
+    provider failed on its own side, and the status line, not the wording,
+    draws that line. The exception form always rejected it, but the rendered
+    form used to accept it: its "provider timeout" label states the kind,
+    and the status — which the render carries in the parenthetical — was
+    never read. A future rendered-message consumer (``AgentEndEvent.error``
+    is one) would have disagreed with the walk; both forms now read the same
+    gates, so this input is rejected either way.
+    """
+    ambiguous = ProviderError(
+        504, "Download the media resource timed out during the data inspection process."
+    )
+
+    assert not is_media_download_failure(ambiguous)
+    assert not is_media_download_failure(
+        str(ambiguous)
+    ), "the rendered form must reject what the exception form rejects"
+
+    # The fix must not have moved the class's DISJOINTNESS from the #1796
+    # input-refusal ladder: the ambiguous input is not an input refusal in
+    # either form, so it can never reach that ladder.
+    assert not is_input_refusal(ambiguous)
+    assert not is_input_refusal(str(ambiguous))
+
+    # And the 4xx members of the class still agree POSITIVELY in both forms:
+    # the render of a 400 carries the status the exception form gates on.
+    for member in (
+        _media_download(),
+        ProviderError(
+            400, "Download the media resource timed out during the data inspection process."
+        ),
+    ):
+        assert is_media_download_failure(member)
+        assert is_media_download_failure(str(member))
+
+
 async def test_a_media_download_failure_is_re_asked_identically_and_recovers() -> None:
     seen: list[ChatRequest] = []
     client_for, calls, _ = _scripted(failures=1, seen=seen)
