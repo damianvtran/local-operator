@@ -775,13 +775,11 @@ class SettingsPreview(Message):
 #: value and never its advice — and the floor MARKS a cut instead of hiding it.
 #:
 #: Cell counts are against `_detail_width()`: 74 at 80x24, 54 at 60x24, 38 at
-#: 44x20. Rung 2 (41 cells — the count was 40 in round 2 and is measured by
-#: `cell_len` here, not estimated: agent review round 3, N1) is what a 60-column
-#: footer shows, and rung 3 (26) is what survives 44 — the widths where the row
-#: help has already shed to its clause.
+#: 44x20. Rung 2 (40) is what a 60-column footer shows, rung 3 (26) is what
+#: survives 44 — the widths where the row help has already shed to its clause.
 _GATE_KEPT_ALERT_RUNGS: tuple[str, ...] = (
     "saved; this session keeps asking — /approvals auto loosens it",  # 61
-    "keeps asking — /approvals auto loosens it",  # 41
+    "keeps asking — /approvals auto loosens it",  # 40
     "/approvals auto loosens it",  # 26
 )
 

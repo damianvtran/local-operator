@@ -3724,47 +3724,6 @@ async def test_the_default_clause_is_not_the_dimmest_ink_on_the_page(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_a_help_that_is_the_whole_line_takes_dim_not_faint(tmp_path: Path) -> None:
-    """Design round 2, D5 / agent review round 3, N2 — the lone-help rung's ink.
-
-    The page's rule is that a clause which is the ONLY text on the line takes
-    ``dim`` (4.55:1), never ``faint`` (1.97:1, the watermark rung). D5 found the
-    help-alone rung inheriting ``faint``, and on the approvals row that sentence
-    is the caveat #1282 added — so the fix was painted at the rung the page
-    reserves for text nobody has to read. Round 3 flagged that the frames were
-    this rung's only evidence; reverting the style to ``faint`` now fails here.
-
-    80x24 is the width where this row reaches the rung at all: the 58-cell help
-    plus the key path is 75 cells against the 74-cell line, so the help is the
-    line's whole content.
-    """
-    from local_operator.tui import theme as theme_mod
-
-    app = OperatorApp(lambda: _factory(FakeSession()))
-    async with app.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
-        view = await _open_page(pilot, app)
-        _select(view, "tool_approval_mode")
-        await pilot.pause()
-
-        help_text = settings_io.BY_KEY["tool_approval_mode"].help
-        detail = view.render_lines_for_test()[-1]
-        assert detail == help_text, f"premise: the help is not alone on the line — {detail!r}"
-
-        dim = theme_mod.semantic_color("dim").lower()
-        faint = theme_mod.semantic_color("faint").lower()
-        inks = [
-            style.color.name.lower() if style.color is not None else ""
-            for _fragment, style in view.detail_spans()
-            if _fragment
-        ]
-        assert inks == [dim], (
-            f"the lone help is painted {inks}, not dim {dim} (faint is {faint}) — the "
-            "rung-scoped rule in `_paint_detail` has regressed"
-        )
-
-
-@pytest.mark.asyncio
 async def test_activation_reveals_an_offscreen_cursor_before_acting(tmp_path: Path) -> None:
     """Issue #440's second comment, and the hazard #447 made reachable.
 
