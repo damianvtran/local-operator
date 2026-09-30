@@ -1210,6 +1210,40 @@ class PendingGateState(BaseModel):
     session_name: str = ""
 
 
+class PendingAskState(BaseModel):
+    """One queued ask on the wire (design ``docs/design/ask-nonblocking.md`` §4).
+
+    The FROZEN contract, shared by the frontend state, the mobile projection and
+    the aggregate index — one shape, three readers, so a surface cannot be told
+    about an ask in words only it understands.
+
+    ``questions`` stays a list of DICTS rather than a nested model on purpose:
+    the log stores plain dicts (``asks/store.py`` is stdlib-only) and the wire
+    deliberately carries the FULL question — options, ``multi``, ``secret``,
+    ``persist``, ``recommended`` — because a surface that can only see an id
+    cannot draw a picker and would have to re-derive the ask from the model's
+    tool call. ``extra="allow"`` matches the sibling gate model: a newer writer
+    adding a key must not be a validation error on an older reader.
+
+    ``answers`` holds SECRET ANSWERS AS KEYS ONLY (``[<key>]``): the value never
+    leaves the session's memory store, so it can never ride this field.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    ask_id: str
+    created_at: int = 0
+    expires_at: int = 0
+    timeout_s: int = 0
+    urgent: bool = False
+    status: str = "open"
+    delivered: bool = False
+    questions: list[dict[str, Any]] = Field(default_factory=list)
+    answers: dict[str, list[str]] | None = None
+    answered_by: dict[str, Any] | None = None
+    answered_at: int | None = None
+
+
 class _FrozenSequence(tuple[Any, ...]):
     """Tuple-backed sequence with list-compatible equality and wire shape."""
 
@@ -2907,6 +2941,28 @@ class FrontendSessionState(BaseModel):
     mcp_startup: dict[str, Any] | None = None
     loop: dict[str, Any] | None = None
     pending_gate: PendingGateState | None = None
+    #: The session's queued asks, newest first with the OPEN ones in front, and
+    #: how many of them are still open.
+    #:
+    #: PRESENCE IS THE CAPABILITY PROXY (design §4/N2, and the UI contract's own
+    #: rule): both fields are ABSENT, not empty, unless queued asks are live in
+    #: this process — so a client may take "``asks`` is on the frame" as "this
+    #: runtime has queued asks" and render the new surfaces. Emitting the field
+    #: while the server default is still blocking is exactly the false proxy the
+    #: rule exists to prevent, which is why the absence is enforced at the
+    #: SERIALIZER (`_serialize_frozen_jobs`) rather than by convention: a
+    #: declared field with a default would ride every frame whether or not the
+    #: feature is on.
+    #:
+    #: ``pending_gate``/``pending``/``pending_count`` keep meaning BLOCKING
+    #: things. For one release a queued ask is ALSO mirrored onto
+    #: ``pending_gate`` as today's per-question card (see
+    #: ``asks/render.mirror_card``) so an old client can still answer it; a
+    #: client that sees ``asks`` must ignore a ``pending_gate`` whose
+    #: ``kind == "ask"`` (client rule N3), and approvals are unaffected either
+    #: way.
+    asks: list[PendingAskState] | None = None
+    asks_open: int | None = None
     slash_capabilities: list[SlashCapability] = Field(default_factory=list)
     # The runtime's provider-catalogue rows, so an attached terminal's bare
     # ``/model`` picker lists the models the SESSION can actually switch to
@@ -2935,7 +2991,18 @@ class FrontendSessionState(BaseModel):
     @model_serializer(mode="wrap")
     def _serialize_frozen_jobs(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
         mutable = self.model_copy(update={"jobs": list(self.jobs)})
-        return handler(mutable)
+        payload = handler(mutable)
+        # N2: the ask fields are present on the frame ONLY while the feature is
+        # live in this process. Popped here rather than left to the writer,
+        # because every consumer of this state — the install snapshot, every
+        # delta, the sync payload, the durable checkpoint — serializes through
+        # this one seam, and a rule that held on one of them would make the
+        # capability proxy true for exactly the client that read the other.
+        if mutable.asks is None:
+            payload.pop("asks", None)
+        if mutable.asks_open is None:
+            payload.pop("asks_open", None)
+        return payload
 
     @field_validator("selected_model", "effective_model", mode="before")
     @classmethod
@@ -3391,6 +3458,7 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
         if isinstance(components, list) and len(components) > USAGE_COMPONENT_CAP:
             snapshot["usage_components"] = _capped_components(components)
         _bound_live_events_in_place(snapshot)
+        _bound_asks_in_place(snapshot)
         # The goal record is bounded at ENTRY by `GoalState` (a swept history, a
         # clipped judge reason) and yielded HERE at the wire, because an entry
         # cap is not a wire bound: the frame this field rides is the one the
@@ -3432,7 +3500,52 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
         # else will shrink. See MODEL_CATALOGUE_FLOOR_ROWS for why the
         # catalogue takes a residual budget where jobs take a fixed one.
         _bound_model_catalogue_in_place(payload, snapshot)
+        _yield_asks_when_the_frame_has_no_room(snapshot)
     return payload
+
+
+def _yield_asks_when_the_frame_has_no_room(snapshot: dict[str, Any]) -> None:
+    """Drop the ask list entirely when the frame it rides is already full.
+
+    THE LAST-RESORT YIELD, and the reason it is needed rather than a smaller
+    constant: the attach frame has essentially no slack at the all-maximum
+    shape the class guard measures (1,048,576-byte line; the fixture sat ~100 B
+    under it before this field existed), so there is NO ask budget, however
+    small, that both carries a question and fits that frame. A field that
+    overflowed the socket while carrying a question would be worse than one that
+    says nothing.
+
+    It runs AFTER ``_bound_model_catalogue_in_place`` deliberately: the
+    catalogue's budget is the frame's residual, so it has already taken
+    everything available, and this is the last field to give way — the same
+    ordering rule the goal record follows, one step further down.
+
+    Absence is the honest wire state for "this frame cannot carry the asks", and
+    it is the same state a client sees for a runtime with nothing queued (see
+    ``_bound_asks_in_place``). It is NOT a claim about the FEATURE: ``N2``'s gate
+    is the publisher's (the flag and a host that can show an ask), so a
+    dark runtime is distinguishable from a full frame by whether the flag was
+    ever on, and the cross-session aggregate route carries the view that a
+    frame this full cannot.
+    """
+    if not snapshot.get("asks"):
+        return
+    if _frame_line_bytes(_snapshot_frame(snapshot)) <= _MODEL_CATALOGUE_LINE_LIMIT:
+        return
+    snapshot.pop("asks", None)
+    snapshot.pop("asks_open", None)
+
+
+def _snapshot_frame(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """The snapshot as the measurement functions expect it.
+
+    ``_bound_model_catalogue_in_place`` measures the whole ``payload`` (the sync
+    envelope), while the fields below it are edited on the ``snapshot``. The
+    yield above has only the snapshot in hand, so it rebuilds the envelope the
+    line is actually measured against rather than measuring a shape that never
+    ships — a lower bound would let a frame through that the socket then drops.
+    """
+    return {"op": "frontend_sync", "data": {"snapshot": snapshot}}
 
 
 def _bound_model_catalogue_in_place(payload: dict[str, Any], snapshot: dict[str, Any]) -> None:
@@ -3569,6 +3682,91 @@ def _bound_goal_record_in_place(payload: dict[str, Any], snapshot: dict[str, Any
         snapshot["goal_history_truncated"] = True
     if isinstance(judge, dict):
         snapshot["goal_judge"] = None
+
+
+#: Per-question text bounds for the ask wire, and the whole field's budget.
+#:
+#: The fold caps the LIST (``asks.policy.PROJECTION_CAP``, 20 rows, open first),
+#: and that is a bound on count — not on bytes. A question, its option labels and
+#: the consequences under them are all model-authored free text, so twenty rows
+#: of it measured 28 KB on the class guard's all-maximum fixture: a field that
+#: could push the attach frame through the socket line on its own, which is the
+#: shape this module's wire bounds exist to close. The frame had ~110 B of slack
+#: at this head, so the ask list's share has to be small and stated.
+#:
+#: The whole-field budget is spent in the fold's own order (open first), so the
+#: rows that survive a clip are the ones a user must answer, and the tail gives
+#: way — the same "the cap keeps what the reader loads first" rule the effort
+#: lineage uses. Text is clipped with an ellipsis rather than dropped, so a
+#: surface can tell a short question from a truncated one.
+ASK_QUESTION_WIRE_CHARS = 200
+ASK_OPTION_LABEL_WIRE_CHARS = 60
+ASK_OPTION_DESC_WIRE_CHARS = 80
+ASK_WIRE_TEXT_BUDGET_CHARS = 8_000
+
+
+def _bound_asks_in_place(snapshot: dict[str, Any]) -> None:
+    """Clip the queued-ask list to its wire bound (see the constants above).
+
+    Operates on the serialized payload for the same reason every other ``_bound_*``
+    here does: this runs at the wire boundary, where the rows are plain JSON and
+    the pydantic model is behind us.
+    """
+    asks = snapshot.get("asks")
+    if not isinstance(asks, list):
+        return
+    kept: list[dict[str, Any]] = []
+    spent = 0
+    for row in asks:
+        if not isinstance(row, dict):
+            continue
+        questions: list[dict[str, Any]] = []
+        charge = 0
+        for question in row.get("questions") or []:
+            if not isinstance(question, dict):
+                continue
+            clipped = dict(question)
+            text = str(clipped.get("question") or "")
+            if len(text) > ASK_QUESTION_WIRE_CHARS:
+                text = text[:ASK_QUESTION_WIRE_CHARS] + "…"
+            clipped["question"] = text
+            options: list[dict[str, Any]] = []
+            for option in clipped.get("options") or []:
+                if not isinstance(option, dict):
+                    continue
+                label = str(option.get("label") or "")
+                if len(label) > ASK_OPTION_LABEL_WIRE_CHARS:
+                    label = label[:ASK_OPTION_LABEL_WIRE_CHARS] + "…"
+                description = str(option.get("description") or "")
+                if len(description) > ASK_OPTION_DESC_WIRE_CHARS:
+                    description = description[:ASK_OPTION_DESC_WIRE_CHARS] + "…"
+                options.append({**option, "label": label, "description": description})
+                charge += len(label) + len(description)
+            clipped["options"] = options
+            questions.append(clipped)
+            charge += len(text)
+        if kept and spent + charge > ASK_WIRE_TEXT_BUDGET_CHARS:
+            break
+        kept.append({**row, "questions": questions})
+        spent += charge
+    if not kept:
+        # NOTHING TO SHOW IS THE SAME WIRE STATE AS "NOTHING TO SAY": the frame
+        # this list would ride is the one the socket refuses, and an empty array
+        # still pays for its keys on a payload with ~100 B of slack at this head
+        # (measured on the class guard's all-maximum fixture: 1,048,408 B without
+        # the field, 1,048,698 B with it empty, against the 1,048,576-byte line).
+        # So a yield that keeps ``"asks": []`` would be a field that overflows
+        # every frame while carrying nothing.
+        #
+        # The capability proxy survives because the gate it protects is the
+        # PUBLISHER's, not this one: a runtime with the feature DARK publishes no
+        # asks at all (N2), so a client can never mistake "the flag is off" for
+        # "nothing queued" — the risky direction the rule exists for. The other
+        # direction only costs a surface some UI in the empty case.
+        snapshot.pop("asks", None)
+        snapshot.pop("asks_open", None)
+        return
+    snapshot["asks"] = kept
 
 
 def _bound_live_events_in_place(snapshot: dict[str, Any]) -> None:
@@ -6185,6 +6383,13 @@ class FrontendStateStore:
             attachment_root=str(getattr(transcript, "directory", "") or "") or None,
             slash_capabilities=_slash_capabilities(),
         )
+        # The ask fold rides every source refresh as well as the queue's own
+        # change path (``Session.publish_ask_state``): a runtime that BOOTED with
+        # asks already on its log publishes them on its first snapshot, which is
+        # what makes an ask survive a restart on the wire (design §2.2).
+        ask_rows, ask_open = ask_wire(session)
+        changes["asks"] = ask_rows
+        changes["asks_open"] = ask_open
         if not bool(getattr(session, "is_streaming", False)) and current.live_events:
             # The in-flight seed is cleared by the same rule its three
             # neighbours above are gated on: its whole contract is "a
@@ -6946,6 +7151,17 @@ class FrontendStateStore:
                 # turn-end fold and the non-streaming gate already clear, so
                 # there is nothing here to make durable or to withhold.
                 "live_tool_started_at": {},
+                # The ask fold is live state for the same reason the two above
+                # are, with one difference that decides the treatment: it is
+                # reconstructable from a DURABLE source the checkpoint is not
+                # (``asks.jsonl``), so persisting it would be a second copy of a
+                # record that can fold forward — and a copy that goes stale the
+                # moment a deadline passes while nothing is running. The resumed
+                # session republishes it from the log on its first refresh.
+                # ``None`` rather than ``[]`` so the absence survives the
+                # checkpoint round trip (the capability proxy, N2).
+                "asks": None,
+                "asks_open": None,
                 "jobs": [
                     job.model_copy(
                         update={
@@ -7521,6 +7737,52 @@ def _json_value(value: Any) -> Any:
     if hasattr(value, "__dict__"):
         return copy.deepcopy(value.__dict__)
     return copy.deepcopy(value)
+
+
+def ask_wire(session: Any) -> tuple[list[dict[str, Any]] | None, int | None]:
+    """The session's queued asks on the wire, or ``(None, None)`` while dark.
+
+    The single derivation every publisher uses (``Session.publish_ask_state``,
+    ``refresh_from_session``, the aggregate routes through the index), so the
+    frontend state, the projection and the list rows cannot disagree about which
+    asks are open.
+
+    Returns ABSENCE — ``None``, not ``[]`` — whenever the queue is not live in
+    this process, which is the capability proxy the whole A2 wire turns on (see
+    ``FrontendSessionState.asks``). ``ask_queue()`` is the one authority on that
+    question (the flag AND a host that can show the ask), and it is asked rather
+    than re-derived: a second spelling of the gate is how the wire would ship
+    the field while the enqueue path still blocked.
+    """
+    from local_operator.asks import policy
+
+    if not policy.enabled():
+        return None, None
+    factory = getattr(session, "ask_queue", None)
+    if not callable(factory):
+        return None, None
+    try:
+        queue = factory()
+    except Exception:  # noqa: BLE001 — an unreadable queue publishes absence
+        logger.debug("ask: could not resolve the queue for the wire", exc_info=True)
+        return None, None
+    if queue is None:
+        return None, None
+    try:
+        rows = [dict(row) for row in queue.projection()]
+    except Exception:  # noqa: BLE001 — the same rule: absence, never a false zero
+        logger.debug("ask: could not fold the queue for the wire", exc_info=True)
+        return None, None
+    if not rows:
+        # Same rule as the wire bound's tail (``_bound_asks_in_place``): an
+        # empty list is published as ABSENCE, because a field that says "nothing"
+        # while costing its keys ~290 B on a frame with ~100 B of slack is a
+        # field that can only ever make the frame worse. The N2 gate — the flag
+        # and a host that can show an ask — is what keeps a dark runtime from
+        # looking merely quiet; see ``FrontendSessionState.asks``.
+        return None, None
+    opens = sum(1 for row in rows if str(row.get("status") or "") == "open")
+    return rows, opens
 
 
 def _todo_state(session_id: str) -> list[TodoPhaseState]:
