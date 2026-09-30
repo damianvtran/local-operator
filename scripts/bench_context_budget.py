@@ -705,7 +705,59 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: attach-on-send API §8.2.5 requires: arming from the tool alone cannot
 #: cover "the message this turn is about to send", which is the case the
 #: mechanism exists for.
-BUDGET_BILLED_TOKENS = 35_836
+#:
+#: RAISED 35,836 -> 36,935 for the ``sessions`` tool (design
+#: ``docs/design/sessions-tool.md``; PR A of the sessions-tool workstream),
+#: stated with the arithmetic because the guard exists to make a new tool an
+#: explicit decision. BOTH sides are measured — the two CI readings are the
+#: ``context-budget`` job logs this branch's push and its base produced — and
+#: the tool's delta is identical on both platforms (its schema is
+#: platform-free):
+#:
+#:   base, CI (ubuntu, py3.12)            99,464 chars = ~35,778 billed
+#:                                        (PASS, 58 under the old ceiling)
+#:   base, this machine (macOS, py3.12)  100,226 chars = ~36,053 billed
+#:   head, CI                            102,526 chars = ~36,880 billed
+#:                                        (the failing run's own line)
+#:   head, this machine                  103,288 chars = ~37,154 billed
+#:
+#: and the delta is the tool and nothing else:
+#:
+#:   + tool_schemas    66,974 vs 63,923 = +3,051 chars = +1,098
+#:   + inventory line                       +11 chars =    +4
+#:   =                                      +3,062 chars = +1,102
+#:
+#: (components rounded up; the total is the char counts': 3,062 / 2.78 =
+#: 1,101.4. The tool's own schema was trimmed once against the note's draft
+#: before this raise was written — the note's measured 781 cl100k param tokens
+#: to the shipped 699, description 782 chars — and the remaining cost is the
+#: price of the capability: six ops in ONE schema where six tools would be
+#: six, each op a flag surface the CLI already takes, with the visibility
+#: default (the incident fix) and the receipts in the text because a guide
+#: that is not read cannot state a default.)
+#:
+#: What makes the raise the right trade is where it is NOT paid: the builder
+#: is createIf rung 3 and returns ``None`` unless ``context.subagent_launcher``
+#: is present, so every child that may not delegate — the population that can
+#: never call ``spawn`` — carries zero schema for it, and the figure above is
+#: the forced-gate worst case (the benchmark gates it ON deliberately). The
+#: ladder's rung 1 (extend an existing tool) is not available: the design's
+#: §3 and §14 lock the ops onto one schema because the capability needs
+#: structured parameters, per-op approval tiers and the gate, which is rung
+#: 3's own example.
+#:
+#: THE GAP HERE RUNS THE OTHER WAY from the ``memory_mb`` entry above: this
+#: tree reads LARGER on this machine than on CI (762 chars, ~274 billed), and
+#: the 762 sits entirely in ``tool_schemas`` — 67,736 local vs 66,974 CI at
+#: head, and the same 762 at base (64,685 vs 63,923) — i.e. in schemas OTHER
+#: than this tool's, present before the diff and unmoved by it. So the ceiling
+#: is set from the CI reading + 55 (the band this file keeps) = 36,935, which
+#: is what the gate runs on. On this machine the reading sits above the
+#: ceiling BOTH before and after the raise (36,053 vs 35,836 pre-existing;
+#: 37,154 vs 36,935 after, a 219 overshoot against a 217 one), so a local
+#: run's overshoot here is this recorded gap, not this change — CI remains
+#: the binding reading. The tighten band below (1,200) is not in play.
+BUDGET_BILLED_TOKENS = 36_935
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
