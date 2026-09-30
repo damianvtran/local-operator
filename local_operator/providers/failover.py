@@ -3071,9 +3071,10 @@ def _pinned_exhaustion_error(
 
     THE FIRST SENTENCE IS THE ACTIONABLE HALF, and that is a measured layout
     constraint rather than a style choice: the failed child's dock row paints
-    only its first ~58 cells (design round 1, D4), so the pin, the state and
-    both ways out LEAD, and the diagnostics follow. Wording speaks the
-    vocabulary of the ``/settings`` page that owns these terms — "hop",
+    only its leading cells — the span is ``77 - len(label) - len(role)``,
+    ~48-58 for typical child labels (design rounds 1-2, D4) — so the pin, the
+    state and both ways out LEAD, and the diagnostics follow. Wording speaks
+    the vocabulary of the ``/settings`` page that owns these terms — "hop",
     "allow cross-vendor" — never "target" and never the raw stored value
     (design round 1, D5).
 
