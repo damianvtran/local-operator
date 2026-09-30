@@ -289,6 +289,10 @@ async def retry(
         auto = ctx.settings().auto_for(body.kind)
         report = svc.apply_items(ctx, kind=body.kind, checks=checks, auto=True, dry_run=not auto)
         _raise_for(report.reports)
+        if any(r.outcome == "would-merge" for r in report.reports):
+            # Manual mode: the retry only PROVED the update computes. Retire the stale
+            # failure so the row offers the update rather than another retry (U10).
+            svc.clear_failure(ctx, body.kind, body.name)
         return {
             "reports": [r.to_json() for r in report.reports],
             "status": svc.status_snapshot(ctx),

@@ -752,7 +752,10 @@ def status_snapshot(ctx: HubSyncContext) -> dict[str, Any]:
     for item in doc.get("items", {}).values():
         state = st.effective_state(item, now)
         counts[state] = counts.get(state, 0) + 1
-        if state == "up-to-date":
+        # An up-to-date item is listed only when it carries the sign-in fact
+        # (``no-credential``): the user has no login for an item they have linked, and
+        # this list is the only place the UI can learn it (UX round 2, U11).
+        if state == "up-to-date" and item.get("error_class") != "no-credential":
             continue
         kind = item.get("kind", "agent")
         auto = settings.auto_for(kind)
@@ -851,6 +854,19 @@ def check_report(c: chk.ItemCheck) -> ItemMergeReport:
         classification=c.classification.state if c.classification else None,
         message=message,
     )
+
+
+def clear_failure(ctx: HubSyncContext, kind: str, name: str) -> None:
+    """Retire an item's stale failure after a manual retry proved it computes (U10)."""
+
+    wanted = name.strip().casefold()
+
+    def fold(doc: dict[str, Any]) -> None:
+        for item in doc.get("items", {}).values():
+            if item.get("kind") == kind and str(item.get("name", "")).casefold() == wanted:
+                st.clear_failure(item)
+
+    ctx.store().mutate(fold)
 
 
 def clear_retry(ctx: HubSyncContext, kind: str, name: str) -> None:

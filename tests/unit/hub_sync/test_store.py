@@ -105,11 +105,44 @@ def test_a_new_remote_fingerprint_rearms_everything_a_human_had_stopped() -> Non
     assert item["auto_retry"] is True and item["attempts"] == 0 and item["next_retry_at"] is None
 
 
-def test_no_credential_is_informational_not_a_failure() -> None:
+def test_no_credential_is_recorded_without_counting_as_a_failed_attempt() -> None:
+    """U11: the fact is kept on the item (the UI needs it) but it is not a failure.
+
+    It is not counted, no retry is scheduled and the state is left alone - so a
+    ``no-credential`` read never invents a failure for an item that was fine.
+    """
+
     doc: dict[str, Any] = {}
     item = _apply(doc)
     item = _apply(doc, verdict="unavailable", reason="no-credential")
-    assert item["state"] == "available" and item["error_class"] is None and item["attempts"] == 0
+    assert item["error_class"] == "no-credential" and item["last_error"] is None
+    assert item["state"] == "available" and item["attempts"] == 0
+    assert item["next_retry_at"] is None and item["auto_retry"] is True
+
+
+def test_a_signed_out_item_keeps_the_fact_until_a_fetch_succeeds() -> None:
+    """The class is a live reading, not a latch: a successful fetch retires it."""
+
+    doc: dict[str, Any] = {}
+    item = _apply(doc, verdict="unavailable", reason="no-credential")
+    assert item["error_class"] == "no-credential"
+    item = _apply(doc)
+    assert item["error_class"] is None and item["state"] == "available"
+
+
+def test_a_manual_retry_that_computed_retires_the_stale_failure() -> None:
+    """U10: the retry proved the update computes, so the row must offer it, not another retry."""
+
+    item = {
+        "state": "available",
+        "error_class": "hub-error",
+        "error_subclass": None,
+        "last_error": "could not reach the hub: 500",
+        "next_retry_at": "2999-01-01T00:00:00Z",
+    }
+    st.clear_failure(item)
+    assert item["error_class"] is None and item["last_error"] is None
+    assert item["next_retry_at"] is None and item["state"] == "available"
 
 
 def test_a_404_stays_visible_as_failed_and_is_throttled_for_a_day() -> None:

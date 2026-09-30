@@ -11,6 +11,7 @@ from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.config import ConfigManager
 from local_operator.hub_sync import provenance as prov
 from local_operator.hub_sync import service as svc
+from local_operator.hub_sync import store as st
 from local_operator.hub_sync.merge import ConflictProposal, ResolverError
 from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 
@@ -445,6 +446,38 @@ def test_the_status_snapshot_is_a_pure_store_read_with_the_documented_shape(env)
     assert (
         svc.status_snapshot(ctx)["items"][0]["auto_will_apply"] is False
     )  # manual mode still shows the update
+
+
+def test_a_signed_out_item_still_reaches_the_snapshot(env) -> None:
+    """U11: an up-to-date item that needs the login is LISTED, or no UI can offer it.
+
+    The snapshot drops every ``up-to-date`` item, which is exactly the state of an
+    org-linked row the user has no credential for. It is listed on its
+    ``no-credential`` class alone, and it still carries nothing a mark would draw.
+    """
+
+    ctx, *_ = env
+    ctx.store().mutate(
+        lambda doc: st.apply_check(
+            doc,
+            kind="agent",
+            local_id="a1",
+            name="oscar",
+            hub_id="h",
+            tenant_id="acme-team",
+            verdict="unavailable",
+            classification=None,
+            baseline="known",
+            local_fp=None,
+            remote_fp=None,
+            reason="no-credential",
+            detail="no Radient credential is available for this item",
+        )
+    )
+    (item,) = svc.status_snapshot(ctx)["items"]
+    assert item["state"] == "up-to-date" and item["error_class"] == "no-credential"
+    assert item["tenant_id"] == "acme-team" and item["name"] == "oscar"
+    assert item["auto_will_apply"] is False
 
 
 def test_a_quota_error_stops_update_all_like_any_other_systemic_class(env) -> None:
