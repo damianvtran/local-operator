@@ -1255,6 +1255,27 @@ async def test_the_heal_spends_no_call_after_a_human_rename() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_unusable_opener_arms_the_heal_with_an_empty_store() -> None:
+    """Tier 3 with nothing usable to fall back to: nothing is stored, and the
+    one-shot latch STILL arms with the opener — the retry the next completed
+    turn spends is exactly what an unnamed session has left (the once-only
+    latch stays spent on this path, and no fallback store released it).
+    """
+    handle, session = make_handle()
+    opener = "<\u56d7>"
+    session.title_replies = ["<first wrapped>", "<second wrapped>"]
+
+    handle._maybe_name_conversation(opener)
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+    assert session.conversation_name == "", "nothing usable -> nothing stored"
+    assert session._named == []
+    assert handle._name_heal_text == opener, "the heal survives an empty fallback"
+    assert len(session._complete_calls) == 2
+
+
+@pytest.mark.asyncio
 async def test_agent_end_clears_streaming_despite_stale_is_streaming() -> None:
     """Regression: the phone stayed pinned to "in progress" after a turn ended.
 

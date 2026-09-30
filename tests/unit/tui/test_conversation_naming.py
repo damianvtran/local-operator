@@ -2592,6 +2592,25 @@ async def test_the_heal_never_displaces_a_human_rename() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_unusable_opener_arms_the_heal_with_an_empty_store() -> None:
+    """Tier 3 with nothing usable to fall back to: nothing is stored, and the
+    one-shot latch STILL arms with the opener — the retry the next completed
+    turn spends (and the only path the opener-filtered provisional left).
+    """
+    app, session = await _boot(title="")
+    opener = "<\u56d7>"
+    session.title_replies = ["<first wrapped>", "<second wrapped>"]
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        app._maybe_name_conversation(opener)
+        await _settle()
+
+        assert session.conversation_name == "", "nothing usable -> nothing stored"
+        assert app._name_heal_text == opener, "the heal survives an empty fallback"
+        assert len(session.completions) == 2
+
+
+@pytest.mark.asyncio
 async def test_a_reachable_classifier_refuses_an_unfit_sample_and_the_retry_lands() -> None:
     """The owner-only fit-check seam is threaded through and consulted: an
     unfit first sample buys the corrective resample, not the store."""

@@ -272,21 +272,28 @@ def _is_own_followup(request: Any) -> bool:
 def _rig_tape() -> list[list[StreamEvent]]:
     """The provider script, indexed by CALL, in the order this rig issues them.
 
-    Measured on the rig (agent review round 2, MINOR-1), and the middle entry is
-    the one worth naming: the handle's conversation-naming call is issued when
-    the QUEUED command is enqueued and lands BETWEEN the delivery turn's two
+    Measured on the rig (agent review round 2, MINOR-1), and the middle entries
+    are the ones worth naming: the handle's conversation-naming errand is issued
+    when the QUEUED command is enqueued and lands BETWEEN the delivery turn's two
     calls, so a tape that ignored it would serve the delivery turn's follow-up
     from the queued command's script and the cells would pass by alignment rather
     than by design.
 
+    The errand spends TWO calls (its acceptance cascade's bounded second sample —
+    this rig wires no classifier seam, so a gate-clean reply hedges once). The
+    hedge is scripted as its own entry for the same reason as the first: without
+    it every later script shifts by one entry and the delivery follow-up eats the
+    queued command's ``glob`` call.
+
     1. the delivery turn's first request — parked by the gate, answered with a
        ``todo`` call so that turn completes a REAL tool boundary;
-    2. the naming call (raises nothing; its turn is irrelevant here);
-    3. the delivery turn's follow-up — the request that FAILS;
-    4. the queued command's first request — answered with a ``glob`` call, a
+    2. the naming call's first sample (raises nothing; its turn is irrelevant);
+    3. the naming call's bounded second sample (the hedge);
+    4. the delivery turn's follow-up — the request that FAILS;
+    5. the queued command's first request — answered with a ``glob`` call, a
        different tool name from the delivery turn's, so a boundary note can be
        attributed to the turn that produced it;
-    5. the queued command's follow-up — served a reply, or made to fail by the
+    6. the queued command's follow-up — served a reply, or made to fail by the
        cell's own predicate.
     """
     return [
@@ -297,6 +304,7 @@ def _rig_tape() -> list[list[StreamEvent]]:
             arguments={"op": "view"},
         ),
         text_turn("unused: the handle's naming call"),
+        text_turn("unused: the handle's naming call, hedged"),
         text_turn("unused: the delivery follow-up raises"),
         tool_call_turn(
             text="exec",

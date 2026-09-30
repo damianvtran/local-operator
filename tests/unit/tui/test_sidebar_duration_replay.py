@@ -114,9 +114,13 @@ async def _live_runtime(tmp_path: Path, n: int):
     await seed_transcript(
         directory, [Message(id="u0", role="user", content=[TextContent(text="start")])]
     )
-    # The session's first model request is its own internal one (conversation
-    # naming), so the scripted tool turns start at index 1.
-    turns: list[Any] = [text_turn("filler")]
+    # The session's first model REQUESTS are its own internal ones
+    # (conversation naming), and the naming errand spends up to TWO samples —
+    # the sample plus its classifier-less hedge (see naming's acceptance
+    # cascade; this rig wires no fit seam) — so the scripted tool turns start at
+    # index 2. Without the second filler the first tool call eats the hedge's
+    # slot and `step 0` is never served.
+    turns: list[Any] = [text_turn("filler"), text_turn("filler")]
     for i in range(n):
         turns.append(
             tool_call_turn(
