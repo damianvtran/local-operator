@@ -271,6 +271,7 @@ def test_sidecar_list_names_every_bookkeeping_file_the_harness_writes() -> None:
     pins them to the canonical constants so a renamed sidecar cannot quietly
     start counting as activity again."""
     from local_operator import resume
+    from local_operator.asks import store
     from local_operator.session.creation import CREATED_AT_NAME
     from local_operator.session.runtime import registry
     from local_operator.session.session import SUBAGENT_ROSTER_SIDECAR
@@ -298,6 +299,12 @@ def test_sidecar_list_names_every_bookkeeping_file_the_harness_writes() -> None:
         # must not be billed against the cleanup size budget. Its canonical name
         # also lives in the registry module.
         registry.TURN_JOURNAL_NAME,
+        # The queued-ask event log (design docs/design/ask-nonblocking.md §2.2).
+        # Bookkeeping for the same reason the journal is: the activity clock is
+        # moved by the transcript, and keeping a session alive with an OPEN ask
+        # is ``cleanup._has_open_asks``'s job — a question about the asks, not
+        # about the file. Its canonical name lives in the asks package.
+        store.ASKS_LOG_NAME,
     }
     assert retention._SIDECAR_NAMES == frozenset(expected)
 

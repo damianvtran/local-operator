@@ -138,6 +138,16 @@ COPY_SET_NAMES: tuple[str, ...] = (
     "turn-journal.json",
     "runtime-stop.json",
     "inbox.jsonl",
+    # THE ASK QUEUE'S LOG (``asks/store.ASKS_LOG_NAME``). An ask that is still
+    # open when the session is forked, exported or MOVED has to travel with it:
+    # the fold is the only record that the question was ever put to the user, and
+    # a destination without it reads as a session nobody asked anything — the
+    # answer already given would be refused as "no such ask" and the deadline row
+    # would never arm. Same class as ``inbox.jsonl`` beside it (an append-only
+    # multi-writer log the session layer owns). It is NOT a secret carrier: values
+    # for secret questions are stored in the credential store and only the KEY
+    # NAME is ever written here.
+    "asks.jsonl",
     "fork-boundary.json",
     "desktop.json",
     # THE SESSION'S BIRTH TIME (``session/creation.CREATED_AT_NAME``). Without it

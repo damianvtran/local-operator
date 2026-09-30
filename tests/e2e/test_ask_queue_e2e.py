@@ -1,0 +1,482 @@
+"""End-to-end: the durable ask queue over a REAL session and a REAL transcript.
+
+Why this file exists
+--------------------
+
+``asks/`` has unit coverage for the fold, the caps and the text, and that
+coverage would all stay green if the queue were never CONSTRUCTED — the failure
+class the design's §5 invariant lives or dies on. So these cells drive assembled
+sessions: the real ``ask`` tool reached through the real tool inventory, writing
+a real ``asks.jsonl`` beside a real ``transcript.jsonl``, with the responses
+injected as real turns.
+
+Three properties are asserted here and nowhere else:
+
+* **Flag off is today.** With ``NONBLOCKING_ASK`` False the tool awaits the host
+  hook exactly as before and NOTHING is written to an ask log — the invariant
+  that lets A1 merge dark.
+* **The log survives the runtime.** A second session over the same directory
+  delivers what the first one owed, exactly once, because the transcript row is
+  the delivery marker rather than a process-local boolean.
+* **Nothing secret reaches disk.** A sentinel credential value is grepped for
+  across the ask log, the derived index and the transcript.
+
+The provider is scripted for the reason ``test_ask_tool_e2e`` gives: this stage's
+failure signal is "the ask was never delivered", and live model latency inside
+its bound would only make that signal slower to read.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from local_operator.asks import policy, store
+from local_operator.session.session import Session
+from tests.e2e.harness import (
+    ScriptedStream,
+    build_session,
+    dispose_quietly,
+    text_turn,
+    tool_call_turn,
+)
+from tests.e2e.watchdog import bounded
+
+pytestmark = pytest.mark.e2e
+
+BOUND_S = 90.0
+SENTINEL = "sk-live-QA-SENTINEL-9f31"
+
+
+def _ask_args(question: str, *, timeout: int | str | None = None) -> dict[str, Any]:
+    args: dict[str, Any] = {
+        "questions": [
+            {"id": "q0", "question": question, "options": [{"label": "yes"}, {"label": "no"}]}
+        ]
+    }
+    if timeout is not None:
+        args["timeout"] = timeout
+    return args
+
+
+def _secret_args(key: str = "API_KEY") -> dict[str, Any]:
+    return {"questions": [{"id": key, "question": "Paste the key", "secret": True}]}
+
+
+async def _wait_until(predicate, *, timeout_s: float = 30.0, what: str = "condition") -> None:
+    """Poll ``predicate`` until true, bounded and LOUD about what never happened.
+
+    The queued path delivers from a spawned turn, so a test cannot await the
+    delivery handle directly; polling on the OBSERVABLE (a transcript row, a
+    provider request) is what keeps the assertion about the effect rather than
+    about a task object.
+    """
+    deadline = asyncio.get_running_loop().time() + timeout_s
+    while asyncio.get_running_loop().time() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"timed out after {timeout_s}s waiting for {what}")
+
+
+def _ask_ids(directory: Path) -> list[str]:
+    return store.ask_ids(store.read_events(directory))
+
+
+@pytest.fixture(autouse=True)
+def _dark_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every cell starts from the shipped default; the dark ones turn it back."""
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", False)
+
+
+# ---------------------------------------------------------------------------
+# The flag-off invariant
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_with_the_flag_off_the_tool_still_awaits_and_writes_no_log(
+    headless_tui_env: Path,
+) -> None:
+    """A1 merges DARK. With the flag off the model's ``ask`` call blocks on the
+    host hook exactly as it always has, and no ask log exists afterwards."""
+    answered: list[str] = []
+
+    async def hook(questions: list[Any]) -> dict[str, list[str]] | None:
+        answered.append(questions[0].question)
+        return {questions[0].id: ["yes"]}
+
+    stream = ScriptedStream(
+        [
+            tool_call_turn(
+                text="Asking.",
+                tool_name="ask",
+                tool_call_id="ask-1",
+                arguments=_ask_args("Still blocking?"),
+            ),
+            text_turn("done"),
+        ]
+    )
+    session = _session(headless_tui_env, "flag-off", stream)
+    session.set_ask_handler(hook)
+    try:
+        with bounded(BOUND_S, "flag-off ask still blocks"):
+            await session.prompt("go")
+            assert answered == ["Still blocking?"], "the hook was not awaited"
+            assert not store.asks_log_path(session.transcript.directory).exists()
+            assert store.ask_ids(store.read_events(session.transcript.directory)) == []
+    finally:
+        await dispose_quietly(session)
+
+
+# ---------------------------------------------------------------------------
+# Queued, accumulating, answered out of order
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_three_asks_accumulate_while_the_agent_works_and_answer_out_of_order(
+    headless_tui_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    hook_calls: list[str] = []
+
+    async def hook(questions: list[Any]) -> dict[str, list[str]] | None:
+        hook_calls.append(questions[0].question)
+        return None
+
+    turns: list[list[Any]] = []
+    for index in range(3):
+        turns.append(
+            tool_call_turn(
+                text=f"queuing {index}",
+                tool_name="ask",
+                tool_call_id=f"ask-{index}",
+                arguments=_ask_args(f"question {index}"),
+            )
+        )
+        turns.append(text_turn("continuing with other work"))
+    # Three response turns: one per answer, each a separate paid turn.
+    turns.extend([text_turn("noted a"), text_turn("noted b"), text_turn("noted c")])
+    stream = ScriptedStream(turns)
+    session = _session(headless_tui_env, "accumulate", stream)
+    session.set_ask_handler(hook)
+    try:
+        with bounded(BOUND_S, "three queued asks answered out of order"):
+            for index in range(3):
+                await session.prompt(f"ask {index}")
+            assert hook_calls == [], "the queued path must not await a human"
+            ask_ids = _ask_ids(session.transcript.directory)
+            assert len(ask_ids) == 3, ask_ids
+            assert len(session.ask_queue().open_records()) == 3
+
+            # Out of order: the last ask first.
+            for ask_id in (ask_ids[2], ask_ids[0], ask_ids[1]):
+                outcome = session.respond_ask(ask_id, {"q0": ["yes"]}, by="terminal")
+                assert outcome["ok"] is True, outcome
+                await session.reconcile_asks()
+
+            await _wait_until(
+                lambda: all(
+                    session.transcript.has_entry(store.response_row_id(ask_id))
+                    for ask_id in ask_ids
+                ),
+                what="one ask_response row per ask",
+            )
+            rows = [entry for entry in session.transcript.entries() if entry.id]
+            for ask_id in ask_ids:
+                assert sum(1 for e in rows if e.id == store.response_row_id(ask_id)) == 1
+                assert not session.transcript.has_entry(store.timeout_row_id(ask_id))
+    finally:
+        await dispose_quietly(session)
+
+
+@pytest.mark.asyncio
+async def test_a_multi_question_ask_is_answered_atomically(
+    headless_tui_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+
+    async def hook(questions: list[Any]) -> dict[str, list[str]] | None:
+        raise AssertionError("the queued path must not call the host hook")
+
+    stream = ScriptedStream(
+        [
+            tool_call_turn(
+                text="two questions",
+                tool_name="ask",
+                tool_call_id="ask-multi",
+                arguments={
+                    "questions": [
+                        {
+                            "id": "q0",
+                            "question": "first?",
+                            "options": [{"label": "a"}, {"label": "b"}],
+                        },
+                        {
+                            "id": "q1",
+                            "question": "second?",
+                            "options": [{"label": "c"}, {"label": "d"}],
+                        },
+                    ]
+                },
+            ),
+            text_turn("working"),
+            text_turn("both answers in hand"),
+        ]
+    )
+    session = _session(headless_tui_env, "multi", stream)
+    session.set_ask_handler(hook)
+    try:
+        with bounded(BOUND_S, "a multi-question ask answered atomically"):
+            await session.prompt("go")
+            (ask_id,) = _ask_ids(session.transcript.directory)
+            outcome = session.respond_ask(ask_id, {"q0": ["a"], "q1": ["c"]}, by="terminal")
+            assert outcome["ok"] is True
+            await session.reconcile_asks()
+            await _wait_until(
+                lambda: session.transcript.has_entry(store.response_row_id(ask_id)),
+                what="the response row",
+            )
+            record = session.ask_queue().find(ask_id)
+            assert record["answers"] == {"q0": ["a"], "q1": ["c"]}
+            # The model read both, from ONE row.
+            last = stream.requests[-1]
+            text = "\n".join((message.text or "") for message in last.messages)
+            assert "first?" in text and "second?" in text
+    finally:
+        await dispose_quietly(session)
+
+
+# ---------------------------------------------------------------------------
+# The deadline
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_deadline_delivers_a_notice_into_the_model_context(
+    headless_tui_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A normal (non-urgent) timeout: one ``ask_timeout`` row, delivered even
+    though the session was idle, and the model's next request carries it."""
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    stream = ScriptedStream(
+        [
+            tool_call_turn(
+                text="asking",
+                tool_name="ask",
+                tool_call_id="ask-t",
+                arguments=_ask_args("expires soon?", timeout=600),
+            ),
+            text_turn("carrying on"),
+            text_turn("the deadline passed, so I proceeded"),
+        ]
+    )
+    session = _session(headless_tui_env, "timeout", stream)
+    session.set_ask_handler(_never_answers)
+    try:
+        with bounded(BOUND_S, "a deadline notice reaching the model"):
+            await session.prompt("go")
+            (ask_id,) = _ask_ids(session.transcript.directory)
+            queue = session.ask_queue()
+            # Inject the clock rather than sleeping two minutes (the floor).
+            # The origin is read BEFORE the clock is replaced: a lambda that
+            # called back into the queue would recurse.
+            started_at = int(queue.find(ask_id)["created_at"])
+            queue._now = lambda: started_at + 700_000
+            await session.reconcile_asks()
+            await _wait_until(
+                lambda: session.transcript.has_entry(store.timeout_row_id(ask_id)),
+                what="the ask_timeout row",
+            )
+            await _wait_until(
+                lambda: any(
+                    "[Ask timed out]" in (message.text or "")
+                    for request in stream.requests
+                    for message in request.messages
+                ),
+                what="the notice in a provider request",
+            )
+            # The ask is still answerable, and a late answer is attributed.
+            assert queue.find(ask_id)["status"] == store.STATUS_TIMED_OUT
+            outcome = session.respond_ask(ask_id, {"q0": ["yes"]}, by="phone")
+            assert outcome["ok"] is True, outcome
+            await session.reconcile_asks()
+            await _wait_until(
+                lambda: session.transcript.has_entry(store.response_row_id(ask_id)),
+                what="the late response row",
+            )
+            record = queue.find(ask_id)
+            assert record["status"] == store.STATUS_LATE
+    finally:
+        await dispose_quietly(session)
+
+
+async def _never_answers(questions: list[Any]) -> dict[str, list[str]] | None:
+    raise AssertionError("the queued path must not call the host hook")
+
+
+# ---------------------------------------------------------------------------
+# Restart durability
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_answer_recorded_before_the_runtime_died_is_delivered_once_on_boot(
+    headless_tui_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Answer-then-kill: the log holds the answer, the transcript holds no row,
+    and the NEXT runtime's boot reconcile delivers it — exactly once."""
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    directory = headless_tui_env / "sessions" / "restart"
+    first_stream = ScriptedStream(
+        [
+            tool_call_turn(
+                text="asking",
+                tool_name="ask",
+                tool_call_id="ask-r",
+                arguments=_ask_args("survive the kill?"),
+            ),
+            text_turn("working"),
+        ]
+    )
+    first = _session(headless_tui_env, "restart", first_stream)
+    first.set_ask_handler(_never_answers)
+    try:
+        with bounded(BOUND_S, "answer survives a runtime death"):
+            await first.prompt("go")
+            (ask_id,) = _ask_ids(directory)
+            # The answer is recorded, then the runtime dies before delivering.
+            session_queue = first.ask_queue()
+            assert session_queue.respond(ask_id, {"q0": ["yes"]}, by="phone")["ok"] is True
+            assert not first.transcript.has_entry(store.response_row_id(ask_id))
+    finally:
+        await dispose_quietly(first)
+
+    second_stream = ScriptedStream([text_turn("I have the answer now")])
+    second = _session(headless_tui_env, "restart", second_stream)
+    second.set_ask_handler(_never_answers)
+    try:
+        with bounded(BOUND_S, "boot reconcile delivers once"):
+            await second.reconcile_asks()
+            await _wait_until(
+                lambda: second.transcript.has_entry(store.response_row_id(ask_id)),
+                what="the delivered response row",
+            )
+            # Delivering again must write nothing new.
+            await second.reconcile_asks()
+            rows = [e for e in second.transcript.entries() if e.id == store.response_row_id(ask_id)]
+            assert len(rows) == 1
+            record = second.ask_queue().find(ask_id)
+            assert record["status"] == store.STATUS_ANSWERED
+            assert record["delivered"] is True
+    finally:
+        await dispose_quietly(second)
+
+
+@pytest.mark.asyncio
+async def test_an_unanswered_ask_outlives_the_runtime_and_stays_open(
+    headless_tui_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SIGKILL-equivalent: the next runtime re-reads the log and the ask is still
+    there, still open, with its deadline untouched."""
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    directory = headless_tui_env / "sessions" / "survive"
+    stream = ScriptedStream(
+        [
+            tool_call_turn(
+                text="asking",
+                tool_name="ask",
+                tool_call_id="ask-s",
+                arguments=_ask_args("still there?", timeout=1800),
+            ),
+            text_turn("working"),
+        ]
+    )
+    session = _session(headless_tui_env, "survive", stream)
+    session.set_ask_handler(_never_answers)
+    try:
+        with bounded(BOUND_S, "an open ask outlives its runtime"):
+            await session.prompt("go")
+            (ask_id,) = _ask_ids(directory)
+    finally:
+        await dispose_quietly(session)
+
+    revived = _session(headless_tui_env, "survive", ScriptedStream([]))
+    revived.set_ask_handler(_never_answers)
+    try:
+        with bounded(BOUND_S, "the ask is re-read from disk"):
+            record = revived.ask_queue().find(ask_id)
+            assert record is not None
+            assert record["status"] == store.STATUS_OPEN
+            assert record["timeout_s"] == 1800
+            # Boot reconcile writes nothing for an ask nobody has answered.
+            await revived.reconcile_asks()
+            assert revived.transcript.has_entry(store.timeout_row_id(ask_id)) is False
+    finally:
+        await dispose_quietly(revived)
+
+
+# ---------------------------------------------------------------------------
+# Secrets
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_secret_answer_never_reaches_disk(
+    headless_tui_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sentinel is grepped for across every artefact the queue writes, and
+    the transcript names the KEY instead — which is the whole contract."""
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    directory = headless_tui_env / "sessions" / "secret"
+    stream = ScriptedStream(
+        [
+            tool_call_turn(
+                text="need the key",
+                tool_name="ask",
+                tool_call_id="ask-k",
+                arguments=_secret_args("API_KEY"),
+            ),
+            text_turn("working"),
+            text_turn("key in hand"),
+        ]
+    )
+    session = _session(headless_tui_env, "secret", stream)
+    session.set_ask_handler(_never_answers)
+    try:
+        with bounded(BOUND_S, "a secret answer stays out of the log"):
+            await session.prompt("go")
+            (ask_id,) = _ask_ids(directory)
+            outcome = session.respond_ask(ask_id, {"API_KEY": [SENTINEL]}, by="terminal")
+            assert outcome["ok"] is True, outcome
+            await session.reconcile_asks()
+            await _wait_until(
+                lambda: session.transcript.has_entry(store.response_row_id(ask_id)),
+                what="the secret response row",
+            )
+
+            log = store.asks_log_path(directory).read_text()
+            index = (store.entry_path(headless_tui_env, "secret")).read_text()
+            transcript = (directory / "transcript.jsonl").read_text()
+            for name, blob in (("asks.jsonl", log), ("index", index), ("transcript", transcript)):
+                assert SENTINEL not in blob, f"the secret value reached {name}"
+            # And the model was told the KEY NAME, not that nothing happened.
+            assert "API_KEY" in log
+            assert "API_KEY" in transcript
+            record = session.ask_queue().find(ask_id)
+            assert record["answers"] == {"API_KEY": ["API_KEY"]}
+    finally:
+        await dispose_quietly(session)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _session(config_dir: Path, name: str, stream: ScriptedStream) -> Session:
+    return build_session(config_dir / "sessions" / name, stream, cwd=config_dir)

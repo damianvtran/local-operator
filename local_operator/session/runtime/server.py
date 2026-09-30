@@ -1536,6 +1536,15 @@ class SessionHandle(Protocol):
         self, request_id: str, value: str, question_index: int | None = None
     ) -> str: ...
 
+    # THE QUEUED-ASK OPS ARE NOT DECLARED HERE ON PURPOSE
+    # (``ask_respond``/``ask_decline``/``ask_dismiss``, design
+    # docs/design/ask-nonblocking.md §2.4). They are OPTIONAL capabilities, and
+    # they are documented in the probed-capabilities block below with the rest:
+    # every existing ``SessionHandle`` double in the suite would have to grow
+    # three methods to satisfy a protocol member, and the whole point of the op
+    # family is that it is ADDITIVE — an old registrant answers ``unknown op``
+    # and a handle without it is refused in words by the ``_dispatch`` probe.
+
     async def refresh(self) -> None:
         """Re-read session state into the projection (post-resume, rename,
         model change): the runtime pushes whatever changed."""
@@ -1563,6 +1572,17 @@ class SessionHandle(Protocol):
     # recall_steer(command_id) -> str: unsend the queued steering message the
     #   follower submitted under ``command_id``; raises when it already
     #   drained. Optional for the same reason.
+    # ask_respond(ask_id, answers, by="") -> str: answer a QUEUED ask,
+    #   whole-ask and atomic (design §2.4). Raises ValueError carrying the
+    #   queue's own refusal copy when the ask is not open, so a stale tap reads
+    #   the same on every surface. Optional and getattr-probed in ``_dispatch``,
+    #   which is what makes the op family ADDITIVE — no ``PROTOCOL_VERSION``
+    #   bump, an old registrant answers ``unknown op``, and a handle without it
+    #   is refused in words rather than with an AttributeError.
+    # ask_decline(ask_id, by="") -> str: the explicit "no answer, decide
+    #   yourself" (today's Esc). Optional, same shape.
+    # ask_dismiss(ask_id, by="") -> str: view-only removal of a TIMED-OUT ask;
+    #   injects nothing. Optional, same shape.
     # receive_peer_message(text, *, mode="mailbox", wake=False, sender=None)
     #   -> str: deliver a message from another local lop session (`lop send`).
     #   Optional (getattr-probed in _dispatch) so reduced test handles and
@@ -6550,6 +6570,34 @@ class RuntimeServer:
                 raise ValueError("this owner cannot recall queued steering")
             typed_recall = cast(Callable[[str], Awaitable[str]], recall)
             return await typed_recall(str(frame.get("command_id", "")))
+        if op in ("ask_respond", "ask_decline", "ask_dismiss"):
+            # THE QUEUED-ASK OP FAMILY. Probed with getattr like every other
+            # optional capability, so a reduced handle (an older bridge, a test
+            # double) answers the unknown-op error rather than an AttributeError
+            # — and the client renders "this session's runtime predates queued
+            # asks" from it, which is the truthful claim.
+            method = getattr(h, op, None)
+            if not callable(method):
+                raise ValueError(
+                    "this session's runtime predates queued asks; update the runtime "
+                    "to answer them"
+                )
+            if op == "ask_respond":
+                raw = frame.get("answers") or {}
+                if not isinstance(raw, dict):
+                    raise ValueError("ask_respond needs an answers map")
+                answers = {
+                    str(key): [str(item) for item in (value or [])] for key, value in raw.items()
+                }
+                outcome = method(str(frame.get("ask_id", "")), answers, by=str(frame.get("by", "")))
+            else:
+                outcome = method(str(frame.get("ask_id", "")), by=str(frame.get("by", "")))
+            # ``method`` came from a getattr probe, so what it returns is not
+            # statically known to be awaitable; the same spelling the
+            # ``adopt_aside`` arm below uses.
+            if not inspect.isawaitable(outcome):
+                raise ValueError(f"owner {op} operation must be awaitable")
+            return cast("str", await outcome)
         if op == "ask_answer":
             # ``question_index`` is the question the phone was DISPLAYING when
             # the user tapped (U8 guard): the handle rejects the answer if the

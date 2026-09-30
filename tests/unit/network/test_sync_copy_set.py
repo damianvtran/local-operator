@@ -348,6 +348,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         1,
         "``sessions`` itself: the directory the entries live IN",
     ),
+    "local_operator/asks/store.py": (
+        2,
+        "``ASKS_DIRNAME`` (``asks``) and ``SESSIONS_DIRNAME`` (``sessions``): the two "
+        "directories the queue's paths are built UNDER, never entries of a session "
+        "directory. The third constant in that module, ``ASKS_LOG_NAME`` "
+        "(``asks.jsonl``), IS an entry of one and is classified instead — it sits in "
+        "``sync.COPY_SET_NAMES``, so a session moved with an open ask carries the "
+        "question with it.",
+    ),
     "local_operator/session/attachments.py": (
         1,
         "``attachments``: the content-addressed store at the config root. A copy set "

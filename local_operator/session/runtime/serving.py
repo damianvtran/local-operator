@@ -1084,6 +1084,32 @@ class ServingSessionHandle(SessionHandle):
         self._ask_gate = ask_gate
         self._session.set_approval_handler(approval_gate)
         self._session.set_ask_handler(ask_gate)
+        # The queued-ask RECEIPT may name where the ask is showing, and only this
+        # handle can answer that: a Session cannot see the attach table. The probe
+        # is the SAME predicate the parked-gate timeout uses -- ``_attached_surfaces``
+        # proves a client is CONNECTED, which is why the receipt claims
+        # presentation and never "the user was told" (design §2.1).
+        #
+        # Probed, like every optional capability on the handle: a reduced session
+        # double (and any host built before this field) has no ``set_ask_reach``,
+        # and the receipt already degrades to "nobody is attached" without one.
+        install_reach = getattr(self._session, "set_ask_reach", None)
+        if callable(install_reach):
+            install_reach(self._ask_reach_probe)
+
+    def _ask_reach_probe(self) -> list[str]:
+        """Surface names something is attached as, for a queued ask's receipt.
+
+        Empty means "nobody" -- the receipt then says the ask will be shown when
+        the user next opens the session, which is true and does not pretend a
+        notification went out. A desktop banner is NOT folded in: an OS toast is
+        a possibility, not an observation, and the entire point of this probe is
+        that the receipt claims only what was measured.
+        """
+        try:
+            return sorted(self._attached_surfaces())
+        except Exception:  # noqa: BLE001 -- an unreadable attach table is "nobody"
+            return []
 
     # -- live config -------------------------------------------------------------
 
@@ -4584,6 +4610,39 @@ class ServingSessionHandle(SessionHandle):
             # Human, reconciling copy: a stale tap means another front end won.
             raise ValueError("that question was already answered") from exc
         return "answered"
+
+    @_on_session_loop
+    async def ask_respond(self, ask_id: str, answers: dict[str, list[str]], by: str = "") -> str:
+        """Answer a QUEUED ask (design §2.4). Additive op: an old registrant
+        answers ``unknown op``, and a runtime without the queue refuses in words.
+
+        Delivery is awaited rather than merely scheduled, so the caller's
+        "answered" is a claim about a row that exists: the queue's own reconcile
+        is idempotent, and awaiting it here means a test (or a person watching the
+        phone) sees the response turn land before the ACK returns.
+        """
+        outcome = self._session.respond_ask(ask_id, answers, by=by or "remote")
+        if not outcome.get("ok"):
+            raise ValueError(str(outcome.get("error") or "the answer was refused"))
+        await self._session.reconcile_asks()
+        return "answered"
+
+    @_on_session_loop
+    async def ask_decline(self, ask_id: str, by: str = "") -> str:
+        """Decline a queued ask: explicit "no answer, decide yourself" (§2.4)."""
+        outcome = self._session.decline_ask(ask_id, by=by or "remote")
+        if not outcome.get("ok"):
+            raise ValueError(str(outcome.get("error") or "the decline was refused"))
+        await self._session.reconcile_asks()
+        return "declined"
+
+    @_on_session_loop
+    async def ask_dismiss(self, ask_id: str, by: str = "") -> str:
+        """Dismiss a timed-out ask from the view. Injects nothing, ever."""
+        outcome = self._session.dismiss_ask(ask_id, by=by or "remote")
+        if not outcome.get("ok"):
+            raise ValueError(str(outcome.get("error") or "the dismissal was refused"))
+        return "dismissed"
 
     def has_admitted_command(self, command_id: str) -> bool:
         """Has this session already durably admitted ``command_id``?
