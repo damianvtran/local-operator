@@ -91,10 +91,10 @@ async def test_flag_off_accepts_an_in_range_timeout_and_awaits():
 
 @pytest.mark.asyncio
 async def test_the_queued_door_returns_a_receipt_and_never_calls_the_hook():
-    calls: list[tuple[Any, Any]] = []
+    calls: list[tuple[Any, ...]] = []
 
-    def enqueue(questions: list[Any], timeout: Any) -> dict[str, Any]:
-        calls.append((questions, timeout))
+    def enqueue(questions: list[Any], timeout: Any, *, tool_call_id: str = "") -> dict[str, Any]:
+        calls.append((questions, timeout, tool_call_id))
         return {
             "ok": True,
             "text": "Ask a-1 queued (1 question(s)); showing on terminal.",
@@ -113,6 +113,10 @@ async def test_the_queued_door_returns_a_receipt_and_never_calls_the_hook():
     )
     assert hook_called == []
     assert calls and calls[0][1] == "30m"
+    # The model's own call id rides the queue call (review round 1, MINOR 5):
+    # without it the receipt's ask could not be linked back to the call that
+    # asked, and every ask in the tree carried an empty id.
+    assert calls[0][2] == "call-1"
     assert "queued" in result.text
     assert result.details is not None and result.details["ask_id"] == "a-1"
     assert result.details["status"] == "queued"
@@ -123,7 +127,7 @@ async def test_a_refused_enqueue_is_reported_as_an_error_with_its_own_words():
     """The caps live in the queue, and their sentence is what the model must read
     — the tool does not paraphrase it into a generic failure."""
 
-    def enqueue(questions: list[Any], timeout: Any) -> dict[str, Any]:
+    def enqueue(questions: list[Any], timeout: Any, *, tool_call_id: str = "") -> dict[str, Any]:
         return {
             "ok": False,
             "error": "this session already has 8 open asks (the cap is 8); "

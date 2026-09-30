@@ -11,6 +11,7 @@ that must ask it are pinned here rather than trusted to have been found.
 
 from __future__ import annotations
 
+import ast
 import inspect
 from pathlib import Path
 
@@ -102,20 +103,136 @@ def test_the_narrow_predicate_still_means_patience_only():
     assert patience.is_patience_row({"kind": "ask_timeout"}) is False
 
 
+#: EVERY reader of a wake scheduler's ``.schedules`` list, as
+#: ``module -> {function: why it may read the RAW list}``.
+#:
+#: The pin is here because the failure mode is a MISSED call site — and because a
+#: source test that only asserted the string ``"scheduled_rows"`` appeared in six
+#: files would pass while someone added a SEVENTH listing surface beside them,
+#: filtering by hand (review round 1, MINOR 8). A new reader therefore fails this
+#: test until it is classified, exactly as a new path-shaped constant fails the
+#: copy-set guard until it is: either it is a human surface and uses
+#: ``scheduled_rows``/``is_internal_wake_row``, or it reads the raw list for one
+#: of the reasons below and says so.
+_SCHEDULES_READERS: dict[str, dict[str, str]] = {
+    "local_operator/session/runtime/serving.py": {
+        "_wake_slash": "a MUTATION path: it rebuilds the whole list to edit one row",
+        "next_wake_due_at": "the supervisor's due-time read: hidden rows must still fire",
+    },
+    "local_operator/session/session.py": {
+        "_aida_reconcile_now": "full-list writer (Aida's cadence reconcile)",
+        "_apply": "full-list writer (the ask deadline row's arm/retire)",
+        "_flush_patience_armed_after": "full-list writer (patience's armed-after patch)",
+        "_rebuild_wake_index_entry": "full-list writer (the index the supervisor reads)",
+        "arm_ask_wake": "full-list writer (the ask deadline row)",
+        "cancel_pending_patience": "full-list writer (patience's cancel)",
+        "hand_wakes_to_successor": "full-list writer (the placement handoff)",
+        "retire_ask_wake": "full-list writer (the ask deadline row)",
+    },
+    "local_operator/tools/builtin.py": {
+        "_wake_cancel": "the wake tool's mutation",
+        "_wake_create": "the wake tool's mutation",
+        "_wake_edit": "the wake tool's mutation",
+        "_wake_list": "a HUMAN surface — subtracts via ``scheduled_rows``",
+        "execute_patience": "the patience engine's own door",
+    },
+    "local_operator/tui/widgets/wake_panel.py": {
+        "sync": "a HUMAN surface — subtracts via ``scheduled_rows``",
+    },
+    "local_operator/wakes/patience.py": {
+        "arm_patience": "the patience engine",
+        "cancel_patience": "the patience engine",
+    },
+}
+
+#: The files that read the list only to render it for a person, and must
+#: therefore never do so unfiltered. Separate from the map above because the two
+#: answer different questions: that one says WHERE the list is read, this one says
+#: what a reader that a human sees must do about it.
+_HUMAN_SURFACES = (
+    "local_operator/tools/builtin.py",
+    "local_operator/tui/widgets/wake_panel.py",
+    "local_operator/server/utils/desktop_feed.py",
+    "local_operator/server/routes/desktop_wakes.py",
+    "local_operator/cli.py",
+    "local_operator/session/catalog.py",
+)
+
+
+def _schedules_readers() -> dict[str, dict[str, str]]:
+    """``module -> {function: base spelling}`` for every ``X.schedules`` read.
+
+    Filtered to the base names that denote a WAKE scheduler (the word ``wake``,
+    ``scheduler`` or ``sched`` in the spelling), because ``.schedules`` is also
+    the agent scheduler's and a frontend view object's attribute and those are not
+    this subsystem's list at all.
+    """
+    found: dict[str, dict[str, str]] = {}
+    for path in sorted((ROOT / "local_operator").rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:  # pragma: no cover — a broken tree is flake8's failure
+            continue
+        module = str(path.relative_to(ROOT))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for inner in ast.walk(node):
+                if not isinstance(inner, ast.Attribute) or inner.attr != "schedules":
+                    continue
+                base = ast.unparse(inner.value)
+                if not any(token in base.lower() for token in ("wake", "scheduler", "sched")):
+                    continue
+                found.setdefault(module, {})[node.name] = base
+    return found
+
+
+def test_every_scheduler_reader_is_classified():
+    """A NEW reader of the wake list fails here until it is classified.
+
+    Both directions, like the copy-set guard: an unlisted reader is a surface
+    nobody has decided about, and a listed reader that no longer exists is a stale
+    row rather than a statement. The failure text says which of the two it is and
+    which side a listing surface belongs on.
+    """
+    found = _schedules_readers()
+    unclassified = sorted(
+        f"{module}::{name}"
+        for module, names in found.items()
+        for name in names
+        if name not in _SCHEDULES_READERS.get(module, {})
+    )
+    assert unclassified == [], (
+        "these functions read a wake scheduler's ``.schedules`` list and no row of "
+        "_SCHEDULES_READERS accounts for them:\n  "
+        + "\n  ".join(unclassified)
+        + "\n\nIf the reader renders the list for a PERSON, it must subtract the hidden "
+        "internal timers (``wakes.store.scheduled_rows`` / ``is_internal_wake_row``) "
+        "rather than filtering by hand. If it is a mutation, an engine reader or a "
+        "delivery path, add it to _SCHEDULES_READERS with the reason."
+    )
+    stale = sorted(
+        f"{module}::{name}"
+        for module, names in _SCHEDULES_READERS.items()
+        for name in names
+        if name not in found.get(module, {})
+    )
+    assert stale == [], (
+        "_SCHEDULES_READERS names readers that no longer read ``.schedules`` "
+        "(the row is stale, not a statement):\n  " + "\n  ".join(stale)
+    )
+
+
 def test_every_listing_surface_goes_through_the_one_filter():
-    """A source sweep, because the failure mode is a MISSED call site: the
-    surfaces that list wakes for a human all read ``scheduled_rows``, and none of
-    them filters ``scheduler.schedules`` by hand."""
-    surfaces = [
-        ROOT / "local_operator/tools/builtin.py",
-        ROOT / "local_operator/tui/widgets/wake_panel.py",
-        ROOT / "local_operator/server/utils/desktop_feed.py",
-        ROOT / "local_operator/server/routes/desktop_wakes.py",
-        ROOT / "local_operator/cli.py",
-        ROOT / "local_operator/session/catalog.py",
-    ]
-    for path in surfaces:
-        assert "scheduled_rows" in path.read_text(), path
+    """The human surfaces, asserted directly: each names the ONE filter.
+
+    The sweep above cannot tell a filtered read from an unfiltered one — it sees
+    the attribute either way — so the two tests are complements: this one pins what
+    the human surfaces must do, and the sweep pins that no fourth surface appears
+    without someone deciding which it is.
+    """
+    for relative in _HUMAN_SURFACES:
+        assert "scheduled_rows" in (ROOT / relative).read_text(encoding="utf-8"), relative
 
 
 def test_the_session_subtracts_the_union_from_the_visible_catch_up_fold():
@@ -127,6 +244,46 @@ def test_the_session_subtracts_the_union_from_the_visible_catch_up_fold():
     source = inspect.getsource(session_module.Session._prepare_missed_wake_catchup)
     assert "is_internal_wake_row" in source
     assert "is_patience_row" not in source
+
+
+def test_hidden_rows_do_not_consume_the_user_wake_cap():
+    """MINOR 7: the 16-row cap is the USER's budget, so an internal timer must not
+    spend it. Eight open asks would otherwise leave a person eight wakes while the
+    refusal still quoted sixteen — flag-on only, and invisible until it bit."""
+    from local_operator.harness.wake import build_wake_schedule
+    from local_operator.harness.wake_types import MAX_WAKE_SCHEDULES
+
+    def internal(index: int) -> WakeSchedule:
+        return WakeSchedule(
+            id=f"ask-timeout-a-{index}",
+            message=f"ask {index} deadline",
+            next_due_at=1_700_000_000_000,
+            created_at=1_700_000_000_000,
+            kind="ask_timeout",
+        )
+
+    rows = [internal(index) for index in range(MAX_WAKE_SCHEDULES)]
+    outcome = build_wake_schedule({"message": "standup", "in": "1h"}, rows, 1_700_000_000_000)
+    assert "error" not in outcome, outcome
+
+
+def test_the_cap_still_refuses_the_seventeenth_real_wake():
+    """The other direction, so the fix cannot be read as "the cap is gone"."""
+    from local_operator.harness.wake import build_wake_schedule
+    from local_operator.harness.wake_types import MAX_WAKE_SCHEDULES
+
+    rows = [
+        WakeSchedule(
+            id=f"w{index}",
+            message="standup",
+            next_due_at=1_700_000_000_000,
+            created_at=1_700_000_000_000,
+        )
+        for index in range(MAX_WAKE_SCHEDULES)
+    ]
+    outcome = build_wake_schedule({"message": "standup", "in": "1h"}, rows, 1_700_000_000_000)
+    assert "error" in outcome
+    assert str(MAX_WAKE_SCHEDULES) in outcome["error"]
 
 
 def test_the_delivery_path_still_routes_ask_timeout_rows():

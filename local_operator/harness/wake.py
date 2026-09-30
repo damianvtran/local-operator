@@ -33,7 +33,7 @@ import inspect
 import logging
 import re
 from datetime import datetime, time, timedelta
-from typing import Any, Awaitable, Callable, Literal, TypedDict
+from typing import Any, Awaitable, Callable, Literal, Sequence, TypedDict
 
 # ``pydantic`` is deliberately NOT imported here any more: the only pydantic
 # types this module ever touched were the two DTOs, and they moved to
@@ -312,6 +312,25 @@ def format_duration(ms: int) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _user_facing(rows: Sequence[Any]) -> list[Any]:
+    """``rows`` minus the HIDDEN internal timers, for the user-facing cap.
+
+    The cap exists so a person cannot fill their own schedule with rows they did
+    not create; the patience and ask-deadline rows are mechanisms the user never
+    asked for, so counting them would silently shrink that budget to as little as
+    eight once eight asks are open — flag-on only, and the error still said
+    "at most 16" while the list showed fewer (review round 1, MINOR 7).
+
+    The subtraction comes from ``wakes.store``, the module that OWNS the
+    predicate, and is imported INSIDE the function: ``harness.wake`` is on the
+    CLI's import path and this is its only need for the wake store, so the import
+    rides the one branch that can run only when someone is creating a wake.
+    """
+    from local_operator.wakes.store import scheduled_rows
+
+    return list(scheduled_rows(rows))
+
+
 def build_wake_schedule(
     request: dict[str, Any],
     existing: list[WakeSchedule],
@@ -347,7 +366,7 @@ def build_wake_schedule(
             "error": f"wake message must be at most {MAX_WAKE_MESSAGE_CHARS} characters.",
             "malformed": True,
         }
-    if len(existing) >= MAX_WAKE_SCHEDULES:
+    if len(_user_facing(existing)) >= MAX_WAKE_SCHEDULES:
         return {
             "error": f"at most {MAX_WAKE_SCHEDULES} wake schedules are allowed.",
             "malformed": False,

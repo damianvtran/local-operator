@@ -24446,7 +24446,7 @@ async def execute_ask(
         # ``Any`` is deliberate: ``callable()`` narrows an untyped callable to
         # ``Callable[..., object]``, which would make every ``outcome.get`` below
         # a type error on a value whose real shape is a mapping.
-        outcome: Any = enqueue(params.questions, params.timeout)
+        outcome: Any = enqueue(params.questions, params.timeout, tool_call_id=tool_call_id)
         if not outcome.get("ok"):
             return _error(
                 tool_call_id,

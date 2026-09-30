@@ -37,6 +37,13 @@ class FakeSession:
         self.batches: list[list[Any]] = []
         self.reach: list[str] = []
         self.spawned: list[asyncio.Task[Any]] = []
+        #: The session's LIVE credential keys. Empty by default, which is also the
+        #: honest answer for a double that stores nothing — and the reason the
+        #: secret-lost tests have to say what is held rather than assume it.
+        self.credentials: list[str] = []
+
+    def credential_names(self) -> list[str]:
+        return list(self.credentials)
 
     def ask_reach(self) -> list[str]:
         return self.reach
@@ -415,6 +422,245 @@ def test_the_expiry_event_carries_the_ask_id_and_no_question_text_for_a_secret(
     text = session.batches[0][0].details["text"]
     assert "API_KEY" in text
     assert "sk-live" not in text
+
+
+def test_a_second_reconcile_does_not_write_the_timeout_after_a_late_answer(tmp_path: Path):
+    """MAJOR 2: the suppression is LEVEL-TRIGGERED, not a one-batch deferral.
+
+    The reviewer's probe, verbatim in shape: a cold late answer, then TWO
+    reconciles. The one-shot form wrote the response first and the ``ask-timeout-``
+    row on the very next pass, so the model read "[Ask timed out] … if they answer
+    later you will be told" directly below the answer that was the reply. Reconcile
+    re-runs on every answer, at every turn start and on the timer tick, so "one
+    reconcile later" is the common case rather than a corner.
+    """
+    session = FakeSession()
+    queue = _queue(tmp_path, session, now=BASE + 200_000)
+    queue._now = lambda: BASE
+    ask_id = queue.enqueue(_questions(), 120)["details"]["ask_id"]
+    queue._now = lambda: BASE + 200_000
+    queue.respond(ask_id, {"q0": ["late"]}, by="terminal")
+    assert _run(queue.reconcile()) == [store.response_row_id(ask_id)]
+    assert _run(queue.reconcile()) == []
+    assert _run(queue.reconcile()) == []
+    kinds = [m.custom_type for batch in session.batches for m in batch]
+    assert kinds == ["ask_response"]
+
+
+def test_a_deadline_that_fired_first_still_writes_its_own_row(tmp_path: Path):
+    """The other side of MAJOR 2: the rule removes a CONTRADICTION, not the notice.
+
+    An ask whose window closed with nobody watching is ``timed_out`` — no response
+    exists — so its deadline row is delivered exactly as §2.5 requires, and the
+    late answer that follows adds the response beside it.
+    """
+    session = FakeSession()
+    queue = _queue(tmp_path, session, now=BASE + 130_000)
+    queue._now = lambda: BASE
+    ask_id = queue.enqueue(_questions(), 120)["details"]["ask_id"]
+    queue._now = lambda: BASE + 130_000
+    assert _run(queue.reconcile()) == [store.timeout_row_id(ask_id)]
+    assert _run(queue.reconcile()) == []
+    queue._now = lambda: BASE + 200_000
+    queue.respond(ask_id, {"q0": ["late"]}, by="terminal")
+    assert _run(queue.reconcile()) == [store.response_row_id(ask_id)]
+    kinds = [m.custom_type for batch in session.batches for m in batch]
+    assert kinds == ["ask_timeout", "ask_response"]
+
+
+# ---------------------------------------------------------------------------
+# the review round 1 contracts
+# ---------------------------------------------------------------------------
+
+
+def test_a_partial_answer_map_is_refused_and_names_the_missing_ids(tmp_path: Path):
+    """QA Q1/§2.4: the submit is atomic per ask, so omitting a question is refused.
+
+    The row that lands is TERMINAL, which is what makes a forgotten key a silent
+    loss rather than a partial answer: the ask can never be completed afterwards.
+    The refusal has to name the ids, because the surface that has to fix it is the
+    one being told.
+    """
+    session = FakeSession()
+    queue = _queue(tmp_path, session)
+    ask_id = queue.enqueue(_questions(2), 120)["details"]["ask_id"]
+    outcome = queue.respond(ask_id, {"q0": ["yes"]}, by="desktop")
+    assert outcome["ok"] is False
+    assert "'q1'" in outcome["error"]
+    record = queue.find(ask_id)
+    assert record is not None and record["status"] == store.STATUS_OPEN
+    # And the ask is still answerable in full, which is the point.
+    assert queue.respond(ask_id, {"q0": ["yes"], "q1": ["eu"]}, by="desktop")["ok"] is True
+
+
+def test_an_empty_list_is_how_a_skipped_question_is_sent(tmp_path: Path):
+    """Completeness is checked on the KEYS, not the values: a question the user
+    skipped has to be sayable, and an empty list says it."""
+    session = FakeSession()
+    queue = _queue(tmp_path, session)
+    ask_id = queue.enqueue(_questions(2), 120)["details"]["ask_id"]
+    assert queue.respond(ask_id, {"q0": [], "q1": ["eu"]}, by="terminal")["ok"] is True
+    answered = queue.find(ask_id)
+    assert answered is not None and answered["status"] == store.STATUS_ANSWERED
+
+
+def test_a_value_shaped_answer_for_a_secret_question_cannot_reach_the_log(
+    tmp_path: Path,
+):
+    """MINOR 6: the queue itself refuses a raw value, not just its caller.
+
+    ``Session.respond_ask`` substitutes the key name BEFORE calling here; this is
+    what keeps that hop load-bearing, because a cold CLI or relay route in B/C
+    reaches the queue directly. Asserted by grepping the LOG for the sentinel, not
+    by reading the return value — the contract is about what is durable.
+    """
+    sentinel = "sk-live-do-not-persist"
+    session = FakeSession()
+    queue = _queue(tmp_path, session)
+    ask_id = queue.enqueue(_questions(1, secret=True), 120)["details"]["ask_id"]
+    assert queue.respond(ask_id, {"key-0": [sentinel]}, by="cli")["ok"] is True
+    log = store.asks_log_path(store.session_dir(tmp_path, "s1")).read_text()
+    assert sentinel not in log
+    record = queue.find(ask_id)
+    assert record is not None and record["answers"]["key-0"] == ["<not provided>"]
+
+
+def test_the_key_name_itself_is_still_accepted_for_a_secret_question(tmp_path: Path):
+    """The guard must not eat the LEGITIMATE cell: the key name is what
+    ``Session.respond_ask`` passes after storing the value, and the model has to
+    read it back."""
+    session = FakeSession()
+    queue = _queue(tmp_path, session)
+    ask_id = queue.enqueue(_questions(1, secret=True), 120)["details"]["ask_id"]
+    assert queue.respond(ask_id, {"key-0": ["KEY-0"]}, by="terminal")["ok"] is True
+    record = queue.find(ask_id)
+    assert record is not None and record["answers"]["key-0"] == ["KEY-0"]
+
+
+def test_the_key_shape_helper_matches_the_real_credential_normaliser():
+    """The guard re-spells ``variables.normalize_credential_key`` rather than
+    importing it (the asks package stays on the lean side of the import graph), so
+    the two spellings are pinned together here: if the real normaliser changes,
+    this fails instead of the guard quietly widening or narrowing."""
+    from local_operator.asks.queue import _credential_key_shape
+    from local_operator.variables import normalize_credential_key
+
+    for raw in ("api key", "API-KEY", "api_key", "API_KEY", "  Api.Key  "):
+        assert _credential_key_shape(raw) == normalize_credential_key(raw)
+
+
+def test_the_tool_call_id_rides_the_queued_event_and_the_answer(tmp_path: Path):
+    """MINOR 5: the id came from an attribute nothing in the tree ever set, so
+    every ask carried ``""`` and A2's card could not link ask to call."""
+    session = FakeSession()
+    queue = _queue(tmp_path, session)
+    ask_id = queue.enqueue(_questions(), 120, tool_call_id="call-7")["details"]["ask_id"]
+    record = queue.find(ask_id)
+    assert record is not None and record["tool_call_id"] == "call-7"
+    queue.respond(ask_id, {"q0": ["yes"]}, by="terminal")
+    _run(queue.reconcile())
+    assert session.batches[0][0].details["tool_call_id"] == "call-7"
+
+
+def test_a_secret_whose_key_is_gone_is_delivered_as_lost(tmp_path: Path):
+    """MAJOR 3/§2.4: verify-on-delivery. The value lives in session memory, so a
+    restart between the answer and its delivery leaves a row announcing a
+    credential the runtime does not hold — the one path where the user answered
+    and the agent still cannot proceed."""
+    session = FakeSession()
+    queue = _queue(tmp_path, session)
+    ask_id = queue.enqueue(_questions(1, secret=True), 120)["details"]["ask_id"]
+    queue.respond(ask_id, {"key-0": ["KEY-0"]}, by="terminal")
+    # The store no longer holds it (the restart the design warns about).
+    session.credentials = []
+    _run(queue.reconcile())
+    details = session.batches[0][0].details
+    assert details["secret_lost"] is True
+    assert "session restarted" in details["text"]
+
+
+def test_a_secret_the_session_still_holds_is_delivered_normally(tmp_path: Path):
+    """The other half, and the one that keeps the gate honest: a key that IS in
+    the store must not be reported lost."""
+    session = FakeSession()
+    queue = _queue(tmp_path, session)
+    ask_id = queue.enqueue(_questions(1, secret=True), 120)["details"]["ask_id"]
+    queue.respond(ask_id, {"key-0": ["KEY-0"]}, by="terminal")
+    session.credentials = ["KEY-0"]
+    _run(queue.reconcile())
+    details = session.batches[0][0].details
+    assert details["secret_lost"] is False
+    assert "session restarted" not in details["text"]
+
+
+def test_a_declined_secret_is_not_reported_as_lost(tmp_path: Path):
+    """``<not provided>`` is a decision, not a loss: nothing was ever handed
+    over, so the lost copy would be a lie about what the user did."""
+    session = FakeSession()
+    queue = _queue(tmp_path, session)
+    ask_id = queue.enqueue(_questions(1, secret=True), 120)["details"]["ask_id"]
+    queue.respond(ask_id, {"key-0": ["<not provided>"]}, by="terminal")
+    _run(queue.reconcile())
+    assert session.batches[0][0].details["secret_lost"] is False
+
+
+def test_a_deadline_that_passed_while_stopped_says_so(tmp_path: Path):
+    """QA Q2/§2.2: the stop rule's copy half. The notice is owed either way —
+    without the sentence the user who stopped the session is told the agent moved
+    on as though they had been watching."""
+    session = FakeSession()
+    session_dir = store.session_dir(tmp_path, "s1")
+    session_dir.mkdir(parents=True, exist_ok=True)
+    # A DELIBERATE stop, stamped between the ask and its deadline.
+    (session_dir / "runtime-stop.json").write_text(
+        '{"deliberate": true, "at": %f}' % ((BASE + 60_000) / 1000.0)
+    )
+    queue = _queue(tmp_path, session, now=BASE + 200_000)
+    queue._now = lambda: BASE
+    queue.enqueue(_questions(), 120)
+    queue._now = lambda: BASE + 200_000
+    _run(queue.reconcile())
+    details = session.batches[0][0].details
+    assert details["lapsed_while_stopped"] is True
+    assert "lapsed while the session was stopped" in details["text"]
+
+
+def test_an_involuntary_death_does_not_claim_the_session_was_stopped(tmp_path: Path):
+    """The marker also records crashes (a reap, a stray kill). Telling a user their
+    session "was stopped" when it died is the kind of wrong sentence that makes the
+    honest ones worthless, so ``deliberate`` is required."""
+    session = FakeSession()
+    session_dir = store.session_dir(tmp_path, "s1")
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "runtime-stop.json").write_text(
+        '{"deliberate": false, "at": %f, "mechanism": "reap"}' % ((BASE + 60_000) / 1000.0)
+    )
+    queue = _queue(tmp_path, session, now=BASE + 200_000)
+    queue._now = lambda: BASE
+    queue.enqueue(_questions(), 120)
+    queue._now = lambda: BASE + 200_000
+    _run(queue.reconcile())
+    details = session.batches[0][0].details
+    assert details["lapsed_while_stopped"] is False
+    assert "lapsed while" not in details["text"]
+
+
+def test_a_stop_outside_the_asks_own_window_is_not_annotated(tmp_path: Path):
+    """The window is the ask's own: an old stop marker may not narrate a deadline
+    that fell while the session was running."""
+    session = FakeSession()
+    session_dir = store.session_dir(tmp_path, "s1")
+    session_dir.mkdir(parents=True, exist_ok=True)
+    # The stop happened BEFORE this ask existed.
+    (session_dir / "runtime-stop.json").write_text(
+        '{"deliberate": true, "at": %f}' % ((BASE - 600_000) / 1000.0)
+    )
+    queue = _queue(tmp_path, session, now=BASE + 200_000)
+    queue._now = lambda: BASE
+    queue.enqueue(_questions(), 120)
+    queue._now = lambda: BASE + 200_000
+    _run(queue.reconcile())
+    assert session.batches[0][0].details["lapsed_while_stopped"] is False
 
 
 # ---------------------------------------------------------------------------

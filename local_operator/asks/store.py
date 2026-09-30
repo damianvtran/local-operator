@@ -259,22 +259,26 @@ def timeout_row_id(ask_id: str) -> str:
 def expected_row_ids(record: Mapping[str, Any]) -> list[str]:
     """The transcript row ids THIS status requires, in delivery order.
 
-    ``late`` legitimately needs TWO rows — the timeout fired first, then the
-    answer was accepted — which is why the delivery marker is per
-    ``(ask_id, kind)`` and not one boolean (design §2.2).
+    ``timed_out`` needs the deadline row and nothing else: the notice is what the
+    status means, and it is written in its own reconcile (there is no response to
+    wait for). A ``late`` ask needs ONE row — the response — because a response row
+    for the ask SUPERSEDES its deadline row for good (review round 1, MAJOR 2; the
+    per-batch form of the suppression let the contradiction in one reconcile
+    later, and §2.3's rule is that the timeout is suppressed for that ask, not
+    postponed). That the two rows can both exist is a fact about the LOG, not about
+    this status: an ask whose deadline fired while nobody was watching was written
+    as ``timed_out`` first, and its answer then arrived as a second reconcile's
+    response row — the lead on that response is what tells the model the window had
+    closed.
     """
     ask_id = str(record.get("ask_id") or "")
     status = record.get("status")
     if not ask_id:
         return []
-    if status == STATUS_ANSWERED:
-        return [response_row_id(ask_id)]
-    if status == STATUS_DECLINED:
+    if status in (STATUS_ANSWERED, STATUS_DECLINED, STATUS_LATE):
         return [response_row_id(ask_id)]
     if status == STATUS_TIMED_OUT:
         return [timeout_row_id(ask_id)]
-    if status == STATUS_LATE:
-        return [timeout_row_id(ask_id), response_row_id(ask_id)]
     return []
 
 

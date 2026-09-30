@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -130,7 +131,13 @@ class AskQueue:
 
     # -- writing -----------------------------------------------------------
 
-    def enqueue(self, questions: Sequence[Any], timeout_raw: Any) -> dict[str, Any]:
+    def enqueue(
+        self,
+        questions: Sequence[Any],
+        timeout_raw: Any,
+        *,
+        tool_call_id: str = "",
+    ) -> dict[str, Any]:
         """Validate, cap, append ``queued``, arm the timer; return a receipt.
 
         Returns ``{"ok": True, "text": …, "details": …}`` or
@@ -138,6 +145,11 @@ class AskQueue:
         model reads, never a silent clamp or a dropped ask: the caps exist
         because non-blocking asking is free for the model and costly for the
         human, and a model that never learns it was refused keeps re-asking.
+
+        ``tool_call_id`` is the model's own call id, passed IN rather than read
+        off the session (review round 1, MINOR 5): the attribute it used to read
+        does not exist anywhere in the tree, so every ask carried ``""`` and the
+        card A2 draws could not point back at the call that asked.
         """
         timeout_s, bounds_error = policy.parse_timeout_param(timeout_raw)
         if bounds_error is not None:
@@ -187,7 +199,7 @@ class AskQueue:
             "expires_at": now + timeout_s * 1000,
             "timeout_s": timeout_s,
             "urgent": policy.is_urgent(timeout_s),
-            "tool_call_id": str(getattr(self._session, "_current_tool_call_id", "") or ""),
+            "tool_call_id": str(tool_call_id or ""),
             "questions": shapes,
         }
         event = {"v": store.EVENT_SCHEMA, "kind": store.EVENT_QUEUED, "at": now, **record}
@@ -218,6 +230,7 @@ class AskQueue:
         answers: Mapping[str, Sequence[str]],
         *,
         by: str = "unknown",
+        tool_call_id: str = "",
     ) -> dict[str, Any]:
         """Append ``answered`` for the whole ask, atomically, and reconcile.
 
@@ -225,6 +238,19 @@ class AskQueue:
         fold keeps, so two surfaces racing produce one winner and the loser
         reads :func:`asks.render.refusal_copy` — the same rule ``_resolve_pending``
         enforced in memory, moved onto the durable record.
+
+        TWO REFUSALS THAT ARE CONTRACTS RATHER THAN GUARDS. FIRST, the map must be
+        COMPLETE (design §2.4, review round 1 QA Q1): every question id has to be
+        present, because the row that lands is terminal — a surface that forgot a
+        key would lose that question for good, and the user would have no way to
+        tell. A question the user deliberately skipped is sent as an EMPTY LIST,
+        which is how "no answer" is said without omitting the key, so the check is
+        on the KEYS and not on the values. SECOND, for a SECRET question the
+        recorded cell can only be a KEY NAME (review round 1, MINOR 6):
+        :meth:`Session.respond_ask` substitutes the value before calling here, and
+        this is what makes that hop load-bearing rather than merely the current
+        caller's good manners — a cold CLI or route in B/C reaches the queue
+        directly, and the value must not be able to reach the log through it.
         """
         now = self._now()
         record = self._find(ask_id, now)
@@ -233,14 +259,29 @@ class AskQueue:
         refusal = render.refusal_copy(record)
         if refusal:
             return {"ok": False, "error": refusal}
+        cleaned = {str(k): [str(v) for v in (vals or [])] for k, vals in answers.items()}
+        unanswered = [
+            str(q.get("id"))
+            for q in (record.get("questions") or ())
+            if str(q.get("id")) not in cleaned
+        ]
+        if unanswered:
+            return {"ok": False, "error": _partial_answer_error(unanswered)}
+        cleaned = _guard_secret_cells(record, cleaned)
         payload = {
             "v": store.EVENT_SCHEMA,
             "kind": store.EVENT_ANSWERED,
             "ask_id": ask_id,
             "at": now,
             "by": {"surface": by},
-            "answers": {str(k): [str(v) for v in (vals or [])] for k, vals in answers.items()},
+            "answers": cleaned,
         }
+        if tool_call_id or record.get("tool_call_id"):
+            # The id of the tool call that QUEUED this ask, carried on the answer
+            # so a card can link the two (review round 1, MINOR 5). The record's
+            # own id is the fallback: the caller that answers a question asked in
+            # an EARLIER turn has no tool call of its own to name.
+            payload["tool_call_id"] = str(tool_call_id or record.get("tool_call_id") or "")
         if not store.append_event(self.session_dir, payload):
             return {"ok": False, "error": "the answer could not be recorded."}
         self._settled(ask_id)
@@ -331,6 +372,13 @@ class AskQueue:
         if self._disposed:
             return []
         now = now_ms if now_ms is not None else self._now()
+        # The stop rule (design §2.2): an ask whose deadline passed while the
+        # session was STOPPED gets its notice annotated, because "Timed out"
+        # arriving at reopen reads as the agent having been slow rather than as
+        # nothing having been running. Read once per reconcile; ``None`` on the
+        # ordinary path, so the flag-off behaviour and the live behaviour are the
+        # same bytes.
+        stopped_at = self._deliberate_stop_ms()
         records, present = self._fold_state(now)
         timeouts: list[tuple[int, CustomMessage]] = []
         responses: list[tuple[int, CustomMessage]] = []
@@ -347,13 +395,29 @@ class AskQueue:
             )
             want_timeout = status in (store.STATUS_TIMED_OUT, store.STATUS_LATE)
             response_missing = want_response and response_id not in present
-            # N8: a timeout row is only written when the response it announces
-            # is NOT in the same batch (see the module docstring).
-            if want_timeout and timeout_id not in present and not response_missing:
+            # N8, AND IT IS PERMANENT RATHER THAN A ONE-BATCH DEFERRAL (review
+            # round 1, MAJOR 2). A response row for this ask — present, or being
+            # written in THIS batch — supersedes its deadline row for good. The
+            # one-shot form only deferred the contradiction: after the response
+            # landed, the next reconcile (and reconcile runs again immediately
+            # after every answer, at every turn start and on the tick) wrote the
+            # ``ask-timeout-`` row for an ask the model had just been told the
+            # answer to, so it read "[Ask timed out] ... if they answer later you
+            # will be told" immediately below the answer itself. A deadline that
+            # genuinely fired first is unaffected: that is the ``timed_out``
+            # status, where no response exists yet, and it is delivered in its own
+            # reconcile. A ``late`` ask therefore carries ONE row, the response,
+            # whose lead already says the window had closed — see
+            # :data:`asks.render.LATE_LEAD` and :func:`store.expected_row_ids`.
+            if want_timeout and timeout_id not in present and not want_response:
                 timeouts.append(
                     (
                         int(record.get("expires_at") or 0),
-                        self._timeout_message(record, now),
+                        self._timeout_message(
+                            record,
+                            now,
+                            lapsed_while_stopped=_lapsed_while_stopped(record, stopped_at),
+                        ),
                     )
                 )
             if response_missing:
@@ -409,8 +473,39 @@ class AskQueue:
         except Exception:  # noqa: BLE001 — a paint event must never fail a delivery
             logger.warning("ask: could not emit delivery event", exc_info=True)
 
+    def _deliberate_stop_ms(self) -> int | None:
+        """When this session was last deliberately stopped, in ms, or ``None``.
+
+        ``runtime-stop.json`` is the durable evidence the stop leaves in the
+        conversation directory (``registry.STOP_MARKER_NAME``, written by the
+        party that acts), and it is the ONE artifact available at boot that says
+        the session was stopped at a known time: the wake index's ``stopped_at``
+        is cleared by the open-time rewrite, so a boot reconcile cannot read it.
+
+        ``deliberate`` is required and that is not pedantry: the same file also
+        records INvoluntary deaths (a supervisor's reap, a stray kill), and telling
+        a user their session "was stopped" when what happened was a crash is the
+        kind of wrong sentence that makes the honest ones worthless. The read is
+        lazy and total: a missing module or a malformed marker is "no evidence",
+        never an exception on a delivery path.
+        """
+        try:
+            from local_operator.session.runtime.registry import read_stop_marker
+
+            marker = read_stop_marker(self.session_dir)
+        except Exception:  # noqa: BLE001 — no evidence, not a delivery failure
+            logger.debug("ask: could not read the stop marker", exc_info=True)
+            return None
+        if not isinstance(marker, Mapping) or not marker.get("deliberate"):
+            return None
+        try:
+            return int(float(marker.get("at") or 0) * 1000)
+        except (TypeError, ValueError):
+            return None
+
     def _response_message(self, record: Mapping[str, Any]) -> CustomMessage:
-        text = render.response_text(record)
+        lost = self._secret_answer_lost(record)
+        text = render.response_text(record, secret_lost=lost)
         return CustomMessage(
             custom_type=ASK_RESPONSE_MESSAGE_TYPE,
             attribution="user",
@@ -421,12 +516,71 @@ class AskQueue:
                 "questions": [dict(q) for q in (record.get("questions") or [])],
                 "answers": {k: list(v) for k, v in (record.get("answers") or {}).items()},
                 "at": record.get("answered_at") or record.get("at") or 0,
+                # ``secret_lost`` is stated on the ROW as well as in the text: a
+                # surface renders the fact (the card must not say "in hand" for a
+                # credential the session no longer holds) and the model reads the
+                # sentence it belongs to.
+                "secret_lost": lost,
+                "tool_call_id": str(record.get("tool_call_id") or ""),
                 "text": text,
             },
         )
 
-    def _timeout_message(self, record: Mapping[str, Any], now_ms: int) -> CustomMessage:
-        text = render.timeout_text(record, now_ms=now_ms)
+    def _secret_answer_lost(self, record: Mapping[str, Any]) -> bool:
+        """Whether a secret this response announces is GONE from the session store.
+
+        The verify-on-delivery half of design §2.4 (review round 1, MAJOR 3, and §8
+        risk 3 — the one path where the user answered and the agent still cannot
+        proceed). Session credentials live in memory unless ``persist`` promoted
+        them, so a restart between an answer and its delivery leaves a row that
+        announces a key the runtime does not hold; a model reading it proceeds to
+        use a credential that is not there. Delivering
+        :data:`render.SECRET_VALUE_LOST` instead is the difference between a bad
+        turn and a plausible-looking wrong one.
+
+        Fail-OPEN in one direction only: with no store to ask (a queue built
+        without a session, the unit shapes) the answer is "not lost", because a
+        gate that fired on an unanswerable question would decorate every secret
+        response in every embedder. A key that WAS declined (the not-provided
+        sentinel) is not "lost" either — nothing was ever handed over.
+        """
+        questions = [q for q in (record.get("questions") or ()) if q.get("secret")]
+        if not questions:
+            return False
+        names = getattr(self._session, "credential_names", None)
+        if not callable(names):
+            variables = getattr(self._session, "_variables", None)
+            names = getattr(variables, "credential_names", None)
+        if not callable(names):
+            return False
+        # ``Any`` is deliberate, here and at the call: ``callable()`` narrows an
+        # untyped attribute to ``Callable[..., object]``, and ``object`` is not
+        # iterable to the checker even though every real answer is a list of
+        # names — the same spelling the tool layer uses for its probed callables.
+        reader: Any = names
+        try:
+            held = {str(name).upper() for name in reader()}
+        except Exception:  # noqa: BLE001 — an unreadable store is not a "lost" claim
+            logger.debug("ask: could not read the credential names", exc_info=True)
+            return False
+        answers = record.get("answers") or {}
+        for question in questions:
+            cell = [str(v) for v in (answers.get(str(question.get("id"))) or ())]
+            key = cell[0].strip() if cell else ""
+            if not key or key == _secret_not_provided():
+                continue
+            if key.upper() not in held:
+                return True
+        return False
+
+    def _timeout_message(
+        self,
+        record: Mapping[str, Any],
+        now_ms: int,
+        *,
+        lapsed_while_stopped: bool = False,
+    ) -> CustomMessage:
+        text = render.timeout_text(record, now_ms=now_ms, lapsed_while_stopped=lapsed_while_stopped)
         waited_s = max(0, now_ms - int(record.get("created_at") or now_ms)) // 1000
         return CustomMessage(
             custom_type=ASK_TIMEOUT_MESSAGE_TYPE,
@@ -437,6 +591,7 @@ class AskQueue:
                 "status": store.STATUS_TIMED_OUT,
                 "waited_s": waited_s,
                 "urgent": bool(record.get("urgent")),
+                "lapsed_while_stopped": lapsed_while_stopped,
                 "text": text,
             },
         )
@@ -623,6 +778,117 @@ class AskQueue:
             if candidate not in used:
                 return candidate
         return store.new_ask_id()
+
+
+def _secret_not_provided() -> str:
+    """The cell value that says the user declined to hand a secret over.
+
+    Imported lazily from the tool module that owns it rather than re-spelled: the
+    two must be the same string, or a declined secret would read as a lost one.
+    """
+    from local_operator.tools.builtin import ASK_SECRET_NOT_PROVIDED
+
+    return ASK_SECRET_NOT_PROVIDED
+
+
+def _credential_key_shape(text: str) -> str:
+    """``text`` in the shape ``variables.normalize_credential_key`` produces.
+
+    Re-spelled rather than imported because this module is on the harness's lean
+    side of the import graph (``session.variables`` pulls the session engine in),
+    and the property being compared is the normaliser's whole contract: letters
+    and digits kept, every other run folded to one ``_``, upper-cased. The spelling
+    is pinned against the real function by ``tests/unit/asks/test_queue.py`` so a
+    drift here fails rather than silently widening the secret guard.
+    """
+    return "_".join(part for part in re.split(r"[^A-Za-z0-9]+", text.strip()) if part).upper()
+
+
+def _secret_cell_ok(cell: Sequence[str], qid: str) -> bool:
+    """Whether ``cell`` for secret question ``qid`` can only be a KEY NAME.
+
+    The positive test is deliberately narrow — a single token with no whitespace
+    whose key shape matches the question id's — because the thing being excluded
+    is a pasted SECRET, and a secret is arbitrary bytes: it has no reason to equal
+    the id it was asked under, while the key name the credential store returns for
+    a question is that id in exactly this shape. The value is never logged,
+    returned or quoted on the refusal path either.
+    """
+    head = str(cell[0]).strip() if cell else ""
+    if not head or any(char.isspace() for char in head):
+        return False
+    return _credential_key_shape(head) == _credential_key_shape(qid)
+
+
+def _guard_secret_cells(
+    record: Mapping[str, Any], answers: dict[str, list[str]]
+) -> dict[str, list[str]]:
+    """Drop anything that is not a key name from a SECRET question's cell.
+
+    Defence in depth for the one hop that must never carry a value (review round
+    1, MINOR 6). :meth:`Session.respond_ask` substitutes the key BEFORE calling
+    :meth:`AskQueue.respond`, and this is what keeps that order load-bearing: a
+    direct caller — a cold CLI or relay route in B/C is the expected one — gets
+    "the user did not provide it" rather than a line in the log that outlives the
+    session. The cell is replaced WHOLE rather than filtered element by element,
+    because a leaked value sitting beside a legitimate key would be just as
+    durable.
+    """
+    out = dict(answers)
+    for question in record.get("questions") or ():
+        if not question.get("secret"):
+            continue
+        qid = str(question.get("id"))
+        if qid not in out:
+            continue
+        cell = list(out[qid])
+        if cell and cell[0] == _secret_not_provided():
+            continue
+        if not _secret_cell_ok(cell, qid):
+            logger.warning(
+                "ask %s: refused a value-shaped answer for secret question %s",
+                record.get("ask_id"),
+                qid,
+            )
+            out[qid] = [_secret_not_provided()]
+    return out
+
+
+def _partial_answer_error(missing: Sequence[str]) -> str:
+    """The refusal for an answer map that omits questions (design §2.4).
+
+    NAMES the missing ids and says what to do instead: the submit is atomic, so a
+    surface that has only some of the answers must wait rather than settle the ask
+    — and a question the user deliberately skipped is sent as an empty list, which
+    is how "no answer" is said while keeping the map complete.
+    """
+    listed = ", ".join(f"{qid!r}" for qid in missing)
+    return (
+        f"every question must be answered at once: {listed} has no entry. "
+        "Send an empty list for a question the user skipped — a partial answer "
+        "would settle the ask and lose the rest."
+    )
+
+
+def _lapsed_while_stopped(record: Mapping[str, Any], stopped_at_ms: int | None) -> bool:
+    """Whether this ask's DEADLINE fell inside a deliberate stop (design §2.2).
+
+    The window is the ask's own: it has to have been created before the stop (or
+    the stop did not interrupt it) and its deadline has to fall after the stop
+    began (or the session was running again before the window closed). Both ends
+    matter — the marker is durable and outlives the stop, so "a marker exists" is
+    not the question, and neither is "the marker is recent".
+
+    The false positives this could still admit need a deliberate stop INSIDE the
+    ask's window, and then a second outage in which the deadline passed: the
+    sentence is true in that case too, and the notice is owed at boot exactly
+    because no live runtime delivered it.
+    """
+    if stopped_at_ms is None:
+        return False
+    created_at = int(record.get("created_at") or 0)
+    expires_at = int(record.get("expires_at") or 0)
+    return bool(created_at) and created_at <= stopped_at_ms <= expires_at
 
 
 def _as_mapping(value: Any) -> dict[str, Any]:

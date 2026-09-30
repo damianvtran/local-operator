@@ -436,13 +436,68 @@ an old path: the old paths are removed **once, in F**, in the same change that r
 pinning tests and ships §9. This is what makes §8.9's "the pinned tests stay green through
 A1–D" true, and a B/C1/C2 diff that removes an old path is a bug against this note.
 
+### 5.0 Shared ask-surface interaction model (R7)
+
+Every surface presents the open ask set in one of **two states**. Both are **client-local
+interaction state: no wire change, §4 is untouched by this section.**
+
+- **EXPANDED** — the answer surface is active (TUI picker/list row, desktop `QuestionDock` or
+  sheet, phone/app sheet). **Entered only by the user** (click the minimized bar, Enter on a
+  focused row, or the explicit `/asks` / header action). **Never automatic on ask arrival** —
+  §5.1's no-auto-mount, no-focus-steal rule is unchanged. Left by Esc, the collapse control,
+  or a click on the bar/chevron.
+- **MINIMIZED** — a compact, persistent single-line affordance; the answer surface is *not*
+  mounted. This is the state a new ask lands in when the user is already mid-answer or
+  mid-draft, and the state the user returns to when they collapse.
+
+**Composer routing rule (INVARIANT, every surface).** The composer routes to the ask **only
+while its answer surface is EXPANDED**; while MINIMIZED the composer sends an ordinary
+conversation message. Toggling preserves **both** drafts: the ask buffer and the chat buffer
+are separate, and neither may ever be sent into the other's channel — a chat draft must never
+become an answer, and an answer draft must never be sent as chat. When the ask **settles while
+expanded** (answered, timed out, declined, dismissed), the placeholder returns to normal and
+the draft is **kept**, neither discarded nor auto-sent.
+
+**Minimized affordance — the minimal design, per surface.** One line, directly above the
+composer, built from each app's existing composer-chip vocabulary — it must read as a chip,
+not as a modal, a toast or a banner:
+
+- **TUI:** a single bar line above the composer, `? 1 question waiting — click to answer`
+  (`? 3 questions waiting` when n>1), with an expand chevron at the right edge. Click or Enter
+  expands; Esc or a click on the chevron collapses. Its accent is a **persistent** colour on
+  the glyph, never animated (a pulse would be the focus-steal this design exists to avoid, in
+  colour instead of keys).
+- **Desktop UI:** the same bar under the chat, styled as the existing composer status chip
+  (`composer-status-row.tsx`) so it sits in the wake/monitor chip row's language; click →
+  `QuestionDock`. Same accent, no badge ticker (D8).
+- **Phone web:** a chip/bar above the composer in the `pending-card.tsx` family; tap → asks
+  sheet.
+- **App:** the bar above the composer plus the list-row badge; tap → sheet.
+- Every surface: **no focus steal**, no modal, nothing that displaces a draft, and the
+  affordance disappears at zero asks.
+
+**Sidebar / list status.** An **outstanding-asks** state on the session's row/icon, distinct
+from the approval state and honest at 0 (absent, never a zero badge): the TUI sidebar and
+`tui/session_catalog.py` ranking, the UI chat list, the mobile web list row, the app list.
+The agent may be *working* while asks are outstanding — this is not a "waiting for you"
+state (§5 header) and it must not read as one.
+
+**Placeholder copy** (one short line per surface; the strings land in that surface's PR):
+expanded → "Answering the agent's question — Esc to collapse"; minimized/normal → each app's
+existing placeholder, unchanged.
+
+**Multiple asks.** The minimized bar always shows the **head** ask plus the count; expansion
+opens the list/picker (TUI) or the sheet (others). Answering one collapses the surface (TUI,
+which returns to work) or advances to the next ask (sheet surfaces, which stay open).
+
 ### 5.1 TUI (PR B)
 - **Entry/badge:** a count chip in the working line/status band (`◆ 2 asks`), sidebar/`/resume`
   catalog badge (`tui/session_catalog.py` `pending` ranking, scout `188/287`), OS notification via
   the existing `tui/notify.py` map (scout `177/237`). **No auto-mount, no focus steal** — a
   new ask must not displace a card the user is mid-answer on or their composer draft
-  (`docs/design/composer-focus-default.md`; #1315 machinery `app.py:7715/7810`). A one-line
-  non-modal notice names the first question and how to open the list.
+  (`docs/design/composer-focus-default.md`; #1315 machinery `app.py:7715/7810`). The
+  **§5.0 minimized bar is what names the first question** — it replaces the ad-hoc one-line
+  notice, so there is one affordance, not two.
 - **List:** `/asks` (+ keybinding) opens a list in `#prompt-host`; per row: status glyph,
   first question, age/expiry. Enter mounts that ask in the **existing** `AskPickerScreen`
   (`ask_picker.py:537`); the single-mounted-card widget model stays — the *queue* is a store,
@@ -450,9 +505,13 @@ A1–D" true, and a B/C1/C2 diff that removes an old path is a bug against this 
   parked-future resolution (`_ask_pending`, `app.py:24949-24990`) is **deleted in F, not in
   B** — with the flag off the TUI is byte-for-byte today's path.
   Gate identity for #1315 drafts becomes `("ask", ask_id)`; approval identity untouched.
+- **Minimized state (§5.0, R7):** the single-line bar above the composer is the default
+  presentation of a queued ask; the composer sends chat while minimized and the answer only
+  while the picker is expanded. Sidebar/`session_catalog` gains the outstanding-asks state,
+  distinct from `pending`/approval.
 - **Interaction change to confirm (D5, flag-on only):** with the flag on, Esc *closes the
   card and leaves the ask open* and decline is an explicit action; with the flag off Esc
-  declines exactly as today (`builtin.py:24408+`).
+  declines exactly as today (`builtin.py:24408+`). Esc here is the collapse in §5.0.
 - **Response card:** transcript block for `ask_response`/`ask_timeout` in
   `tui/session_presentation.py`, tool-card visual family (`tool_card.py:278` registers `ask` as
   `tool.row.name_meta`), collapsed one-liner, expandable Q&A; secret shows key only.
@@ -460,12 +519,15 @@ A1–D" true, and a B/C1/C2 diff that removes an old path is a bug against this 
 - **Capture recipes:** new `scripts/ask_queue_shot.py` (pattern of `ask_shot.py`,
   `isolate_capture()`/`save_capture()`, real `OperatorApp` + `FakeSession`, `run_test`,
   `save_screenshot` → view the SVG). Frames at 100x30/130x30/190x50: chip only, list (1/3/8
-  asks), card from list, timed-out, late-answered, response card collapsed+expanded, secret.
+  asks), card from list, timed-out, late-answered, response card collapsed+expanded, secret,
+  **minimized bar (1 and 3 asks), expanded, and the two placeholder variants**.
   BEFORE = `ask_shot.py`/`ask_scroll_shot.py`/`ask_long_shot.py`/`approval_shot.py` on
   `origin/main`. Geometry numbers alongside (AGENTS.md "Visual validation" step 4): prompt-host
   height, composer focus, no reflow between first and settled frame. `ask-long-descriptions`
   invariants (approval frames byte-identical) must still hold.
-- **Design + UX rounds:** both (new list entry point, Esc semantics, no-steal policy).
+- **Design + UX rounds:** both (new list entry point, Esc semantics, no-steal policy,
+  **and the §5.0 minimized bar + composer routing, which the UX round must walk with a real
+  typed draft**).
 
 ### 5.2 Desktop UI (repo `local-operator-ui`; PRs C1/C2)
 - **Read rule:** when `asks` is present, ignore a `pending_gate` with `kind == "ask"`
@@ -487,6 +549,10 @@ A1–D" true, and a B/C1/C2 diff that removes an old path is a bug against this 
   (`ask-answer.ts:99-111`) retired for asks; working line no longer suppressed
   (`working-line-model.ts:455-461`); sidebar must not classify a working session as
   `answer`→RUNNING purely for open asks; `answerState` keyed per ask.
+- **Minimized state (§5.0, R7):** the chip/bar under the chat is the default; the composer
+  routes to the ask only while the dock/sheet is expanded, otherwise to the conversation —
+  this **replaces** the current unconditional composer swallow (which stays for the flag-off
+  path only). Chat-list status gains the outstanding-asks state, distinct from approval.
 - **Answer path:** addressed by `ask_id` + whole-ask `answers`; new refusal-copy families for
   timed-out/late beside `SETTLED_ELSEWHERE`/`QUESTION_MOVED_ON` (`ask-answer.ts:428-469`);
   late press must reach the backend, not be refused client-side (`:954-974`).
@@ -497,7 +563,9 @@ A1–D" true, and a B/C1/C2 diff that removes an old path is a bug against this 
 - **Evidence:** Storybook stories next to `ask-options.stories.tsx` registered in
   `capture-evidence.mjs`; states: single, multi-question, several open, answering, answered,
   timed-out, late, secret open/timed-out, empty, error/held; both palettes; before/after of
-  dock **and** composer; live-app composer frames via `renderer-driver` (state window mode);
+  dock **and** composer; **minimized bar (1 and 3 asks), expanded, both placeholder variants,
+  and the chat-list outstanding-asks row (light+dark)**; live-app composer frames via
+  `renderer-driver` (state window mode);
   `pnpm check-themes`, contrast rows; `docs/evidence/manifest.json` re-stamp in its own
   docs-only commit after each fold. **Conflict watch:** #615 (dock mount, answer path,
   composer props, `desktop-contract.ts`), #705 (composer moves to `shared/components/composer/`),
@@ -511,14 +579,21 @@ A1–D" true, and a B/C1/C2 diff that removes an old path is a bug against this 
   fold `ask_response`/`ask_timeout`; `_tool_row_details` `:455` keeps `ask` receipt),
   `tui_handle.py:1233-1490` and `serving.py` both project from the one queue,
   `attach_client.py:2269` gains `ask_respond`, `daemon.py` `asks_open` on list rows.
-- **Web (`mobile/web/src`):** session-list row chip; header entry → **asks sheet**
+- **Minimized state (§5.0, R7):** the chip/bar above the composer is the default; tap opens
+  the sheet. The web composer routes to the ask only while the sheet is open — the
+  `forceCollapsed` behaviour must not be used to "minimize" (it hides the panels, which is a
+  different promise).
+- **Web (`mobile/web/src`):** session-list row chip (and the outstanding-asks row state,
+  distinct from approval); header entry → **asks sheet**
   (`components/ui/sheet.tsx`/`projects-sheet.tsx` pattern), aggregated across sessions via
   `GET /api/asks`; multi-question form reusing `PendingCard` fields (`pending-card.tsx:131`);
   the card must NOT set `forceCollapsed` on todos/subagents for asks; response card in
   `tool-row.tsx`/`transcript.tsx` via the new kind (unknown-kind path degrades safely).
   Same-binary bundle ⇒ no skew for the web client.
 - **Evidence:** extend `scripts/mobile_overflow_capture.py` + `mobile_overflow_fixture.py`
-  (headless Chrome over CDP, touch gestures) with ask states at phone size; **one reused
+  (headless Chrome over CDP, touch gestures) with ask states at phone size — **including the
+   minimized bar, the expanded sheet, both placeholders and the list-row outstanding state**;
+   **one reused
   browser, `--use-mock-keychain`, reaped by exact pid**; before/after, light+dark if the
   client has both. Design + UX rounds.
 
@@ -545,6 +620,9 @@ A1–D" true, and a B/C1/C2 diff that removes an old path is a bug against this 
   owner or explicitly refused. E1's ADR records both the override and the bound. Updates
   `docs/relay/contract.md`/`feature-map.md`
   (`:46,66,135-137`), `docs/ux/`.
+- **Minimized state (§5.0, R7):** the app implements the bar-above-composer + list-badge
+  pattern and the composer routing rule; E2's docs pass carries a **one-paragraph pointer to
+  §5.0** in the ADR — **E1 is not reopened**.
 - **E2 = implementation** (after #11/#12 land, since it edits `pending.ts`/`pending-card.tsx`
   — **#12-scoped (`feat/screens-session`), not yet repo fact on `main`**): badge on list/tab,
   asks list, multi-question answer form,
@@ -592,6 +670,10 @@ A1 → A2 ─┬→ B ──┐
   contract change expected).
 - **Must wait for the wire freeze:** everything except A1/E1. "Frozen" = this note approved by
   Aida; from then a wire change is an amendment PR to this file, reviewed like code.
+- **R7 (minimized ask surface) is in scope for B, C1/C2, D and E2, and for each one's design
+  and UX rounds** — the minimized bar, the composer routing rule and the list/sidebar
+  outstanding-asks state are user-visible, so those rounds cover them (§5.0, §7). E1 (the
+  ADR) is **not reopened**: E2's docs pass adds a one-paragraph pointer to §5.0.
 - **Merge discipline (each PR):** never a version bump (`pyproject.toml` stays at last
   release); `Release:` line in the body; on merge send the window owner (0.64.10 lock is PR
   #1834; measure the window from tags, not sessions) PR#, merge SHA, Release line; flag Aida at
@@ -657,6 +739,21 @@ no-regression on approvals and the composer. **Before/after frames** per §5 rec
 geometry numbers; timed-out and late states must appear in frames. Frames go on the PR, not
 in the repo (AGENTS.md visual step 7). Frame the first and settled state when anything
 animates or ticks.
+
+**R7 — the minimized surface (every user-visible PR: B, C1/C2, D, E2).** A dedicated case,
+because the routing rule is a *behavioural* claim that stills cannot show:
+- **Asserts (automated where the surface allows, walked by hand in the UX round otherwise):**
+  (1) an ask arriving while a chat draft is in the composer leaves the draft intact and the
+  ask MINIMIZED; (2) with the surface minimized, Enter on the composer sends a **conversation**
+  message, never an answer; (3) with the surface expanded, Enter sends the **answer**, never
+  chat; (4) collapsing preserves both drafts and re-expanding restores the ask draft;
+  (5) an ask settling while expanded returns the placeholder to normal and keeps the draft.
+  (6) the minimized bar is absent at zero asks and shows head + count at 3.
+- **Frames:** minimized bar (1 and 3 asks), expanded, both placeholder variants, and the
+  list/sidebar outstanding-asks state — **light and dark** where the surface has both, at
+  phone size for web/app. Before/after against `origin/main`.
+- **No wire assertions:** R7 is client-local interaction state and changes nothing in §4 —
+  any PR that touches the wire for R7 is out of scope.
 
 **F:** full cross-surface matrix on the flipped default plus a regression pass on approvals,
 wake/monitor/patience surfaces (the `is_internal_wake_row` swap), `lop sessions`, cleanup
