@@ -508,8 +508,11 @@ async def test_a_named_show_leaves_the_detail_and_the_page_keeps_its_own_project
     session = _ProjectSession()
     registry = _rich_registry(tmp_path)
     session.project_registry = registry
-    parity_id = str(registry.get_project_by_name("parity-spec").id)
-    board_id = str(registry.get_project_by_name("board-entry").id)
+    parity_row = registry.get_project_by_name("parity-spec")
+    board_row = registry.get_project_by_name("board-entry")
+    assert parity_row is not None and board_row is not None
+    parity_id = str(parity_row.id)
+    board_id = str(board_row.id)
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
         await _boot(pilot, app)
@@ -546,6 +549,7 @@ async def test_a_named_show_leaves_the_detail_and_the_page_keeps_its_own_project
         await pilot.pause()
         parity = registry.get_project_by_name("parity-spec")
         board = registry.get_project_by_name("board-entry")
+        assert parity is not None and board is not None
         assert any(m.name == "step 01" for m in parity.milestones)
         assert not any(m.name == "step 01" for m in board.milestones)
 
