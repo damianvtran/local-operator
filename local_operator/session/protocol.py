@@ -635,7 +635,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 134 public members and a POSITIVE
+    than stylistic. This protocol carries 135 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -680,7 +680,9 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     distinguish "the owner is there" from "the owner was there"), 133 once the
     projects primitive needed the ``project_registry`` ``/project`` reads, 134
     once the proactive class needed ``cleanup_after_class_switch`` so a viewer's
-    class switch answers honestly instead of dying on a duck-probe), so
+    class switch answers honestly instead of dying on a duck-probe, 135 once a
+    dropped refusal notice needed ``forget_gate_refusal`` so its retry could
+    still deliver), so
     recompute it rather
     than adjusting it by the size of your own change.
 
@@ -1493,6 +1495,24 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         undeclared duck-typed member is what
         ``tests/unit/session/test_viewer_protocol.py`` exists to catch, and it
         did catch this one (agent review round 3, Q5 — the head was red).
+        """
+        ...
+
+    def forget_gate_refusal(self, error: BaseException) -> None:
+        """Un-record a refusal whose delivery the host DROPPED, so a retry speaks.
+
+        Viewer-only by the same construction as :meth:`set_gate_refusal_handler`
+        above: an owner ``Session`` answers its own gates, so there is no host
+        above it whose drop could strand a record. The record itself lives on
+        the facade — ``AttachedSession._refusal_is_new_state`` writes it when a
+        refusal surfaces — and this is its un-record, called by the host's drop
+        path when the notice could not be shown (agent review R1-1 = QA Q-1:
+        without it the retry's refusal was silenced and the explanation
+        displayed nowhere).
+
+        Declared for the same reason as its neighbour: an undeclared duck-typed
+        member is what ``tests/unit/session/test_viewer_protocol.py`` exists to
+        catch, and it did catch this one (QA round 2, Q-3 — the shard was red).
         """
         ...
 
