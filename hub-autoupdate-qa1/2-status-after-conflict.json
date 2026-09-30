@@ -1,0 +1,45 @@
+{
+ "items": {
+  "agent:d6e79086-3960-4f5a-8a1c-ebceb48085b7": {
+   "applied_backup": "hub/backups/agent-d6e79086-3960-4f5a-8a1c-ebceb48085b7-20260930T132201924688Z.json",
+   "applied_seen": false,
+   "attempts": 0,
+   "auto_retry": true,
+   "baseline": "known",
+   "classification": null,
+   "error_class": null,
+   "error_subclass": null,
+   "first_seen_available_at": null,
+   "hub_id": "a4e7495a-801a-4628-92bd-e6ccbb9f8214",
+   "kind": "agent",
+   "last_applied_at": "2026-09-30T13:22:01Z",
+   "last_checked_at": "2026-09-30T13:21:59Z",
+   "last_error": null,
+   "local_fingerprint": "295cf1283e3821ab90fb8bdeb6d5dec273d1cc527e42d56398cdf289690a764d",
+   "local_id": "d6e79086-3960-4f5a-8a1c-ebceb48085b7",
+   "name": "LO-hub-autoupdate-QA",
+   "next_retry_at": null,
+   "remote_fingerprint": "4e53c259af5b0f6894de24d8a6b70dd1c3baed9ee763a91c9343feeee47ceffe",
+   "state": "applied",
+   "summary": {
+    "combined": 1,
+    "kept-local": 1,
+    "removal-honored": 1,
+    "taken-remote": 0,
+    "unresolved": 0
+   },
+   "tenant_id": "5b72d9f4-8ce7-4821-ac8a-f92c365ed5b3"
+  }
+ },
+ "last_tick": {
+  "applied": 1,
+  "at": "2026-09-30T13:22:01Z",
+  "available": 1,
+  "checked": 1,
+  "credential": "ok",
+  "failed": 0,
+  "reason": "timer"
+ },
+ "schema": 1,
+ "updated_at": "2026-09-30T13:22:01Z"
+}
