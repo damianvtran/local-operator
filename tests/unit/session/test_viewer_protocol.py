@@ -1302,9 +1302,18 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # Viewer-only for the same reason ``set_gate_refusal_handler`` is — an owner
     # ``Session`` answers its own gates and has no host above it that can drop a
     # notice. Declared in ``ViewerSessionProtocol`` in the same commit.
-    assert len(viewer_only) == 70, (
+    # 70 → 71 is the queued-ask answer rung (design
+    # docs/design/ask-nonblocking.md §4). ``ask_respond`` is viewer-only by
+    # construction rather than by choice: an ask OUTLIVES the runtime that
+    # queued it, so answering one from a front end means reaching an owner that
+    # may not be running yet (the bind is the cold arm), and only the facade owns
+    # a dial. An owner ``Session`` answers its own queue in-process
+    # (``Session.respond_ask``) and has no wire to send on. Declared in
+    # ``ViewerSessionProtocol`` in the same commit, which is what the
+    # undeclared-member check above requires.
+    assert len(viewer_only) == 71, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
-        "says 70, and the aggregate floor is set at 40 against that number. A "
+        "says 71, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "
         "genuinely a removal before editing this figure."
     )
