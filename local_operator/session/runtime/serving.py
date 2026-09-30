@@ -429,15 +429,30 @@ def _read_child_todo_snapshot(directory: Any) -> list[dict[str, Any]] | None:
         return None
 
 
-#: What a ROUTED approvals change must disclose about the pane's persistent
-#: marker (UX round 2, U6). The marker is fed by the pane's own `_approve_all`
-#: (`tui/app.py`), a routed command cannot move it, and after #1282 a routed
-#: `/approvals auto` is the only route that loosens a running session — so the
-#: one indicator built to survive a scrolling receipt is dark for exactly the
-#: state that route creates. Fixing the MECHANISM is a change of its own
-#: (deferred, with the measurements, on the PR); telling the operator is one
-#: clause, on the surface where the state changes, and that is what this is.
-_GATE_MARKER_CLAUSE = "; the band's ! will not follow this — /approvals re-reports the gate"
+#: The RULE about the pane's persistent marker, stated wherever a routed approvals
+#: change is disclosed (UX round 2, U6; round 3, U11; QA round 3, Q6; agent review
+#: round 3, M1). The marker is fed by the pane's own `_approve_all` (`tui/app.py`),
+#: which a routed command cannot move, and after #1282 a routed `/approvals auto`
+#: is the only route that loosens a running session — so the one indicator built
+#: to survive a scrolling receipt does not report that route's effect. Fixing the
+#: MECHANISM is a change of its own (deferred, with the measurements, on the PR).
+#:
+#: It states the RULE and not this change's effect, because the emitting process
+#: cannot see the pane's flag and two reachable states falsify the prediction:
+#: round 3's UX round drove a session that BOOTED ungated (marker legitimately
+#: lit) and then a routed `/approvals auto` — the earlier "the ! will not follow
+#: this" was painted beside a lit marker — and QA measured the same reach. "Tracks
+#: this window's own mode" is true in every state the pane can be in: booted at the
+#: file's mode, moved by a file-driven TIGHTENING, never moved by a routed change.
+_GATE_MARKER_RULE = (
+    "; the band's ! tracks this window's own mode — a routed change does not move it"
+)
+
+#: The pointer that resolves the rule, on the RECEIPT only: it is the surface the
+#: operator has just acted on, and the one where "go and look" is apt. Left off
+#: the reports, which are what the pointer tells the reader to run (UX round 3,
+#: U11's sub-point: on a bare `/approvals` it was circular).
+_GATE_MARKER_POINTER = "; /approvals re-reports the gate"
 
 
 #: The decorated method's own type, returned unchanged. A decorator that instead
@@ -7726,6 +7741,7 @@ class ServingSessionHandle(SessionHandle):
                 # both directions — `/approvals auto` for the divergence this
                 # change makes common (a live `ask` over a file that says
                 # `auto`), and `/approvals ask` for the mirror case.
+<<<<<<< Updated upstream
                 # The remedy names WHERE it works. This handle cannot see the
                 # connection that asked, so the sentence is written to be true
                 # from either side: a tightening word takes effect anywhere, and
@@ -7769,6 +7785,25 @@ class ServingSessionHandle(SessionHandle):
                         f"tool approvals: {live} (this session) — {effect}; "
                         f"config.yml says {on_disk} — {remedy}"
                     ),
+=======
+                text = (
+                    f"tool approvals: {live} (this session) — {effect}; "
+                    f"config.yml says {on_disk} — /approvals {on_disk} adopts it in "
+                    "this session"
+                )
+                # The rule belongs on this form too (agent review round 3, M1):
+                # the state a routed loosening usually LEAVES BEHIND is the
+                # divergence (a live `auto` over a file that still says `ask`),
+                # and the receipt's pointer sends the operator here to read it.
+                # Gated on `live == "auto"` for the same reason as the matched
+                # pair: with the gate asking there is nothing the marker is
+                # failing to show.
+                if live == "auto":
+                    text += _GATE_MARKER_RULE
+                return SlashResult(
+                    kind="notice",
+                    text=text,
+>>>>>>> Stashed changes
                     style="warning" if self._auto_approve else "info",
                 )
             # The matched pair, worded as the app words it (UX round 2, U10):
@@ -7790,7 +7825,7 @@ class ServingSessionHandle(SessionHandle):
             # says so. Only for `auto`: a routed tightening leaves the marker
             # correctly dark, and the clause would be noise there.
             if live == "auto":
-                matched += _GATE_MARKER_CLAUSE
+                matched += _GATE_MARKER_RULE
             return SlashResult(
                 kind="notice",
                 text=matched,
@@ -7827,7 +7862,8 @@ class ServingSessionHandle(SessionHandle):
             kind="notice",
             text=(
                 "tool approvals: auto — every tool runs without asking (this session)"
-                + _GATE_MARKER_CLAUSE
+                + _GATE_MARKER_RULE
+                + _GATE_MARKER_POINTER
                 if wanted_auto
                 else "tool approvals: ask — write and command tools prompt before running "
                 "(this session)"

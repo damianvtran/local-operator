@@ -24156,12 +24156,9 @@ class AskParams(BaseModel):
     timeout: int | str | None = Field(
         default=None,
         description=(
-            "How long the question stays open: an integer number of SECONDS, or a "
-            'duration string such as "30m" or "2h". Default 3600 (1 hour). '
-            "Minimum 120 (2 minutes); maximum 86400 (24 hours). A shorter window "
-            "(300-900 s) says an answer is wanted soon; a longer one says the "
-            "question is genuinely non-urgent. Values outside the bounds are "
-            "rejected rather than clamped."
+            "How long to wait for an answer: seconds (int) or a duration string "
+            'like "30m"/"2h". Default 3600 (1 h); min 120 (2 min); max 86400 '
+            "(24 h). Out-of-range values are rejected, never clamped."
         ),
     )
 
