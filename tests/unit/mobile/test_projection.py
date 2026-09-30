@@ -2047,6 +2047,72 @@ def test_summarize_args_priority_and_compaction() -> None:
     assert _summarize_args("noop", {}) == "noop"
 
 
+def test_summarize_args_sessions_rows_are_the_shared_decision() -> None:
+    """PR C: the phone's sessions summary comes from ``harness/rows.py``.
+
+    The SAME function the TUI's tool card calls (``sessions_row_summary``), so
+    the two surfaces cannot disagree about one call; these literals pin the
+    contract at the phone's edge, and the TUI's own tests pin the same strings
+    on the terminal's. The generic ``op=…`` fallback this replaces never drew
+    the op at all — a `stop` and a `peek` on one session rendered identical
+    rows — and the op now leads because both rows shed from the right.
+    """
+    assert (
+        _summarize_args("sessions", {"op": "spawn", "name": "night-audit", "prompt": "go"})
+        == "spawn · workstream · night-audit"
+    )
+    assert (
+        _summarize_args(
+            "sessions", {"op": "spawn", "prompt": "fix the shard", "visibility": "ephemeral"}
+        )
+        == "spawn · ephemeral · fix the shard"
+    )
+    assert (
+        _summarize_args("sessions", {"op": "stop", "target": "release-crew"})
+        == "stop · release-crew"
+    )
+    assert _summarize_args("sessions", {"op": "stop", "pid": 48213}) == "stop · pid 48213"
+    assert (
+        _summarize_args("sessions", {"op": "resume", "session": "abcdef123456"})
+        == "resume · session abcdef123456"
+    )
+    assert (
+        _summarize_args("sessions", {"op": "peek", "target": "release-crew", "steps": 12})
+        == "peek · release-crew · last 12"
+    )
+    # R1 (round 1): `query` is the discriminator that survives beside a
+    # window — `query` + `steps=N` is the tool's own "N around the match"
+    # (its validation keeps `steps` as the size of the match window), so a
+    # row painting "last 6" claimed a tail read this call never makes.
+    assert (
+        _summarize_args(
+            "sessions", {"op": "peek", "target": "release-crew", "query": "needle", "steps": 6}
+        )
+        == "peek · release-crew · search needle · 6 around"
+    )
+    assert (
+        _summarize_args("sessions", {"op": "peek", "target": "release-crew", "query": "needle"})
+        == "peek · release-crew · search needle"
+    )
+    assert (
+        _summarize_args("sessions", {"op": "list", "include_stored": True, "query": "flaky shard"})
+        == "list · stored · flaky shard"
+    )
+    assert _summarize_args("sessions", {"op": "list"}) == "list"
+    assert _summarize_args("sessions", {"op": "stop"}) == "stop · ?"
+    assert _summarize_args("sessions", {"op": "frobnicate"}) == "frobnicate"
+    # R2 (round 1): a degenerate call stands on the tool name, exactly as the
+    # TUI's row does — `sessions_row_summary` returns "" when even the op is
+    # unreadable, and the substitution back to the name is the contract both
+    # hosts document (a bare `sessions` beats a blank summary cell).
+    assert _summarize_args("sessions", {}) == "sessions"
+    assert _summarize_args("sessions", {"op": None}) == "sessions"
+    # This module's uniform cap still bounds the row: a long name cannot make
+    # a projection repaint carry an unbounded string.
+    bounded = _summarize_args("sessions", {"op": "spawn", "name": "x" * 300})
+    assert len(bounded) <= 80 and bounded.endswith("…")
+
+
 def test_diff_counts_only_from_reported_details() -> None:
     assert _diff_counts(None) == (0, 0)
     assert _diff_counts({}) == (0, 0)

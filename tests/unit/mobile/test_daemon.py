@@ -1660,6 +1660,56 @@ def test_the_phone_list_carries_the_delegated_work_from_the_record() -> None:
     assert rows[0]["subagents_queued"] is None, rows[0]
 
 
+def test_the_phone_list_carries_the_workstream_opener() -> None:
+    """PR C: a machine-opened row reaches the phone with its opener on board.
+
+    The phone list carried no opener/origin while the TUI and desktop both mark
+    machine-opened rows — the 2026-09-18 confusion class, one surface out. The
+    daemon publishes the same frozen three-key object the desktop wire does
+    (``resume.OPENED_BY_KEYS``) and None on every ordinary row; the object's
+    PRESENCE is the fact the phone's chip is drawn from, so a row whose opener
+    could not be identified still carries it, with null members rather than no
+    mark. Built through the real writers and the real scan, so the chain
+    marker → durable row → merge is what is exercised, not a hand-built dict.
+    """
+    from local_operator.paths import config_dir
+    from local_operator.resume import (
+        ORIGIN_AGENT_WORKSTREAM,
+        mark_session_origin,
+        recent_session_rows,
+        write_session_title,
+    )
+
+    daemon = MobileDaemon(port=0, password="pw")
+
+    def seed(session_id: str, opener: dict[str, str | None] | None) -> None:
+        directory = config_dir() / "sessions" / session_id
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
+        write_session_title(directory, f"conversation {session_id}", user_set=False, past_names=[])
+        if opener is not None:
+            mark_session_origin(directory, ORIGIN_AGENT_WORKSTREAM, opened_by=opener)
+
+    seed("ws0000000001", {"agent": "manager", "label": "sessions-tool", "session": "e84228882245"})
+    seed("ws0000000002", {"agent": None, "label": None, "session": None})
+    seed("plain0000001", None)
+    durable = {row.id: row for row in recent_session_rows(config_dir(), 100, strict=True)}
+    rows = {row["session_id"]: row for row in daemon.table._merge_summaries(durable)}
+
+    assert rows["ws0000000001"]["opened_by"] == {
+        "agent": "manager",
+        "label": "sessions-tool",
+        "session": "e84228882245",
+    }
+    # Presence is the fact: all-null members still mean "an agent opened this".
+    assert rows["ws0000000002"]["opened_by"] == {"agent": None, "label": None, "session": None}
+    # The control: an ordinary conversation carries no opener, and neither
+    # does a row the durable scan could not describe.
+    assert rows["plain0000001"]["opened_by"] is None
+    merged = daemon.table._merge_summaries({"s-durable": None})
+    assert merged[0]["opened_by"] is None, merged[0]
+
+
 def test_the_phone_list_withholds_counts_the_daemon_cannot_vouch_for() -> None:
     """U1: the phone must not advertise children the terminal calls "Leaving…".
 

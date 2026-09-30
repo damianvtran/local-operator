@@ -1020,6 +1020,20 @@ class SessionTable:
                     "subagents_queued": counts[1],
                     "ended": ended,
                     "degraded": degraded,
+                    # WHO opened this conversation, when an agent did — the
+                    # frozen three-key object the desktop wire publishes
+                    # (``resume.OPENED_BY_KEYS``), or None on every ordinary
+                    # row. Present iff the row's marker says
+                    # ``ORIGIN_AGENT_WORKSTREAM``: the durable scan already
+                    # parsed that marker (``recent_session_rows`` reads
+                    # ``workstream_opened_by`` on exactly those rows), so this
+                    # line costs no read on the loop, and every other row pays
+                    # a comparison. The PRESENCE is the fact — the phone chip
+                    # is drawn from it, not from any member, because on a
+                    # top-level requester's row all three members are null and
+                    # the row is still not the operator's own conversation
+                    # (the 2026-09-18 confusion class).
+                    "opened_by": (row.opened_by if row else None),
                     "todos_open": sum(
                         1
                         for phase in (p.todos if p else [])
