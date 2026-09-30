@@ -474,12 +474,28 @@ stays in the process that dialled it:
 lop network join @<token-file> --park --json
 #  → {"status":"awaiting_confirmation","sas":"481926","shown":"481 926",
 #     "name":"damian-mbp","expires_at":1789400600.0,
+#     "offers":[{"key":"openai","kind":"oauth-rotating",
+#                "label":"d***@example.com","share":true}],
 #     "sentence":"Ask the user to read back the code 481 926 from the other
-#     device, then confirm it with `lop network join --confirm <code>`."}
+#     device, then confirm it with `lop network join --confirm <code>`. damian-mbp
+#     will serve: openai."}
 #    this call WAITS, up to the same window the prompt uses
 lop network join --confirm 481926 --json
-#  → {"status":"joined","device_id":"9f2c…","network_id":"n_4a1c","epoch":7}
+#  → {"status":"joined","device_id":"9f2c…","network_id":"n_4a1c","epoch":7,
+#     "shares":["openai"]}
 ```
+
+**`offers` is the both-ends share list** (the memo's `net_pair_offer` frame, §3.2's
+as-built contract): present as a — possibly empty — list **only when the other
+device sent one and the bounded drain read it**; absent for an older build, and
+absent when a sent offer did not arrive in time (the drain expires; the ceremony
+proceeds). The `sentence` carries the same fact
+in words (one clause: `… will serve: openai.` / `No credentials were offered.` /
+`The other device did not offer credentials …`), so an agent that only renders the
+sentence can still say what will be shared, and the finished payload's `shares` is
+the final granted set — the owner may only reduce it during confirm, and a promised
+key the result does not carry is named in the receipt: deliberately not shared
+(the owner's person removed it) or, if the grant failed, with the remedy.
 
 **Exit `3` is what a park nobody answered returns** (`pairing_unanswered`), not
 what a phase one that needs a human returns: with the socket held, the question
