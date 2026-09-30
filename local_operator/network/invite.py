@@ -683,7 +683,11 @@ def joiner_prompt(
     ]
     block = _offer_block(offers_mod, offer_state, list(offer_items or []), inviter=inviter)
     if block:
-        lines.extend(["", *block])
+        # THE BLANK AFTER THE BLOCK IS LOAD-BEARING (design round 1, D3): without
+        # it the deadline and the "type the code" instruction render as if they
+        # were the last rows of the credential list, and they are the lines a
+        # person must not skip.
+        lines.extend(["", *block, ""])
     lines.append(
         f"  you have {int(seconds)}s ({_minutes(seconds)}): type it on BOTH devices,"
         " and a mistake can be retried with the same token"
@@ -803,7 +807,9 @@ def inviter_prompt_for(
     elif offer_state == offers_mod.OWNER_SENT:
         items = list(offer_items or [])
         if items:
-            lines.extend(["", *offers_mod.render_owner_block(items, joiner=label)])
+            # The trailing blank keeps the question off the list's tail (design
+            # round 1, D3) — same rule as the joiner's prompt.
+            lines.extend(["", *offers_mod.render_owner_block(items, joiner=label), ""])
         else:
             lines.append(offers_mod.OWNER_EMPTY_LINE)
     lines.append("Do they match? Confirm only if the other device shows the same code.")

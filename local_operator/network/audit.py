@@ -242,7 +242,17 @@ CAUSES: frozenset[str] = frozenset(
 #: aspirational.
 DETAIL_KEYS: dict[str, frozenset[str]] = {
     "pairing_refused": frozenset({"cause", "subject"}),
-    "pairing_awaiting_confirmation": frozenset({"subject", "role", "seconds_left", "offer"}),
+    "pairing_awaiting_confirmation": frozenset(
+        {
+            "subject",
+            "role",
+            "seconds_left",
+            "offer_sent",
+            "offer_digest",
+            "offer_skip",
+            "offer_enumeration",
+        }
+    ),
     "pairing_confirmed": frozenset({"subject", "role", "answered_by", "shares"}),
     "invite_minted": frozenset({"role", "expires_at", "bound_device"}),
     "member_admitted": frozenset({"role", "member_kind", "epoch", "grants"}),
