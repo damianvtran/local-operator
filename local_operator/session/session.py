@@ -579,6 +579,13 @@ SESSION_CAPABILITY_TOOLS: tuple[str, ...] = (
     "monitor",
     "hub",
     "ask",
+    # The sessions tool is gated on `subagent_launcher` — a field only a real
+    # Session's per-turn context carries — so the merge below is what puts it
+    # on a live session's inventory (and `harness/subagent`'s derived prune is
+    # what keeps it off a child that may not delegate). Last, so the appended
+    # end of the provider-visible array stays appended (design
+    # sessions-tool.md §3.3).
+    "sessions",
 )
 
 #: Tag put on a tool executor that :func:`_op_scoped_execute` already wrapped, so

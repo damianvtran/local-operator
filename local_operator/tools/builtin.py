@@ -129,6 +129,7 @@ from local_operator.imaging import (
     IMAGE_MAX_PIXELS,
     bound_image_for_model,
 )
+from local_operator.interpreter import python_argv
 from local_operator.media import ImageInfo, sniff_image_file
 from local_operator.paths import config_dir
 from local_operator.procstate import (
@@ -493,6 +494,80 @@ NON_INTERACTIVE_ENV: dict[str, str] = {
     "COMPOSER_NO_INTERACTION": "1",
     "CLOUDSDK_CORE_DISABLE_PROMPTS": "1",
 }
+
+
+def may_delegate_env_injection(context: object | None) -> dict[str, str]:
+    """The three-arm ``LOCAL_OPERATOR_AGENT_MAY_DELEGATE`` write for a child env.
+
+    ONE helper rather than a block copied into each spawn site, because the two
+    writers of an inherited-shaped variable would otherwise drift — the rule the
+    scratchpad path below follows. The ``bash`` tool and the ``sessions`` tool's
+    spawn/resume path both hand this answer to a `lop` child, and the guard that
+    reads it (``local_operator/agent_shell.py``) must see the same three arms
+    from both.
+
+    WHY THE ALLOWANCE TRAVELS AT ALL: a `lop exec` run by a session that holds
+    ``task`` is a legitimate way to open separate top-level sessions when the
+    user asked for them, and the session guard runs in the CHILD process, so the
+    only way it can tell that shell from one with no ``task`` to delegate with is
+    for the answer to travel with the command. The name lives in
+    ``agent_shell`` and this is the one writer.
+
+    THREE ARMS, and the third is not an oversight. ``1`` when the session holds
+    ``task``; the EMPTY string only when the name is actually present in this
+    process's environment and must not be inherited; otherwise the name is NOT
+    WRITTEN AT ALL.
+
+    Why the CLEAR exists: `shell_env.child_environment` starts from a copy of
+    THIS process's environment in the default `inherit` mode, so a marker the
+    child inherited from its own ancestors would survive a `may_delegate=False`
+    context untouched and the session would be admitted on an allowance nobody
+    granted it. That is not hypothetical — the allowed route creates exactly
+    that state: an allowed `lop exec` runs `lop` (and, for `--background`, a
+    detached worker spawned with no `env=`) as a child of the delegating shell,
+    so the session it opens starts life with the marker set whatever its own
+    role says. Injections are applied LAST, so this beats the inherited copy,
+    and the guard reads the empty string as "no" (`_on("")` is False). The
+    presence test is over ``os.environ`` rather than over the built child env on
+    purpose: in `allowlist` mode the inherited copy is dropped by construction
+    UNLESS the policy names the marker back in `inherit`, and when it does the
+    name is in this process's environment too — so the test covers both modes,
+    and a policy that re-grants an inherited value is still beaten by an
+    injection applied last.
+
+    Why the OMIT is deliberate: the marker's NAME is the whole mechanism. The
+    guard reads its own process environment, so a shell that knows the spelling
+    needs only `LOCAL_OPERATOR_AGENT_MAY_DELEGATE=1 lop exec …` and the `lop` it
+    starts is admitted — which is exactly why `agent_shell.refusal_message`
+    does not name it ("a reader told how the second route is spelled could go
+    looking for a shell that carries it"). Writing the empty value
+    unconditionally would export the name into every child of every session,
+    including a session that may not delegate, and turn "go looking for a shell
+    that carries it" into "read your own environment" — a self-grant one
+    inference away from an `env` an agent runs routinely. A reader who was never
+    told the name cannot be refused anything by an empty value that names it.
+    This is the least-resistance check and NOT a security boundary — a
+    model-authored command can assert the variable inline, as `docs/EXEC.md`
+    says — so what the omit restores is the block against the accident and the
+    path of least resistance, which is what the guard is for. Nothing is lost by
+    omitting: an ABSENT marker and an empty one are the same verdict to
+    `may_delegate_from_shell` (`_on(get(k, ""))`), which is the contract the
+    name is documented with, and the arms are pinned in
+    `tests/unit/test_agent_shell_guard.py`.
+
+    FAIL CLOSED on both shapes of "no answer": `context is None` (the loop with
+    no host) and a duck-typed context that simply lacks the field (the
+    `tests/e2e` doubles — reading it with `getattr` rather than a bare access is
+    what keeps a double working here at all). The refusal a missing answer
+    produces is the cheap failure; the expensive one is a session in the
+    operator's list that they never opened.
+    """
+    if context is not None and getattr(context, "may_delegate", False):
+        return {MAY_DELEGATE_ENV: "1"}
+    if MAY_DELEGATE_ENV in os.environ:
+        # Clear what this child would otherwise inherit — and only that.
+        return {MAY_DELEGATE_ENV: ""}
+    return {}
 
 
 #: Marker written where the middle of an output was removed. Now a re-export of
@@ -3732,70 +3807,13 @@ async def execute_bash(
             _secret_sink_refusal(scan, text=params.command, tool_name="bash"),
         )
     injections: dict[str, str] = dict(NON_INTERACTIVE_ENV)
-    # The DELEGATION ALLOWANCE rides the child environment for the same reason
-    # the marker in ``NON_INTERACTIVE_ENV`` does: a `lop exec` run by a session
-    # that holds ``task`` is a legitimate way to open separate top-level sessions
-    # when the user asked for them, and the session guard
-    # (``local_operator/agent_shell.py``) runs in the CHILD process, so the only
-    # way it can tell that shell from one with no ``task`` to delegate with is
-    # for the answer to travel with the command. The name lives in
-    # ``agent_shell`` and this is the one writer — one name, two consumers, the
-    # same rule the marker above follows.
-    #
-    # THREE ARMS, and the third is not an oversight. ``1`` when the session
-    # holds ``task``; the EMPTY string only when the name is actually present in
-    # this process's environment and must not be inherited; otherwise the name is
-    # NOT WRITTEN AT ALL.
-    #
-    # Why the CLEAR exists: `shell_env.child_environment` starts from a copy of
-    # THIS process's environment in the default `inherit` mode, so a marker the
-    # child inherited from its own ancestors would survive a `may_delegate=False`
-    # context untouched and the session would be admitted on an allowance nobody
-    # granted it. That is not hypothetical — the allowed route creates exactly
-    # that state: an allowed `lop exec` runs `lop` (and, for `--background`, a
-    # detached worker spawned with no `env=`) as a child of the delegating shell,
-    # so the session it opens starts life with the marker set whatever its own
-    # role says. Injections are applied LAST, so this beats the inherited copy,
-    # and the guard reads the empty string as "no" (`_on("")` is False). The
-    # presence test is over ``os.environ`` rather than over the built child env on
-    # purpose: in `allowlist` mode the inherited copy is dropped by construction
-    # UNLESS the policy names the marker back in `inherit`, and when it does the
-    # name is in this process's environment too — so the test covers both modes,
-    # and a policy that re-grants an inherited value is still beaten by an
-    # injection applied last.
-    #
-    # Why the OMIT is deliberate: the marker's NAME is the whole mechanism. The
-    # guard reads its own process environment, so a shell that knows the spelling
-    # needs only `LOCAL_OPERATOR_AGENT_MAY_DELEGATE=1 lop exec …` and the `lop` it
-    # starts is admitted — which is exactly why `agent_shell.refusal_message`
-    # does not name it ("a reader told how the second route is spelled could go
-    # looking for a shell that carries it"). Writing the empty value
-    # unconditionally would export the name into every ``bash`` child, including
-    # a session that may not delegate, and turn "go looking for a shell that
-    # carries it" into "read your own environment" — a self-grant one inference
-    # away from an `env` an agent runs routinely. A reader who was never told the
-    # name cannot be refused anything by an empty value that names it. This is the
-    # least-resistance check and NOT a security boundary — a model-authored
-    # command can assert the variable inline, as `docs/EXEC.md` says — so what the
-    # omit restores is the block against the accident and the path of least
-    # resistance, which is what the guard is for. Nothing is
-    # lost by omitting: an ABSENT marker and an empty one are the same verdict to
-    # `may_delegate_from_shell` (`_on(get(k, ""))`), which is the contract the
-    # name is documented with, and the arms are pinned in
-    # `tests/unit/test_agent_shell_guard.py`.
-    #
-    # FAIL CLOSED on both shapes of "no answer": `context is None` (the loop with
-    # no host) and a duck-typed context that simply lacks the field (the
-    # `tests/e2e` doubles — reading it with `getattr` rather than a bare access
-    # is what keeps a double working here at all, matching the
-    # `getattr(store, "credential_env", None)` two lines above). The refusal a
-    # missing answer produces is the cheap failure; the expensive one is a
-    # session in the operator's list that they never opened.
-    if context is not None and getattr(context, "may_delegate", False):
-        injections[MAY_DELEGATE_ENV] = "1"
-    elif MAY_DELEGATE_ENV in os.environ:
-        # Clear what this child would otherwise inherit — and only that.
-        injections[MAY_DELEGATE_ENV] = ""
+    # The DELEGATION ALLOWANCE rides the child environment (see the helper for
+    # the full three-arm reasoning — it is shared with the ``sessions`` tool's
+    # spawn/resume path so the two writers cannot drift). The short form: the
+    # guard (``local_operator/agent_shell.py``) runs in the CHILD process, so
+    # the session's own answer — does it hold ``task`` — has to travel with the
+    # command, and a name that was never exported cannot be used as one.
+    injections.update(may_delegate_env_injection(context))
     # The session's scratchpad root rides the SAME three arms, from one helper, so
     # the two writers of an inherited-shaped variable cannot drift apart: set to
     # this session's root, cleared when the name is inherited and this session has
@@ -13078,6 +13096,1254 @@ async def _arm_send_patience(
     return (
         f" (patience armed, {getattr(row, 'id', '')}: follow up in "
         f"{format_duration(due_in)} if no reply)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# sessions — lifecycle ops over the existing exec front end
+# ---------------------------------------------------------------------------
+#
+# Why a tool, and why it is small: a dispatcher session spawned parallel work
+# with the raw CLI and omitted ``--workstream``. The stamp is written once and
+# immutable, so the run stayed out of every operator-facing listing for its
+# whole life and could not be promoted after the fact — the invisible
+# disposition was the default and the visible one was one easy-to-miss word.
+# Everything the tool needs already exists (the flag, the stamp, the guard,
+# the listings, the registry, the stop ladder); it is a typed front door over
+# them with the visibility default flipped, and it runs the SAME ``lop exec``
+# every other spawn runs — as a subprocess, so ``cli.main`` stays the single
+# refuser of what an agent shell may open (``local_operator/agent_shell.py``),
+# including for a session whose ``spawn`` this tool advertises while the guard
+# declines it (the refusal passes through verbatim). See
+# ``docs/design/sessions-tool.md``.
+#
+# The gate is createIf rung 3, ``context.subagent_launcher is not None``: zero
+# schema in every context that cannot hold the delegation surface, and the
+# EXISTING trim rules take over from there (the subagent prune strips it from
+# a child that may not delegate, ``--tools`` declarations drop it unless
+# named, and a role allowlist follows the ``hub`` precedent). A built
+# top-level session that cannot delegate still carries the schema and a
+# ``spawn`` the guard refuses per call; that is the accepted cost of not
+# inventing a second gating convention (design note §3.3/§14.1).
+
+_SESSIONS_CLI: tuple[str, ...] = ("-m", "local_operator.cli")
+
+#: Bound on the ``--background`` launcher subprocess. The launcher itself
+#: waits at most 5 s for readiness (``exec_mode._spawn_background``) and then
+#: prints its receipt and exits; this is the fence for a wedged launcher, not
+#: a latency budget, so it is generous for the same reason ``bash``'s default
+#: (120 s) is.
+SESSIONS_LAUNCH_TIMEOUT_S = 120.0
+
+#: How long a ``starting`` job is polled for its ``running`` record after the
+#: launcher returns, before the receipt honestly reports the session id and
+#: pid as not yet published. The launcher already waited its own 5 s grace
+#: (``exec_mode._spawn_background``), and this second window is deliberately
+#: the SAME length rather than a shorter one (review round 1, R-3): a worker
+#: whose session booted just past the launcher's deadline still gets a full
+#: window, and a job that never publishes is bounded the same way.
+SESSIONS_READY_GRACE_S = 5.0
+_SESSIONS_READY_POLL_S = 0.1
+
+#: The launcher's readiness receipt, as the e2e harnesses already parse it
+#: (``stderr.split("Background job ", 1)[1].split(":", 1)[0]`` is the
+#: established spelling in ``tests/e2e``). The job id is minted by our own
+#: printer in ``exec_mode`` at the same revision, and the STRUCTURED fields
+#: come from the durable ledger it writes — this one line is the only text
+#: parsed, and only to learn the id. A prompt that happens to contain the
+#: words cannot be mistaken for the receipt: the match is anchored on the
+#: start of a line.
+_SESSIONS_JOB_LINE_RE = re.compile(r"^Background job ([^:\s]+):", re.MULTILINE)
+
+#: The tool's description — a module constant so the builder, the budget
+#: guard and the PR's measurement all read the same bytes (design note §3.4).
+_SESSIONS_TOOL_DESCRIPTION = (
+    "Manage OTHER local `lop` sessions on this machine (top-level sessions and"
+    " stored conversations; subagents are `hub`'s). `list` shows what is running"
+    " (add `include_stored` for stored conversations, `query` to search names and"
+    " recent content); `info` describes one session — its state, directory, origin"
+    " and whether the operator's sidebar lists it; `spawn` opens a parallel session"
+    " for work the USER asked to run separately — it is a listed workstream by"
+    ' default (use `visibility="ephemeral"` only for a throwaway run the'
+    " operator did not ask to see); `resume` reopens a stored/stopped session"
+    " headlessly; `stop` ends a running session gracefully. Address a session with"
+    " exactly one of `session` (exact id), `target` (name/cwd substring) or `pid`."
+    " Steering mid-turn is `send` with now=True."
+)
+
+
+# The single flat schema (the ``hub``/``send`` precedent) with the ops as one
+# union. Op-conditional requirements (``spawn``/``resume`` need ``prompt``; an
+# address is exactly one of ``session``/``target``/``pid``) are not expressible
+# in JSON Schema, so they are enforced at execute time by
+# :func:`_sessions_validation_error` — which refuses rather than silently
+# ignoring a field that does not belong to the call's op. The class docstring
+# is one line on purpose: pydantic renders it into ``model_json_schema()`` as
+# the schema's ``description``, and every token here rides every request in a
+# delegating session (design §3.4's budget).
+class SessionsParams(BaseModel):
+    """Parameters for the ``sessions`` tool (see ``_SESSIONS_TOOL_DESCRIPTION``)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    op: Literal["list", "info", "spawn", "resume", "stop"] = Field(
+        description=(
+            "list sessions; info one; spawn a parallel session (work the USER asked "
+            "for; listed by default); resume a stored one; stop a running one."
+        )
+    )
+    session: str | None = Field(default=None, description="info/resume/stop: exact session id.")
+    target: str | None = Field(
+        default=None,
+        description=("info/resume/stop: substring of name, id or cwd; live first, then stored."),
+    )
+    pid: int | None = Field(default=None, description="info/stop: exact pid.")
+    prompt: str | None = Field(
+        default=None,
+        description="spawn/resume: message to run (required).",
+    )
+    name: str | None = Field(default=None, description="spawn: title.")
+    team: str | None = Field(default=None, description="spawn: team to attach.")
+    profile: str | None = Field(default=None, description="spawn: role to attach.")
+    model: str | None = Field(default=None, description="spawn: <provider>/<model-id>.")
+    visibility: Literal["workstream", "ephemeral"] = Field(
+        default="workstream",
+        description=(
+            "spawn: 'workstream' (default) lists the run for the operator; "
+            "'ephemeral' (explicit) hides it and stays silent."
+        ),
+    )
+    background: bool = Field(
+        default=True,
+        description="spawn/resume: detach; v1's only value.",
+    )
+    include_stored: bool = Field(
+        default=False,
+        description="list: include stored (not running) sessions.",
+    )
+    limit: int = Field(default=20, ge=1, le=100, description="list: max rows.")
+    query: str | None = Field(
+        default=None,
+        description="list: search stored sessions by name/content.",
+    )
+
+
+#: What each op may carry. Keys outside the op's set are REFUSED rather than
+#: dropped: a ``name`` on ``stop`` or a ``query`` on ``spawn`` is a misspelled
+#: intent, and reporting success for a call the caller did not make is the one
+#: failure this table exists to prevent (design note §3.2).
+_SESSIONS_OP_FIELDS: dict[str, frozenset[str]] = {
+    "list": frozenset({"op", "include_stored", "limit", "query"}),
+    "info": frozenset({"op", "session", "target", "pid"}),
+    "spawn": frozenset(
+        {"op", "prompt", "name", "team", "profile", "model", "visibility", "background"}
+    ),
+    "resume": frozenset({"op", "session", "target", "pid", "prompt", "background"}),
+    "stop": frozenset({"op", "session", "target", "pid"}),
+}
+
+_SESSIONS_ADDRESS_FIELDS = ("session", "target", "pid")
+
+#: Ops that address ONE existing session. ``spawn`` creates one; ``list`` reads
+#: the set; the shared resolver runs for these.
+_SESSIONS_TARGET_OPS = frozenset({"info", "resume", "stop"})
+
+
+def _sessions_validation_error(params: SessionsParams) -> str | None:
+    """One legible refusal per op/field mismatch, or ``None``.
+
+    Checked against ``model_fields_set`` rather than against values, because an
+    explicitly-passed default is still a deliberate act on the wrong op — and
+    because the alternative silently drops a field the caller meant.
+    """
+    op = params.op
+    given = params.model_fields_set
+
+    if op in ("spawn", "resume"):
+        if params.prompt is None or not params.prompt.strip():
+            return (
+                f"{op} needs `prompt`: the message the opened run executes. A headless "
+                "exec refuses a prompt-less run the same way."
+            )
+        if not params.background:
+            return (
+                "`background=false` is not supported in v1: spawn/resume detach and "
+                "report a readiness receipt. A foreground run is the CLI's (`lop exec` "
+                "without --background) — it blocks for the task's whole duration, which "
+                "is not a tool call."
+            )
+    elif "prompt" in given:
+        return "`prompt` applies to spawn/resume only."
+
+    if op == "resume" and "visibility" in given:
+        # The immutability sentence (§5.3): origin.json is written once, at
+        # creation, and this tool never writes it — so a resumed session keeps
+        # whatever visibility it had, and the remedy for a hidden one is a new
+        # workstream, not an edit.
+        return (
+            "visibility is set at creation and never re-stamped: origin.json is "
+            "written once and immutable, so resume cannot change it — spawn a new "
+            "workstream instead (that is the default)."
+        )
+
+    allowed = _SESSIONS_OP_FIELDS[op]
+    for field in sorted(given - allowed):
+        if field in _SESSIONS_ADDRESS_FIELDS:
+            if op == "spawn":
+                return (
+                    f"spawn creates a new session, so it takes no `{field}` — drop it, "
+                    "or address an existing session with info/resume/stop."
+                )
+            return f"`{field}` does not apply to op='{op}' — it takes no address."
+        if field == "background":
+            return "`background` applies to spawn/resume only."
+        if op == "list":
+            return f"`{field}` applies to other ops; list takes no `{field}`."
+        return f"`{field}` applies to op='spawn' only."
+
+    if op in _SESSIONS_TARGET_OPS:
+        provided = [
+            field
+            for field in _SESSIONS_ADDRESS_FIELDS
+            if (getattr(params, field) is not None and str(getattr(params, field)).strip())
+        ]
+        if not provided:
+            return (
+                "address the session with exactly one of `session` (exact id), "
+                "`target` (name/cwd substring) or `pid`."
+            )
+    return None
+
+
+def _sessions_tier(args: dict[str, Any]) -> Literal["read", "write", "exec"]:
+    """Per-call approval tier: the guard is per TOOL, the tier is per OP.
+
+    ``list``/``info`` are reads and must not prompt; ``spawn``/``resume`` ask
+    the user for the same commitment `task` does (a session is being started);
+    ``stop`` ends a process and keeps the tool's static ``exec``. An unknown op
+    keeps ``exec`` — a tier must never downgrade on a guess.
+    """
+    op = str(args.get("op") or "")
+    if op in ("list", "info"):
+        return "read"
+    if op in ("spawn", "resume"):
+        return "write"
+    return "exec"
+
+
+def _describe_sessions_approval(args: dict[str, Any], cwd: str) -> str:
+    """What the approval prompt says: the act, who it hits, and enough of the
+    body to decide in one glance. The consequence, not the mechanism — and no
+    tool-name repeat, because the host already leads with the tool's label.
+
+    Written against the RAW arguments, like every describer: it runs before
+    the call executes, so the session name behind a ``pid`` is not knowable
+    yet and a resolved name here would be a promise the resolver may not keep.
+    """
+    op = str(args.get("op") or "")
+    if op == "spawn":
+        name = " ".join(str(args.get("name") or "").split())
+        prompt = _truncate_approval_body(" ".join(str(args.get("prompt") or "").split()))
+        qualifiers = [
+            f"{label} {str(args[key]).strip()}"
+            for key, label in (("team", "team"), ("profile", "profile"), ("model", "model"))
+            if str(args.get(key) or "").strip()
+        ]
+        qualifier = f" ({', '.join(qualifiers)})" if qualifiers else ""
+        disposition = (
+            "an ephemeral session"
+            if str(args.get("visibility") or "workstream") == "ephemeral"
+            else "a listed workstream"
+        )
+        head = (
+            f'open "{name}" as {disposition}{qualifier}'
+            if name
+            else f"open as {disposition}{qualifier}"
+        )
+        return f"{head}: {prompt}" if prompt else head
+    address = _sessions_address_label(args)
+    if op == "stop":
+        return f"stop {address}: ends its current run and releases the session lease"
+    if op == "resume":
+        return f"resume {address}: reopens its transcript headlessly"
+    return op or "sessions"
+
+
+def _sessions_address_label(args: Mapping[str, Any]) -> str:
+    """The address a describer can name before resolution — ``pid 48213``,
+    ``session a1b2c3d4`` (short id; the full one is in the args anyway), or
+    the quoted substring — in the grammar the prompt already uses."""
+    pid = args.get("pid")
+    session = str(args.get("session") or "").strip()
+    target = " ".join(str(args.get("target") or "").split())
+    if isinstance(pid, int) and not isinstance(pid, bool):
+        return f"pid {pid}"
+    if session:
+        return f"session {session}"
+    if target:
+        return f'"{target}"'
+    return "the named session"
+
+
+#: The stored-row lookup window for ``info``'s stored half. The send-side
+#: resolver scans up to its own ``STORED_DISCOVERY_LIMIT`` (200); the listing's
+#: default stored cap is 50, so the lookup asks for the wider window the
+#: resolver used — otherwise a session the resolver just found could be
+#: missing from its own description. There is deliberately no uncapped
+#: spelling (``info.collect``'s rule).
+_SESSIONS_STORED_LOOKUP_LIMIT = 200
+
+
+class _SessionsTarget(NamedTuple):
+    """What an address resolved to: one live record, a stored session id, an
+    ambiguous candidate list, or an error. Exactly one outcome is ever
+    meaningful, and ``candidates_stored`` says which grammar the candidate
+    list is drawn from — the two resolvers return different row shapes and
+    different disambiguation lines."""
+
+    record: Any | None
+    session_id: str
+    candidates: list[Any]
+    candidates_stored: bool
+    error: str
+
+
+async def _sessions_target(params: SessionsParams) -> _SessionsTarget:
+    """Resolve one address the way ``send`` resolves a recipient — the same
+    resolver, the same predicates, and therefore the same disambiguation text
+    a model already knows from that tool.
+
+    The stored fallback runs on the send tool's own gates
+    (``session_id_unowned`` for an exact id the live scan did not claim,
+    ``live_scan_found_nothing`` for a substring), so both tools fail — and
+    disambiguate — in one vocabulary. Wedged and not-yet-started records
+    resolve on purpose: ``info`` describes what is there, and ``stop`` is the
+    kill switch — a session that is not answering is exactly the one a stop
+    exists to reach. All the resolver's I/O runs off the loop: it walks and
+    parses every registry record, and this tool runs inside the session's own
+    event loop.
+    """
+    from local_operator.mobile import peer_send
+
+    record, candidates, error = await asyncio.to_thread(
+        peer_send.resolve_peer_target,
+        target=params.target,
+        pid=params.pid,
+        session=params.session,
+        include_wedged=True,
+        require_started=False,
+    )
+    if record is not None:
+        return _SessionsTarget(record, record.session_id, [], False, "")
+    if candidates:
+        return _SessionsTarget(None, "", list(candidates), False, "")
+    if params.session and peer_send.session_id_unowned(error):
+        cold = await asyncio.to_thread(peer_send.resolve_cold_session, params.session)
+        if cold:
+            return _SessionsTarget(None, cold, [], True, "")
+    if params.target and peer_send.live_scan_found_nothing(error):
+        stored_id, stored_candidates, stored_error = await asyncio.to_thread(
+            peer_send.resolve_stored_target, params.target
+        )
+        if stored_id:
+            return _SessionsTarget(None, stored_id, [], True, "")
+        if stored_candidates:
+            return _SessionsTarget(None, "", list(stored_candidates), True, "")
+        if stored_error:
+            return _SessionsTarget(None, "", [], False, stored_error)
+    if error and peer_send.live_scan_found_nothing(error):
+        error = f"no session matches {params.target!r} (searched live and stored sessions)"
+    return _SessionsTarget(None, "", [], False, error or "no session resolved")
+
+
+def _sessions_candidates_text(target: _SessionsTarget) -> str:
+    """The disambiguation block, byte-compatible with ``send``'s: its
+    candidate lines and its "drop `target` and retry with" grammar are what
+    models already know (review round 1, MINOR-1 on the send tool's own
+    text)."""
+    from local_operator.mobile.peer_send import candidate_lines, stored_candidate_lines
+
+    if target.candidates_stored:
+        lines = [
+            f"{len(target.candidates)} stored sessions match; drop `target` and retry "
+            "with session=<id> instead (passing both is refused):"
+        ]
+        lines.extend(stored_candidate_lines(target.candidates, indent="  ", prefix="session="))
+    else:
+        lines = [
+            f"{len(target.candidates)} sessions match; drop `target` and retry with "
+            "pid=<n> instead (passing both is refused):"
+        ]
+        lines.extend(candidate_lines(target.candidates, indent="  ", prefix="pid="))
+    return "\n".join(lines)
+
+
+async def _session_row_for_id(
+    session_id: str, *, include_stored: bool, stored_limit: int | None = None
+) -> dict[str, Any] | None:
+    """One row out of the published listing, or ``None``.
+
+    ``info`` reuses ``session_rows`` rather than deriving a second row shape —
+    the same reason the extraction exists at all (``info/collect.py``'s own
+    comment): a second composition would drift from the CLI's ``--json``
+    contract the moment either changed.
+    """
+    from local_operator.info.collect import session_rows
+
+    rows = await asyncio.to_thread(
+        session_rows, config_dir(), include_stored=include_stored, stored_limit=stored_limit
+    )
+    for row in rows:
+        if row.get("session_id") == session_id:
+            return row
+    return None
+
+
+def _sessions_marker_extras(session_id: str) -> dict[str, Any]:
+    """The single-row additions: where it lives, its origin, its opener.
+
+    Read directly rather than from a bulk scan because these are exactly the
+    per-row facts a listing cannot afford (design §4): one marker read, one
+    opener read, two stat calls, per call. Every reader is the tree's own
+    tolerant one, so a session without a marker reads as the user's own and a
+    truncated marker cannot fail the row.
+
+    ``session_origin`` rather than ``origin``: the published row already owns
+    the name ``origin`` for the mesh placement stamp (``session_rows``), a
+    different fact with the same name — and a published key must not change
+    meaning between ``list`` and ``info``. The value's reader is
+    ``resume.session_origin``; the name follows it.
+    """
+    from local_operator.resume import (
+        TRANSCRIPT_NAME,
+        is_user_session,
+        session_origin,
+        workstream_opened_by,
+    )
+
+    extras: dict[str, Any] = {
+        "session_dir": None,
+        "transcript_path": None,
+        "session_origin": None,
+        "opened_by": None,
+        # A directory that cannot be read is "unknown" visibility, never a
+        # guess: the pre-seeded value is what both early returns carry, and
+        # "listed" there asserted the one fact the read failed to establish
+        # (review round 1, R-4). The normal path overwrites it with the
+        # marker's own answer.
+        "sidebar_visibility": "unknown",
+    }
+    directory = config_dir() / "sessions" / session_id
+    try:
+        if not directory.is_dir():
+            return extras
+    except OSError:
+        return extras
+    extras["session_dir"] = str(directory)
+    try:
+        transcript = directory / TRANSCRIPT_NAME
+        if transcript.is_file():
+            extras["transcript_path"] = str(transcript)
+    except OSError:
+        pass
+    origin = session_origin(directory)
+    extras["session_origin"] = origin or None
+    extras["opened_by"] = workstream_opened_by(directory)
+    extras["sidebar_visibility"] = "listed" if is_user_session(directory) else "hidden"
+    return extras
+
+
+def _session_row_brief(row: Mapping[str, Any]) -> str:
+    """One lean listing line: the fields a caller acts on. The full published
+    row rides in ``details``, which costs no prompt tokens."""
+    state = str(row.get("state") or "?")
+    name = str(row.get("conversation_name") or "(unnamed)")
+    bits = [f"[{state}] {name}"]
+    if row.get("session_id"):
+        bits.append(f"session {row['session_id']}")
+    if row.get("pid"):
+        bits.append(f"pid {row['pid']}")
+    if row.get("model_label"):
+        bits.append(str(row["model_label"]))
+    if row.get("busy"):
+        bits.append("busy")
+    if row.get("pending"):
+        bits.append(f"pending {row['pending']}")
+    # ``uptime_s`` is meaningful only for a row with a PROCESS: a stored row
+    # carries the empty default (0.0, not None), and rendering it as ``up 0ms``
+    # would dress a dead session as a just-started one — the exact
+    # live-measured-vs-never-measured distinction the row keeps its ``None``s
+    # for. ``cwd`` rides under the same rule (a stored row cannot prove one).
+    if row.get("pid") and row.get("uptime_s") is not None:
+        bits.append(f"up {format_duration(int(float(row['uptime_s']) * 1000))}")
+    if row.get("last_activity_s") is not None:
+        age = max(0.0, time.time() - float(row["last_activity_s"]))
+        bits.append(f"last active {format_duration(int(age * 1000))} ago")
+    if row.get("cwd") and row.get("pid"):
+        bits.append(str(row["cwd"]))
+    return "- " + ", ".join(bits)
+
+
+async def _sessions_list(
+    tool_call_id: str, params: SessionsParams, context: ToolContext | None
+) -> ToolResult:
+    """``lop sessions``' rows, lean; ``details`` carries them whole."""
+    if params.query and params.query.strip():
+        return await _sessions_list_query(tool_call_id, params, context)
+
+    from local_operator.info.collect import session_rows
+
+    stored_limit = params.limit if params.include_stored else None
+    # ``config_dir()`` EXPLICITLY, not ``None``: the stored half of the listing
+    # is skipped for a caller that passes no root (``collect_sessions``'s
+    # rule), so ``None`` here would silently answer include_stored=true with
+    # zero stored rows. Same root the CLI's own listing passes.
+    rows = await asyncio.to_thread(
+        session_rows, config_dir(), include_stored=params.include_stored, stored_limit=stored_limit
+    )
+    shown = rows[: params.limit]
+    details: dict[str, Any] = {
+        "op": "list",
+        "count": len(shown),
+        "total": len(rows),
+        "rows": shown,
+    }
+    if not shown:
+        suffix = (
+            "" if params.include_stored else " (live only; pass include_stored=true for stored)"
+        )
+        text = f"no sessions to list{suffix}"
+    else:
+        text = "\n".join(_session_row_brief(row) for row in shown)
+        if len(rows) > len(shown):
+            text += (
+                f"\n({len(rows)} rows available; {len(shown)} shown — raise `limit` "
+                "or narrow with `query`)"
+            )
+    text, spill = spill_truncate(text, "sessions", context)
+    if spill:
+        details.update(spill)
+    return _text(tool_call_id, "sessions", text, details=details)
+
+
+async def _sessions_list_query(
+    tool_call_id: str, params: SessionsParams, context: ToolContext | None
+) -> ToolResult:
+    """``list query=`` — locate sessions by name or recent content.
+
+    The store search's own boundedness is the honest limit this op reports:
+    its digest is a bounded head read of roles user/assistant, so it locates
+    SESSIONS, not positions inside them — a reader who wants a position uses
+    ``peek`` (PR B) with a smaller scope. The scan below covers the sessions
+    the picker would offer, which is the population search answers over; a
+    hidden agent-shell run is findable through ``list`` without a query.
+    """
+    from local_operator.session import session_search
+    from local_operator.session.runtime import registry
+
+    matches = await asyncio.to_thread(
+        session_search.search_store, config_dir(), params.query or "", limit=params.limit
+    )
+    scanned = await asyncio.to_thread(registry.scan)
+    live = {rec.session_id: (rec, state) for rec, state in scanned if state in ("live", "wedged")}
+    rows: list[dict[str, Any]] = []
+    lines: list[str] = []
+    for match in matches:
+        session_row = match.row
+        entry = live.get(session_row.id)
+        row: dict[str, Any] = {
+            "state": entry[1] if entry else "stored",
+            "session_id": session_row.id,
+            "conversation_name": session_row.name,
+            "last_activity_s": session_row.mtime,
+        }
+        if entry:
+            row["pid"] = entry[0].pid
+            row["model_label"] = entry[0].model_label
+        rows.append(row)
+        name = session_row.name or "(unnamed)"
+        if entry:
+            lines.append(f"- [live] {name}, session {session_row.id}, pid {entry[0].pid}")
+        else:
+            age = max(0.0, time.time() - float(session_row.mtime or 0.0))
+            age_text = format_duration(int(age * 1000))
+            lines.append(f"- [stored] {name}, session {session_row.id}, last active {age_text} ago")
+    details: dict[str, Any] = {
+        "op": "list",
+        "query": params.query,
+        "count": len(rows),
+        "rows": rows,
+    }
+    if not lines:
+        text = f"no sessions match {params.query!r} (searched the store: names and recent content)"
+    else:
+        text = "\n".join(lines)
+        text += (
+            "\n(matched by the store search — names and recent content; it locates "
+            "sessions, not positions inside them)"
+        )
+    text, spill = spill_truncate(text, "sessions", context)
+    if spill:
+        details.update(spill)
+    return _text(tool_call_id, "sessions", text, details=details)
+
+
+def _sessions_facts_line(extras: Mapping[str, Any]) -> str:
+    """The durable-facts line every ``info`` text ends with.
+
+    Shared by the row-backed and the disk-only bodies so the two cannot drift
+    into different sentences about the same directory (QA round 1, Q1).
+    """
+    origin_text = extras.get("session_origin") or "the user's own (no marker)"
+    second = [
+        f"origin: {origin_text}",
+        f"sidebar visibility: {extras.get('sidebar_visibility')}",
+    ]
+    opener = extras.get("opened_by")
+    if opener:
+        bits = [str(opener.get("agent") or "?")]
+        if opener.get("label"):
+            bits.append(f"label {opener['label']!r}")
+        if opener.get("session"):
+            bits.append(f"session {opener['session']}")
+        second.append("opened by " + ", ".join(bits))
+    if extras.get("session_dir"):
+        second.append(f"dir: {extras['session_dir']}")
+    if extras.get("transcript_path"):
+        second.append(f"transcript: {extras['transcript_path']}")
+    return "; ".join(second)
+
+
+def _sessions_disk_only_body(facts: _SessionsDiskFacts, extras: Mapping[str, Any]) -> str:
+    """The ``info`` text when no listing row describes the session.
+
+    A stored directory can be absent from a listing scan for four reasons,
+    and the sentence must name the TRUE one (review rounds 1-2): a hidden
+    origin (dropped at the scan's origin gate, at any limit), an archived id
+    (dropped before the activity read), no recorded activity (never a row),
+    and — only when a limit is passed — ranking past the newest-first window.
+    The middle two made "past the window" false for them (R-5). Each arm asks
+    the scan's OWN predicate (the same marker read behind
+    ``sidebar_visibility``, ``archived_ids``, ``session_activity_path``), so
+    the sentence and the scan cannot disagree. The per-row reads need only
+    the id, which is why the answer can be composed here at all.
+    """
+    name = facts.name or "(unnamed)"
+    directory = str(extras.get("session_dir") or "")
+    resumable = True
+    if extras.get("sidebar_visibility") == "hidden":
+        why = "hidden from every listing scan by its origin marker"
+    else:
+        from local_operator.session.archived import archived_ids
+        from local_operator.session.retention import session_activity_path
+
+        in_archive = bool(directory) and Path(directory).name in archived_ids(config_dir())
+        if in_archive:
+            why = "archived — not offered in listings"
+        elif not directory or session_activity_path(directory) is None:
+            # The activity clock is the transcript and the mail spool, so a
+            # directory holding neither has never been worked in: it is not a
+            # resumable session, and the resume sentence would be a lie.
+            why = "no recorded activity to list or resume it by"
+            resumable = False
+        else:
+            why = "past the newest-first window a listing scan reads"
+    first = f'"{name}" — stored, {why}'
+    if resumable:
+        first += "; it can still be resumed by its exact session id"
+    return first + "\n" + _sessions_facts_line(extras)
+
+
+def _sessions_info_body(row: Mapping[str, Any], extras: Mapping[str, Any]) -> str:
+    """Two lines: the live-state row, then the durable facts about it."""
+    state = str(row.get("state") or "?")
+    name = str(row.get("conversation_name") or "(unnamed)")
+    parts = [f'"{name}" — {state}']
+    if row.get("session_id"):
+        parts.append(f"session {row['session_id']}")
+    if row.get("pid"):
+        parts.append(f"pid {row['pid']}")
+    if row.get("busy"):
+        parts.append("busy")
+    if row.get("pending"):
+        parts.append(f"pending {row['pending']}")
+    if row.get("model_label"):
+        parts.append(str(row["model_label"]))
+    return ", ".join(parts) + "\n" + _sessions_facts_line(extras)
+
+
+async def _sessions_info(
+    tool_call_id: str, params: SessionsParams, context: ToolContext | None
+) -> ToolResult:
+    target = await _sessions_target(params)
+    if target.candidates:
+        return _error(tool_call_id, "sessions", _sessions_candidates_text(target))
+    if not target.session_id:
+        return _error(tool_call_id, "sessions", target.error)
+    stored = target.record is None
+    row = await _session_row_for_id(
+        target.session_id,
+        include_stored=stored,
+        stored_limit=_SESSIONS_STORED_LOOKUP_LIMIT,
+    )
+    if row is None:
+        if stored:
+            # Two situations land here, and until review round 1 they shared
+            # one wrong sentence: a stored session genuinely past the
+            # newest-first window, and one a listing scan excludes at ANY
+            # limit because its origin is hidden (``resume._is_hidden_origin``
+            # — an ``agent-shell`` session never appears in a listing, so
+            # "past the window" was false for it; QA round 1, Q1). The
+            # per-row reads need only the id, so when the directory exists
+            # the answer is composed from disk; the error survives only for
+            # an id with no readable directory, where there is nothing to
+            # describe and no window claim to make.
+            extras = await asyncio.to_thread(_sessions_marker_extras, target.session_id)
+            if extras.get("session_dir"):
+                facts = await asyncio.to_thread(_sessions_disk_facts, target.session_id)
+                details = {
+                    "op": "info",
+                    "session_id": target.session_id,
+                    "listed": False,
+                    **extras,
+                }
+                text = await asyncio.to_thread(_sessions_disk_only_body, facts, extras)
+                text, spill = spill_truncate(text, "sessions", context)
+                if spill:
+                    details.update(spill)
+                return _text(tool_call_id, "sessions", text, details=details)
+            return _error(
+                tool_call_id,
+                "sessions",
+                f"session {target.session_id!r} has no readable session directory, so "
+                "there is nothing to describe; check the id, or run `lop sessions` "
+                "via bash for the raw listing.",
+            )
+        return _error(
+            tool_call_id,
+            "sessions",
+            f"session {target.session_id!r} resolved a live record but its listing row "
+            "could not be read (the record may have been reaped mid-call); retry, or "
+            "run `lop sessions` via bash for the raw listing.",
+        )
+    extras = await asyncio.to_thread(_sessions_marker_extras, target.session_id)
+    details: dict[str, Any] = {"op": "info", **row, **extras}
+    text = _sessions_info_body(row, extras)
+    text, spill = spill_truncate(text, "sessions", context)
+    if spill:
+        details.update(spill)
+    return _text(tool_call_id, "sessions", text, details=details)
+
+
+async def _sessions_stop(tool_call_id: str, params: SessionsParams) -> ToolResult:
+    """End one running session via the existing kill-switch ladder.
+
+    ``force=False``: v1 is the graceful ladder only — no SIGKILL from the
+    tool (design §6.1). The outcome line is the ladder's own receipt, painted
+    verbatim, because the TUI, the CLI and this tool must report the same
+    event in the same words.
+    """
+    from local_operator.session.runtime import control
+
+    target = await _sessions_target(params)
+    if target.candidates:
+        return _error(tool_call_id, "sessions", _sessions_candidates_text(target))
+    if target.record is None:
+        if target.session_id:
+            return _error(
+                tool_call_id,
+                "sessions",
+                f"session {target.session_id!r} is not running — `stop` ends a live "
+                "run, and a stored conversation has none to end.",
+            )
+        return _error(tool_call_id, "sessions", target.error)
+
+    if target.record.pid == os.getpid():
+        # Self-guard on the same predicate ``send`` uses: the tool runs INSIDE
+        # the caller's session process, so a target naming this pid IS the
+        # session making the call. The ladder would socket-op (then signal)
+        # our own runtime and the call would die mid-flight with no receipt —
+        # refuse before the ladder (review round 1, R-2).
+        return _error(
+            tool_call_id,
+            "sessions",
+            "that target is this session; a session cannot stop itself — the ladder "
+            "would signal the very run making this call, which would die before it "
+            "could report anything back. Stop it from outside the session.",
+        )
+
+    waited: list[str] = []
+    outcome = await control.stop_session(
+        target.record,
+        timeout_s=control.DEFAULT_TIMEOUT_S,
+        force=False,
+        _command="sessions tool",
+        on_wait=waited.append,
+    )
+    details: dict[str, Any] = {
+        "op": "stop",
+        "session_id": outcome.session_id,
+        "name": outcome.name,
+        "pid": outcome.pid,
+        "method": outcome.method,
+        "wakes_dormant": outcome.wakes_dormant,
+        "monitors_dormant": outcome.monitors_dormant,
+    }
+    return _text(tool_call_id, "sessions", "\n".join([*waited, outcome.line]), details=details)
+
+
+def _sessions_open_argv(params: SessionsParams, *, resume_id: str = "") -> list[str]:
+    """The ``lop exec`` arguments for one spawn/resume (no interpreter prefix).
+
+    Pure, so the executor-level test can assert on it directly (design
+    §11.2), and one of the two places the visibility decision is made (the
+    other is the description). ``--workstream`` is the DEFAULT and the whole
+    fix: absent it an agent-opened run is stamped ``agent-shell`` and hidden
+    everywhere (``session_factory._prepare`` →
+    ``agent_shell.stamp_agent_shell_session``) and the stamp cannot be
+    corrected later. ``visibility="ephemeral"`` is the explicit opt-out and
+    passes no flag at all.
+
+    The prompt is a POSITIONAL, so it is separated with ``--``: a prompt that
+    begins with a dash would otherwise be read as the next option by argparse
+    and the run would fail before it started. The ``--`` form parses
+    identically for every prompt (verified against the real parser).
+    """
+    argv = ["exec"]
+    if params.background:
+        argv.append("--background")
+    if resume_id:
+        argv += ["--resume", resume_id]
+    else:
+        if params.visibility == "workstream":
+            argv.append("--workstream")
+        for flag, value in (
+            ("--name", params.name),
+            ("--team", params.team),
+            ("--profile", params.profile),
+            ("--model", params.model),
+        ):
+            if value and value.strip():
+                argv += [flag, value.strip()]
+    argv.append("--")
+    argv.append(params.prompt or "")
+    return argv
+
+
+def _sessions_child_cwd(context: object | None) -> str | None:
+    """The directory the spawned run starts in: this session's own cwd, when
+    it is a real directory. Same rule the ``bash`` tool's cwd resolution
+    protects for a command — a worker inheriting whatever cwd happened to be
+    current would silently change what relative paths in its prompt mean."""
+    raw = getattr(context, "cwd", None)
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return raw if Path(raw).is_dir() else None
+    except OSError:
+        return None
+
+
+def _sessions_open_env(context: object | None) -> dict[str, str]:
+    """The environment the spawned CLI runs under — the ``bash`` tool's build.
+
+    ``shell_env.child_environment`` is THE helper for this ("so the next tool
+    that spawns a child has a function to call rather than a pattern to
+    copy", its module docstring), and the injections are the same decisions
+    the ``bash`` tool makes, for the same reasons:
+
+    * ``NON_INTERACTIVE_ENV`` — which carries the agent-shell marker the
+      session guard (``cli.main``) reads, so the guard decides this call
+      exactly as it decides a `lop exec` typed into ``bash``;
+    * the three-arm delegation allowance, through the one shared helper, so
+      the two writers cannot drift;
+    * this session's scratchpad root — NOT an afterthought: the workstream's
+      ``opened_by`` attribution is read from exactly this variable at stamp
+      time (``agent_shell._origin_attribution`` takes the opener's session
+      directory from its parent), so a spawn that omitted it would produce a
+      listed workstream with no attributable opener — the confusion the
+      workstream value exists to remove.
+
+    Deliberately NOT carried: the session's credential overlay
+    (``context.variables.credential_env()``). That grant is scoped to commands
+    THIS session runs; a spawned session is a different identity that
+    resolves its own credentials from the store, and the frozen design
+    enumerates the injections without it (§6.2).
+    """
+    injections: dict[str, str] = dict(NON_INTERACTIVE_ENV)
+    injections.update(may_delegate_env_injection(context))
+    injections.update(scratchpad_env_injection(ensure_scratchpad_dir(scratchpad_dir_of(context))))
+    return shell_env.child_environment(injections=injections)
+
+
+async def _sessions_launch(
+    argv: list[str], env: dict[str, str], cwd: str | None
+) -> tuple[int, str]:
+    """Run THIS build's CLI (``python -P -m local_operator.cli …``) and return
+    ``(returncode, stderr)``.
+
+    Not ``shutil.which("lop")``: the ``lop`` on PATH may be a different build
+    (a global install, a generation pointer) than the session that spawned
+    it, and the two could disagree about a flag the argv above uses.
+    ``python_argv`` adds ``-P`` so a checkout that merely happens to be the
+    cwd cannot shadow the installed package — the same spelling
+    ``update.py``'s relaunch and ``tui/session_move.py``'s nested run use.
+
+    The child is its own process group so a fired bound can reap the whole
+    tree; ``stdin`` is /dev/null because an exec run is never interactive
+    (``--control`` is deliberately not exposed by this tool).
+    """
+    process = await asyncio.create_subprocess_exec(
+        *python_argv(*_SESSIONS_CLI, *argv),
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+        cwd=cwd,
+        start_new_session=True,
+    )
+    try:
+        _out, err = await asyncio.wait_for(process.communicate(), SESSIONS_LAUNCH_TIMEOUT_S)
+    except (asyncio.TimeoutError, TimeoutError):
+        _sessions_kill_group(process)
+        await process.wait()
+        raise
+    return int(process.returncode or 0), err.decode("utf-8", "replace")
+
+
+def _sessions_kill_group(process: "asyncio.subprocess.Process") -> None:
+    """SIGKILL the launcher's whole process group (the bound fired; nothing
+    may outlive the call). Windows has no ``killpg`` and no ``start_new_session``
+    — there the child was never detached from us, so a pid kill is the best
+    available."""
+    import signal
+
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except (AttributeError, OSError):
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+
+
+def _sessions_published_pid(state: Mapping[str, Any]) -> int | None:
+    """The run's pid — reported only once its discovery record exists.
+
+    The ledger's ``runtime_path`` is ``registry.record_path(pid)`` and the
+    file NAME is the pid; the record only exists after the runtime published.
+    The file is re-read and matched against the ledger's ``session_id`` so a
+    recycled pid's leftover record can never be reported as this run's (the
+    schema's "pid-when-published", design §5.4).
+    """
+    raw = str(state.get("runtime_path") or "")
+    session_id = str(state.get("session_id") or "")
+    if not raw or not session_id:
+        return None
+    path = Path(raw)
+    try:
+        pid = int(path.stem)
+    except ValueError:
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if str(payload.get("session_id") or "") != session_id:
+        return None
+    return pid
+
+
+class _SessionsDiskFacts(NamedTuple):
+    """What the session's own directory says about it — or ``None``s when the
+    directory does not exist: the produced origin, sidebar visibility, the
+    opener and the conversation name."""
+
+    origin: str | None
+    sidebar_visibility: str | None
+    opener: dict[str, str | None] | None
+    name: str
+
+
+def _sessions_disk_facts(session_id: str) -> _SessionsDiskFacts:
+    """Read the receipt facts from the session directory itself.
+
+    The disk is the authority for all four — for ``resume`` the design says
+    so explicitly ("origin/sidebar_visibility echoed from disk", §5.3), and
+    for ``spawn`` the same read is what turns "we passed the flag" into "the
+    stamp fired", which is the difference this tool exists to make checkable.
+    """
+    from local_operator.resume import (
+        is_user_session,
+        session_name,
+        session_origin,
+        workstream_opened_by,
+    )
+
+    facts = _SessionsDiskFacts(None, None, None, "")
+    directory = config_dir() / "sessions" / session_id
+    try:
+        if not directory.is_dir():
+            return facts
+    except OSError:
+        return facts
+    origin = session_origin(directory)
+    return _SessionsDiskFacts(
+        origin or None,
+        "listed" if is_user_session(directory) else "hidden",
+        workstream_opened_by(directory),
+        session_name(directory),
+    )
+
+
+def _sessions_open_body(params: SessionsParams, details: Mapping[str, Any]) -> str:
+    """The one-line-ish receipt (§5.4): what was opened, where it shows up,
+    and — for a hidden run — how each side still reaches it."""
+    name = str(details.get("name") or "")
+    # Two spellings, because the spaces differ per branch: ``named`` carries
+    # no trailing space and ``where`` starts with one, so composing them
+    # directly produced a double space in the resume receipt (review round 1,
+    # Q2). ``lead`` restores the trailing space the spawn sentences need
+    # before their literal verb.
+    named = f'"{name}"' if name else ""
+    lead = f"{named} " if named else ""
+    bits = []
+    if details.get("session_id"):
+        bits.append(f"session {details['session_id']}")
+    if details.get("job_id"):
+        bits.append(f"job {details['job_id']}")
+    if details.get("pid"):
+        bits.append(f"pid {details['pid']}")
+    where = f" ({', '.join(bits)})" if bits else ""
+    opener = details.get("opener") or {}
+    opened_by = ""
+    if opener.get("agent"):
+        opened_by = f" opened by {opener['agent']}"
+        if opener.get("label"):
+            opened_by += f" (label {opener['label']!r})"
+        if opener.get("session"):
+            opened_by += f" from session {opener['session']}"
+        opened_by += "."
+    if params.op == "resume":
+        origin = details.get("origin") or "not recorded"
+        visibility = details.get("sidebar_visibility") or "unknown"
+        # The lead carries the space ``named`` needs and nothing in the
+        # unnamed case: ``named`` empty plus ``where``'s leading space
+        # produced 'reopened  (session …)' (review round 2, R-6).
+        reopened = f"reopened {named}" if named else "reopened"
+        text = (
+            f"{reopened}{where} — origin {origin} and sidebar visibility "
+            f"unchanged ({visibility}): origin.json is written once and never "
+            "re-stamped (visibility_changed: false)."
+        )
+        if details.get("sidebar_visibility") == "hidden":
+            text += (
+                " A hidden session stays hidden; spawn a new workstream instead if "
+                "this work should be visible."
+            )
+        return text
+    if details.get("sidebar_visibility") == "listed":
+        text = (
+            f"opened {lead}as a listed workstream{where} — visible in the operator's "
+            "sidebar, /resume and the phone list."
+        )
+    else:
+        text = (
+            f"opened {lead}as an ephemeral session{where} — hidden from the sidebar "
+            "and /resume and silent."
+        )
+    text += opened_by
+    if details.get("origin"):
+        text += f" origin: {details['origin']}."
+    if not details.get("session_id"):
+        text += (
+            " The session id is not published yet — follow the run with "
+            f"`lop exec --status {details.get('job_id')}`."
+        )
+    elif details.get("sidebar_visibility") == "hidden":
+        text += (
+            " The operator reaches it through `lop sessions` (the live run); your "
+            f"route back is `lop exec --resume {details['session_id']}`."
+        )
+    return text
+
+
+async def _sessions_open(
+    tool_call_id: str, params: SessionsParams, context: ToolContext | None
+) -> ToolResult:
+    """spawn/resume: run the real CLI and report a readiness receipt.
+
+    The receipt is readiness, not completion (``docs/EXEC.md``:40): the
+    returned fields say what was OPENED, and the run's own progress is
+    followed with ``--status``/``info``. The one text line parsed from the
+    launcher is its job-id line — the same line the e2e harnesses already
+    parse — and everything structured comes from the durable ledger the
+    launcher wrote.
+    """
+    from local_operator.exec_mode import job_status
+
+    resume_id = ""
+    if params.op == "resume":
+        target = await _sessions_target(params)
+        if target.candidates:
+            return _error(tool_call_id, "sessions", _sessions_candidates_text(target))
+        if not target.session_id:
+            return _error(tool_call_id, "sessions", target.error)
+        if target.record is not None and target.record.pid == os.getpid():
+            # Same self-guard as ``stop`` (review round 1, R-2): ``resume``
+            # reopens a stored/stopped conversation, and a session that is
+            # already live HERE has nothing to reopen — asking the CLI to
+            # open a handle on the transcript this call is writing to is not
+            # a thing to discover through the lease. A stored id (no live
+            # record) cannot be told apart from any other stored session and
+            # is left to the CLI's own refusal, passed through verbatim.
+            return _error(
+                tool_call_id,
+                "sessions",
+                "that target is this session; a session cannot resume itself — it is "
+                "already live here. Continue the work in this session, or address a "
+                "different one.",
+            )
+        resume_id = target.session_id
+
+    argv = _sessions_open_argv(params, resume_id=resume_id)
+    env = _sessions_open_env(context)
+    try:
+        code, err = await _sessions_launch(argv, env, _sessions_child_cwd(context))
+    except (asyncio.TimeoutError, TimeoutError):
+        return _error(
+            tool_call_id,
+            "sessions",
+            f"the `lop exec` launcher did not finish within "
+            f"{int(SESSIONS_LAUNCH_TIMEOUT_S)}s and was killed; check `lop sessions` "
+            "and the exec job log before retrying.",
+        )
+    if code != 0:
+        # `cli.main` is the only decider of what an agent shell may open, and
+        # every refusal it prints is a sentence on stderr (the guard's text
+        # included). Verbatim: a tool-side paraphrase would teach a different
+        # rule than the CLI the operator reads, and the refusal IS the answer.
+        return _error(
+            tool_call_id, "sessions", err.strip() or f"`lop exec` exited {code} without output"
+        )
+
+    match = _SESSIONS_JOB_LINE_RE.search(err)
+    job_id = match.group(1) if match else ""
+    if not job_id:
+        # Defensive only: the line is printed by our own `exec_mode` at this
+        # revision. A success with no parseable receipt is a bug to surface,
+        # not to paper over with a half-empty result.
+        return _error(
+            tool_call_id,
+            "sessions",
+            "`lop exec` exited 0 but printed no background receipt, so the job id is "
+            f"unknown; check `lop sessions`. Launcher output: {err.strip()[:400]!r}",
+        )
+    state = await asyncio.to_thread(job_status, job_id)
+    deadline = time.monotonic() + SESSIONS_READY_GRACE_S
+    while (
+        str(state.get("status") or "") in ("starting", "")
+        and not state.get("session_id")
+        and time.monotonic() < deadline
+    ):
+        await asyncio.sleep(_SESSIONS_READY_POLL_S)
+        state = await asyncio.to_thread(job_status, job_id, reconcile=False)
+    state = await asyncio.to_thread(job_status, job_id)
+
+    session_id = str(state.get("session_id") or "") or resume_id
+    pid = _sessions_published_pid(state)
+    disk = (
+        await asyncio.to_thread(_sessions_disk_facts, session_id)
+        if session_id
+        else _SessionsDiskFacts(None, None, None, "")
+    )
+    fallback_origin = None
+    fallback_visibility = None
+    if params.op == "spawn":
+        fallback_origin = "agent-workstream" if params.visibility == "workstream" else "agent-shell"
+        fallback_visibility = "listed" if params.visibility == "workstream" else "hidden"
+    origin = disk.origin if disk.origin is not None else fallback_origin
+    visibility = (
+        disk.sidebar_visibility if disk.sidebar_visibility is not None else fallback_visibility
+    )
+    name = params.name or disk.name or ""
+
+    details: dict[str, Any] = {
+        "op": params.op,
+        "session_id": session_id or None,
+        "job_id": job_id,
+        "name": name or None,
+        "state": str(state.get("status") or "starting"),
+        "origin": origin,
+        "sidebar_visibility": visibility,
+        "opener": disk.opener,
+        "pid": pid,
+        "log_path": str(state.get("log") or "") or None,
+    }
+    if params.op == "resume":
+        details["visibility_changed"] = False
+    return _text(tool_call_id, "sessions", _sessions_open_body(params, details), details=details)
+
+
+async def execute_sessions(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """Run one ``sessions`` op and report what it produced."""
+    try:
+        params = SessionsParams(**args)
+    except ValidationError as exc:
+        return _validation_error(tool_call_id, "sessions", exc)
+
+    refusal = _sessions_validation_error(params)
+    if refusal is not None:
+        return _error(tool_call_id, "sessions", refusal)
+
+    if params.op == "list":
+        return await _sessions_list(tool_call_id, params, context)
+    if params.op == "info":
+        return await _sessions_info(tool_call_id, params, context)
+    if params.op == "stop":
+        return await _sessions_stop(tool_call_id, params)
+    return await _sessions_open(tool_call_id, params, context)
+
+
+def build_sessions_tool(context: ToolContext) -> AgentTool | None:
+    """createIf rung 3: built only where the delegation surface can exist.
+
+    The predicate is ``context.subagent_launcher is not None`` — the
+    session-owned prerequisite ``task``/``wait``/``jobs`` already gate on,
+    present on every real Session's per-turn context (``session.py``'s
+    ``_build_tool_context``) and absent from the factory and
+    child-construction contexts. The population is trimmed AFTER build by the
+    mechanisms that already exist (``harness/subagent``'s derived prune,
+    ``_filter_declared``, role allowlists — design §3.3), so this gate is
+    about paying no schema in contexts that can never hold the surface, not
+    about per-session policy.
+    """
+    if getattr(context, "subagent_launcher", None) is None:
+        return None
+    return AgentTool(
+        name="sessions",
+        label="Sessions",
+        description=_SESSIONS_TOOL_DESCRIPTION,
+        parameters=SessionsParams.model_json_schema(),
+        # Static tier is the highest any op needs (``stop`` ends a process);
+        # the per-call hook downgrades the reads so list/info never prompt.
+        approval_tier="exec",
+        call_approval_tier=_sessions_tier,
+        # EXCLUSIVE: spawn/resume start processes, and a stop races the very
+        # runtime it is asking for a clean exit; nothing here wants a
+        # concurrent sibling, and the reads pay for the slot with a
+        # subprocess-free scan, which is bounded.
+        concurrency="exclusive",
+        # A started spawn or an in-flight stop must not be torn mid-ladder by
+        # a steer; the ops are bounded by their own waits (the launcher bound,
+        # the stop ladder's rungs).
+        interruptible=False,
+        describe_approval=_describe_sessions_approval,
+        execute=execute_sessions,
     )
 
 
