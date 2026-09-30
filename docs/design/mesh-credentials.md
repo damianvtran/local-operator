@@ -362,7 +362,7 @@ record, so "nothing to share" and "older build" stay different sentences, and
 an unreadable store records `offer_enumeration: "unreadable"` (scalar
 `offer_sent` / `offer_digest` keys beside it) on the owner's audit;
 * the receipt says WHY a promised key is missing: a deliberate reduction gets
-`not served: … — the other device chose not to share it` (no remedy — the
+`not available here: … — the other device chose not to share it` (no remedy — the
 result frame carries `reduced` for exactly this), while a grant that failed
 keeps the share-verb remedy;
 * the row schema evolves ADDITIVELY: the digest is over the canonical

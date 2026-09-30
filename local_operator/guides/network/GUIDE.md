@@ -74,7 +74,7 @@ rendering is not a contract.
    The owner may only REMOVE rows (`[t]` at its prompt; nothing can be added in
    a pairing), the confirm screen re-renders the list after each edit so the
    frame you answer `y` at matches the grant, and the final set is what the
-   joined receipt reports (`serving here: …`; a promised key the result does not
+   joined receipt reports (`available here: …`; a promised key the result does not
    carry is named either as deliberately not shared or, if the grant failed,
    with the remedy).
    An older build on EITHER end shows no list and the ceremony is exactly what
@@ -124,8 +124,8 @@ rendering is not a contract.
    # → {"ok":true,"status":"joined","network_id":…,"epoch":…,"shares":["openai"]}
    ```
 
-   The joined receipt also names the final set in words — `serving here: openai`,
-   plus `not served:` lines beside it: a key the owner's person removed says so
+   The joined receipt also names the final set in words — `available here: openai`,
+   plus `not available here:` lines beside it: a key the owner's person removed says so
    ("the other device chose not to share it"), while a grant that failed names
    the remedy.
 

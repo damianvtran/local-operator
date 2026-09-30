@@ -7717,7 +7717,7 @@ class RelayServer:
                 material=state.secret,
                 rotations=dict(record.rotations),
                 # THE RECEIPT'S FINAL SET: what was actually served, drift and
-                # drops included. The joiner shows it ("serving here: …") and it
+                # drops included. The joiner shows it ("available here: …") and it
                 # is the only fact that reconciles the two screens when a share
                 # could not be applied. ``reduced`` names the keys the owner's
                 # person removed at confirm — the deliberate half of the delta,

@@ -343,19 +343,19 @@ def test_the_receipt_delta_keeps_a_decision_apart_from_a_failure() -> None:
     verb, which is the one thing they can act on.
     """
     assert offers.missing_share_lines(["openai"], [], ["openai"]) == [
-        "not served: openai — the other device chose not to share it"
+        "not available here: openai — the other device chose not to share it"
     ]
     assert offers.missing_share_lines(["a", "b"], [], ["a", "b"]) == [
-        "not served: a, b — the other device chose not to share them"
+        "not available here: a, b — the other device chose not to share them"
     ]
     assert offers.missing_share_lines(["openai"], [], []) == [
-        "not served: openai — ask the other device to run "
+        "not available here: openai — ask the other device to run "
         "`lop network credential share <key> --with <device>` to lend it after the join"
     ]
     # Both causes at once, deliberately first; nothing that WAS served is named.
     assert offers.missing_share_lines(["a", "b", "c"], ["a"], ["c"]) == [
-        "not served: c — the other device chose not to share it",
-        "not served: b — ask the other device to run "
+        "not available here: c — the other device chose not to share it",
+        "not available here: b — ask the other device to run "
         "`lop network credential share <key> --with <device>` to lend it after the join",
     ]
 
@@ -894,6 +894,9 @@ def test_confirm_screen_shows_the_offer_and_a_reduction_lands_in_the_decision(
     # the frame the final `y` lands on shows openai as removed — not as served.
     assert out.count("Credentials this device will serve") == 2
     assert "openai (OAuth, d***@example.com)   no longer served" in out
+    # D9 (design round 2): the re-asked question gets its blank line back — the
+    # re-printed block ends with the tail plus one blank, like the first frame.
+    assert out.count("nothing else will be served.\n\n") == 2
     assert "anthropic (OAuth)" + " " * 18 + "will be served" in out
     decision = store.pair_decision("i_offer1", root)
     assert decision is not None and decision.matched and decision.decision == "admit"
@@ -910,11 +913,16 @@ def test_confirm_refuses_an_unoffered_addition_by_name(
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
     _pending_with_offer(root)
     monkeypatch.setattr(net_cli, "_has_terminal", lambda: True)
-    answers = iter(["t", "ghost-key", "openai", "y"])
+    answers = iter(["t", "t", "ghost-key", "openai", "y"])
     monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
     assert net_cli._cmd_confirm(_confirm_args()) == 0  # noqa: SLF001
     out = capsys.readouterr().out
+    # U8 (round 2): a stray `t` answered here is the prompt's own word, not a key
+    # — it must not be pointed at `credential share t`.
+    assert "'t' is not a known key here" in out
+    assert "credential share t " not in out
     assert "'ghost-key' is not currently being served" in out
+    assert "credential share ghost-key" in out
     assert "nothing can be added in this ceremony" in out
     decision = store.pair_decision("i_offer1", root)
     assert decision is not None and decision.matched and decision.decision == "admit"
@@ -942,6 +950,85 @@ def test_confirm_refuses_an_unoffered_addition_by_name(
         ], "the refused widening frame rewrote the decision"
     finally:
         server.stop()
+
+
+def test_the_owner_receipt_names_what_it_served(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """U6 (design-confirmed fold, round 2): the owner's own receipt names the
+    final set — the same fact the joiner reads — or says nothing was served; a
+    ceremony with no offer sent keeps the bare line."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    _pending_with_offer(root)
+    monkeypatch.setattr(net_cli, "_has_terminal", lambda: True)
+    joiner = "d_" + "b" * 32
+
+    # Run A: keep openai, stop anthropic -> "— serving: openai".
+    answers = iter(["t", "anthropic", "y"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    assert net_cli._cmd_confirm(_confirm_args(json=False)) == 0  # noqa: SLF001
+    out = capsys.readouterr().out
+    assert f"admitted {joiner} to home-net — serving: openai" in out
+
+    # Run B: stop both -> "— serving nothing".
+    answers = iter(["t", "openai anthropic", "y"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    assert net_cli._cmd_confirm(_confirm_args(json=False)) == 0  # noqa: SLF001
+    out = capsys.readouterr().out
+    assert f"admitted {joiner} to home-net — serving nothing" in out
+
+    # Run C: no offer sent (an older peer) -> the line is unchanged.
+    skipped = types.PendingPairing(
+        invite_id="i_offer1",
+        network_id="n_0123456789abcdef01234567",
+        network_name="home-net",
+        joiner_device_id=joiner,
+        joiner_name="laptop",
+        sas="481926",
+        fingerprint="K7QM-3XPD-4WZ9-8NRB",
+        transcribed="481926",
+        peer_addr="127.0.0.1:4097",
+        expires_at=time.time() + 120,
+        prompt="no share list travelled here.",
+        offer=[],
+        offer_state="skipped_peer_unsupported",
+    )
+    store.save_pending_pairing(skipped, root)
+    answers = iter(["y"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    assert net_cli._cmd_confirm(_confirm_args(json=False)) == 0  # noqa: SLF001
+    out = capsys.readouterr().out
+    assert f"admitted {joiner} to home-net" in out
+    assert "— serving" not in out
+
+
+def test_the_tool_finished_receipt_mounts_the_same_delta_lines() -> None:
+    """N3 (agent review round 2): the tool's finished-receipt mount renders the
+    SAME subjects, sentences and order the CLI does — one helper, pinned where
+    it is used."""
+    from local_operator.network import tool as net_tool
+
+    payload = {
+        "name": "lab",
+        "network_id": "n_0123456789abcdef01234567",
+        "epoch": 1,
+        "role": "drive",
+        "members": 2,
+        "fingerprint": "K7QM-3XPD-4WZ9-8NRB",
+        "shares": ["openai"],
+        "reduced": ["azon"],
+        "offers": [
+            {"key": "azon", "kind": "oauth-rotating", "label": "", "share": True},
+            {"key": "openai", "kind": "oauth-rotating", "label": "", "share": True},
+            {"key": "legacy-key", "kind": "api-key-static", "label": "", "share": False},
+        ],
+    }
+    lines = net_tool._render("join", payload)  # noqa: SLF001 — the mount itself
+    assert lines[0].startswith("joined lab ")
+    assert lines[1] == "available here: openai"
+    assert lines[2] == "not available here: azon — the other device chose not to share it"
+    assert lines[-1].startswith("fingerprint ")
+    assert all("legacy-key" not in line for line in lines), "an unoffered key entered the receipt"
 
 
 # ---------------------------------------------------------------------------
@@ -1039,7 +1126,7 @@ def test_result_frame_carries_the_granted_shares_and_the_receipt_shows_them(
     _record, lines, payload = _pair_with_credential(devices, monkeypatch)
     assert payload["shares"] == ["openai"]
     assert payload["reduced"] == []
-    assert "serving here: openai" in lines
+    assert "available here: openai" in lines
 
 
 def test_a_reduction_cannot_widen_at_admission(
@@ -1097,8 +1184,8 @@ def test_a_deliberate_reduction_reaches_the_joiner_as_a_decision_not_a_failure(
     # Both delta lines sit beside the serving line, right after `joined …` (D5),
     # and the deliberate one carries no remedy (U2).
     assert lines[0].startswith("joined ")
-    assert lines[1] == "serving here: openai"
-    assert lines[2] == "not served: azon — the other device chose not to share it"
+    assert lines[1] == "available here: openai"
+    assert lines[2] == "not available here: azon — the other device chose not to share it"
     assert not any(
         "credential share" in line for line in lines
     ), "a deliberate reduction still points the joiner at the share verb"
