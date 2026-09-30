@@ -917,6 +917,18 @@ def reported_age(project: Project, *, now: float | None = None) -> str | None:
     return age_text(project.progress_updated_at, now=now)
 
 
+def is_session_id(value: object) -> bool:
+    """Is ``value`` shaped like a session id (the 12-hex UI contract)?
+
+    Public because a RENDERER needs the answer too — the updates feed labels a
+    reporter ``session <id>`` only when it is one, and an agent label otherwise
+    — and reaching for the module's private ``_SESSION_ID_RE`` from another
+    layer is a coupling nobody can change safely (agent review round 1, NIT-2).
+    The shape itself stays defined HERE, beside the validator that enforces it.
+    """
+    return isinstance(value, str) and bool(_SESSION_ID_RE.fullmatch(value))
+
+
 def display_name(project: Project | Mapping[str, Any]) -> str:
     """The human-facing name: the display ``title`` when set, else ``name``.
 
