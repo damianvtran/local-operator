@@ -123,7 +123,7 @@ class AgentParams(BaseModel):
             "says (show also prints the packaged text when an installed role "
             "has diverged from it); install: add a packaged starter; reset: "
             "restore it over an edited role, reporting what it replaced; sync: "
-            "pull the latest for installed roles (force overrides edits); "
+            "pull the latest for installed roles (merges hub updates with local edits); "
             "create/update: author or fix a role or a specialist profile."
         )
     )
@@ -233,14 +233,18 @@ class AgentParams(BaseModel):
             "being a role. Ignored on update: a profile cannot change kind."
         ),
     )
-    # A plain bool, not ``bool | None``: the tri-state costs ~55 characters of
-    # JSON on EVERY session's tools array (the anyOf branch), and "unset" has
-    # no meaning for a force flag — the budget gate in
-    # ``scripts/bench_context_budget.py`` is the reason to care which shape a
-    # schema field takes, not a style preference.
-    force: bool = Field(
-        default=False,
-        description="sync: apply over local edits.",
+    # A plain string with an empty-string "unset", NOT ``Literal["", ...]`` and not
+    # ``Literal[...] | None``: an empty-string enum member is rejected by the
+    # Gemini-family providers (``tests/unit/tools/test_registry.py`` pins that no
+    # built-in schema emits one), and the optional form costs an ``anyOf`` null
+    # branch on EVERY session's tools array while ``scripts/bench_context_budget.py``
+    # gates the schema's size. The accepted values are validated in ``_op_sync``.
+    # ``""`` is "no decision": the merge runs and a genuine conflict is left for the
+    # user. There is no ``replace`` here on purpose — a model must never be able to
+    # discard the user's copy of a role.
+    resolve: str = Field(
+        default="",
+        description="sync: local|remote picks a side for a hub conflict.",
     )
 
 
@@ -1047,7 +1051,7 @@ async def _op_reset(context: ToolContext | None, tool_call_id: str, name: str) -
 
 
 async def _op_sync(
-    context: ToolContext | None, tool_call_id: str, name: str | None, force: bool
+    context: ToolContext | None, tool_call_id: str, name: str | None, resolve: str | None
 ) -> ToolResult:
     """Pull the latest for installed starters and hub-pulled agents.
 
@@ -1063,34 +1067,80 @@ async def _op_sync(
     word a caller typed.
     """
 
+    side = (resolve or "").strip().lower()
+    if side not in ("", "local", "remote"):
+        return _error(
+            tool_call_id,
+            "agent",
+            f"resolve must be 'local' or 'remote' (got {resolve!r}); "
+            "leave it out to let conflicts wait for the user.",
+        )
     registry = _registry(context)
     if registry is None:
         return _error(
             tool_call_id, "agent", "no agent registry attached to this session; cannot sync."
         )
-    from local_operator.agent_sync import resolve_hub_client, sync_agent_profiles
+    from local_operator.agent_profiles import sync_installed_seeds
+    from local_operator.agent_sync import SyncReport
+    from local_operator.hub_sync import service as svc
+    from local_operator.hub_sync.report import render_report
 
     names = [name] if name and name.strip() else None
-    radient_client = None
     config_dir = getattr(registry, "config_dir", None)
-    if config_dir is not None:
+
+    def run() -> str:
+        # The registry and the hub both do blocking I/O; this whole body runs off
+        # the loop so a slow marketplace listing cannot stall the session.
+        seed = SyncReport(entries=tuple(sync_installed_seeds(registry, names=names, force=False)))
+        if config_dir is None:
+            return seed.render()
+        from local_operator.config import ConfigManager
+
+        # ``resolve`` is the model's ONLY conflict lever, and it maps to ``prefer`` --
+        # never to ``replace``. An agent must not be able to discard the user's copy;
+        # that stays a CLI/UI decision (design B5.4).
         try:
-            # The async resolver, not the CLI bridge: the bridge refuses to
-            # run inside a live event loop, and a tool executor is exactly that.
-            radient_client = await resolve_hub_client(config_dir)
+            ctx = svc.sync_context(ConfigManager(config_dir))
         except Exception:  # noqa: BLE001 - hub arm only; local updates still run
             logger.warning("hub credential resolution failed; syncing local starters only")
+            return seed.render()
+        ctx.agent_registry = registry
+        try:
+            hub = svc.apply_items(
+                ctx,
+                kind="agent",
+                names=names,
+                prefer="local" if side == "local" else "remote" if side == "remote" else "none",
+            )
+        except svc.HubBusy as busy:
+            # Another process is mid-update: report it beside the local starters
+            # rather than failing the whole sync.
+            return seed.render() + f"\n\nHub updates not run: {busy}"
+        hub_names = {r.name.lower() for r in hub.reports}
+        seed_only = SyncReport(
+            entries=tuple(
+                v
+                for v in seed.entries
+                if not (v.verdict == "not-installed" and v.name.lower() in hub_names)
+            )
+        )
+        parts = [seed_only.render()] if seed_only.entries else []
+        if hub.reports:
+            parts.append(render_report(hub, style="tool"))
+        if names and not parts:
+            return seed.render()
+        return "\n".join(parts) if parts else seed.render()
 
-    # The registry and the hub both do blocking I/O; run them off the loop so a
-    # slow marketplace listing cannot stall the session's other work.
-    report = await asyncio.to_thread(
-        sync_agent_profiles,
-        registry,
-        radient_client=radient_client,
-        names=names,
-        force=bool(force),
-    )
-    text, spill = spill_truncate(report.render(), "agent", context)
+    rendered = await asyncio.to_thread(run)
+    if "re-run with force" in rendered or "differs from the packaged starter" in rendered:
+        # The seed arm's refusal sentence is shared with the CLI, where --force
+        # still exists. A model has no force (it must never be able to discard a
+        # user's edits), so point it at the explicit, echoing path instead.
+        rendered += (
+            "\n\nThis tool cannot overwrite an edited starter. To take the packaged text, "
+            "ask the user, then use op='reset' name=<role> (it prints what it replaced)."
+        )
+    text, spill = spill_truncate(rendered, "agent", context)
     return _text(tool_call_id, "agent", text, details=spill or None)
 
 
@@ -1384,7 +1434,7 @@ async def execute_agent(
         return await _op_reset(context, tool_call_id, str(params.name))
     if params.op == "sync":
         return await _op_sync(
-            context, tool_call_id, str(params.name) if params.name else None, bool(params.force)
+            context, tool_call_id, str(params.name) if params.name else None, params.resolve or None
         )
     return await _op_write(context, tool_call_id, params, creating=params.op == "create")
 

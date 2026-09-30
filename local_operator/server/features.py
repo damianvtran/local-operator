@@ -53,6 +53,10 @@ def feature_flags() -> dict[str, Any]:
         "catalogues": 1,
         "profile_catalogue": 1,
         "team_catalogue": 1,
+        # Agent Hub update availability: GET /v1/desktop/hub/updates (a store read,
+        # no network) plus check/apply/apply-all/retry. A renderer gates the
+        # sidebar indicator on this so it never polls a backend that lacks it.
+        "hub_updates": 1,
         # 3 adds POST /v1/desktop/sessions/{id}/warm, which starts a
         # session's runtime without submitting work to it.
         #

@@ -1,0 +1,924 @@
+{
+ "contract": "docs/design/hub-auto-update.md A10",
+ "vectors": [
+  {
+   "id": "V01 remote-only edit",
+   "field_kind": "markdown",
+   "B": "## A\nx.",
+   "L": "## A\nx.",
+   "R": "## A\nx2.",
+   "prefer": "none",
+   "acknowledge_unknown_baseline": false,
+   "model_stub": null,
+   "note": "",
+   "expected": {
+    "outcome": "merged",
+    "merged": "## A\nx2.",
+    "provenance_by_region": {
+     "A": "taken-remote"
+    },
+    "removed_by": {},
+    "warnings": []
+   }
+  },
+  {
+   "id": "V02 local-only edit",
+   "field_kind": "markdown",
+   "B": "## A\nx.",
+   "L": "## A\nx2.",
+   "R": "## A\nx.",
+   "prefer": "none",
+   "acknowledge_unknown_baseline": false,
+   "model_stub": null,
+   "note": "nothing to pull; for a push the merged text is L",
+   "expected": {
+    "outcome": "unchanged",
+    "merged": "## A\nx2.",
+    "provenance_by_region": {
+     "A": "kept-local"
+    },
+    "removed_by": {},
+    "warnings": []
+   }
+  },
+  {
+   "id": "V03 disjoint edits",
+   "field_kind": "markdown",
+   "B": "## A\nx.\n## B\ny.",
+   "L": "## A\nx2.\n## B\ny.",
+   "R": "## A\nx.\n## B\ny2.",
+   "prefer": "none",
+   "acknowledge_unknown_baseline": false,
+   "model_stub": null,
+   "note": "",
+   "expected": {
+    "outcome": "merged",
+    "merged": "## A\nx2.\n## B\ny2.",
+    "provenance_by_region": {
+     "A": "kept-local",
+     "B": "taken-remote"
+    },
+    "removed_by": {},
+    "warnings": []
+   }
+  },
+  {
+   "id": "V04 local deletes a section; remote untouched",
+   "field_kind": "markdown",
+   "B": "## A\nx.\n## B\ny.",
+   "L": "## A\nx.",
+   "R": "## A\nx.\n## B\ny.",
+   "prefer": "none",
+   "acknowledge_unknown_baseline": false,
+   "model_stub": null,
+   "note": "must not regrow",
+   "expected": {
+    "outcome": "unchanged",
+    "merged": "## A\nx.",
+    "provenance_by_region": {
+     "A": "unchanged",
+     "B": "removal-honored"
+    },
+    "removed_by": {
+     "B": "local"
+    },
+    "warnings": []
+   }
+  },
+  {
+   "id": "V05 remote deletes a section; local untouched",
+   "field_kind": "markdown",
+   "B": "## A\nx.\n## B\ny.",
+   "L": "## A\nx.\n## B\ny.",
+   "R": "## A\nx.",
+   "prefer": "none",
+   "acknowledge_unknown_baseline": false,
+   "model_stub": null,
+   "note": "",
+   "expected": {
+    "outcome": "merged",
+    "merged": "## A\nx.",
+    "provenance_by_region": {
+     "A": "unchanged",
+     "B": "removal-honored"
+    },
+    "removed_by": {
+     "B": "remote"
+    },
+    "warnings": []
+   }
+  },
+  {
+   "id": "V06 local deletes, remote edits it",
+   "field_kind": "markdown",
+   "B": "## A\nx.\n## B\ny.",
+   "L": "## A\nx.",
+   "R": "## A\nx.\n## B\ny2.",
+   "prefer": "none",
+   "acknowledge_unknown_baseline": false,
+   "model_stub": null,
+   "note": "",
+   "expected": {
+    "outcome": "needs-review",
+    "merged": "## A\nx.",
+    "provenance_by_region": {
+     "A": "unchanged",
+     "B": "unresolved"
+    },
+    "removed_by": {},
+    "warnings": []
+   },
+   "prefer_variants": {
+    "local": {
+     "outcome": "unchanged",
+     "merged": "## A\nx.",
+     "provenance_by_region": {
+      "B": "removal-honored"
+     },
+     "removed_by": {
+      "B": "local"
+     },
+     "warnings": [],
+     "dropped": {
+      "B": "y2."
+     }
+    },
+    "remote": {
+     "outcome": "merged",
+     "merged": "## A\nx.\n## B\ny2.",
+     "provenance_by_region": {
+      "B": "taken-remote"
+     },
+     "removed_by": {},
+     "warnings": []
+    }
+   }
+  },
+  {
+   "id": "V07 local shortens a sentence; remote edits elsewhere",
+   "field_kind": "markdown",
+   "B": "## A\nUse tools carefully and never run destructive commands without asking.",
+   "L": "## A\nUse tools carefully.",
+   "R": "## A\nUse tools carefully and never run destructive commands without asking.\n## C\nnew.",
+   "prefer": "none",
+   "acknowledge_unknown_baseline": false,
+   "model_stub": null,
+   "note": "",
+   "expected": {
+    "outcome": "merged",
+    "merged": "## A\nUse tools carefully.\n## C\nnew.",
+    "provenance_by_region": {
+     "A": "kept-local",
+     "C": "taken-remote"
+    },
+    "removed_by": {},
+    "warnings": [],
+    "absent": [
+     "destructive commands"
+    ]
+   }
+  },
+  {
+   "id": "V08 both edit the same atom",
+   "field_kind": "markdown",
+   "B": "## A\nBe brief.",
+   "L": "## A\nBe brief and cite sources.",
+   "R": "## A\nBe brief and use plain words.",
+   "prefer": "none",
+   "acknowledge_unknown_baseline": false,
+   "model_stub": [
+    {
+     "text": "Be brief, cite sources, and use plain words.",
+     "covers": [
+      "l1",
+      "r1"
+     ]
+    }
+   ],
+   "note": "",
+   "expected": {
+    "outcome": "merged",
+    "merged": "## A\nBe brief, cite sources, and use plain words.",
+    "provenance_by_region": {
+     "A": "combined"
+    },
+    "removed_by": {},
+    "warnings": [],
+    "engine_mode": "llm"
+   },
+   "no_model": {
+    "outcome": "needs-review",
+    "merged": "## A\nBe brief and cite sources.",
+    "provenance_by_region": {
+     "A": "unresolved"
+    },
+    "removed_by": {},
+    "warnings": []
+   }
+  },
+  {
+   "id": "V09 combine that regrows a removal is rejected",
+   "field_kind": "markdown",
+   "B": "## A\nx. old-rule.",
+   "L": "## A\nx.",
+   "R": "## A\nx-edited. old-rule.",
+   "prefer": "none",
+   "acknowledge_unknown_baseline": false,
+   "model_stub": [
+    {
+     "text": "x-edited. old-rule.",
+     "covers": [
+      "l1",
+      "r1"
+     ]
+    },
+    {
+     "text": "x-edited. old-rule.",
+     "covers": [
+      "l1",
+      "r1"
+     ]
+    }
+   ],
+   "note": "",
+   "expected": {
+    "outcome": "needs-review",
+    "merged": "## A\nx.",
+    "provenance_by_region": {
+     "A": "unresolved"
+    },
+    "removed_by": {},
+    "warnings": []
+   }
+  },
+  {
+   "id": "V10 both add different atoms",
+   "field_kind": "markdown",
+   "B": "## A\nx.",
+   "L": "## A\nx.\ny.",
+   "R": "## A\nx.\nz.",
+   "prefer": "none",
+   "acknowledge_unknown_baseline": false,
+   "model_stub": null,
+   "note": "",
+   "expected": {
+    "outcome": "merged",
+    "merged": null,
+    "provenance_by_region": {
+     "A": "taken-remote"
+    },
+    "removed_by": {},
+    "warnings": [],
+    "contains": [
+     "x.",
+     "y.",
+     "z."
+    ]
+   }
+  },
+  {
+   "id": "V11 identical edits both sides",
+   "field_kind": "markdown",
+   "B": "## A\nx.",
+   "L": "## A\nx2.",
+   "R": "## A\nx2.",
+   "prefer": "none",
+   "acknowledge_unknown_baseline": false,
+   "model_stub": null,
+   "note": "",
+   "expected": {
+    "outcome": "unchanged",
+    "merged": "## A\nx2.",
+    "provenance_by_region": {
+     "A": "kept-local"
+    },
+    "removed_by": {},
+    "warnings": []
+   }
+  },
+  {
+   "id": "V12 baseline unknown",
+   "field_kind": "markdown",
+   "B": null,
+   "L": "## A\nx.\n## B\ny.",
+   "R": "## A\nx.\n## B\ny.\n## C\nz.",
+   "prefer": "none",
+   "acknowledge_unknown_baseline": false,
+   "model_stub": null,
+   "note": "",
+   "expected": {
+    "outcome": "needs-review",
+    "merged": "## A\nx.\n## B\ny.",
+    "provenance_by_region": {},
+    "removed_by": {},
+    "warnings": [
+     "baseline-unknown"
+    ]
+   },
+   "ack_variant": {
+    "outcome": "merged",
+    "merged": "## A\nx.\n## B\ny.\n## C\nz.",
+    "provenance_by_region": {
+     "C": "taken-remote"
+    },
+    "removed_by": {},
+    "warnings": [
+     "baseline-unknown"
+    ]
+   }
+  },
+  {
+   "id": "V13 roster: remote adds slot, local removes another",
+   "field_kind": "roster",
+   "B": [
+    {
+     "role": "coder",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "reviewer",
+     "kind": "agent",
+     "count": 2
+    }
+   ],
+   "L": [
+    {
+     "role": "coder",
+     "kind": "agent",
+     "count": 1
+    }
+   ],
+   "R": [
+    {
+     "role": "coder",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "reviewer",
+     "kind": "agent",
+     "count": 2
+    },
+    {
+     "role": "qa",
+     "kind": "agent",
+     "count": 1
+    }
+   ],
+   "prefer": "none",
+   "acknowledge_unknown_baseline": false,
+   "model_stub": null,
+   "note": "",
+   "expected": {
+    "outcome": "merged",
+    "merged": [
+     {
+      "role": "coder",
+      "kind": "agent",
+      "count": 1
+     },
+     {
+      "role": "qa",
+      "kind": "agent",
+      "count": 1
+     }
+    ],
+    "provenance_by_region": {
+     "agent/reviewer": "removal-honored",
+     "agent/qa": "taken-remote"
+    },
+    "removed_by": {
+     "agent/reviewer": "local"
+    },
+    "warnings": []
+   }
+  },
+  {
+   "id": "V14 roster: count edited both",
+   "field_kind": "roster",
+   "B": [
+    {
+     "role": "reviewer",
+     "kind": "agent",
+     "count": 2
+    }
+   ],
+   "L": [
+    {
+     "role": "reviewer",
+     "kind": "agent",
+     "count": 3
+    }
+   ],
+   "R": [
+    {
+     "role": "reviewer",
+     "kind": "agent",
+     "count": 4
+    }
+   ],
+   "prefer": "none",
+   "acknowledge_unknown_baseline": false,
+   "model_stub": null,
+   "note": "",
+   "expected": {
+    "outcome": "needs-review",
+    "merged": [
+     {
+      "role": "reviewer",
+      "kind": "agent",
+      "count": 3
+     }
+    ],
+    "provenance_by_region": {
+     "agent/reviewer": "unresolved"
+    },
+    "removed_by": {},
+    "warnings": []
+   }
+  },
+  {
+   "id": "V15 manager: both changed",
+   "field_kind": "scalar",
+   "B": "manager",
+   "L": "lead",
+   "R": "director",
+   "prefer": "none",
+   "acknowledge_unknown_baseline": false,
+   "model_stub": null,
+   "note": "",
+   "expected": {
+    "outcome": "needs-review",
+    "merged": "lead",
+    "provenance_by_region": {
+     "manager": "unresolved"
+    },
+    "removed_by": {},
+    "warnings": []
+   }
+  },
+  {
+   "id": "V16 team caps",
+   "field_kind": "roster",
+   "B": [
+    {
+     "role": "coder",
+     "kind": "agent",
+     "count": 1
+    }
+   ],
+   "L": [
+    {
+     "role": "coder",
+     "kind": "agent",
+     "count": 1
+    }
+   ],
+   "R": [
+    {
+     "role": "coder",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r0",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r1",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r2",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r3",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r4",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r5",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r6",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r7",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r8",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r9",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r10",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r11",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r12",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r13",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r14",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r15",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r16",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r17",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r18",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r19",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r20",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r21",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r22",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r23",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r24",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r25",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r26",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r27",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r28",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r29",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r30",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r31",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r32",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r33",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r34",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r35",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r36",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r37",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r38",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r39",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r40",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r41",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r42",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r43",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r44",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r45",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r46",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r47",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r48",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r49",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r50",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r51",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r52",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r53",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r54",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r55",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r56",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r57",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r58",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r59",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r60",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r61",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r62",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r63",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r64",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r65",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r66",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r67",
+     "kind": "agent",
+     "count": 1
+    },
+    {
+     "role": "r68",
+     "kind": "agent",
+     "count": 1
+    }
+   ],
+   "prefer": "none",
+   "acknowledge_unknown_baseline": false,
+   "model_stub": null,
+   "note": "",
+   "expected": {
+    "outcome": "refused",
+    "merged": null,
+    "provenance_by_region": {},
+    "removed_by": {},
+    "warnings": [],
+    "refusal": "must hold at most 64 items (submitted 70)"
+   },
+   "max_items": 64
+  },
+  {
+   "id": "V17 heading demotion",
+   "field_kind": "markdown",
+   "B": "## A\nx.",
+   "L": "### A\nx.",
+   "R": "## A\nx.",
+   "prefer": "none",
+   "acknowledge_unknown_baseline": false,
+   "model_stub": null,
+   "note": "",
+   "expected": {
+    "outcome": "unchanged",
+    "merged": "### A\nx.",
+    "provenance_by_region": {
+     "A": "kept-local"
+    },
+    "removed_by": {},
+    "warnings": []
+   }
+  },
+  {
+   "id": "V18 CRLF/whitespace-only remote",
+   "field_kind": "markdown",
+   "B": "x.\n",
+   "L": "x.\n",
+   "R": "x.\r\n\r\n",
+   "prefer": "none",
+   "acknowledge_unknown_baseline": false,
+   "model_stub": null,
+   "note": "",
+   "expected": {
+    "outcome": "unchanged",
+    "merged": "x.",
+    "provenance_by_region": {},
+    "removed_by": {},
+    "warnings": []
+   }
+  },
+  {
+   "id": "V19 fence atomic",
+   "field_kind": "markdown",
+   "B": "## A\n```\na\nb\n```",
+   "L": "## A\n```\na\nb\n```",
+   "R": "## A\n```\na\nb\nc\n```",
+   "prefer": "none",
+   "acknowledge_unknown_baseline": false,
+   "model_stub": null,
+   "note": "",
+   "expected": {
+    "outcome": "merged",
+    "merged": "## A\n```\na\nb\nc\n```",
+    "provenance_by_region": {
+     "A": "taken-remote"
+    },
+    "removed_by": {},
+    "warnings": []
+   }
+  },
+  {
+   "id": "V20 replace",
+   "field_kind": "markdown",
+   "B": "## A\nx.\n## B\ny.",
+   "L": "## A\nx2.",
+   "R": "## A\nz.\n## B\ny.",
+   "prefer": "none",
+   "acknowledge_unknown_baseline": false,
+   "model_stub": null,
+   "note": "",
+   "expected": {
+    "outcome": "merged",
+    "merged": "## A\nz.\n## B\ny.",
+    "provenance_by_region": {},
+    "removed_by": {},
+    "warnings": [],
+    "engine_mode": "replace",
+    "dropped_contains": "x2."
+   },
+   "replace": "remote"
+  }
+ ]
+}

@@ -1470,7 +1470,9 @@ async def test_sync_updates_an_untouched_starter_and_echoes_the_replaced_text(
 
 
 @pytest.mark.asyncio
-async def test_sync_refuses_an_edited_starter_until_force(context, registry, scratch_seeds) -> None:
+async def test_sync_refuses_an_edited_starter_and_the_model_has_no_force(
+    context, registry, scratch_seeds
+) -> None:
     await call(context, op="install", name="reviewer")
     row = registry.get_agent_by_name("reviewer")
     registry.set_agent_system_prompt(row.id, "MY EDITED PROMPT")
@@ -1479,14 +1481,25 @@ async def test_sync_refuses_an_edited_starter_until_force(context, registry, scr
     refused = await call(context, op="sync", name="reviewer")
 
     assert "reviewer: differs from the packaged starter in instructions" in refused
-    assert "force" in refused
+    # The model is pointed at the explicit, echoing path, never at a flag it lacks.
+    assert "op='reset'" in refused
     assert registry.get_agent_system_prompt(row.id) == "MY EDITED PROMPT"
 
+    # `force` left the model-facing schema (design B5.4): an agent must not be
+    # able to discard the user's copy of a role.
     forced = await call(context, op="sync", name="reviewer", force=True)
+    assert "force" in forced and "Extra inputs are not permitted" in forced
+    assert registry.get_agent_system_prompt(row.id) == "MY EDITED PROMPT"
 
-    assert "reviewer: updated (forced over local edits) — replaced instructions" in forced
-    assert "MY EDITED PROMPT" in forced  # the echo of what was overwritten
-    assert registry.get_agent_system_prompt(row.id).strip() == "REVIEWER v2 GUIDANCE"
+    # The one lever it does have settles a HUB conflict and cannot discard a copy.
+    await call(context, op="sync", name="reviewer", resolve="local")
+    assert registry.get_agent_system_prompt(row.id) == "MY EDITED PROMPT"
+
+    # ``resolve`` is a plain string in the schema (an empty-string enum member is
+    # rejected by Gemini-family providers), so its values are checked HERE.
+    bad = await call(context, op="sync", name="reviewer", resolve="replace")
+    assert "resolve must be 'local' or 'remote'" in bad
+    assert registry.get_agent_system_prompt(row.id) == "MY EDITED PROMPT"
 
 
 @pytest.mark.asyncio
@@ -1573,14 +1586,47 @@ async def test_a_bad_class_spelling_is_refused_by_the_schema(context) -> None:
 
 
 @pytest.mark.asyncio
-async def test_sync_degrades_the_hub_arm_without_a_credential(
+async def test_sync_degrades_the_hub_arm_per_row_and_never_fails_the_run(
     context, registry, monkeypatch
 ) -> None:
-    """The hub arm never fails the run: no credential is a per-row verdict."""
+    """A public row is checked anonymously (design Q3); a failed fetch is a per-row verdict."""
 
     monkeypatch.delenv("RADIENT_API_KEY", raising=False)
+
+    def unreachable(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("connection refused")
+
+    # Hermetic: without this the public check would reach the real hub.
+    monkeypatch.setattr("local_operator.agents._fetch_hub_profile", unreachable)
     registry.create_agent(
         _edit_fields(name="hunter", description="d", tags=["role", "hub:abc-123"])
+    )
+
+    body = await call(context, op="sync")
+
+    assert "hunter: hub unavailable" in body
+    assert "could not reach the hub" in body
+
+
+@pytest.mark.asyncio
+async def test_sync_reports_no_credential_for_an_organization_row(
+    context, registry, monkeypatch
+) -> None:
+    """An org row needs the signed-in person; without a login it says so, not '404'."""
+
+    from local_operator.hub_sync import provenance as prov
+
+    monkeypatch.delenv("RADIENT_API_KEY", raising=False)
+    row = registry.create_agent(
+        _edit_fields(name="hunter", description="d", tags=["role", "hub:abc-123"])
+    )
+    prov.record_agent_baseline(
+        registry.config_dir,
+        local_id=row.id,
+        hub_id="abc-123",
+        instructions="x",
+        description="d",
+        tenant_id="org-1",
     )
 
     body = await call(context, op="sync")

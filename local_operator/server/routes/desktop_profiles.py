@@ -53,7 +53,12 @@ class ProfileSync(Input):
     request_id: RequestID
     name: str | None = Field(default=None, min_length=1, max_length=128)
     all: bool = False
+    #: DEPRECATED (design B5.5). It used to mean "overwrite local edits" for the hub
+    #: arm; that is now ``replace`` and must be CONFIRMED, because it is the one
+    #: operation that discards a side. It still forces the SEED arm, a different
+    #: family with its own well-understood meaning.
     force: bool = False
+    confirm_replace: bool = False
 
 
 class ProfileEdit(Input):
@@ -183,34 +188,54 @@ async def sync_profiles(
         raise HTTPException(422, "Pass either name or all, not both")
     names = [body.name] if body.name else None
 
-    # Imported per call, not at module scope: this pulls the sync coordinator's
+    # Imported per call, not at module scope: this pulls the sync machinery's
     # graph (agents + radient client), which is dead weight on every `lop serve`
     # boot for a route that only runs when someone asks for an update.
-    from local_operator.agent_sync import (
-        resolve_hub_client,
-        sync_agent_profiles,
-        sync_payload,
-    )
+    from local_operator.agent_profiles import sync_installed_seeds
+    from local_operator.agent_sync import SyncReport, sync_payload
+    from local_operator.hub_sync import service as svc
 
     async def mutate() -> dict[str, Any]:
         agents, _ = registries(request)
         agents.require_complete_metadata()
-        # The async resolver with the route's shared AuthStore, the pattern the
-        # Radient routes already use so a credential refresh persists in the
-        # one place the login owns.
-        client = await resolve_hub_client(
-            config_manager.config_dir,
-            base_url=env_config.radient_api_base_url,
-            store=provider_auth_store,
+        # The person-scoped resolver with the route's shared AuthStore, the pattern
+        # the Radient routes already use so a credential refresh persists in the one
+        # place the login owns. Best-effort rather than a 401: without a login the
+        # hub rows report `unavailable` and the local seed updates still run.
+        for_tenant, credential = await svc.build_clients(config_manager, provider_auth_store)
+        ctx = svc.HubSyncContext(
+            config_dir=config_manager.config_dir,
+            config_manager=config_manager,
+            client_for_tenant=for_tenant,
+            credential=credential,  # type: ignore[arg-type]
+            agent_registry=agents,
         )
-        report = await asyncio.to_thread(
-            sync_agent_profiles,
-            agents,
-            radient_client=client,
-            names=names,
-            force=body.force,
-        )
-        return sync_payload(report)
+
+        def run() -> dict[str, Any]:
+            # `force` on the hub arm now means `replace`, which throws away the
+            # user's copy, so a bare boolean from an old client must not reach it
+            # unconfirmed. Decided BEFORE any work (the seed arm below also honours
+            # `force`, and a refused request must have changed nothing), and only
+            # when the hub arm would actually be reached: an old seed-arm-only
+            # client that sends `force` for the starters keeps working and simply
+            # gets the hub arm as a plain merge.
+            replace = "remote" if body.force and body.confirm_replace else None
+            if body.force and not body.confirm_replace and _has_hub_rows(agents, names):
+                raise HTTPException(
+                    422, "--force replaces your copy; use replace with confirm_replace"
+                )
+            seeds = SyncReport(
+                entries=tuple(sync_installed_seeds(agents, names=names, force=body.force))
+            )
+            try:
+                hub = svc.apply_items(ctx, kind="agent", names=names, replace=replace)
+            except svc.HubBusy as busy:
+                raise HTTPException(409, str(busy)) from None
+            payload = sync_payload(seeds)
+            payload["hub"] = hub.to_json()
+            return payload
+
+        return await asyncio.to_thread(run)
 
     async with errors(request):
         return reply(
@@ -221,6 +246,22 @@ async def sync_profiles(
                 retry_safe=True,
             )
         )
+
+
+def _has_hub_rows(agents: Any, names: list[str] | None) -> bool:
+    """Whether the hub arm has any linked agent to act on for this request.
+
+    Decides whether an unconfirmed ``force`` is a seed-only call (harmless, kept
+    working for old clients) or one that would reach a hub-pulled row.
+    """
+
+    from local_operator.agents import hub_origin
+
+    wanted = {n.strip().casefold() for n in names} if names else None
+    return any(
+        hub_origin(a) is not None and (wanted is None or str(a.name).strip().casefold() in wanted)
+        for a in agents.list_agents()
+    )
 
 
 async def save_profile(

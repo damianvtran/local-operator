@@ -45,6 +45,7 @@ from local_operator.server.routes import (
     desktop_aida,
     desktop_catalogues,
     desktop_claim,
+    desktop_hub,
     desktop_lifecycle,
     desktop_mcp,
     desktop_mesh,
@@ -382,8 +383,45 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 reload_task.add_done_callback(serve_reload.observe_reload)
                 app.state.serve_reload = reload_task
 
+    # THE HUB UPDATE RUNNER: one asyncio task per daemon, started AFTER the serve
+    # record and the reload task so readiness is never delayed by it (its first
+    # tick waits ~45 s; see ``hub_sync.runner``). It runs for a bare-uvicorn daemon
+    # too — it is deliberately not tied to the serve record — and it is the SAME
+    # object the ``/v1/desktop/hub/...`` routes call, so the timer and the buttons
+    # share one lock. Imported here, inside the lifespan, not at module scope: the
+    # server-shape import guard fails the build if a boot pulls the hub/model stack.
+    #
+    # ``never raises`` is the runner's contract, but the START is wrapped anyway:
+    # a broken hub module must cost the user auto-update, never the daemon.
+    hub_sync_task: asyncio.Task[None] | None = None
+    try:
+        from local_operator.hub_sync.runner import HubSyncRunner
+
+        def _auth_store() -> Any:
+            # The store the desktop login owns, once a request has created it (a
+            # token refresh then persists in the one place the login lives). None
+            # before that: the resolver then opens a short-lived store itself.
+            host = getattr(app.state, "desktop_auth", None)
+            return getattr(host, "store", None)
+
+        app.state.hub_sync = HubSyncRunner(
+            config_manager=app.state.config_manager,
+            auth_store_provider=_auth_store,
+            env_config=app.state.env_config,
+        )
+        hub_sync_task = asyncio.create_task(app.state.hub_sync.run_forever())
+    except Exception:  # noqa: BLE001 - auto-update is optional; the daemon is not
+        logger.warning("hub update runner could not start", exc_info=True)
+        app.state.hub_sync = None
+
     yield
     try:
+        if hub_sync_task is not None:
+            if app.state.hub_sync is not None:
+                app.state.hub_sync.stop()
+            hub_sync_task.cancel()
+            await asyncio.gather(hub_sync_task, return_exceptions=True)
+        app.state.hub_sync = None
         # Clean up on shutdown
         desktop_auth = getattr(app.state, "desktop_auth", None)
         if desktop_auth is not None:
@@ -700,6 +738,9 @@ app.include_router(settings.router)
 app.include_router(desktop_sessions.router)
 app.include_router(desktop_catalogues.router)
 app.include_router(desktop_profiles.router)
+# Agent Hub update availability/apply. Beside the profile routes it extends; no
+# sibling declares a `/v1/desktop/hub...` template, so nothing can swallow it.
+app.include_router(desktop_hub.router)
 # The projects surface: `/v1/desktop/projects` and its `.../{key}` templates.
 # Registered after the profile routes for the reason every block in this file
 # gives — FastAPI matches in declaration order, and no sibling above declares a

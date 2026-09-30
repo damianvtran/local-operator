@@ -652,6 +652,20 @@ SECTIONS: tuple[Section, ...] = (
         "The name applies everywhere at once; edits are read at her next "
         "action, and /aida pause|resume act immediately.",
     ),
+    # The hub keys. LIVE is honest here: the update runner re-reads the mapping
+    # on every tick (and every interval sleep), so an edit lands within one tick.
+    # Both auto-update switches default ON; turning one OFF keeps the runner
+    # CHECKING (the sidebar still shows "update available") and only stops it
+    # from merging, so "manual" never means "blind".
+    Section(
+        "hub",
+        "Agent Hub",
+        Scope.LIVE,
+        "Keep agents and teams you pulled from the Agent Hub current: whether "
+        "updates are merged in automatically, how often the hub is checked, and "
+        "which model resolves a conflict. Your edits and deletions are merged, "
+        "never overwritten.",
+    ),
     # The projects store's own knobs. LIVE because the staleness window is
     # resolved at each staleness computation (the badge, the tool rows, the
     # completion check and the wake-trigger snapshot all read through
@@ -3789,6 +3803,57 @@ SETTINGS: tuple[Setting, ...] = (
             "asking again, and so how long a revoked or offline owner's login keeps "
             "working elsewhere. Never longer than the token itself."
         ),
+    ),
+    # -- hub ---------------------------------------------------------------
+    # Defaults are LITERALS here for the same reason the aida ones are: this module
+    # stays off the hub_sync import path (it loads on every CLI start), and
+    # `_consumer_defaults()` in tests/unit/test_settings_io.py imports the real
+    # constants from ``local_operator/hub_sync/settings.py`` to pin they cannot
+    # drift. Every path is a genuinely NESTED tuple, read back through
+    # ``ConfigManager.get_nested_value`` — NOT ``get_config_value`` on the dotted
+    # string, which looks up a literal top-level key and would read nothing.
+    # Help strings are budgeted to <=72 cells (the detail line at 100 columns).
+    Setting(
+        key="hub.auto_update.agents",
+        path=("hub", "auto_update", "agents"),
+        section="hub",
+        label="Auto-update agents",
+        kind=Kind.BOOL,
+        default=True,
+        choices=_bool_choices("merge hub updates automatically", "only tell me; I apply them"),
+        help="Merge hub updates into pulled agents automatically.",
+    ),
+    Setting(
+        key="hub.auto_update.teams",
+        path=("hub", "auto_update", "teams"),
+        section="hub",
+        label="Auto-update teams",
+        kind=Kind.BOOL,
+        default=True,
+        choices=_bool_choices("merge hub updates automatically", "only tell me; I apply them"),
+        help="Merge hub updates into pulled teams automatically.",
+    ),
+    Setting(
+        key="hub.check_interval_min",
+        path=("hub", "check_interval_min"),
+        section="hub",
+        label="Check interval (minutes)",
+        kind=Kind.INT,
+        default=60,
+        minimum=5,
+        maximum=1440,
+        help="Minutes between hub update checks (both modes).",
+    ),
+    Setting(
+        key="hub.merge_model",
+        path=("hub", "merge_model"),
+        section="hub",
+        label="Merge model",
+        kind=Kind.TEXT,
+        default="",
+        placeholder="provider/model",
+        help="provider/model for merges; empty uses your default model.",
+        empty_unsets=True,
     ),
     # -- aida --------------------------------------------------------------
     # Defaults are LITERALS here, not imports: this module deliberately keeps the

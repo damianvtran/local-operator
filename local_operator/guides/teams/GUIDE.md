@@ -1,6 +1,6 @@
 ---
 name: teams
-description: "Create, update, and run Local Operator teams: a manager plus reusable agents, with layered collaboration and project briefs."
+description: "Create, update, and run Local Operator teams: a manager plus reusable agents, with layered briefs. Covers org pull/push/update."
 ---
 
 # Teams
@@ -143,6 +143,12 @@ local-operator teams create feature-release --manager manager --member coder --m
 local-operator teams create eng-org --manager director --member team:feature-release --member team:platform-pod:2
 local-operator teams show feature-release
 local-operator teams delete --name feature-release
+local-operator teams sync --name feature-release   # check the hub and merge its updates
+local-operator teams link feature-release <hub-team-id> --org <tenant>   # adopt a team pulled before tracking
 ```
 
 Do not list the team registry at every session start. Discover it when the user asks about teams or when a task would benefit from one.
+
+## Teams on the Agent Hub
+
+Teams are organization-only on the hub (`teams push|pull --org`). A pulled team remembers its hub id and the text it pulled; `teams sync` (and the background update check) merges hub changes three-way into description, manager, roster, collaboration brief and project brief. The local **name** never changes. The roster merges per slot (added / removed / count) and a slot you removed stays removed. Roles the roster names but you lack produce a `missing-role` warning, not a failure. Teams pulled before this feature are unlinked until `teams link`. Auto-update is `hub.auto_update.teams`; `--check`, `--prefer local|remote` and `--replace --yes` work as for agents (see the agents guide, "Agent Hub: pull, push, update", for the FAQ).

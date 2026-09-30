@@ -486,15 +486,21 @@ def _profile_row(**overrides: Any) -> AgentEditFields:
 async def test_sync_route_reports_seed_and_hub_verdicts(api, monkeypatch) -> None:
     """One request, both arms: the seed row is current, the hub row degrades.
 
-    No Radient credential is present in the fixture's isolated home, so the hub
-    entry must read ``unavailable`` with the reason rather than failing the
-    request — using local updates must not depend on a marketplace login.
+    The seed arm keeps its ``entries``/``summary`` shape; the hub arm now reports
+    through the merge service under ``hub`` (design B5.2). A hub failure is a
+    per-row verdict, never a failed request — using local updates must not depend
+    on a marketplace login or the network.
     """
 
     from local_operator.agent_profiles import install_seed
 
     client, root = api
     monkeypatch.delenv("RADIENT_API_KEY", raising=False)
+
+    def unreachable(*_args, **_kwargs):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr("local_operator.agents._fetch_hub_profile", unreachable)
     registry = AgentRegistry(root)
     assert install_seed("reviewer", registry=registry) is not None
     registry.create_agent(
@@ -508,16 +514,40 @@ async def test_sync_route_reports_seed_and_hub_verdicts(api, monkeypatch) -> Non
     entries = {entry["name"]: entry for entry in payload["entries"]}
     assert entries["reviewer"]["kind"] == "seed"
     assert entries["reviewer"]["verdict"] == "up-to-date"
-    assert entries["hunter"]["kind"] == "hub"
-    assert entries["hunter"]["verdict"] == "unavailable"
-    assert "no Radient credential" in entries["hunter"]["reason"]
-    assert payload["summary"] == {
-        "up-to-date": 1,
-        "updated": 0,
-        "diverged": 0,
-        "unavailable": 1,
-        "not-installed": 0,
-    }
+    (hunter,) = payload["hub"]["reports"]
+    assert hunter["name"] == "hunter"
+    assert hunter["outcome"] == "unavailable"
+    assert "could not reach the hub" in hunter["message"]
+
+
+async def test_sync_route_refuses_force_without_confirm_replace(api) -> None:
+    """`force` on the hub arm is `replace`: it discards the user's copy, so it is confirmed."""
+
+    client, root = api
+    AgentRegistry(root).create_agent(
+        _profile_row(name="hunter", description="d", tags=["role", "hub:abc-123"])
+    )
+
+    refused = await client.post("/v1/desktop/profiles/sync", json=mutation(all=True, force=True))
+    assert refused.status_code == 422
+    assert "confirm_replace" in refused.json()["detail"]
+
+    confirmed = await client.post(
+        "/v1/desktop/profiles/sync", json=mutation(all=True, force=True, confirm_replace=True)
+    )
+    assert confirmed.status_code == 200
+
+
+async def test_sync_route_keeps_an_old_seed_only_force_client_working(api) -> None:
+    """R13: `force` used to mean only "overwrite an edited starter". With no hub-pulled
+    agent for the hub arm to act on, an unconfirmed `force` must not turn into a 422."""
+
+    client, _root = api
+
+    result = await client.post("/v1/desktop/profiles/sync", json=mutation(all=True, force=True))
+
+    assert result.status_code == 200
+    assert result.json()["result"]["hub"]["reports"] == []
 
 
 async def test_sync_route_refuses_name_and_all_together(api) -> None:

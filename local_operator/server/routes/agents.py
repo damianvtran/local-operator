@@ -1607,9 +1607,10 @@ async def pull_team_from_radient(
                 ),
             )
 
+        team_registry = TeamRegistry(config_manager.config_dir)
         try:
             outcome = await asyncio.to_thread(
-                TeamRegistry(config_manager.config_dir).import_hub_team,
+                team_registry.import_hub_team,
                 document,
                 auth_store=provider_auth_store,
             )
@@ -1619,9 +1620,25 @@ async def pull_team_from_radient(
                 detail=f"Cannot reconstruct this team locally: {exc}",
             )
 
+        # Link the row to its hub document and record what was pulled, so the update
+        # runner and `teams sync` can three-way merge it later. Best-effort inside
+        # ``record_team_pull``: the pull already succeeded and must stay successful.
+        from local_operator.hub_sync.provenance import record_team_pull
+
+        linked = await asyncio.to_thread(
+            lambda: record_team_pull(
+                team_registry.config_dir,
+                team_registry.get_team(outcome.team.id),
+                document,
+                tenant_id=owner or tenant_id or "",
+            )
+        )
+
         result = outcome.team.model_dump()
         result["renamed_from"] = outcome.renamed_from
         result["invalid_name"] = outcome.invalid_name
+        result["hub_id"] = linked.hub_id if linked else None
+        result["linked"] = linked is not None
         # The non-blocking model-suggestion report (§4.3): null when nothing was
         # suggested or the suggestion was stored on the row; present with the
         # reason when this machine could not honour it.

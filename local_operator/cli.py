@@ -485,10 +485,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Sync every installed starter and hub-pulled agent (default when --name is absent)",
     )
+    _add_hub_sync_flags(sync_parser)
     sync_parser.add_argument(
         "--force",
         action="store_true",
-        help="Also replace copies that were edited locally after their install/pull",
+        help=argparse.SUPPRESS,  # deprecated alias of `--replace --yes` (see hub_sync docs)
     )
 
     # Teams command
@@ -552,6 +553,44 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Organization tenant the team belongs to (`lop teams pull --org "
         "<tenant_id> <team-id>`; requires `lop login radient`)",
     )
+
+    teams_sync = teams_subparsers.add_parser(
+        "sync",
+        help="Check pulled teams against the hub and merge their updates",
+        parents=[parent_parser],
+    )
+    teams_sync_group = teams_sync.add_mutually_exclusive_group()
+    teams_sync_group.add_argument("--name", type=str, help="Sync only the team with this name")
+    teams_sync_group.add_argument(
+        "--all", action="store_true", help="Sync every linked team (default when --name is absent)"
+    )
+    _add_hub_sync_flags(teams_sync)
+    teams_link = teams_subparsers.add_parser(
+        "link",
+        help="Link a local team to a hub team so it can receive updates",
+        parents=[parent_parser],
+    )
+    teams_link.add_argument("name", type=str, help="Name of the local team")
+    teams_link.add_argument("hub_team_id", type=str, help="ID of the hub team to link it to")
+    teams_link.add_argument(
+        "--org", type=str, default=None, help="Organization tenant that owns the hub team"
+    )
+    teams_link.add_argument(
+        "--accept-unknown-baseline",
+        action="store_true",
+        help="Link even though the local copy differs from the hub's (nothing is deleted)",
+    )
+
+    hub_parser = subparsers.add_parser(
+        "hub", help="Agent Hub update status", parents=[parent_parser]
+    )
+    hub_subparsers = hub_parser.add_subparsers(dest="hub_command")
+    hub_status = hub_subparsers.add_parser(
+        "status",
+        help="Show which pulled agents and teams have hub updates",
+        parents=[parent_parser],
+    )
+    hub_status.add_argument("--json", action="store_true", help="Emit the desktop route payload")
 
     # Serve command to start the API server
     serve_parser = subparsers.add_parser(
@@ -7928,40 +7967,264 @@ def agents_list_command(args: argparse.Namespace, agent_registry: "AgentRegistry
     return 0
 
 
+def _add_hub_sync_flags(parser: argparse.ArgumentParser) -> None:
+    """The merge flags `agents sync` and `teams sync` share (design B5.3).
+
+    One definition so the two commands cannot drift. `--prefer` is a CONFLICT
+    decision the caller makes on purpose, `--replace` is the only way to discard
+    a side wholesale, and neither is reachable from auto-update.
+    """
+
+    parser.add_argument(
+        "--check", action="store_true", help="Only report what is available; change nothing"
+    )
+    parser.add_argument(
+        "--prefer",
+        choices=("local", "remote"),
+        default=None,
+        help="Decide a conflict: keep your side or take the hub's for the sections both changed",
+    )
+    parser.add_argument(
+        "--accept-unknown-baseline",
+        action="store_true",
+        help="Apply when the baseline is unknown: hub additions are taken, nothing of yours goes",
+    )
+    parser.add_argument(
+        "--replace",
+        action="store_true",
+        help="DISCARD your copy for the hub's (echoes what it discarded; needs --yes)",
+    )
+    parser.add_argument("--yes", action="store_true", help="Confirm --replace")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Show what would change; write nothing"
+    )
+    parser.add_argument("--json", action="store_true", help="Emit the report as JSON")
+
+
+def _hub_sync_run(
+    args: argparse.Namespace,
+    base_dir: Path,
+    *,
+    kind: str,
+    registries: Any,
+) -> tuple[Any, Any] | None:
+    """Shared body of `agents sync` / `teams sync`: ``(ctx, report)``, or None after a message."""
+
+    from local_operator.hub_sync import service as svc
+
+    replace: str | None = None
+    if getattr(args, "force", False):
+        print(
+            "\033[1;33m--force is deprecated: it replaces your copy with the hub text; "
+            "prefer a merge (the default) or --replace\033[0m",
+            file=sys.stderr,
+        )
+        args.replace, args.yes = True, True
+    if getattr(args, "replace", False):
+        if not getattr(args, "yes", False):
+            print("\n\033[1;31mError: --replace discards your copy; confirm with --yes.\033[0m")
+            return None
+        replace = "remote"
+    if getattr(args, "check", False) and (replace or args.prefer or args.accept_unknown_baseline):
+        print("\n\033[1;31mError: --check only reports; drop the other merge flags.\033[0m")
+        return None
+    config_manager = ConfigManager(base_dir)
+    ctx = svc.sync_context(config_manager)
+    ctx.agent_registry, ctx.team_registry = registries
+    names = [args.name] if getattr(args, "name", None) else None
+    if getattr(args, "check", False):
+        checks = svc.check_items(ctx, kinds=(kind,), names=names)
+        return ctx, svc.ApplyReport(tuple(svc.check_report(c) for c in checks))
+    try:
+        report = svc.apply_items(
+            ctx,
+            kind=kind,
+            names=names,
+            prefer=args.prefer or "none",
+            acknowledge_unknown_baseline=bool(args.accept_unknown_baseline),
+            replace=replace,  # type: ignore[arg-type]
+            dry_run=bool(args.dry_run),
+        )
+    except svc.HubBusy as busy:
+        print(f"\n\033[1;31mError: {busy}\033[0m")
+        return None
+    return ctx, report
+
+
 def agents_sync_command(
     args: argparse.Namespace, agent_registry: "AgentRegistry", base_dir: Path
 ) -> int:
-    """Update installed starters and hub-pulled agents; print the shared report.
+    """Update installed starters, then merge hub updates into pulled agents.
 
-    A named function rather than inline dispatch so the command is reachable
-    the way its siblings are (``agents_delete_command`` et al.) — the parser
-    test and the handler test then cover the same callable the CLI runs, and
-    the rendering comes from ``agent_sync`` so this surface cannot grow a
-    second opinion about what a verdict means.
+    The seed arm is unchanged (an unedited starter updates in place). The hub arm
+    is now a THREE-WAY MERGE (design B2) instead of refuse-or-clobber: your edits
+    and deliberate deletions survive, the hub's changes land, and a genuine
+    conflict is left for you (`--prefer`). Rendering comes from
+    ``hub_sync.report`` so this surface cannot grow a second opinion about what a
+    verdict means.
     """
 
-    # Lazy: the sync coordinator pulls the agent registry module (dill, yaml)
-    # and the Radient client, none of which belong on the startup path.
-    from local_operator.agent_sync import resolve_hub_client_sync, sync_agent_profiles
+    # Lazy: the sync machinery pulls the agent registry module (dill, yaml) and the
+    # Radient client, none of which belong on the startup path.
+    from local_operator.agent_profiles import sync_installed_seeds
+    from local_operator.agent_sync import SyncReport
+    from local_operator.hub_sync.report import render_report
 
-    # ``--all`` is READ, not decorative: it names "every installed row" — the
-    # same set the absence of --name selects — so the flag does what it says
-    # instead of parsing into nothing (agent review round 1, n1).
-    if getattr(args, "all", False):
-        names = None
-    else:
-        names = [args.name] if getattr(args, "name", None) else None
-    radient_client = resolve_hub_client_sync(
-        agent_registry.config_dir,
-        base_url=_radient_hub_base_url(ConfigManager(base_dir)),
+    # ``--all`` is READ, not decorative: it names "every installed row" — the same
+    # set the absence of --name selects (agent review round 1, n1).
+    names = None if getattr(args, "all", False) or not getattr(args, "name", None) else [args.name]
+    seed_verdicts = []
+    if not getattr(args, "check", False):
+        seed_verdicts = sync_installed_seeds(
+            agent_registry, names=names, force=bool(getattr(args, "force", False))
+        )
+    from local_operator.teams import TeamRegistry
+
+    outcome = _hub_sync_run(
+        args, base_dir, kind="agent", registries=(agent_registry, TeamRegistry(base_dir))
     )
-    report = sync_agent_profiles(
-        agent_registry,
-        radient_client=radient_client,
-        names=names,
-        force=bool(getattr(args, "force", False)),
+    if outcome is None:
+        return 1
+    _, report = outcome
+    if getattr(args, "json", False):
+        import json as _json
+
+        payload = report.to_json()
+        payload["seeds"] = [vars(v) for v in seed_verdicts]
+        print(_json.dumps(payload, indent=2, default=str))
+        return 0
+    hub_names = {r.name.lower() for r in report.reports}
+    seed_only = SyncReport(
+        entries=tuple(
+            v
+            for v in seed_verdicts
+            if not (v.verdict == "not-installed" and v.name.lower() in hub_names)
+        )
     )
-    print("\n" + report.render())
+    parts = [seed_only.render()] if seed_only.entries else []
+    if report.reports:
+        parts.append(render_report(report, style="cli"))
+    if names and not parts:
+        parts = [f"{names[0]}: not installed — no starter or hub-pulled agent has that name"]
+    print("\n" + "\n".join(parts if parts else ["nothing to sync"]))
+    return 0
+
+
+def teams_sync_command(args: argparse.Namespace, team_registry: Any, base_dir: Path) -> int:
+    """``lop teams sync`` — check pulled teams against the hub and merge (design B5.3)."""
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.hub_sync.report import render_report
+
+    outcome = _hub_sync_run(
+        args, base_dir, kind="team", registries=(AgentRegistry(base_dir), team_registry)
+    )
+    if outcome is None:
+        return 1
+    _, report = outcome
+    if getattr(args, "json", False):
+        import json as _json
+
+        print(_json.dumps(report.to_json(), indent=2, default=str))
+        return 0
+    print("\n" + (render_report(report, style="cli") or "no linked teams"))
+    return 0
+
+
+def teams_link_command(args: argparse.Namespace, team_registry: Any, base_dir: Path) -> int:
+    """``lop teams link <team> <hub-team-id> --org <tenant>`` — adopt a pre-tracking team (A2.3).
+
+    Teams pulled before hub tracking have no link. Linking records the baseline
+    as the CURRENT local copy only after showing the hub's, and requires them to
+    match unless the caller accepts the unknown baseline (nothing is deleted
+    either way).
+    """
+
+    from local_operator.hub_sync import provenance as prov
+
+    target = _org_target_or_picker(args, base_dir)
+    if target is None:
+        return 1
+    client, tenant = target
+    team = team_registry.get_team_by_name(args.name)
+    if team is None:
+        print(f"\n\033[1;31mError: no local team named '{args.name}'.\033[0m")
+        return 1
+    try:
+        document = client.get_team(args.hub_team_id)
+    except Exception as exc:  # noqa: BLE001 — the hub's refusal is the report
+        print(f"\n\033[1;31mError reading the hub team: {_hub_cause(exc)}\033[0m")
+        return 1
+    owner = str(document.get("tenant_id") or "")
+    if owner and owner != tenant:
+        print(
+            f"\n\033[1;31mError: that team belongs to organization '{owner}', "
+            f"not '{tenant}'.\033[0m"
+        )
+        return 1
+    full = team_registry.get_team(team.id)
+    local = prov.team_fields(
+        description=full.description,
+        manager=full.manager,
+        members=full.members,
+        instructions=full.instructions,
+        project=full.project,
+    )
+    remote = prov.team_fields(
+        description=str(document.get("description") or ""),
+        manager=str(document.get("manager") or ""),
+        members=document.get("members"),
+        instructions=str(document.get("instructions") or ""),
+        project=str(document.get("project") or ""),
+    )
+    identical = prov.fingerprint_team(local) == prov.fingerprint_team(remote)
+    if not identical and not args.accept_unknown_baseline:
+        print(
+            f"\n\033[1;33mTeam '{team.name}' differs from the hub's copy, so its history is "
+            "unknown: a deliberate deletion could not be told from a hub addition. Nothing was "
+            "linked. Re-run with --accept-unknown-baseline to link it; you stay in control "
+            "(nothing of yours is deleted, and hub additions need `lop teams sync "
+            "--accept-unknown-baseline`).\033[0m"
+        )
+        return 1
+    # An identical pair links with a real baseline (B == L == R). A differing pair
+    # is linked as ``adopt-unknown``: the link exists but the baseline does NOT, so
+    # every sync is the two-way conservative merge (A2.3) and needs the caller's
+    # acknowledgement. Recording B := L instead would read a later hub DELETION as a
+    # plain remote removal and delete text the user wrote.
+    prov.write_baseline(
+        team_registry.config_dir,
+        prov.make_record(
+            "team",
+            team.id,
+            args.hub_team_id,
+            tenant,
+            local,
+            "adopt" if identical else prov.UNKNOWN_BASELINE,
+        ),
+    )
+    print(f"\n\033[1;32mLinked team '{team.name}' to hub team {args.hub_team_id}.\033[0m")
+    return 0
+
+
+def hub_status_command(args: argparse.Namespace, base_dir: Path) -> int:
+    """``lop hub status`` — the same payload the sidebar polls; a store read, no network."""
+
+    import json as _json
+
+    from local_operator.hub_sync import service as svc
+
+    config_manager = ConfigManager(base_dir)
+    ctx = svc.HubSyncContext(
+        config_dir=config_manager.config_dir,
+        config_manager=config_manager,
+        client_for_tenant=lambda _tenant: None,
+    )
+    snapshot = svc.status_snapshot(ctx)
+    if getattr(args, "json", False):
+        print(_json.dumps(snapshot, indent=2))
+        return 0
+    print(svc.render_status(snapshot))
     return 0
 
 
@@ -8426,7 +8689,9 @@ def agents_pull_org_command(args: argparse.Namespace, agent_registry: Any, base_
             )
         return 1
     try:
-        outcome = agent_registry.download_agent_from_radient(client, args.id, with_credential=True)
+        outcome = agent_registry.download_agent_from_radient(
+            client, args.id, with_credential=True, tenant_id=tenant
+        )
         imported_agent = outcome.agent
         print(
             f"\n\033[1;32mSuccessfully pulled agent '{imported_agent.name}' "
@@ -8543,10 +8808,26 @@ def teams_pull_command(args: argparse.Namespace, team_registry: Any, base_dir: P
         print(f"\n\033[1;31mError: cannot reconstruct this team locally: {exc}\033[0m")
         return 1
     team = outcome.team
+    # Link the row to its hub document and record what was pulled, so `teams sync`
+    # and the update runner can three-way merge later. Best-effort inside: the pull
+    # has already succeeded and stays successful if the bookkeeping cannot be written.
+    from local_operator.hub_sync.provenance import record_team_pull
+
+    linked = record_team_pull(
+        team_registry.config_dir,
+        team_registry.get_team(team.id),
+        document,
+        tenant_id=owner or tenant,
+    )
     print(
         f"\n\033[1;32mSuccessfully pulled team '{team.name}' (ID: {team.id}) "
         f"from organization '{tenant}'\033[0m"
     )
+    if linked is None:
+        print(
+            "\033[1;33m  This team could not be linked to the hub, so it will not receive "
+            "updates (`lop teams link` can retry).\033[0m"
+        )
     if outcome.renamed_from is not None:
         if outcome.invalid_name:
             print(
@@ -10507,6 +10788,10 @@ def main() -> int:
                     return teams_push_command(args, team_registry, base_dir)
                 elif args.teams_command == "pull":
                     return teams_pull_command(args, team_registry, base_dir)
+                elif args.teams_command == "sync":
+                    return teams_sync_command(args, team_registry, base_dir)
+                elif args.teams_command == "link":
+                    return teams_link_command(args, team_registry, base_dir)
                 else:
                     parser.error(f"Invalid teams command: {args.teams_command}")
             except (TeamRegistryLockTimeout, TeamRegistryRecoveryError) as e:
@@ -10527,6 +10812,10 @@ def main() -> int:
             standby.enable_warming(daemon=True)
             # Use the provided host, port, and reload options for serving the API.
             return serve_command(args.host, args.port, args.reload, listener_fd=args.listener_fd)
+        elif args.subcommand == "hub":
+            if args.hub_command == "status":
+                return hub_status_command(args, base_dir)
+            parser.error(f"Invalid hub command: {args.hub_command}")
         elif args.subcommand == "mobile":
             return mobile_command(args)
         elif args.subcommand == "tunnel":

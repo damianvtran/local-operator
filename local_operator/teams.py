@@ -58,7 +58,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Literal, Mapping
+from typing import Any, Callable, Iterable, Iterator, Literal, Mapping
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
@@ -1496,7 +1496,22 @@ class TeamRegistry:
             )
             return self._save_team_locked(team, briefs_authoritative=True)
 
-    def update_team(self, team_id: str, fields: TeamEditFields) -> Team:
+    def update_team(
+        self,
+        team_id: str,
+        fields: TeamEditFields,
+        *,
+        precondition: Callable[[Team], None] | None = None,
+    ) -> Team:
+        """Apply ``fields`` to one team under the writer lock.
+
+        ``precondition`` runs against the row AS RE-READ UNDER THE LOCK, before
+        anything is staged; whatever it raises aborts the write untouched. It is
+        the hub auto-update's concurrent-edit guard: a merge is computed from a
+        snapshot, and only the lock holder can say the row still equals it. A
+        check made outside the lock would leave exactly the window the lock
+        exists to close.
+        """
         team_id = validate_team_id(team_id)
         with self._persistence_lock():
             # Refresh exactly once under the writer lock, then mutate and save
@@ -1506,6 +1521,8 @@ class TeamRegistry:
             if current is None:
                 raise KeyError(f"Team with id {team_id} not found")
             current = self._load_briefs(current)
+            if precondition is not None:
+                precondition(current)
             # Keep the canonical cache on the last acknowledged durable row.
             # Stage all edits on a detached candidate and adopt only after the
             # directory transaction completes successfully.
