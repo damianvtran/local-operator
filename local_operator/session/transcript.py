@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, Callable, Literal, Sequence
 
 from local_operator.harness.message_types import (
+    SESSION_BINDING_NOTICE_MESSAGE_TYPE,
     SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
     SESSION_INCIDENT_MESSAGE_TYPE,
     SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
@@ -150,11 +151,19 @@ ENTRY_PRUNE = "prune"
 #: exemption is honoured only when the whole batch is in this set — see
 #: :func:`_is_bookkeeping_batch`). It never reaches the model: unlisted custom
 #: types are no conversation content on either replay path.
+#:
+#: ``session_credential_binding_notice.v1`` (the account-change NOTICE, slice B)
+#: rides the same exemption for the same reason one level up: it ANNOUNCES a
+#: change to that bookkeeping, is written by the Session with
+#: ``preserve_mtime=True``, and announcing an account change is never work a
+#: turn carried. Its own note in ``harness/message_types.py`` states the
+#: operator-facing surface.
 BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset(
     {
         SESSION_INCIDENT_MESSAGE_TYPE,
         SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
         SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
+        SESSION_BINDING_NOTICE_MESSAGE_TYPE,
         SESSION_SPEND_CUSTOM_TYPE,
         SESSION_BINDING_CUSTOM_TYPE,
     }
@@ -268,6 +277,21 @@ SHRUNK_KEY = "context_shrunk_here"
 #: left to care — ``tests/unit/session/test_transcript.py`` pins this member
 #: against that module's constant, so a rename shows up as a failing test
 #: rather than as a type that is silently never collapsed.
+#:
+#: ``mesh_credential_binding.v1`` IS DELIBERATELY ABSENT, and the reason is the
+#: granularity of this collapse rather than an auditability trade. This pass
+#: keeps ONE newest row PER TYPE, while binding rows are per (type, provider)
+#: facts: a session on openai and anthropic carries a live row for each, and
+#: collapsing to the newest row of the type would drop the other provider's
+#: binding — ``recall_for`` would answer ``None`` and resolution would silently
+#: fall back to placement. That is a behaviour loss, not a storage
+#: optimisation, so the type may join only if this machinery learns a per-key
+#: collapse. Accumulation is not the hazard meanwhile: rows are appended on an
+#: account CHANGE (rare — the spend/checkpoint failure mode above was a row per
+#: call/turn), and §5.5's move assertion compares row bytes.
+#: ``tests/unit/session/test_credential_binding.py`` pins two providers' rows
+#: across a real compaction, so this member cannot be added back without
+#: addressing the granularity above first.
 _COLLAPSIBLE_CUSTOM_TYPES = frozenset(
     {"subagent_roster", SESSION_SPEND_CUSTOM_TYPE, "frontend_state_checkpoint_v1"}
 )

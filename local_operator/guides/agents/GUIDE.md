@@ -1,6 +1,6 @@
 ---
 name: agents
-description: "Use Local Operator agent profiles, roles, subagents and Agent Hub pull/push/update: create, select, delegate, choose a collaboration mode."
+description: "Use Local Operator agent profiles, roles, and subagents: discover, create, select, interact and delegate — including parallel sessions via the `sessions` tool."
 ---
 
 # Agent profiles and subagents
@@ -51,30 +51,40 @@ Use the `task` tool when the current job contains an independent, well-bounded s
 - may itself delegate **if and only if its role allows the `task` tool**. A `manager` keeps `task` at any depth, so a manager's child is a manager too; a role that does not delegate (a `reviewer`, a `coder`, a `scout`) is never handed it and must do the work itself. A subagent launched with no role inherits its parent's allowance. When a child does delegate, its own children are listed in its page — in the TUI the roster re-scopes to them and you walk back up with `p`/`Esc`; the desktop UI walks the same tree with its back control and breadcrumbs.
 - is ephemeral; it does not become a registered profile or keep durable specialist state
 
-## Separate sessions: `lop exec`, only when the user asked
+## Separate sessions: the `sessions` tool, only when the user asked
 
 Default to `task`. A separate top-level session is a different tool with a
-different cost, and `lop exec` is how one is opened from inside a session:
+different cost, and the `sessions` tool (`op=spawn`) opens one from inside a
+session:
 
-- Use `exec` when the USER explicitly asked for separate parallel sessions to
-  fully delegate work — independent workstreams that must outlive this turn, or a
-  large fan-out of them. A `task` child takes one prompt and then ends, so it
-  cannot be a long-lived workstream; that shape is what `exec` is for.
-- Never use it to get around a missing `task` tool. A session that does not hold
-  `task` may not create subagents at all: do the work yourself, and report a
-  genuine blocker with `hub` to the session that delegated to you. A session
-  that DOES hold `task` is the only one the CLI is even open to — the guard reads
-  the caller's live inventory, so this is enforced, not advice.
+- Use it when the USER explicitly asked for separate parallel sessions to
+  fully delegate work — independent workstreams that must outlive this turn, or
+  a large fan-out of them. A `task` child takes one prompt and then ends, so it
+  cannot be a long-lived workstream; that shape is what `spawn` is for.
+- A spawned run is a listed workstream by default: the operator's sidebar,
+  `/resume` and the phone list show it, labelled with the session that opened
+  it. `visibility="ephemeral"` is the explicit opt-out, only for a throwaway
+  run the operator did not ask to see.
+- Never use it to get around a missing `task` tool. A session that does not
+  hold `task` may not create subagents at all: do the work yourself, and report
+  a genuine blocker with `hub` to the session that delegated to you. A session
+  that DOES hold `task` is the only one the guard lets spawn — it reads the
+  caller's live inventory, so this is enforced, not advice.
 - Never use the interactive path from inside a session (`lop`, `lop --resume`,
-  `--tui`). An agent has no terminal, so that opens a front end on the operator's
-  screen rather than work of yours.
+  `--tui`). An agent has no terminal, so that opens a front end on the
+  operator's screen rather than work of yours.
 
-A session either route opens is stamped `origin.json` = `agent-shell`: it will
-not appear in the operator's `/resume` picker, desktop sidebar or phone list as a
-chat they started. It is not hidden — `lop sessions` lists the live run, `exec`
-prints its id, and YOUR route back to it is `lop exec --resume <id>`. The bare
-`lop --resume <id>` form belongs to the operator: it is the interactive path,
-which stays refused for every agent shell (see above).
+A run opened without `--workstream` — or spawned with
+`visibility="ephemeral"` — is stamped `origin.json` = `agent-shell`: it will
+not appear in the operator's `/resume` picker, desktop sidebar or phone list as
+a chat they started. It is not hidden — `lop sessions` lists the live run,
+`exec` prints its id, and YOUR route back to it is `lop exec --resume <id>`.
+The bare `lop --resume <id>` form belongs to the operator: it is the
+interactive path, which stays refused for every agent shell (see above). A
+`spawn` (or an explicit `--workstream` on the CLI) stamps `agent-workstream`
+instead: the operator's lists show it, labelled with the session that opened
+it — and where the tool is absent, the CLI fallback is `lop exec --workstream
+--name <name> "<task>"`.
 
 ## Roles: `task(agent=...)`
 
@@ -136,12 +146,3 @@ Use `jobs` to inspect background work, and `hub` to question or steer a running 
 - No clear specialization or concurrency benefit: do not delegate.
 
 Never inject or enumerate every registered agent speculatively. The registry can be large and may contain private descriptions; discover it only in response to a relevant task.
-
-## Agent Hub: pull, push, update
-
-- `agents pull <id>` copies a hub agent (add `--org <tenant>` for an organization's). The pull remembers the hub id and the text it pulled — the *baseline*.
-- Updates are a three-way merge of baseline, your copy and the hub's. What each side changed is kept; a section you deleted stays deleted, one the hub deleted goes; a shortened paragraph stays shortened. Both sides editing the same sentence is combined by your default model when the meaning is preserved, otherwise left for you.
-- Auto-update is on by default (`hub.auto_update.agents`); off, you still see "update available" and apply it yourself: `agents sync --name X`. `--check` only reports. `--prefer local|remote` decides a conflict. `--replace --yes` (CLI/UI only) discards your copy for the hub's and echoes what it discarded. `--force` is a deprecated alias of that.
-- `agent op='sync'` merges; `resolve='local'|'remote'` decides a conflict. It can never discard the user's copy.
-- FAQ — *Will a pull/update overwrite my local changes?* No: edits and deliberate deletions on your side survive; anything replaced is backed up (`hub/backups/`) and echoed. *Will my publish clobber someone else's edits?* Push runs the same merge against the hub copy first; their changes and removals are kept unless you choose `--replace`.
-- Best practice: pull once, edit freely, let updates flow. To drop a section for good, delete it — do not blank it. Publish after an update, not before.

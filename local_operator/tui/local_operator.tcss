@@ -2085,6 +2085,37 @@ Screen.settings #input-dock #prompt-chevron {
     height: auto;
 }
 
+/* The detail state (S6d parity P2): the SAME frame as the canvas — title,
+ * rule, body, footer, hints — with the body swapped for a one-axis widget
+ * scroll. The canvas is one pinned Static and the detail is a tree of rows,
+ * so the container scrolls its CHILDREN; the scrollbars are the same 1-cell
+ * `$lo-edge` bars the canvas body uses, and there is deliberately no top
+ * padding: the section ruler's content-relative anchors and the container's
+ * `scroll_offset` must share one coordinate space. */
+.projects-detail {
+    height: 1fr;
+    padding: 0;
+    overflow: auto;
+    scrollbar-size-vertical: 1;
+    scrollbar-background: $lo-bg;
+    scrollbar-color: $lo-edge;
+    scrollbar-color-hover: $lo-dim;
+    scrollbar-color-active: $lo-muted;
+}
+
+.projects-detail-row {
+    width: 1fr;
+    height: auto;
+}
+
+/* One blank line before every section heading rides the sheet's single
+ * sanctioned spacing declaration (`.gap-above`), applied by the page — a
+ * margin here would be a second source the minimalism guard reads as a
+ * violation, and it could silently double with the class. The page withholds
+ * the class from its first row, so the heading opening the page is not
+ * pushed down a row. The markdown description declares nothing either: its
+ * rhythm comes from the markdown blocks' own fills, not the sheet. */
+
 /* The pinned footer: the highlighted project's detail in the list view, the
  * aggregate counts elsewhere. ALWAYS one row plus its quiet lead-in, even when
  * empty: a footer that appeared and disappeared would move the canvas on every

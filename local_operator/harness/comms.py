@@ -75,6 +75,7 @@ from typing import (
 from local_operator.harness.message_types import (
     HUB_MESSAGE_TYPE,
     PEER_MESSAGE_MESSAGE_TYPE,
+    SESSION_BINDING_NOTICE_MESSAGE_TYPE,
     SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
 )
 from local_operator.harness.types import (
@@ -3523,4 +3524,11 @@ def _render_custom_step(index: int, payload: dict[str, Any]) -> PeekStep:
         # that date still carries the rows: without it a parent peeking an old
         # child would see the raw wire type where it used to read a phrase.
         return PeekStep(index, "system", "credential masked", _clip(str(details.get("text", ""))))
+    if custom_type == SESSION_BINDING_NOTICE_MESSAGE_TYPE:
+        # The account-change notice (mesh credential binding, slice B). Like the
+        # row above, this is a notice the operator is meant to READ, and the
+        # text is already a rendered sentence — so the peek names what happened
+        # in words rather than printing the wire type over a sentence that
+        # already says it.
+        return PeekStep(index, "system", "account change", _clip(str(details.get("text", ""))))
     return PeekStep(index, "system", custom_type, _clip(str(details.get("text", ""))))

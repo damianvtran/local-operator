@@ -52,7 +52,7 @@ import time
 import uuid
 from collections.abc import Mapping
 from contextlib import contextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Literal, Sequence
 
@@ -531,12 +531,12 @@ def milestone_status(
 ) -> Literal["completed", "overdue", "upcoming"]:
     """The milestone's status, DERIVED at render, never stored.
 
-    ``today`` exists for tests; left ``None`` the basis is :func:`_utc_today`
+    ``today`` exists for tests; left ``None`` the basis is :func:`_local_today`
     — the SAME date ``completed_at`` is stamped from — so "overdue" and "done
     today" cannot disagree about which day it is. The rule itself lives in
     :func:`milestone_state`, shared with the JSON-row readers.
     """
-    moment = today or _utc_today()
+    moment = today or _local_today()
     return milestone_state(milestone.completed_at, milestone.target_date, today=moment.isoformat())
 
 
@@ -1103,19 +1103,23 @@ def _utc_stamp(now: float) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
 
 
-def _utc_today() -> date:
-    """The ONE "today" this module reasons about: the UTC date.
+def _local_today() -> date:
+    """The ONE "today" this module reasons about: the OPERATOR'S local day.
 
-    ``completed_at`` is stamped from the UTC date when ``status='done'`` is set,
-    so every date COMPARISON has to use the same basis or an operator far from
-    UTC reads a badge one day off the stamp it contradicts (agent review round
-    1, n1). One helper, two callers, so the two cannot drift apart again.
+    ``completed_at`` is stamped from this date and every date COMPARISON
+    reads it, so the two cannot drift apart (agent review round 1, n1). The
+    basis is LOCAL, deliberately: the stamp is a human-facing day, and a UTC
+    basis stored tomorrow's date for an evening toggle west of Greenwich
+    (UX round 1 follow-up; measured: a 2026-09-29 20:5x EDT toggle stored
+    2026-09-30). The store is this machine's, so the machine's clock is the
+    human who saw the toggle — and the one-basis rule this helper exists for
+    is unchanged; only the basis moved.
     """
-    return datetime.now(timezone.utc).date()
+    return datetime.now().date()
 
 
 def _today_iso() -> str:
-    return _utc_today().isoformat()
+    return _local_today().isoformat()
 
 
 def _try_lock_exclusive(fd: int) -> bool:
@@ -1880,6 +1884,10 @@ class ProjectRegistry:
                 if "target_date" in supplied:
                     milestone.target_date = fields.target_date or None
                 if fields.completed is not None:
+                    # NOTE: a re-completion re-stamps to today; the prior date
+                    # is not kept (restoring it would need a completion
+                    # history — a store-schema change, deferred in the UX
+                    # round 1 remediation record).
                     milestone.completed_at = _today_iso() if fields.completed else None
                 if milestone.model_dump(mode="json") == before:
                     # Nothing supplied (or nothing moved): report the truthful

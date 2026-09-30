@@ -29,6 +29,7 @@ from local_operator.tools.builtin import (
     BrowserParams,
     EditParams,
     SendParams,
+    SessionsParams,
     WakeParams,
     WriteParams,
     _describe_browser_approval,
@@ -36,6 +37,7 @@ from local_operator.tools.builtin import (
     build_bash_tool,
     build_edit_tool,
     build_send_tool,
+    build_sessions_tool,
     build_wake_tool,
     build_write_tool,
 )
@@ -53,6 +55,13 @@ class _Scheduler:
         self, schedules: Sequence[WakeSchedule]
     ) -> None:  # pragma: no cover - never called here
         return None
+
+
+def _sessions_launcher(
+    label: str, prompt: str, *, agent: str = "task", effort: str | None = None
+) -> str:
+    """The surface the sessions builder checks for (createIf rung 3)."""
+    return "job-x"
 
 
 def _summary(
@@ -76,6 +85,7 @@ def test_every_write_exec_tool_describes_its_own_approval() -> None:
         build_edit_tool(),
         build_wake_tool(ToolContext(wake_scheduler=_Scheduler())),
         build_send_tool(ToolContext()),
+        build_sessions_tool(ToolContext(subagent_launcher=_sessions_launcher)),
     ]
     for tool in described:
         assert tool is not None
@@ -95,6 +105,10 @@ def test_every_write_exec_tool_describes_its_own_approval() -> None:
         (SendParams, {"target": "release cutter", "message": "gates are green"}),
         (SendParams, {"pid": 48213, "message": "verify prod", "wake": False}),
         (SendParams, {"session": "s1", "message": "hold off", "now": True}),
+        (SessionsParams, {"op": "list"}),
+        (SessionsParams, {"op": "spawn", "prompt": "go"}),
+        (SessionsParams, {"op": "stop", "target": "release crew"}),
+        (SessionsParams, {"op": "resume", "pid": 48213, "prompt": "continue"}),
     ],
 )
 def test_every_described_shape_is_one_the_schema_accepts(params, arguments) -> None:

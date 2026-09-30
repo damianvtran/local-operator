@@ -221,29 +221,36 @@ def _type_the_code(monkeypatch: pytest.MonkeyPatch, code: str | None = None) -> 
 
 
 def _answer_confirmation(
-    server: relay.RelayServer, *, admit: bool = True, timeout: float = 20.0
+    server: relay.RelayServer,
+    *,
+    admit: bool = True,
+    timeout: float = 20.0,
+    shares: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """The INVITER's person, standing at `lop network confirm`.
 
     The relay has no terminal here (a daemon, and a test process besides), so it
     parks the pairing in a 0600 pending record carrying BOTH codes; this waits for
     that record and answers it through the relay's own control op — the same path
-    the CLI takes, audit record included. Returns the parked row it answered, or
-    ``None`` when none appeared, which is what the refusal cases assert.
+    the CLI takes, audit record included. ``shares`` drives the reduce-only
+    choice exactly as the CLI sends it; omitting it is the y/N default (the whole
+    offered set). Returns the parked row it answered, or ``None`` when none
+    appeared, which is what the refusal cases assert.
     """
     deadline = time.time() + timeout
     while time.time() < deadline:
         rows = server._ctl_pair_pending({})  # noqa: SLF001 — the CLI's own control op
         if rows:
-            server._ctl_pair_confirm(  # noqa: SLF001
-                {
-                    "invite_id": rows[0]["invite_id"],
-                    "decision": "admit" if admit else "decline",
-                    "matched": admit,
-                    "reason": "" if admit else "declined",
-                    "answered_by": "harness",
-                }
-            )
+            frame: dict[str, Any] = {
+                "invite_id": rows[0]["invite_id"],
+                "decision": "admit" if admit else "decline",
+                "matched": admit,
+                "reason": "" if admit else "declined",
+                "answered_by": "harness",
+            }
+            if shares is not None:
+                frame["shares"] = list(shares)
+            server._ctl_pair_confirm(frame)  # noqa: SLF001
             return dict(rows[0])
         time.sleep(0.05)
     return None

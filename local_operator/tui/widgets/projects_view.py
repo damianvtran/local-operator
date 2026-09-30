@@ -52,6 +52,10 @@ from local_operator.tui.projects_render import (
     auto_timeline_tier,
     board_position,
     detail_footer,
+    detail_progress_line,
+    detail_ruler,
+    detail_session_state,
+    display_name,
     list_position,
     project_at,
     render_project_board,
@@ -60,9 +64,11 @@ from local_operator.tui.projects_render import (
     section_header_at,
     section_ruler,
     sections_of,
+    status_chip_text,
     timeline_position,
     timeline_span,
 )
+from local_operator.tui.widgets.projects_detail import ProjectDetailPage
 from local_operator.tui.widgets.subagent_view import READ_ONLY_NOTE, HintButton
 
 #: The view vocabulary, in the order ``1``/``2``/``3`` address it and ``v``
@@ -158,6 +164,25 @@ def _style_resolver() -> Callable[[str], Style]:
     return resolve
 
 
+class ProjectsViewMilestoneToggled(Message):
+    """``↵`` on a milestone row: flip its completion through the store.
+
+    The page never writes (module docstring): the app calls the same
+    ``registry.set_milestone`` core the tool and the API use, recomposes,
+    and hands the page fresh data — a refusal lands as a notice, never a
+    silent no-op (spec §10.5).
+    """
+
+    def __init__(
+        self, project_id: str, name: str, completed: bool, *, project_name: str = ""
+    ) -> None:
+        super().__init__()
+        self.project_id = project_id
+        self.name = name
+        self.completed = completed
+        self.project_name = project_name
+
+
 class ProjectsViewJumpRequested(Message):
     """``↵`` on the selected project: open its conversation (S3b).
 
@@ -206,6 +231,10 @@ class ProjectsView(Vertical):
         Binding("2", "show_board", "Board view", show=False),
         Binding("3", "show_timeline", "Timeline view", show=False),
         Binding("v", "cycle_view", "Next view", show=False),
+        # `d` opens the DETAIL page for the selection (S6d parity P2). The
+        # recorded fallback of the spec's D1 — `↵` keeps its shipped meaning
+        # (open the conversation), and the detail takes the free letter.
+        Binding("d", "open_detail", "Detail", show=False),
         Binding("r", "refresh", "Refresh", show=False),
         # Zoom is TIME resolution on the timeline (the org-chart "zoom is level
         # of detail" rule); in the other views it is inert and the footer sheds
@@ -254,6 +283,17 @@ class ProjectsView(Vertical):
         #: timeline tier, and the one-clock "updated at" the title states.
         self._view: str = "list"
         self._cursor: int = 0
+        #: ``canvas`` | ``detail`` — where the page is (spec §10.1's state
+        #: machine). The canvas keeps the shipped mechanics while the detail
+        #: owns its own body; `esc` pops ONE level and only the canvas exits.
+        self._mode: str = "canvas"
+        #: The calling process's own session id, when the host knows it — the
+        #: `◆` marker and `own session` label on the detail page. Sticky: a
+        #: refresh load may omit it without clearing it.
+        self._own_session: str | None = None
+        #: The project the detail state is showing, by id — the anchor a
+        #: recomposition re-finds (a rename can move its index).
+        self._detail_project_id: str | None = None
         self._tier: str = "month"
         #: Whether the tier above was chosen by hand (``+``/``-``) and, if so,
         #: the dated span it was chosen for. A manual zoom survives a
@@ -263,6 +303,8 @@ class ProjectsView(Vertical):
         self._tier_manual: bool = False
         self._manual_span: tuple[str, str] | None = None
         self._updated_at: float | None = None
+        #: The footer's one-sentence notice (refusals, pops) — UX round 1.
+        self._notice: str | None = None
         #: Last render, kept for the geometry probes and rendered_rows().
         self._last: RenderResult | None = None
         self._title = Static(classes="projects-view-title")
@@ -272,6 +314,10 @@ class ProjectsView(Vertical):
         # scrolls it, so Textual's own scrollbars appear exactly when over.
         self._canvas = Static(classes="projects-view-canvas")
         self._body = ScrollableContainer(self._canvas, classes="projects-view-body")
+        self._detail_page = ProjectDetailPage(
+            self._detail_row_action, _style_resolver(), on_nav=self._detail_nav
+        )
+        self._detail_page.display = False
         # The pinned footer: the highlighted project's detail in the list view,
         # aggregate counts elsewhere. ALWAYS one row (a footer that appeared
         # and disappeared would move the body on every view switch).
@@ -286,13 +332,16 @@ class ProjectsView(Vertical):
         # return at ~97 (open outranks zoom in `all_leads` — the recorded
         # trade; review rounds 2 R2-2b and 3 R3-1).
         self._open_hint = HintButton("↵", lambda: self.action_jump())
+        self._detail_hint = HintButton("d", lambda: self.action_open_detail())
+        self._move_hint = HintButton("↑↓", self._focus_detail_page)
+        self._page_hint = HintButton("pgup/pgdn", lambda: self._detail_page.scroll_page_down())
         self._list_hint = HintButton("1", lambda: self.action_show_list())
         self._board_hint = HintButton("2", lambda: self.action_show_board())
         self._timeline_hint = HintButton("3", lambda: self.action_show_timeline())
         self._next_hint = HintButton("v", lambda: self.action_cycle_view())
         self._refresh_hint = HintButton("r", lambda: self.action_refresh())
         self._zoom_hint = HintButton("+/-", self._cycle_tier)
-        self._exit_hint = HintButton("esc", self._leave)
+        self._exit_hint = HintButton("esc", self._leave_or_pop)
         self._state_hint = HintButton(READ_ONLY_NOTE)
         self._hints = Horizontal(classes="projects-view-hints")
 
@@ -305,6 +354,7 @@ class ProjectsView(Vertical):
         updated_at: float | None = None,
         view: str | None = None,
         associated: frozenset[str] | None = None,
+        own_session: str | None = None,
     ) -> None:
         """Point the page at a fresh composition and paint it.
 
@@ -316,9 +366,20 @@ class ProjectsView(Vertical):
         session's own project ids with ``◆`` (the nameless ``/project show``;
         S3b) — the title says whose set it is, and a load CARRYING a set seeds
         the cursor onto it (an entry), while one that carries none (a refresh)
-        never moves the reader.
+        never moves the reader. ``own_session`` is THIS process's session id,
+        used by the detail page's `◆`/`own session` labels; sticky, so a
+        refresh load may omit it.
         """
+        # A recompose answers whatever the last notice said; `_resync_detail`
+        # below may set its own (the vanished-project pop, UX round 1, U5).
+        self._notice = None
         self._views = list(views)
+        if own_session is not None:
+            self._own_session = own_session
+        if view is not None and self._mode == "detail":
+            # An EXPLICIT canvas request outranks the open detail: the reader
+            # asked for the board/timeline, not the page they were on.
+            self._exit_detail()
         if associated is not None:
             self._associated = frozenset(str(pid) for pid in associated)
             if self._associated:
@@ -352,6 +413,13 @@ class ProjectsView(Vertical):
                 # requested `view` (the board/timeline entries) outranks that.
                 self._view = "list"
         self._cursor = max(0, min(self._cursor, max(self._painted_count() - 1, 0)))
+        if self._mode == "detail":
+            # Keep the detail open across a recomposition: re-show the SAME
+            # project (by id — the store's order can shift with a rename) and
+            # keep the row cursor; a deleted project pops back to the canvas.
+            self._resync_detail()
+        elif self._detail_page.display:
+            self._exit_detail()
         if self._view == "timeline":
             # A recomposition can change the dated span (a new target date),
             # and the auto tier exists to fit it; an explicit zoom is kept
@@ -372,6 +440,18 @@ class ProjectsView(Vertical):
             if isinstance(project, dict) and str(project.get("id")) == str(project_id):
                 self._view = "list"
                 self._cursor = max(0, min(index, max(self._painted_count() - 1, 0)))
+                # A retarget is a fresh intent: whatever the last notice said
+                # belonged to the project being left (UX round 1).
+                self._notice = None
+                if self._mode == "detail":
+                    # A named show is a CANVAS retarget, obeying the same rule
+                    # `load` states for an explicit canvas request: the reader
+                    # asked to be shown a project, not the page they were on.
+                    # Leaving the page open split it — chrome on the named
+                    # project, body on the old one — and `↵` then wrote through
+                    # the cursor into a project its row never came from
+                    # (QA round 1, Q1).
+                    self._exit_detail()
                 self._repaint()
                 self._scroll_cursor_into_view()
                 self.call_after_refresh(self._scroll_cursor_into_view)
@@ -466,7 +546,50 @@ class ProjectsView(Vertical):
         self.call_after_refresh(self._paint_chrome)
         self.call_after_refresh(self._sync_scroll_hint)
 
+    def show_notice(self, text: str) -> None:
+        """One sentence in the footer until the state changes (UX round 1).
+
+        The mode's OWN line for refusals and pops: while a page is up the
+        transcript it hides is no surface at all, so a sentence posted there
+        reached nobody (U1) — and the footer is the pinned one-row chrome, so
+        nothing moves when the line appears. Cleared by the next ``load``, a
+        fresh detail entry, or leaving the detail by hand.
+        """
+        self._notice = text
+        self._paint_chrome()
+
+    def _notice_text(self, width: int) -> Text:
+        """The footer's notice line: warning ink, fitted to the MEASURED box.
+
+        Rich's ``overflow="ellipsis"`` is inert on a Static (the title's
+        recorded lesson), so the cut is done HERE — cell-accurate, with an
+        ellipsis — instead of letting the box clip mid-token (UX round 1,
+        U8: at 50x18 the refusal sentence ran 72 cells into a 46-cell box).
+        """
+        from rich.cells import cell_len
+
+        sentence = self._notice or ""
+        if cell_len(sentence) > width:
+            budget = max(width - 1, 1)  # one cell for the ellipsis
+            kept: list[str] = []
+            used = 0
+            for char in sentence:
+                size = cell_len(char)
+                if used + size > budget:
+                    break
+                kept.append(char)
+                used += size
+            sentence = "".join(kept).rstrip() + "…"
+        return Text(
+            sentence,
+            style=Style(color=theme_mod.semantic_color("warning")),
+            no_wrap=True,
+        )
+
     def _paint_chrome(self) -> None:
+        if self._mode == "detail":
+            self._paint_detail_chrome()
+            return
         muted = Style(color=theme_mod.semantic_color("muted"))
         dim = Style(color=theme_mod.semantic_color("dim"))
         # The nameless entry's set (S3b): whose projects the `◆` markers are,
@@ -520,7 +643,9 @@ class ProjectsView(Vertical):
         # ladder sheds whole segments instead of the container cutting a
         # clause mid-token (design review round 1, D5).
         footer_width = self._detail.size.width or width
-        if self._view == "list" and self._views:
+        if self._notice is not None:
+            self._detail.update(self._notice_text(footer_width))
+        elif self._view == "list" and self._views:
             index = max(0, min(self._cursor, max(self._painted_count() - 1, 0)))
             self._detail.update(
                 detail_footer(self._views[index], style_for=_style_resolver(), width=footer_width)
@@ -537,6 +662,63 @@ class ProjectsView(Vertical):
             )
         self._paint_hints()
 
+    def _paint_detail_chrome(self) -> None:
+        """Chrome for the detail state: identity title, in-page ruler, freshness.
+
+        The title pins the identity (spec §5.4) and sheds the newest clauses
+        first — the update stamp, then the `(key)` parenthetical — the canvas
+        title's own ladder. The rule is the detail's section ruler (design §6)
+        and the footer the freshness attribution, which must stay visible
+        while the description scrolls under it.
+        """
+        muted = Style(color=theme_mod.semantic_color("muted"))
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        view_row = self._detail_view_row() or {}
+        project = view_row.get("project") if isinstance(view_row.get("project"), dict) else {}
+        project = project if isinstance(project, dict) else {}
+        name = str(project.get("name") or "")
+
+        def build_title(*, with_name: bool, with_updated: bool) -> Text:
+            title = Text(no_wrap=True, overflow="ellipsis")
+            label = display_name(project) or "(unnamed)"
+            title.append("projects", style=Style(color=theme_mod.semantic_color("fg"), bold=True))
+            title.append(" · ", style=muted)
+            title.append(label, style=Style(color=theme_mod.semantic_color("fg"), bold=True))
+            if with_name and name and name != label:
+                title.append(f" ({name})", style=muted)
+            status = str(project.get("status") or "active")
+            title.append(
+                f" {status_chip_text(status)}", style=_style_resolver()(f"status_{status}")
+            )
+            if with_updated and self._updated_at is not None:
+                import time as _time
+
+                stamp = _time.strftime("%H:%M", _time.localtime(self._updated_at))
+                title.append(f" · updated {stamp}", style=dim)
+            return title
+
+        from rich.cells import cell_len
+
+        title = build_title(with_name=True, with_updated=True)
+        available = self._title.content_size.width or self._title.size.width
+        if available and cell_len(title.plain) > available:
+            title = build_title(with_name=True, with_updated=False)
+            if cell_len(title.plain) > available:
+                title = build_title(with_name=False, with_updated=False)
+        self._title.update(title)
+
+        width = max(self.size.width - 2, 1)
+        self._paint_rule(width)
+
+        footer_width = self._detail.size.width or width
+        if self._notice is not None:
+            self._detail.update(self._notice_text(footer_width))
+        else:
+            self._detail.update(
+                detail_progress_line(view_row, width=footer_width, style_for=_style_resolver())
+            )
+        self._paint_hints()
+
     def _paint_rule(self, width: int | None = None) -> None:
         """The rule row: the shipped plain rule, or the section ruler.
 
@@ -548,14 +730,22 @@ class ProjectsView(Vertical):
         """
         if width is None:
             width = max(self.size.width - 2, 1)
-        ruler = section_ruler(
-            self._views,
-            self._view,
-            top_row=int(self._body.scroll_offset.y),
-            cursor=self._cursor if self._views else None,
-            width=width,
-            style_for=_style_resolver(),
-        )
+        if self._mode == "detail":
+            ruler = detail_ruler(
+                self._detail_page.section_anchors(),
+                int(self._detail_page.scroll_offset.y),
+                width=width,
+                style_for=_style_resolver(),
+            )
+        else:
+            ruler = section_ruler(
+                self._views,
+                self._view,
+                top_row=int(self._body.scroll_offset.y),
+                cursor=self._cursor if self._views else None,
+                width=width,
+                style_for=_style_resolver(),
+            )
         if ruler is None:
             ruler = Text("─" * width, style=Style(color=theme_mod.semantic_color("dim")))
         self._rule.update(ruler)
@@ -570,16 +760,95 @@ class ProjectsView(Vertical):
             return
         self._paint_rule()
 
+    def _detail_scroll_changed(self, *_args: Any) -> None:
+        """The detail's ruler tracks ITS viewport (design §6).
+
+        Same zero-row counterpart as the canvas rule, watching the detail
+        body's own ``scroll_y``. The repaint is DEFERRED past the refresh: a
+        scroll watch can fire before the children's regions move, and an
+        anchor read at that instant is the stale offset's (design review
+        round 1, D1, measured — the entry reveal's scroll was exactly this
+        case). After the refresh the children sit at the settled offset and
+        the anchors are content-relative again; the pass is idempotent like
+        every deferred chrome paint in this file.
+        """
+        if self._mode != "detail":
+            return
+        self.call_after_refresh(self._paint_rule)
+
     def _paint_hints(self) -> None:
         """Lay out the footer hints, shedding WHOLE hints until the row fits.
 
-        The org-chart ladder, same rule: each rung is measured before it is
-        committed and ``esc`` is never dropped because it is the only way out.
-        What sheds first is the order's own statement: ``+/-`` (timeline only)
-        and ``r`` go before the view triplet, and ``↔↕ scroll`` — a gesture a
-        reader finds by trying an arrow — goes before ``3 timeline``/``v next``,
-        so the newest view types stay advertised on a narrow terminal (UX
-        round 1, U3).
+        TWO ladders, one machinery: the canvases' and the detail page's, each
+        built as candidate rungs and committed through the same measure-then-
+        paint path. The org-chart rule throughout: each rung is measured
+        before it is committed and ``esc`` is never dropped because it is the
+        only way out.
+        """
+        rungs = self._detail_hint_rungs() if self._mode == "detail" else self._canvas_hint_rungs()
+        width = max(self.size.width - 2, 1)
+        chosen = rungs[-1]
+        for leads, esc_label in rungs:
+            if self._measure_hints(leads, esc_label) <= width:
+                chosen = (leads, esc_label)
+                break
+        plan, esc_label = chosen
+        visible = {hint for hint, _label, _lead in plan}
+        for hint, label, lead in plan:
+            hint.paint(esc_label if hint is self._exit_hint else label, lead=lead)
+        for hint in self._hint_buttons():
+            hint.display = hint in visible
+        # The hint BUTTONS keep one DOM order (the two ladders share them), and
+        # a Horizontal lays children out by document order — not by paint
+        # time — so the row read `r refresh · ↵ toggle · ↑↓ move` on the
+        # detail page (measured, and exactly what a shared widget pool costs)
+        # until the painter re-ordered it to the plan it just chose. Each
+        # rung's visible order IS its priority order; the seam flags painted
+        # above come from the plan, so they cannot disagree with it.
+        if [child for child in self._hints.children if child.display] != [
+            hint for hint, _label, _lead in plan
+        ]:
+            for index in range(len(plan) - 2, -1, -1):
+                self._hints.move_child(plan[index][0], before=plan[index + 1][0])
+        # Arm what was just painted against the geometry it would act on; the
+        # deferred pass in `_repaint` re-arms once the layout has settled.
+        if self._mode == "detail":
+            self._sync_detail_hints()
+        else:
+            self._sync_scroll_hint()
+
+    def _hint_buttons(self) -> tuple[HintButton, ...]:
+        """Every button the painter owns — one list for the hide pass."""
+        return (
+            self._scroll_hint,
+            self._list_hint,
+            self._board_hint,
+            self._timeline_hint,
+            self._next_hint,
+            self._detail_hint,
+            self._refresh_hint,
+            self._open_hint,
+            self._move_hint,
+            self._page_hint,
+            self._zoom_hint,
+            self._exit_hint,
+            self._state_hint,
+        )
+
+    def _canvas_hint_rungs(
+        self,
+    ) -> list[tuple[list[tuple[HintButton, str, bool]], str]]:
+        """The canvases' ladder, in priority order (widest rung first).
+
+        What sheds first is the order's own statement: ``+/-`` (timeline
+        only), then ``↵ open`` and ``r refresh`` before the newest action,
+        ``d detail`` (S6d parity P2 — the canvas's headline affordance
+        outranks the legacy conversation key under width pressure; the
+        designer round may re-rank, it is one rung swap); then ``↔↕ scroll``,
+        then ``d`` itself, and only then the esc LABEL and the view triplet —
+        a gesture a reader finds by trying an arrow goes before a view they
+        cannot discover, and the newest view types stay advertised on a
+        narrow terminal (UX round 1, U3).
         """
 
         def rung(
@@ -593,21 +862,6 @@ class ProjectsView(Vertical):
             if state:
                 row.append((self._state_hint, "", True))
             return (row, esc_label)
-
-        scroll = (self._scroll_hint, " scroll", False)
-        list_hint = (self._list_hint, " list", True)
-        board_hint = (self._board_hint, " board", True)
-        timeline_hint = (self._timeline_hint, " timeline", True)
-        refresh = (self._refresh_hint, " refresh", True)
-        open_hint = (self._open_hint, " open", True)
-        nxt = (self._next_hint, " next", True)
-        # `+/-` is TIME zoom: it acts only on the timeline, and a hinted key
-        # that changes nothing is worse than an absent one (the org chart's own
-        # rule for its zoom hint) — so the button is advertised where it works
-        # and dropped from every rung elsewhere.
-        zoom: tuple[HintButton, str, bool] | None = (
-            (self._zoom_hint, " zoom", True) if self._view == "timeline" else None
-        )
 
         def leads_of(
             *leads: tuple[HintButton, str, bool] | None,
@@ -624,74 +878,116 @@ class ProjectsView(Vertical):
                 )
             ]
 
-        all_leads = leads_of(
-            scroll, list_hint, board_hint, timeline_hint, nxt, refresh, open_hint, zoom
+        scroll = (self._scroll_hint, " scroll", False)
+        list_hint = (self._list_hint, " list", True)
+        board_hint = (self._board_hint, " board", True)
+        timeline_hint = (self._timeline_hint, " timeline", True)
+        refresh = (self._refresh_hint, " refresh", True)
+        open_hint = (self._open_hint, " open", True)
+        detail_hint = (self._detail_hint, " detail", True)
+        nxt = (self._next_hint, " next", True)
+        # `+/-` is TIME zoom: it acts only on the timeline, and a hinted key
+        # that changes nothing is worse than an absent one (the org chart's own
+        # rule for its zoom hint) — so the button is advertised where it works
+        # and dropped from every rung elsewhere.
+        zoom: tuple[HintButton, str, bool] | None = (
+            (self._zoom_hint, " zoom", True) if self._view == "timeline" else None
         )
-        rungs: list[tuple[list[tuple[HintButton, str, bool]], str]] = [
+
+        all_leads = leads_of(
+            scroll, list_hint, board_hint, timeline_hint, nxt, refresh, open_hint, detail_hint, zoom
+        )
+        return [
             rung(all_leads, "back to conversation", state=True),
             rung(all_leads, "back to conversation", state=False),
             rung(all_leads, "back", state=False),
             rung(
-                leads_of(scroll, list_hint, board_hint, timeline_hint, nxt, refresh, open_hint),
-                "back",
-                state=False,
-            ),
-            # `↵ open` sheds HERE, before `r refresh` in the RUNG ORDER. The
-            # measured boundaries (terminal columns, this harness): `scroll`
-            # returns at 72, `refresh` at 85, `open` at 95; at 60 all three are
-            # absent and the row is `1 list · 2 board · 3 timeline · v next ·
-            # esc back` (review round 2 R2-2a corrected the earlier claim that
-            # 60 keeps the refresher).
-            rung(
-                leads_of(scroll, list_hint, board_hint, timeline_hint, nxt, refresh),
+                leads_of(
+                    scroll,
+                    list_hint,
+                    board_hint,
+                    timeline_hint,
+                    nxt,
+                    refresh,
+                    open_hint,
+                    detail_hint,
+                ),
                 "back",
                 state=False,
             ),
             rung(
-                leads_of(scroll, list_hint, board_hint, timeline_hint, nxt),
+                leads_of(scroll, list_hint, board_hint, timeline_hint, nxt, refresh, detail_hint),
                 "back",
                 state=False,
             ),
-            # `↔↕ scroll` sheds HERE, before any view key: a view the reader
-            # cannot discover is worse than a gesture they will try anyway.
+            rung(
+                leads_of(scroll, list_hint, board_hint, timeline_hint, nxt, detail_hint),
+                "back",
+                state=False,
+            ),
+            rung(
+                leads_of(list_hint, board_hint, timeline_hint, nxt, detail_hint),
+                "back",
+                state=False,
+            ),
             rung(leads_of(list_hint, board_hint, timeline_hint, nxt), "back", state=False),
-            # …and the esc LABEL sheds before a view key too (the key itself
-            # never drops): at 60 columns `1/2/3 · v · esc` all fit as bare
-            # keys, and the dock still spells the full sentence
-            # (`Read-only · esc back`), so nothing is lost that a reader needs
-            # to leave the page (UX round 1, U3).
             rung(leads_of(list_hint, board_hint, timeline_hint, nxt), "", state=False),
             rung(leads_of(list_hint, board_hint, timeline_hint), "", state=False),
             rung(leads_of(list_hint, board_hint), "", state=False),
             rung(leads_of(list_hint), "", state=False),
             rung(leads_of(), "", state=False),
         ]
-        width = max(self.size.width - 2, 1)
-        chosen = rungs[-1]
-        for leads, esc_label in rungs:
-            if self._measure_hints(leads, esc_label) <= width:
-                chosen = (leads, esc_label)
-                break
-        plan, esc_label = chosen
-        visible = {hint for hint, _label, _lead in plan}
-        for hint, label, lead in plan:
-            hint.paint(esc_label if hint is self._exit_hint else label, lead=lead)
-        for hint in (
-            self._scroll_hint,
-            self._list_hint,
-            self._board_hint,
-            self._timeline_hint,
-            self._next_hint,
-            self._refresh_hint,
-            self._open_hint,
-            self._zoom_hint,
-            self._exit_hint,
-            self._state_hint,
-        ):
-            hint.display = hint in visible
-        # Arm the scroll hint against the geometry just painted; the deferred
-        # pass in `_repaint` re-arms it once the layout has settled.
-        self._sync_scroll_hint()
+
+    def _detail_hint_rungs(
+        self,
+    ) -> list[tuple[list[tuple[HintButton, str, bool]], str]]:
+        """The detail page's ladder — P2's subset of the spec's §3.3 row.
+
+        ``↑↓ move · pgup/pgdn page · ↵ <context> · r refresh · esc back``:
+        only what WORKS on this slice (`m`/`s`/`e` land with P4–P6; a hinted
+        key that does nothing is the failure the page's own rules name), and
+        the `↵` label is the selected row's VERB — ``open`` on a session,
+        ``toggle`` on a milestone — inside the shipped slot (spec §3.2/10.3).
+        ``esc`` pops one level here, so its label is ``back`` at every rung.
+        """
+
+        def rung(
+            leads: list[tuple[HintButton, str, bool]], esc_label: str
+        ) -> tuple[list[tuple[HintButton, str, bool]], str]:
+            row = list(leads)
+            row.append((self._exit_hint, esc_label, bool(row)))
+            return (row, esc_label)
+
+        context = self._detail_page.selected_action_label()
+        verb = self._detail_page.selected_action_verb()
+        move = (self._move_hint, " move", False)
+        page = (self._page_hint, " page", True)
+        open_hint = (self._open_hint, f" {context}" if context else " open", True)
+        # The bare verb is a LOW rung: a long target name sheds before the key
+        # does (UX round 1, U3 — the name informs, the key acts).
+        open_bare = (self._open_hint, f" {verb}" if verb else " open", True)
+        refresh = (self._refresh_hint, " refresh", True)
+        return [
+            rung([move, page, open_hint, refresh], "back"),
+            rung([move, page, open_hint], "back"),
+            rung([move, open_hint], "back"),
+            rung([move, open_hint], ""),
+            rung([move, open_bare], ""),
+            rung([move], ""),
+            rung([], ""),
+        ]
+
+    def _sync_detail_hints(self) -> None:
+        """Arm the detail hints against what they would act on just now.
+
+        ``↑↓ move`` needs a selectable row, ``pgup/pgdn`` a scrollable page,
+        and the ``↵`` context action a selected row that HAS one — a heading
+        or the description offers nothing, and the hint states the row's verb
+        or stops offering itself (``HintButton.set_actionable``'s rule).
+        """
+        self._move_hint.set_actionable(self._detail_page.selectable_count > 0)
+        self._page_hint.set_actionable(self._detail_page.max_scroll_y > 0)
+        self._open_hint.set_actionable(self._detail_page.selected_action_label() is not None)
 
     def _measure_hints(self, plan: list[tuple[HintButton, str, bool]], esc_label: str) -> int:
         """Cell width of a candidate hint row, measured before it is painted."""
@@ -707,6 +1003,7 @@ class ProjectsView(Vertical):
         yield self._title
         yield self._rule
         yield self._body
+        yield self._detail_page
         yield self._detail
         with self._hints:
             yield self._scroll_hint
@@ -714,8 +1011,11 @@ class ProjectsView(Vertical):
             yield self._board_hint
             yield self._timeline_hint
             yield self._next_hint
+            yield self._detail_hint
             yield self._refresh_hint
             yield self._open_hint
+            yield self._move_hint
+            yield self._page_hint
             yield self._zoom_hint
             yield self._exit_hint
             yield self._state_hint
@@ -732,6 +1032,9 @@ class ProjectsView(Vertical):
         # from is worse than none. The subagent page's watch shape, same
         # reason.
         self.watch(self._body, "scroll_y", self._scroll_changed, init=False)
+        # The detail body has its own viewport and its own ruler watch: the
+        # rule must follow whichever body is on screen (design §6).
+        self.watch(self._detail_page, "scroll_y", self._detail_scroll_changed, init=False)
         try:
             self.focus()
         except Exception:
@@ -754,6 +1057,8 @@ class ProjectsView(Vertical):
         deferred pass for the post-layout geometry (agent review round 1,
         finding 8: the hint lit on hover on a canvas that could not scroll).
         """
+        if self._mode != "canvas":
+            return
         self._scroll_hint.set_actionable(self._body.max_scroll_x > 0 or self._body.max_scroll_y > 0)
         # `↵ open` needs an object: on an empty store there is nothing to open
         # and the hint stops offering itself (the same rule as the arrows).
@@ -802,6 +1107,13 @@ class ProjectsView(Vertical):
             return ""
 
         rows = [plain(self._title), plain(self._rule)]
+        if self._mode == "detail":
+            # The detail state swaps the CANVAS rows for the page's own rows;
+            # the title, rule and footer are the same boxes either way (S6d
+            # P2), so the reads stay in one place for tests and evidence.
+            rows.extend(self._detail_page.painted_rows())
+            rows.append(plain(self._detail))
+            return rows
         if self._last is not None:
             rows.extend(text.plain for text in self._last.text.split("\n"))
         rows.append(plain(self._detail))
@@ -809,6 +1121,11 @@ class ProjectsView(Vertical):
 
     # -- view switching -----------------------------------------------------
     def _set_view(self, view: str) -> None:
+        if self._mode != "canvas":
+            # The view triplet is a CANVAS control; on the detail page it is
+            # inert rather than a hidden exit (spec §10.1: actions no-op where
+            # they do not apply — the `action_zoom_in` pattern).
+            return
         if view not in VIEWS or view == self._view:
             return
         self._view = view
@@ -854,8 +1171,13 @@ class ProjectsView(Vertical):
 
         Clamped at the ends (a canvas is several viewports tall; the bottom is
         a destination — the same clamp the arrows state) and inert while the
-        canvas is ungrouped.
+        canvas is ungrouped. On the DETAIL page the same keys move the row
+        cursor to the neighbouring SECTION's first selectable row (spec §3.2).
         """
+        if self._mode == "detail":
+            self._detail_page.jump_to_section(direction)
+            self._paint_chrome()
+            return
         groups = sections_of(self._views)
         if groups is None or not self._views:
             return
@@ -886,15 +1208,12 @@ class ProjectsView(Vertical):
         self._scroll_cursor_into_view()
 
     def action_jump(self) -> None:
-        """``↵``: ask the host to open the selected project's conversation.
-
-        The selection is the page's ONE cursor — the row the list paints `▸`
-        on and the card/row the other canvases mark — so the key means the
-        same thing in every view (S3b). The message carries each linked
-        session with its state, and the HOST decides: a live one is switched
-        to through the existing session machinery, and anything less is named
-        honestly. The page does not guess, and never opens a session itself.
-        """
+        """``↵``: the selected row's own action — canvas: open the conversation;
+        detail: activate the selected row (a session opens through the same
+        shipped ladder; a milestone toggles) — spec §3.2/§10.3."""
+        if self._mode == "detail":
+            self._detail_page.activate()
+            return
         if not (0 <= self._cursor < len(self._views)):
             return
         view_row = self._views[self._cursor]
@@ -974,10 +1293,17 @@ class ProjectsView(Vertical):
         # this the board/timeline arrows only panned — `↵` stayed aimed at
         # whatever the list cursor happened to be, on a card often off-screen.
         # The canvas follows the selection through the reveal; ←/→ and the
-        # page keys still pan.
+        # page keys still pan. On the detail page the arrows move the ROW
+        # cursor over the page's selectable rows, clamped (spec §10.3).
+        if self._mode == "detail":
+            self._detail_nav(-1)
+            return
         self._move(-1)
 
     def action_down(self) -> None:
+        if self._mode == "detail":
+            self._detail_nav(1)
+            return
         self._move(1)
 
     def current_project_id(self) -> str | None:
@@ -1101,18 +1427,28 @@ class ProjectsView(Vertical):
         self._body.scroll_to(x=target_x, y=target_y, animate=False)
 
     def action_scroll_left(self) -> None:
+        if self._mode == "detail":
+            return
         self._body.scroll_left()
 
     def action_scroll_right(self) -> None:
+        if self._mode == "detail":
+            return
         self._body.scroll_right()
 
     def action_page_up(self) -> None:
+        if self._mode == "detail":
+            self._detail_page.scroll_page_up()
+            return
         if self._view == "list":
             self._move(-max(1, self._usable_height()))
             return
         self._body.scroll_page_up()
 
     def action_page_down(self) -> None:
+        if self._mode == "detail":
+            self._detail_page.scroll_page_down()
+            return
         if self._view == "list":
             self._move(max(1, self._usable_height()))
             return
@@ -1125,6 +1461,11 @@ class ProjectsView(Vertical):
         self._body.scroll_page_right()
 
     def action_scroll_home(self) -> None:
+        if self._mode == "detail":
+            # The detail page scrolls one axis; home/end are the content's
+            # edges and leave the row cursor where it is (the wheel's rule).
+            self._detail_page.scroll_to(y=0, animate=False)
+            return
         if self._view == "list":
             self._move(-self._cursor)
             return
@@ -1133,6 +1474,9 @@ class ProjectsView(Vertical):
         self._body.scroll_to(x=0, y=0, animate=False)
 
     def action_scroll_end(self) -> None:
+        if self._mode == "detail":
+            self._detail_page.scroll_to(y=self._detail_page.max_scroll_y, animate=False)
+            return
         if self._view == "list":
             # The cursor stops at the last PAINTED row (see `_painted_count`).
             self._move(max(0, self._painted_count() - 1 - self._cursor))
@@ -1218,7 +1562,157 @@ class ProjectsView(Vertical):
 
     # -- leaving ------------------------------------------------------------
     def action_leave(self) -> None:
+        """``esc``: pop ONE level — detail → canvas keeps view and cursor —
+        and only the canvas exits the mode (spec §1: the shipped contract)."""
+        if self._mode == "detail":
+            # Leaving by hand drops any refusal/pop sentence with the page it
+            # belonged to (UX round 1, U1/U5).
+            self._notice = None
+            self._exit_detail()
+            return
         self._leave()
+
+    def _leave_or_pop(self) -> None:
+        """The `esc` HINT's action: the button must do what the key does."""
+        if self._mode == "detail":
+            # Leaving by hand drops any refusal/pop sentence with the page it
+            # belonged to (UX round 1, U1/U5).
+            self._notice = None
+            self._exit_detail()
+            return
+        self._leave()
+
+    # -- the detail state (S6d parity P2) -----------------------------------
+    def action_open_detail(self) -> None:
+        """``d``: open the detail page for the selection (spec §3.2)."""
+        if self._mode != "canvas":
+            return
+        self._enter_detail()
+
+    def _enter_detail(self) -> None:
+        view_row = self._detail_view_row()
+        if view_row is None:
+            return
+        project_value = view_row.get("project")
+        project = project_value if isinstance(project_value, dict) else {}
+        self._detail_project_id = str(project.get("id") or "") or None
+        self._notice = None
+        self._mode = "detail"
+        self._detail_page.show(view_row, own_session=self._own_session, style_for=_style_resolver())
+        self._body.display = False
+        self._detail_page.display = True
+        self._paint_chrome()
+        # The footer's own box width is only final after layout, and the
+        # hint arming reads the settled scroll geometry — the same deferred
+        # pair every repaint schedules.
+        self.call_after_refresh(self._paint_chrome)
+        try:
+            self._detail_page.focus()
+        except Exception:
+            pass  # focus is a nicety; the keys bubble to this view either way
+
+    def _exit_detail(self) -> None:
+        self._mode = "canvas"
+        self._detail_page.display = False
+        self._body.display = True
+        self._paint_chrome()
+        self.call_after_refresh(self._paint_chrome)
+        try:
+            self.focus()
+        except Exception:
+            pass
+
+    def _resync_detail(self) -> None:
+        """Keep the detail page open across a recomposition, by project ID.
+
+        A refresh must not bounce the reader back to the canvas (they may be
+        reading the description), and a rename may have moved the project's
+        index — so the row is found by id, the cursor follows it, and only a
+        project that is GONE pops back to the canvas.
+        """
+        detail_id = self._detail_project_id
+        index: int | None = None
+        for position, view_row in enumerate(self._views):
+            project = view_row.get("project") if isinstance(view_row, dict) else None
+            if isinstance(project, dict) and str(project.get("id") or "") == detail_id:
+                index = position
+                break
+        if index is None:
+            name = self._detail_page.project_name or "that project"
+            # The pop says WHY — the reader pressed `r` on a page whose
+            # project left the store underneath it (UX round 1, U5).
+            self._notice = f"'{name}' is no longer in the store — back to the canvas."
+            self._exit_detail()
+            return
+        self._cursor = index
+        self._detail_page.show(
+            self._views[index],
+            own_session=self._own_session,
+            selected=self._detail_page.selected_index,
+            style_for=_style_resolver(),
+        )
+
+    def _focus_detail_page(self) -> None:
+        """The `↑↓` hint's click target: focus the page (a void wrapper — the
+        hint's action type is `() -> None`, and ``focus()`` returns the widget)."""
+        self._detail_page.focus()
+
+    def _detail_nav(self, delta: int) -> None:
+        """The ONE row-cursor path: move the page, then repaint the chrome.
+
+        The page's own up/down bindings, the view's arrow actions and any
+        click-driven move all land here, so the `↵ <verb>` hint label and
+        the ruler can never trail the cursor (the page binding consumes the
+        arrows before an ancestor sees them — the measured reason the route
+        exists).
+        """
+        self._detail_page.move(delta)
+        self._paint_chrome()
+
+    def _detail_view_row(self) -> dict[str, Any] | None:
+        if 0 <= self._cursor < len(self._views) and isinstance(self._views[self._cursor], dict):
+            return self._views[self._cursor]
+        return None
+
+    def _detail_row_action(self, kind: str, row: dict[str, Any]) -> None:
+        """Relay one row activation to the host — the page never acts alone.
+
+        Sessions reuse the shipped conversation ladder by posting the SAME
+        message the canvas does, scoped to the one row; milestones post the
+        toggle the app answers with the same store core the tool uses.
+
+        The target is the PAGE's own provenance — the id and name its rows
+        were built from in ``DetailPage.show`` — never the canvas cursor's
+        current row: a retarget mid-read once split the page, and `↵` then
+        wrote through the cursor into a project the row never came from
+        (QA round 1, Q1). Bound to the build snapshot, that write is
+        impossible by construction.
+        """
+        project_id = self._detail_page.project_id or ""
+        if kind == "session":
+            session_id = str(row.get("session_id") or "")
+            if not session_id:
+                return
+            self.post_message(
+                ProjectsViewJumpRequested(
+                    project_id=project_id,
+                    project_name=self._detail_page.project_name or "(unnamed)",
+                    sessions=((session_id, detail_session_state(row)),),
+                )
+            )
+            return
+        if kind == "milestone":
+            name = str(row.get("name") or "")
+            if not name:
+                return
+            self.post_message(
+                ProjectsViewMilestoneToggled(
+                    project_id=project_id,
+                    name=name,
+                    completed=not bool(row.get("completed_at")),
+                    project_name=self._detail_page.project_name,
+                )
+            )
 
     def _leave(self) -> None:
         self.post_message(ProjectsViewDismissed())

@@ -5373,3 +5373,149 @@ def test_build_model_spec_carries_a_stated_audio_capability_and_defaults_closed(
     # NOT a ModelInfo, the shape ``test_naming`` pins for the same defensive read.
     stub: Any = SimpleNamespace(**base)
     assert build_model_spec("openrouter", "meta/muse-spark-1.3", stub).supports_audio_input is False
+
+
+# ---------------------------------------------------------------------------
+# Pinned-child fallback integrity at the quota boundary
+# ---------------------------------------------------------------------------
+#
+# ``_first_available_fallback``'s ``different_provider`` preference is
+# ADVISORY beneath the pin policy: a pinned route's candidates are ordered
+# family-first and, under the default ``retry.pinnedFallback: same-family``,
+# cross-vendor targets are refused outright — with a notice, because "no
+# fallback" would otherwise read as "configure one" while one IS configured.
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_preflight_activates_the_same_family_target_not_the_chain_first_cross_vendor(
+    tmp_path,
+) -> None:
+    """T6/P2: the cross-vendor target is FIRST in the chain, and the pinned
+    preflight must still activate the same-family one."""
+    store = AuthStore(tmp_path / "auth.db")
+    account = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    store.block_credential(account.id, "anthropic", block_ms=60_000)
+    store.upsert_credential("openai", {"key": "sk-openai", "source": "login"})
+    store.upsert_credential("openrouter", {"key": "sk-or-test", "source": "login"})
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "fallbackChains": {
+                    "default": [
+                        "openai/gpt-5.3-codex",
+                        "openrouter/anthropic/claude-sonnet-5-5",
+                    ]
+                },
+            }
+        },
+        session_id="session-a",
+    )
+    stream._route_state.launch_pin = "anthropic/claude-opus-5"
+
+    try:
+        with patch(
+            "local_operator.providers.usage.fetch_usage",
+            side_effect=lambda *_args, **_kwargs: _anthropic_usage(100.0),
+        ):
+            await stream.preflight_usage(ModelSpec(provider="anthropic", model_id="claude-opus-5"))
+
+        assert store.is_blocked(account.id, "anthropic")
+        assert stream._route_state.active == FallbackTarget(
+            "openrouter/anthropic/claude-sonnet-5-5"
+        )
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_preflight_with_no_same_family_target_announces_instead_of_crossing(
+    tmp_path,
+) -> None:
+    """T6/P3: pinned + strict + no same-family target = announce, do not
+    cross. The cross-vendor fallback from the same chain must remain
+    un-activated, and the notice must name the pin and the remedy."""
+    store = AuthStore(tmp_path / "auth.db")
+    account = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    store.block_credential(account.id, "anthropic", block_ms=60_000)
+    store.upsert_credential("openai", {"key": "sk-openai", "source": "login"})
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "fallbackChains": {"default": ["openai/gpt-5.3-codex"]},
+            }
+        },
+        session_id="session-a",
+    )
+    stream._route_state.launch_pin = "anthropic/claude-opus-5"
+    notices: list[str] = []
+    stream.set_notice_handler(lambda text, kind: notices.append(text))
+
+    try:
+        with patch(
+            "local_operator.providers.usage.fetch_usage",
+            side_effect=lambda *_args, **_kwargs: _anthropic_usage(100.0),
+        ):
+            await stream.preflight_usage(ModelSpec(provider="anthropic", model_id="claude-opus-5"))
+
+        assert store.is_blocked(account.id, "anthropic")
+        assert stream._route_state.active is None
+        assert any(
+            "pinned model anthropic/claude-opus-5" in notice and "retry.pinnedFallback" in notice
+            for notice in notices
+        ), notices
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_preflight_round_trips_an_aggregator_pin_onto_its_own_model(
+    tmp_path,
+) -> None:
+    """F1 at the OTHER descent point: with the pin resolved THROUGH an
+    aggregator (``openrouter/anthropic/claude-sonnet-5-5``), the quota
+    preflight must activate the SAME model's direct route
+    (``anthropic/claude-sonnet-5-5``). Before the fix that route ranked
+    cross-vendor, the strict filter dropped it, and the pinned preflight
+    announced a strand instead of descending — the review's F1, whose coverage
+    previously only used a direct pin."""
+    store = AuthStore(tmp_path / "auth.db")
+    blocked = store.upsert_credential("openrouter", {"key": "sk-or-test", "source": "login"})
+    store.block_credential(blocked.id, "openrouter", block_ms=60_000)
+    store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    store.upsert_credential("openai", {"key": "sk-openai", "source": "login"})
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "fallbackChains": {
+                    "default": [
+                        "openai/gpt-5.3-codex",
+                        "anthropic/claude-sonnet-5-5",
+                    ]
+                },
+            }
+        },
+        session_id="session-a",
+    )
+    stream._route_state.launch_pin = "openrouter/anthropic/claude-sonnet-5-5"
+
+    def _usage(_client, provider, **_kwargs):
+        return _anthropic_usage(100.0 if provider == "openrouter" else 40.0)
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=_usage):
+            await stream.preflight_usage(
+                ModelSpec(provider="openrouter", model_id="anthropic/claude-sonnet-5-5")
+            )
+
+        assert stream._route_state.active == FallbackTarget("anthropic/claude-sonnet-5-5")
+    finally:
+        await stream.close()
+        store.close()

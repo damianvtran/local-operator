@@ -879,6 +879,25 @@ def _render(action: str, payload: dict[str, Any]) -> list[str]:
             f"{payload.get('members')} member(s)",
             f"fingerprint {payload.get('fingerprint')}",
         ]
+        # THE TWO CAUSES READ DIFFERENTLY (UX round 1, U2), the delta lines sit
+        # beside the serving line rather than after "next:" (design round 1, D5),
+        # and the subjects are the joiner's — "available here:" (UX round 1, U5)
+        # — the same receipt the CLI renders from the same facts
+        # (``offers.missing_share_lines`` owns the sentences for both paths).
+        from local_operator.network.credentials import offers as offers_mod
+
+        shares = [str(key) for key in payload.get("shares") or []]
+        reduced = [str(key) for key in payload.get("reduced") or []]
+        offered = [
+            str(item.get("key"))
+            for item in payload.get("offers") or []
+            if isinstance(item, dict) and item.get("share")
+        ]
+        extras: list[str] = []
+        if shares:
+            extras.append(f"available here: {', '.join(shares)}")
+        extras.extend(offers_mod.missing_share_lines(offered, shares, reduced))
+        lines[1:1] = extras
         return lines
     if action == "sessions":
         rows = payload.get("sessions")

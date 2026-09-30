@@ -91,6 +91,15 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     # `wake`). Appended at the end of both tables for the same cache-prefix
     # reason the two rows above are (design monitor-tool.md §19.1).
     "monitor": lambda context: builtin.build_monitor_tool(context),
+    # createIf: rung 3 — only a session that can hold the delegation surface
+    # builds it (`context.subagent_launcher is not None`), so a context that
+    # cannot delegate pays no schema for it. A built top-level session that
+    # cannot delegate still gets it and its `spawn` is refused per call by the
+    # CLI guard — the accepted cost of not inventing a second gating
+    # convention (design sessions-tool.md §3.3). Appended at the END of both
+    # tables on purpose: appending never shifts a provider-visible array
+    # prefix, which is what the prompt cache keys on.
+    "sessions": lambda context: builtin.build_sessions_tool(context),
 }
 
 #: Tool set used when the session does not restrict the names. Kept explicit
@@ -130,6 +139,7 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "project",
     "project_delete",
     "monitor",
+    "sessions",
 ]
 
 

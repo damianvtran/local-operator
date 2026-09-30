@@ -32,6 +32,7 @@ that question and :func:`_process_alive` is the shared liveness probe
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
@@ -141,6 +142,56 @@ TRANSCRIPT_FILENAME = "transcript.jsonl"
 #: for this file once per unlisted directory, so a rename that missed one site
 #: would not fail loudly — it would silently stop listing every desktop draft.
 DESKTOP_MARKER_NAME = "desktop.json"
+
+#: The ``desktop.json`` key naming what a session was created FOR, when its
+#: creator asked for something other than an ordinary conversation. Additive
+#: exactly as ``model`` is (see ``server.utils.desktop_sessions.DRAFT_MODEL_KEY``):
+#: a marker written before this key existed loads byte-for-byte as it did, and the
+#: marker's other readers take the keys they know.
+DESKTOP_PURPOSE_KEY = "purpose"
+
+#: The ``purpose`` value for a CONFIGURATION RUN: the supervised session the
+#: Agents/Teams page starts to author agents and teams by conversation.
+#:
+#: THE TWO NAMES ARE NOT INTERCHANGEABLE, which is why both are stated here
+#: rather than derived from one another. This one is what a CREATE sends; the
+#: run's ORIGIN (``resume.ORIGIN_AGENT_CONFIG`` = ``"agent-config"``) is what the
+#: session is STAMPED with, and the two answer different questions — "what did
+#: the caller ask for" and "who does this directory belong to" — so a reader that
+#: collapsed them would be guessing one from the other.
+AGENTS_CONFIG_PURPOSE = "agents-config"
+
+
+def read_desktop_purpose(session_dir: Path) -> str:
+    """The ``purpose`` a desktop marker records, or ``""``.
+
+    A deliberately SEPARATE reader from the desktop server's
+    :func:`read_desktop_marker`, and the separation is the point: the value is
+    consumed by the RUNTIME CHILD (``session_factory.create_session``, through
+    ``session.runtime.process``), which must not import the server package — its
+    whole dependency cost is the harness, and the desktop adapter is one front
+    end of several. Same tolerant contract as that reader, for the same reason:
+    this runs on a file a process can be killed mid-write, and a marker that
+    cannot be parsed means "no purpose", never a failed session.
+
+    Tolerant of the VALUE too, by shape: a purpose this build does not know is
+    returned as-is and matches no branch in the caller, so a marker written by a
+    NEWER build cannot silently become an ordinary conversation — it simply is
+    not the one purpose this build acts on.
+    """
+    try:
+        raw = (session_dir / DESKTOP_MARKER_NAME).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    value = payload.get(DESKTOP_PURPOSE_KEY)
+    return value if isinstance(value, str) else ""
+
 
 #: The files whose mtime IS "when the user last worked here": the transcript
 #: (every turn appends to it) and the peer-message spool (a note the user has

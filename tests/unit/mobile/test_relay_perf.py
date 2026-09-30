@@ -1099,10 +1099,18 @@ def test_a_live_session_does_not_jump_when_its_birth_resolves() -> None:
 
 
 def _durable_record(session_id: str, birth: float):
-    """A minimal durable-row stand-in: the merge only reads name/created_at/mtime."""
+    """A minimal durable-row stand-in: what the merge READS, no more.
+
+    ``opened_by`` is part of that read set since the phone opener chip
+    (the merge copies it onto the row, presence-only); a stand-in without
+    it raises ``AttributeError`` inside the merge, which is how this
+    helper was found stale rather than silently rendering unmarked.
+    """
     from types import SimpleNamespace
 
-    return SimpleNamespace(name=session_id, created_at=birth, mtime=birth, id=session_id)
+    return SimpleNamespace(
+        name=session_id, created_at=birth, mtime=birth, id=session_id, opened_by=None
+    )
 
 
 def test_section_membership_is_the_shared_active_rule() -> None:

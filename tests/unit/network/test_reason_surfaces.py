@@ -127,6 +127,18 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "input to the sentence map (moved with the abort frame it reads)",
     ),
+    # The same two reads on the DRAIN path: the share list is the first sealed
+    # record after ``welcome``, and the frame that can stand there instead of it is
+    # the pair abort — its ``reason``/``detail`` go through ``refusal_from_pairing``
+    # (the same sentence map as ``_finish_pairing`` above), never to a line raw.
+    ("local_operator/network/cli.py", "_drain_pair_offer", "detail"): (
+        1,
+        "input to the sentence map, with the abort it was read from",
+    ),
+    ("local_operator/network/cli.py", "_drain_pair_offer", "reason"): (
+        1,
+        "input to the sentence map, with the abort it was read from",
+    ),
     # The tool's digest of a session VERB: the owner's own sentence for the op
     # ("runtime joining", "nothing to stop"), carried verbatim exactly as the CLI's
     # receipt carries it, because a flag and its English translation on two lines is
@@ -265,6 +277,16 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         "not a mesh reason",
     ),
     ("local_operator/tui/app.py", "_loop_status_line", "reason"): (1, "not a mesh reason"),
+    # ``session.py`` joins this scan set only because slice B's account-change
+    # notice import spells ``local_operator.network`` (the credential binding).
+    # The read below is the session's OWN attention marker's field, re-published
+    # into the attention store — a ``str()`` coercion on its way into a store
+    # write, never rendered here, and not a mesh value at all.
+    (
+        "local_operator/session/session.py",
+        "Session._republish_journalled_outcome",
+        "reason",
+    ): (1, "the attention marker's own field, written to the store, never rendered"),
 }
 
 _ROOT = Path(local_operator.__file__).parent

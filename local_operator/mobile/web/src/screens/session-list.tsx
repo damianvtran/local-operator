@@ -384,6 +384,31 @@ function SessionCard({
 				{s.degraded ? (
 					<span className="shrink-0 text-meta text-ink-dim">not answering</span>
 				) : null}
+				{/* THE AGENT-OPENED MARK (design §10.4). This conversation is a
+				    listed workstream an agent opened on the operator's behalf, not
+				    one the operator started — the 2026-09-18 confusion class, one
+				    surface out. Drawn from the PRESENCE of `opened_by`, never from a
+				    member: a top-level requester's object has all three members
+				    null and the row is still not the operator's own. Quiet like
+				    `ended`/`not answering` beside it — a fact to notice on the row
+				    that has it, not an alarm — and text, never a glyph (this
+				    package carries no icon dependency). `agent` is the word the
+				    product already uses for the certain half of the opener: the
+				    TUI's own gutter falls back to exactly it when the role cannot
+				    be read (`session/preview.py`). */}
+				{s.opened_by != null ? (
+					<span className="shrink-0 text-meta text-ink-dim">
+						{/* D1 (round 1): a bare `agent` is a noun, and a screen reader
+						    heard "Anonymous workstream agent" as the session's identity
+						    rather than its origin. The sr-only prefix makes the
+						    accessible name read "… opened by agent" — the TUI's own
+						    words for the same fact — at zero geometry cost: sr-only is
+						    clipped out of the layout, the same idiom as the `working`
+						    status span above, so the measured 40 px chip budget stands. */}
+						<span className="sr-only">opened by </span>
+						agent
+					</span>
+				) : null}
 				{/* A PINNED ROW CARRIES ITS ★, and it rides the RIGHT cluster rather than
 				    the state slot. The TUI made exactly this call (`session_sidebar.py`
 				    `_special_mark`): a ★ in the state column made the sessions a user

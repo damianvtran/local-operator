@@ -191,6 +191,15 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             # symptom disappears is exactly the one not to delete while stored
             # rows still exist; it becomes dead only once no transcript anywhere
             # carries the type, which is a migration decision and not this one.
+            #
+            # ``SESSION_BINDING_NOTICE_MESSAGE_TYPE`` IS THE SECOND SUCH
+            # DELIBERATE ABSENCE (mesh credential binding, slice B): the
+            # account-change notice is OPERATOR-facing — it exists so a session
+            # does not silently change which account serves it — and its
+            # sentence may carry the account label, which §2.1 keeps off
+            # anything the model reads. Same treatment, same reason: unlisted
+            # means bookkeeping-dropped here, and the transcript row, the TUI
+            # fold and replay carry it (see `harness/message_types.py`).
             out.append(_injected_user_message(message.details.get("text", ""), message.id))
         elif message.custom_type == GATE_TIMEOUT_CUSTOM_TYPE:
             # An unattended gate that expired is NOT a user decision, and the

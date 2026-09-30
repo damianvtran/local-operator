@@ -155,6 +155,13 @@ export interface SubagentRow {
 	 * that number (design round 3, D8). Withholding is now expressible. */
 	elapsed_s: number | null;
 	model_label: string;
+	/** True while the child is off the pin its launch resolved: the projection
+	 * composes `model_label` into the `A → B ⚠ fallback` badge on the SAME
+	 * comparison (see `projection.py`), and the roster row paints its fallback
+	 * line from THIS rather than parsing the badge back out of the string.
+	 * Optional because a payload from a runtime that predates the field must
+	 * read as "no substitution" — the historical behaviour — rather than fail. */
+	model_fallback?: boolean;
 	/** Settled outcome, one line. */
 	result_text: string;
 	error_text: string;
@@ -287,6 +294,19 @@ export interface SessionProjection {
 	version: number;
 }
 
+/** The opener of an agent workstream, mirroring the desktop contract
+    (`SessionOpenedBy`, local-operator-ui `src/shared/desktop-session-contract.ts`)
+    member for member: every member INDEPENDENTLY nullable — a requester's
+    identity is a fact the backend may hold none of — so read each one
+    separately and never require another. `label` is a conversation name (free
+    text, arbitrarily long): a surface that prints it must bound and truncate
+    it. `session` is the requester's id. */
+export interface SessionOpenedBy {
+	agent: string | null;
+	label: string | null;
+	session: string | null;
+}
+
 export interface SessionSummary {
 	session_id: string;
 	section: "active" | "previous";
@@ -346,6 +366,15 @@ export interface SessionSummary {
 	    because a reader that tolerates absence for one and not the other is a
 	    reader whose two arms drift (review round 1, R2). */
 	subagents_queued?: number | null;
+	/** WHO opened this conversation when an AGENT did — the frozen three-key
+	    object the desktop wire publishes (`resume.OPENED_BY_KEYS`), or
+	    absent/null on every ordinary row. Present iff the session's marker
+	    says `agent-workstream` (a listed workstream); the PRESENCE is the
+	    fact the row's chip draws, not any member — a top-level requester's
+	    object carries all three members null and the row is still not the
+	    operator's own conversation. Additive and defaulted: an older daemon
+	    omits it, and a reader must treat absence as "no opener". */
+	opened_by?: SessionOpenedBy | null;
 	todos_open: number;
 	mtime: number;
 	/** Immutable conversation birth; absent on older daemons, never activity. */

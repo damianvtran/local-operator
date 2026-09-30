@@ -1495,10 +1495,11 @@ def _shareable_providers(self_device: str) -> list[dict[str, Any]]:
     own Radient org account among them — had no row on any surface until
     ``credential share`` refused. One row per ENABLED provider login in this device's
     store, read through the same open-first guard the share verb's refusal uses
-    (``_open_local_store``: never constructs a store, never creates one), joined with
-    any placement entry this device holds so an already-shared login says where.
-    ``kind``/``identity_label`` come from ``_shape_from_rows``, the same classifier
-    the share records with, so the two cannot disagree.
+    (``credentials.offers.open_store``: never constructs a store, never creates one),
+    joined with any placement entry this device holds so an already-shared login says
+    where. ``kind``/``identity_label`` come from ``credentials.offers.shape_from_rows``,
+    the same classifier the share verb and the join-time offer use, so the three
+    cannot disagree.
 
     EXCLUDED, deliberately: the MCP rows (``mcp-oauth`` — the server rows above are
     their ledger) and device-bound logins (``DEVICE_BOUND_PROVIDERS``, i.e. kimi): a
@@ -1507,10 +1508,11 @@ def _shareable_providers(self_device: str) -> list[dict[str, Any]]:
     remedy is the command the operator would run next, with ``<device>`` standing
     where a target device goes (the ledger cannot know which one).
     """
+    from local_operator.network.credentials import offers
     from local_operator.network.credentials import placement as placement_mod
     from local_operator.network.credentials.types import DEVICE_BOUND_PROVIDERS
 
-    store = _open_local_store(_config_dir())
+    store = offers.open_store(_config_dir())
     if store is None:
         # No store at all: nothing to enumerate, and creating one to say so would
         # make the ledger a writer (the read-only promise above).
@@ -1520,7 +1522,7 @@ def _shareable_providers(self_device: str) -> list[dict[str, Any]]:
     except Exception:  # noqa: BLE001 — an unreadable store has no provider logins to show
         return []
     finally:
-        _close_quietly(store)
+        offers.close_quietly(store)
 
     by_provider: dict[str, list[Any]] = {}
     for credential in credentials:
@@ -1531,7 +1533,7 @@ def _shareable_providers(self_device: str) -> list[dict[str, Any]]:
 
     rows: list[dict[str, Any]] = []
     for provider in sorted(by_provider):
-        kind, _name, label = _shape_from_rows(provider, by_provider[provider])
+        kind, _name, label = offers.shape_from_rows(provider, by_provider[provider])
         shared_with: list[dict[str, str]] = []
         found = placement_mod.placement_entries_for(provider=provider, root=_config_dir())
         if found is not None:
@@ -1572,6 +1574,7 @@ def _cmd_credential(args: argparse.Namespace) -> int:
     capability rather than the share — so the two are written in one command and the
     payload reports both.
     """
+    from local_operator.network.credentials import offers
     from local_operator.network.credentials import placement as placement_mod
     from local_operator.network.identity import load as load_identity
     from local_operator.network.types import MeshRefusal
@@ -1596,7 +1599,7 @@ def _cmd_credential(args: argparse.Namespace) -> int:
         )
 
     if verb == "share":
-        kind, provider, label = _credential_shape(key)
+        kind, provider, label = offers.shape_for_key(key, _config_dir())
         _require_local_credential(key, provider)
     else:
         kind, provider, label = "", "", ""
@@ -1701,62 +1704,6 @@ def _cmd_credential(args: argparse.Namespace) -> int:
     return _emit(args, payload, lines)
 
 
-def _credential_shape(key: str) -> tuple[str, str, str]:
-    """``(placement kind, provider, identity label)`` for a key.
-
-    Read from the OWNER's own store, so the document records what is actually signed
-    in rather than what the operator typed: a ``kind`` that disagreed with the row
-    would make the broker's narrowing rule and the operator's expectation diverge.
-
-    THE OAUTH ROW WINS over an older pasted key (Radient org projection): a provider
-    can hold BOTH a ``radient-key`` login and the org OAuth login under one provider
-    (``radient-key`` aliases into ``"radient"``), and org calls are served from the
-    OAuth row. Reading the oldest row — ``list_credentials`` is ``ORDER BY id`` —
-    recorded ``api-key-static``/``""`` for a store whose org calls are OAuth, so a
-    share looked narrower than the login actually is. The aliased MIXED buckets
-    today are ``radient``, ``xai`` and ``zai``; the OAuth row wins in all of
-    them.
-    """
-    from local_operator.network.credentials.types import is_mcp_key, mcp_url_from_key
-
-    config = _config_dir()
-    if is_mcp_key(key):
-        url = mcp_url_from_key(key)
-        # OPEN FIRST, CONSTRUCT ONLY WHEN A STORE CAME BACK (review round 1,
-        # MINOR; QA round 1, Q1): the ambient ``McpTokenStorage(url)`` built an
-        # ``AuthStore`` that CREATES its database, so this read made a store
-        # appear on a device that never signed in.
-        store = _open_local_store(config)
-        if store is not None:
-            try:
-                from local_operator.mcp.auth import McpTokenStorage
-
-                if McpTokenStorage(url, store=store).has_stored_row():
-                    return "mcp-rotating", "mcp-oauth", ""
-            except Exception:  # noqa: BLE001 — an unreadable store is "not signed in"
-                pass
-            finally:
-                _close_quietly(store)
-        return "mcp-rotating", "mcp-oauth", ""
-    return _shape_from_rows(key, _provider_rows(key, config))
-
-
-def _shape_from_rows(key: str, rows: list[Any]) -> tuple[str, str, str]:
-    """``(kind, key, identity label)`` from a provider's enabled store rows.
-
-    One spelling for the share verb (``_credential_shape``) and the ledger
-    (``_shareable_providers``), so the kind a share records and the kind the ledger
-    shows cannot drift. An OAuth row is preferred over an older static row (see
-    ``_credential_shape``); ``key`` is what the no-rows case names.
-    """
-    if not rows:
-        return "oauth-rotating", key, ""
-    row = next((candidate for candidate in rows if candidate.credential_type == "oauth"), rows[0])
-    label = str(row.data.get("email") or row.data.get("account_id") or "")
-    kind = "oauth-rotating" if row.credential_type == "oauth" else "api-key-static"
-    return kind, key, label
-
-
 def _require_local_credential(key: str, provider: str) -> None:
     """Refuse to share something this device does not hold.
 
@@ -1764,80 +1711,30 @@ def _require_local_credential(key: str, provider: str) -> None:
     device's document whose owner cannot serve it — the borrow would fail at
     ``no_local_credential`` with a sentence telling the operator to sign in on the
     device they just shared FROM, which is the confusing half of a lazy check.
+
+    THE CHECK IS THE SHARED ONE (``credentials.offers.credential_here``): the same
+    read-only store guard (open-first: never constructs a store, never creates
+    one) the join-time admission re-check runs, so "this device holds it" cannot
+    mean two things.
     """
     from local_operator.network import readiness as readiness_mod
+    from local_operator.network.credentials import offers
     from local_operator.network.credentials.types import is_mcp_key, mcp_url_from_key
     from local_operator.network.types import MeshRefusal
 
+    if offers.credential_here(key, _config_dir()):
+        return
     if is_mcp_key(key):
         url = mcp_url_from_key(key)
-        # OPEN FIRST, CONSTRUCT ONLY WHEN A STORE CAME BACK (review round 1,
-        # MINOR; QA round 1, Q1): the refusal below must stay read-only even on
-        # a device that never signed in.
-        store = _open_local_store(_config_dir())
-        if store is not None:
-            try:
-                from local_operator.mcp.auth import McpTokenStorage
-
-                if McpTokenStorage(url, store=store).has_stored_row():
-                    return
-            except Exception:  # noqa: BLE001
-                pass
-            finally:
-                _close_quietly(store)
         raise MeshRefusal(
             "no_local_credential",
             f"this device has no MCP login for {url}; {readiness_mod.mcp_login_remedy(url)}",
         )
-    rows = _provider_rows(provider, _config_dir())
-    if not rows:
-        raise MeshRefusal(
-            "no_local_credential",
-            f"this device has no credential for {provider!r}; run 'lop login {provider}' "
-            "here first — a share is only meaningful on the device that holds the login",
-        )
-
-
-def _open_local_store(config: Any) -> Any | None:
-    """This device's credential store, or ``None`` when none can be read.
-
-    TWO ABSENCES, ONE ANSWER, deliberately: no database at all (the store's
-    absence — ``readiness._open_store`` refuses to create one; review round 1,
-    MINOR; QA round 1, Q1) and a database that EXISTS but cannot be opened
-    (corrupt bytes, a ``000`` mode — ``AuthStore.__init__`` connects eagerly)
-    both answer ``None`` here (convergence round 2, MAJOR). Every caller below
-    already renders ``None`` as its own degrade — the default shape, the
-    no-local-credential refusal, no rows — which is what the pre-open-first code
-    answered from inside its per-call ``try``.
-    """
-    from local_operator.network import readiness as readiness_mod
-
-    try:
-        return readiness_mod._open_store(config)  # noqa: SLF001 — the one read-only store guard
-    except Exception:  # noqa: BLE001 — an unopenable store answers None, never raises
-        return None
-
-
-def _close_quietly(store: Any) -> None:
-    """Close a store without letting a close failure change the answer."""
-    try:
-        store.close()
-    except Exception:  # noqa: BLE001 — closing is best-effort
-        pass
-
-
-def _provider_rows(provider: str, config: Any) -> list[Any]:
-    """This device's rows for a provider, or ``[]``. Never raises, never writes."""
-    try:
-        store = _open_local_store(config)
-        if store is None:
-            return []
-        try:
-            return list(store.list_credentials(provider))
-        finally:
-            _close_quietly(store)
-    except Exception:  # noqa: BLE001 — an unreadable store is "no credential here"
-        return []
+    raise MeshRefusal(
+        "no_local_credential",
+        f"this device has no credential for {provider!r}; run 'lop login {provider}' "
+        "here first — a share is only meaningful on the device that holds the login",
+    )
 
 
 def _config_dir() -> Any:
@@ -2456,6 +2353,18 @@ def _join_one(
         result = handshake.establish()
         codec = handshake.codec()
         fingerprint = wire.transcript_fingerprint(bytes.fromhex(result.transcript_hash))
+        # THE SHARE LIST COMES FIRST (when the owner advertised it): one bounded
+        # read, before either prompt, so both humans see the same rows before the
+        # joiner types. Gated on the capability the owner advertised in its own
+        # challenge — an older owner sends and reads nothing, byte-identical to
+        # before — and a late frame is still tolerated by `_finish_pairing`.
+        offer_view: dict[str, Any] = {"state": "absent", "items": []}
+        offer_view["state"], offer_view["items"] = _drain_pair_offer(
+            handshake=handshake,
+            codec=codec,
+            reader=reader,
+            remaining_s=invite_mod.remaining_seconds(envelope),
+        )
         if args.emit_sas:
             print(json.dumps({"sas": result.sas, "fingerprint": fingerprint}))
             sys.stdout.flush()
@@ -2476,10 +2385,19 @@ def _join_one(
                 identity=identity,
                 advertised=advertised,
                 handshake=handshake,
+                offer_view=offer_view,
                 helpers=helpers,
             )
         else:
-            print(invite_mod.joiner_prompt(envelope, result.sas, fingerprint))
+            print(
+                invite_mod.joiner_prompt(
+                    envelope,
+                    result.sas,
+                    fingerprint,
+                    offer_state=str(offer_view["state"]),
+                    offer_items=list(offer_view["items"]),
+                )
+            )
             sys.stdout.flush()
         typed = _read_code(args, result.sas, fingerprint)
         if typed is None:
@@ -2497,6 +2415,7 @@ def _join_one(
             handshake=handshake,
             advertised=advertised,
             fingerprint=fingerprint,
+            offer_view=offer_view,
             helpers=helpers,
         )
     except HandshakeRefusal as refusal:
@@ -2569,6 +2488,59 @@ def _read_code(args: argparse.Namespace, derived: str, fingerprint: str) -> str 
     return typed
 
 
+def _drain_pair_offer(
+    *,
+    handshake: Any,
+    codec: Any,
+    reader: Any,
+    remaining_s: float,
+) -> tuple[str, list[dict[str, Any]]]:
+    """The one bounded read of the share list, right after ``welcome``.
+
+    Returns ``(state, items)``. ``"listed"``/``"empty"`` when the owner sent a
+    list; ``"absent"`` when this ceremony cannot have one: the owner never
+    advertised ``pair-offer-v1`` (an older build — no read and NO WAIT, the
+    legacy sequence is byte-identical), or the bounded wait ran out. The wait is
+    a RENDEZVOUS bound, not a human budget: the owner sends the offer immediately
+    after ``welcome`` with no human step in between, and a frame that arrives
+    late is still stashed by ``_finish_pairing`` — a slow sender costs the list
+    on screen, never the ceremony.
+
+    Anything else on this first record is a refusal (``net_pair_abort`` through
+    the one reason map) or a protocol error — NEVER a silent downgrade to "no
+    offer", because a corrupt or malformed frame is exactly the case the sealed
+    layer exists to surface.
+    """
+    from local_operator.network import wire
+    from local_operator.network.handshake import (
+        PAIR_OFFER_WAIT_S,
+        parse_pair_offer,
+        refusal_from_pairing,
+    )
+    from local_operator.network.types import MeshRefusal
+
+    if wire.PAIR_OFFER_V1 not in handshake.peer_capabilities:
+        return "absent", []
+    budget = min(PAIR_OFFER_WAIT_S, max(0.0, remaining_s))
+    try:
+        frame = codec.open(reader.read_record_payload(wire.deadline_in(budget)))
+    except TimeoutError:
+        return "absent", []
+    op = str(frame.get("op") or "")
+    if op == "net_pair_abort":
+        raise refusal_from_pairing(
+            str(frame.get("reason") or "aborted"), detail=str(frame.get("detail") or "")
+        )
+    if op != "net_pair_offer":
+        raise MeshRefusal(
+            "protocol_error",
+            "the other device sent something other than the share list before the "
+            "pairing was confirmed; nothing was admitted",
+        )
+    items = parse_pair_offer(frame)
+    return ("empty" if not items else "listed"), items
+
+
 def _finish_pairing(
     *,
     typed: str,
@@ -2582,6 +2554,7 @@ def _finish_pairing(
     handshake: Any,
     advertised: list[str],
     fingerprint: str,
+    offer_view: dict[str, Any],
     helpers: dict[str, Any],
 ) -> tuple[list[str], dict[str, Any]]:
     """Send the human's transcription and turn the answer into a receipt.
@@ -2594,7 +2567,11 @@ def _finish_pairing(
     prompt path does.
     """
     from local_operator.network import wire
-    from local_operator.network.handshake import pair_ready_frame, refusal_from_pairing
+    from local_operator.network.handshake import (
+        pair_ready_frame,
+        parse_pair_offer,
+        refusal_from_pairing,
+    )
     from local_operator.network.types import MeshRefusal
 
     invite_mod = helpers["invite_mod"]
@@ -2606,9 +2583,24 @@ def _finish_pairing(
     # of "what is left", so the promise and this wait cannot drift with the token's
     # age (agent review round 1, MAJOR 2).
     remaining = invite_mod.remaining_seconds(envelope)
-    answer = codec.open(
-        reader.read_record_payload(wire.deadline_in(helpers["pair_timeout_seconds"](remaining)))
-    )
+    deadline = wire.deadline_in(helpers["pair_timeout_seconds"](remaining))
+    answer = codec.open(reader.read_record_payload(deadline))
+    if answer.get("op") == "net_pair_offer":
+        # A LATE SHARE LIST IS TOLERATED ONCE (the race §6.6 names): the drain in
+        # `_join_one` may have timed out while the offer was still in flight, and
+        # a frame arriving after the human already typed must not fail the
+        # ceremony. A SECOND one is a protocol error: exactly one offer exists per
+        # ceremony, and a peer that sends another is driving a state machine this
+        # side does not have.
+        if offer_view.get("state") != "absent":
+            raise MeshRefusal(
+                "protocol_error",
+                "the other device sent a second share list; the pairing is refused",
+            )
+        items = parse_pair_offer(answer)
+        offer_view["state"] = "empty" if not items else "listed"
+        offer_view["items"] = items
+        answer = codec.open(reader.read_record_payload(deadline))
     if answer.get("op") == "net_pair_abort":
         # ``refusal_from_pairing`` OWNS the reason -> sentence map, and it lives
         # in ``handshake`` beside the frames it describes. This call used to go
@@ -2625,6 +2617,7 @@ def _finish_pairing(
         )
     if not answer.get("admit"):
         raise MeshRefusal("not_admitted", "the other device did not admit this machine")
+    shares = [str(key) for key in (answer.get("shares") or [])]
     record = _persist_join(
         answer,
         envelope,
@@ -2634,12 +2627,37 @@ def _finish_pairing(
         peer_endpoints=handshake.peer_endpoints,
         advertised=advertised,
     )
+    lines = [
+        f"joined {record.name} ({record.network_id}) at epoch {record.epoch}",
+        f"members: {len(record.active_members())}",
+        "next: lop network peers   ·   lop sessions --all-peers",
+    ]
+    # WHAT WAS OFFERED BUT NOT SERVED GETS A LINE (§5.3's dropped-key sentence),
+    # and THE TWO CAUSES READ DIFFERENTLY (UX round 1, U2): a deliberate
+    # reduction is its own fact — no remedy, nothing to fix — while a grant that
+    # failed names the share verb. Both sit beside the serving line, right after
+    # "joined …", so the receipt's last line is never the one to act on (design
+    # round 1, D5). ``reduced`` is the relay's word for the keys the owner's
+    # person removed at the confirm screen; a relay that predates the key leaves
+    # the whole delta in the failed bucket, which is the pre-fix behaviour.
+    # The SUBJECTS are the joiner's (UX round 1, U5 folded in round 2):
+    # "available here: …" / "not available here: …" — "serve" stays the
+    # owner's word (the block above reads "will serve to this device").
+    from local_operator.network.credentials import offers as offers_mod
+
+    reduced = [str(key) for key in (answer.get("reduced") or [])]
+    offered = (
+        offers_mod.served_keys(list(offer_view["items"]))
+        if offer_view.get("state") == offers_mod.OFFER_LISTED
+        else []
+    )
+    extras: list[str] = []
+    if shares:
+        extras.append(f"available here: {', '.join(shares)}")
+    extras.extend(offers_mod.missing_share_lines(offered, shares, reduced))
+    lines[1:1] = extras
     return (
-        [
-            f"joined {record.name} ({record.network_id}) at epoch {record.epoch}",
-            f"members: {len(record.active_members())}",
-            "next: lop network peers   ·   lop sessions --all-peers",
-        ],
+        lines,
         {
             "network_id": record.network_id,
             "name": record.name,
@@ -2649,6 +2667,17 @@ def _finish_pairing(
             "inviter": envelope.inviter_device_id,
             "role": record.self_role,
             "fingerprint": fingerprint,
+            # The final granted set, exactly what the receipt line above names.
+            "shares": shares,
+            # The deliberate half of the offer-to-final delta, so the tool's
+            # receipt branch can keep "the owner chose not to" apart from "the
+            # grant failed" the same way the CLI receipt does (U2).
+            "reduced": reduced,
+            # The offer as it was shown, so a renderer that only sees the payload
+            # (the tool's finished-receipt branch) can name the delta between what
+            # was promised and what was served — the masking rule covers the label
+            # already, and the keys are the same ones `shares` names.
+            "offers": [dict(item) for item in offer_view["items"]],
         },
     )
 
@@ -2669,6 +2698,15 @@ def _finish_pairing(
 # (``relay._await_pairing_decision``). These are the joining device's mirror of that
 # pair of records, and the poll interval and the window are the same two numbers.
 
+
+#: §4.5's skew check: a relay that does not ECHO the ``shares`` the CLI sent is
+#: older than the CLI, and the share choices just confirmed were not applied by
+#: it. Printed (never a refusal): the admission still lands, and the operator needs
+#: to know why the receipt shows no grants, with the remedy in the line.
+_STALE_RELAY_SHARES_SENTENCE = (
+    "the running relay is an older build; restart it (`lop network serve`/launchd unit) "
+    "to apply share choices"
+)
 
 #: What phase one says when nobody answered in time. One owner, because the JSON
 #: caller, the terminal caller and the phase-two invocation all have to say it.
@@ -2701,18 +2739,40 @@ def _process_alive(pid: int) -> bool:
 
 
 def _awaiting_payload(pending: Any) -> dict[str, Any]:
-    """Phase one's body: the code, and the sentence that says who must read it.
+    """Phase one's body: the code, the share list, and the sentence that says who
+    must read it.
 
     THE SENTENCE IS PART OF THE CONTRACT, which is why it is produced here rather
     than by whichever caller happens to render it (``mesh-ui.md`` §3.2): an agent
     that shows the user anything other than this sentence is paraphrasing the one
-    instruction that makes the ceremony a human step.
+    instruction that makes the ceremony a human step. The share-list fact rides the
+    sentence too — all three states gain exactly one clause — because an agent that
+    only reads the sentence must still be able to say what will be served.
+
+    ``offers`` IS PRESENT IFF THE OWNER ADVERTISED THE CAPABILITY: a list (possibly
+    empty) when it did, absent when it did not. That presence is the machine-readable
+    half of §4.3-vs-§4.4; the sentence says the same thing in words.
     """
     from local_operator.network import wire
+    from local_operator.network.credentials import offers as offers_mod
 
     shown = pending.fingerprint if pending.verify else wire.sas_display(pending.sas)
     what = "fingerprint" if pending.verify else "code"
-    return {
+    state = str(getattr(pending, "offer_state", "") or offers_mod.OFFER_ABSENT)
+    items = [dict(item) for item in getattr(pending, "offers", []) or []]
+    if state == offers_mod.OWNER_SENT:
+        # An owner-side state must never leak into a joiner payload: this record is
+        # a PendingJoin, whose states are the three below.
+        state = offers_mod.OFFER_EMPTY
+    sentence = (
+        f"Ask the user to read back the {what} {shown} from the other device, then "
+        f"confirm it with `lop network join --confirm <{what}>`."
+    )
+    clause = offers_mod.sentence_clause(
+        state, items, inviter=pending.inviter_name or pending.inviter_device_id
+    )
+    sentence = f"{sentence} {clause}"
+    payload: dict[str, Any] = {
         "ok": True,
         "status": "awaiting_confirmation",
         "sas": pending.sas,
@@ -2725,11 +2785,11 @@ def _awaiting_payload(pending: Any) -> dict[str, Any]:
         "invite_id": pending.invite_id,
         "expires_at": pending.expires_at,
         "seconds_left": round(pending.seconds_left(), 1),
-        "sentence": (
-            f"Ask the user to read back the {what} {shown} from the other device, then "
-            f"confirm it with `lop network join --confirm <{what}>`."
-        ),
+        "sentence": sentence,
     }
+    if state in (offers_mod.OFFER_LISTED, offers_mod.OFFER_EMPTY):
+        payload["offers"] = items
+    return payload
 
 
 def _await_join_answer(invite_id: str, window: float, store: Any) -> Any:
@@ -2792,6 +2852,7 @@ def _park_join(
     identity: Any,
     advertised: list[str],
     handshake: Any,
+    offer_view: dict[str, Any],
     helpers: dict[str, Any],
 ) -> tuple[list[str], dict[str, Any]]:
     """Phase one: hold the open ceremony and wait for a second invocation's answer.
@@ -2827,6 +2888,12 @@ def _park_join(
         verify=bool(getattr(args, "verify", False)),
         pid=os.getpid(),
         expires_at=time.time() + window,
+        # THE LIST THE HUMAN WILL BE TOLD TO READ (both directions: the non-JSON
+        # prompt below and the payload's ``offers``). Stored on the record so the
+        # phase-two invocation and any later reader see the same list that was
+        # printed, not a re-enumeration that could have drifted.
+        offers=[dict(item) for item in offer_view["items"]],
+        offer_state=str(offer_view["state"]),
     )
     # A leftover answer from an earlier ceremony would answer THIS one: the record is
     # keyed by invite, and one invite mints one ceremony. Cleared BEFORE the record is
@@ -2843,7 +2910,15 @@ def _park_join(
         print(json.dumps(_awaiting_payload(pending), indent=2, sort_keys=True, default=str))
         sys.stdout.flush()
     else:
-        print(invite_mod.joiner_prompt(envelope, result.sas, fingerprint))
+        print(
+            invite_mod.joiner_prompt(
+                envelope,
+                result.sas,
+                fingerprint,
+                offer_state=str(offer_view["state"]),
+                offer_items=list(offer_view["items"]),
+            )
+        )
         print(
             f"waiting up to {int(window)}s for the code from the other device: answer it with "
             "`lop network join --confirm <code>`, run wherever the person reading that "
@@ -2891,6 +2966,7 @@ def _park_join(
             handshake=handshake,
             advertised=advertised,
             fingerprint=fingerprint,
+            offer_view=offer_view,
             helpers=helpers,
         )
     except MeshRefusal as refusal:
@@ -3181,6 +3257,7 @@ def _persist_join(
     # device's log stayed empty — no `audit.jsonl` was even created — while the
     # inviter had the full pairing history, so an incident review on the joiner
     # had nothing to read (QA round 1, F-3).
+    shares = [str(key) for key in (answer.get("shares") or [])]
     _audit(
         "member_admitted",
         network_id=record.network_id,
@@ -3191,8 +3268,15 @@ def _persist_join(
         # THE SAME DETAIL SHAPE THE INVITER WRITES for the same event, and only the
         # keys the audit writer's per-event whitelist keeps — a key the whitelist
         # does not know is dropped by the writer, so passing one here would claim a
-        # record the file never gets.
-        detail={"role": record.self_role, "member_kind": "device", "epoch": record.epoch},
+        # record the file never gets. ``grants`` is the granted count the owner's
+        # own ``member_admitted`` carries beside it: the two sides of one ceremony
+        # read the same number even when their sentences differ.
+        detail={
+            "role": record.self_role,
+            "member_kind": "device",
+            "epoch": record.epoch,
+            "grants": len(shares),
+        },
     )
     return record
 
@@ -4922,7 +5006,7 @@ def _cmd_confirm(args: argparse.Namespace) -> int:
     property the joiner's prompt enforces from the other side. ``--sas-stdin`` is
     the harness's seam and is refused outside ``LOP_NETWORK_TEST_MODE=1``.
     """
-    from local_operator.network import store, types, wire
+    from local_operator.network import store, types
 
     rows = _pending_pairings()
     if args.list_pending:
@@ -4947,14 +5031,17 @@ def _cmd_confirm(args: argparse.Namespace) -> int:
 
     invite_id = str(chosen.get("invite_id") or "")
     admit = False
+    shares: list[str] = []
     if not args.decline:
         print(str(chosen.get("prompt") or ""))
-        print(
-            f"YOUR screen shows {wire.sas_display(str(chosen.get('sas') or ''))}; the other "
-            f"device should show the same six digits."
-        )
-        answer = _read_confirmation(args)
+        # NO SECOND "YOUR screen shows" LINE HERE (design round 1, D6): the
+        # parked record's own prompt already prints it (`inviter_prompt_for`),
+        # and the CLI's duplicate read as a second, separate claim nine lines
+        # below the first — the new share block sitting between them is what
+        # made the pair glaring.
+        answer, shares = _read_confirmation(args, chosen)
         admit = answer == "yes"
+    chosen_shares = sorted(shares) if admit else []
     live = _relay_call(
         "net_pair_confirm",
         invite_id=invite_id,
@@ -4962,6 +5049,11 @@ def _cmd_confirm(args: argparse.Namespace) -> int:
         matched=admit,
         reason="" if admit else "declined",
         answered_by=_answered_by(args),
+        # THE SHARE CHOICES TRAVEL WITH THE ANSWER (§3.3). A relay new enough to
+        # have sent an offer understands them; one that does not answers without
+        # the echo below, and this CLI says so by name instead of quietly
+        # admitting more than the operator chose.
+        shares=chosen_shares,
         allow_no_answer=True,
     )
     if live is None:
@@ -4973,6 +5065,7 @@ def _cmd_confirm(args: argparse.Namespace) -> int:
             decision="admit" if admit else "decline",
             matched=admit,
             reason="" if admit else "declined",
+            shares=chosen_shares,
         )
         store.save_pair_decision(decision, None)
         _audit(
@@ -4986,20 +5079,31 @@ def _cmd_confirm(args: argparse.Namespace) -> int:
             "decision": decision.decision,
             "matched": admit,
             "joiner_device_id": chosen.get("joiner_device_id"),
+            "shares": list(chosen_shares),
             "relay": "not running: the answer is recorded for when it is",
         }
-    return _emit(
-        args,
-        {"ok": True, **live},
-        [
-            (
-                f"admitted {chosen.get('joiner_device_id')} to {chosen.get('network_name')}"
-                if admit
-                else f"refused the pairing with {chosen.get('joiner_device_id')}; the "
-                "invite is burned"
-            )
-        ],
+    elif chosen_shares and "shares" not in live:
+        # §4.5, the one silent-loss case: the relay that answered did not report
+        # the share choices, so it is older than this CLI and the shares were not
+        # applied by it. The admission still lands — warn, never refuse; the
+        # remedy is the relay restart plus the share verb (the receipt here shows
+        # no grants, and this line is why).
+        print(_STALE_RELAY_SHARES_SENTENCE, file=sys.stderr)
+    admitted = (
+        f"admitted {chosen.get('joiner_device_id')} to {chosen.get('network_name')}"
+        if admit
+        else f"refused the pairing with {chosen.get('joiner_device_id')}; the " "invite is burned"
     )
+    # U6 (design-confirmed fold, round 2): the owner's own receipt names what it
+    # served, from the shares list the payload already carries — but ONLY when an
+    # offer was actually sent. A mixed/older-build ceremony has no share list and
+    # keeps the bare line; an offered ceremony reduced to nothing says so.
+    from local_operator.network.credentials import offers as offers_mod
+
+    if admit and str(chosen.get("offer_state") or "") == offers_mod.OWNER_SENT:
+        served = ", ".join(chosen_shares)
+        admitted += f" — serving: {served}" if served else " — serving nothing"
+    return _emit(args, {"ok": True, **live}, [admitted])
 
 
 def _pending_pairings() -> list[dict[str, Any]]:
@@ -5013,12 +5117,27 @@ def _pending_pairings() -> list[dict[str, Any]]:
     return [pending.to_json() for pending in store.pending_pairings()]
 
 
-def _read_confirmation(args: argparse.Namespace) -> str:
-    """The human's answer, or a refusal explaining how to give one."""
+def _read_confirmation(args: argparse.Namespace, chosen: dict[str, Any]) -> tuple[str, list[str]]:
+    """The human's answer, or a refusal explaining how to give one.
+
+    Returns ``(answer, shares)``: ``answer`` is ``"yes"``/``"no"``, and
+    ``shares`` is the set to serve when the answer is yes — the offered set by
+    default (a y/N-only flow admits what the screen showed), reducible in an
+    interactive ``t`` step (§3.3's reduce-only toggles) and NEVER extendable: an
+    edit that names anything else is refused by sentence before anything is
+    written anywhere.
+    """
     import os
 
     from local_operator.network import types
+    from local_operator.network.credentials import offers as offers_mod
 
+    items = [item for item in (chosen.get("offer") or []) if isinstance(item, dict)]
+    default_shares = (
+        offers_mod.owner_default_shares(items)
+        if str(chosen.get("offer_state") or "") == offers_mod.OWNER_SENT
+        else []
+    )
     if args.sas_stdin:
         if os.environ.get(TEST_MODE_ENV) != "1":
             raise types.MeshRefusal(
@@ -5028,7 +5147,7 @@ def _read_confirmation(args: argparse.Namespace) -> str:
                 "check, and answering it from a script makes it a formality.",
             )
         typed = sys.stdin.readline().strip().lower()
-        return "yes" if typed in ("y", "yes") else "no"
+        return ("yes" if typed in ("y", "yes") else "no"), list(default_shares)
     if not _has_terminal():
         raise types.MeshRefusal(
             "confirm_needs_tty",
@@ -5037,11 +5156,94 @@ def _read_confirmation(args: argparse.Namespace) -> str:
             "terminal, or run the relay in the foreground with `lop network serve` so "
             "its own prompt appears there.",
         )
-    try:
-        typed = input("do the two devices show the same code? [y/N] ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        typed = ""
-    return "yes" if typed in ("y", "yes") else "no"
+    servable = {str(item.get("key")) for item in items if item.get("share")}
+    hint = " (t to remove what will be served)" if servable else ""
+    shares = list(default_shares)
+    while True:
+        try:
+            typed = input(f"do the two devices show the same code? [y/N]{hint} ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return "no", []
+        if typed == "t" and servable:
+            shares = _edit_share_list(items, shares, chosen)
+            # THE SCREEN THE NEXT y/N LANDS ON MUST SHOW THE CURRENT SET (design
+            # round 1, D1 / UX round 1, U1): the block was printed once, before
+            # the loop, so the last frame before admission still promised every
+            # offered key. Re-render it from the CURRENT decision — the state is
+            # already tracked; this only shows it. The trailing blank keeps the
+            # re-asked question off the block's tail, matching the first frame
+            # (design round 2, D9).
+            print()
+            print(
+                "\n".join(
+                    offers_mod.render_owner_block(
+                        items,
+                        joiner=str(
+                            chosen.get("joiner_name") or chosen.get("joiner_device_id") or ""
+                        ),
+                        decision=shares,
+                    )
+                )
+            )
+            print()
+            continue
+        break
+    return ("yes" if typed in ("y", "yes") else "no"), shares
+
+
+#: The words this prompt's OWN vocabulary puts one keystroke away (see
+#: ``_edit_share_list``): a person who answers the keys question with one of
+#: these is re-typing the question, not naming a credential, and must not be
+#: pointed at ``credential share <word>`` as if it were a key (U8).
+_SHARE_PROMPT_WORDS: frozenset[str] = frozenset({"t", "y", "n", "yes", "no"})
+
+
+def _edit_share_list(
+    items: list[dict[str, Any]], shares: list[str], chosen: dict[str, Any]
+) -> list[str]:
+    """One reduce-only edit of the served set (§3.3: ``[t]`` unchecks; nothing adds).
+
+    A key that is not currently being served is refused BY SENTENCE — naming the
+    key and the remedy — and the SAME question is asked again (design round 1,
+    D8): the refusal used to be raised, which exited the command even though the
+    parked pairing survives and nothing was lost except the screen. The relay's
+    own control op still refuses a widening that arrives in a frame; this loop is
+    the interactive half.
+    """
+    servable = {str(item.get("key")) for item in items if item.get("share")}
+    while True:
+        current = [key for key in shares if key in servable]
+        typed = input(
+            "type the keys to stop serving, space-separated (blank keeps all)"
+            f" [{', '.join(current) or 'none'}]: "
+        ).strip()
+        if not typed:
+            return shares
+        to_stop = typed.split()
+        unknown = [key for key in to_stop if key not in current]
+        if unknown:
+            key = unknown[0]
+            if key in _SHARE_PROMPT_WORDS:
+                # U8 (UX round 1 nit, folded in round 2): a stray `t` answered at
+                # this prompt is the person re-typing the key from the question
+                # above, not naming a credential — do not advise `credential
+                # share t` as if `t` were a key.
+                print(
+                    f"{key!r} is not a known key here — type the keys to stop "
+                    "serving, space-separated (blank keeps all)."
+                )
+                continue
+            print(
+                f"{key!r} is not currently being served, and only served items can be "
+                "removed here — nothing can be added in this ceremony. To serve it, run "
+                f"`lop network credential share {key} --with "
+                f"{chosen.get('joiner_device_id')}` on this device after the join."
+            )
+            continue
+        # A COMPREHENSION, not ``current.remove``: the session-removal guard scans the
+        # whole tree for ``.remove`` spellings, and a list-of-keys call does not need to
+        # be explained to it as a false positive.
+        return [key for key in current if key not in to_stop]
 
 
 def _answered_by(args: argparse.Namespace) -> str:

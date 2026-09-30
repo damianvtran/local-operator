@@ -14,7 +14,12 @@ drives ONE prompt to completion, and settles the job:
   — progress fires on tool starts/ends and assistant message ends, NEVER on
   stream deltas;
 - completion is delivered ONLY as ``SubagentEndEvent``: no NoticeEvent and no
-  parent-transcript write, so the front end has exactly one delivery path.
+  parent-transcript write, so the front end has exactly one delivery path —
+  with ONE deliberate exception, which is a state notice rather than a
+  completion: a PINNED child whose route settles onto a fallback emits a
+  ``NoticeEvent`` on the parent stream (see :func:`_pinned_fallback_notice`),
+  because a silently substituted review is the failure the pin exists to
+  prevent and it has to be loud on the surface the operator reads.
 
 Construction reuses the session primitives directly (the way
 ``session_factory.create_session`` composes a Session) rather than calling
@@ -143,6 +148,7 @@ from local_operator.harness.types import (
     MessageUpdateEvent,
     ModelChangeEvent,
     ModelSpec,
+    NoticeEvent,
     ReasoningDeltaEvent,
     SubagentEndEvent,
     SubagentProgressEvent,
@@ -152,6 +158,7 @@ from local_operator.harness.types import (
     Usage,
 )
 from local_operator.mcp.config import server_own_turn_only
+from local_operator.model.naming import model_label as model_label_forms
 from local_operator.paths import config_dir
 from local_operator.resume import ORIGIN_SUBAGENT, mark_session_origin
 
@@ -1018,6 +1025,16 @@ def run_subagent(
         # was accepted" are different facts about who spent the money. The
         # runner never rewrites this one (see ``AsyncJob.owns_model``).
         job.owns_model = model_spec is not None
+        # And WHICH model the pin asked for, on the same registration-time rule
+        # and as the mirror of that attribution: ``model_label`` above is
+        # overwritten once the child is built (and again by every route edge),
+        # so without this the pin label survives NOWHERE and "pinned to X,
+        # running on Y" — the comparison that makes a silent substitution
+        # visible — cannot be rendered at all. Never rewritten, unlike the
+        # effective label (see ``AsyncJob.requested_model_label``).
+        job.requested_model_label = (
+            f"{model_spec.provider}/{model_spec.model_id}" if model_spec is not None else None
+        )
         jobs_manager._notify_roster_change()
     # Same reason: the parent must be able to address a child that is parked
     # behind the capacity gate (messages to it buffer until it starts), so the
@@ -1587,6 +1604,51 @@ async def _publish_terminal_outcome(
     return resolved_status, resolved_error, resolved_result
 
 
+def _display_model_name(selector: str) -> str:
+    """The product's own vocabulary for one ``provider/model_id`` selector.
+
+    ``model/naming.py``'s honesty rule decides: a display name only where one
+    names this model and no other, else the selector itself. Shared by the two
+    halves of the notice pair so neither can be spelled in a vocabulary the
+    other does not speak.
+    """
+    provider, _, model_id = selector.partition("/")
+    return model_label_forms(provider, model_id).full
+
+
+def _pinned_fallback_notice(
+    label: str, role: str, requested: str, effective: str, reason: str
+) -> str:
+    """The notice a pinned child's fallback shows on the PARENT's stream.
+
+    Four facts, because a reader must be able to judge the substitution without
+    opening anything: WHICH child (its label and role), WHAT the launch asked
+    for (the pin), what is ACTUALLY serving, and the route edge's own cause
+    phrase. The cause is carried VERBATIM — never re-derived here — so the
+    enrichment that names the refusing provider and the failure kind (done at
+    the descent point, where the classification already exists) reaches this
+    surface unchanged; an absent reason leaves the sentence without a cause
+    clause rather than inventing one.
+
+    The two models are stated in the PRODUCT's vocabulary — resolved display
+    names where naming can vouch for one, else the selector — and as an
+    ``A → B`` pair, the same relation spelling the band's badge uses, rather
+    than words the badge does not (design D4 / UX U3). The pair is joined with
+    non-breaking spaces INSIDE each display name too — the names carry spaces
+    of their own — because the notice's own wrap breaks on ASCII spaces only
+    (``transcript.wrap_cells``): with a plain-space join the pair still split
+    (`…Sonnet 5.5 →` / `DeepSeek Flash…`) at exactly the widths this fix
+    exists for. The pair reads identically in every renderer and copies as
+    visible spaces; the rest of the sentence wraps as prose.
+    """
+    role_clause = f" ({role})" if role else ""
+    cause = f" — {reason.strip()}" if reason.strip() else ""
+    pin = _display_model_name(requested).replace(" ", "\u00a0")
+    running = _display_model_name(effective).replace(" ", "\u00a0")
+    pair = f"{pin}\u00a0→\u00a0{running}"
+    return f"subagent '{label}'{role_clause} pinned {pair}{cause}."
+
+
 def _make_relay(
     job_id: str,
     label: str,
@@ -1791,9 +1853,53 @@ def _make_relay(
             # child that fell over to another provider mid-run is exactly what
             # a reader of those surfaces needs to know.
             if job is not None:
-                job.model_label = f"{event.provider}/{event.model_id}"
+                effective = f"{event.provider}/{event.model_id}"
+                job.model_label = effective
                 if event.context_window > 0:
                     job.context_window = event.context_window
+                # Pin integrity, the loud half. A PINNED child (``owns_model``)
+                # the route has taken off its requested model is the failure
+                # this harness must never let pass silently: the pin exists so
+                # a review cannot collapse onto the author's model, and a quiet
+                # substitution restores exactly that collapse — "Independence
+                # that can silently collapse into self-review is not
+                # independence" (Session._launch_subagent). The marker and its
+                # ONE notice are stamped HERE because the relay is where the
+                # child's route edge meets the parent's job row, and the SAME
+                # edge restores the state when the requested model serves
+                # again. An unpinned child (``requested`` empty) inherits the
+                # parent's routing and carries none of this by design.
+                requested = str(getattr(job, "requested_model_label", "") or "")
+                if getattr(job, "owns_model", None) is True and requested:
+                    if event.is_fallback and effective != requested:
+                        was = bool(getattr(job, "model_fallback", False))
+                        job.model_fallback = True
+                        job.model_fallback_reason = str(event.reason or "")
+                        if not was:
+                            # ONE notice per fallback EPISODE. A later hop to
+                            # another fallback updates the row's label (and so
+                            # the badge) without re-announcing the descent, and
+                            # a recovery clears the flag so a genuinely new
+                            # episode speaks again.
+                            await emit(
+                                NoticeEvent(
+                                    text=_pinned_fallback_notice(
+                                        label,
+                                        str(getattr(job, "agent_role", "") or ""),
+                                        requested,
+                                        effective,
+                                        str(event.reason or ""),
+                                    ),
+                                    kind="warning",
+                                    headline=f"'{label}' fell back to {effective}",
+                                )
+                            )
+                    elif not event.is_fallback and effective == requested:
+                        # Recovery edge: the requested model serves again, so
+                        # the marker must not outlive it — a stale badge would
+                        # claim a substitution that has ended.
+                        job.model_fallback = False
+                        job.model_fallback_reason = ""
                 jobs_manager._notify_roster_change()
         elif isinstance(event, AgentEndEvent):
             if event.error:
@@ -2782,6 +2888,17 @@ async def _construct_child_session(
         # Register before Session.__init__, which can itself fail. close() is
         # idempotent: this fallback also runs if a later child dispose hook fails.
         cleanup.push_async_callback(child_stream.close)
+        if model_spec is not None:
+            # PIN the child's routing to the model the launch resolved (a role
+            # tier, or a resumed child's recorded tier). Marked on the CHILD's
+            # stream only — inside this guard, never on ``parent_stream``,
+            # whose routing must stay untouched — and only when the launch
+            # resolved an explicit spec: an inherit-child runs the parent's
+            # model with no pin, and the failover policies are all gated on
+            # the marker (see ``local_operator/providers/failover.py``).
+            mark_pin = getattr(child_stream, "mark_launch_pin", None)
+            if callable(mark_pin):
+                mark_pin(f"{model_spec.provider}/{model_spec.model_id}")
     child = Session(
         model=model_spec if model_spec is not None else parent_session.model,
         # A child's model was chosen HERE (tier or parent), never by the
@@ -2986,11 +3103,21 @@ async def _construct_child_session(
     # Read through ``getattr`` because not every session shape is a real
     # ``Session`` (reduced test doubles and the resume path construct children
     # around hosts that predate this attribute).
+    #
+    # THE OP SCOPE RIDES ALONG WITH THE NAMES, and it is not an optional extra:
+    # a declaration's reach is the names AND the ops a scoped name is cut down
+    # to, so passing the names alone would hand a child the whole of a tool its
+    # parent was declared not to have in full — ``agent sync`` and ``agent
+    # reset`` behind a parent that may only author, which is the sentence above
+    # ("a declared session cannot reach an excluded tool one hop down") being
+    # false one hop down. Read the same way, and ``None`` for a parent that
+    # declared no scope means "every op", exactly as it does on the parent.
     declared = getattr(parent_session, "_declared_tools", None)
     if declared is not None and hasattr(child, "set_tool_inventory"):
         child.set_tool_inventory(
             declared,
             unattended=bool(getattr(parent_session, "_declared_tools_unattended", False)),
+            ops=getattr(parent_session, "_declared_tool_ops", None),
         )
     # Record the denial on the child so its OWN children inherit it (see the
     # ``restricted`` computation above). Set UNCONDITIONALLY, outside the

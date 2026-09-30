@@ -152,6 +152,7 @@ class Job:
         result_text: str | None = None,
         error_text: str | None = None,
         agent_role: str = "",
+        requested_model_label: str | None = None,
     ) -> None:
         self.id = job_id
         self.type = "task"
@@ -159,6 +160,10 @@ class Job:
         # Defaults to "" rather than "task" so the existing rows in this file
         # keep saying what they said: a plain task shows no role segment.
         self.agent_role = agent_role
+        # The pin the launch resolved, when one did — the second half of the
+        # comparison the fallback marker reads (``jobs.is_model_fallback``).
+        # ``None`` is the inherit case, exactly as on the real job row.
+        self.requested_model_label = requested_model_label
         self.status = status
         self.label = label
         self.start_time = time.time() - age
@@ -475,6 +480,92 @@ def test_the_mark_survives_every_width_that_still_paints_a_label() -> None:
     for width in range(24, 141):
         row = _plain(Job("j1", label, progress="auditing merged MRs"), width, children=1)
         assert "⊞1" in row, (width, row)
+        assert cell_len(row) <= width, (width, row)
+
+
+def test_a_pinned_child_off_its_model_wears_the_fallback_marker_on_the_label() -> None:
+    """Design D2 / UX U1: the dock is where the operator scans for children
+    that misbehaved, and it painted NOTHING for a substituted child — the row
+    was byte-identical to a never-pinned one's (the design round confirmed it
+    by md5).
+
+    The marker rides the LABEL (the field the panel keeps down every rung —
+    the role column is already shed at 80x24), and it takes the `warning` ink
+    WITH the glyph so it survives NO_COLOR. The two cues are additive to each
+    other; neither is load-bearing alone.
+    """
+    from local_operator.tui import theme as theme_mod
+
+    off_pin = Job(
+        "j1",
+        "round1-designer",
+        progress="reading the diff",
+        agent_role="designer",
+        requested_model_label="anthropic/claude-sonnet-5-5",
+        model_label="deepseek/deepseek-flash",
+    )
+    text = _plain(off_pin, 120)
+    assert "round1-designer ⚠" in text, text
+    assert cell_len(text) <= 120
+
+    # The ink itself: the glyph carries `warning`, the name keeps the label's
+    # ordinary foreground.
+    facts = row_facts(off_pin, fallback_id="j1", current=False)
+    stats = job_stats(off_pin)
+    rung, column, clock, role_column = panel_layout([(facts, stats)], 120)
+    row = compose_row(
+        facts=facts,
+        stats=stats,
+        spinner_glyph="⣾",
+        width=120,
+        rung=rung,
+        column=column,
+        clock=clock,
+        role_column=role_column,
+    )
+    inks = {
+        row.plain[span.start : span.end].strip(): getattr(span.style, "color", None)
+        for span in row.spans
+    }
+    marker_ink = inks.get("⚠")
+    label_ink = inks.get("round1-designer")
+    assert marker_ink is not None, [str(s.style) for s in row.spans]
+    assert marker_ink.name == theme_mod.semantic_color("warning")
+    assert label_ink is not None and label_ink.name == theme_mod.semantic_color("fg")
+
+    # A child ON its pin, and one that never had one, are exactly the rows
+    # they always were.
+    on_pin = Job(
+        "j2",
+        "round1-coder",
+        progress="running tests",
+        requested_model_label="deepseek/deepseek-flash",
+        model_label="deepseek/deepseek-flash",
+    )
+    assert "⚠" not in _plain(on_pin, 120)
+    assert "⚠" not in _plain(Job("j3", "plain", progress="running tests"), 120)
+
+
+def test_the_fallback_marker_survives_every_width_that_still_paints_a_label() -> None:
+    """The same sweep contract the children mark is held to, for the same
+    reason: the label is the last field to yield, so there is no width at
+    which the marker may vanish while a label still paints — that is the
+    difference between "this child fell back" and "this child never had a
+    pin", and a per-width cliff hides the signal exactly where the roster is
+    read most (design D2).
+    """
+    for width in range(24, 141):
+        row = _plain(
+            Job(
+                "j1",
+                "Inspect documentation",
+                progress="auditing merged MRs",
+                requested_model_label="anthropic/claude-sonnet-5-5",
+                model_label="deepseek/deepseek-flash",
+            ),
+            width,
+        )
+        assert "⚠" in row, (width, row)
         assert cell_len(row) <= width, (width, row)
 
 

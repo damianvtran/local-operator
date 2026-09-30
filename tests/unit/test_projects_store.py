@@ -132,7 +132,7 @@ def test_milestone_status_is_derived_from_dates_never_stored() -> None:
     assert milestone_status(ProjectMilestone(name="m")) == "upcoming"
 
 
-def test_the_default_date_basis_is_the_utc_today_the_stamp_comes_from(
+def test_the_default_date_basis_is_the_local_today_the_stamp_comes_from(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One "today" or the badge contradicts the stamp (agent review round 1, n1).
@@ -141,14 +141,40 @@ def test_the_default_date_basis_is_the_utc_today_the_stamp_comes_from(
     (2000-01-01) is BEFORE the target (2000-06-01), which is before any real
     run's local today. A helper-basis run calls that "upcoming"; a fallback to
     ``date.today()`` calls it "overdue", so the test fails if the two bases
-    ever drift apart again.
+    ever drift apart again. The basis is the OPERATOR'S LOCAL day (UX round 1
+    follow-up: the stamp is a human-facing date, and a UTC basis stored
+    tomorrow's day for an evening toggle west of Greenwich) — the one-basis
+    rule this test exists for is what must not move.
     """
 
     from local_operator import projects
 
-    monkeypatch.setattr(projects, "_utc_today", lambda: datetime.date(2000, 1, 1))
+    monkeypatch.setattr(projects, "_local_today", lambda: datetime.date(2000, 1, 1))
     assert milestone_status(ProjectMilestone(name="m", target_date="2000-06-01")) == "upcoming"
     assert projects._today_iso() == "2000-01-01"
+
+
+def test_local_today_reads_the_local_clock_not_utc(monkeypatch: pytest.MonkeyPatch) -> None:
+    """UX round 1 follow-up: the stamp is the day the OPERATOR saw.
+
+    Reproduces the measured case: a 2026-09-29 20:5x EDT toggle stored
+    2026-09-30 (UTC's tomorrow). The fake clock's naive ``now()`` is the
+    evening of the 29th while its UTC reading is already the 30th — a UTC
+    basis stamps the 30th; the local basis must say 29.
+    """
+    import datetime as dt
+
+    from local_operator import projects
+
+    class FakeDatetime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return dt.datetime(2026, 9, 29, 20, 55)
+            return dt.datetime(2026, 9, 30, 0, 55, tzinfo=dt.timezone.utc)
+
+    monkeypatch.setattr(projects, "datetime", FakeDatetime)
+    assert projects._today_iso() == "2026-09-29"
 
 
 # -- storage -----------------------------------------------------------------

@@ -1663,8 +1663,9 @@ def test_the_makefile_typed_gate_is_the_same_command_as_the_job() -> None:
 
     Mutations that must fail this: textually unwrap the recipe; change its
     `BOUND_TIMEOUT` default; add a SECOND `BOUND_TIMEOUT` assignment (which wins
-    silently, since the token comparison abstracts the value); or narrow its
-    payload to a file list.
+    silently, since the token comparison abstracts the value); narrow its
+    payload to a file list; drop the `NODE_OPTIONS=` prefix the wrapper is
+    invoked with; or raise node's heap to a value ci.yml does not set.
     """
     scope = _scope()
     job_tokens = shlex.split(scope.JOB_COMMANDS["type-check"][0])
@@ -1676,11 +1677,27 @@ def test_the_makefile_typed_gate_is_the_same_command_as_the_job() -> None:
     recipe = _makefile_recipe_blocks()["type-check"].replace("\\\n", " ")
     make_tokens = shlex.split(recipe)
     assert "$(BOUND_TIMEOUT)" in make_tokens, make_tokens
-    make_tokens[make_tokens.index("$(BOUND_TIMEOUT)")] = "BOUND"
 
-    assert make_tokens == job_tokens, (
+    # The recipe wraps the gate in a shell preamble that sizes node's old space
+    # (the CI heap value asserted below), so the GATE is the slice from the
+    # wrapped invocation onward: the interpreter that runs `run_bounded.py`,
+    # preceded by the `NODE_OPTIONS=` prefix the recipe exports for it.
+    # Comparing ONLY that slice keeps the anti-drift comparison exact without
+    # pinning the preamble's shell spelling.
+    wrapper_at = next(
+        index
+        for index, token in enumerate(make_tokens)
+        if Path(token).name == scope.BOUNDED_WRAPPER_NAME
+    )
+    assert wrapper_at >= 2 and make_tokens[wrapper_at - 2].startswith("NODE_OPTIONS="), (
+        "the recipe no longer exports NODE_OPTIONS for the wrapped pyright: "
+        f"{make_tokens[max(0, wrapper_at - 2) : wrapper_at + 1]!r}"
+    )
+    gate_tokens = make_tokens[wrapper_at - 1 :]
+    gate_tokens[gate_tokens.index("$(BOUND_TIMEOUT)")] = "BOUND"
+    assert gate_tokens == job_tokens, (
         "the Makefile target and JOB_COMMANDS have drifted apart: "
-        f"make={' '.join(make_tokens)!r} job={' '.join(job_tokens)!r}"
+        f"make={' '.join(gate_tokens)!r} job={' '.join(job_tokens)!r}"
     )
     text = MAKEFILE.read_text()
     assignments = re.findall(r"^BOUND_TIMEOUT\s*[:?+]?=", text, re.MULTILINE)
@@ -1695,7 +1712,70 @@ def test_the_makefile_typed_gate_is_the_same_command_as_the_job() -> None:
         f"the Makefile bounds itself at {default.group(1)}s while the runner uses "
         f"{scope.BOUNDED_GATE_TIMEOUT}s"
     )
+    # The node heap headroom is the same drift class as the bound: a SECOND
+    # copy of a value ci.yml owns, and the recipe raises it precisely when the
+    # caller has none (a bare `make type-check` used to inherit node's ~4 GB
+    # default, which OOMed the analyzer under fleet load). Pin them equal.
+    local_heap = re.search(r"--max-old-space-size=(\d+)", recipe)
+    assert local_heap, "the recipe no longer raises node's old-space cap"
+    ci_heaps = []
+    for step in _steps("type-check"):
+        node_options = str((step.get("env") or {}).get("NODE_OPTIONS"))
+        match = re.search(r"--max-old-space-size=(\d+)", node_options)
+        if match:
+            ci_heaps.append(match)
+    assert ci_heaps, "ci.yml's type-check job no longer sets a node old-space NODE_OPTIONS"
+    assert local_heap.group(1) == ci_heaps[0].group(1), (
+        f"the Makefile raises node's heap to {local_heap.group(1)} MB while ci.yml "
+        f"sets {ci_heaps[0].group(1)} MB — the same drift the bound guard exists for"
+    )
     assert job_tokens[-1] == ".", "both spellings stay whole-tree"
+
+
+def test_the_makefile_typecheck_recipe_raises_the_node_heap_only_when_needed() -> None:
+    """A18. The heap branch's CONDITION, driven through /bin/sh.
+
+    A17 pins the recipe's strings — the `NODE_OPTIONS=` prefix, the 6144
+    literal, its equality with ci.yml — and a mutant that keeps all of them
+    while gutting the branch logic stays green there: `if true;` (raise always,
+    so a LARGER operator value gets a smaller one appended after it) or a
+    `-z`-only condition (never raise a smaller caller value). So this drives
+    the REAL preamble text, exactly as make hands it to the shell (`$$`
+    expanded, continuations joined), with a probe printing what the branch left
+    in `node_opts`, and asserts the three behaviours the branch exists for:
+    absent -> set, smaller -> raised (appended last: V8 resolves the flag
+    last-wins), larger -> untouched.
+
+    Mutations that must fail this: `if true;`; `-z` without the `-lt 6144`
+    arm; deleting the branch; dropping the caller's value from the append.
+    """
+    preamble, marker, _ = _makefile_recipe_blocks()["type-check"].partition(
+        'NODE_OPTIONS="$$node_opts" .venv/bin/python'
+    )
+    assert marker, "the recipe no longer exports NODE_OPTIONS for the wrapped gate"
+    # What make does before /bin/sh sees the recipe: `$$` -> `$`, and the
+    # `\`+newline continuations are one logical line. The probe prints exactly
+    # what the export uses.
+    script = preamble.replace("$$", "$").replace("\\\n", "\n") + "\nprintf '%s' \"$node_opts\"\n"
+
+    def effective(node_options: str | None) -> str:
+        env = dict(os.environ)
+        env.pop("NODE_OPTIONS", None)
+        if node_options is not None:
+            env["NODE_OPTIONS"] = node_options
+        proc = subprocess.run(["/bin/sh", "-c", script], capture_output=True, text=True, env=env)
+        assert proc.returncode == 0, (proc.returncode, proc.stderr)
+        return proc.stdout
+
+    assert (
+        effective(None) == "--max-old-space-size=6144"
+    ), "an unset NODE_OPTIONS must get ci.yml's heap headroom"
+    assert effective("--max-old-space-size=2048") == (
+        "--max-old-space-size=2048 --max-old-space-size=6144"
+    ), "a smaller caller value must be raised (appended last: V8 last-wins)"
+    assert (
+        effective("--max-old-space-size=8192") == "--max-old-space-size=8192"
+    ), "a larger operator value must pass through untouched"
 
 
 def test_ci_and_make_share_one_classifier_module() -> None:

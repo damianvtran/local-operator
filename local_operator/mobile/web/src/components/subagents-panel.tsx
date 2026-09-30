@@ -84,6 +84,22 @@ export function AgentRow({
 			</span>
 			<span className="min-w-0 flex flex-1 flex-col">
 				<span className="truncate text-body-sm text-ink">{agent.label}</span>
+				{agent.model_fallback === true ? (
+					/* The pin-integrity badge (PR review round 1, reviewer MAJOR): the wire
+					   has carried `model_label` as the `A → B ⚠ fallback` string since the
+					   projection was written, and no phone component painted it — a
+					   substituted child read exactly like a never-pinned one. Directly
+					   under the label in warning ink: the string itself carries the `⚠`
+					   and the word `fallback`, so the signal survives grayscale and
+					   NO_COLOR alike, matching the notice treatment. `break-words` rather
+					   than `truncate`: the tail of this string IS the alarm, and an
+					   ellipsis that eats `⚠ fallback` would leave the two model names
+					   with nothing saying they disagree. Only children OFF their pin grow
+					   this line, so a healthy roster spends no vertical space on it.
+					   `=== true`, not truthy: a payload from a runtime that predates the
+					   field must read as `no substitution`. */
+					<span className="break-words text-meta text-warning">{agent.model_label}</span>
+				) : null}
 				{showMetadata ? (
 					<span className="truncate text-meta text-ink-dim">
 						{agent.agent}{agent.effort ? ` · ${agent.effort}` : ""}
