@@ -32311,14 +32311,16 @@ class OperatorApp(App[None]):
         remote-owner guard, the local attach, the full reboot), so the page
         adds no second way to change sessions. Anything else is answered
         honestly — the states that exist, and the command that starts one —
-        never a silent no-op. The page closes first in both cases: the notice
-        lands in the transcript that the mode was hiding.
+        never a silent no-op. A live jump leaves the mode (the reader goes to
+        the conversation); a DEAD link keeps the page and lands its sentence
+        on the page's own footer — the transcript the mode hides is not a
+        surface (UX round 1, U4).
         """
         message.stop()
         live = [session_id for session_id, state in message.sessions if state == "live"]
         current = str(getattr(self._session, "session_id", "") or "") if self._session else ""
-        self._close_projects_view()
         if live:
+            self._close_projects_view()
             # The terminal's OWN session is checked FIRST (review r1 NIT 6):
             # when it is one of several live links, whether `↵` says "already
             # in" or switches to a sibling must not depend on the store's link
@@ -32330,9 +32332,11 @@ class OperatorApp(App[None]):
                 return
             self._resume_session(live[0], self._notice)
             return
-        self._system_notice(
-            project_jump_no_live_text(message.project_name, message.sessions), "info"
-        )
+        # No live session: the page KEEPS the reader and says so on its own
+        # footer; the copy is the shipped one.
+        view = self._projects_view
+        if view is not None:
+            view.show_notice(project_jump_no_live_text(message.project_name, message.sessions))
 
     def on_projects_view_refresh_requested(self, message: ProjectsViewRefreshRequested) -> None:
         """``r`` on the page — recompose HERE and hand the widget fresh data.
@@ -32361,8 +32365,9 @@ class OperatorApp(App[None]):
         so the page adds no second write path (spec §10.5). The recomposition
         that follows is what makes the row, the header count and the footer
         rollup agree — every derived fact comes from the store, never from an
-        optimistic guess in the widget. A refusal is a notice carrying the
-        store's own words, never a silent no-op.
+        optimistic guess in the widget. A refusal is never a silent no-op: it
+        lands on the PAGE's own footer line, where the reader pressed — the
+        transcript the mode hides is not asked to carry it (UX round 1, U1).
         """
         message.stop()
         view = self._projects_view
@@ -32377,9 +32382,16 @@ class OperatorApp(App[None]):
                 MilestoneEdit(name=message.name, completed=message.completed),
             )
         except Exception as exc:  # noqa: BLE001 — a keystroke never crashes the app
-            self._system_notice(
-                f"could not update the milestone: {store_error_text(exc)}", "warning"
-            )
+            if isinstance(exc, KeyError):
+                # The store grew one: the project is gone (this path's only
+                # KeyError source). Human words with the project NAME — the
+                # raw store message carries a UUID (UX round 1, U1).
+                name = message.project_name or "that project"
+                view.show_notice(
+                    f"could not update the milestone — '{name}' is no longer in the store"
+                )
+            else:
+                view.show_notice(f"could not update the milestone: {store_error_text(exc)}")
             return
         import time as _time
 

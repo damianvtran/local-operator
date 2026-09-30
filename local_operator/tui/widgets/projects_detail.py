@@ -71,6 +71,10 @@ class DetailRow(Static):
     def action_label(self) -> str | None:
         return None
 
+    def action_verb(self) -> str | None:
+        """The bare verb — the hint's fallback when the named form cannot fit."""
+        return None
+
     def activate(self) -> None:
         return None
 
@@ -133,10 +137,22 @@ class DetailProseRow(DetailRow):
 
     def __init__(self, description: str, style_for: StyleFor) -> None:
         super().__init__(classes="projects-detail-prose")
+        self._source = description
         if description.strip():
             self.update(Markdown(autolink_bare_urls(description)))
         else:
             self.update(Text("no description yet", style=style_for("dim"), no_wrap=True))
+
+    def readback(self) -> str | None:
+        """The description's source text for ``painted_rows`` (UX round 1, U6).
+
+        The row holds a rich ``Markdown`` renderable, which carries no
+        ``.plain``; without this the page's own readback showed ``""`` for the
+        description — the slice's headline feature, unassertable. ``None`` on
+        the empty case, so the honest sentence still reads from the row's
+        plain ``Text``.
+        """
+        return self._source if self._source.strip() else None
 
 
 class DetailMilestoneRow(DetailRow):
@@ -165,6 +181,18 @@ class DetailMilestoneRow(DetailRow):
         )
 
     def action_label(self) -> str | None:
+        """The verb NAMED at its target (UX round 1, U3).
+
+        ``toggle step 00`` rather than a bare ``toggle``: a reader scrolled
+        away from the row cursor could not predict what the press would
+        change — or that it would yank the viewport back to the row. The bare
+        verb is the hint ladder's low rung (``action_verb``), so a long name
+        sheds before the key does.
+        """
+        name = str(self._row.get("name") or "")
+        return f"toggle {name}" if name else "toggle"
+
+    def action_verb(self) -> str | None:
         return "toggle"
 
     def activate(self) -> None:
@@ -204,6 +232,9 @@ class DetailSessionRow(DetailRow):
         )
 
     def action_label(self) -> str | None:
+        return "open"
+
+    def action_verb(self) -> str | None:
         return "open"
 
     def activate(self) -> None:
@@ -290,12 +321,19 @@ class ProjectDetailPage(VerticalScroll):
         *,
         own_session: str | None,
         selected: int | None = None,
+        style_for: StyleFor | None = None,
     ) -> None:
         """(Re)build the page for one composed project view.
 
         ``selected`` keeps the cursor across a refresh; a fresh entry lands on
-        the first selectable row.
+        the first selectable row. ``style_for`` re-binds the row styles for
+        every show: the resolver is built AT THIS MOMENT, so a theme switch
+        under an open page repaints in the new palette on the next re-show
+        (UX round 1, U2 — the org chart's rule, which the constructor-only
+        capture had defeated).
         """
+        if style_for is not None:
+            self._style_for = style_for
         self._view = view
         self._own_session = own_session
         # The rows' provenance, captured in the SAME snapshot the rows are
@@ -386,13 +424,21 @@ class ProjectDetailPage(VerticalScroll):
         """
         rows: list[str] = []
         for child in self.children:
-            for candidate in (getattr(child, "content", None), child.render()):
-                text = getattr(candidate, "plain", None)
-                if text is not None:
-                    rows.append(str(text))
-                    break
-            else:
-                rows.append("")
+            # Rows may carry their own plain readback (the prose row's rich
+            # ``Markdown`` has no ``.plain``) — duck-typed, so narrow by hand.
+            readback = getattr(child, "readback", None)
+            value: str | None = None
+            if callable(readback):
+                result = readback()
+                if result is not None:
+                    value = str(result)
+            if value is None:
+                for candidate in (getattr(child, "content", None), child.render()):
+                    plain = getattr(candidate, "plain", None)
+                    if plain is not None:
+                        value = str(plain)
+                        break
+            rows.append(value if value is not None else "")
         return rows
 
     @property
@@ -408,6 +454,11 @@ class ProjectDetailPage(VerticalScroll):
     def selected_action_label(self) -> str | None:
         row = self._current()
         return row.action_label() if row is not None else None
+
+    def selected_action_verb(self) -> str | None:
+        """The bare verb — the ``↵`` hint's fallback label (UX round 1, U3)."""
+        row = self._current()
+        return row.action_verb() if row is not None else None
 
     def _current(self) -> DetailRow | None:
         if not self._selectables:
