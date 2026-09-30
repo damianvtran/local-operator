@@ -993,11 +993,24 @@ class ProjectsView(Vertical):
         verb = self._detail_page.selected_action_verb()
         move = (self._move_hint, " move", False)
         page = (self._page_hint, " page", True)
-        open_hint = (self._open_hint, f" {context}" if context else " open", True)
+        # The `↵` hint exists only while the selected row HAS a verb: its old
+        # `" open"` fallback was unreachable until design D1 and UX U3 made
+        # verb-less rows real (a one-line entry, a missing copy), and a dimmed
+        # `↵ open` on a row that cannot act is the same wrong promise in a
+        # quieter ink (UX review round 2, U6). No verb, no rung.
+        named = context or verb
+        open_hint = (self._open_hint, f" {named}", True)
         # The bare verb is a LOW rung: a long target name sheds before the key
         # does (UX round 1, U3 — the name informs, the key acts).
-        open_bare = (self._open_hint, f" {verb}" if verb else " open", True)
+        open_bare = (self._open_hint, f" {verb or context}", True)
         refresh = (self._refresh_hint, " refresh", True)
+        if named is None:
+            return [
+                rung([move, page, refresh], "back"),
+                rung([move, page], "back"),
+                rung([move], ""),
+                rung([], ""),
+            ]
         return [
             rung([move, page, open_hint, refresh], "back"),
             rung([move, page, open_hint], "back"),
