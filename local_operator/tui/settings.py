@@ -218,6 +218,12 @@ _DEFAULT_NOTES: dict[str, Any] = {
     # keep every row, and the raw-journal surfaces (`jobs`, `hub op='peek'`,
     # the picker's verbose preview) still show them.
     "display.hide_cross_session": False,
+    # The desktop transcript's mark beside the answer that closes a turn. The
+    # TUI has no such element (its own rail is `display.rail`), so nothing here
+    # reads it: it is declared so the registry, `lop config`, and the desktop
+    # app's settings read/write path all know the key. Default OFF because the
+    # operator found the rail heavy; it ships opt-in.
+    "display.turn_answer_rail": False,
     # --- the composer widget-visibility family (operator request, 2026-09-27) ---
     #
     # One BOOL per composable piece of the composer, all default True because

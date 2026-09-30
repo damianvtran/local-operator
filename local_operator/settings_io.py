@@ -2029,6 +2029,26 @@ SETTINGS: tuple[Setting, ...] = (
         help="Hide lop send traffic and inbound peer messages from transcripts.",
         choices=_bool_choices("hide new; reopen to re-read", "show new; reopen to re-read"),
     ),
+    # The desktop transcript's answer mark: a thin rule to the left of the row
+    # that CLOSES a turn (the `display.rail` idea, for the desktop app). Only
+    # `local-operator-ui` draws it; the TUI has no such element, so the TUI
+    # reader is settings-only (this key is in the test allow-list of keys with
+    # no single-value consumer, like every registry-derived `display.*` flag).
+    #
+    # Default OFF, deliberately: the operator reported the rail looked heavy
+    # next to the answer text, so it ships opt-in rather than as the new look.
+    # "Unset" must therefore mean the transcript as it renders today. Flat-dotted
+    # like every `display.*` key (see the block comment at `display.shimmer`).
+    Setting(
+        key="display.turn_answer_rail",
+        path=("display.turn_answer_rail",),
+        section="appearance",
+        label="Mark the turn answer",
+        kind=Kind.BOOL,
+        default=False,  # opt-in: the rail looked heavy; see tui/settings.py _DEFAULT_NOTES
+        help="Draw a thin rule beside the answer that closes a turn (desktop app).",
+        choices=_bool_choices("rule beside the closing answer", "no rule beside the answer"),
+    ),
     # -- the composer widget-visibility family (operator request, 2026-09-27) --
     #
     # One BOOL per composable piece of the composer: the status band and the
