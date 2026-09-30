@@ -563,15 +563,19 @@ def test_tier_table_is_per_op() -> None:
 def test_describe_approval_sentences_are_pinned() -> None:
     assert _describe_sessions_approval(
         {"op": "spawn", "name": "night-audit", "prompt": "go"}, "."
-    ) == (
-        'open "night-audit" as a listed workstream: go'
+    ) == ('open "night-audit" as a listed workstream: go')
+    assert (
+        _describe_sessions_approval(
+            {"op": "spawn", "name": "x", "prompt": "go", "visibility": "ephemeral"}, "."
+        )
+        == 'open "x" as an ephemeral session: go'
     )
-    assert _describe_sessions_approval(
-        {"op": "spawn", "name": "x", "prompt": "go", "visibility": "ephemeral"}, "."
-    ) == 'open "x" as an ephemeral session: go'
-    assert _describe_sessions_approval(
-        {"op": "spawn", "prompt": "go", "team": "release", "profile": "coder"}, "."
-    ) == "open as a listed workstream (team release, profile coder): go"
+    assert (
+        _describe_sessions_approval(
+            {"op": "spawn", "prompt": "go", "team": "release", "profile": "coder"}, "."
+        )
+        == "open as a listed workstream (team release, profile coder): go"
+    )
     assert _describe_sessions_approval({"op": "stop", "pid": 48213}, ".") == (
         "stop pid 48213: ends its current run and releases the session lease"
     )
@@ -691,13 +695,13 @@ async def test_resume_refuses_a_live_runtime_with_the_cli_sentence(root: Path) -
 def test_published_pid_requires_the_record_to_name_our_session(root: Path) -> None:
     record = _publish_record(root, "abcdabcdabcd", "pidful")
     path = registry.record_path(record.pid, root)
-    assert _sessions_published_pid(
-        {"runtime_path": str(path), "session_id": record.session_id}
-    ) == record.pid
+    assert (
+        _sessions_published_pid({"runtime_path": str(path), "session_id": record.session_id})
+        == record.pid
+    )
     # A recycled pid's leftover file must not be reported as this run's.
     assert (
-        _sessions_published_pid({"runtime_path": str(path), "session_id": "othereid00000"})
-        is None
+        _sessions_published_pid({"runtime_path": str(path), "session_id": "othereid00000"}) is None
     )
     assert _sessions_published_pid({"session_id": record.session_id}) is None
     registry.unpublish(record.pid, root)
@@ -708,9 +712,7 @@ def test_validation_refusals_are_legible_and_per_op() -> None:
         "spawn needs `prompt`: the message the opened run executes. A headless exec "
         "refuses a prompt-less run the same way."
     )
-    refusal = _sessions_validation_error(
-        SessionsParams(op="spawn", prompt="go", background=False)
-    )
+    refusal = _sessions_validation_error(SessionsParams(op="spawn", prompt="go", background=False))
     assert refusal is not None and "not supported in v1" in refusal
     refusal = _sessions_validation_error(
         SessionsParams(op="resume", session="a", prompt="p", visibility="workstream")
