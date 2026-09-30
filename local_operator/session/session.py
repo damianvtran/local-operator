@@ -219,6 +219,7 @@ from local_operator.prompts_api import (
 )
 from local_operator.redaction_shapes import ShapeReport
 from local_operator.references import expand_references
+from local_operator.session.credential_binding import SESSION_BINDING_CUSTOM_TYPE
 from local_operator.session.goal import GoalHistoryEntry, GoalJudgeState, GoalState
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.model_selection import SELECTED_MODEL_CUSTOM_TYPE
@@ -990,6 +991,16 @@ _PERSISTABLE_CUSTOM_TYPES: frozenset[str] = frozenset(
         "session_state",
         SESSION_INCIDENT_MESSAGE_TYPE,
         SESSION_MODEL_SWITCH_MESSAGE_TYPE,
+        # SESSION_BINDING_CUSTOM_TYPE follows the design's instruction to join
+        # (design §10): the mesh credential binding's row is bookkeeping about
+        # the session — which account served it, and when that changed — and its
+        # writer appends through ``append_custom`` directly, exactly like the
+        # spend record, so membership is NOT what persists it today. The line is
+        # kept for the reason the redaction member's comment below states: so a
+        # future path which DOES route through :func:`_is_persistable_message`
+        # cannot silently drop the row. The MODEL is kept out of it by the
+        # renderer's allow-list, not by this one.
+        SESSION_BINDING_CUSTOM_TYPE,
         # SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE IS persisted, and it is the
         # member whose persistence is easiest to mistake for an oversight: the
         # record is operator-facing and enters no model context (see its own

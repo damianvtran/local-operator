@@ -62,6 +62,7 @@ from local_operator.session.creation import (
     ensure_session_created_at,
     session_created_at,
 )
+from local_operator.session.credential_binding import SESSION_BINDING_CUSTOM_TYPE
 
 # The engagement reader — and the transcript filename it looks for — live in
 # ``session/runtime/engagement.py``, a stdlib-only module, so the peer-send core
@@ -140,12 +141,22 @@ ENTRY_PRUNE = "prune"
 #: call site) because the type is what the allow-list names, so a live accrual
 #: during a real turn is exempt too — which costs nothing, since that turn's own
 #: messages move the clock in the same batch.
+#:
+#: ``mesh_credential_binding.v1`` is here for the same reason and by the same
+#: rule: it is bookkeeping ABOUT the session — which account served it — written
+#: on every CHANGE of that answer, and its writer calls ``append_custom`` with
+#: ``preserve_mtime=True``. Omitting it here would silently restamp the session
+#: as freshly worked on every account change AND age it toward deletion (the
+#: exemption is honoured only when the whole batch is in this set — see
+#: :func:`_is_bookkeeping_batch`). It never reaches the model: unlisted custom
+#: types are no conversation content on either replay path.
 BOOKKEEPING_CUSTOM_TYPES: frozenset[str] = frozenset(
     {
         SESSION_INCIDENT_MESSAGE_TYPE,
         SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
         SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
         SESSION_SPEND_CUSTOM_TYPE,
+        SESSION_BINDING_CUSTOM_TYPE,
     }
 )
 
