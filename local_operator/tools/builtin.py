@@ -7798,7 +7798,7 @@ def build_read_tool() -> AgentTool:
         label="Read",
         description=(
             "Read a file, line range, or internal URL (skill://, guide://, mcp://, "
-            "scratchpad://). "
+            "scratchpad://, tool://). "
             "PNG/JPEG/GIF/WebP/HEIC files come back as a viewable image. "
             "Python files read whole return a structural summary; use a "
             "range or raw=true for exact text."
@@ -20743,8 +20743,7 @@ def build_console_tool(context: ToolContext | None) -> AgentTool | None:
             "running a command, with a real terminal grid, that keeps running and keeps its "
             "output while its tab is closed. Use it for things `bash` cannot host — a "
             "full-screen TUI, a REPL, an installer, an interactive prompt — and NOT for "
-            "ordinary commands: `bash` returns output directly, cannot wedge on a prompt, and "
-            "cannot leave a process running behind your turn. The surface handle names this "
+            "ordinary commands: `bash` returns output directly. The surface handle names this "
             "host (`con:`). `list` shows surfaces the USER opened too; read those rather than "
             "asking them to repeat their output. Playbook: `guide://console`."
         ),
