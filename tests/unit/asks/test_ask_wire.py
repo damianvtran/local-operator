@@ -17,6 +17,7 @@ them would test the stub.
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any, cast
 
@@ -449,8 +450,12 @@ def test_the_mirrored_answer_resolves_onto_the_queue(
     def _decline(ask: str, by: str = "unknown") -> Any:
         return queue.decline(ask, by=by)
 
+    def _answer_one(ask: str, key: str, values: Any, by: str = "unknown") -> Any:
+        return queue.answer_one(ask, key, values, by=by)
+
     session.respond_ask = _respond  # type: ignore[attr-defined]
     session.decline_ask = _decline  # type: ignore[attr-defined]
+    session.answer_ask_question = _answer_one  # type: ignore[attr-defined]
 
     class _Handle:
         _session = session
@@ -460,7 +465,7 @@ def test_the_mirrored_answer_resolves_onto_the_queue(
 
     session.reconcile_asks = _reconcile  # type: ignore[attr-defined]
 
-    async def _drive() -> str:
+    async def _drive() -> str | None:
         detail = await ServingSessionHandle._mirror_ask_answer(
             cast(Any, _Handle()), store.mirror_request_id(ask_id, 0), "yes"
         )
@@ -657,11 +662,12 @@ def test_the_answers_body_accepts_all_three_shapes() -> None:
 
 def test_the_answers_body_refuses_the_shapes_that_mix_rules() -> None:
     from pydantic import ValidationError
+
     from local_operator.server.routes.desktop_sessions import Answer
 
     # A gate answer still needs both identity fields: the queued-ask shape
     # loosened nothing about the two blocking ones.
-    for body in (
+    bodies: tuple[dict[str, Any], ...] = (
         {"request_id": "r1", "approved": True},
         {"epoch": "e1", "approved": True},
         {"epoch": "e1", "request_id": "r1"},
@@ -671,6 +677,294 @@ def test_the_answers_body_refuses_the_shapes_that_mix_rules() -> None:
         {"ask_id": "a-1", "answers": {}},
         {"ask_id": "a-1", "answers": {"q0": "yes"}},
         {"ask_id": "a-1", "answers": {"q0": ["yes"]}, "decline": True},
-    ):
+    )
+    for body in bodies:
         with pytest.raises(ValidationError):
             Answer(**body)
+
+
+# ---------------------------------------------------------------------------
+# the legacy path is INCREMENTAL, the new ops stay ATOMIC (§4 A2 addendum)
+# ---------------------------------------------------------------------------
+
+
+def _multi_question_ask(queue: Any, count: int = 2) -> str:
+    outcome = queue.enqueue(_questions(count, text="Which one?"), None)
+    assert outcome["ok"] is True
+    return str(outcome["details"]["ask_id"])
+
+
+def _status(queue: Any, ask_id: str) -> str:
+    """The ask's folded status, with a missing record as the assertion itself.
+
+    ``AskQueue.find`` returns ``None`` for an id the log no longer holds, so a
+    bare ``queue.find(id)["status"]`` is a subscript on an optional — and a
+    silently-missing record would raise a ``TypeError`` the test reads as a
+    crash rather than as the wrong outcome it is.
+    """
+    record = queue.find(ask_id)
+    assert record is not None, f"{ask_id} is not on this queue"
+    return str(record["status"])
+
+
+def test_the_legacy_path_settles_a_multi_question_ask_one_tap_at_a_time(tmp_path: Path) -> None:
+    """The review round 1 blocker: the mirror could SEE multi-question asks and
+    never settle one, because every tap was a partial map for an atomic op."""
+    session, queue = _live_session(tmp_path)
+    ask_id = _multi_question_ask(queue)
+
+    first = queue.answer_one(ask_id, "q0", ["yes"], by="mirror")
+    assert first == {"ok": True, "settled": False, "waiting": ["q1"]}
+    assert _status(queue, ask_id) == "open", "a partial must not settle the ask"
+    assert (
+        store.read_events(queue.session_dir)[-1]["kind"] == store.EVENT_QUEUED
+    ), "nothing durable yet"
+
+    second = queue.answer_one(ask_id, "q1", ["no"], by="mirror")
+    assert second["ok"] is True and second["settled"] is True
+    record = queue.find(ask_id)
+    assert record is not None and record["status"] == "answered"
+    answered = [
+        e for e in store.read_events(queue.session_dir) if e["kind"] == store.EVENT_ANSWERED
+    ]
+    # ONE atomic write, carrying BOTH cells: the log never holds a partial.
+    assert len(answered) == 1
+    assert answered[0]["answers"] == {"q0": ["yes"], "q1": ["no"]}
+
+
+def test_a_repeat_tap_on_the_same_question_is_refused(tmp_path: Path) -> None:
+    session, queue = _live_session(tmp_path)
+    ask_id = _multi_question_ask(queue)
+    assert queue.answer_one(ask_id, "q0", ["yes"], by="mirror")["ok"] is True
+    again = queue.answer_one(ask_id, "q0", ["no"], by="mirror")
+    assert again["ok"] is False and "already answered" in again["error"]
+    assert _status(queue, ask_id) == "open"
+
+
+def test_an_unknown_question_id_is_refused_by_name(tmp_path: Path) -> None:
+    session, queue = _live_session(tmp_path)
+    ask_id = _multi_question_ask(queue)
+    outcome = queue.answer_one(ask_id, "nope", ["yes"], by="mirror")
+    assert outcome["ok"] is False and "not a question" in outcome["error"]
+
+
+def test_the_partial_rides_the_published_rows_so_the_card_advances(tmp_path: Path) -> None:
+    """The mirrored card must move off the question the old client just tapped."""
+    session, queue = _live_session(tmp_path)
+    ask_id = _multi_question_ask(queue)
+    before = mirror_card(queue.projection(drafts=True))
+    assert before is not None and before["request_id"] == f"{ask_id}.0"
+    queue.answer_one(ask_id, "q0", ["yes"], by="mirror")
+    after = mirror_card(queue.projection(drafts=True))
+    assert after is not None and after["request_id"] == f"{ask_id}.1"
+    assert after["title"].endswith("(1)")
+    # ...and the DURABLE index never sees the draft: an answer a runtime death
+    # would erase must not be presented as a settled one to a cross-session view.
+    index_rows = store.index_asks(tmp_path, now=BASE)
+    assert index_rows and "draft_question_ids" not in index_rows[0]
+    assert "answers" not in index_rows[0]
+
+
+def test_the_new_ops_still_refuse_a_partial_map(tmp_path: Path) -> None:
+    """The atomic contract is unchanged: only the mirror's bridge is incremental."""
+    session, queue = _live_session(tmp_path)
+    ask_id = _multi_question_ask(queue)
+    outcome = queue.respond(ask_id, {"q0": ["yes"]}, by="desktop")
+    assert outcome["ok"] is False and "has no entry" in outcome["error"]
+    assert _status(queue, ask_id) == "open"
+
+
+def test_a_declined_ask_drops_its_draft(tmp_path: Path) -> None:
+    session, queue = _live_session(tmp_path)
+    ask_id = _multi_question_ask(queue)
+    queue.answer_one(ask_id, "q0", ["yes"], by="mirror")
+    assert queue.decline(ask_id, by="mirror")["ok"] is True
+    assert queue.draft_question_ids(ask_id) == []
+
+
+def test_the_session_bridge_stores_a_secret_at_the_tap_and_keeps_the_key(tmp_path: Path) -> None:
+    """The legacy path must not put a secret value anywhere durable, not even in
+    a draft held across taps."""
+    session, queue = _live_session(tmp_path)
+    outcome = queue.enqueue(_questions(1, secret=True), None)
+    assert outcome["ok"] is True
+    ask_id = str(outcome["details"]["ask_id"])
+    stored: dict[str, list[str]] = {}
+
+    class _Variables:
+        def store(self, name: str, value: str) -> None:  # pragma: no cover - shape only
+            stored[name] = [value]
+
+    class _Session(FakeSession):
+        _variables = _Variables()
+
+        def journal_credential_change(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
+    # ``answer_ask_question`` needs the real substitution hop, so it is exercised
+    # through a small stand-in session rather than the module-level double.
+    from local_operator.session.session import Session
+
+    holder = _Session(queue)
+    holder._queue = queue
+    monkey = Session.answer_ask_question
+    outcome = monkey(cast(Any, holder), ask_id, "key-0", ["sk-live-value"], by="mirror")
+    assert outcome["ok"] is True and outcome["settled"] is True
+    events = store.read_events(queue.session_dir)
+    answers = [e for e in events if e["kind"] == store.EVENT_ANSWERED][0]["answers"]
+    assert answers == {"key-0": ["key-0"]} or "sk-live-value" not in json.dumps(events)
+    assert "sk-live-value" not in json.dumps(events)
+
+
+# ---------------------------------------------------------------------------
+# the wire bound (§4 A2 addendum; review round 1 findings 2/4/5/8)
+# ---------------------------------------------------------------------------
+
+
+def _ask_row(index: int, *, questions: int = 1, text: str = "Which one?") -> dict[str, Any]:
+    return {
+        "ask_id": f"a-{index:04x}",
+        "created_at": BASE + index,
+        "expires_at": BASE + 3_600_000,
+        "timeout_s": 3600,
+        "urgent": False,
+        "status": "open",
+        "delivered": False,
+        "questions": [
+            {
+                "id": f"q{question}",
+                "question": f"{text} {question}",
+                "options": [{"label": "yes", "description": ""}],
+                "multi": False,
+                "secret": False,
+                "persist": False,
+                "recommended": None,
+            }
+            for question in range(questions)
+        ],
+    }
+
+
+def test_the_bound_caps_counts_as_well_as_text() -> None:
+    """The first revision exempted the first row from the budget entirely, so one
+    ask with a hundred long questions could spend the whole frame."""
+    from local_operator.session.frontend_state import (
+        ASK_WIRE_OPTIONS_MAX,
+        ASK_WIRE_QUESTIONS_MAX,
+        bound_ask_rows,
+    )
+
+    row = _ask_row(0, questions=400, text="x" * 500)
+    row["questions"][0]["options"] = [
+        {"label": "y" * 300, "description": "z" * 300} for _ in range(200)
+    ]
+    kept, dropped = bound_ask_rows([row])
+    assert dropped is True
+    questions = kept[0]["questions"]
+    assert len(questions) <= ASK_WIRE_QUESTIONS_MAX
+    for question in questions:
+        assert question["question"].endswith("…") and len(question["question"]) <= 201
+        assert len(question["options"]) <= ASK_WIRE_OPTIONS_MAX
+        for option in question["options"]:
+            assert len(option["label"]) <= 61 and len(option["description"]) <= 81
+
+
+def test_the_first_row_is_clipped_to_the_budget_rather_than_exempt() -> None:
+    from local_operator.session.frontend_state import bound_ask_rows
+
+    row = _ask_row(0, questions=6, text="q" * 5_000)
+    kept, _dropped = bound_ask_rows([row], budget=1_000)
+    charged = sum(len(q["question"]) for q in kept[0]["questions"])
+    assert charged <= 1_000, charged
+
+
+def test_the_snapshot_marks_a_clipped_list_rather_than_shipping_a_bare_count() -> None:
+    """QA round 1 Q2: 20 long asks shipped as 9 rows beside ``asks_open: 20``."""
+    from local_operator.session.frontend_state import (
+        FrontendStateStore,
+        sync_wire_payload,
+    )
+
+    state = FrontendSessionState(
+        session_id="s1",
+        epoch="e",
+        asks=[
+            PendingAskState(**row)  # type: ignore[arg-type]
+            for row in [_ask_row(i, questions=3, text="q" * 400) for i in range(20)]
+        ],
+        asks_open=20,
+    )
+    store = FrontendStateStore(state)
+    payload = sync_wire_payload(store.subscribe(lambda _u: None).sync)
+    snapshot = payload["snapshot"]
+    assert len(snapshot["asks"]) < 20, "the bound must have dropped something"
+    assert snapshot["asks_truncated"] is True
+    # The count keeps its meaning (the session's open asks); the flag is what
+    # stops a client drawing a prefix as if it were the whole list.
+    assert snapshot["asks_open"] == 20
+
+
+def test_a_complete_list_carries_no_truncation_flag() -> None:
+    from local_operator.session.frontend_state import (
+        FrontendStateStore,
+        sync_wire_payload,
+    )
+
+    state = FrontendSessionState(
+        session_id="s1",
+        epoch="e",
+        asks=[  # type: ignore[arg-type]
+            PendingAskState(**_ask_row(0)),
+            PendingAskState(**_ask_row(1)),
+        ],
+        asks_open=2,
+    )
+    payload = sync_wire_payload(FrontendStateStore(state).subscribe(lambda _u: None).sync)
+    assert "asks_truncated" not in payload["snapshot"]
+
+
+def test_the_delta_route_is_bounded_too() -> None:
+    """The queue's own change path drives ``mutate``, so a snapshot-only bound
+    would hold for the first frame and leak on every one after it."""
+    from local_operator.session.frontend_state import FrontendStateStore
+
+    store = FrontendStateStore(FrontendSessionState(session_id="s1", epoch="e"))
+    update = store.mutate(
+        asks=[_ask_row(i, questions=3, text="q" * 400) for i in range(20)], asks_open=20
+    )
+    assert update is not None
+    assert len(update.changes["asks"]) < 20
+    assert update.changes["asks_truncated"] is True
+
+
+def test_the_yield_measures_the_real_payload_not_a_rebuilt_envelope() -> None:
+    """Review round 1 finding 2: the first revision rebuilt a push-shaped envelope
+    from the snapshot, omitting ``epoch``/``sequence``/``live_cursor`` and using
+    the wrong frame shape — ~220 B under against ~110 B of slack, so the branch
+    could fail to fire and the whole frame would degrade instead."""
+    from local_operator.session import frontend_state as fs
+
+    state = FrontendSessionState(
+        session_id="s1",
+        epoch="e",
+        asks=[PendingAskState(**_ask_row(0))],  # type: ignore[arg-type]
+        asks_open=1,
+    )
+    payload = fs.sync_wire_payload(fs.FrontendStateStore(state).subscribe(lambda _u: None).sync)
+    snapshot = payload["snapshot"]
+    limit = fs._MODEL_CATALOGUE_LINE_LIMIT
+
+    # Park the REAL frame just under the line...
+    snapshot["cwd"] = "x" * max(0, limit - fs._frame_line_bytes(payload) - 40)
+    assert fs._frame_line_bytes(payload) <= limit
+    fs._yield_asks_when_the_frame_has_no_room(snapshot, payload)
+    assert snapshot.get("asks"), "an under-line frame keeps its asks"
+
+    # ...then push it over, by less than the envelope delta the old measurement
+    # got wrong: the asks must give way (the old shape would have kept them).
+    snapshot = payload["snapshot"]
+    snapshot["cwd"] += "x" * 200
+    assert fs._frame_line_bytes(payload) > limit
+    fs._yield_asks_when_the_frame_has_no_room(snapshot, payload)
+    assert "asks" not in snapshot and "asks_open" not in snapshot
+    assert "asks_truncated" not in snapshot, "the flag goes with the rows it describes"

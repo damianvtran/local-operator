@@ -1353,19 +1353,27 @@ class TuiSessionHandle(SessionHandle):
         if record is None:
             raise ValueError("that question was already answered on the terminal")
         if not value:
+            # An EMPTY value is today's Esc and settles the WHOLE ask: a decline
+            # is not a step of the multi-step flow.
             outcome = session.decline_ask(ask_id, by="mirror")
-        else:
-            questions = list(record.get("questions") or [])
-            key = (
-                str(questions[question_index].get("id") or "")
-                if 0 <= question_index < len(questions)
-                else ""
-            )
-            if not key:
-                raise ValueError("that question was already answered on the terminal")
-            outcome = session.respond_ask(ask_id, {key: [value]}, by="mirror")
+            if not outcome.get("ok"):
+                raise ValueError(str(outcome.get("error") or "the decline was refused"))
+            return "declined"
+        questions = list(record.get("questions") or ())
+        if not 0 <= question_index < len(questions):
+            raise ValueError("that question was already answered on the terminal")
+        key = str(questions[question_index].get("id") or "")
+        # THE LEGACY PATH IS INCREMENTAL (design §4, A2 addendum), and it is the
+        # same bridge the runtime uses so a mirror answered through the terminal's
+        # registrant settles exactly as one answered through the runtime: one
+        # question per tap into the queue's draft, one atomic write on the last.
+        outcome = session.answer_ask_question(ask_id, key, [value], by="mirror")
         if not outcome.get("ok"):
             raise ValueError(str(outcome.get("error") or "the answer was refused"))
+        if not outcome.get("settled"):
+            total = len(questions)
+            waiting = len(outcome.get("waiting") or ())
+            return f"answered {total - waiting} of {total}; the next question is on the card"
         return "answered"
 
     async def refresh(self) -> None:

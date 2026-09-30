@@ -771,6 +771,12 @@ class PendingAskWire:
     answers: dict[str, list[str]] | None = None
     answered_by: dict[str, Any] | None = None
     answered_at: int | None = None
+    #: Question ids the LEGACY incremental path (design §4, A2 addendum) has
+    #: already taken in THIS runtime for a still-open ask. They are not settled
+    #: answers — the log holds none of them until the last question lands — and
+    #: they exist so the mirrored card advances to the next question between an
+    #: old client's taps. Absent on every ask answered the atomic way.
+    draft_question_ids: list[str] | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {key: value for key, value in asdict(self).items() if value is not None}

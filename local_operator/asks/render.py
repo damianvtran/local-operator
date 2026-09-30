@@ -254,6 +254,13 @@ def mirror_card(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
     NEWEST-first; the queue's own ``open_records`` is log order) and a card that
     changed identity between publishers is a card the user answers twice.
 
+    That choice is deliberately NOT "the list's first row" — the published list
+    leads with the NEWEST open ask, while a mirrored card that jumped to each new
+    arrival would move under a user's finger mid-tap. The eventual fix is to make
+    the list lead with the oldest too (the design's own "head" wording); until
+    then the divergence is named here and in §4's A2 addendum rather than
+    discovered.
+
     Only an ``open`` ask is mirrored, deliberately: a ``timed_out`` ask is past
     its deadline, and painting the old "waiting for you" card for it would tell
     the user their answer still counts as one did before the deadline. It is
@@ -274,7 +281,13 @@ def mirror_card(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
         key=lambda row: (int(row.get("created_at") or 0), str(row.get("ask_id") or "")),
     )
     questions = [dict(q) for q in (head.get("questions") or []) if isinstance(q, Mapping)]
+    # ``answers`` is what the LOG holds; ``draft_question_ids`` is what the old
+    # client has ALREADY TAPPED in this runtime (the incremental legacy path,
+    # §4 addendum). Both mean "do not offer this question again", and the card
+    # has to advance on a draft or the old client would be offered the question
+    # it just answered until the ask settles.
     answered = {str(key) for key in (head.get("answers") or {})}
+    answered |= {str(key) for key in (head.get("draft_question_ids") or ())}
     index = 0
     for position, question in enumerate(questions):
         if str(question.get("id") or "") not in answered:

@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import contextlib
 import errno
 import json
 import os
@@ -8357,3 +8358,163 @@ async def test_desktop_history_hides_patience_rows_through_the_real_bridge(tmp_p
     # Visible controls: both the scheduled receipt and the ordinary tool row.
     assert "morning check" in body
     assert "file body" in body
+
+
+# ---------------------------------------------------------------------------
+# POST .../answers — the QUEUED-ASK body (design §4; review/QA round 1)
+# ---------------------------------------------------------------------------
+
+
+def _install_ask_remote(app: FastAPI, remote: Any) -> None:
+    """Point the answers route at a stub bridge carrying ``remote``.
+
+    The pool is the only thing stubbed: the route, its body model, the refusal
+    ladder and the response envelope are the real ones. ``SimpleNamespace`` is
+    what the route reads (``bridge.remote``), which is the same shape
+    ``test_viewer_protocol`` pins for the real bridge.
+    """
+    bridge = SimpleNamespace(remote=remote)
+
+    class _Pool:
+        @contextlib.asynccontextmanager
+        async def session(self, session_id: str, *, read: bool = False, allow_draft: bool = False):
+            del session_id, read, allow_draft
+            yield bridge
+
+    app.state.desktop_sessions = _Pool()
+
+
+@pytest_asyncio.fixture
+async def answers_api(tmp_path: Path, monkeypatch):
+    """A minimal desktop app over THIS test's root, for the answers route.
+
+    Not the shared ``test_app_client``: the property under test is how the route
+    maps a REFUSAL, and the refusal has to come from the runtime rather than from
+    a cold pool, so the pool is stubbed per test (``_install_ask_remote``).
+    """
+    for name in list(os.environ):
+        if name.startswith("CMUX_"):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "token")
+    app = FastAPI()
+    app.state.config_manager = ConfigManager(tmp_path)
+    app.include_router(desktop_sessions.router)
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": "Bearer token"},
+    ) as client:
+        yield client, app
+
+
+class _AskRemote:
+    """A viewer facade double for the queued-ask answer path.
+
+    ``refuse_with`` raises what the real wire raises: ``AttachedSession.ask_respond``
+    forwards the runtime's error frame, and ``attach_client._request`` re-raises it
+    as a plain ``RuntimeError`` (measured: ``RuntimeError("already answered by
+    desktop.")``). That class is the whole point of these cells — the route's first
+    revision caught only ``ValueError`` and let the shared ladder answer 503.
+    """
+
+    def __init__(self, *, refuse_with: str = "", detail: str = "answered") -> None:
+        self.refuse_with = refuse_with
+        self.detail = detail
+        self.calls: list[tuple[str, Any, bool]] = []
+        # The route reads ``remote.frontend_state.epoch`` on the GATE arm (the
+        # queued-ask arm skips the epoch check by design), so the double has to
+        # carry the attribute the real ``AttachedSession`` carries. Declared as
+        # an instance attribute rather than set ad hoc in the one gate test so
+        # the gate test's own override type-checks against the same name.
+        self.frontend_state: Any = SimpleNamespace(epoch="epoch-current")
+
+    async def ask_respond(self, ask_id: str, answers: Any = None, *, decline: bool = False) -> str:
+        self.calls.append((ask_id, answers, decline))
+        if self.refuse_with:
+            raise RuntimeError(self.refuse_with)
+        return self.detail
+
+
+@pytest.mark.asyncio
+async def test_a_queued_ask_answer_is_accepted_without_an_epoch(answers_api) -> None:
+    client, app = answers_api
+    remote = _AskRemote()
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-1", "answers": {"q0": ["yes"]}},
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["result"] == {"detail": "answered"}
+    assert remote.calls == [("a-1", {"q0": ["yes"]}, False)]
+
+
+@pytest.mark.asyncio
+async def test_a_declined_ask_answer_is_accepted(answers_api) -> None:
+    client, app = answers_api
+    remote = _AskRemote(detail="declined")
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers", json={"ask_id": "a-1", "decline": True}
+    )
+    assert result.status_code == 200, result.text
+    assert remote.calls == [("a-1", None, True)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        "already answered by desktop.",
+        "you already declined this.",
+        "that ask is not in this session's queue.",
+        "this ask expired 7 days ago — ask again if it is still needed.",
+    ],
+)
+async def test_a_refused_queued_ask_answer_answers_409_with_the_asks_own_sentence(
+    answers_api, refusal: str
+) -> None:
+    """QA round 1 Q1: these came back 503 ``runtime_unreachable`` — a reconnect
+    remedy that cannot work while the owner is fine and the ask is settled."""
+    client, app = answers_api
+    _install_ask_remote(app, _AskRemote(refuse_with=refusal))
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"ask_id": "a-1", "answers": {"q0": ["yes"]}},
+    )
+    assert result.status_code == 409, result.text
+    assert result.json()["detail"] == refusal
+
+
+@pytest.mark.asyncio
+async def test_a_queued_ask_body_without_answers_or_decline_is_a_422(answers_api) -> None:
+    """``decline: false`` is not a way to say "answer with nothing" — it is a
+    malformed body, and it must not reach the queue to be refused as a 409."""
+    client, app = answers_api
+    remote = _AskRemote()
+    _install_ask_remote(app, remote)
+    for body in (
+        {"ask_id": "a-1"},
+        {"ask_id": "a-1", "decline": False},
+        {"ask_id": "a-1", "answers": {}},
+    ):
+        result = await client.post("/v1/desktop/sessions/0123456789ab/answers", json=body)
+        assert result.status_code == 422, (body, result.text)
+    assert remote.calls == [], "a malformed body must not reach the runtime"
+
+
+@pytest.mark.asyncio
+async def test_the_gate_body_still_needs_its_epoch(answers_api) -> None:
+    """The queued-ask shape loosened nothing about the blocking one."""
+    client, app = answers_api
+    remote = _AskRemote()
+    remote.frontend_state = SimpleNamespace(epoch="e-new")
+    _install_ask_remote(app, remote)
+    result = await client.post(
+        "/v1/desktop/sessions/0123456789ab/answers",
+        json={"epoch": "e-old", "request_id": "r1", "approved": True},
+    )
+    assert result.status_code == 409
+    assert "earlier session owner" in result.json()["detail"]

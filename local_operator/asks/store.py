@@ -449,7 +449,7 @@ def ask_ids(events: Sequence[Mapping[str, Any]]) -> list[str]:
     return _asks_in_order(events)
 
 
-def pending_row(record: Mapping[str, Any]) -> dict[str, Any]:
+def pending_row(record: Mapping[str, Any], draft: Iterable[str] | None = None) -> dict[str, Any]:
     """One folded record as the wire's ``PendingAsk`` (design §4, frozen).
 
     Secret answers hold the KEY ONLY (``[<key>]``) because they are stored that
@@ -476,6 +476,17 @@ def pending_row(record: Mapping[str, Any]) -> dict[str, Any]:
     answered_at = record.get("answered_at")
     if answered_at:
         row["answered_at"] = int(answered_at)
+    drafted = sorted(str(qid) for qid in (draft or ()))
+    if drafted:
+        # THE LEGACY DRAFT (design §4, A2 addendum). The old single-slot client
+        # answers a queued ask ONE QUESTION AT A TIME, so between its taps the
+        # question already answered exists nowhere durable — the log is written
+        # atomically, on the last question. It is published BESIDE ``answers``
+        # rather than inside it on purpose: ``answers`` states what the log
+        # holds, and a client that rendered a draft as a settled answer would be
+        # showing an answer a runtime death would erase. Only the mirror needs
+        # it, and only to know which question to put on the card next.
+        row["draft_question_ids"] = drafted
     return row
 
 
@@ -613,6 +624,14 @@ def index_asks(config_dir: Path | str, *, now: int | None = None) -> list[dict[s
     """
     stamp = now if now is not None else now_ms()
     horizon_ms = LATE_WINDOW_S * _MILLIS
+    #: NO CROSS-SESSION CAP, deliberately (review round 1, NIT 9). The population
+    #: is (sessions with ask activity) × (rows the fold already caps at
+    #: ``PROJECTION_CAP``), and the reader is an on-demand HTTP route rather than
+    #: a per-frame path, so the honest bound today is "however many conversations
+    #: have questions waiting" — a number the user can see and act on. It WOULD
+    #: need one before it ever feeds a frame: if a surface starts polling this
+    #: into a push, add the cap here (newest first, open-first) rather than in
+    #: each caller.
     rows: list[dict[str, Any]] = []
     for session_id, entry in (read_index(config_dir, now=stamp) or {}).items():
         for ask in _entry_asks(entry):

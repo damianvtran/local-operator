@@ -8609,6 +8609,65 @@ class Session:
             )
         return queue.respond(ask_id, merged, by=by)
 
+    def answer_ask_question(
+        self,
+        ask_id: str,
+        question_id: str,
+        values: "Sequence[str]",
+        *,
+        by: str = "unknown",
+    ) -> dict[str, Any]:
+        """THE LEGACY INCREMENTAL ANSWER (design §4, A2 addendum).
+
+        The mirror exists for clients that can only answer ONE question at a
+        time — today's single-slot card, whose flow advanced question by question
+        because the blocking gate held one future per question. The NEW ops
+        (``ask_respond``) are atomic per ask and refuse a partial map, which is
+        right for a client that can hold the whole ask. This method is the bridge:
+        it merges one cell into the queue's in-flight draft and lets
+        :meth:`AskQueue.answer_one` settle the ask in one atomic write once every
+        question has an entry.
+
+        The SECRET hop is the same one and in the same order as
+        :meth:`respond_ask`, per question rather than per ask: the value reaches
+        the session's memory-only store and the draft carries the KEY NAME, so a
+        partial never puts a value anywhere durable.
+        """
+        queue = self.ask_queue()
+        if queue is None:
+            return {"ok": False, "error": "this session's runtime predates queued asks"}
+        record = queue.find(ask_id)
+        if record is None:
+            return {"ok": False, "error": _ask_refusal_copy(None)}
+        refusal = _ask_refusal_copy(record)
+        if refusal:
+            return {"ok": False, "error": refusal}
+        key = str(question_id)
+        question = next(
+            (item for item in (record.get("questions") or ()) if str(item.get("id") or "") == key),
+            None,
+        )
+        if question is None:
+            refusals = ", ".join(
+                f"{str(item.get('id') or '')!r}" for item in (record.get("questions") or ())
+            )
+            return {
+                "ok": False,
+                "error": f"{key!r} is not a question on ask {ask_id}; it asks {refusals}.",
+            }
+        cell = [str(item) for item in (values or ())]
+        if question.get("secret") and cell:
+            from local_operator.asks.render import apply_secret_answers
+
+            substituted = apply_secret_answers(
+                [question],
+                {key: cell},
+                variables=self._variables,
+                journal_credential=self.journal_credential_change,
+            )
+            cell = [str(item) for item in substituted.get(key, ())]
+        return queue.answer_one(ask_id, key, cell, by=by)
+
     def decline_ask(self, ask_id: str, *, by: str = "unknown") -> dict[str, Any]:
         """Decline a queued ask — today's Esc, made explicit (design D5)."""
         queue = self.ask_queue()
