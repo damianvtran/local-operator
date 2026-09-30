@@ -152,6 +152,17 @@ def test_default_set_drops_monitor_without_scheduler() -> None:
     assert names == [name for name in DEFAULT_TOOL_NAMES if name != "monitor"]
 
 
+def test_default_set_drops_sessions_without_a_launcher() -> None:
+    # createIf rung 3 for the sessions tool: no delegation surface -> no tool.
+    # The same predicate ``task`` gates on, so BOTH leave together — pinned as
+    # the exact delta so a later gate change cannot quietly widen or narrow it
+    # (design sessions-tool.md §3.3).
+    tools = create_tools(_engine_context(subagent_launcher=None))
+    names = [tool.name for tool in tools]
+    assert "sessions" not in names
+    assert names == [name for name in DEFAULT_TOOL_NAMES if name not in {"task", "sessions"}]
+
+
 def test_default_set_drops_ask_without_a_host_that_can_answer_it() -> None:
     """The mirror of the wake case, and the one that keeps SUBAGENTS out: a child
     session inherits ``has_ui`` from its parent and is built with no ask handler,
