@@ -188,7 +188,10 @@ def _state() -> tuple[FakeSession, _Job]:
         context_window=160_000,
     )
     session = _Session()
-    session.jobs = _Jobs([designer, coder])
+    # A duck manager, not ``_FakeJobs``: this script needs rows with the
+    # pin-integrity attributes the panel reads through ``getattr``, which the
+    # fixture's derived rows do not carry.
+    session.jobs = _Jobs([designer, coder])  # type: ignore[assignment]
     return session, designer
 
 
@@ -272,6 +275,14 @@ async def main(out: str, size: tuple[int, int], *, notice: bool, dock: bool) -> 
             panel._stop_spinner()
             panel._spinner_index = 0
             panel._paint_all(reread_stats=False)
+        view = getattr(app, "_subagent_view", None)
+        if view is not None:
+            # The PAGE TITLE has its own spinner tick, separate from the dock's
+            # (pinned above); unpinned, a before/after pair differs by one
+            # animation frame in the title glyph — noise the pair cannot afford.
+            view._stop_spinner()
+            view._spinner_index = 0
+            view._paint_chrome()
         await pilot.pause()
         save_capture(app, out)
 
