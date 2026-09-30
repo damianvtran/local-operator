@@ -69,6 +69,10 @@ class _GatedSession(FakeSession):
         #: hedged resample), so a test that wants a wrapped FIRST sample spells
         #: the second reply out — see the cascade tests at the end of the file.
         self.title_replies: list[str] = []
+        #: The owner-only fit-check seam the app reads per attempt. ``None``
+        #: (the default) is "no classifier", which the cascade answers by
+        #: hedging; a test that pins the classifier path sets a callable here.
+        self.title_fit_check: naming.TitleFitCheck | None = None
         self.name_gate: asyncio.Event | None = None
         # The two "this worker got here" barriers. `_settle` yields for a fixed
         # number of ticks, which is a guess about the scheduler rather than a
