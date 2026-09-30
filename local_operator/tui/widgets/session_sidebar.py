@@ -32,6 +32,7 @@ from local_operator.resume import (
 from local_operator.session.preview import AGENT_OPENED_MARK, opener_role
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import BLURRED_SPINNER_INTERVAL_S, animation_focused
+from local_operator.tui.composer_focus import composer_may_take_focus, focus_is_claimed
 from local_operator.tui.session_catalog import CatalogEntry, rank_entries
 from local_operator.tui.terminal_title import SPINNER_FRAMES
 from local_operator.tui.widgets.session_picker import (
@@ -313,42 +314,63 @@ _PEER_HEADER_PREFIX = "peer:"
 
 
 class SessionSidebar(Widget, can_focus=True):
-    #: A pointer press on this list acts on the row under the pointer and nothing
-    #: else: it does NOT move the keyboard (design round, D1).
+    #: A pointer press on this list moves the keyboard to it — a row, the pin
+    #: cell and the panel's dead space alike — and the list wears the shipped
+    #: focus ground. Two rules bound that, both from the issue #1357 decision
+    #: (`### lopdev — design decision: click-to-focus`, recorded on the issue):
     #:
-    #: With Textual's default (``True``) the click-to-focus walk lands on this
-    #: widget (``Screen._forward_event`` -> ``get_focusable_widget_at``,
-    #: ``screen.py:1933-1939``, consulting ``Widget.focus_on_click``) and the
-    #: keyboard LEAVES the composer. Measured on the design round's frames at
-    #: 120x40: a click anywhere in the panel — a row and the dead space below the
-    #: list alike — dimmed the composer's chevron, took the caret, and then
-    #: swallowed everything typed next (four typed keys, a 0-cell frame delta,
-    #: the draft untouched). The user cannot even tell that state apart from
-    #: "nothing holds the keys", and nothing on the frame says typing is going
-    #: nowhere. The gesture is complete when the click lands — it attached a
-    #: session or it missed — and this list has no text input, so it has nothing
-    #: to do with the keys afterwards.
+    #: * the press is refused while a hard claimant holds the keyboard — a live
+    #:   approval or ask, the aside, a full-page mode or pushed screen, a
+    #:   read-only composer. Those surfaces need the keys they hold, so a press
+    #:   may act on the row but must not take them (G7); the guard lives in
+    #:   :meth:`focus_on_click`, which Textual's click-to-focus walk consults
+    #:   before any handler here runs;
+    #: * in the narrow drawer placement a row press CLOSES the panel and the
+    #:   keyboard goes back to the composer (G8/T1n), so a closed panel is never
+    #:   left holding the keyboard — a hidden widget owning it is the "typed
+    #:   input going nowhere" state arriving by another route.
     #:
-    #: ``can_focus`` deliberately stays ``True``: the list keeps its keyboard
-    #: mode and its arrows/``enter``/cursor tint unchanged, entered only on
-    #: purpose (``f9``, or ``/sidebar focus`` — its own footer names the key) and
-    #: left with Esc or ``f9`` again. The app already behaves this way in the one
-    #: click path that DOES act: clicking the attached session's own row focuses
-    #: the editor itself (:meth:`OperatorApp.on_session_sidebar_selected`), so
-    #: this only makes the rest of the panel agree with it.
+    #: What makes the press safe is no longer "the list never gets the
+    #: keyboard". The composer-focus change forbade the press for a real reason
+    #: — the walk left the keyboard on a widget with no text input, and every
+    #: typed key went nowhere (measured then at 120x40: four typed keys, a
+    #: 0-cell frame delta, the draft untouched) — but by the time this was
+    #: decided the list ALREADY had a keyboard mode (`f9`, `/sidebar focus`)
+    #: and text typed into it was already swallowed (measured: `f9` then `A`
+    #: left `editor.text` empty, with the keys still on the list). The safety
+    #: property therefore moved to the widget: :meth:`on_key` and
+    #: :meth:`on_paste` hand the first printable character (or paste) to the
+    #: composer, and the composer takes the keyboard back — **however the
+    #: list's keyboard mode was entered** (press, `f9`, `/sidebar focus`). The
+    #: list can never swallow text.
     #:
-    #: Accepted trade-off, stated so it is not discovered later: with the click no
-    #: longer changing the composer's state, ``enter`` right after a row click
-    #: still means "send the draft" (``editor.py`` ``_submit``) rather than "open
-    #: the row". A frame that did not visibly change is the price; the alternative
-    #: was text that vanished with no frame change at all.
-    #:
-    #: Do NOT pair this with forwarding printable keys from ``on_key`` to the
-    #: composer (the mechanism the UX diagnosis floated): under this rule the list
-    #: is only ever entered deliberately, so there is nothing to repair, and the
-    #: forwarding would contradict itself the day the list grows the filter field
-    #: a click on it implies.
-    FOCUS_ON_CLICK = False
+    #: ``can_focus`` stays ``True`` and the list keeps its arrows/``enter``/
+    #: cursor tint unchanged; `escape`/`f9` still leave the mode. The one
+    #: shipped behaviour this decision changes is called out on its PR: pressing
+    #: the already-attached session's row keeps the keyboard on the list rather
+    #: than returning it to the composer — every row press behaves alike — and
+    #: typing-home makes the cost brief, because the first keystroke is typed
+    #: rather than discarded.
+    FOCUS_ON_CLICK = True
+
+    def focus_on_click(self) -> bool:
+        """Textual's click-to-focus walk for this widget, gated by the claims.
+
+        ``Screen._forward_event`` consults this on every ``MouseDown`` before
+        any handler here runs, and focuses the widget when it answers ``True``.
+        The base answer is :data:`FOCUS_ON_CLICK`; the addition is the ONE
+        hard-claim predicate (``composer_focus.focus_is_claimed``), so a press
+        on the list can never take the keyboard from a live approval/ask, the
+        aside, a pushed screen, a full-page mode or a read-only composer
+        (issue #1357 decision, G7). The press itself still acts on the row;
+        only the keyboard does not move.
+
+        Soft on the other side, deliberately: this gate protects claims that
+        need their keys, not a claim on who presses where. The list's own claim
+        in ``_focus_is_claimed`` stays SOFT (design round D2), which is what
+        lets the composer's own chrome take the keyboard back from it.
+        """
+        return super().focus_on_click() and not focus_is_claimed(self.app)
 
     #: Textual re-renders a widget on every pointer move to look for link
     #: spans (``Widget.watch_hover_style``, whose own comment notes it fires
@@ -1743,6 +1765,100 @@ class SessionSidebar(Widget, can_focus=True):
         if self._deferred is not None:
             deferred, self._deferred = self._deferred, None
             self.set_entries(deferred)
+        event.stop()
+
+    @classmethod
+    def _bound_keys(cls) -> frozenset[str]:
+        """The keys this widget answers itself — never candidates for typing-home.
+
+        Read at call time from ``_merged_bindings`` rather than derived in the
+        class body, for the reason ``TranscriptView._bound_keys`` records:
+        ``DOMNode.__init_subclass__`` assigns that map AFTER the body runs, so
+        a body-time read would see the parent's map.
+        """
+        merged = cls._merged_bindings
+        return frozenset() if merged is None else frozenset(merged.key_to_bindings)
+
+    def on_key(self, event: events.Key) -> None:
+        """TYPING-HOME: text pressed on the list is typed, not swallowed.
+
+        Issue #1357 decision, T12/G1 (the `### lopdev — design decision:
+        click-to-focus` comment on the issue): the list's keyboard mode —
+        entered by a press, by `f9` or by `/sidebar focus` — is for this
+        widget's OWN bindings (arrows, enter, escape, ctrl+a/ctrl+o). Any
+        printable character it does not bind is handed to the composer, which
+        takes the keyboard back, so "typed input going nowhere" cannot happen
+        while the list owns the keys. Measured on main before this existed:
+        `f9` then `A` left `editor.text == ""` with focus still on the list —
+        the failure mode the old `FOCUS_ON_CLICK = False` rule was written to
+        stop, reachable all along on the deliberate path (F3).
+
+        A FRESH ``Key`` is posted to the editor rather than the original, and
+        the editor is focused first, matching ``TranscriptView.on_key``: this
+        event is already part-way through Textual's dispatch, and the
+        composer's own ``_on_key`` must see a key that behaves exactly as if
+        the composer had held focus all along (draft, caret, shell mode and
+        the live-answer hold all live there — the decision forbids a parallel
+        text path).
+
+        Keys this widget binds itself are excluded via :meth:`_bound_keys`, so
+        a future printable binding (a filter field, say) is not shadowed by
+        this handler; ctrl+a and ctrl+o are two of them, which is also why
+        they can never be mistaken for text (G9). ``event.is_printable``
+        admits a printable character only — every control key and every arrow
+        stays with this widget's own bindings.
+
+        Refusal mirrors the guard the composer's own routes use: while the
+        composer is read-only or a hard claimant holds the keyboard, the key
+        is left UNSTOPPED so whatever owns it still receives it — a key is
+        not ours to take (``composer_focus.composer_may_take_focus``).
+        """
+        if event.key in self._bound_keys() or not event.is_printable:
+            return
+        from local_operator.tui.widgets.editor import Editor
+
+        try:
+            editor = self.app.query_one(Editor)
+        except Exception:  # noqa: BLE001 — a harness that hosts a list and no composer
+            return
+        if not composer_may_take_focus(self.app, editor):
+            return
+        editor.focus()
+        editor.post_message(events.Key(event.key, event.character))
+        event.stop()
+        event.prevent_default()
+
+    def on_paste(self, event: events.Paste) -> None:
+        """TYPING-HOME for a paste: it is delivered to the composer, never dropped.
+
+        The same rule as :meth:`on_key` (issue #1357 decision, T12/G1). A
+        bracketed paste arrives as ONE event rather than as keystrokes, and
+        with the list owning the keyboard it must not vanish with nothing on
+        the frame to say it did: the composer takes the keyboard and receives
+        a fresh ``Paste``, so its own ``_on_paste`` (credential capture, image
+        attachment, collapse) and ``TextArea``'s insert run exactly as if the
+        composer had held focus. A paste has no bindings of its own, so the
+        only refusal is the same claimed/read-only guard the key path uses.
+        """
+        from local_operator.tui.widgets.editor import Editor
+
+        try:
+            editor = self.app.query_one(Editor)
+        except Exception:  # noqa: BLE001 — a harness that hosts a list and no composer
+            return
+        if not composer_may_take_focus(self.app, editor):
+            return
+        editor.focus()
+        paste = events.Paste(event.text)
+        # Stopped BEFORE it is posted, and that is load-bearing: ``Paste``
+        # bubbles, the bubble reaches ``App.on_event``, and its Paste route
+        # re-forwards anything not already marked forwarded to
+        # ``self.focused`` — the editor we just focused — so the payload would
+        # land twice (measured: "pasted textpasted text"). Pre-stopping keeps
+        # the delivery to the ONE handler chain a focused composer runs
+        # (``Editor._on_paste`` plus ``TextArea``'s insert).
+        paste.stop()
+        editor.post_message(paste)
         event.stop()
 
     def _describe(self, entry: CatalogEntry | None) -> str | None:

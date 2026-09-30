@@ -713,10 +713,10 @@ async def test_sidebar_escape_restores_settings_and_current_narrow_selection_clo
         await pilot.pause()
         settings_focus = app.focused
         assert settings_focus is not None and settings_focus is not app._editor()
-        # Entered the list the way its own footer names (f9), not by clicking it:
-        # a pointer press on the list no longer moves the keyboard (design round
-        # D1, `SessionSidebar.FOCUS_ON_CLICK = False`), so a click could not put
-        # the sidebar in the state this test is about any more.
+        # Entered the list the way its own footer names (f9). The premise is the
+        # keyboard route, not the pointer: a press also enters this state now
+        # (issue #1357 click-to-focus), but this test's subject is the f9 entry
+        # whose Escape must restore the surface the list replaced.
         app.action_focus_sidebar()
         await pilot.pause()
         assert app._session_sidebar.has_focus, "premise: f9 focused the list"

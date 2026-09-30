@@ -10290,9 +10290,25 @@ class OperatorApp(App[None]):
             # downstream will clear the intent published for it. Drop it here
             # or the next burst would step from an id no switch is pursuing.
             self._sidebar_navigation.intend("")
-            if self.query_one("#session-workspace").has_class("sidebar-overlay"):
+            overlay = self.query_one("#session-workspace").has_class("sidebar-overlay")
+            if overlay:
+                # T1n (issue #1357 decision): in the drawer placement a valid
+                # selection CLOSES the panel and the keyboard goes back to the
+                # composer — through the guarded route, so the close never
+                # takes the keys off a live claimant on the way out (G7). The
+                # unguarded `self._editor().focus()` this replaces is the F4
+                # defect: a press on the attached session's row stole the
+                # keyboard from a live approval.
                 self._set_sidebar_open(False)
-            self._editor().focus()
+                self._return_focus_to_composer()
+            elif not self._focus_is_claimed():
+                # T1: a docked press keeps the keyboard on the list. The PRESS
+                # is what focused it (`SessionSidebar.focus_on_click`), and no
+                # handler may take it back — the shipped behaviour this
+                # decision changes, called out on its PR. Guarded so a live
+                # claimant keeps its keys (F4/G7: this branch used to call
+                # `self._editor().focus()` and steal a live approval's keys).
+                self._session_sidebar.focus()
             return
         self._select_sidebar_session(message.session_id)
 
