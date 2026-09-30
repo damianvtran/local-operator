@@ -63,9 +63,9 @@ from local_operator.projects import (
     ProjectRegistryLockTimeout,
     ProjectSchemaGuardError,
     build_project_view,
-    stale_after_s,
     readable_error,
     scan_runtime_states,
+    stale_after_s,
 )
 from local_operator.server.models.desktop_projects import (
     STATUS_RANK,
@@ -262,9 +262,9 @@ def detail_payload(config_dir: Path, key: str) -> dict[str, Any]:
         raise _not_found(registry, key)
     view = build_project_view(found, config_dir=registry.config_dir)
     return {
-        "project": project_view(
-            found, window=stale_after_s(registry.config_dir)
-        ).model_dump(mode="json"),
+        "project": project_view(found, window=stale_after_s(registry.config_dir)).model_dump(
+            mode="json"
+        ),
         "links": [linked_session_view(row).model_dump(mode="json") for row in view["sessions"]],
     }
 
@@ -364,9 +364,9 @@ def milestone_payload(config_dir: Path, key: str, body: dict[str, Any]) -> dict[
         raise _refusal(exc) from exc
     return {
         "ok": True,
-        "project": project_view(
-            project, window=stale_after_s(registry.config_dir)
-        ).model_dump(mode="json"),
+        "project": project_view(project, window=stale_after_s(registry.config_dir)).model_dump(
+            mode="json"
+        ),
     }
 
 
@@ -382,9 +382,9 @@ def milestone_remove_payload(config_dir: Path, key: str, name: str) -> dict[str,
         raise _refusal(exc) from exc
     return {
         "ok": True,
-        "project": project_view(
-            project, window=stale_after_s(registry.config_dir)
-        ).model_dump(mode="json"),
+        "project": project_view(project, window=stale_after_s(registry.config_dir)).model_dump(
+            mode="json"
+        ),
     }
 
 

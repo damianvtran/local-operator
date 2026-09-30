@@ -55,9 +55,10 @@ every arm is fail-closed:
    engaged runtime is what runs it.
 
 **Dedupe and bounds live in one place.** One wake per *condition instance*,
-identified by ``(source, key, fingerprint)`` — the fingerprint is the same
-``(id, status, int(progress_updated_at))`` shape the project completion check
-already latches on, so "what counts as a new episode" cannot mean two things.
+identified by ``(source, key, fingerprint)`` — the fingerprint's leading
+``(id, status, int(progress_updated_at))`` shape is the project completion
+check's own latch minus its refresh-assertion element, so "what counts as a
+new episode" cannot mean two things.
 A per-target rolling-24 h budget and a minimum gap between check-ins bound the
 wakes (``state.json``); instances blocked by a bound stay candidates and fire
 when it clears — they are never marked notified until a record is written.

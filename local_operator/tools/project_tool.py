@@ -56,11 +56,11 @@ from local_operator.projects import (
     milestone_status,
     progress_date_text,
     progress_is_stale,
-    stale_after_s,
     readable_error,
     refreshed_age_text,
     refreshed_note,
     reported_age,
+    stale_after_s,
     truncate_row,
 )
 from local_operator.tools.builtin import (
@@ -119,11 +119,10 @@ class ProjectParams(BaseModel):
     progress: str | None = Field(
         default=None,
         description=(
-            "update: one dated line (markdown text), not a transcript; every NEW "
-            "line is appended to the history and moves the freshness clock. "
-            "Re-sending the identical line records a refresh (a check) WITHOUT "
-            "moving that clock; prefer op='refresh' for that. A line that only "
-            "looks similar is a new line — it appends."
+            "update: one dated line (markdown text), not a transcript; a NEW "
+            "line appends and moves the freshness clock. An identical re-send "
+            "records a refresh that keeps the clock (prefer op='refresh'); a "
+            "near-identical line is NEW — it appends."
         ),
     )
     tags: list[str] | None = Field(
@@ -764,9 +763,30 @@ async def _op_link(
     # FILED moves it between lists, and a receipt that said "linked" would
     # hide the one act a reader must know about (its liveness role changed).
     was_filed = session_id in project.coordination_sessions
+    # SELF-FILING (P1's write policy at the link surface): when the CHIEF OF
+    # STAFF links HERSELF, the link is provenance, not work — the create-time
+    # auto-link's role decision, applied here so a self-link can never quietly
+    # flip her from filed to working. Two edges, both deliberate:
+    #  - `session_id not in project.sessions` keeps an EXISTING work link
+    #    untouched (a self-link on a row she genuinely works on is a no-op,
+    #    never a demotion);
+    #  - the check reads TARGET == CALLER, so an explicit `link` naming her id
+    #    from ANOTHER session still lands as work — the "a wrong demotion is
+    #    one op='link' from restored" repair path (ruling §2.3).
+    self_filing = False
+    if (
+        linking
+        and session_id == _calling_session_id(context)
+        and session_id not in project.sessions
+    ):
+        from local_operator.aida.state import is_aida_session
+
+        self_filing = is_aida_session(registry.config_dir, session_id)
     try:
         if linking:
-            project, changed = registry.link_session(project.id, session_id)
+            project, changed = registry.link_session(
+                project.id, session_id, role="coordination" if self_filing else "work"
+            )
         else:
             project, changed = registry.unlink_session(project.id, session_id)
     except ProjectRegistryLockTimeout as exc:
@@ -778,6 +798,20 @@ async def _op_link(
     working = f"{len(project.sessions)} working"
     if project.coordination_sessions:
         working += f" + {len(project.coordination_sessions)} filed"
+    if linking and self_filing:
+        if changed:
+            return _text(
+                tool_call_id,
+                "project",
+                f"filed session {session_id} on {project.name!r} — a coordination link, "
+                "not a working session.",
+            )
+        return _text(
+            tool_call_id,
+            "project",
+            f"session {session_id} is already filed on {project.name!r} — a coordination "
+            "link, not a working session.",
+        )
     if linking and not changed:
         return _text(
             tool_call_id,
@@ -903,12 +937,11 @@ def build_project_tool(context: ToolContext) -> AgentTool | None:
         name="project",
         label="Projects",
         description=(
-            "Track multi-session workstreams: create a project (auto-linked to this "
-            "session — filed as coordination rather than a working link when the caller "
-            "is the chief of staff), report honest progress (op='refresh' when you "
-            "checked and nothing moved; re-sending the identical line refreshes too), "
-            "link sessions, set dates/estimate/milestones, read the aggregated view. "
-            "Read guide://projects first."
+            "Track multi-session workstreams: create a project (auto-linked; "
+            "filed as coordination when the caller is the chief of staff), "
+            "report honest progress (op='refresh' when you checked and nothing "
+            "moved), link sessions, set dates/estimate/milestones, read the "
+            "aggregated view. Read guide://projects first."
         ),
         parameters=ProjectParams.model_json_schema(),
         approval_tier="read",

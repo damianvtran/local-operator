@@ -177,6 +177,43 @@ async def test_link_and_unlink_receipts_name_the_link_set(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_link_files_a_chief_of_staff_session(tmp_path: Path) -> None:
+    """The create-time role decision at the slash link surface (agent review r1,
+    F3): `/project link` from her session FILES — it can never silently flip her
+    to a working link — and a re-link names the role rather than claiming a
+    working link. Unlink still reaches the filed list."""
+    from local_operator.aida.state import write_state
+
+    write_state(tmp_path, {"session_id": SESSION_ID})
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await _boot(pilot, app)
+        app._run_slash_command("/project link alpha")
+        await pilot.pause()
+        assert _notices(app)[-1] == (
+            f"filed session {SESSION_ID} on 'alpha' — a coordination link, not a working session."
+        )
+        project = session.project_registry.get_project_by_name("alpha")
+        assert project is not None
+        assert project.sessions == [] and project.coordination_sessions == [SESSION_ID]
+
+        app._run_slash_command("/project link alpha")
+        await pilot.pause()
+        assert _notices(app)[-1] == (
+            f"session {SESSION_ID} is already filed on 'alpha' — a coordination link, "
+            "not a working session."
+        )
+        app._run_slash_command("/project unlink alpha")
+        await pilot.pause()
+        assert _notices(app)[-1] == (f"unlinked session {SESSION_ID} from 'alpha' (0 working now).")
+        project = session.project_registry.get_project_by_name("alpha")
+        assert project is not None
+        assert project.sessions == [] and project.coordination_sessions == []
+
+
+@pytest.mark.asyncio
 async def test_delete_needs_the_typed_yes(tmp_path: Path) -> None:
     """``_cmd_delete``'s two-step shape: rehearsal first, ``yes`` removes."""
     session = _ProjectSession()

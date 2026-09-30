@@ -485,6 +485,42 @@ async def test_the_history_shows_a_tail_and_attach_stores_files(
 
 
 @pytest.mark.asyncio
+async def test_history_collapses_adjacent_identical_normalized_entries(context, registry) -> None:
+    """Display-only collapse (ruling §4.4, agent review r1 F2): a legacy run of
+    adjacent identical-NORMALIZED entries renders as its NEWEST row plus
+    "(re-sent N×)" — the stored log is never rewritten — while a near-identical
+    neighbour stays its own row (the refresh rule's false-positive argument)."""
+    await call(context, op="create", name="alpha")
+    project = registry.get_project_by_name("alpha")
+    assert project is not None
+    path = registry.projects_dir / f"{project.id}.json"
+    payload = json.loads(path.read_text())
+    # A run an older build could have left: whitespace-only differences
+    # normalize equal; the near-identical suffix variant must stay separate.
+    payload["updates"] = [
+        {"at": "2026-09-30T01:00:00Z", "text": "checked: still true", "by": SESSION},
+        {"at": "2026-09-30T02:00:00Z", "text": "checked:  still   true", "by": SESSION},
+        {"at": "2026-09-30T03:00:00Z", "text": "checked: still true", "by": SESSION},
+        {"at": "2026-09-30T04:00:00Z", "text": "checked: still true too", "by": SESSION},
+    ]
+    path.write_text(json.dumps(payload))
+    # The registry's snapshot reloads on the directory mtime or the interval;
+    # this edit moves neither, so force the bounded re-read the flag surfaces
+    # use (``refresh``) before the show reads the rewritten row.
+    registry.refresh()
+
+    shown = await call(context, op="show", name="alpha")
+    assert "history (4, latest 2 shown):" in shown
+    # The NEWEST copy of the run survives; the elided copies' stamps are gone.
+    assert f"  - 2026-09-30T03:00:00Z by {SESSION}: checked: still true (re-sent 3×)" in shown
+    assert "2026-09-30T01:00:00Z" not in shown and "2026-09-30T02:00:00Z" not in shown
+    assert f"  - 2026-09-30T04:00:00Z by {SESSION}: checked: still true too" in shown
+    # Display-only: the stored log keeps all four entries.
+    kept = registry.get_project_by_name("alpha")
+    assert kept is not None and len(kept.updates) == 4
+
+
+@pytest.mark.asyncio
 async def test_attach_refusals_surface_the_stores_sentence(context, tmp_path) -> None:
     await call(context, op="create", name="alpha")
     shot = tmp_path / "s.png"
@@ -613,6 +649,54 @@ async def test_create_files_a_chief_of_staff_session_instead_of_joining_it(
     shown = await call(context, op="show", name="filed-for-a-worker")
     assert "working sessions (0/64):" not in shown  # an empty section is not painted
     assert f"filed by (1):\n  - {SESSION} [filed]" in shown
+
+
+@pytest.mark.asyncio
+async def test_a_chief_of_staff_self_link_files_and_never_re_kinds_a_link(
+    registry: ProjectRegistry, context: ToolContext, tmp_path: Path
+) -> None:
+    """The create-time role decision, applied at the LINK surface (agent review
+    r1, F3): her self-link is provenance — it can neither silently flip her
+    filed→working nor demote a work link she already holds. An explicit link
+    naming her id from ANOTHER session still lands as work: the "a wrong
+    demotion is one op='link' from restored" repair path (ruling §2.3)."""
+    from local_operator.aida.state import write_state
+
+    write_state(tmp_path, {"session_id": SESSION})
+    worker = ToolContext(cwd=".", session_id="abcdef012345", project_registry=registry)
+
+    await call(worker, op="create", name="plain")
+    # A fresh self-link FILES: she filed it, she does not work it.
+    body = await call(context, op="link", name="plain")
+    assert "filed session" in body and "not a working session" in body
+    project = registry.get_project_by_name("plain")
+    assert project is not None
+    assert project.sessions == ["abcdef012345"] and project.coordination_sessions == [SESSION]
+
+    # A re-link is a no-op that still names the ROLE — never "linked ... as a
+    # working session".
+    again = await call(context, op="link", name="plain")
+    assert "already filed" in again and "not a working session" in again
+
+    # A work link she already holds survives a self-link untouched (the other
+    # silent re-kind is refused too).
+    registry.link_session(project.id, SESSION, role="work")
+    untouched = await call(context, op="link", name="plain")
+    assert "already linked" in untouched and "as a working session" in untouched
+    settled = registry.get_project_by_name("plain")
+    assert settled is not None and settled.sessions == ["abcdef012345", SESSION]
+
+    # The repair path: another session explicitly naming her id lands as WORK —
+    # and the receipt NAMES the re-kind it performed.
+    await call(worker, op="create", name="repair")
+    await call(context, op="link", name="repair")
+    repaired = await call(worker, op="link", name="repair", session_id=SESSION)
+    assert repaired == (
+        f"moved session {SESSION} from filed to working links on 'repair' (2 working now)."
+    )
+    row = registry.get_project_by_name("repair")
+    assert row is not None
+    assert row.sessions == ["abcdef012345", SESSION] and row.coordination_sessions == []
 
 
 @pytest.mark.asyncio

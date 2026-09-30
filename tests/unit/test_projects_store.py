@@ -1273,7 +1273,6 @@ def test_a_row_with_an_unknown_status_loads_with_a_warning(store, caplog) -> Non
 # cosmetic.
 from local_operator.projects import (  # noqa: E402
     SESSIONS_MAX,
-    stale_after_s,
     refreshed_age_text,
     refreshed_note,
     stale_projects_fingerprint,
