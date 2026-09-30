@@ -638,6 +638,35 @@ def order_key_of(
     return entry_for(row, attention).rank
 
 
+def status_and_order_keys(
+    row: SessionRow, attention: Mapping[str, Any] | None
+) -> tuple[tuple[str, str], tuple[int, int, float, str]]:
+    """The TWO channel keys ONE ``entry_for`` build derives — dedupe pair first, placement second.
+
+    The desktop feed asks for both keys for every candidate it primes or
+    diffs: the dedupe pair (:func:`status_dedupe_key`) decides whether a
+    ``session_status`` frame is owed, and the order key (:func:`order_key_of`)
+    decides whether a catalogue invalidation is owed. Each of those helpers
+    builds the entry, so asking them separately built it TWICE per candidate —
+    measured 16,394 ``entry_for`` calls for 8,197 rows on a 15,441-directory
+    store, plus the counted-delegation recompute inside each build. This is
+    the same two derivations from a single construction, so the pair cannot
+    drift from the order key: both read the one :func:`entry_for` this module
+    treats as the only construction site, and the feed's published pair still
+    comes from :func:`status_of` (never restated here).
+
+    The dedupe pair carries the age-cleared spelling for a row that HAS an
+    age — the wedged label's live clock is the only reader of the heartbeat
+    term, and :func:`status_dedupe_key` documents why the pair the channel
+    dedupes on must ignore it. A row without an age is the common case, and
+    for it the dedupe pair is the entry's own pair.
+    """
+    entry = entry_for(row, attention)
+    if row.heartbeat_age_s is None:
+        return (entry.status_code, entry.status), entry.rank
+    return status_of(row._replace(heartbeat_age_s=None), attention), entry.rank
+
+
 def status_of(row: SessionRow, attention: Mapping[str, Any] | None) -> tuple[str, str]:
     """``(status_code, status)`` for one row — the transport spelling and the label.
 

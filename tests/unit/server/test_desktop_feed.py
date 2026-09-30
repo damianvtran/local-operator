@@ -2001,6 +2001,116 @@ def test_a_quiet_tick_costs_four_stats_and_no_record_reads(tmp_path):
     asyncio.run(feed.close())
 
 
+def test_a_second_probe_primes_no_markers(tmp_path, monkeypatch):
+    """An unchanged name set must not re-ask the user-session question OR
+    rebuild the cache wholesale — that pair is the whole 1 Hz saving.
+
+    The marker read is what fills ``_user_cache``, and the rebuild is the dict
+    comprehension that re-seats it; on a steady store a second probe pays the
+    readdir and nothing else. Both halves are pinned here — the judged list for
+    the reads, and the cache's own identity for the rebuild — while a directory
+    that APPEARS is still judged exactly once and still moves the token.
+    """
+    root = tmp_path
+    _session(root, "b1" * 6)
+    _session(root, "b2" * 6)
+    feed = _feed(root)
+    feed._take_baseline()
+
+    judged: list[str] = []
+    original = DesktopFeed._is_user_session
+
+    def counted(self: DesktopFeed, identity: str) -> bool:
+        judged.append(identity)
+        return original(self, identity)
+
+    monkeypatch.setattr(DesktopFeed, "_is_user_session", counted)
+
+    primed = feed._user_cache
+    token, names = feed._catalogue_probe()
+    assert names == ("b1b1b1b1b1b1", "b2b2b2b2b2b2")
+    assert judged == [], "an unchanged set re-read a marker"
+    assert feed._user_cache is primed, "an unchanged set was rebuilt wholesale"
+    assert feed._user_cache == {"b1b1b1b1b1b1": True, "b2b2b2b2b2b2": True}
+
+    _session(root, "b3" * 6)
+    token_after, names_after = feed._catalogue_probe()
+    assert judged == ["b3b3b3b3b3b3"], "the new directory was not judged exactly once"
+    assert feed._user_cache is not primed, "a moved set was not rebuilt"
+    assert token_after != token
+    assert names_after == ("b1b1b1b1b1b1", "b2b2b2b2b2b2", "b3b3b3b3b3b3")
+
+
+def test_the_probe_token_moves_on_a_delete_and_a_pin(tmp_path):
+    """The two membership causes a create does not cover.
+
+    A create is pinned by ``test_a_new_session_directory_publishes_a_catalogue_
+    invalidation``; this is the other direction of membership (a directory
+    removed from the store) and the cross-surface term (a pin written by the
+    TUI), each of which must move the token or the desktop app keeps a stale
+    list until its 30 s safety poll.
+    """
+    from local_operator.tui.sidebar_pins import set_pin
+
+    root = tmp_path
+    _session(root, "c1" * 6)
+    feed = _feed(root)
+    token, names = feed._catalogue_probe()
+    assert names == ("c1c1c1c1c1c1",)
+
+    (root / "sessions" / ("c1" * 6)).rmdir()
+    token_after_delete, names = feed._catalogue_probe()
+    assert names == ()
+    assert token_after_delete != token
+
+    _session(root, "c2" * 6)
+    token_before_pin, _ = feed._catalogue_probe()
+    set_pin(root, "c2" * 6, True)
+    token_after_pin, _ = feed._catalogue_probe()
+    assert token_after_pin != token_before_pin
+
+
+def test_the_baseline_prime_agrees_with_the_derived_keys(tmp_path):
+    """The prime's maps hold exactly what the channel's comparisons derive.
+
+    ``_take_baseline`` fills ``_status_seen``/``_position_seen`` through one
+    shared construction (``catalog.status_and_order_keys``); this recomputes
+    both keys the long way — the pair helper and the order helper the frame and
+    the list use — for every primed row, and again for a row carrying a
+    heartbeat AGE, which is the branch where the two keys diverge (the pair
+    drops the live clock term; the order key never reads it).
+    """
+    from local_operator.session import catalog
+
+    root = tmp_path
+    _session(root, "d1" * 6)
+    _session(root, "d2" * 6)
+    # A WEDGED row is the case the age branch exists for: its dedupe pair drops
+    # the live clock term while the order key never reads it. Written BEFORE the
+    # baseline so the prime itself has to derive it.
+    _session(root, "d3" * 6)
+    path = _record_publish(root, "d3" * 6)
+    aged_record = _record("d3" * 6)
+    aged_record.heartbeat_at = time.time() - HEARTBEAT_TIMEOUT_S - 30.0
+    path.write_text(json.dumps(aged_record.to_json()), encoding="utf-8")
+    feed = _feed(root)
+    feed._take_baseline()
+
+    for session_id in ("d1" * 6, "d2" * 6, "d3" * 6):
+        row = feed._row_for(session_id)
+        assert row is not None
+        if session_id == "d3" * 6:
+            assert row.heartbeat_age_s is not None, "the wedge never reached the row"
+        attention = feed._attention.get(session_id)
+        assert feed._status_seen[session_id] == catalog.status_dedupe_key(row, attention)
+        assert feed._position_seen[session_id] == catalog.order_key_of(row, attention)
+
+        aged = row._replace(heartbeat_age_s=12.5)
+        pair, position = catalog.status_and_order_keys(aged, attention)
+        assert pair == catalog.status_dedupe_key(aged, attention)
+        assert position == catalog.order_key_of(aged, attention)
+
+
 def test_the_status_probe_reads_only_the_records_and_never_walks_the_store(tmp_path):
     """ONE READ PER LIVE RECORD PER SECOND, and O(live records) rather than O(store).
 
