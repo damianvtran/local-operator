@@ -13717,21 +13717,40 @@ def _sessions_facts_line(extras: Mapping[str, Any]) -> str:
 def _sessions_disk_only_body(facts: _SessionsDiskFacts, extras: Mapping[str, Any]) -> str:
     """The ``info`` text when no listing row describes the session.
 
-    Two stored situations land here, and until review round 1 they shared one
-    wrong story: a session genuinely past the newest-first window, and one a
-    listing scan excludes at ANY limit because its origin is hidden
-    (``resume._is_hidden_origin`` — an ``agent-shell`` session is never in a
-    listing, so "past the window" was false for it; QA round 1, Q1). The
-    per-row reads need only the id, so the answer is composed from the
-    directory itself — and the reason named is the true one.
+    A stored directory can be absent from a listing scan for four reasons,
+    and the sentence must name the TRUE one (review rounds 1-2): a hidden
+    origin (dropped at the scan's origin gate, at any limit), an archived id
+    (dropped before the activity read), no recorded activity (never a row),
+    and — only when a limit is passed — ranking past the newest-first window.
+    The middle two made "past the window" false for them (R-5). Each arm asks
+    the scan's OWN predicate (the same marker read behind
+    ``sidebar_visibility``, ``archived_ids``, ``session_activity_path``), so
+    the sentence and the scan cannot disagree. The per-row reads need only
+    the id, which is why the answer can be composed here at all.
     """
     name = facts.name or "(unnamed)"
-    why = (
-        "hidden from every listing scan by its origin marker"
-        if extras.get("sidebar_visibility") == "hidden"
-        else "past the newest-first window a listing scan reads"
-    )
-    first = f'"{name}" — stored, {why}; it can still be resumed by its exact session id'
+    directory = str(extras.get("session_dir") or "")
+    resumable = True
+    if extras.get("sidebar_visibility") == "hidden":
+        why = "hidden from every listing scan by its origin marker"
+    else:
+        from local_operator.session.archived import archived_ids
+        from local_operator.session.retention import session_activity_path
+
+        in_archive = bool(directory) and Path(directory).name in archived_ids(config_dir())
+        if in_archive:
+            why = "archived — not offered in listings"
+        elif not directory or session_activity_path(directory) is None:
+            # The activity clock is the transcript and the mail spool, so a
+            # directory holding neither has never been worked in: it is not a
+            # resumable session, and the resume sentence would be a lie.
+            why = "no recorded activity to list or resume it by"
+            resumable = False
+        else:
+            why = "past the newest-first window a listing scan reads"
+    first = f'"{name}" — stored, {why}'
+    if resumable:
+        first += "; it can still be resumed by its exact session id"
     return first + "\n" + _sessions_facts_line(extras)
 
 
@@ -13788,7 +13807,7 @@ async def _sessions_info(
                     "listed": False,
                     **extras,
                 }
-                text = _sessions_disk_only_body(facts, extras)
+                text = await asyncio.to_thread(_sessions_disk_only_body, facts, extras)
                 text, spill = spill_truncate(text, "sessions", context)
                 if spill:
                     details.update(spill)
@@ -14106,8 +14125,12 @@ def _sessions_open_body(params: SessionsParams, details: Mapping[str, Any]) -> s
     if params.op == "resume":
         origin = details.get("origin") or "not recorded"
         visibility = details.get("sidebar_visibility") or "unknown"
+        # The lead carries the space ``named`` needs and nothing in the
+        # unnamed case: ``named`` empty plus ``where``'s leading space
+        # produced 'reopened  (session …)' (review round 2, R-6).
+        reopened = f"reopened {named}" if named else "reopened"
         text = (
-            f"reopened {named}{where} — origin {origin} and sidebar visibility "
+            f"{reopened}{where} — origin {origin} and sidebar visibility "
             f"unchanged ({visibility}): origin.json is written once and never "
             "re-stamped (visibility_changed: false)."
         )
