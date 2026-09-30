@@ -717,6 +717,29 @@ def test_system_md_teaches_wake_vs_monitor_and_the_no_action_norm() -> None:
     assert "finds nothing needing action is complete" in flat
 
 
+def test_system_md_cues_on_demand_tool_references() -> None:
+    """The ``tool://`` cue (audit C3): the reference exists, when to reach for
+    it (op-based tools whose ops take different fields — the systemic
+    op-ambiguity finding), and where the listing is. Every scheme's how/when
+    cue lives in this section; the read description carries only the bare
+    scheme list."""
+    flat = " ".join(render_template("system.md", {}).split())
+    assert "accepted inputs are unclear" in flat
+    assert "`tool://<name>`" in flat
+    assert "`read tool://` lists tools" in flat
+
+
+def test_system_md_scopes_the_peer_gate_to_spawning_and_names_restart_cutoffs() -> None:
+    """C1: listing or inspecting peer sessions needs no permission — only
+    spawning does; the old sentence gated all three under "when the user
+    asked". C4: a restart or update that cut a turn off belongs in the
+    incident cause list (kept cause-agnostic: a held-delivery card does not
+    end a turn)."""
+    flat = " ".join(render_template("system.md", {}).split())
+    assert "list or inspect sessions any time, and to spawn one only when the user asked" in flat
+    assert "or a restart or update that cut a turn off" in flat
+
+
 def test_inventory_does_not_repeat_descriptions_the_tools_array_carries() -> None:
     """The inventory is an ANCHOR ("these tools exist"), not a second copy of
     the tool descriptions.
