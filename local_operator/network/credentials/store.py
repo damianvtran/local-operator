@@ -37,8 +37,9 @@ why a brokered failure is reported to the owner rather than repaired here, and w
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
-from typing import Any, Collection, Protocol
+from typing import Any, Callable, Collection, Protocol
 
 from local_operator.network.credentials.client import MeshCredentialClient, key_for
 from local_operator.network.credentials.placement import placement_for_store
@@ -49,6 +50,8 @@ from local_operator.network.credentials.types import (
     is_synthetic_credential_id,
     synthetic_credential_id,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class CredentialSource(Protocol):
@@ -159,6 +162,69 @@ class MeshAwareAuthStore:
         #: The broker's last refusal per key, so a turn that ends with no bearer can
         #: say WHY in the broker's own sentence (see :meth:`no_credential_reason`).
         self._refusals: dict[str, BrokerError] = {}
+        #: Optional sink notified after each successful serve, installed by the
+        #: session factory for the durable credential binding (see
+        #: :meth:`set_serve_sink`). ``None`` — every other construction site —
+        #: keeps the store byte-identical: no sink, no added work on any path.
+        self._serve_sink: Callable[..., None] | None = None
+
+    # -- the serve sink (the durable credential binding's feed) --------------
+
+    def set_serve_sink(self, sink: Callable[..., None] | None) -> None:
+        """Install the sink notified after each successful serve, or clear it.
+
+        THE BORROW FEED for the durable binding row
+        (``session/credential_binding.py``): called with the OWNER-side
+        ``credential_id`` from the grant ref — in hand only here, the store is
+        the one place a borrow's real row id exists — and, from the local
+        branch, with this device's sticky row id read AFTER the resolve (the
+        walk pins the session to whatever row it lands on, so the read returns
+        the one that just served).
+
+        Optional and set AFTER construction, deliberately: ``build_auth_store``
+        is also the exec-preflight and Radient construction site, whose callers
+        have no session transcript; with no sink they pay nothing and stay
+        byte-identical.
+        """
+        self._serve_sink = sink
+
+    def _note_borrow_serve(self, provider: str, grant: Grant) -> None:
+        """Report a borrow's serve to the sink, from the ref itself (no added work).
+
+        Guarded: a bookkeeping sink must never fail a serve.
+        """
+        sink = self._serve_sink
+        if sink is None:
+            return
+        ref = grant.credential_ref
+        try:
+            sink(
+                provider=provider,
+                owner_device=ref.owner_device,
+                owner_device_name=ref.owner_device_name,
+                credential_id=ref.credential_id,
+                identity=grant.identity,
+            )
+        except Exception:  # noqa: BLE001 — a bookkeeping sink must not fail a serve
+            logger.debug("credential serve sink failed", exc_info=True)
+
+    def _note_local_serve(self, provider: str, session_id: str | None) -> None:
+        """Report a local serve, off the sticky read that names the serving row.
+
+        ``session_id`` is the resolve's own parameter: the sticky was written
+        by the same resolve, so a resolve without one has no row to name and
+        reports nothing.
+        """
+        sink = self._serve_sink
+        if sink is None:
+            return
+        credential_id = self._local.session_credential_id(provider, session_id)
+        if credential_id is None:
+            return
+        try:
+            sink(provider=provider, owner_device="", credential_id=credential_id)
+        except Exception:  # noqa: BLE001 — a bookkeeping sink must not fail a serve
+            logger.debug("credential serve sink failed", exc_info=True)
 
     # -- the two resolution entry points the providers use ------------------
 
@@ -186,6 +252,7 @@ class MeshAwareAuthStore:
         if key:
             # LOCAL-FIRST IS NOT NEGOTIABLE, and it is also what keeps a device that
             # has its own login from quietly spending someone else's account.
+            self._note_local_serve(provider, session_id)
             return key
         grant = await self._borrow(
             key_for(provider=provider),
@@ -194,7 +261,10 @@ class MeshAwareAuthStore:
             model_id=model_id,
             force_refresh=force_refresh,
         )
-        return grant.access_token if isinstance(grant, Grant) else None
+        if not isinstance(grant, Grant):
+            return None
+        self._note_borrow_serve(provider, grant)
+        return grant.access_token
 
     async def get_oauth_access(
         self,
@@ -218,6 +288,7 @@ class MeshAwareAuthStore:
             exclude_credential_ids=exclude_credential_ids,
         )
         if access is not None:
+            self._note_local_serve(provider, session_id)
             return access
         grant = await self._borrow(
             key_for(provider=provider),
@@ -228,6 +299,7 @@ class MeshAwareAuthStore:
         )
         if not isinstance(grant, Grant):
             return None
+        self._note_borrow_serve(provider, grant)
         return self._access_from_grant(grant)
 
     # -- the broker rung ----------------------------------------------------
