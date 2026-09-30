@@ -78,7 +78,7 @@ async def test_create_auto_links_the_calling_session_and_says_so(context) -> Non
     assert "created project 'payments-migration'" in body
     assert SESSION in body
     listed = await call(context, op="list")
-    assert "payments-migration" in listed and "1 session" in listed
+    assert "payments-migration" in listed and "1 working session" in listed
 
 
 @pytest.mark.asyncio
@@ -124,14 +124,19 @@ async def test_identical_progress_on_a_stale_record_refreshes_it(
     # surgery would be discarded: every mutation reloads under the lock.)
     path = tmp_path / "projects" / f"{project.id}.json"
     payload = json.loads(path.read_text())
-    payload["progress_updated_at"] = time.time() - PROJECT_PROGRESS_STALE_S - 60
+    backdated = time.time() - PROJECT_PROGRESS_STALE_S - 60
+    payload["progress_updated_at"] = backdated
     path.write_text(json.dumps(payload))
 
     body = await call(context, op="update", name="alpha", progress="still true")
-    assert "refreshed" in body
+    assert "refreshed" in body and "progress unchanged" in body and "no new content" in body
     refreshed = registry.get_project_by_name("alpha")
     assert refreshed.progress == "still true"
-    assert refreshed.progress_updated_at > project.progress_updated_at
+    # Refresh ≠ update: the CONTENT clock did not move (the badge keeps its
+    # truth), and the assertion pair is what the call wrote.
+    assert refreshed.progress_updated_at == backdated
+    assert refreshed.progress_refreshed_at is not None
+    assert refreshed.progress_refreshed_by == SESSION
 
 
 @pytest.mark.asyncio
@@ -156,9 +161,9 @@ async def test_update_of_an_unknown_name_points_at_list(context) -> None:
 async def test_link_and_unlink_receipts_name_the_resulting_set(context, registry) -> None:
     await call(context, op="create", name="alpha")
     body = await call(context, op="link", name="alpha", session_id="abcdef012345")
-    assert "linked session abcdef012345" in body and "2 linked" in body
+    assert "linked session abcdef012345" in body and "2 working" in body
     body = await call(context, op="unlink", name="alpha", session_id="abcdef012345")
-    assert "unlinked session abcdef012345" in body and "1 linked" in body
+    assert "unlinked session abcdef012345" in body and "1 working" in body
 
     absent = await call(context, op="unlink", name="alpha", session_id="abcdef012345")
     assert "not linked" in absent
@@ -390,7 +395,7 @@ async def test_show_reports_the_record_and_its_linked_sessions(context) -> None:
     assert "alpha [active]" in body
     assert "est 13pt" in body
     assert "milestones (1/20):" in body and "- beta cut [upcoming]" in body
-    assert "linked sessions (1/64):" in body
+    assert "working sessions (1/64):" in body
     assert f"- {SESSION} [missing] — no session directory" in body
 
 
@@ -560,3 +565,135 @@ async def test_a_forced_create_names_the_deliberate_close(context) -> None:
     # An ordinary create claims nothing: no force clause without the force.
     plain = await call(context, op="create", name="beta", status="done")
     assert "force_done" not in plain
+
+
+# -- the role split and refresh ≠ update (schema 2, P1/P3) -------------------
+
+
+def _backdate(registry: ProjectRegistry, name: str, age_s: float) -> float:
+    """Age the stored content clock; returns the stamp the store now holds."""
+    project = registry.get_project_by_name(name)
+    assert project is not None
+    path = registry.projects_dir / f"{project.id}.json"
+    payload = json.loads(path.read_text())
+    payload["progress_updated_at"] = time.time() - age_s
+    path.write_text(json.dumps(payload))
+    return float(payload["progress_updated_at"])
+
+
+@pytest.mark.asyncio
+async def test_create_files_a_chief_of_staff_session_instead_of_joining_it(
+    registry: ProjectRegistry, context: ToolContext, tmp_path: Path
+) -> None:
+    """The CoS's create-time auto-link is ROLE-ASSIGNED at the write surface:
+    her id lands in ``coordination_sessions`` (provenance — never a liveness
+    fact, never a nudge), ``sessions`` stays empty, and the receipt says so.
+    A worker's create keeps the working auto-link."""
+    from local_operator.aida.state import write_state
+
+    write_state(tmp_path, {"session_id": SESSION})
+
+    body = await call(context, op="create", name="filed-for-a-worker")
+    assert "filed by this session" in body and "not a working session" in body
+    project = registry.get_project_by_name("filed-for-a-worker")
+    assert project is not None
+    assert project.sessions == []
+    assert project.coordination_sessions == [SESSION]
+
+    other = ToolContext(cwd=".", session_id="abcdef012345", project_registry=registry)
+    worker_body = await call(other, op="create", name="worker-owned")
+    assert "linked this session" in worker_body
+    worker = registry.get_project_by_name("worker-owned")
+    assert worker is not None
+    assert worker.sessions == ["abcdef012345"] and worker.coordination_sessions == []
+
+    # The listing counts the two kinds separately, and the show splits them.
+    listed = await call(context, op="list")
+    assert "0 working sessions · 1 filed" in listed
+    shown = await call(context, op="show", name="filed-for-a-worker")
+    assert "working sessions (0/64):" not in shown  # an empty section is not painted
+    assert f"filed by (1):\n  - {SESSION} [filed]" in shown
+
+
+@pytest.mark.asyncio
+async def test_refresh_records_a_check_without_moving_the_content_clock(
+    registry: ProjectRegistry, context: ToolContext
+) -> None:
+    await call(context, op="create", name="alpha")
+    await call(context, op="update", name="alpha", progress="still true")
+    backdated = _backdate(registry, "alpha", PROJECT_PROGRESS_STALE_S + 60)
+
+    body = await call(context, op="refresh", name="alpha")
+    assert "refreshed project 'alpha'" in body
+    assert "progress unchanged" in body and "no new content" in body
+    row = registry.get_project_by_name("alpha")
+    assert row is not None
+    assert row.progress == "still true"
+    assert row.progress_updated_at == backdated  # the badge's clock never moved
+    assert row.progress_refreshed_at is not None
+    assert row.progress_refreshed_by == SESSION
+
+    # On a content-FRESH record the same op writes nothing ("no reason to send
+    # it every turn"), and the receipt says exactly that. A re-refresh of a
+    # still-stale record is deliberately allowed (the gate is content-stale,
+    # not assertion-age) and re-dates the assertion — the ruling's risk note
+    # accepts that as visible and badge-neutral.
+    await call(context, op="update", name="alpha", progress="moved on")
+    fresh = await call(context, op="refresh", name="alpha")
+    assert "not stale — nothing written" in fresh
+
+
+@pytest.mark.asyncio
+async def test_refresh_without_recorded_progress_names_the_right_act(
+    registry: ProjectRegistry, context: ToolContext
+) -> None:
+    await call(context, op="create", name="alpha")
+    body = await call(context, op="refresh", name="alpha")
+    assert "no recorded progress to refresh" in body
+    assert "op='update'" in body
+
+
+@pytest.mark.asyncio
+async def test_refresh_is_textless_and_progress_rides_update(context) -> None:
+    await call(context, op="create", name="alpha")
+    body = await call(context, op="refresh", name="alpha", progress="a line")
+    assert "op='refresh' is textless" in body and "op='update'" in body
+
+
+@pytest.mark.asyncio
+async def test_the_update_receipt_for_a_refresh_never_claims_freshness(
+    registry: ProjectRegistry, context: ToolContext
+) -> None:
+    """The old receipt said "re-stamped just now", which reads as "the record
+    is fresh again" — precisely the belief P3 removes. The new one dates the
+    CHECK and says the line did not move."""
+    await call(context, op="create", name="alpha")
+    await call(context, op="update", name="alpha", progress="still true")
+    _backdate(registry, "alpha", PROJECT_PROGRESS_STALE_S + 60)
+    body = await call(context, op="update", name="alpha", progress="still true")
+    assert "refreshed project 'alpha' — progress unchanged" in body
+    assert "no new content" in body
+    assert "re-stamped" not in body
+
+
+@pytest.mark.asyncio
+async def test_linking_a_filed_session_moves_it_to_working(registry, context) -> None:
+    """One op re-kinds: linking an id that was filed MOVES it between lists
+    (the repair path a wrong migration demotion takes), and the receipt names
+    the role change rather than hiding it behind a plain "linked"."""
+    await call(context, op="create", name="alpha")
+    registry.link_session(registry.get_project_by_name("alpha").id, SESSION, role="coordination")
+    body = await call(context, op="link", name="alpha", session_id=SESSION)
+    assert "moved session" in body and "from filed to working links" in body
+    project = registry.get_project_by_name("alpha")
+    assert project is not None
+    assert project.sessions == [SESSION] and project.coordination_sessions == []
+
+    # Unlink targets the id across either list: after re-filing, the same op
+    # still removes it.
+    registry.link_session(project.id, SESSION, role="coordination")
+    body = await call(context, op="unlink", name="alpha", session_id=SESSION)
+    assert "1 filed" in body or "0 working" in body
+    cleaned = registry.get_project_by_name("alpha")
+    assert cleaned is not None
+    assert cleaned.sessions == [] and cleaned.coordination_sessions == []

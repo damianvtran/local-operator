@@ -2062,6 +2062,17 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "path is proven under <config_dir>/projects/attachments/ — a row pointing "
         "anywhere else (including sessions/) is skipped, never removed",
     ),
+    (
+        "local_operator/projects.py::migrate_coordination_links",
+        "shutil.rmtree",
+        # Cleanup of a FAILED backup directory only (abort-if-no-backup): the
+        # path is ``projects_dir / '.migrations-backup-<stamp>'`` — config-derived
+        # plus a datetime stamp, never a session id, never under ``sessions/`` —
+        # and the call is best-effort (ignore_errors) on the abort path where no
+        # row was rewritten (the live rows are still the "before" copy).
+        "Removes <config_dir>/projects/.migrations-backup-<stamp> after a failed "
+        "backup; config-derived, never sessions/",
+    ),
     # The eval tool's cross-process restart marker (``tools/eval.py``): the same
     # atomic-write shape as ``registry._staged_write`` above — a
     # ``<session>/eval-kernel.json.<pid>.tmp`` FILE renamed onto the

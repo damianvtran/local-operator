@@ -72,8 +72,11 @@ logger = logging.getLogger(__name__)
 #: The row format this build writes. A row whose ``schema`` is HIGHER than this
 #: is readable but not mutable (see the module docstring): it was written by a
 #: newer local-operator, and this build cannot promise to preserve fields it
-#: does not know about.
-PROJECT_SCHEMA = 1
+#: does not know about. Schema 2 adds ``coordination_sessions`` (the
+#: "filed by" provenance list) and the ``progress_refreshed_at/_by`` assertion
+#: pair; the guard is what stops an older build's rewrite from silently
+#: dropping either.
+PROJECT_SCHEMA = 2
 
 #: A project name is also a slash-command argument and an ``@project:<name>``
 #: token, so it cannot contain spaces — the exact rule team names follow
@@ -325,6 +328,20 @@ def _validate_sessions(sessions: list[str] | None) -> list[str]:
         if not isinstance(session_id, str) or not _SESSION_ID_RE.fullmatch(session_id):
             raise ValueError(f"session id {session_id!r} is not a 12-character hex id")
     return values
+
+
+def _attribution(value: str, label: str) -> str:
+    """One attribution field: a session id, ``"operator"``, or ``""`` (unknown).
+
+    Shared by the freshness pair's ``progress_reported_by`` and the assertion
+    pair's ``progress_refreshed_by`` so the two can never accept different
+    vocabularies — a checker name that the content side would refuse must be
+    refused on the assertion side too.
+    """
+    candidate = (value or "").strip()
+    if candidate in {"", "operator"} or _SESSION_ID_RE.fullmatch(candidate):
+        return candidate
+    raise ValueError(f"{label} must be a session id, 'operator', or ''")
 
 
 def _short_text_or_none(value: object, label: str, cap: int) -> str | None:
@@ -627,20 +644,36 @@ class Project(BaseModel):
     progress_updated_at: float | None = None
     #: Session id, ``"operator"`` (a surface with no session), or ``""``.
     progress_reported_by: str = ""
+    #: The ASSERTION pair: when a writer last checked that the recorded line
+    #: still describes reality (an identical-normalized re-send, or the
+    #: textless ``op='refresh'``), and who checked. Set by a refresh; CLEARED by
+    #: the next append — the old assertion described superseded text. The
+    #: content clock (``progress_updated_at``) never moves on a refresh: the
+    #: badge keeps telling the truth about content age, while the assertion
+    #: quiets the completion check for one window.
+    progress_refreshed_at: float | None = None
+    progress_refreshed_by: str = ""
     tags: list[str] = Field(default_factory=list)
+    #: Sessions that WORK on the stream — the working set every liveness count
+    #: and the completion check read.
     sessions: list[str] = Field(default_factory=list)
+    #: Sessions that FILED the stream without working on it (the chief of
+    #: staff's create-time auto-link lands here — see ``link_session``'s role).
+    #: Provenance only: disjoint from ``sessions`` (the ``_links_disjoint``
+    #: validator), never counted as a working link, never a liveness claim.
+    coordination_sessions: list[str] = Field(default_factory=list)
     created_at: float = 0.0
     updated_at: float = 0.0
-    # -- v2 planning fields (slice 1 writes them; nothing has shipped without
-    # them, so there is no migration and ``schema`` stays 1) ------------------
+    # -- v2 planning fields (they shipped in schema 1; the schema-2 bump is the
+    # coordination/refresh pair above) -----------------------------------------
     start_date: str | None = None
     target_date: str | None = None
     completed_at: str | None = None
     estimate: float | None = Field(default=None, description="0 < estimate <= 1000.")
     estimate_unit: EstimateUnit = "points"
     milestones: list[ProjectMilestone] = Field(default_factory=list)
-    # -- slice 2: the append-only history (the v2 comment above still applies:
-    # nothing has shipped without it, so ``schema`` stays 1) -------------------
+    # -- slice 2: the append-only history (rides any schema; the coordination
+    # bump above does not touch it) --------------------------------------------
     #: Every write of a NEW progress line appends one entry here (newest last,
     #: bounded :data:`UPDATES_MAX`); the freshness pair above remains the
     #: "current" pointer at its tail. Malformed history reads as ``[]`` — a
@@ -689,13 +722,20 @@ class Project(BaseModel):
     def _sessions(cls, value: list[str]) -> list[str]:
         return _validate_sessions(value)
 
+    @field_validator("coordination_sessions")
+    @classmethod
+    def _coordination(cls, value: list[str]) -> list[str]:
+        return _validate_sessions(value)
+
     @field_validator("progress_reported_by")
     @classmethod
     def _reported_by(cls, value: str) -> str:
-        candidate = (value or "").strip()
-        if candidate in {"", "operator"} or _SESSION_ID_RE.fullmatch(candidate):
-            return candidate
-        raise ValueError("progress_reported_by must be a session id, 'operator', or ''")
+        return _attribution(value, "progress_reported_by")
+
+    @field_validator("progress_refreshed_by")
+    @classmethod
+    def _refreshed_by(cls, value: str) -> str:
+        return _attribution(value, "progress_refreshed_by")
 
     @field_validator("start_date")
     @classmethod
@@ -732,6 +772,29 @@ class Project(BaseModel):
         """
         if self.start_date and self.target_date and self.target_date < self.start_date:
             raise ValueError("target_date cannot be before start_date")
+        return self
+
+    @model_validator(mode="after")
+    def _links_disjoint(self) -> "Project":
+        """The two link lists are one link set: an id sits in at most one of them.
+
+        Disjointness is what makes every reader correct BY CONSTRUCTION — a
+        reader of ``sessions`` counts working links and nothing else, and
+        overlaps could otherwise smuggled a filing into a liveness count. The
+        union is capped by the same discipline as a single list (the store's
+        ``SESSIONS_MAX``), so ``link_session`` moving an id between lists can
+        never grow past the cap.
+        """
+        overlap = sorted(set(self.sessions) & set(self.coordination_sessions))
+        if overlap:
+            raise ValueError(
+                "a session link cannot be both working and coordination: " + ", ".join(overlap)
+            )
+        if len(self.sessions) + len(self.coordination_sessions) > SESSIONS_MAX:
+            raise ValueError(
+                f"a project holds at most {SESSIONS_MAX} session links across both "
+                "working and coordination lists"
+            )
         return self
 
 
@@ -847,8 +910,9 @@ class ProjectUpdate:
 
     ``changed`` is False when every supplied field already held the value the
     caller sent (the no-op the model is told about rather than a silent write);
-    ``refreshed`` is True when an identical progress text on a STALE record
-    re-stamped its freshness instead of being suppressed.
+    ``refreshed`` is True when the call recorded an assertion that a stored
+    line still describes reality (an identical-normalized re-send of stale
+    text, or ``refresh_project``) — no append, content clock unmoved.
     """
 
     __slots__ = ("project", "changed", "refreshed")
@@ -914,14 +978,19 @@ def stale_after_s(config_dir: Path | str | None = None) -> float:
         return PROJECT_PROGRESS_STALE_S
 
 
-def progress_is_stale(project: Project, *, now: float | None = None) -> bool:
+def progress_is_stale(
+    project: Project, *, now: float | None = None, window: float | None = None
+) -> bool:
     """Whether the project's recorded progress needs refreshing.
 
     THE single staleness rule: no report yet is stale by construction (the
     first honest line is still owed), and a report older than the CONFIGURED
     window (:func:`stale_after_s`, default :data:`PROJECT_PROGRESS_STALE_S`)
     is stale. Computed here so the tool, the routes and the completion check
-    cannot disagree about one record.
+    cannot disagree about one record. ``window`` is seconds — the default
+    resolves through :func:`stale_after_s`; a caller holding a config dir
+    resolves it once per payload and passes it down, so every row of one
+    payload is measured against the same boundary.
 
     ONLY ``planning``, ``active``, ``qa`` AND ``validation`` RECORDS CAN READ
     STALE — the statuses that are work in flight. Paused, done and archived are
@@ -938,7 +1007,55 @@ def progress_is_stale(project: Project, *, now: float | None = None) -> bool:
     if project.progress_updated_at is None:
         return True
     moment = time.time() if now is None else now
-    return (moment - project.progress_updated_at) > stale_after_s()
+    window_s = stale_after_s() if window is None else window
+    return (moment - project.progress_updated_at) > window_s
+
+
+def progress_asserted_within(
+    project: Project, *, now: float | None = None, window: float | None = None
+) -> bool:
+    """Whether a refresh assertion is recent enough to quiet the completion check.
+
+    THE nudge's assertion arm (P3): a writer that refreshed within the window
+    has already acted on this record, so the reminder is retired for one
+    window — while the operator-facing badge keeps reading the content clock's
+    truth (two clocks, one name each: *content age* drives the badge and every
+    summary, *assertion age* quiets the nudge). ``window`` defaults to the
+    CONFIGURED window (:func:`stale_after_s`); the nudge passes the same
+    resolved value staleness uses.
+    """
+    if project.progress_refreshed_at is None:
+        return False
+    moment = time.time() if now is None else now
+    window_s = stale_after_s() if window is None else window
+    return (moment - project.progress_refreshed_at) <= window_s
+
+
+def _normalize_progress(text: str) -> str:
+    """Normalized progress text for the refresh-vs-update classification.
+
+    THE dedupe rule (P3): strip and collapse internal whitespace runs,
+    case-SENSITIVE and punctuation-significant, so an exact-normalized re-send
+    classifies as a refresh while everything else — including near-identical
+    text — is an update that appends. There is deliberately NO similarity
+    threshold: tiny edits flip meaning constantly (``QA 7/7`` vs ``QA 0/7``,
+    ``merged as c9326d8`` vs ``merged as 0b2dc18``), and a threshold that
+    swallows "(Refreshed …)" annotations swallows real outcomes too.
+    """
+    return " ".join((text or "").split())
+
+
+def progress_date_text(updated_at: float | None) -> str | None:
+    """The content clock as a LOCAL calendar day (``YYYY-MM-DD``), or ``None``.
+
+    The day a reader sees in "no new content since <date>" / "the line still
+    dates from <date>". Local because the stamp is a human-facing day (the
+    same basis milestone derivation uses); ISO because that is the date
+    vocabulary every other project field speaks.
+    """
+    if updated_at is None:
+        return None
+    return datetime.fromtimestamp(updated_at).date().isoformat()
 
 
 def age_text(updated_at: float | None, *, now: float | None = None) -> str | None:
@@ -999,6 +1116,76 @@ def is_session_id(value: object) -> bool:
     The shape itself stays defined HERE, beside the validator that enforces it.
     """
     return isinstance(value, str) and bool(_SESSION_ID_RE.fullmatch(value))
+
+
+def _live_refresh_assertion(
+    project: Project | Mapping[str, Any],
+) -> tuple[float, float] | None:
+    """``(refreshed_at, content_at)`` while the assertion is NEWER, else ``None``.
+
+    "Live" is the one visibility rule the refresh annotation has: an assertion
+    set before the line it describes was superseded (an append clears it, so
+    this is a hand-edit guard as much as an invariant), and an assertion about
+    no content at all paints nothing rather than a sentence without a date.
+    Accepts the row model or its JSON dump, like :func:`display_name`.
+    """
+    if isinstance(project, Mapping):
+        refreshed_at = project.get("progress_refreshed_at")
+        updated_at = project.get("progress_updated_at")
+    else:
+        refreshed_at = project.progress_refreshed_at
+        updated_at = project.progress_updated_at
+    if refreshed_at is None or updated_at is None:
+        return None
+    if not isinstance(refreshed_at, (int, float)) or not isinstance(updated_at, (int, float)):
+        return None
+    if refreshed_at <= updated_at:
+        return None
+    return float(refreshed_at), float(updated_at)
+
+
+def refreshed_age_text(
+    project: Project | Mapping[str, Any], *, now: float | None = None
+) -> str | None:
+    """``1h``-style age of a live refresh assertion, or ``None``.
+
+    The TOKEN every compact surface renders beside the content age ("the
+    refreshed token beside the age"); the fuller :func:`refreshed_note` is the
+    same fact as a sentence. Both read :func:`_live_refresh_assertion`, so a
+    token and a sentence can never disagree about whether a refresh shows.
+    """
+    live = _live_refresh_assertion(project)
+    if live is None:
+        return None
+    return age_text(live[0], now=now)
+
+
+def refreshed_note(project: Project | Mapping[str, Any], *, now: float | None = None) -> str | None:
+    """``refreshed 1h ago by session X — no new content since 2026-09-29``, or ``None``.
+
+    THE operator-visible sentence for the assertion pair (P3 §4.3), shown only
+    while the assertion is newer than the content. The by-clause follows the
+    freshness pair's vocabulary: ``operator`` is named as such because a reader
+    must not take it for a session id, and no checker reads as no clause at
+    all.
+    """
+    live = _live_refresh_assertion(project)
+    if live is None:
+        return None
+    age = age_text(live[0], now=now)
+    if age is None:
+        return None
+    if isinstance(project, Mapping):
+        checked_by = project.get("progress_refreshed_by") or ""
+    else:
+        checked_by = project.progress_refreshed_by or ""
+    if checked_by == "operator":
+        who = " by operator"
+    elif checked_by:
+        who = f" by session {checked_by}"
+    else:
+        who = ""
+    return f"refreshed {age} ago{who} — no new content since {progress_date_text(live[1])}"
 
 
 def display_name(project: Project | Mapping[str, Any]) -> str:
@@ -1132,9 +1319,13 @@ def store_error_text(exc: Exception) -> str:
 
 
 def stale_projects_for_session(
-    registry: ProjectRegistry, session_id: str, *, now: float | None = None
+    registry: ProjectRegistry,
+    session_id: str,
+    *,
+    now: float | None = None,
+    window: float | None = None,
 ) -> list[Project]:
-    """The active, stale projects ``session_id`` is linked to, name-sorted.
+    """The active, stale projects ``session_id`` WORKS ON, name-sorted.
 
     THE single reading behind the completion-time project check: the producer
     (``Session._project_continuation``) and the expiry scan
@@ -1146,28 +1337,50 @@ def stale_projects_for_session(
     settled, and a reminder about one would nag the session to revive it — and
     a project with no progress yet is stale by construction, because the first
     honest line is still owed.
+
+    WORK LINKS ONLY: a coordination link ("filed by" — the chief of staff's
+    create-time auto-link) is provenance, not participation, so it can never
+    make an unrelated session answer for a project it does not work on; the
+    filter reads ``sessions`` itself. And the assertion arm applies here, in
+    the one derivation both ends share: a refresh recorded within the window
+    retires the reminder for one window
+    (:func:`progress_asserted_within`) even though the operator-facing badge
+    keeps reading stale — a reminder that repeats after the session checked
+    is the bug the exit list exists to prevent.
     """
+    moment = time.time() if now is None else now
+    window_s = stale_after_s(registry.config_dir) if window is None else window
     return [
         project
         for project in registry.projects_for_session(session_id)
-        if project.status in PROJECT_LIVE_STATUSES and progress_is_stale(project, now=now)
+        if session_id in project.sessions
+        and project.status in PROJECT_LIVE_STATUSES
+        and progress_is_stale(project, now=moment, window=window_s)
+        and not progress_asserted_within(project, now=moment, window=window_s)
     ]
 
 
-def stale_projects_fingerprint(projects: Sequence[Project]) -> tuple[tuple[str, str, int], ...]:
-    """The latch/expiry identity of a stale set: ``(id, status, int(stamp))``.
+def stale_projects_fingerprint(
+    projects: Sequence[Project],
+) -> tuple[tuple[str, str, int, int], ...]:
+    """The latch/expiry identity of a stale set: ``(id, status, int(stamp), int(refreshed))``.
 
-    Sorted so two reads of the same set compare equal; the integer stamp is
-    ``progress_updated_at`` floored (``0`` when unset), which is the freshness
-    state the reminder asserts. A report or status change ALWAYS moves it —
-    the stamp being replaced is at least the staleness window old, so even a
-    refresh cannot land on the same floored integer, and an unset stamp starts
-    at ``0`` — so the remaining stale projects earn another nudge in the same
-    turn.
+    Sorted so two reads of the same set compare equal; the integer stamps are
+    ``progress_updated_at`` and ``progress_refreshed_at`` floored (``0`` when
+    unset). A report, a status change OR a refresh ALWAYS moves it — a
+    replaced content stamp is at least the staleness window old, and the
+    assertion stamp is newer than the content it asserts about — so the
+    remaining stale projects earn another nudge in the same turn, and a
+    refresh is what retires the reminder whose assertion it just answered.
     """
     return tuple(
         sorted(
-            (project.id, project.status, int(project.progress_updated_at or 0))
+            (
+                project.id,
+                project.status,
+                int(project.progress_updated_at or 0),
+                int(project.progress_refreshed_at or 0),
+            )
             for project in projects
         )
     )
@@ -1449,10 +1662,22 @@ class ProjectRegistry:
         return self._find_cached_project_by_name(name)
 
     def projects_for_session(self, session_id: str) -> list[Project]:
-        """Derived reverse lookup: the projects this session is linked to."""
+        """Derived reverse lookup: the projects this session is linked to.
+
+        MEMBERSHIP, either list: a coordination link ("filed by") is still a
+        link, and the scoping sets that use this reading — nameless
+        ``/project show``, the TUI's ◆ set — are sets of ROWS, not liveness
+        claims. The completion check narrows to ``sessions`` itself
+        (``stale_projects_for_session``), so a filing can never make an
+        unrelated session answer for a project it does not work on.
+        """
         self._refresh_if_needed()
         return sorted(
-            (p for p in self._projects.values() if session_id in p.sessions),
+            (
+                p
+                for p in self._projects.values()
+                if session_id in p.sessions or session_id in p.coordination_sessions
+            ),
             key=lambda project: project.name.casefold(),
         )
 
@@ -1500,6 +1725,15 @@ class ProjectRegistry:
                 f"project {project.name!r} was written by a newer local-operator "
                 f"(schema {project.schema_version}); update this build to change it"
             )
+        # The row is written in THIS build's format: stamp the current schema so
+        # the guard above protects the fields this build adds — from its first
+        # write on, an older build's later rewrite must refuse rather than
+        # silently drop ``coordination_sessions`` / the assertion pair. A row
+        # already at PROJECT_SCHEMA is untouched by this line, and an UNTOUCHED
+        # old row stays at its old schema until something writes it (the
+        # migration's "untouched rows stay 1" rule).
+        if project.schema_version != PROJECT_SCHEMA:
+            project.schema_version = PROJECT_SCHEMA
         name_key = project.name.casefold()
         occupant = next(
             (
@@ -1652,14 +1886,20 @@ class ProjectRegistry:
         fields: ProjectEdit,
         *,
         sessions: Sequence[str] = (),
+        coordination_sessions: Sequence[str] = (),
         progress_reported_by: str = "",
         force_done: bool = False,
     ) -> Project:
         """Create one project from ``fields``; the name must be free.
 
-        ``sessions`` is the auto-link the ``project`` tool passes (the calling
-        session); the desktop create route passes none, so a UI-created project
-        starts unlinked and is linked from the projects surface.
+        ``sessions`` is the WORKING auto-link; ``coordination_sessions`` is the
+        provenance ("filed by") link. The ``project`` tool and ``/project new``
+        pass the calling session to exactly one of them — the role decision is
+        the write surface's (:func:`local_operator.aida.state.is_aida_session`
+        separates the chief of staff's filings from a worker's link, and a
+        manager filing for a worker will read the same way). The desktop create
+        route passes none, so a UI-created project starts unlinked and is
+        linked from the projects surface.
         """
         name = validate_project_name(fields.name or "")
         now = _utc_now()
@@ -1710,6 +1950,7 @@ class ProjectRegistry:
                 ),
                 tags=list(fields.tags or []),
                 sessions=list(sessions),
+                coordination_sessions=list(coordination_sessions),
                 created_at=now,
                 updated_at=now,
                 start_date=fields.start_date or None,
@@ -1734,16 +1975,19 @@ class ProjectRegistry:
 
         Per-field last-writer-wins: only the fields present in
         ``fields.model_fields_set`` are touched, so two sessions updating
-        different fields serialize without clobbering. The progress rule is the
-        refresh amendment: identical text on a FRESH record writes nothing,
-        identical text on a STALE record re-stamps freshness (which is what
-        makes the completion check's "already current" exit real), and new text
-        writes, stamps, and APPENDS one entry to the append-only history.
+        different fields serialize without clobbering. The progress rule is
+        refresh ≠ update (P3): an identical-NORMALIZED re-send on a STALE record
+        is a refresh — no append, an assertion pair written, the content clock
+        UNMOVED so the stale badge keeps telling the truth; an identical
+        re-send on a FRESH record is a no-op; everything else — near-identical
+        text included, there is deliberately no similarity heuristic — is an
+        update that writes, stamps, and APPENDS one entry to the history
+        (clearing the assertion, which described superseded text).
 
         ``attachments`` rides that new entry: the paths are copied into the
-        store and described on it. Attaching without a new line (a refresh, a
-        clear, or an update that omits ``progress``) is refused, because there
-        would be no entry for the files to belong to.
+        store and described on it. Attaching without a new line (a refresh, an
+        identical re-send, a clear, or an update that omits ``progress``) is
+        refused, because there would be no entry for the files to belong to.
         """
         project_id = validate_project_id(project_id)
         now = _utc_now()
@@ -1800,55 +2044,77 @@ class ProjectRegistry:
                     candidate.completed_at = _today_iso()
 
             new_text = (fields.progress or "") if "progress" in supplied else ""
+            # The classification, computed before any mutation: normalized
+            # equality is refresh, normalized difference is update, empty is
+            # clear. There is NO similarity threshold (see _normalize_progress).
+            new_normalized = _normalize_progress(new_text)
+            stored_normalized = _normalize_progress(current.progress)
+            appends = bool(new_normalized) and new_normalized != stored_normalized
             # The attachment contract, checked BEFORE any mutation: files
-            # attach to the entry a NEW line appends, so a refresh, a clear or
-            # an update without ``progress`` has nothing to carry them.
-            if attachments and not (new_text and new_text != current.progress):
+            # attach to the entry a NEW line appends, so a refresh, an identical
+            # re-send, a clear or an update without ``progress`` has nothing to
+            # carry them.
+            if attachments and not appends:
                 raise ValueError(
                     "attachments ride a NEW progress line: send progress=<text> "
-                    "with attach in the same update (an identical re-send or a "
-                    "clear appends no entry to carry them)"
+                    "with attach in the same update (a refresh, an identical "
+                    "re-send or a clear appends no entry to carry them)"
                 )
             stored_attachments: list[ProjectAttachment] = []
             evicted_entries: list[ProjectUpdateEntry] = []
             if "progress" in supplied:
-                if new_text != candidate.progress:
+                if appends:
                     candidate.progress = new_text
-                    if new_text:
-                        candidate.progress_updated_at = now
-                        candidate.progress_reported_by = reporter
-                        stored_attachments = self._store_attachments(
-                            project_id, attachments, now=now
-                        )
-                        appended = [
-                            *candidate.updates,
-                            ProjectUpdateEntry(
-                                at=_utc_stamp(now),
-                                text=new_text,
-                                by=reporter,
-                                attachments=stored_attachments,
-                            ),
-                        ]
-                        # The cap evicts oldest-first, and the evicted entries'
-                        # files are reclaimed only AFTER the save lands, so a
-                        # failed save can never leave the live row pointing at
-                        # files this call removed (agent review round 1, F1).
-                        evicted_entries = appended[:-UPDATES_MAX]
-                        candidate.updates = appended[-UPDATES_MAX:]
-                    else:
-                        # An empty snippet IS "no progress recorded": clearing
-                        # the text clears the freshness pair with it, so a
-                        # reader never sees a timestamp over nothing.
-                        candidate.progress_updated_at = None
-                        candidate.progress_reported_by = ""
-                    changed = True
-                elif progress_is_stale(candidate, now=now):
-                    # THE REFRESH AMENDMENT: identical text on a stale record.
                     candidate.progress_updated_at = now
-                    candidate.progress_reported_by = reporter or candidate.progress_reported_by
+                    candidate.progress_reported_by = reporter
+                    # The old assertion described superseded text; an append is
+                    # exactly what clears it (T3's clock rule).
+                    candidate.progress_refreshed_at = None
+                    candidate.progress_refreshed_by = ""
+                    stored_attachments = self._store_attachments(project_id, attachments, now=now)
+                    appended = [
+                        *candidate.updates,
+                        ProjectUpdateEntry(
+                            at=_utc_stamp(now),
+                            text=new_text,
+                            by=reporter,
+                            attachments=stored_attachments,
+                        ),
+                    ]
+                    # The cap evicts oldest-first, and the evicted entries'
+                    # files are reclaimed only AFTER the save lands, so a
+                    # failed save can never leave the live row pointing at
+                    # files this call removed (agent review round 1, F1).
+                    evicted_entries = appended[:-UPDATES_MAX]
+                    candidate.updates = appended[-UPDATES_MAX:]
+                    changed = True
+                elif not new_normalized:
+                    # An empty (or whitespace-only) snippet IS "no progress
+                    # recorded": clearing the text clears BOTH pairs with it —
+                    # the freshness pair and the refresh assertion, which
+                    # described text that no longer exists — so a reader never
+                    # sees a timestamp over nothing.
+                    candidate.progress = ""
+                    candidate.progress_updated_at = None
+                    candidate.progress_reported_by = ""
+                    candidate.progress_refreshed_at = None
+                    candidate.progress_refreshed_by = ""
+                    changed = True
+                elif progress_is_stale(
+                    candidate, now=now, window=stale_after_s(self.config_dir)
+                ):
+                    # REFRESH: identical-normalized text on a stale record. No
+                    # append and the content clock is NEVER moved — the stale
+                    # badge keeps reading the truth about content age — while
+                    # the assertion pair quiets the completion check for one
+                    # window. The checker is attributed separately from the
+                    # reporter: the line's authorship did not change.
+                    candidate.progress_refreshed_at = now
+                    candidate.progress_refreshed_by = reporter
                     changed = True
                     refreshed = True
-                # else: identical text on a fresh record — a no-op, no write.
+                # else: identical-normalized text on a fresh record — the
+                # documented no-op, no write ("no reason to send it every turn").
 
             # Re-validate the merged candidate through the model's own rules
             # before anything touches disk (dates order, caps, grammar).
@@ -1888,29 +2154,92 @@ class ProjectRegistry:
                 self._reclaim_attachment_files(a.path for a in evicted.attachments)
             return ProjectUpdate(saved, changed=changed, refreshed=refreshed)
 
-    def link_session(self, project_id: str, session_id: str) -> tuple[Project, bool]:
-        """Link one session to one project. Returns ``(project, added)``."""
+    def refresh_project(self, project_id: str, *, reporter: str = "") -> ProjectUpdate:
+        """Record a CHECK that the stored progress line still describes reality.
+
+        The textless ``op='refresh'``: an identical-normalized re-send reaches
+        the same mechanics through :meth:`update_project`. Appends nothing and
+        never moves the content clock (``progress_updated_at``) — the line is
+        unchanged — but sets the assertion pair, which is what quiets the
+        completion check for one window. Allowed only when the record is
+        content-stale: on a fresh record a refresh is a no-op ("no reason to
+        send it every turn"), and a record with no progress at all has nothing
+        to assert about (the first honest line is the right act — and one with
+        no text would render a sentence about content that does not exist).
+        """
         project_id = validate_project_id(project_id)
-        session_id = _validate_sessions([session_id])[0]
         with self._persistence_lock():
             self._load()
             current = self._projects.get(project_id)
             if current is None:
                 raise KeyError(f"Project with id {project_id} not found")
-            if session_id in current.sessions:
+            if not _normalize_progress(current.progress):
+                return ProjectUpdate(current, changed=False, refreshed=False)
+            now = _utc_now()
+            window = stale_after_s(self.config_dir)
+            if not progress_is_stale(current, now=now, window=window):
+                return ProjectUpdate(current, changed=False, refreshed=False)
+            candidate = current.model_copy(deep=True)
+            candidate.progress_refreshed_at = now
+            candidate.progress_refreshed_by = _attribution(reporter, "progress_refreshed_by")
+            candidate.updated_at = now
+            saved = self._save_project_locked(candidate)
+            return ProjectUpdate(saved, changed=True, refreshed=True)
+
+    def link_session(
+        self,
+        project_id: str,
+        session_id: str,
+        *,
+        role: Literal["work", "coordination"] = "work",
+    ) -> tuple[Project, bool]:
+        """Link one session to one project under ``role``. Returns ``(project, changed)``.
+
+        ``role`` names WHICH list the link belongs to: ``work`` (default — the
+        session drives the stream, feeds liveness counts and the completion
+        check) or ``coordination`` ("filed by" — provenance only). The caller
+        DECIDES the role at the write surface (the tool and ``/project new``
+        ask ``is_aida_session``); the store only enforces the one representation
+        rule. An id already linked under the requested role is a no-op; an id
+        linked under the OTHER role MOVES between lists — that move is how a
+        misfired migration demotion is restored with one ``op='link'``. The
+        two lists share the one cap, and a move never grows it.
+        """
+        if role not in ("work", "coordination"):
+            raise ValueError("role must be 'work' or 'coordination'")
+        project_id = validate_project_id(project_id)
+        session_id = _validate_sessions([session_id])[0]
+        target = "sessions" if role == "work" else "coordination_sessions"
+        other = "coordination_sessions" if role == "work" else "sessions"
+        with self._persistence_lock():
+            self._load()
+            current = self._projects.get(project_id)
+            if current is None:
+                raise KeyError(f"Project with id {project_id} not found")
+            if session_id in getattr(current, target):
                 return current, False
-            if len(current.sessions) >= SESSIONS_MAX:
+            linked = session_id in current.sessions or session_id in current.coordination_sessions
+            if (
+                not linked
+                and len(current.sessions) + len(current.coordination_sessions) >= SESSIONS_MAX
+            ):
                 raise ValueError(
                     f"project {current.name!r} already has {SESSIONS_MAX} linked "
                     "sessions; unlink one first"
                 )
             candidate = current.model_copy(deep=True)
-            candidate.sessions = [*candidate.sessions, session_id]
+            setattr(candidate, other, [s for s in getattr(candidate, other) if s != session_id])
+            setattr(candidate, target, [*getattr(candidate, target), session_id])
             candidate.updated_at = _utc_now()
             return self._save_project_locked(candidate), True
 
     def unlink_session(self, project_id: str, session_id: str) -> tuple[Project, bool]:
-        """Unlink one session from one project. Returns ``(project, removed)``."""
+        """Unlink one session from one project, from EITHER list. Returns ``(project, removed)``.
+
+        Target by id across both lists: the caller states "this session should
+        not be linked", and which list held it is bookkeeping a reader should
+        not have to look up first.
+        """
         project_id = validate_project_id(project_id)
         session_id = _validate_sessions([session_id])[0]
         with self._persistence_lock():
@@ -1918,10 +2247,16 @@ class ProjectRegistry:
             current = self._projects.get(project_id)
             if current is None:
                 raise KeyError(f"Project with id {project_id} not found")
-            if session_id not in current.sessions:
+            if (
+                session_id not in current.sessions
+                and session_id not in current.coordination_sessions
+            ):
                 return current, False
             candidate = current.model_copy(deep=True)
             candidate.sessions = [s for s in candidate.sessions if s != session_id]
+            candidate.coordination_sessions = [
+                s for s in candidate.coordination_sessions if s != session_id
+            ]
             candidate.updated_at = _utc_now()
             return self._save_project_locked(candidate), True
 
@@ -2180,6 +2515,12 @@ def build_project_view(
        merged over the computed row for the calling process's own session, whose
        in-memory values are fresher than disk.
 
+    Work links get rows as before; a coordination link ("filed by") ALSO gets
+    one, tagged ``role="coordination"`` and stripped of every liveness fact —
+    no ``runtime``, ``subagents`` or ``todos`` key at all — so no renderer can
+    misread a filing as a working session and every existing reader of
+    ``sessions`` stays correct without a filter of its own.
+
     ``None`` means unknown and is never rendered as 0: a session that never
     launched a subagent has ``subagents: null``, and a session that never
     persisted a todo snapshot has ``todos: null``.
@@ -2194,6 +2535,7 @@ def build_project_view(
     root = Path(config_dir)
     sessions_root = root / "sessions"
     states = scan_runtime_states(root) if records is None else records
+    window = stale_after_s(root)
 
     try:
         archived = archived_ids(root)
@@ -2220,6 +2562,7 @@ def build_project_view(
 
         row: dict[str, Any] = {
             "session_id": session_id,
+            "role": "work",
             "exists": exists,
             "title": title,
             "created_at": created_at,
@@ -2234,9 +2577,33 @@ def build_project_view(
             row.update(live[session_id])
         rows.append(row)
 
+    # Coordination links ("filed by") get a row too, tagged and stripped of
+    # every liveness fact — no runtime, no subagents, no todos — so nothing
+    # exists on the row for a renderer to misread as a working session. The
+    # provenance fields a detail list can honestly show stay.
+    for session_id in project.coordination_sessions:
+        session_dir = sessions_root / session_id
+        exists = session_dir.is_dir()
+        title: str | None = None
+        created_at: float | None = None
+        if exists:
+            state = read_title_state(session_dir)
+            title = state.text if state is not None else None
+            created_at = session_created_at(session_dir) or None
+        rows.append(
+            {
+                "session_id": session_id,
+                "role": "coordination",
+                "exists": exists,
+                "title": title,
+                "created_at": created_at,
+                "archived": session_id in archived,
+            }
+        )
+
     return {
         "project": project.model_dump(mode="json", by_alias=True),
-        "progress_stale": progress_is_stale(project),
+        "progress_stale": progress_is_stale(project, window=window),
         "sessions": rows,
     }
 
@@ -2263,3 +2630,175 @@ def readable_error(exc: Exception) -> str:
             message = str(first.get("msg", "invalid value"))
             return f"{location}: {message}" if location else message
     return str(exc)
+
+
+# ---------------------------------------------------------------------------
+# The schema-1 -> 2 coordination migration (run from the startup seam)
+# ---------------------------------------------------------------------------
+#
+# WHY this exists at all: the chief of staff's create-time auto-link wrote her
+# session id into ``sessions`` — the WORK set — so 30 rows on the operator's
+# store count her as a worker, satisfy liveness, and earn her session a
+# completion-check nudge for projects she filed but does not work on. Schema 2
+# splits the two meanings; this migration moves the existing links to the side
+# they always meant, PRESERVATIVELY (re-kind, never delete): a row where she is
+# the actual owner, the sole link, or the author of every recorded entry keeps
+# her as a working link.
+
+
+def _coordination_keep_rule(
+    project: Project, *, cos_session_id: str, cos_display_name: str
+) -> str | None:
+    """The KEEP clause that protects a row from demotion, or ``None`` to demote.
+
+    The three clauses, in the ruling's order:
+
+    1. ``owner`` names her — casefold against her CURRENT display name. A
+       rename since the row was written breaks the match; the dry run shows
+       it, and a wrong demotion is one ``op='link'`` from restored.
+    2. She is the SOLE linked session — the row is hers (nothing else can
+       work on it, so demoting her would leave it unowned).
+    3. She authored EVERY non-empty ``by`` entry on the row (at least one) —
+       the record is hers even where other session files exist.
+    """
+    owner = (project.owner or "").strip().casefold()
+    if cos_display_name and owner and owner == cos_display_name.strip().casefold():
+        return "owner"
+    if len(project.sessions) == 1:
+        return "sole_link"
+    authors = [(entry.by or "").strip() for entry in project.updates if (entry.by or "").strip()]
+    if authors and all(author == cos_session_id for author in authors):
+        return "authored_all"
+    return None
+
+
+def migrate_coordination_links(
+    config_dir: Path | str,
+    *,
+    dry_run: bool = False,
+    cos_session_id: str | None = None,
+    cos_display_name: str | None = None,
+) -> list[dict[str, Any]]:
+    """Re-kind the chief of staff's create-time auto-links. Returns the plan.
+
+    Selector: every SCHEMA-1 row whose WORK links include her session
+    (:func:`local_operator.aida.state.session_id_of`). Decision per row:
+    :func:`_coordination_keep_rule` or demote (move her id
+    ``sessions`` -> ``coordination_sessions``, written ``schema=2``). Kept rows
+    are NOT rewritten — "a wrong keep just leaves one row as today" — so they
+    still match the selector on a later run and are re-decided (to keep) at
+    the cost of one read each, writing nothing. That no-op IS the gate, exactly
+    the config-migrations doctrine's shape: no stamp file, an idempotent
+    predicate, backup-first, abort-if-no-backup.
+
+    ``dry_run=True`` returns the full per-row plan (``id``, ``name``,
+    ``decision`` in ``demote|keep``, the deciding ``rule``, and the planned
+    ``sessions``/``coordination_sessions`` lists) and writes NOTHING — no lock,
+    no backup dir, no row. Apply takes the store's own lock, re-derives the
+    targets from a fresh read under it, backs every row it will rewrite into
+    ``projects/.migrations-backup-<stamp>/`` BEFORE any rewrite, and aborts
+    the whole run if any backup cannot be written (a later launch retries).
+    ``cos_session_id``/``cos_display_name`` are injection points for tests and
+    for the seam; both default to the live aida state/config.
+    """
+    root = Path(config_dir)
+    if cos_session_id is None:
+        from local_operator.aida.state import session_id_of
+
+        cos_session_id = session_id_of(root)
+    if not cos_session_id:
+        # No chief of staff on this install (or no state yet): nothing can
+        # match the selector, and the caller needs no error for that.
+        return []
+    if cos_display_name is None:
+        from local_operator.aida.naming import display_name as aida_display_name
+
+        cos_display_name = aida_display_name(root)
+
+    registry = ProjectRegistry(root)
+
+    def plan_row(project: Project) -> dict[str, Any] | None:
+        if project.schema_version != 1 or cos_session_id not in project.sessions:
+            return None
+        rule = _coordination_keep_rule(
+            project, cos_session_id=cos_session_id, cos_display_name=cos_display_name
+        )
+        if rule is not None:
+            sessions_after = list(project.sessions)
+            coordination_after = list(project.coordination_sessions)
+            decision = "keep"
+        else:
+            sessions_after = [s for s in project.sessions if s != cos_session_id]
+            coordination_after = [*project.coordination_sessions, cos_session_id]
+            decision = "demote"
+            rule = "no_keep_clause"
+        return {
+            "id": project.id,
+            "name": project.name,
+            "decision": decision,
+            "rule": rule,
+            "sessions": sessions_after,
+            "coordination_sessions": coordination_after,
+        }
+
+    plan = [entry for project in registry.list_projects() if (entry := plan_row(project))]
+    if dry_run:
+        return plan
+    if not any(entry["decision"] == "demote" for entry in plan):
+        return plan
+
+    with registry._persistence_lock():
+        registry._load()
+        # Re-derive under the lock: the pre-lock scan chose the backup-dir
+        # decision only; the rows actually rewritten are TODAY's, from this
+        # read, with the same clauses applied (a frame that moved in between
+        # must not be re-kinded on a stale decision).
+        targets = [
+            project
+            for project in registry._projects.values()
+            if project.schema_version == 1
+            and cos_session_id in project.sessions
+            and _coordination_keep_rule(
+                project, cos_session_id=cos_session_id, cos_display_name=cos_display_name
+            )
+            is None
+        ]
+        if not targets:
+            return plan
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup_dir = registry.projects_dir / f".migrations-backup-{stamp}"
+        try:
+            backup_dir.mkdir(parents=True, exist_ok=False)
+            for project in targets:
+                source = registry.projects_dir / f"{project.id}.json"
+                (backup_dir / f"{project.id}.json").write_bytes(source.read_bytes())
+        except OSError as exc:
+            # Abort-if-no-backup: the rows are untouched and the next launch
+            # retries (nothing records the attempt as done). The partial dir
+            # is removed — it guards bytes that no rewrite ever replaced.
+            logger.warning(
+                "project migration: could not back up every row to %s (%s); "
+                "no row rewritten, retrying at the next launch",
+                backup_dir,
+                exc,
+            )
+            shutil.rmtree(backup_dir, ignore_errors=True)
+            return plan
+        for project in targets:
+            candidate = project.model_copy(deep=True)
+            candidate.sessions = [s for s in candidate.sessions if s != cos_session_id]
+            candidate.coordination_sessions = [*candidate.coordination_sessions, cos_session_id]
+            # The re-kinded row carries the new field, so its schema must say
+            # so or an older build would be free to drop it again.
+            candidate.schema_version = PROJECT_SCHEMA
+            # Deliberately NOT moving ``updated_at``: this is a provenance
+            # correction, not operator activity, and the board sorts on it.
+            registry._save_project_locked(candidate)
+        logger.warning(
+            "project migration: re-kinded %d chief-of-staff link%s into "
+            "coordination (backup at %s)",
+            len(targets),
+            "" if len(targets) == 1 else "s",
+            backup_dir,
+        )
+    return plan

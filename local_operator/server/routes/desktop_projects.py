@@ -56,6 +56,7 @@ from local_operator.projects import (
     ProjectRegistryLockTimeout,
     ProjectSchemaGuardError,
     build_project_view,
+    stale_after_s,
     readable_error,
     scan_runtime_states,
 )
@@ -90,6 +91,16 @@ def _registry(request: Request) -> ProjectRegistry:
     adapter over the same directory the tool writes, not a second registry.
     """
     return ProjectRegistry(request.app.state.config_manager.config_dir)
+
+
+def _window(registry: ProjectRegistry) -> float:
+    """The configured staleness window for this request's config root.
+
+    Resolved ONCE per handler and passed to every ``project_summary``/
+    ``project_view`` call there, so every row of one payload is measured
+    against the same boundary ("server-computed once").
+    """
+    return stale_after_s(registry.config_dir)
 
 
 def _find(registry: ProjectRegistry, key: str) -> Project | None:
@@ -169,7 +180,9 @@ async def projects(request: Request) -> CRUDResponse[Any]:
             listed = registry.list_projects()
             live = _live_counts(registry, listed)
             rows = [
-                project_summary(project, live_sessions=live.get(project.id, 0))
+                project_summary(
+                    project, live_sessions=live.get(project.id, 0), window=_window(registry)
+                )
                 for project in listed
             ]
             rows.sort(key=lambda row: (STATUS_RANK.get(row.status, 99), -row.updated_at))
@@ -204,7 +217,7 @@ async def create(body: ProjectCreate, request: Request) -> CRUDResponse[Any]:
                 raise _refusal(exc, body.name) from exc
             # A route-created project starts unlinked by design (§4.1's body
             # carries no sessions), so the live count is 0 without a scan.
-            return project_summary(created, live_sessions=0)
+            return project_summary(created, live_sessions=0, window=_window(registry))
 
         return reply(await asyncio.to_thread(mutate))
 
@@ -220,7 +233,7 @@ async def detail(key: str, request: Request) -> CRUDResponse[Any]:
                 raise _not_found(registry, key)
             view = build_project_view(found, config_dir=registry.config_dir)
             return ProjectDetail(
-                project=project_view(found),
+                project=project_view(found, window=_window(registry)),
                 links=[linked_session_view(row) for row in view["sessions"]],
             )
 
@@ -257,7 +270,9 @@ async def patch(key: str, body: ProjectPatch, request: Request) -> CRUDResponse[
                 raise _refusal(exc, key) from exc
             updated = outcome.project
             live = _live_counts(registry, [updated])
-            return project_summary(updated, live_sessions=live.get(updated.id, 0))
+            return project_summary(
+                updated, live_sessions=live.get(updated.id, 0), window=_window(registry)
+            )
 
         return reply(await asyncio.to_thread(mutate))
 
@@ -319,7 +334,9 @@ async def link(key: str, body: LinkMutation, request: Request) -> CRUDResponse[A
                 # uncaught guard reaches ``errors()``'s 503 arm.
                 raise _refusal(exc, key) from exc
             live = _live_counts(registry, [project])
-            return project_summary(project, live_sessions=live.get(project.id, 0))
+            return project_summary(
+                project, live_sessions=live.get(project.id, 0), window=_window(registry)
+            )
 
         return reply(await asyncio.to_thread(mutate))
 
@@ -343,7 +360,9 @@ async def unlink(key: str, session_id: str, request: Request) -> CRUDResponse[An
             ) as exc:
                 raise _refusal(exc, key) from exc
             live = _live_counts(registry, [project])
-            return project_summary(project, live_sessions=live.get(project.id, 0))
+            return project_summary(
+                project, live_sessions=live.get(project.id, 0), window=_window(registry)
+            )
 
         return reply(await asyncio.to_thread(mutate))
 
@@ -370,7 +389,7 @@ async def milestone(key: str, body: MilestoneMutation, request: Request) -> CRUD
                 ProjectRegistryLockTimeout,
             ) as exc:
                 raise _refusal(exc, key) from exc
-            return project_view(project)
+            return project_view(project, window=_window(registry))
 
         return reply(await asyncio.to_thread(mutate))
 
@@ -396,6 +415,6 @@ async def milestone_remove(key: str, name: str, request: Request) -> CRUDRespons
                 ProjectRegistryLockTimeout,
             ) as exc:
                 raise _refusal(exc, key) from exc
-            return project_view(project)
+            return project_view(project, window=_window(registry))
 
         return reply(await asyncio.to_thread(mutate))
