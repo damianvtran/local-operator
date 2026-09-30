@@ -1131,10 +1131,17 @@ class SessionSidebar(Widget, can_focus=True):
         self.refresh()
 
     def set_open(self, opened: bool) -> None:
-        if not opened and self._pressed_id is not None:
+        if not opened and (self._pressed_id is not None or self._pressed_chip):
+            # A gesture interrupted by the close is cancelled, not left primed:
+            # the pin cell is protected by its row id being cleared here, but
+            # the chip has no row id, so its own flag is cleared too — the next
+            # press anywhere (even dead space, whose press records nothing)
+            # must not inherit the interrupted gesture and flip the layer on a
+            # click that never touched the chip.
             self.release_mouse()
             self._pressed_id = None
             self._pressed_pin = False
+            self._pressed_chip = False
             if self._deferred is not None:
                 deferred, self._deferred = self._deferred, None
                 self.set_entries(deferred)
