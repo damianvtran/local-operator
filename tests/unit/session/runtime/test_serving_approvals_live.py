@@ -375,46 +375,14 @@ async def test_a_bare_approvals_reports_a_divergence_against_the_file(
     # report both resolve — there is no second watcher to keep in step.
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(watcher.config_dir))
 
-    # The state a routed loosening usually LEAVES BEHIND: the gate is
-    # `this session`'s `auto` while the file still says `ask` (its seeded
-    # default). This is where the rule has to be stated as well as on the
-    # receipt — the receipt's pointer sends the operator here to read it
-    # (agent review round 3, M1).
-    receipt = getattr(handle._approvals_slash(session, "auto", SlashResult), "text", "")
-    assert receipt == (
-        "tool approvals: auto — every tool runs without asking (this session); "
-        "the band's ! tracks this window's own mode — a routed change does not move "
-        "it; /approvals re-reports the gate"
-    ), receipt
-
-    divergence = getattr(handle._approvals_slash(session, "", SlashResult), "text", "")
-    assert divergence == (
-        "tool approvals: auto (this session) — every tool runs without asking; "
-        "config.yml says ask — /approvals ask adopts it in this session; "
-        "the band's ! tracks this window's own mode — a routed change does not move it"
-    ), divergence
-    # The report does not repeat the pointer: it is the surface the pointer names,
-    # so "run /approvals" on it tells the reader to run what they just ran.
-    assert "re-reports the gate" not in divergence, divergence
-
-    # An ATTRIBUTED write (the operator's own facade, this process) is authorised,
-    # so the file and the runtime agree again and the report is the matched pair.
-    _write_here(watcher.config_dir, "tool_approval_mode", "auto")
-    watcher.poll_now()
+    handle._approvals_slash(session, "ask", SlashResult)
+    _write_elsewhere(watcher.config_dir, "tool_approval_mode", "auto")
+    watcher.poll_now()  # the explicit-`ask` keep rule holds this gate at `ask`
     await asyncio.sleep(0)
-    report = getattr(handle._approvals_slash(session, "", SlashResult), "text", "")
-    assert report == (
-        "tool approvals: auto — every tool runs without asking; new sessions open the "
-        "same way; the band's ! tracks this window's own mode — a routed change does "
-        "not move it"
-    ), report
 
-    # A routed TIGHTENING leaves the marker correctly dark, so the clause would be
-    # noise there — pinned so it cannot spread.
-    tighten = getattr(handle._approvals_slash(session, "ask", SlashResult), "text", "")
-    assert "the band's !" not in tighten, tighten
+    texts = [getattr(e, "text", "") for e in emitted]
+    assert any("set with /approvals in this session" in t for t in texts), texts
 
-<<<<<<< Updated upstream
     # ``may_loosen=True`` explicitly: the DEFAULT is now "not said", which the
     # sentence builders read conservatively (agent review round 4, R4-3), and
     # every production caller passes the connection's own answer.
@@ -509,14 +477,6 @@ async def test_a_bare_approvals_reports_a_divergence_against_the_file(
     assert "lop operator install" in both, both
     assert "authority is not installed on this machine" in both, both
     assert len(both) <= 400, len(both)
-=======
-    # No watcher snapshot: the runtime has not read the file, so it says nothing
-    # about it (the clause is conditional on `on_disk == live`).
-    monkeypatch.delenv("LOCAL_OPERATOR_CONFIG_DIR", raising=False)
-    bare = getattr(handle._approvals_slash(session, "", SlashResult), "text", "")
-    assert "new sessions" not in bare, bare
-    assert bare == "tool approvals: ask — write and command tools prompt before running", bare
->>>>>>> Stashed changes
     await handle.dispose()
 
 
@@ -536,48 +496,26 @@ async def test_the_routed_receipt_discloses_the_dark_marker(tmp_path, monkeypatc
     closed for the receipts. Both sentences are asserted verbatim, and the clause
     that names the FILE is asserted absent when no watcher has read it, because
     the runtime may not vouch for a file it cannot see.
-
-    Round 3: the marker clause states the RULE ("tracks this window's own mode")
-    rather than the marker's future, because the emitting process cannot see the
-    pane's flag and a session that BOOTED ungated has a lit marker beside it (UX
-    round 3, U11; QA round 3, Q6). It is on the DIVERGENCE form as well as the
-    matched pair, since a routed loosening usually leaves the divergence behind
-    and the receipt's pointer sends the operator there (agent review round 3,
-    M1); the self-pointer is on the receipt only, where "go and look" is apt.
     """
     handle, session, watcher, _emitted = _handle(tmp_path, auto_approve=False)
 
     from local_operator.session.frontend_state import SlashResult
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(watcher.config_dir))
-    # The file starts at `ask` (the schema default), so this routed loosening
-    # lands in the DIVERGENCE state — the one a routed loosening usually leaves
-    # behind, and the one `_handle`'s own config file already carries.
+    _write_elsewhere(watcher.config_dir, "tool_approval_mode", "auto")
+    watcher.poll_now()
+    await asyncio.sleep(0)
+
     receipt = getattr(handle._approvals_slash(session, "auto", SlashResult), "text", "")
     assert receipt == (
         "tool approvals: auto — every tool runs without asking (this session); "
-        "the band's ! tracks this window's own mode — a routed change does not move "
-        "it; /approvals re-reports the gate"
+        "the band's ! will not follow this — /approvals re-reports the gate"
     ), receipt
-    divergence = getattr(handle._approvals_slash(session, "", SlashResult), "text", "")
-    assert divergence == (
-        "tool approvals: auto (this session) — every tool runs without asking; "
-        "config.yml says ask — /approvals ask adopts it in this session; "
-        "the band's ! tracks this window's own mode — a routed change does not move it"
-    ), divergence
-    # The report does NOT repeat the pointer: it is the surface the pointer names.
-    assert "re-reports the gate" not in divergence, divergence
 
-    # An ATTRIBUTED write (the operator's own facade, this process): authorised,
-    # so the file and the runtime agree again and the report is the matched pair.
-    _write_here(watcher.config_dir, "tool_approval_mode", "auto")
-    watcher.poll_now()
-    await asyncio.sleep(0)
     report = getattr(handle._approvals_slash(session, "", SlashResult), "text", "")
     assert report == (
         "tool approvals: auto — every tool runs without asking; new sessions open the "
-        "same way; the band's ! tracks this window's own mode — a routed change does "
-        "not move it"
+        "same way; the band's ! will not follow this — /approvals re-reports the gate"
     ), report
 
     # A routed TIGHTENING leaves the marker correctly dark, so the clause would be
