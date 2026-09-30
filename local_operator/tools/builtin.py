@@ -13162,7 +13162,7 @@ _SESSIONS_TOOL_DESCRIPTION = (
     " recent content); `info` describes one session — its state, directory, origin"
     " and whether the operator's sidebar lists it; `spawn` opens a parallel session"
     " for work the USER asked to run separately — it is a listed workstream by"
-    " default (use `visibility=\"ephemeral\"` only for a throwaway run the"
+    ' default (use `visibility="ephemeral"` only for a throwaway run the'
     " operator did not ask to see); `resume` reopens a stored/stopped session"
     " headlessly; `stop` ends a running session gracefully. Address a session with"
     " exactly one of `session` (exact id), `target` (name/cwd substring) or `pid`."
@@ -13190,14 +13190,10 @@ class SessionsParams(BaseModel):
             "for; listed by default); resume a stored one; stop a running one."
         )
     )
-    session: str | None = Field(
-        default=None, description="info/resume/stop: exact session id."
-    )
+    session: str | None = Field(default=None, description="info/resume/stop: exact session id.")
     target: str | None = Field(
         default=None,
-        description=(
-            "info/resume/stop: substring of name, id or cwd; live first, then stored."
-        ),
+        description=("info/resume/stop: substring of name, id or cwd; live first, then stored."),
     )
     pid: int | None = Field(default=None, description="info/stop: exact pid.")
     prompt: str | None = Field(
@@ -13642,11 +13638,7 @@ async def _sessions_list_query(
         session_search.search_store, config_dir(), params.query or "", limit=params.limit
     )
     scanned = await asyncio.to_thread(registry.scan)
-    live = {
-        rec.session_id: (rec, state)
-        for rec, state in scanned
-        if state in ("live", "wedged")
-    }
+    live = {rec.session_id: (rec, state) for rec, state in scanned if state in ("live", "wedged")}
     rows: list[dict[str, Any]] = []
     lines: list[str] = []
     for match in matches:
@@ -14147,9 +14139,7 @@ async def _sessions_open(
     fallback_origin = None
     fallback_visibility = None
     if params.op == "spawn":
-        fallback_origin = (
-            "agent-workstream" if params.visibility == "workstream" else "agent-shell"
-        )
+        fallback_origin = "agent-workstream" if params.visibility == "workstream" else "agent-shell"
         fallback_visibility = "listed" if params.visibility == "workstream" else "hidden"
     origin = disk.origin if disk.origin is not None else fallback_origin
     visibility = (
