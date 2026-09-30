@@ -2015,6 +2015,32 @@ class TestTheSubagentModelChoiceRow:
         assert "inherits" in by_value["operator"].description
         assert "costlier model" in by_value["model"].description
 
+    def test_the_pinned_fallback_row_fits_its_copy(self) -> None:
+        """Design round 1, D1/D3, pinned as facts rather than as wording.
+
+        The choice descriptions render ONLY on the expanded rows, where the
+        60x20 captured-frame fields are 17 and 26 cells (a clipped line spends
+        its last cell on the truncation ellipsis; the pairs at 80x24 are 37/46
+        and at 100x30 are 23/32). So each description must fit the SMALLEST
+        field pair, and the shipped pair — 16 and 22 cells — paints WITHOUT an
+        ellipsis at 60x20, 80x24 and 100x30 (frames). The pair this replaced
+        ran to 121 and 129 characters, was clipped at every size, and always
+        lost the discriminating words (which vendor the child may reach).
+        The help must fit the detail line's 93 cells at 100x30 WITHOUT losing
+        `same-family hops only, or any vendor (announced)` — the clause the
+        overlong predecessor dropped on the line that exists to say it; it
+        now paints all 87 cells there (frame).
+        """
+        setting = settings_io.resolve_key("retry.pinnedFallback")
+        assert setting is not None
+        by_value = {choice.value: choice for choice in setting.choices}
+        assert cell_len(by_value["same-family"].description) <= 17
+        assert cell_len(by_value["cross-family"].description) <= 26
+        assert "same vendor" in by_value["same-family"].description
+        assert "any vendor" in by_value["cross-family"].description
+        assert "same-family hops only, or any vendor (announced)" in setting.help
+        assert cell_len(setting.help) <= 92
+
     @pytest.mark.parametrize("tier", ["lo", "med", "hi"])
     def test_the_tier_rows_name_the_billing_and_the_picker(self, tier: str) -> None:
         """The two facts the incident proved these rows were missing.

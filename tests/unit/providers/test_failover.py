@@ -6676,11 +6676,173 @@ async def test_pinned_route_fails_visibly_rather_than_crossing_vendors(
 
     assert "deepseek/deepseek-flash" not in specs_seen, "the pin policy must hold"
     message = str(caught.value)
-    assert f"pinned model {_PIN}" in message
+    assert f"Pin {_PIN} failed" in message
     assert "model unavailable" in message, "the cause is named, not swallowed"
     assert "deepseek/deepseek-flash" in message, "the refused candidate is named by name"
     assert "retry.fallbackChains" in message, "remedy 1"
-    assert "retry.pinnedFallback: cross-family" in message, "remedy 2"
+    assert "set retry.pinnedFallback to allow cross-vendor" in message, "remedy 2"
+    # The lead and the vocabulary are LAYOUT constraints, not prose taste
+    # (design round 1, D4/D5): the failed child's dock row paints ~58 cells,
+    # so remedy 1 must land inside that span, and the wording speaks the
+    # /settings page's words — "hop", never "target"; the choice label
+    # "allow cross-vendor", never the raw stored value.
+    assert message.index("allow cross-vendor") + len("allow cross-vendor") <= 58
+    assert "same-family hop" in message
+    assert "target" not in message
+    assert "cross-family" not in message
+
+
+async def test_pinned_route_with_no_chain_still_fails_legibly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F3: strictness is a property of the (pin, policy) pair, not of a chain
+    happening to expand. With NO fallbackChains configured, a pinned child
+    now fails with the legible refusal — pin, cause, both remedies, and the
+    nothing-configured note — where it used to surface the raw provider
+    error with no pin named and no way out."""
+
+    def pinned_call(request: ChatRequest, api_key: str | None, oauth_access: Any = None):
+        raise ProviderError(429, "quota reset pending", retryable=True, retry_after_ms=45_000)
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return _FnClient(pinned_call)
+
+    async def no_sleep(delay_ms: int, signal: Any) -> None:
+        return None
+
+    monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", no_sleep)
+
+    settings = {"retry": {"baseDelayMs": 1}}  # no fallbackChains at all
+    auth = FakeAuth({"anthropic": ["ka1"]})
+
+    with pytest.raises(ProviderError) as caught:
+        await _collect(
+            stream_with_failover(
+                _request("anthropic", "claude-sonnet-5-5"),
+                auth,
+                settings,
+                client_for,
+                route_state=_pinned_state(),
+            )
+        )
+
+    message = str(caught.value)
+    assert f"Pin {_PIN} failed" in message
+    assert "quota reset pending" in message, "the cause is named, not swallowed"
+    assert "No same-family hop is configured." in message
+    assert "retry.fallbackChains" in message and "allow cross-vendor" in message
+
+
+def test_pinned_family_rank_matrix_round_trips_across_aggregator_routes() -> None:
+    """F1: the pin-preserving rank is SYMMETRIC — the same model ranks 0
+    whichever side of the comparison the aggregator sits on, so a pin resolved
+    THROUGH an aggregator (a ``subagents.models`` tier may name one) can take
+    its own model on the direct route instead of being filtered as
+    "cross-vendor" and failing. The sibling edges are pinned too: same-vendor
+    siblings rank 1 in both directions, and two routes of ONE aggregator whose
+    underlying vendors differ rank cross-vendor — the old "same provider"
+    read had let that descend silently."""
+    from local_operator.providers.failover import (
+        PIN_FAMILY_CROSS_VENDOR,
+        PIN_FAMILY_SAME_MODEL,
+        PIN_FAMILY_SAME_VENDOR,
+        pinned_family_rank,
+    )
+
+    direct = "anthropic/claude-sonnet-5-5"
+    via_openrouter = "openrouter/anthropic/claude-sonnet-5-5"
+    via_radient = "radient/anthropic/claude-sonnet-5-5"
+
+    # The round-trip this matrix exists for: same model, rank 0 both ways.
+    assert pinned_family_rank(direct, direct) == PIN_FAMILY_SAME_MODEL
+    assert pinned_family_rank(direct, via_openrouter) == PIN_FAMILY_SAME_MODEL
+    assert pinned_family_rank(via_openrouter, direct) == PIN_FAMILY_SAME_MODEL
+    assert pinned_family_rank(via_openrouter, via_radient) == PIN_FAMILY_SAME_MODEL
+    # A bare-model aggregator id still counts as the same model both ways
+    # (``openrouter/deepseek-chat`` vs ``deepseek/deepseek-chat``).
+    assert (
+        pinned_family_rank("deepseek/deepseek-chat", "openrouter/deepseek-chat")
+        == PIN_FAMILY_SAME_MODEL
+    )
+    assert (
+        pinned_family_rank("openrouter/deepseek-chat", "deepseek/deepseek-chat")
+        == PIN_FAMILY_SAME_MODEL
+    )
+    # Same-vendor siblings, both directions, direct and through an aggregator.
+    assert pinned_family_rank(direct, "anthropic/claude-opus-5") == PIN_FAMILY_SAME_VENDOR
+    assert (
+        pinned_family_rank(direct, "openrouter/anthropic/claude-opus-5") == PIN_FAMILY_SAME_VENDOR
+    )
+    assert pinned_family_rank(via_openrouter, "anthropic/claude-opus-5") == PIN_FAMILY_SAME_VENDOR
+    # Cross-vendor, both directions — including two routes of ONE aggregator
+    # whose underlying vendors differ.
+    assert pinned_family_rank(direct, "deepseek/deepseek-flash") == PIN_FAMILY_CROSS_VENDOR
+    assert pinned_family_rank(via_openrouter, "deepseek/deepseek-flash") == PIN_FAMILY_CROSS_VENDOR
+    assert (
+        pinned_family_rank(via_openrouter, "openrouter/deepseek/deepseek-chat")
+        == PIN_FAMILY_CROSS_VENDOR
+    )
+    assert (
+        pinned_family_rank("openrouter/deepseek/deepseek-chat", via_openrouter)
+        == PIN_FAMILY_CROSS_VENDOR
+    )
+
+
+async def test_pinned_aggregator_route_takes_its_own_model_on_the_direct_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F1 round-trip, end to end: a child resolved onto an aggregator route
+    (``openrouter/anthropic/claude-sonnet-5-5``) whose chain offers the same
+    model DIRECTLY must descend onto that route and serve. Before the fix the
+    rank only unwrapped the TARGET side, so this pin ranked its own model
+    "cross-vendor", the strict filter dropped it, and the child failed with a
+    message miscalling the pin's own model a cross-vendor fallback."""
+    events: list[str] = []
+    sleeps: list[int] = []
+
+    def pinned_call(request: ChatRequest, api_key: str | None, oauth_access: Any = None):
+        events.append(f"call:{api_key}")
+        raise ProviderError(429, "quota reset pending", retryable=True, retry_after_ms=45_000)
+
+    async def client_for(spec: ModelSpec) -> Any:
+        events.append(f"ask:{spec.provider}/{spec.model_id}")
+        if spec.provider == "openrouter":
+            return _FnClient(pinned_call)
+        return ScriptedClient([StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")])
+
+    async def record_sleep(delay_ms: int, signal: Any) -> None:
+        sleeps.append(delay_ms)
+
+    monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", record_sleep)
+
+    settings = {
+        "retry": {
+            "baseDelayMs": 1,
+            "fallbackChains": {"default": ["anthropic/claude-sonnet-5-5"]},
+        }
+    }
+    auth = FakeAuth({"openrouter": ["ko1"], "anthropic": ["ka1"]})
+
+    got = await _collect(
+        stream_with_failover(
+            _request("openrouter", "anthropic/claude-sonnet-5-5"),
+            auth,
+            settings,
+            client_for,
+            route_state=_pinned_state("openrouter/anthropic/claude-sonnet-5-5"),
+        )
+    )
+
+    # One probation re-ask on the pin, then the SAME model's direct route is
+    # asked and serves — no refusal, no cross-vendor hop.
+    assert events[:3] == [
+        "ask:openrouter/anthropic/claude-sonnet-5-5",
+        "call:ko1",
+        "call:ko1",
+    ], events
+    assert events[3] == "ask:anthropic/claude-sonnet-5-5", events
+    assert sleeps == [45_000]
+    assert any(isinstance(e, StreamTextDelta) and e.delta == "ok" for e in got)
 
 
 async def test_settle_reason_names_the_failure_kind_and_status(

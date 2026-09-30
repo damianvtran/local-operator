@@ -2598,6 +2598,10 @@ def _coerce_int(value: Any, default: int) -> int:
         return default
 
 
+PINNED_FALLBACK_SAME_FAMILY = "same-family"
+PINNED_FALLBACK_CROSS_FAMILY = "cross-family"
+PINNED_FALLBACK_VALUES = (PINNED_FALLBACK_SAME_FAMILY, PINNED_FALLBACK_CROSS_FAMILY)
+
 #: ``retry.pinnedFallback`` — what a pinned child's cascade may descend onto
 #: when no same-family route can serve it. The shipped default refuses the
 #: cross-vendor hop, trading a silent vendor substitution for a VISIBLE
@@ -2605,11 +2609,10 @@ def _coerce_int(value: Any, default: int) -> int:
 #: reach (targets are still ordered same-family first, and the descent still
 #: announces itself). A module-level constant rather than a literal at the
 #: reader, because ``tests/unit/test_settings_io.py::_consumer_defaults``
-#: pins the ``/settings`` registry row to exactly this value.
-DEFAULT_PINNED_FALLBACK = "same-family"
-PINNED_FALLBACK_SAME_FAMILY = "same-family"
-PINNED_FALLBACK_CROSS_FAMILY = "cross-family"
-PINNED_FALLBACK_VALUES = (PINNED_FALLBACK_SAME_FAMILY, PINNED_FALLBACK_CROSS_FAMILY)
+#: pins the ``/settings`` registry row to exactly this value; it IS the
+#: ``PINNED_FALLBACK_SAME_FAMILY`` member above rather than a second literal
+#: for the same word (review round 1, nit F4).
+DEFAULT_PINNED_FALLBACK = PINNED_FALLBACK_SAME_FAMILY
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2922,15 +2925,36 @@ PIN_FAMILY_SAME_VENDOR = 1
 PIN_FAMILY_CROSS_VENDOR = 2
 
 
+def _route_identity(provider: str, model_id: str, aggregators: "frozenset[str]") -> tuple[str, str]:
+    """Normalize a selector to the ``(vendor, model)`` pair it ultimately serves.
+
+    An aggregator route spells the underlying model as ``vendor/model`` after
+    its own prefix (``openrouter/anthropic/claude-sonnet-5-5`` serves Anthropic's
+    ``claude-sonnet-5-5``), so the SAME model reached directly and through an
+    aggregator must compare equal no matter which side of the comparison the
+    aggregator is on — the asymmetry review round 1 (F1) reproduced as a child
+    failing on its own model. An aggregator id with no vendor segment
+    (``openrouter/deepseek-chat``) has nothing to unwrap and keeps its own
+    name; a direct route is already ``(provider, model_id)``.
+    """
+    if provider in aggregators:
+        vendor, slash, rest = model_id.partition("/")
+        if slash and vendor and rest:
+            return vendor, rest
+    return provider, model_id
+
+
 def pinned_family_rank(pin_selector: str, target_selector: str) -> int:
     """Rank ``target_selector`` against a pinned child's ``pin_selector``.
 
-    ``0`` PIN-PRESERVING — the same model through another route (an
-    aggregator serving the pin's own model id), the only fallback that cannot
-    change the model answering a pinned child; ``1`` SAME-VENDOR — a sibling
-    model of the pin's vendor, served directly or by an aggregator whose model
-    id's leading segment names that vendor; ``2`` CROSS-VENDOR — anything
-    else.
+    ``0`` PIN-PRESERVING — the same model through another route, whichever
+    side of the comparison the aggregator is on (both sides are unwrapped
+    with :func:`_route_identity`, so an aggregator-resolved pin can take its
+    own model on the direct route — and a direct pin on an aggregator route;
+    the rank cannot depend on which side is aggregated, review round 1, F1);
+    ``1`` SAME-VENDOR — a sibling model of the pin's vendor, served directly
+    or by an aggregator whose model id's leading segment names that vendor;
+    ``2`` CROSS-VENDOR — anything else.
 
     Pure and total: an unparsable selector ranks cross-vendor, because a
     target this cannot read must not be treated as family. THE one definition
@@ -2943,25 +2967,40 @@ def pinned_family_rank(pin_selector: str, target_selector: str) -> int:
     target_provider, target_model = parse_selector(target_selector)
     if not pin_provider or not target_provider:
         return PIN_FAMILY_CROSS_VENDOR
-    if target_provider == pin_provider:
-        return PIN_FAMILY_SAME_MODEL if target_model == pin_model else PIN_FAMILY_SAME_VENDOR
     # Imported at call time like this module's other registry readers: this
     # runs on the request path and `registry` should not ride the import graph
     # of every failover consumer.
     from local_operator.providers.registry import AGGREGATOR_PROVIDERS
 
-    if target_provider in AGGREGATOR_PROVIDERS:
-        if target_model == pin_model or target_model.endswith("/" + pin_model):
-            return PIN_FAMILY_SAME_MODEL
-        if target_model.split("/", 1)[0] == pin_provider:
-            return PIN_FAMILY_SAME_VENDOR
+    pin_vendor, pin_served_model = _route_identity(pin_provider, pin_model, AGGREGATOR_PROVIDERS)
+    target_vendor, target_served_model = _route_identity(
+        target_provider, target_model, AGGREGATOR_PROVIDERS
+    )
+    if pin_vendor == target_vendor and pin_served_model == target_served_model:
+        return PIN_FAMILY_SAME_MODEL
+    # An aggregator id may BE the pin's model id, or END WITH it, when there
+    # is no vendor segment to unwrap (``openrouter/deepseek-chat`` vs
+    # ``deepseek/deepseek-chat``); the same model through another route,
+    # checked on EITHER side so the rank never depends on which side is the
+    # aggregator.
+    if target_provider in AGGREGATOR_PROVIDERS and (
+        target_model == pin_model or target_model.endswith("/" + pin_model)
+    ):
+        return PIN_FAMILY_SAME_MODEL
+    if pin_provider in AGGREGATOR_PROVIDERS and (
+        pin_model == target_model or pin_model.endswith("/" + target_model)
+    ):
+        return PIN_FAMILY_SAME_MODEL
+    if pin_vendor == target_vendor:
+        return PIN_FAMILY_SAME_VENDOR
     return PIN_FAMILY_CROSS_VENDOR
 
 
 def is_same_family(pin_selector: str, target_selector: str) -> bool:
     """Boolean view of :func:`pinned_family_rank` — may a pinned child be
     served here at all (i.e. not cross-vendor). Named separately because that
-    is the question the strict filter and the quota preflight each ask."""
+    is the question the strict filter and the pin's availability flag ask;
+    the quota preflight reaches it through :func:`order_pinned_targets`."""
     return pinned_family_rank(pin_selector, target_selector) < PIN_FAMILY_CROSS_VENDOR
 
 
@@ -2977,9 +3016,9 @@ def order_pinned_targets(
     vendor's model — while the opt-in keeps them, last, so a cross-vendor hop
     is the last resort and still proceeds loudly.
     """
-    ranked = [(pinned_family_rank(pin_selector, target.selector), target) for target in targets]
     if strict:
-        ranked = [pair for pair in ranked if pair[0] < PIN_FAMILY_CROSS_VENDOR]
+        targets = [target for target in targets if is_same_family(pin_selector, target.selector)]
+    ranked = [(pinned_family_rank(pin_selector, target.selector), target) for target in targets]
     ranked.sort(key=lambda pair: pair[0])
     return [target for _rank, target in ranked]
 
@@ -3030,9 +3069,19 @@ def _pinned_exhaustion_error(
     classifier re-derive a kind from that quote could dress the refusal as the
     provider's own quota error.
 
+    THE FIRST SENTENCE IS THE ACTIONABLE HALF, and that is a measured layout
+    constraint rather than a style choice: the failed child's dock row paints
+    only its first ~58 cells (design round 1, D4), so the pin, the state and
+    both ways out LEAD, and the diagnostics follow. Wording speaks the
+    vocabulary of the ``/settings`` page that owns these terms — "hop",
+    "allow cross-vendor" — never "target" and never the raw stored value
+    (design round 1, D5).
+
     ``same_family_available`` distinguishes the three exhaustion shapes so
-    the note never lies about what was configured: same-family targets tried
-    and spent, cross-vendor targets refused by policy, or neither configured.
+    the note never lies about what was configured: same-family hops tried
+    and spent, cross-vendor hops refused by policy, or neither configured —
+    the last one reachable in its natural no-chain shape (review round 1,
+    F3).
     """
     if reported is None:
         cause = "every route that could serve it failed"
@@ -3041,21 +3090,21 @@ def _pinned_exhaustion_error(
         cause = f"{reported.kind or 'failure'}{status}: {reported.message}"
     notes: list[str] = []
     if same_family_available:
-        notes.append("Every configured same-family fallback was tried and could not serve it.")
+        notes.append("Every configured same-family hop was tried and could not serve it.")
     if blocked:
         notes.append(
-            f"A cross-vendor fallback ({', '.join(blocked)})"
-            " is configured but refused by retry.pinnedFallback=same-family."
+            f"A cross-vendor hop ({', '.join(blocked)})"
+            " is configured but refused by retry.pinnedFallback (same family only)."
         )
     if not notes:
-        notes.append("No same-family fallback target is configured.")
+        notes.append("No same-family hop is configured.")
     return ProviderError(
         None,
-        f"pinned model {pin_selector} could not stay on its pin: {cause}."
+        f"Pin {pin_selector} failed; allow cross-vendor or add a same-family hop."
+        f" Cause: {cause}."
         f" {' '.join(notes)}"
-        " Add a same-family target to retry.fallbackChains, or set"
-        " retry.pinnedFallback: cross-family to allow a cross-vendor fallback"
-        " for pinned children.",
+        " Fix: add a same-family hop to retry.fallbackChains, or set"
+        " retry.pinnedFallback to allow cross-vendor.",
         retryable=False,
         kind="unknown",
     )
@@ -3509,13 +3558,20 @@ async def stream_with_failover(
     pinned = pin_selector is not None
 
     targets = [primary_target]
-    # Strict pin policy state, filled in only for a pinned route; the tail of
-    # the walk reads it to raise a legible refusal instead of dressing a
-    # policy-forced failure as a bare provider error.
+    # Strict pin policy state; the tail of the walk reads it to raise a
+    # legible refusal instead of dressing a policy-forced failure as a bare
+    # provider error. STRICTNESS is a property of the (pin, policy) pair, NOT
+    # of whether a chain happens to expand: with fallbacks on, a pinned child
+    # with NO chain still fails VISIBLY, with the no-candidates note naming
+    # why (review round 1, F3). The two flags stay empty when no chain
+    # contributed candidates, which is exactly the shape
+    # `_pinned_exhaustion_error` reads.
     pinned_strict = False
     pinned_blocked: list[str] = []
     pinned_family_available = False
     if retry.enabled and retry.model_fallback:
+        if pinned and pin_selector is not None:
+            pinned_strict = retry.pinned_fallback != PINNED_FALLBACK_CROSS_FAMILY
         chain = resolve_chain(primary_selector, retry.fallback_chains)
         if chain:
             candidates = expand_fallback_targets(
@@ -3529,17 +3585,14 @@ async def stream_with_failover(
                 # (`model.configure._first_available_fallback`), so the walk
                 # and the message boundary cannot form two opinions about
                 # which targets may serve a pinned child.
-                pinned_strict = retry.pinned_fallback != PINNED_FALLBACK_CROSS_FAMILY
                 pinned_family_available = any(
-                    pinned_family_rank(pin_selector, candidate.selector) < PIN_FAMILY_CROSS_VENDOR
-                    for candidate in candidates
+                    is_same_family(pin_selector, candidate.selector) for candidate in candidates
                 )
                 if pinned_strict:
                     pinned_blocked = [
                         candidate.selector
                         for candidate in candidates
-                        if pinned_family_rank(pin_selector, candidate.selector)
-                        == PIN_FAMILY_CROSS_VENDOR
+                        if not is_same_family(pin_selector, candidate.selector)
                     ]
                 candidates = order_pinned_targets(pin_selector, candidates, strict=pinned_strict)
             for candidate in candidates:

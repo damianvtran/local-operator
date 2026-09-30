@@ -64,15 +64,20 @@ rotation or descent begins. The existing `min(max_retries, 2)` budget and the
 Candidates are ranked by **vendor**, not by `model_family()` — that function
 is a *quota-scoping* notion ("which cap does this model draw on") with no
 capability semantics, while the line this policy draws is "the pin's own
-vendor" vs "another vendor". The ranks, implemented once as
-`failover.pinned_family_rank` (with `is_same_family` / `order_pinned_targets`
-as views over it):
+vendor" vs "another vendor". The ranks are implemented once, in
+`failover.pinned_family_rank`, which normalizes BOTH selectors to the
+`(vendor, model)` pair they ultimately serve — an aggregator's `vendor/model`
+suffix is unwrapped no matter which side of the comparison the aggregator is
+on (review round 1, F1: the one-directional form filtered out a pin's OWN
+model on the direct route and miscalled it "cross-vendor"). `is_same_family`
+is the boolean view the strict filter and the walk's availability flag call;
+`order_pinned_targets` is the ordering both descent points share:
 
 | rank | name | what it is | example for pin `anthropic/claude-sonnet-5-5` |
 |---|---|---|---|
-| 0 | PIN-PRESERVING | the same model through another route | `openrouter/anthropic/claude-sonnet-5-5` |
-| 1 | SAME-VENDOR | a sibling model of the pin's vendor (directly, or via an aggregator whose model id's leading segment names that vendor) | `anthropic/claude-opus-5`, `openrouter/anthropic/claude-opus-5` |
-| 2 | CROSS-VENDOR | anything else | `deepseek/deepseek-flash` |
+| 0 | PIN-PRESERVING | the same model through another route — and the round-trip: a pin resolved THROUGH an aggregator takes its own model on the direct route | `openrouter/anthropic/claude-sonnet-5-5`; for pin `openrouter/anthropic/claude-sonnet-5-5`: `anthropic/claude-sonnet-5-5`, `radient/anthropic/claude-sonnet-5-5` |
+| 1 | SAME-VENDOR | a sibling model of the pin's vendor (directly, or via an aggregator whose model id's leading segment names that vendor; symmetric too) | `anthropic/claude-opus-5`, `openrouter/anthropic/claude-opus-5` |
+| 2 | CROSS-VENDOR | anything else — including two routes of ONE aggregator whose underlying vendors differ (the old same-provider read had ranked that 1) | `deepseek/deepseek-flash`, `openrouter/deepseek/deepseek-chat` |
 
 The same predicate orders and filters **both** entry points — the cascade walk
 (`providers/failover.py`) and the message-boundary quota preflight
@@ -84,7 +89,7 @@ two opinions about which target may serve a pinned child; the preflight's
 
 | value | behaviour |
 |---|---|
-| `same-family` (**default**) | a pinned child does **not** enter a cross-vendor target. After probation and every same-family candidate are spent it **fails**, with an error naming the pin, the cause, and both remedies (add a same-family target to `retry.fallbackChains`, or set `cross-family`). At a quota boundary the same disposition is **announced** (a notice) instead of activated. |
+| `same-family` (**default**) | a pinned child does **not** enter a cross-vendor target. After probation and every same-family candidate are spent it **fails**, with a refusal that LEADS with the actionable half — the failed child's dock row paints only its first ~58 cells — and names the pin, the cause, and both remedies in the `/settings` page's own vocabulary: "add a same-family hop to `retry.fallbackChains`", "set `retry.pinnedFallback` to allow cross-vendor". A pinned child with NO chain takes the same legible path rather than surfacing a bare provider error (review round 1, D4/D5/F3). At a quota boundary the same disposition is **announced** (a notice) instead of activated. |
 | `cross-family` | the opt-in: cross-vendor targets remain available as the **last** resort, still after family-first ordering, and a descent states itself in the settle reason/report ("cross-vendor descent for pinned …"). |
 
 Junk or absent values degrade to the default (`same-family`), matching the

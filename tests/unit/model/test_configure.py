@@ -5471,3 +5471,51 @@ async def test_a_pinned_preflight_with_no_same_family_target_announces_instead_o
     finally:
         await stream.close()
         store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_preflight_round_trips_an_aggregator_pin_onto_its_own_model(
+    tmp_path,
+) -> None:
+    """F1 at the OTHER descent point: with the pin resolved THROUGH an
+    aggregator (``openrouter/anthropic/claude-sonnet-5-5``), the quota
+    preflight must activate the SAME model's direct route
+    (``anthropic/claude-sonnet-5-5``). Before the fix that route ranked
+    cross-vendor, the strict filter dropped it, and the pinned preflight
+    announced a strand instead of descending — the review's F1, whose coverage
+    previously only used a direct pin."""
+    store = AuthStore(tmp_path / "auth.db")
+    blocked = store.upsert_credential("openrouter", {"key": "sk-or-test", "source": "login"})
+    store.block_credential(blocked.id, "openrouter", block_ms=60_000)
+    store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    store.upsert_credential("openai", {"key": "sk-openai", "source": "login"})
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "fallbackChains": {
+                    "default": [
+                        "openai/gpt-5.3-codex",
+                        "anthropic/claude-sonnet-5-5",
+                    ]
+                },
+            }
+        },
+        session_id="session-a",
+    )
+    stream._route_state.launch_pin = "openrouter/anthropic/claude-sonnet-5-5"
+
+    def _usage(_client, provider, **_kwargs):
+        return _anthropic_usage(100.0 if provider == "openrouter" else 40.0)
+
+    try:
+        with patch("local_operator.providers.usage.fetch_usage", side_effect=_usage):
+            await stream.preflight_usage(
+                ModelSpec(provider="openrouter", model_id="anthropic/claude-sonnet-5-5")
+            )
+
+        assert stream._route_state.active == FallbackTarget("anthropic/claude-sonnet-5-5")
+    finally:
+        await stream.close()
+        store.close()
