@@ -1538,6 +1538,14 @@ async def _render(
     # so building it here would be wasted work on every call (review round 1, m1).
     error = response.get("error")
     display = [str(item) for item in response.get("display") or []]
+    # The failed ``tool()`` calls this cell made (the worker records them; see
+    # ``_tool_failures_notice`` for why their ABSENCE from this result was the
+    # incident). Tolerant of the field's absence so an older-generation worker
+    # response renders exactly as before.
+    raw_failures = response.get("tool_failures")
+    tool_failures = [item for item in raw_failures or [] if isinstance(item, dict)]
+    raw_count = response.get("tool_failure_count")
+    failure_count = raw_count if isinstance(raw_count, int) else len(tool_failures)
 
     if display and on_update is not None:
         on_update(
@@ -1558,7 +1566,41 @@ async def _render(
         display,
         context,
         reset,
+        tool_failures,
+        failure_count,
     )
+
+
+def _tool_failures_notice(failures: list[dict[str, Any]], total: int) -> str:
+    """The loud note carried by every eval result whose cell failed tool calls.
+
+    The incident: thirteen ``sessions`` calls made through ``tool()`` returned
+    ``is_error`` dicts the cell never read, and nothing else carried them — the
+    calling agent could not tell a failed call from a successful empty one.
+    The worker records each failed call per request and this note states the
+    count, the tool names and their error text in the eval result itself, so a
+    failure reaches the agent without the agent inspecting a dict. The dicts
+    are STILL returned to the cell unchanged: code that probes failures keeps
+    working, and an expected failure costs a line of explanation, never a
+    broken pipeline.
+    """
+    plural = "s" if total != 1 else ""
+    lines = [
+        f"{total} tool() call{plural} in this cell returned is_error — do not read the "
+        "cell's output as success; the failed calls were:"
+    ]
+    for failure in failures:
+        name = str(failure.get("name") or "tool")
+        text = " ".join(str(failure.get("text") or "").split()) or "(no error text)"
+        lines.append(f"    - {name}: {text}")
+    if total > len(failures):
+        lines.append(f"    ... and {total - len(failures)} more failed call(s), not listed")
+    lines.append(
+        "    (tool() reports failures as data so cells may handle them; this note is the "
+        "copy that reaches the agent. Fix the arguments and re-run, or catch an "
+        "expected failure deliberately.)"
+    )
+    return "\n".join(lines)
 
 
 def _build_render_result(
@@ -1571,6 +1613,8 @@ def _build_render_result(
     display: list[str],
     context: ToolContext | None,
     reset: str | None = None,
+    tool_failures: list[dict[str, Any]] | None = None,
+    failure_count: int = 0,
 ) -> ToolResult:
     """Assemble the ToolResult body off the event loop.
 
@@ -1590,6 +1634,11 @@ def _build_render_result(
             "Variables, imports and functions from earlier calls are gone; "
             "re-create anything this code needed."
         )
+    if tool_failures or failure_count:
+        # Right after the reset notice, still ahead of the cell's own output:
+        # head-biased truncation keeps the one statement a failed call must not
+        # lose (see ``_tool_failures_notice``).
+        notice.append(_tool_failures_notice(list(tool_failures or []), failure_count))
     # The result leads so head-biased truncation keeps it: it is the one line
     # the call existed to produce.
     if ok:
@@ -1602,11 +1651,15 @@ def _build_render_result(
         details = spill_details
         if display:
             details = {**(details or {}), "display": display}
+        if failure_count:
+            details = {**(details or {}), "tool_failures": failure_count}
         return _text(tool_call_id, "eval", text, details=details)
 
     error_text = str(error or "(no error reported)")
     body = "\n".join(notice + [error_text, _bash_output_summary(stdout, stderr)])
     text, spill_details = spill_truncate(body, "eval", context, TOOL_OUTPUT_LIMIT_CHARS)
+    if failure_count:
+        spill_details = {**(spill_details or {}), "tool_failures": failure_count}
     return ToolResult(
         tool_call_id=tool_call_id,
         tool_name="eval",
@@ -1821,7 +1874,8 @@ def build_eval_tool() -> AgentTool:
             "instead of print() when only the human needs to see something. "
             "In foreground calls, tool(name, **arguments) invokes an available "
             "tool through its normal validation and approval gate and returns "
-            "a result dictionary; compose reads/filtering locally and print "
+            "a result dictionary — a failed call is also called out in this "
+            "result's own text. Compose reads/filtering locally and print "
             "only the answer. Background kernels do not support tool()."
         ),
         parameters=EvalParams.model_json_schema(),
