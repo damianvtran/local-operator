@@ -40,6 +40,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 from collections.abc import Sequence
@@ -48,6 +49,8 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from textual import events  # noqa: E402
+from textual.geometry import Offset  # noqa: E402
 from textual.pilot import Pilot  # noqa: E402
 
 from scripts.visual_capture import (  # noqa: E402
@@ -293,6 +296,16 @@ else:
 #: Unset leaves it ON, as the existing frames have it.
 SHOW_SUBAGENTS = os.environ.get("LO_SIDEBAR_SHOT_LAYER") != "0"
 
+#: A POINTER GESTURE on the footer's `⌥N` chip: ``hover`` moves the pointer
+#: onto its cells, ``click`` presses them (issue #1357 principle 5). The cells
+#: are located in the PAINTED footer (`⌥N` at its end), not through widget
+#: internals, so one command captures both halves of a before/after pair: on a
+#: tree without the control both gestures are no-ops and the frame is the
+#: before, while on the changed tree hover shows the affordance and click the
+#: flipped layer. The click answers its own re-poll from the fixture (the same
+#: discipline the chord knob keeps). Unset performs no gesture.
+CHIP_GESTURE = os.environ.get("LO_SIDEBAR_SHOT_CHIP") or ""
+
 #: Which row the cursor sits on. ``LO_SIDEBAR_SHOT_CURSOR`` takes an id so a
 #: pinned row can be put under the cursor and the `›`-displaces-`★` handoff
 #: captured. Unset keeps the current/cursor row at the first seeded id.
@@ -484,6 +497,51 @@ async def _await_sidebar_poll(app: OperatorApp, pilot: Pilot[None]) -> None:
     raise AssertionError(
         f"the sidebar catalog poll did not land within {POLL_SETTLE_FRAMES} frames"
     )
+
+
+async def _forward_mouse(
+    app: OperatorApp,
+    pilot: Pilot[None],
+    widget: Any,
+    event_classes: Sequence[type],
+    offset: tuple[int, int],
+    button: int = 1,
+) -> None:
+    """Deliver pilot-shaped mouse events at a widget-relative ``offset``.
+
+    FOR THE FULL-HEIGHT (DOCKED) SIDEBAR THE PILOT CANNOT REACH THE FOOTER.
+    ``pilot.hover``/``pilot.click`` refuse any target outside
+    ``screen.size.region`` — a region that starts at the screen's ORIGIN — and
+    with the app's one-cell screen inset the docked sidebar's footer (the
+    widget's last content line) sits exactly one row below that check region.
+    A real terminal clicks that row fine; the overlay drawer is height-clamped
+    above the input dock, so its footer sits INSIDE the region and the plain
+    pilot does reach it. The seam is used uniformly anyway — these are the
+    same events pilot builds and the same delivery it performs
+    (``app.mouse_position`` + ``screen._forward_event``, pilot.py
+    ``_post_mouse_events``); only the bounds pre-check is skipped.
+    """
+    x = widget.region.x + offset[0]
+    y = widget.region.y + offset[1]
+    app.mouse_position = Offset(x, y)
+    for event_class in event_classes:
+        kwargs: dict[str, Any] = {"chain": 1} if event_class is events.Click else {}
+        event = event_class(
+            widget=widget,
+            x=x,
+            y=y,
+            delta_x=0,
+            delta_y=0,
+            button=0 if event_class is events.MouseMove else button,
+            shift=False,
+            meta=False,
+            ctrl=False,
+            screen_x=x,
+            screen_y=y,
+            **kwargs,
+        )
+        app.screen._forward_event(event)
+        await pilot.pause()
 
 
 def _pin_spinner(sidebar: SessionSidebar) -> None:
@@ -743,6 +801,50 @@ async def main() -> None:
                     "LO_SIDEBAR_SHOT_PINS=none to capture the jump landing on the delivery.",
                     file=sys.stderr,
                 )
+
+        if CHIP_GESTURE:
+            # THE CHIP AS A CONTROL. `⌥N` lives in the footer, and its cells
+            # are read off the PAINTED line so the same command runs on a tree
+            # with and without the control — the before half of a pair
+            # gestures at a chip that is a marker, and does nothing.
+            if CHIP_GESTURE not in {"hover", "click"}:
+                raise SystemExit(
+                    f"LO_SIDEBAR_SHOT_CHIP={CHIP_GESTURE!r}: expected 'hover' or 'click'"
+                )
+            footer = sidebar.render().plain.splitlines()[-1]
+            match = re.search(r"⌥(?:1k\+|\d+)\s*$", footer)
+            if match is None:
+                raise SystemExit(f"no ⌥ chip on the footer to gesture at: {footer!r}")
+            offset = (
+                int(sidebar.styles.padding.left) + match.start(),
+                sidebar.size.height - 1,
+            )
+            was = sidebar.show_subagents
+            if CHIP_GESTURE == "hover":
+                await _forward_mouse(app, pilot, sidebar, [events.MouseMove], offset, button=0)
+            else:
+                # Answer the re-poll the click's own `SubagentLayerToggled`
+                # posts from the fixture, exactly as the chord block does. On
+                # a tree without the control nothing is posted and
+                # `_await_sidebar_poll` returns on its first pause.
+                _serve_fixture_to_app_poll()
+                await _await_sidebar_poll(app, pilot)
+                await _forward_mouse(
+                    app,
+                    pilot,
+                    sidebar,
+                    [events.MouseDown, events.MouseUp, events.Click],
+                    offset,
+                )
+                await pilot.pause()
+                await _await_sidebar_poll(app, pilot)
+                _pin_spinner(sidebar)
+            await pilot.pause()
+            await pilot.pause()
+            print(
+                f"chip gesture: {CHIP_GESTURE} at footer col {match.start()} "
+                f"-> show_subagents {was}->{sidebar.show_subagents}"
+            )
 
         if silent:
             # BEFORE the write, so a frame that is not the state it claims is
