@@ -358,13 +358,15 @@ def fit_frames_to_wire_budget(
     handful of full-size frames did. And because each frame's replacement is
     deterministic and memoized per ``(bytes, rung)``, a frame's bytes change
     at most once per rung it renders at — the turn it stops being the newest
-    frame, again only on a step down a rung, and under step 2 the turn the
+    frame, again only on a rung step in either direction, and under step 2 the turn the
     newest itself first has to descend (at most three changes across the
     ladder) — so the provider's prompt-cache prefix is rewritten at most once
-    per rung transition rather than churned on every render. An episode whose
-    step 1 fits renders every frame's bytes exactly as it did before step 2
-    existed: step 2 only widens the set the same walk applies to, below that
-    boundary.
+    per rung transition rather than churned on every render. A growing session
+    normally steps frames down; the descent entry (step 2) can also step older
+    frames one rung UP when it lands on a rung wider than the one step 1 had
+    reached — a bounded one-off, not per-turn churn. An episode whose step 1
+    fits renders every frame's bytes exactly as it did before step 2 existed:
+    step 2 only widens the set the same walk applies to, below that boundary.
 
     Driven by the SAME ``budget`` the shed was driven by (the number
     ``resolve_wire_bytes_budget`` resolves; the render seam and the
