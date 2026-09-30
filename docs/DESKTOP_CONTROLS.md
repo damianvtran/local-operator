@@ -441,7 +441,63 @@ it answers `nothing to clear in THIS terminal — no loop is running here`. The
 owner-path refusal above is about the PUBLISHED state a detached runtime holds, which
 this surface does not have.
 
+## Configuration runs: `purpose` on `POST /v1/desktop/sessions`
+
+A **configuration run** is the supervised session the Agents/Teams page starts to
+author agents and teams by conversation. It is one additive field on the existing
+create route and nothing else — the prompt, the follow-ups, the live view and the
+stop are the existing `messages`, `events`, `watch` and `interrupt` surfaces,
+unchanged. The design it implements lives in the UI repository
+(`docs/design/agents-conversational-config.md`, PR #700).
+
+`purpose: "agents-config"` (``Literal``; omitted means today's create byte for byte):
+
+- **The origin is stamped BEFORE the marker.** The session is stamped
+  `agent-config` in `origin.json` first and `desktop.json` second, because the
+  marker is what materialises the session and the listing surfaces memoise the
+  user-session verdict per id — a session classified in the gap would be cached as
+  the operator's own. A run whose stamp did not take is REFUSED rather than created
+  visible.
+- **Hidden, but reachable.** `agent-config` is deliberately NOT in `USER_ORIGINS`,
+  so the run is absent from the catalogue, `/resume`, the phone list, the attention
+  feed, the first-run scan and the desktop search — and it is admitted through the
+  desktop DOOR (`DesktopSessions.locate`) for snapshot, history, events, watch,
+  messages and interrupt. The widening names exactly one origin, so `subagent`,
+  `agent-shell` and every future hidden value are still refused; a rewrite to a
+  "hidden but reachable" catch-all would admit every machine-made session.
+- **The server owns the run's shape.** `cwd` is the config root (the client cannot
+  name a path it cannot verify), the model is the configured default, no target and
+  no draft are involved, and the client is REFUSED with `agents_config_client_fields`
+  (422) if it sends any of the four — tolerance would let a renderer believe it had
+  chosen a paid model for a run that used none.
+- **Local only.** A create naming both `purpose` and `peer` is refused with
+  `agents_config_local_only` (422): the registries a run edits are this device's.
+- **Single flight per config root.** A create while a run's turn is in flight
+  answers 409 `agents_config_running` carrying the active run's `session_id`, which
+  is how a second window joins the run instead of starting a rival. Busy rather than
+  merely resident: what a second run would race is a write, so a settled run frees
+  the flight.
+- **A bounded inventory, by name AND by op.** The run's declaration names `agent`
+  and `team` only (no `team_delete`, no shell, no file tools, no network), and
+  `Session.set_tool_inventory(..., ops=...)` narrows each declared tool's own `op`
+  values: `agent reset` and `agent sync` are dropped from the advertised enum and
+  refused before dispatch, because they are ops of the `agent` tool rather than
+  tools of their own — one overwrites instructions the operator wrote, the other
+  fetches from the hub with their stored credentials. Both halves are one-way for
+  the session's life, like the names.
+- **A server-owned preamble** rides the volatile tail as the
+  `<configuration-run>` system block (`session_factory.AGENTS_CONFIG_PREAMBLE`),
+  not the frozen prefix and not the operator's custom instructions.
+- Gated by `features.agents_config` — its own key, because an older backend
+  answers the unknown field with a 422 (``Input`` is ``extra="forbid"``).
+
+Deliberately out of scope in v1: any conversational DELETE (no desktop op and no
+page control deletes a profile or a team today), an undo, a model picker, and a
+read that tells a page mid-run "a run is live" without attempting a create (the
+409's `session_id` is the whole answer this backend gives).
+
 ## Provider and reporting endpoints
+
 
 - GET `/v1/desktop/models?live=false|true`: ProviderController initial/cached or live
   model catalogue, selectors, connectivity and listing errors. Connectivity means

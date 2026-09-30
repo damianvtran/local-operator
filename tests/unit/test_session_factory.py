@@ -6545,3 +6545,137 @@ async def test_without_the_key_the_headless_gate_still_asks(
             await gates[0]("bash", "echo probe")
     finally:
         await session.dispose()
+
+
+# --- The configuration run's shape is applied by the FACTORY, not by a caller ---
+#
+# The helper's own behaviour is pinned in
+# ``tests/unit/server/test_agents_config_run.py``. What these two tests add is the
+# PATH: the run is bounded because ``create_session`` applies the shape, and a
+# reordering inside that function (after the MCP wiring, say) or a transcript that
+# stopped being the session's own directory would leave the run unbounded with
+# every other test still green.
+
+
+@pytest.fixture
+def run_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """One root for every reader: the env, the config dir and the registry.
+
+    ``tmp_config_dir`` deliberately returns ``<tmp>/.local-operator`` while
+    exporting ``LOCAL_OPERATOR_CONFIG_DIR=<tmp>``, and a test about a MARKER READ
+    cannot survive that split: ``spawn_owned_session`` builds its registries from
+    ``config_dir()`` (the env) while a directly-built ``ConfigManager`` gets the
+    path the test passes. Here they are the same directory, so the marker the test
+    writes is the marker the code under test reads.
+    """
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.chdir(tmp_path)
+    root = tmp_path / "config"
+    root.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    return root
+
+
+def _configuration_run_dir(root: Path, session_id: str) -> Path:
+    """A session directory stamped like the desktop ``create`` leaves one.
+
+    The origin is stamped first and the marker second, exactly as ``create``
+    writes them (``utils.desktop_sessions.create``'s ``persist``) — that order is
+    the contract, and a rig that reversed it would be testing a session the
+    product cannot produce.
+    """
+    import json
+
+    from local_operator.resume import ORIGIN_AGENT_CONFIG, mark_session_origin
+    from local_operator.session.retention import (
+        AGENTS_CONFIG_PURPOSE,
+        DESKTOP_MARKER_NAME,
+        DESKTOP_PURPOSE_KEY,
+    )
+
+    directory = root / "sessions" / session_id
+    directory.mkdir(parents=True)
+    mark_session_origin(directory, ORIGIN_AGENT_CONFIG)
+    (directory / DESKTOP_MARKER_NAME).write_text(
+        json.dumps({"version": 1, "cwd": str(root), DESKTOP_PURPOSE_KEY: AGENTS_CONFIG_PURPOSE}),
+        encoding="utf-8",
+    )
+    return directory
+
+
+@pytest.mark.asyncio
+async def test_create_session_applies_the_configuration_run_shape(
+    run_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The composition root bounds the run: names, ops and the preamble."""
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.session.session import Session
+    from local_operator.session_factory import (
+        AGENTS_CONFIG_PREAMBLE,
+        AGENTS_CONFIG_TOOL_OPS,
+    )
+
+    run_id = "abcdef123456"
+    _configuration_run_dir(run_root, run_id)
+    # The runtime child's OWN environment (``process.amain`` sets this when it
+    # resumes an id), because that is the boot this test is standing in for.
+    monkeypatch.setenv("LOP_RUNTIME_ADOPT_SESSION", "1")
+
+    session = await create_session(
+        _args(hosting="test", model="test", yolo=True, resume=run_id),
+        ConfigManager(run_root),
+        AgentRegistry(run_root),
+    )
+    # ``create_session`` is annotated with the protocol, and these two facts live
+    # on the concrete class — the same narrowing ``test_factory_publishes_stable_
+    # birth_off_loop_before_first_journal`` uses.
+    assert isinstance(session, Session)
+    try:
+        assert {tool.name for tool in session._tools} == {"agent", "team"}
+        assert session.__dict__["_declared_tool_ops"] == {
+            name: frozenset(values) for name, values in AGENTS_CONFIG_TOOL_OPS.items()
+        }
+        assert session._goal_state.run_brief == AGENTS_CONFIG_PREAMBLE
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_runtime_child_of_a_run_boots_declared(
+    run_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``spawn_owned_session`` — the path the desktop actually boots — declares.
+
+    The child is the session that runs the tools, so this is the chain that has to
+    hold: the desktop engages a runtime, the runtime builds through
+    ``spawn_owned_session``, and the run's own marker bounds it there.
+    """
+    import asyncio
+
+    from local_operator.session.runtime.serving import spawn_owned_session
+    from local_operator.session_factory import AGENTS_CONFIG_PREAMBLE
+
+    run_id = "fedcba654321"
+    _configuration_run_dir(run_root, run_id)
+    monkeypatch.setenv("LOP_RUNTIME_ADOPT_SESSION", "1")
+
+    handle = await asyncio.wait_for(
+        spawn_owned_session(
+            asyncio.get_running_loop(),
+            cwd=str(run_root),
+            provider="test",
+            model_id="test",
+            resume=run_id,
+        ),
+        timeout=60,
+    )
+    try:
+        session = handle._session
+        assert {tool.name for tool in session._tools} == {
+            "agent",
+            "team",
+        }, "a run's runtime child must boot bounded, not with the full builtin inventory"
+        assert session._goal_state.run_brief == AGENTS_CONFIG_PREAMBLE
+    finally:
+        await handle._session.dispose()
