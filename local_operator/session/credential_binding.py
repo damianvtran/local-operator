@@ -91,10 +91,12 @@ def _as_int(value: Any) -> int | None:
 
     ``bool`` is rejected on purpose: ``True`` is an ``int`` in Python, and a
     malformed row must not be able to contribute a silent ``1`` credential id.
-    Mirrors the spend ledger's reader rule — one spelling of "not a number"
-    across the two record types.
+    Strings are rejected too, exactly as the spend ledger's reader does (one
+    spelling of "not a number" across the two record types): ``json`` writes a
+    number as a number, so a quoted one is a malformed row, and coercing it
+    would let a broken writer's ``"42"`` read as a confident binding.
     """
-    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+    if isinstance(value, bool) or not isinstance(value, int | float):
         return None
     try:
         return int(value)
@@ -578,11 +580,18 @@ def recorder_for_session(
     root with a placement document but no keypair is a broken/moved state where
     the honest answer is to stay mute rather than write rows with an empty
     owner. Reads only; nothing is created or minted here.
+
+    A ``None`` ``config_dir`` means "nothing to gate on", never "the default
+    root": a session's recorder must read the root it was built for, and an
+    ambient fallback here would read — and bind rows to — whichever config dir
+    happened to be current.
     """
     from local_operator.network.credentials.placement import has_any_placement
     from local_operator.network.identity import load as load_identity
 
-    root = Path(config_dir) if config_dir is not None else None
+    if config_dir is None:
+        return None
+    root = Path(config_dir)
     if not has_any_placement(root):
         return None
     identity = load_identity(root)
