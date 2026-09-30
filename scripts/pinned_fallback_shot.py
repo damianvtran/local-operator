@@ -78,9 +78,7 @@ _update.check_latest = lambda *a, **k: _NotBehind()  # type: ignore[assignment]
 
 from local_operator.harness.types import Usage  # noqa: E402
 from local_operator.tui.app import OperatorApp  # noqa: E402
-from local_operator.tui.events import NoticePosted  # noqa: E402
 from local_operator.tui.widgets.transcript import UserBlock  # noqa: E402
-
 from tests.unit.tui.test_app_pilot import FakeSession, _factory  # noqa: E402
 
 #: The incident's shape: a review child pinned cross-family, then served by the
