@@ -36,6 +36,7 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -107,11 +108,64 @@ class UpdateError(Exception):
 #: successful-upgrade path. The daemon itself is not waited on.
 _MOBILE_RESTART_TIMEOUT_S = 30.0
 
-#: Bound on the child that repairs the OTHER supervised daemons. Larger than the
-#: mobile bounds because it is one child doing four plists, each with a
-#: bootout/bootstrap pair; still bounded so a hung ``launchctl`` cannot stall a
-#: successful upgrade.
+#: Bound on the child that repairs the supervised daemons' plists. Larger than
+#: the mobile bounds because it is one child doing the other daemons' plists,
+#: each with a bootout/bootstrap pair; still bounded so a hung ``launchctl``
+#: cannot stall a successful upgrade.
 _DAEMON_REFRESH_TIMEOUT_S = 60.0
+
+#: The whole daemon-refresh stage's budget, when the services child and the
+#: mobile unit run concurrently (:func:`refresh_daemons_after_upgrade`).
+#:
+#: ONE stage, ONE deadline — and it SHORTENS the per-child bounds rather than
+#: replacing them. Each unit's own bound (60 s for the child that rewrites
+#: plists, 30 s for the mobile half) stays the bound a standalone caller gets;
+#: the stage only ever gives a unit what is left of the shared budget, so a
+#: wedged child still lands on the SAME kill-and-report path its own bound
+#: uses (:func:`_bound_fired_sentence`), just sooner.
+#:
+#: Sized at several times the honest worst sum of the units on a healthy
+#: machine (a few seconds each; today's measured stage was ~14 s WITH the
+#: serialisation this change removes), so the deadline firing is a signal that
+#: something is wedged, not that the machine was slow.
+_STAGE_DEADLINE_S = 30.0
+
+#: The floor a stage-driven unit's subprocess bound may be shortened to. A
+#: stage already past its deadline still gets one real second for its child's
+#: kill and its sentence, rather than a zero timeout that can only be reported
+#: as ``0s``.
+_MIN_STAGE_BOUND_S = 1.0
+
+#: One bounded retry for the mobile bounce, this long after the first attempt.
+#:
+#: THE MEASURED FAILURE THIS EXISTS FOR (2026-09-30): the bounce's ``launchctl
+#: kickstart`` was refused once because a concurrent wave had the job
+#: mid-bootout, and NOTHING retried it — the phone relay stayed on the old
+#: build until a foreign repair wave happened to arrive ~4 minutes later. One
+#: retry after a short pause rides out exactly that window; more retries would
+#: only postpone the honest failure report.
+_MOBILE_RETRY_DELAY_S = 1.0
+
+#: The line prefix a refresh CHILD uses for its per-daemon machine-readable
+#: outcome. It doubles as the completion marker of the announcement protocol:
+#: the parent reads ``refreshing:`` lines (see :data:`_PROGRESS_PREFIX`) to
+#: attribute a killed child, and a ``daemon_report:`` line for that daemon
+#: proves its repair FINISHED. Dropped from human output like the
+#: announcement lines are; parsed back out for the update report.
+_DAEMON_REPORT_PREFIX = "daemon_report: "
+
+#: The report line's schema token. FROZEN CONTRACT: the desktop app parses the
+#: ``update_report`` line and keys its post-update verification off these
+#: fields, so key names move only with a schema bump that names itself here.
+_UPDATE_REPORT_SCHEMA = "update.report.v1"
+
+#: The four machine-readable daemon states the report carries. Frozen like the
+#: schema token: ``refreshed`` = this stage moved the daemon (or its LaunchAgent)
+#: onto the new build; ``already`` = the stage left it alone and that is not a
+#: failure (already current, absent, unaddressable from here, or deliberately
+#: left stopped); ``failed`` = a repair was attempted and did not complete;
+#: ``unsupervised`` = the mobile daemon runs with no LaunchAgent to bounce.
+DaemonStatusKind = Literal["refreshed", "already", "failed", "unsupervised"]
 
 #: The line the refresh CHILD prints before it repairs each daemon, and the prefix
 #: the parent drops from a healthy run's output.
@@ -167,10 +221,16 @@ MobileRefreshKind = Literal["skipped", "restarted", "failed", "unsupervised"]
 
 @dataclass(frozen=True)
 class MobileRefresh:
-    """Outcome of the post-upgrade LaunchAgent bounce. Never an exception."""
+    """Outcome of the post-upgrade LaunchAgent bounce. Never an exception.
+
+    ``lines`` carries any human sentence the CHILD produced that the summary
+    should surface (today: the stale-LaunchAgent repair, which used to be
+    printed by the plist child and now belongs to the mobile unit).
+    """
 
     kind: MobileRefreshKind
     error: str = ""
+    lines: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -190,6 +250,60 @@ class DaemonRefresh:
     name: str
     lines: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+    #: Machine-readable per-daemon outcomes, when the refresh that produced
+    #: this entry knows them (the plist child's ``daemon_report`` lines, the
+    #: mobile half's own kind). Feeds :func:`_emit_update_report`; empty is a
+    #: valid value for callers that only render the human sentences.
+    statuses: tuple[DaemonStatus, ...] = ()
+
+
+@dataclass(frozen=True)
+class DaemonStatus:
+    """One supervised daemon's outcome, machine-readable.
+
+    The vocabulary is :data:`DaemonStatusKind`'s and it is what the report's
+    ``daemons[].status`` carries.
+    """
+
+    name: str
+    status: DaemonStatusKind
+
+
+@dataclass(frozen=True)
+class ServeMove:
+    """One live ``serve`` daemon's before/after, for the report line.
+
+    ``instance`` is the serve RECORD's ``instance_id`` — the token minted once
+    per daemon process (``server/app.py``) and republished under a new value
+    only by a replacement of that process. It is the same token the reload
+    machinery keys its own move-proof on (``services._await_relocations``),
+    and it is read from the same record file the desktop app already reads for
+    its boot-version check, so a before/after comparison of it proves a move
+    on both sides of the contract. ``before`` is empty when the pid was not
+    live when the stage started (a daemon that appeared mid-update), and
+    ``moved`` is False then: there is no prior to compare against and the
+    report must not claim a move it cannot see.
+    """
+
+    pid: int
+    before: str
+    after: str
+    moved: bool
+    instance: str
+
+
+@dataclass(frozen=True)
+class StageReport:
+    """The structured half of one services-stage run, for the update report.
+
+    Produced by :func:`_services_stage` and threaded to the process's single
+    report emission; empty is the honest value for the paths that ran no
+    stage (a refusal, ``--no-services``, or a caller that only wanted the
+    human sentences).
+    """
+
+    serve: tuple[ServeMove, ...] = ()
+    daemons: tuple[DaemonStatus, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -4895,8 +5009,34 @@ def _mobile_healthz_answers() -> bool:
         return False
 
 
+def _bounded_timeout(own_bound: float, deadline: float | None) -> float:
+    """The subprocess bound a STAGE-DRIVEN refresh may use.
+
+    ``deadline`` is a monotonic timestamp, or ``None`` for every caller that is
+    not the concurrent stage — and ``None`` returns ``own_bound`` untouched, so
+    a standalone caller's bound (the 60 s plist child, the 30 s mobile half)
+    is exactly what it always was. The stage only ever SHORTENS the bound to
+    what is left of the shared budget (:data:`_STAGE_DEADLINE_S`), which keeps
+    the kill and its sentence on the unit's own, tested path — the bound-fires
+    branch — rather than inventing a second way for a child to die.
+    """
+    if deadline is None:
+        return own_bound
+    remaining = deadline - time.monotonic()
+    return max(min(own_bound, remaining), _MIN_STAGE_BOUND_S)
+
+
 def _mobile_restart_invocation() -> tuple[list[str], str | None] | None:
-    """``(argv, executable)`` for the *new* distribution's ``mobile restart``.
+    """``(argv, executable)`` for the mobile unit's child, ``update --refresh-mobile``.
+
+    THE MOBILE UNIT OWNS ITS OWN PLIST, and that is why this is not ``mobile
+    restart`` any more (2026-09-30 design): the plist repair and the bounce must
+    not split across actors. A bounce that lands before the rewrite restarts
+    the previous definition, and the split was exactly what double-bounced this
+    daemon on the measured run; one child rendering the plist and then bouncing
+    is also what lets ONE bounded retry sit around the whole sequence — the
+    child refreshes the daemon's own plist first, then bounces
+    (:func:`mobile_refresh_command`).
 
     ``sys.executable -m local_operator.cli`` is the post-upgrade
     interpreter — the same interpreter the LaunchAgent's ProgramArguments
@@ -4929,20 +5069,31 @@ def _mobile_restart_invocation() -> tuple[list[str], str | None] | None:
     """
     from local_operator import procname
 
-    return _post_upgrade_invocation(procname.LABEL_MOBILE_RESTART, ["mobile", "restart"])
+    # The child's tail is an ``update`` command rather than ``mobile restart``
+    # so the plist refresh happens under the same roof as the bounce; the role
+    # label does not move, because the process is still perceived as a mobile
+    # restart by everything that watches.
+    return _post_upgrade_invocation(procname.LABEL_MOBILE_RESTART, ["update", "--refresh-mobile"])
 
 
-def refresh_mobile_after_upgrade() -> MobileRefresh:
+def refresh_mobile_after_upgrade(*, deadline: float | None = None) -> MobileRefresh:
     """Bounce the supervised mobile daemon after a successful wheel install.
 
     Kept out of :func:`perform_upgrade` so existing installer tests cannot
     kickstart a real LaunchAgent. Never raises: the package upgrade already
     succeeded, and a failed bounce must not roll it back.
 
-    ``restart``, not ``install``: the wheel already ships ``mobile/web/dist``,
-    cookies live in the Keychain, and ``install`` would regenerate a
-    password. In-process ``service_action`` would run *this* (old) code
-    and import Starlette into the TUI worker.
+    ``update --refresh-mobile``, not ``install``: the wheel already ships
+    ``mobile/web/dist``, cookies live in the Keychain, and ``install`` would
+    regenerate a password. In-process ``service_action`` would run *this*
+    (old) code and import Starlette into the TUI worker; the child runs the
+    freshly installed wheel, renders this daemon's own plist from it, and
+    THEN bounces — the plist rewrite and the bounce are one actor, and one
+    bounded retry sits around the bounce inside the child.
+
+    ``deadline`` is the concurrent stage's shared budget (see
+    :func:`_bounded_timeout`); ``None`` — every other caller — keeps this
+    half's own :data:`_MOBILE_RESTART_TIMEOUT_S`.
     """
     import subprocess
 
@@ -4964,13 +5115,16 @@ def refresh_mobile_after_upgrade() -> MobileRefresh:
             check=False,
             capture_output=True,
             text=True,
-            timeout=_MOBILE_RESTART_TIMEOUT_S,
+            timeout=_bounded_timeout(_MOBILE_RESTART_TIMEOUT_S, deadline),
         )
         if completed.returncode != 0:
             tail = (completed.stderr or completed.stdout or "").strip()
             detail = tail.splitlines()[-1][:200] if tail else f"exit {completed.returncode}"
             return MobileRefresh(kind="failed", error=detail)
-        return MobileRefresh(kind="restarted")
+        # The child owns the plist half now, so any sentence it produced about
+        # a stale-LaunchAgent repair rides up through the summary here — the
+        # line the plist child used to print for this daemon.
+        return MobileRefresh(kind="restarted", lines=_result_lines(completed.stdout))
     except subprocess.TimeoutExpired:
         return MobileRefresh(kind="failed", error="timed out")
     except FileNotFoundError as exc:
@@ -5071,7 +5225,7 @@ def _installed_daemon_plists() -> list[Path]:
     return found
 
 
-def refresh_service_daemons_after_upgrade() -> DaemonRefresh:
+def refresh_service_daemons_after_upgrade(*, deadline: float | None = None) -> DaemonRefresh:
     """Repair the supervised daemons ``lop-update`` used to leave behind.
 
     THE GAP THIS CLOSES: ``lop-update`` bounced mobile and touched nothing else,
@@ -5084,6 +5238,23 @@ def refresh_service_daemons_after_upgrade() -> DaemonRefresh:
     wheel's renderers exist, and because four children would pay four
     interpreter startups on every upgrade. Never raises: the upgrade already
     succeeded, so the worst outcome here is a warning.
+
+    THE MOBILE DAEMON IS NOT IN THIS CHILD (2026-09-30 design). Its plist has
+    exactly one owner — the mobile unit itself, which refreshes it and then
+    bounces, so the rewrite and the bounce never split across actors — and a
+    second writer here would race that owner's ``bootout``/``bootstrap`` pair.
+    ``_refresh_steps`` therefore carries the other three; the mobile half is
+    :func:`refresh_mobile_after_upgrade`'s child.
+
+    ``deadline`` is the concurrent stage's shared budget (see
+    :func:`_bounded_timeout`); ``None`` — every other caller — keeps this
+    child's own :data:`_DAEMON_REFRESH_TIMEOUT_S`.
+
+    THE CHILD'S PER-DAEMON MACHINE LINES come back as ``statuses`` (parsed
+    from its ``daemon_report:`` lines, plus a synthetic ``failed`` for a
+    daemon it announced but never completed — the killed-child case), so the
+    update report can carry per-daemon outcomes without re-reading the human
+    sentences.
 
     A PLATFORM IT CANNOT ADDRESS IS REPORTED, NOT SILENT (audit A24). The scan
     is ``~/Library/LaunchAgents``, so on Linux and Windows it finds nothing and
@@ -5137,6 +5308,7 @@ def refresh_service_daemons_after_upgrade() -> DaemonRefresh:
             ),
         )
     argv, executable = invocation
+    timeout = _bounded_timeout(_DAEMON_REFRESH_TIMEOUT_S, deadline)
     try:
         completed = subprocess.run(
             argv,
@@ -5144,35 +5316,48 @@ def refresh_service_daemons_after_upgrade() -> DaemonRefresh:
             check=False,
             capture_output=True,
             text=True,
-            timeout=_DAEMON_REFRESH_TIMEOUT_S,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
         # The kill is the bound working as designed; what must not happen is that it
         # is reported as an anonymous timeout. The killed child's captured output is
-        # read for the daemon it had announced it was repairing, so the line can name
-        # the daemon that may now be STOPPED and the command that brings it back.
-        return DaemonRefresh(name, warnings=(_bound_fired_sentence(exc.stdout, exc.stderr),))
+        # read for every daemon it announced but never completed (the machine lines
+        # are the completion markers), so the line can name what may now be STOPPED
+        # and the command that brings it back.
+        return DaemonRefresh(
+            name,
+            warnings=(_bound_fired_sentence(exc.stdout, exc.stderr, bound=timeout),),
+            statuses=_child_daemon_statuses(exc.stdout, exc.stderr),
+        )
     except Exception as exc:  # noqa: BLE001 — a failed repair must not fail the update
         warning = f"warning: could not refresh installed daemons: {exc}"
         return DaemonRefresh(name, warnings=(warning,))
     lines = _result_lines(completed.stdout)
+    statuses = _child_daemon_statuses(completed.stdout, completed.stderr)
     if completed.returncode != 0:
         tail = "\n".join(_result_lines(completed.stderr or completed.stdout))
         detail = tail.splitlines()[-1][:200] if tail else f"exit {completed.returncode}"
         warning = f"warning: could not refresh installed daemons: {detail}"
-        return DaemonRefresh(name, warnings=(warning,))
+        return DaemonRefresh(name, warnings=(warning,), statuses=statuses)
     warnings = _result_lines(completed.stderr)
-    return DaemonRefresh(name, lines=lines, warnings=warnings)
+    return DaemonRefresh(name, lines=lines, warnings=warnings, statuses=statuses)
 
 
 def _mobile_daemon_refresh(result: MobileRefresh) -> DaemonRefresh:
     """The mobile bounce as a summary entry, in the sentences it always used.
 
     Moved out of the CLI's own printer unchanged, so the U1/U2 copy below lives
-    in one place whatever prints it.
+    in one place whatever prints it. The machine half (``statuses``) carries
+    the bounce's outcome for the update report: ``refreshed`` for a restart,
+    ``failed`` for a failure, ``unsupervised`` for a daemon no LaunchAgent
+    owns; a daemon that is not installed at all stays out of the report.
     """
     if result.kind == "restarted":
-        return DaemonRefresh("mobile", lines=("mobile daemon restarted — refresh the phone UI",))
+        return DaemonRefresh(
+            "mobile",
+            lines=(*result.lines, "mobile daemon restarted — refresh the phone UI"),
+            statuses=(DaemonStatus("mobile", "refreshed"),),
+        )
     if result.kind == "failed":
         # U1: name the recovery, not just the failure — the update itself
         # succeeded, so the only action left is the bounce the update could
@@ -5183,6 +5368,7 @@ def _mobile_daemon_refresh(result: MobileRefresh) -> DaemonRefresh:
                 f"warning: mobile daemon did not restart: {result.error}; "
                 "run lop mobile restart",
             ),
+            statuses=(DaemonStatus("mobile", "failed"),),
         )
     if result.kind == "unsupervised":
         # U2: no LaunchAgent owns this daemon, so `lop mobile restart` is not
@@ -5194,31 +5380,107 @@ def _mobile_daemon_refresh(result: MobileRefresh) -> DaemonRefresh:
                 "warning: a mobile daemon is running unsupervised; stop and "
                 "relaunch the foreground lop mobile serve process to pick up the new UI",
             ),
+            statuses=(DaemonStatus("mobile", "unsupervised"),),
         )
     return DaemonRefresh("mobile")
+
+
+def _stage_overrun_sentence(late: Sequence[str]) -> str:
+    """The one warning a stage that blew its budget adds — with the remedy."""
+    bound = f"{_STAGE_DEADLINE_S:g}s"
+    names = f" — the {', '.join(late)} had not returned" if late else ""
+    return (
+        f"warning: the daemon refresh stage did not finish within {bound}{names}; "
+        "run `lop services status` to see what is still moving"
+    )
 
 
 def refresh_daemons_after_upgrade() -> list[DaemonRefresh]:
     """Every supervised daemon this build knows, refreshed with the NEW wheel.
 
-    Order is load-bearing. The service child runs FIRST because it REWRITES
-    plists; the mobile bounce that follows is a ``mobile restart``, so running it
-    first would restart mobile from the previous plist and then restart it again
-    — the second start being the only one on the new definition. "First" here
-    means "before", not "printed first": the service lines are printed ahead of
-    the mobile line for the same reason.
+    ONE STAGE, TWO CONCURRENT UNITS (2026-09-30 design): the services child
+    (browser bridge, tunnel and wakes plists) and the mobile unit (this daemon's
+    own plist, then its bounce) run AT THE SAME TIME, joined once under the
+    :data:`_STAGE_DEADLINE_S` budget. The serial order between the two units is
+    gone; what is kept is the per-daemon order that made that order
+    load-bearing — every daemon's plist is current before that daemon is
+    bounced — because each plist now has exactly ONE actor: the mobile unit
+    refreshes its own plist before bouncing it, and the services child owns the
+    other three. No daemon's plist is ever touched by two processes.
+
+    "First" in the old sense is now "printed first": the list comes back
+    ``[services, mobile, ...]`` whatever order the units finished in, so the
+    summary's shape is stable across runs.
+
+    THE DEADLINE SHORTENS THE UNITS' OWN BOUNDS; it does not add a second way
+    for a child to die. Each unit receives it and runs its subprocess with
+    ``min(own bound, remaining)`` (see :func:`_bounded_timeout`), so an expiry
+    lands on the same kill-and-report path the child's own bound uses — sooner.
+    A stage that blew the budget adds ONE warning naming the remedy.
 
     Never raises. A daemon that did not restart is a warning on a successful
-    upgrade, which is the same disposition mobile has always had.
+    upgrade, which is the same disposition mobile has always had. An unexpected
+    raise from either unit (a contract violation) is still caught and worded,
+    rather than eating the other unit's outcome.
 
     This is the entry point ``lop update`` prints from. The TUI composes the two
     halves itself (:func:`refresh_service_daemons_after_upgrade` and
     :func:`refresh_mobile_after_upgrade`) because it renders the mobile outcome
-    as its own notice with a token, before relaunching.
+    as its own notice with a token, before relaunching; both halves keep their
+    standalone bounds, so that composition is unchanged by this stage.
     """
-    services = refresh_service_daemons_after_upgrade()
-    mobile = _mobile_daemon_refresh(refresh_mobile_after_upgrade())
-    return [services, mobile]
+    deadline = time.monotonic() + _STAGE_DEADLINE_S
+    results: dict[str, DaemonRefresh] = {}
+
+    def _run(key: str, label: str, unit: Callable[[], DaemonRefresh]) -> None:
+        try:
+            results[key] = unit()
+        except Exception as exc:  # noqa: BLE001 — see the docstring's no-raise contract
+            results[key] = DaemonRefresh(
+                label,
+                warnings=(f"warning: the {label} refresh failed unexpectedly: {exc}",),
+            )
+
+    def _services() -> None:
+        _run(
+            "services",
+            "service daemons",
+            lambda: refresh_service_daemons_after_upgrade(deadline=deadline),
+        )
+
+    def _mobile() -> None:
+        _run(
+            "mobile",
+            "mobile",
+            lambda: _mobile_daemon_refresh(refresh_mobile_after_upgrade(deadline=deadline)),
+        )
+
+    units = {
+        "services child": threading.Thread(target=_services, name="lop-daemon-refresh-services"),
+        "mobile half": threading.Thread(target=_mobile, name="lop-daemon-refresh-mobile"),
+    }
+    for thread in units.values():
+        thread.start()
+    for thread in units.values():
+        thread.join(max(deadline - time.monotonic(), 0.0))
+    # A unit is self-bounded by the deadline it was handed, so an unfinished
+    # thread here is one whose child kill is still landing; join it out so the
+    # stage owns no live thread and every outcome is reported. The join is a
+    # wait, not a guard — both units are no-raise by contract.
+    stragglers = [label for label, thread in units.items() if thread.is_alive()]
+    for thread in units.values():
+        if thread.is_alive():
+            thread.join()
+
+    out = [
+        results.get("services", DaemonRefresh("service daemons")),
+        results.get("mobile", DaemonRefresh("mobile")),
+    ]
+    if stragglers or time.monotonic() > deadline:
+        out.append(
+            DaemonRefresh("daemon refresh stage", warnings=(_stage_overrun_sentence(stragglers),))
+        )
+    return out
 
 
 def _print_daemon_refreshes(refreshes: Sequence[DaemonRefresh]) -> None:
@@ -5283,7 +5545,7 @@ def _repair_refusal() -> str | None:
 
 
 def _refresh_steps() -> tuple[tuple[str, str, Callable[[], launchd.PlistRefresh]], ...]:
-    """Every supervised daemon this build knows, in the order the repair walks them.
+    """The supervised daemons THIS CHILD walks, in the order it starts them.
 
     Each entry carries the daemon's name as its own repair sentence prints it, the
     command that restores it, and the repair itself. The two words exist for ONE
@@ -5293,25 +5555,36 @@ def _refresh_steps() -> tuple[tuple[str, str, Callable[[], launchd.PlistRefresh]
     which daemon a killed child had reached and must not enumerate what a fifth
     daemon would make stale.
 
+    THE MOBILE DAEMON IS DELIBERATELY NOT HERE (2026-09-30 design). Its plist is
+    owned END TO END by the mobile unit (:func:`refresh_mobile_after_upgrade` →
+    ``update --refresh-mobile``), which refreshes that plist and then bounces the
+    daemon — one actor, so a rewrite and a bounce cannot race, and "plist before
+    bounce" holds for that daemon by construction. A second writer here would
+    ``bootout``/``bootstrap`` the same job the mobile unit is working on, which is
+    the split the design names as what double-bounced this daemon on the measured
+    run.
+
+    THE STEPS RUN CONCURRENTLY (see :func:`daemons_refresh_command`), so this
+    tuple's order is the order the child STARTS them and prints their
+    announcements — not a serial walk.
+
     THE RECOVERY COMMANDS ARE THE INSTALLERS' OWN SPELLINGS, not new ones:
     ``launchd.reload_failure`` is handed each of them at that daemon's repair site,
     and `tests/unit/test_daemon_plist_refresh.py` pins this table against the same
-    four strings it holds for the failure sentences, so a moved verb has to be a
+    strings it holds for the failure sentences, so a moved verb has to be a
     decision in both.
 
     The imports are function-local for the reason this module repeats everywhere it
-    touches an installer: ``mobile.install`` pulls the Starlette daemon in, and this
+    touches an installer: the daemon modules pull in heavier stacks, and this
     module is imported by the TUI. In THIS process the cost is the point — it is a
-    short-lived child whose whole job is the repair — but the module-level import is
-    still paid by every session that never refreshes anything.
+    short-lived child whose whole job is the repair — but the module-level import
+    is still paid by every session that never refreshes anything.
     """
     from local_operator.browser_bridge import install as browser_install
-    from local_operator.mobile import install as mobile_install
     from local_operator.tunnels import install as tunnel_install
     from local_operator.wakes import install as wakes_install
 
     return (
-        ("mobile", "lop mobile install", mobile_install.refresh_plist_if_stale),
         ("browser bridge", "lop browser install", browser_install.refresh_plist_if_stale),
         ("tunnel", "lop tunnel install", tunnel_install.refresh_plist_if_stale),
         ("wakes supervisor", "lop wake install", wakes_install.refresh_plist_if_stale),
@@ -5338,79 +5611,199 @@ def _text(value: object) -> str:
 
 
 def _result_lines(value: object) -> tuple[str, ...]:
-    """A stream's real output, with the per-daemon announcements dropped.
+    """A stream's real output, with the machine lines dropped.
 
     A healthy upgrade must print exactly what it printed before announcements
-    existed: they are how a KILLED child is attributed, not lines the operator
-    asked to read on every upgrade. Dropping our own progress marker is not
-    swallowing a warning — the daemon's own ``warning:`` lines are untouched.
+    existed: the per-daemon ``refreshing:`` lines are how a KILLED child is
+    attributed, and the ``daemon_report:`` lines are the completion markers and
+    the report's per-daemon source — neither is a line the operator asked to read
+    on every upgrade. Dropping our own markers is not swallowing a warning — the
+    daemon's own ``warning:`` lines are untouched.
     """
     return tuple(
         line
         for line in _text(value).splitlines()
-        if line.strip() and not line.startswith(_PROGRESS_PREFIX)
+        if line.strip()
+        and not line.startswith(_PROGRESS_PREFIX)
+        and not line.startswith(_DAEMON_REPORT_PREFIX)
     )
 
 
-def _in_flight_daemon(
+def _in_flight_daemons(
     *streams: object,
-) -> tuple[str, str] | None:
-    """``(name, recovery)`` of the last daemon the child announced, or ``None``.
+) -> tuple[tuple[str, str], ...]:
+    """``((name, recovery), ...)`` of every daemon announced but not completed.
 
-    THE LAST ONE WINS: an announcement precedes each daemon's repair, so the newest
-    is the one being repaired when the bound fired. Both streams are read because
-    the marker is written to stdout and a wedged child may have been killed
-    mid-write; a half-written marker is rejected rather than reported (a partial
-    daemon name would be a sentence about the wrong thing).
+    ONE DAEMON ON A SERIAL CHILD, SEVERAL NOW: the repairs run concurrently, so
+    a kill can land with more than one in flight and the sentence must name all
+    of them rather than the newest. An announcement precedes a daemon's repair
+    and a ``daemon_report:`` line follows it (the completion marker), so the
+    in-flight set is announced minus completed, in announcement order.
+
+    Both streams are read because the marker is written to stdout and a wedged
+    child may have been killed mid-write; a half-written marker is rejected
+    rather than reported (a partial daemon name would be a sentence about the
+    wrong thing).
     """
-    found: tuple[str, str] | None = None
+    announced: dict[str, str] = {}
+    completed: set[str] = set()
     for stream in streams:
         for line in _text(stream).splitlines():
-            if not line.startswith(_PROGRESS_PREFIX):
-                continue
-            daemon, separator, recovery = line[len(_PROGRESS_PREFIX) :].partition(
-                _PROGRESS_SEPARATOR
-            )
-            if separator and daemon.strip() and recovery.strip():
-                found = (daemon.strip(), recovery.strip())
-    return found
+            if line.startswith(_PROGRESS_PREFIX):
+                daemon, separator, recovery = line[len(_PROGRESS_PREFIX) :].partition(
+                    _PROGRESS_SEPARATOR
+                )
+                if separator and daemon.strip() and recovery.strip():
+                    announced.setdefault(daemon.strip(), recovery.strip())
+            elif line.startswith(_DAEMON_REPORT_PREFIX):
+                payload = _report_payload(line)
+                name = payload.get("name") if payload is not None else None
+                if isinstance(name, str) and name:
+                    completed.add(name)
+    return tuple(
+        (daemon, recovery) for daemon, recovery in announced.items() if daemon not in completed
+    )
 
 
-def _bound_fired_sentence(*streams: object) -> str:
+def _bound_fired_sentence(*streams: object, bound: float | None = None) -> str:
     """The upgrade's line for a refresh the bound had to kill.
 
     Takes the killed child's captured STREAMS rather than the exception, the way
-    :func:`_in_flight_daemon` does: this module imports ``subprocess`` inside the
+    :func:`_in_flight_daemons` does: this module imports ``subprocess`` inside the
     functions that use it, so an annotation naming the exception type would be a
-    name this module does not carry (and flake8 says so).
+    name this module does not carry (and flake8 says so). ``bound`` is the bound
+    that actually fired — a stage-driven child runs under ``min(own bound,
+    remaining stage budget)`` — and defaults to this child's own
+    :data:`_DAEMON_REFRESH_TIMEOUT_S`, because a sentence claiming ``60s`` when
+    the deadline fired at 30 would be wrong about the one number it exists to
+    report.
 
-    TWO SENTENCES, because the two states are different jobs for the operator and
-    neither may claim more than is known. A child that had announced a daemon was
-    mid-repair when it died is the one worth naming: a ``bootout`` that already
-    landed is not undone by the kill, so THAT daemon may be down, and it may not
-    (its own repair may have been the no-op kind) — which is the difference the
-    sentence has to carry, because its reader is deciding whether to touch anything.
+    TWO SENTENCES — the single-daemon one is the historical shape and stays
+    byte-for-byte, and the multi-daemon one is what concurrent repairs make
+    possible. Neither may claim more than is known. A child that had announced a
+    daemon was mid-repair when it died is the one worth naming: a ``bootout``
+    that already landed is not undone by the kill, so THAT daemon may be down, and
+    it may not (its own repair may have been the no-op kind) — which is the
+    difference the sentence has to carry, because its reader is deciding whether
+    to touch anything.
 
-    The recovery command is the child's, carried in the announcement, so this
-    sentence stays true when a fifth daemon exists. Both sentences name a command
+    The recovery command is the child's, carried in the announcement, so these
+    sentences stay true when a fifth daemon exists. All of them name a command
     rather than leaving the operator to find one: the whole point of the failure is
     that a daemon is STOPPED, and 0.61.4's own reload failure already names one.
     """
-    bound = f"{_DAEMON_REFRESH_TIMEOUT_S:.0f}s"
-    in_flight = _in_flight_daemon(*streams)
-    if in_flight is None:
+    effective = _DAEMON_REFRESH_TIMEOUT_S if bound is None else bound
+    label = f"{effective:g}s"
+    in_flight = _in_flight_daemons(*streams)
+    if not in_flight:
         return (
-            f"warning: the daemon refresh did not finish within {bound} and was stopped; "
+            f"warning: the daemon refresh did not finish within {label} and was stopped; "
             "a daemon whose LaunchAgent had to be rewritten may now be STOPPED — run "
-            "each daemon's installer (`lop mobile install`, `lop browser install`, "
-            "`lop tunnel install`, `lop wake install`) to bring it back"
+            "each daemon's installer (`lop browser install`, `lop tunnel install`, "
+            "`lop wake install`) to bring it back"
         )
-    daemon, recovery = in_flight
+    if len(in_flight) == 1:
+        daemon, recovery = in_flight[0]
+        return (
+            f"warning: the daemon refresh did not finish within {label} and was stopped "
+            f"while the {daemon} daemon was being repaired; if that daemon's LaunchAgent "
+            f"had to be rewritten it is now STOPPED — run `{recovery}` to bring it back"
+        )
+    names = ", ".join(daemon for daemon, _recovery in in_flight)
+    commands = ", ".join(f"`{recovery}`" for _daemon, recovery in in_flight)
     return (
-        f"warning: the daemon refresh did not finish within {bound} and was stopped "
-        f"while the {daemon} daemon was being repaired; if that daemon's LaunchAgent "
-        f"had to be rewritten it is now STOPPED — run `{recovery}` to bring it back"
+        f"warning: the daemon refresh did not finish within {label} and was stopped while "
+        f"the {names} daemons were being repaired; if any of their LaunchAgents had to "
+        f"be rewritten those daemons may now be STOPPED — run {commands} to bring them back"
     )
+
+
+#: How a plist repair's outcome words itself in the report's fixed vocabulary
+#: (see :data:`DaemonStatusKind`). ``"already"`` is the bucket for "this stage
+#: left it alone and that is not a failure" — already current, absent,
+#: unaddressable from here, on a platform with no LaunchAgent, or deliberately
+#: left stopped — because the vocabulary has no word for those distinctions and
+#: a warning would cry wolf on a machine where nothing is wrong. A kind this
+#: table does not know is left OUT of the report rather than forced into a word
+#: that would be wrong.
+_PLIST_STATUS: dict[str, DaemonStatusKind] = {
+    "repaired": "refreshed",
+    "restarted": "refreshed",
+    "revived": "refreshed",
+    "current": "already",
+    "left-stopped": "already",
+    "unsupported": "already",
+    "not-addressable": "already",
+    "not-installed": "already",
+    "failed": "failed",
+}
+
+_STATUS_KINDS = frozenset({"refreshed", "already", "failed", "unsupervised"})
+
+
+def _plist_status(kind: str) -> DaemonStatusKind | None:
+    """The report status for one repair outcome, or ``None`` for unknown kinds."""
+    return _PLIST_STATUS.get(kind)
+
+
+def _daemon_report_line(name: str, status: DaemonStatusKind) -> str:
+    """The child's per-daemon machine line — completion marker and report source."""
+    payload = json.dumps({"name": name, "status": status}, separators=(",", ":"))
+    return f"{_DAEMON_REPORT_PREFIX}{payload}"
+
+
+def _report_payload(line: str) -> dict[str, object] | None:
+    """The dict behind a ``daemon_report:`` line, or ``None`` if malformed."""
+    try:
+        payload = json.loads(line[len(_DAEMON_REPORT_PREFIX) :])
+    except ValueError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _parse_daemon_reports(*streams: object) -> tuple[DaemonStatus, ...]:
+    """Every ``daemon_report:`` line in the captured streams, as statuses.
+
+    First spelling per daemon wins (one child prints one line per daemon per
+    run); a malformed line or an unknown status is ignored rather than worded —
+    the machine channel must not turn a mangled line into a daemon verdict.
+    """
+    found: dict[str, DaemonStatusKind] = {}
+    for stream in streams:
+        for line in _text(stream).splitlines():
+            if not line.startswith(_DAEMON_REPORT_PREFIX):
+                continue
+            payload = _report_payload(line)
+            if payload is None:
+                continue
+            name = payload.get("name")
+            status = payload.get("status")
+            if (
+                isinstance(name, str)
+                and name
+                and isinstance(status, str)
+                and status in _STATUS_KINDS
+                and name not in found
+            ):
+                found[name] = status  # type: ignore[assignment]  # checked against _STATUS_KINDS
+    return tuple(DaemonStatus(name, status) for name, status in found.items())
+
+
+def _child_daemon_statuses(*streams: object) -> tuple[DaemonStatus, ...]:
+    """A refresh child's per-daemon statuses: completed lines plus killed ones.
+
+    A daemon the child ANNOUNCED but never completed gets a synthetic
+    ``failed``: the kill may have left its LaunchAgent mid-rewrite, and the
+    sentence naming the recovery rides the same entry's warnings.
+    """
+    completed = _parse_daemon_reports(*streams)
+    done = {status.name for status in completed}
+    killed = tuple(
+        DaemonStatus(daemon, "failed")
+        for daemon, _recovery in _in_flight_daemons(*streams)
+        if daemon not in done
+    )
+    return completed + killed
 
 
 def daemons_refresh_command() -> int:
@@ -5448,21 +5841,55 @@ def daemons_refresh_command() -> int:
         # "nothing needed repairing" and "this process is not allowed to".
         print(f"warning: {refusal}", file=sys.stderr)
         return 0
-    for name, recovery, refresh in _refresh_steps():
+    steps = _refresh_steps()
+    # ONE LOCK AROUND THE CHILD'S OUTPUT. The repairs run in threads, and an
+    # interleaved announcement would read as two half lines — the parent parses
+    # these lines back to attribute a killed child, and a mangled one names the
+    # wrong daemon.
+    lock = threading.Lock()
+
+    def run_step(name: str, recovery: str, refresh: Callable[[], launchd.PlistRefresh]) -> None:
         # BEFORE the repair, and FLUSHED: this process can be killed at the parent's
         # bound with a bootout already issued, and this line is the only record of
         # which daemon that was (see `_PROGRESS_PREFIX`). Unflushed it would sit in
         # a pipe buffer that dies with us.
-        print(_refresh_announcement(name, recovery), flush=True)
-        # Every one of these is no-raise by contract, so no guard is needed here
-        # and a failure in one daemon cannot stop the next.
-        outcome = refresh()
+        with lock:
+            print(_refresh_announcement(name, recovery), flush=True)
+        try:
+            # Every one of these is no-raise by contract; the guard is belt to
+            # that suspenders, because in a THREAD an unexpected raise would
+            # print a traceback and lose the daemon's machine line — one bad
+            # daemon must not eat the other two's outcomes either way.
+            outcome = refresh()
+        except Exception as exc:  # noqa: BLE001 — see above
+            outcome = launchd.PlistRefresh(name=name, kind="failed", detail=str(exc))
         line = outcome.summary()
-        if line:
-            print(line)
         warning = outcome.warning()
-        if warning:
-            print(warning, file=sys.stderr)
+        status = _plist_status(outcome.kind)
+        with lock:
+            if line:
+                print(line)
+            if warning:
+                print(warning, file=sys.stderr)
+            # The machine line is printed for EVERY step that completed — it is
+            # the completion marker the parent's kill attribution reads, and the
+            # report's per-daemon source. A kind the report vocabulary does not
+            # know prints nothing rather than a wrong word.
+            if status is not None:
+                print(_daemon_report_line(name, status), flush=True)
+
+    threads = [
+        threading.Thread(target=run_step, args=step, name=f"lop-daemon-repair-{index}")
+        for index, step in enumerate(steps)
+    ]
+    for thread in threads:
+        thread.start()
+    # Joined with no timeout: each repair carries its own internal bounds
+    # (launchctl timeouts, the reload helpers' deadlines), and this child's
+    # whole-run bound is the PARENT's — the kill it can cause is exactly the
+    # one the announcements above exist to attribute.
+    for thread in threads:
+        thread.join()
     return 0
 
 
@@ -5493,6 +5920,70 @@ def _run_daemon_repair(*, services_only: bool) -> int:
         return code
     _print_daemon_refreshes([_mobile_daemon_refresh(refresh_mobile_after_upgrade())])
     return code
+
+
+def mobile_refresh_command() -> int:
+    """``lop update --refresh-mobile``: this daemon's plist and its bounce, one actor.
+
+    The CHILD half of :func:`refresh_mobile_after_upgrade` (and, through it, of
+    the TUI's own composition). It runs under the NEW wheel because the plist
+    must be rendered by the build the installer just wrote — the parent process
+    still holds the pre-upgrade modules in memory, and a repair rendered by them
+    is a no-op wearing the costume of a fix.
+
+    ONE OWNER FOR PLIST + BOUNCE (2026-09-30 design): the rewrite and the bounce
+    must not split across actors — a bounce that lands before the rewrite
+    restarts the previous definition, and the split double-bounced this daemon
+    on the measured run. Refreshing here FIRST also keeps the per-daemon order
+    the old serial composition bought ("every daemon's plist before that daemon's
+    bounce") now that the plist child runs concurrently with this one.
+
+    ONE BOUNDED RETRY, for the measured failure mode: the bounce's ``kickstart``
+    was refused once because a concurrent repair wave had the job mid-bootout,
+    and nothing retried it (2026-09-30; the relay recovered only when a foreign
+    wave arrived ~4 minutes later). One retry after :data:`_MOBILE_RETRY_DELAY_S`
+    rides out exactly that window; the parent's subprocess bound still bounds the
+    whole child.
+
+    A REFUSED REPAIR BOUNCES NOTHING — the same guard, asked in the same place,
+    as :func:`daemons_refresh_command`; without it the hidden flag would be a new
+    hand-reachable way to rewrite the operator's plist from a checkout.
+
+    Exit code: 0 when the refresh did not FAIL (a ``current``, ``repaired`` or
+    ``not-addressable`` outcome) and the bounce succeeded; 1 when either half
+    did — the last stderr line is what the parent's failure sentence carries.
+    """
+    refusal = _repair_refusal()
+    if refusal is not None:
+        print(f"warning: {refusal}", file=sys.stderr)
+        return 0
+    from local_operator.mobile import install as mobile_install
+
+    outcome = mobile_install.refresh_plist_if_stale()
+    # The line the plist child used to print for this daemon; surfaced by the
+    # parent through MobileRefresh.lines so a stale-LaunchAgent repair still
+    # reaches the summary.
+    line = outcome.summary()
+    if line:
+        print(line)
+    refresh_failed = outcome.kind == "failed"
+    warning = outcome.warning()
+    if warning:
+        print(warning, file=sys.stderr)
+
+    result = mobile_install.service_action("restart")
+    if not result["ok"]:
+        time.sleep(_MOBILE_RETRY_DELAY_S)
+        result = mobile_install.service_action("restart")
+    if not result["ok"]:
+        print(str(result["error"]), file=sys.stderr)
+        return 1
+    if refresh_failed:
+        # The bounce worked but the plist did not — both facts stay visible,
+        # and the refresh's own warning above is what the parent's sentence will
+        # quote.
+        return 1
+    return 0
 
 
 def _print_current_generation() -> None:
@@ -5577,7 +6068,58 @@ def _services_refusal(prefix: Path | None = None) -> str | None:
     return None
 
 
-def _services_stage(*, wait_s: float | None = None) -> None:
+def _live_serve_records() -> dict[int, Any]:
+    """The live serve records by pid, for the report's before/after diff.
+
+    Never raises and degrades to ``{}``: a registry this function cannot read
+    must not fail an update that has already succeeded, and an empty map simply
+    produces an empty (honest) ``serve`` list.
+    """
+    from local_operator.services import live_serve_daemons
+
+    try:
+        return {record.pid: record for record in live_serve_daemons()}
+    except Exception:  # noqa: BLE001 — the report must never fail the update
+        logger.debug("serve scan for the update report failed", exc_info=True)
+        return {}
+
+
+def _serve_moves(before: dict[int, Any], after: dict[int, Any]) -> tuple[ServeMove, ...]:
+    """The report's ``serve`` entries: one per live daemon at report time.
+
+    ``before``/``after`` are the record versions on either side of the stage and
+    ``moved`` is an ``instance_id`` change — the same proof the reload machinery
+    itself waits on (``services._await_relocations``), never a version compare,
+    because a same-version rebuild is this host's ordinary case. A daemon that
+    appeared while the stage ran has no prior record and cannot claim a move.
+    """
+    moves: list[ServeMove] = []
+    for pid in sorted(after):
+        record = after[pid]
+        previous = before.get(pid)
+        moves.append(
+            ServeMove(
+                pid=pid,
+                before=previous.version if previous is not None else "",
+                after=record.version,
+                moved=previous is not None and previous.instance_id != record.instance_id,
+                instance=record.instance_id,
+            )
+        )
+    return tuple(moves)
+
+
+def _collect_daemon_statuses(refreshes: Sequence[Any]) -> tuple[DaemonStatus, ...]:
+    """Every machine-readable status the given refresh entries carry, in order.
+
+    Takes :class:`DaemonRefresh` and :class:`ServiceRefresh` entries alike —
+    both carry the ``statuses`` pass-through — so the stage and the
+    ``--no-services`` tail share one collector.
+    """
+    return tuple(status for refresh in refreshes for status in refresh.statuses)
+
+
+def _services_stage(*, wait_s: float | None = None) -> StageReport:
     """Bring the non-runtime fleet onto the build the pointer now names.
 
     THE STEP THAT MAKES AN UPDATE ACTUALLY AN UPDATE. Replacing the install used
@@ -5592,6 +6134,13 @@ def _services_stage(*, wait_s: float | None = None) -> None:
     Imported function-locally because ``services`` reaches the serve registry and
     ``update`` is on ``lop``'s startup path — the same rule that keeps this module
     free of uvicorn (``tests/unit/test_import_graph.py``).
+
+    RETURNS its structured half for the process's single report emission: the
+    serve before/after diff and the daemons' machine statuses, taken around
+    ``restart_services`` (which owns the moving) and threaded back through the
+    ``ServiceRefresh`` pass-through. A refusal or a failed stage returns an
+    EMPTY report — the warning already carries what happened, and the report
+    must not claim moves nobody made.
     """
     from local_operator.services import print_refreshes, restart_services
 
@@ -5624,8 +6173,9 @@ def _services_stage(*, wait_s: float | None = None) -> None:
             "from the install that owns them",
             file=sys.stderr,
         )
-        return
+        return StageReport()
 
+    before = _live_serve_records()
     try:
         refreshes = restart_services() if wait_s is None else restart_services(wait_s=wait_s)
     except Exception as exc:  # noqa: BLE001 — the install already succeeded
@@ -5634,11 +6184,81 @@ def _services_stage(*, wait_s: float | None = None) -> None:
             "run `lop services restart` when this is resolved",
             file=sys.stderr,
         )
-        return
+        return StageReport()
     print_refreshes(refreshes)
+    return StageReport(
+        serve=_serve_moves(before, _live_serve_records()),
+        daemons=_collect_daemon_statuses(refreshes),
+    )
 
 
-def _generation_upgrade(total: int, *, services: bool = True) -> int:
+def _run_services_tail(*, services: bool) -> StageReport:
+    """The successful exits' shared tail half: move the fleet, collect the report.
+
+    One owner for the ``services``/``--no-services`` choice, so the three exits
+    that share it cannot drift; ``--no-services`` stays exactly the pre-services
+    path (the supervised daemons only), with its statuses collected straight
+    from the refresh entries. Tolerates a patched ``_services_stage`` returning
+    ``None`` in tests — an empty report is the honest fallback.
+    """
+    if services:
+        report = _services_stage()
+        return report if report is not None else StageReport()
+    refreshes = refresh_daemons_after_upgrade()
+    _print_daemon_refreshes(refreshes)
+    return StageReport(daemons=_collect_daemon_statuses(refreshes))
+
+
+def _emit_update_report(*, install_version: str, target: str, stage: StageReport | None) -> None:
+    """Emit the ONE machine-readable line at exit — additive to the sentences.
+
+    THE LINE IS A CONTRACT (2026-09-30 design): the desktop app parses it to
+    decide whether its backend provably moved (``serve``) and whether every
+    supervised daemon is refreshed/already (``daemons``), so the key names, the
+    ``schema`` token and the four status words are frozen; anything added here
+    is additive or it is a schema bump that names itself in the token.
+
+    ``install_version`` is the version the install NAMES when this line is
+    written (the target on a successful upgrade; the running version on the
+    "nothing to install" path) and ``target`` is the version the flow set out
+    to have — the app's blocking wait ends when the two agree, so a
+    disagreement is how a failed install is seen. Each daemon's ``version`` is
+    the target when this stage moved it or found it already current, and empty
+    when it failed or is unsupervised: no claim the evidence does not support.
+    """
+    report = stage if stage is not None else StageReport()
+    daemons = [
+        {
+            "name": status.name,
+            "status": status.status,
+            "version": target if status.status in ("refreshed", "already") else "",
+        }
+        for status in report.daemons
+    ]
+    payload = {
+        "update_report": {
+            "schema": _UPDATE_REPORT_SCHEMA,
+            "install_version": install_version,
+            "target": target,
+            "serve": [
+                {
+                    "pid": move.pid,
+                    "from": move.before,
+                    "to": move.after,
+                    "moved": move.moved,
+                    "instance": move.instance,
+                }
+                for move in report.serve
+            ],
+            "daemons": daemons,
+        }
+    }
+    print(json.dumps(payload, separators=(",", ":")), flush=True)
+
+
+def _generation_upgrade(
+    total: int, *, services: bool = True, install_version: str = "", target: str = ""
+) -> int:
     """The tail every successful install shares: report, prune, refresh, succeed.
 
     ``lop update --from-snapshot`` uses this directly; the PyPI path prints its own
@@ -5650,17 +6270,17 @@ def _generation_upgrade(total: int, *, services: bool = True) -> int:
     ``services=False`` (``lop update --no-services``) stops after the supervised
     daemons are repaired, which is the pre-``services`` behaviour exactly: a caller
     that wants the trees and nothing else is a caller that has its own reason for
-    leaving a daemon where it is.
+    leaving a daemon where it is. The process's single machine-readable report
+    line (:func:`_emit_update_report`) is emitted last, after every human line
+    the successful exit prints.
     """
     _print_current_generation()
     for line in prune_notice_lines(
         prune_generations(referenced=referenced_install_roots(), actor=ACTOR_UPGRADE)
     ):
         print(line)
-    if services:
-        _services_stage()
-    else:
-        _print_daemon_refreshes(refresh_daemons_after_upgrade())
+    stage = _run_services_tail(services=services)
+    _emit_update_report(install_version=install_version, target=target, stage=stage)
     return total
 
 
@@ -5811,7 +6431,9 @@ def _snapshot_command(value: str, *, services: bool = True) -> int:
             # ref-snapshot is the case that leaves the extract behind when this
             # sits outside the guard.
             _remove_tree(snapshot.path)
-    return _generation_upgrade(0, services=services)
+    return _generation_upgrade(
+        0, services=services, install_version=snapshot.version, target=snapshot.version
+    )
 
 
 def update_command(
@@ -5819,6 +6441,7 @@ def update_command(
     check: bool = False,
     refresh_daemons: bool = False,
     services_only: bool = False,
+    refresh_mobile: bool = False,
     from_snapshot: str | None = None,
     services: bool = True,
 ) -> int:
@@ -5835,7 +6458,13 @@ def update_command(
     ``services_only`` is what that CHILD is told by the upgrade that spawned it
     (``--services-only``, hidden like the flag above): the caller bounces the mobile
     daemon itself, immediately after, so the child must not — see
-    :func:`_run_daemon_repair`.
+    :func:`_run_daemon_repair`. The mobile half's OWN child is
+    ``--refresh-mobile`` (:func:`mobile_refresh_command`), which owns that daemon's
+    plist repair and its bounce as one actor.
+
+    A successful exit prints ONE machine-readable line last (:func:`_emit_update_report`),
+    the ``update_report`` the desktop app parses; the human sentences above it
+    are unchanged and it is additive to them.
 
     ``--from-snapshot`` is checked before the PyPI call for the same reason: it
     installs a build that is already on this machine, so a host with no route to
@@ -5845,6 +6474,9 @@ def update_command(
     """
     if refresh_daemons:
         return _run_daemon_repair(services_only=services_only)
+
+    if refresh_mobile:
+        return mobile_refresh_command()
 
     if from_snapshot is not None:
         if check:
@@ -5880,10 +6512,8 @@ def update_command(
         # current build is reported as such and not touched, so the cost of
         # running it on every `lop update` is a health probe per daemon.
         print(f"local-operator {result.installed} is the latest")
-        if services:
-            _services_stage()
-        else:
-            _print_daemon_refreshes(refresh_daemons_after_upgrade())
+        stage = _run_services_tail(services=services)
+        _emit_update_report(install_version=result.installed, target=result.latest, stage=stage)
         return 0
 
     kind = install_kind()
@@ -5920,8 +6550,6 @@ def update_command(
     _print_current_generation()
     for line in pruned:
         print(line)
-    if services:
-        _services_stage()
-    else:
-        _print_daemon_refreshes(refresh_daemons_after_upgrade())
+    stage = _run_services_tail(services=services)
+    _emit_update_report(install_version=installed, target=result.latest, stage=stage)
     return 0
