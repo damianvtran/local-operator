@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -615,6 +616,7 @@ async def test_list_query_uses_the_store_search(root: Path) -> None:
 def test_tier_table_is_per_op() -> None:
     assert _sessions_tier({"op": "list"}) == "read"
     assert _sessions_tier({"op": "info"}) == "read"
+    assert _sessions_tier({"op": "peek"}) == "read"
     assert _sessions_tier({"op": "spawn"}) == "write"
     assert _sessions_tier({"op": "resume"}) == "write"
     assert _sessions_tier({"op": "stop"}) == "exec"
@@ -909,15 +911,494 @@ def test_validation_refusals_are_legible_and_per_op() -> None:
 
 
 def test_schema_budget_is_measured_with_the_repos_own_ruler() -> None:
-    """The design note's §3.4 budget, guarded so a later field cannot drift it.
+    """The design's §3.4 budget, re-measured for the peek surface (PR B).
 
     Ruler: ``compaction/tokens.count_text_tokens`` (cl100k_base via tiktoken,
-    the repo's estimator — the same ruler the design measured the draft with);
-    subject: the exact JSON the provider sees as the tool's ``parameters``.
+    the repo's estimator and the one §3.4 was measured with); subject: the
+    exact JSON the provider sees as the tool's ``parameters``.
+
+    §14.6 locked the lifecycle tool at ≤700 tokens (shipped at 699 in PR A).
+    The six peek window fields cannot fit under it: with their descriptions
+    written lean the tool measures 945, and the 21-field floor with EVERY
+    field description stripped is still 644 — holding 700 would mean shipping
+    an undocumented schema. The ceiling below pins the measured figure with
+    the same knife-edge headroom the 700 had; tighten it when the schema is
+    trimmed, never widen it to admit a verbose field. (The CI-side cost of the
+    same growth is the ratchet entry for PR B in
+    ``scripts/bench_context_budget.py``.)
     """
     from local_operator.compaction.tokens import count_text_tokens
     from local_operator.tools.builtin import _SESSIONS_TOOL_DESCRIPTION
 
     params = json.dumps(SessionsParams.model_json_schema(), ensure_ascii=False)
-    assert count_text_tokens(params) <= 700
+    assert count_text_tokens(params) <= 950
     assert count_text_tokens(_SESSIONS_TOOL_DESCRIPTION) <= 200
+
+
+# --- peek (PR B): bounded transcript inspection ------------------------------
+
+
+def _synth_row(
+    i: int,
+    *,
+    role: str | None = None,
+    text: str | None = None,
+    pad: int = 0,
+) -> str:
+    """One message row shaped like a real journal's, ~``pad`` bytes of filler."""
+    role = role or ("user", "assistant", "tool")[i % 3]
+    payload: dict[str, Any] = {
+        "kind": "message",
+        "role": role,
+        "content": [{"text": text if text is not None else f"row {i} " + "x" * pad}],
+    }
+    if role == "assistant":
+        payload["tool_calls"] = [{"name": "bash", "arguments": {"command": f"cmd {i}"}}]
+    if role == "tool":
+        payload["tool_name"] = "bash"
+    return json.dumps({"id": f"{i:032x}", "ts": i, "type": "message", "payload": payload})
+
+
+def _write_journal(root: Path, session_id: str, lines: list[str], *, title: str = "") -> Path:
+    directory = root / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "created_at.json").write_text("1700000000.0", encoding="utf-8")
+    (directory / "transcript.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    if title:
+        # A stored title keeps ``session_name`` off the transcript, so the
+        # byte-counting instrument below sees only the peek read it measures.
+        write_session_title(directory, title, user_set=False, past_names=[])
+    return directory
+
+
+def _big_journal(
+    root: Path,
+    session_id: str,
+    *,
+    rows: int,
+    pad: int,
+    custom_every: int = 0,
+    needle: str = "",
+    needle_row: int = -1,
+) -> tuple[Path, list[str], list[str]]:
+    """A large synthetic journal: (directory, row ids, raw lines).
+
+    Rows are ~``pad`` bytes of filler so a whole-file parse is a byte count
+    away from being detectable, and every ``custom_every``-th row appends a
+    bookkeeping row — the shape that renders as NO step, which is what the
+    step walks exist to tolerate. ``needle`` lands in row ``needle_row``.
+    """
+    lines: list[str] = []
+    ids: list[str] = []
+    for i in range(1, rows + 1):
+        text = f"row {i} {needle} " + "x" * pad if needle and i == needle_row else None
+        lines.append(_synth_row(i, text=text, pad=pad))
+        ids.append(f"{i:032x}")
+        if custom_every and i % custom_every == 0:
+            lines.append(
+                json.dumps(
+                    {
+                        "id": f"c{i:031x}",
+                        "ts": i,
+                        "type": "custom",
+                        "payload": {
+                            "kind": "custom",
+                            "custom_type": "todo_snapshot",
+                            "details": {"text": "t"},
+                        },
+                    }
+                )
+            )
+    directory = _write_journal(root, session_id, lines, title=f"journal {session_id[:4]}")
+    return directory, ids, lines
+
+
+async def _peek(root: Path, case: dict[str, Any]) -> Any:
+    return await execute_sessions("t", case, None, None, _context(root))
+
+
+def _rows_in(text: str) -> set[int]:
+    """The ``row N`` markers a rendered window actually shows.
+
+    Bodies arrive through ``_clip``, which STRIPS, so "row 148 " loses its
+    trailing space and a substring check on that space would be quietly wrong;
+    the word-boundary digit run is the spelling that survives the strip.
+    """
+    return {int(match) for match in re.findall(r"row (\d+)\b", text)}
+
+
+@pytest.mark.asyncio
+async def test_peek_tail_read_cost_is_the_window_not_the_journal(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§11.8's structural byte bound, pointed at the default peek read.
+
+    The instrument is ``test_transcript.py``'s own ``_counted_reads`` — bytes
+    handed OUT of ``Path.open`` for this one file, which no machine load can
+    move — reused rather than re-written so the peek and the reader it rides
+    are held to one ruler. A whole-file parse on this fixture reads ~7.7 MB;
+    the bound below is the page plus two chunks. Can fail: make
+    ``_peek_page_rows`` return ``10**9`` (the reader then walks the journal
+    back to its start) and this test goes red on the byte count.
+    """
+    from local_operator.session import transcript as transcript_module
+    from local_operator.tools.builtin import _peek_page_rows
+    from tests.unit.session.test_transcript import _counted_reads
+
+    directory, ids, lines = _big_journal(root, "aaaa11112222", rows=8000, pad=900, custom_every=10)
+    path = directory / "transcript.jsonl"
+    size = path.stat().st_size
+
+    with _counted_reads(monkeypatch, path) as counted:
+        result = await _peek(root, {"op": "peek", "session": "aaaa11112222"})
+    assert not result.is_error, result.text
+    details = result.details or {}
+    assert details["mode"] == "tail" and details["steps_shown"] == 12
+    assert 8000 in _rows_in(result.text)  # the newest message row is the newest step
+    assert details["has_older"] is True
+
+    page_bytes = sum(len(line.encode("utf-8")) + 1 for line in lines[-_peek_page_rows(12) :])
+    assert counted[0] <= page_bytes + 2 * transcript_module._BACKWARD_CHUNK_BYTES
+    # ... and never anything like the journal, however long the journal is.
+    assert counted[0] * 4 < size
+
+
+@pytest.mark.asyncio
+async def test_peek_head_read_cost_is_the_window_not_the_journal(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The head read's bound, same instrument, bounded the other direction.
+
+    The forward walker exists as a generator precisely so the caller's stop is
+    the bound: this consumes the first rows and never walks the journal. Can
+    fail: drop the stop condition in ``_peek_head`` (let the walker run to
+    EOF) and the byte count grows to the journal's size.
+    """
+    from local_operator.session import transcript as transcript_module
+    from tests.unit.session.test_transcript import _counted_reads
+
+    directory, ids, lines = _big_journal(root, "bbbb22223333", rows=8000, pad=900, custom_every=10)
+    path = directory / "transcript.jsonl"
+    size = path.stat().st_size
+
+    with _counted_reads(monkeypatch, path) as counted:
+        result = await _peek(root, {"op": "peek", "session": "bbbb22223333", "head": 3})
+    assert not result.is_error, result.text
+    details = result.details or {}
+    assert details["mode"] == "head" and details["steps_shown"] == 3
+    # The window is rows 1..3, oldest first. Asserting on "row 4" would be
+    # WRONG to expect absent: it is the one-row lookahead consumed to answer
+    # ``has_newer`` — consumed, but never rendered, so the shown rows are 1-3.
+    assert _rows_in(result.text) == {1, 2, 3}
+
+    head_bytes = sum(len(line.encode("utf-8")) + 1 for line in lines[:6])
+    assert counted[0] <= head_bytes + 2 * transcript_module._BACKWARD_CHUNK_BYTES
+    assert counted[0] * 4 < size
+
+
+@pytest.mark.asyncio
+async def test_peek_cursor_pages_round_trip_without_gaps_or_repeats(root: Path) -> None:
+    """Two ``before_id`` pages chained through the footer's own cursor.
+
+    The cursor must be the oldest SHOWN step, never the oldest row the walk
+    read past while hunting for steps: a cursor into a row the caller never
+    saw would make the next page skip everything between (the first draft did
+    exactly that and skipped 36 rows on a dense page). The assertions below
+    are the rows themselves, so a regression is named, not inferred.
+    """
+    directory, ids, _ = _big_journal(root, "cccc33334444", rows=200, pad=40)
+    first = await _peek(root, {"op": "peek", "session": "cccc33334444", "before_id": ids[159]})
+    assert not first.is_error, first.text
+    # The 12 steps immediately before row 160, oldest→newest: rows 148..159.
+    assert _rows_in(first.text) == set(range(148, 160))
+    cursor = re.search(r"before_id=([0-9a-f]{32}) for earlier", first.text)
+    assert cursor is not None, first.text
+    assert cursor.group(1) == ids[147]  # the OLDEST SHOWN step, not ~ids[111]
+
+    second = await _peek(
+        root, {"op": "peek", "session": "cccc33334444", "before_id": cursor.group(1)}
+    )
+    assert not second.is_error, second.text
+    assert _rows_in(second.text) == set(range(136, 148))
+
+
+@pytest.mark.asyncio
+async def test_peek_around_window_reports_both_edges(root: Path) -> None:
+    directory, ids, _ = _big_journal(root, "dddd77778888", rows=100, pad=40)
+    result = await _peek(root, {"op": "peek", "session": "dddd77778888", "around_id": ids[49]})
+    assert not result.is_error, result.text
+    details = result.details or {}
+    assert details["mode"] == "around" and details["steps_shown"] == 12
+    assert details["has_older"] is True and details["has_newer"] is True
+    assert 50 in _rows_in(result.text)  # the anchor itself is a step
+    assert "before_id=" in result.text and "around_id=" in result.text
+
+
+@pytest.mark.asyncio
+async def test_peek_search_finds_a_deep_needle_within_the_budget(root: Path) -> None:
+    """A needle ~3 MB deep is found, windowed, and its depth reported."""
+    from local_operator.tools.builtin import _PEEK_SCAN_BYTES
+
+    directory, ids, _ = _big_journal(
+        root, "eeee44445555", rows=12000, pad=300, needle="needle-alpha", needle_row=6000
+    )
+    result = await _peek(root, {"op": "peek", "session": "eeee44445555", "query": "needle-alpha"})
+    assert not result.is_error, result.text
+    details = result.details or {}
+    assert details["mode"] == "search" and details["match_id"] == ids[5999]
+    assert "needle-alpha" in result.text and "← match" in result.text
+    # The depth is the point: a scan that stopped near EOF would report a few
+    # KB; this one had to walk the ~2.8 MB above the needle.
+    assert 2_000_000 <= details["scanned_bytes"] <= _PEEK_SCAN_BYTES
+
+
+@pytest.mark.asyncio
+async def test_peek_search_budget_is_a_depth_and_moves_with_the_needle(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The prove-can-fail pair for the search budget (§11.9): same 64 KiB
+    budget, needle at ~5 KB depth (hit, ``scanned_bytes`` under the cap) and
+    the SAME fixture shape with the needle at ~330 KB depth (honest miss) —
+    the miss message names the bound and a pointer to widen."""
+    from local_operator.tools import builtin as builtin_module
+
+    monkeypatch.setattr(builtin_module, "_PEEK_SCAN_BYTES", 64 * 1024)
+
+    _, shallow_ids, _ = _big_journal(
+        root, "ffff66667777", rows=400, pad=900, needle="needle-shallow", needle_row=395
+    )
+    hit = await _peek(root, {"op": "peek", "session": "ffff66667777", "query": "needle-shallow"})
+    assert not hit.is_error, hit.text
+    assert (hit.details or {})["match_id"] == shallow_ids[394]
+    assert (hit.details or {})["scanned_bytes"] < 64 * 1024
+
+    _big_journal(root, "aaaa66667777", rows=400, pad=900, needle="needle-deep", needle_row=50)
+    miss = await _peek(root, {"op": "peek", "session": "aaaa66667777", "query": "needle-deep"})
+    assert not miss.is_error  # an honest miss is an ANSWER, not an error
+    assert miss.text.startswith("no match for 'needle-deep'")
+    assert "bounded" in miss.text and "around_id" in miss.text
+    details = miss.details or {}
+    assert details["steps_shown"] == 0
+    assert 64 * 1024 <= details["scanned_bytes"] <= 64 * 1024 + 2000
+
+
+@pytest.mark.asyncio
+async def test_peek_digest_shape_and_counts(root: Path) -> None:
+    """§8.3: counts per kind, the newest ask/reply, the tool tail, ≤10 lines."""
+    rows = [
+        ("user", "add a retry budget to the flaky shard test"),
+        ("assistant", "reading the shard report first"),
+        ("tool", "exit code: 0"),
+        ("assistant", "three retries in; the shard is green"),
+        ("tool", "ran pytest -q"),
+        ("user", "ship it"),
+        ("tool", "wrote the file"),
+        ("tool", "no output"),
+    ]
+    lines = [_synth_row(i, role=role, text=text) for i, (role, text) in enumerate(rows, 1)]
+    _write_journal(root, "aaaa99990000", lines, title="digest case")
+
+    result = await _peek(root, {"op": "peek", "session": "aaaa99990000", "digest": True})
+    assert not result.is_error, result.text
+    fold = result.text.splitlines()
+    assert fold[0] == (
+        "digest: 8 steps seen (user 2, assistant 2, tool 4) — stored; whole transcript"
+    )
+    assert fold[1] == "ask: ship it"
+    assert fold[2] == "assistant: three retries in; the shard is green"
+    assert fold[3:] == [
+        "tool: bash · exit code: 0",
+        "tool: bash · ran pytest -q",
+        "tool: bash · wrote the file",
+        "tool: bash · no output",
+    ]
+    assert len(fold) <= 10
+    assert result.details == {
+        "op": "peek",
+        "mode": "digest",
+        "session_id": "aaaa99990000",
+        "steps_seen": 8,
+        "tool_calls": 4,
+        "has_older": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_peek_digest_empty_and_one_turn_cases(root: Path) -> None:
+    _write_journal(root, "bbbb99990000", [], title="empty")
+    result = await _peek(root, {"op": "peek", "session": "bbbb99990000", "digest": True})
+    assert not result.is_error, result.text
+    assert result.text.startswith("digest: 0 steps seen")
+    assert (result.details or {})["steps_seen"] == 0
+
+    _write_journal(root, "cccc99990000", [_synth_row(1, role="user", text="hello")], title="one")
+    result = await _peek(root, {"op": "peek", "session": "cccc99990000", "digest": True})
+    assert not result.is_error, result.text
+    assert result.text.splitlines() == [
+        "digest: 1 steps seen (user 1, assistant 0, tool 0) — stored; whole transcript",
+        "ask: hello",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_peek_output_budgets_are_guarded_by_char_proxy_and_tokens(root: Path) -> None:
+    """§8.4's per-op output budgets, measured on each op's DEFAULT invocation.
+
+    Ruler: the repo's own ``count_text_tokens`` (cl100k_base when tiktoken is
+    installed, the chars/4 proxy otherwise — the fallback discipline
+    ``compaction/tokens.py`` documents) plus the character proxy (4 chars per
+    token). The peek fixture is the WORST default case — every step body at
+    the 600-char clip cap — so the ceilings pin the maximum the default
+    invocation can emit, not a friendly average. §8.4's figures are
+    bodies-only approximations ("12 steps × ≤600 chars" is 7,200 chars ≈ 1,800
+    tokens at the proxy, with no room for headings or the footer); the numbers
+    below are this implementation's measured worst case (peek 8,385 chars /
+    2,153 cl100k tokens; digest 817 / 241) with a small margin, and a
+    regression that stops clipping or drops the digest's line cap goes red.
+    ``stop`` is not measured: its body is the kill-switch ladder's own
+    receipt painted verbatim, and the tool adds only a bounded ``waited`` list.
+    """
+    from local_operator.compaction.tokens import count_text_tokens
+    from local_operator.tools.builtin import _sessions_open_body
+
+    long_body = (
+        "The frobnicator test failed on shard 3. Running pytest -q tests/unit/tools "
+        "-x gave an exit code of 1 after 42 seconds.\n"
+    ) * 30
+    long_body = (long_body * 4)[:2000]
+    rows = [_synth_row(i, text=long_body) for i in range(1, 31)]
+    _write_journal(root, "dddd99990000", rows, title="budget")
+
+    result = await _peek(root, {"op": "peek", "session": "dddd99990000"})
+    assert not result.is_error, result.text
+    assert "chars elided" in result.text  # the clip is real, not assumed
+    assert len(result.text) <= 8_600
+    assert count_text_tokens(result.text) <= 2_400
+
+    result = await _peek(root, {"op": "peek", "session": "dddd99990000", "digest": True})
+    assert not result.is_error, result.text
+    assert len(result.text.splitlines()) <= 10
+    assert len(result.text) <= 900
+    assert count_text_tokens(result.text) <= 300
+
+    # The lifecycle ops' rows of the same table, measured the same way: a real
+    # list over one live + one stored row, one info read, and the two receipts
+    # through their own body builder.
+    _publish_record(root, "dddd99990000", "budget", pid=os.getpid())
+    _write_journal(
+        root, "eeee99990000", [_synth_row(1, role="user", text="stored row")], title="stored"
+    )
+    result = await _peek(root, {"op": "list", "include_stored": True, "limit": 5})
+    assert not result.is_error, result.text
+    assert len(result.text) <= 2_400 and count_text_tokens(result.text) <= 600
+
+    result = await _peek(root, {"op": "info", "session": "dddd99990000"})
+    assert not result.is_error, result.text
+    assert len(result.text) <= 800 and count_text_tokens(result.text) <= 200
+
+    receipt = _sessions_open_body(
+        _spawn_params(),
+        {
+            "session_id": "a1b2c3d4e5f6",
+            "job_id": "3f9c2b17",
+            "name": "night-audit",
+            "state": "starting",
+            "origin": "agent-workstream",
+            "sidebar_visibility": "listed",
+            "opener": {"agent": "coder", "label": "sessions-PR-B", "session": "0b39"},
+        },
+    )
+    assert len(receipt) <= 480 and count_text_tokens(receipt) <= 120
+
+
+@pytest.mark.asyncio
+async def test_peek_spill_fit_on_an_oversize_window(root: Path) -> None:
+    """§14.7, verified: spill_truncate applies cleanly to peek bodies at these
+    sizes. The default 12-step window is designed to fit INLINE — bodies at
+    the 600-char clip cap plus headings and the footer stay under the 8 KiB
+    tool limit — and a 50-step window is over it by construction, so it must
+    come back as an elided body around a ``spill://`` handle whose byte count
+    is the FULL body, never as the raw ~32 KB."""
+    rows = [_synth_row(i, text="s" * 600) for i in range(1, 61)]
+    _write_journal(root, "ffff99990011", rows, title="spill case")
+
+    small = await _peek(root, {"op": "peek", "session": "ffff99990011"})
+    assert not small.is_error, small.text
+    assert "spill" not in (small.details or {})
+    assert len(small.text) < 8 * 1024
+
+    big = await _peek(root, {"op": "peek", "session": "ffff99990011", "steps": 50})
+    assert not big.is_error, big.text
+    spill = (big.details or {}).get("spill")
+    assert spill is not None and spill["handle"].startswith("spill://")
+    assert spill["bytes"] > 20_000  # the body it replaced is the raw 50-step window
+    assert len(big.text) < 9_000  # the elided body, never the raw ~32k
+
+
+@pytest.mark.asyncio
+async def test_peek_empty_transcript_reports_no_steps(root: Path) -> None:
+    _write_journal(root, "ffff99990000", [], title="empty")
+    result = await _peek(root, {"op": "peek", "session": "ffff99990000"})
+    assert not result.is_error, result.text
+    assert "no steps yet" in result.text
+    assert (result.details or {})["steps_shown"] == 0
+
+
+@pytest.mark.asyncio
+async def test_peek_refuses_unknown_ids_and_a_missing_transcript(root: Path) -> None:
+    _write_journal(root, "aaaa77778888", [_synth_row(1, role="user", text="hi")], title="t")
+
+    result = await _peek(root, {"op": "peek", "session": "aaaa77778888", "before_id": "f" * 32})
+    assert result.is_error and "no transcript entry with id" in result.text
+
+    result = await _peek(root, {"op": "peek", "session": "aaaa77778888", "around_id": "f" * 32})
+    assert result.is_error and "no transcript entry with id" in result.text
+
+    result = await _peek(
+        root, {"op": "peek", "session": "aaaa77778888", "query": "([", "regex": True}
+    )
+    assert result.is_error and "not a valid regular expression" in result.text
+
+    (root / "sessions" / "bbbb77778888").mkdir(parents=True)
+    result = await _peek(root, {"op": "peek", "session": "bbbb77778888"})
+    assert result.is_error and "has no transcript to peek at" in result.text
+
+
+def test_peek_scan_budget_matches_the_readers_cursor_window() -> None:
+    """§8.1's "the same budget": the search's cap and the reader's own
+    16 MiB cursor window are one number, pinned so they cannot drift apart."""
+    from local_operator.session import transcript as transcript_module
+    from local_operator.tools.builtin import _PEEK_SCAN_BYTES
+
+    assert _PEEK_SCAN_BYTES == transcript_module._PAGE_LOCATE_WINDOW_BYTES
+
+
+def test_peek_validation_refusals_are_legible() -> None:
+    refusal = _sessions_validation_error(SessionsParams(op="peek", target="x", steps=5, head=3))
+    assert refusal is not None and "one window at a time" in refusal
+    refusal = _sessions_validation_error(
+        SessionsParams(op="peek", target="x", steps=5, before_id="a")
+    )
+    assert refusal is not None and "one window at a time" in refusal
+    refusal = _sessions_validation_error(SessionsParams(op="peek", target="x", regex=True))
+    assert refusal == "`regex` needs `query`: it selects how the query matches."
+    refusal = _sessions_validation_error(
+        SessionsParams(op="peek", target="x", digest=True, steps=4)
+    )
+    assert refusal is not None and "drop `steps`" in refusal
+    refusal = _sessions_validation_error(
+        SessionsParams(op="peek", target="x", digest=True, query="q")
+    )
+    assert refusal is not None and "different reads" in refusal
+    refusal = _sessions_validation_error(SessionsParams(op="peek", target="x", query="q", head=3))
+    assert refusal is not None and "`steps=N` around the match" in refusal
+    refusal = _sessions_validation_error(SessionsParams(op="peek", target="x", steps=0))
+    assert refusal == "`steps` needs a count of at least 1."
+    refusal = _sessions_validation_error(SessionsParams(op="peek", target="x", head=51))
+    assert refusal is not None and "too many for one peek (max 50)" in refusal
+    refusal = _sessions_validation_error(SessionsParams(op="peek", target="x", before_id="  "))
+    assert refusal == "`before_id` needs the entry id an earlier peek returned."
+    # The window fields are peek-only, and the refusal says so rather than
+    # misdirecting the caller at another op.
+    refusal = _sessions_validation_error(SessionsParams(op="info", target="x", steps=4))
+    assert refusal == "`steps` applies to op='peek' only."
