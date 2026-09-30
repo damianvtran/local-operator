@@ -277,6 +277,16 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         "not a mesh reason",
     ),
     ("local_operator/tui/app.py", "_loop_status_line", "reason"): (1, "not a mesh reason"),
+    # ``session.py`` joins this scan set only because slice B's account-change
+    # notice import spells ``local_operator.network`` (the credential binding).
+    # The read below is the session's OWN attention marker's field, re-published
+    # into the attention store — a ``str()`` coercion on its way into a store
+    # write, never rendered here, and not a mesh value at all.
+    (
+        "local_operator/session/session.py",
+        "Session._republish_journalled_outcome",
+        "reason",
+    ): (1, "the attention marker's own field, written to the store, never rendered"),
 }
 
 _ROOT = Path(local_operator.__file__).parent

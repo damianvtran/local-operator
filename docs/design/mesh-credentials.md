@@ -204,8 +204,9 @@ modern successor framing (`mesh-prior-art.md` §7).
 ### 2.1 The synced placement document
 
 Written by each device for the credentials **it owns**, merged on receipt, and
-persisted at `<config>/network/<network_id>/placement.json`. It carries facts
-and only facts: a volatile observation never enters this file.
+persisted at `<config>/network/credentials/<network_id>/placement.json`
+(`placement.py:3`; the un-prefixed path this section used to carry was drift).
+It carries facts and only facts: a volatile observation never enters this file.
 
 ```json
 {
@@ -394,8 +395,8 @@ MeshAwareAuthStore.get_api_key(provider, session_id, ...)
 resolution that first served it, as a **transcript custom row** — the
 established pattern for session bookkeeping that has to travel with the
 transcript (`session_spend.v1`, `local_operator/session/spend.py:47-56`;
-membership in `session._PERSISTABLE_CUSTOM_TYPES`,
-`local_operator/session/session.py:772`). A transcript row rather than a
+membership in `session._PERSISTABLE_CUSTOM_TYPES`, `local_operator/session/session.py`
+— cited by symbol, not line: the constant has moved twice already). A transcript row rather than a
 sidecar file means the binding rides the existing fork and mobility copy
 (`fork.fork_session`, `local_operator/fork.py:167`) with **no change to either
 path**, and never enters LLM context.
@@ -411,7 +412,9 @@ path**, and never enters LLM context.
 
 - **Replacement state, never a delta** — newest row per provider wins, exactly
   as the spend accumulator states its own rule (`spend.py:14-27`). Two writers
-  cannot corrupt it.
+  cannot corrupt it. (As built, spend is deliberately NOT a member of
+  `session._PERSISTABLE_CUSTOM_TYPES` — its writer appends through
+  `append_custom` directly; the binding row IS a member.)
 - `policy` is `local-first` (default) or `owner` (set when the creating human
   says "run this on my account"). `local-first` means a device that *does* have
   its own login keeps using it; `owner` means it brokers even so. Both are
@@ -420,6 +423,47 @@ path**, and never enters LLM context.
 - **A move preserves the binding.** So does a fork. This is the mechanism
   behind R13: the credential follows the *session*, and what actually follows is
   a pointer to the device that owns it.
+
+**As built (2026-09-30; slices A+B shipped).** The row is
+`local_operator/session/credential_binding.py`: type `mesh_credential_binding.v1`,
+schema `lop.mesh.credential_binding.v1`, `version` gated by EXACT match (an
+unknown version reads as "no row"; bytes are never rewritten or normalised —
+sync digests compare them). It carries the sketch's fields plus
+`owner_device_name` and the owner's `credential_id` (never a synthetic id; the
+writer refuses one at construction), is read newest-per-PROVIDER, and is
+appended on every successful serve whose effective identity changed
+(`owner_device`, `credential_id`, `identity_label` or `policy`). Registry
+membership: `session._PERSISTABLE_CUSTOM_TYPES` (defence in
+depth — the writer appends through `append_custom` directly) and
+`transcript.BOOKKEEPING_CUSTOM_TYPES` (so an account change never restamps the
+session clock). The renderer drops the row as bookkeeping on both replay paths.
+It is deliberately NOT in `_COLLAPSIBLE_CUSTOM_TYPES`: that pass keeps ONE row
+per type, and binding rows are per-provider facts.
+
+**The consult sites (slice B).** Resolution reads the row through
+`store.set_binding_reader` AFTER the local tiers, in both `get_api_key` and
+`get_oauth_access`: a row carrying `policy: owner` that names another device
+skips a local answer and brokers (the one deliberate carve-out of "local-first
+is not negotiable" — and on failure there is no local fallback); otherwise a
+local miss leaves the existing relay/placement ask unchanged, and when the row
+names a remote owner that device is the owner this session resolves to — the
+borrow dials the owner the placement document holds, and an ownership ceremony
+is where the two can differ, in which case the new owner's serve re-binds the
+row (§4.9 below). A root with no placement document or no identity builds no
+recorder and no reader: 0-peer resolution is byte-identical.
+
+**The notices (D1).** Every appended change row emits ONE operator-visible
+notice through the recorder's `on_change` seam, journaled by
+`Session.journal_credential_binding_change` as a
+`session_credential_binding_notice.v1` message row: persisted, painted by the
+TUI fold, and deliberately NOT model-visible (the renderer's allow-list omits
+it). Sentences are rendered in `network/credentials/messages.py`. M1 (first
+serve) and label-only refinements journal nothing; every account change — a
+same-owner sibling pick (M3, emitting this section's §4.9 sentence), a local
+capture (M4), an ownership move (M6) — is recorded and announced. NOT shipped:
+§6.3's metering fields (`serving_identity.credential_owner`/`credential_ref`)
+and the `owner`-policy set verb (D2) — a row carrying `owner` is honoured, but
+nothing in this build writes one.
 
 ---
 
@@ -683,7 +727,9 @@ class MeshAwareAuthStore:
     """AuthStore, with brokering as the LAST rung of the cascade."""
 
     def __init__(self, local: AuthStore, *, mesh: MeshCredentialClient | None,
-                 config_dir: Path, session_id: str) -> None: ...
+                 config_dir: Path) -> None: ...  # as built: the sketch's
+    # ``session_id`` parameter was dropped — the session id arrives per call
+    # (``store.py:140-146``), because one store serves several callers.
 
     # FailoverAuthStore (providers/failover.py:2719)
     async def get_api_key(self, provider: str, session_id: str | None = None, *,
@@ -835,7 +881,7 @@ which is the rule `incidents.py` already states for its own four records.
 | 4.6 | **A peer asks for a credential it is not a holder for** | Refused with `not_a_holder`; `credential.grant_refused` audit record on the owner with the requesting device, the key and the reason; the requester caches the refusal for 60 s (`placement.state.json`) and does **not** re-ask this session. | Requester: `damian-mbp does not share 'openai' with this device.` Owner (in `lop network log` / the TUI's network view): `refused a credential request for openai from gpu-pod-3 (not a holder)`. |
 | 4.7 | **MCP interactive login needed remotely** | **Revised in review round 1 (audit round 2, F3/R1) to what ships.** `ensure_mcp_oauth_fresh` cannot refresh a stored grant whose own record calls it expired (`stored_token_expiry()` in the past), so the owner's broker refuses the borrow with `interactive_required` and writes a `credential.report {failure: interactive_required}` audit record; nothing opens a browser on either device. The *repair* path this row used to promise is **not built as an op**: there is no `credential_repair` verb, no owner-side toast and no `inbox.jsonl` entry — what ships is DERIVED from the `credential.report` row below (`network/credentials/repair.py`): a `credential_repair` check row in `lop network doctor` and a line in the `/network` panel, both reusing `messages.render_repair_notice`'s wording; that function remains what the owner puts on the WIRE as a diagnostic. On the requester the sentence is `render_broker_error`'s `interactive_required` row; on a BORROWING device the composed MCP failure line (`mcp/manager.py::_auth_failure_text`) names the owning device and puts the command there instead of the local `/mcp login <name> to authorize` — which a headless borrower cannot run, and which a browser-capable one would satisfy with a LOCAL grant that then wins over the borrow. | Requester (borrow surfaces): `'mcp:https://…' needs an interactive sign-in on damian-mbp before it can be lent out; the operator there can run '/mcp login https://…'.` Borrower's MCP failure line: `damian-mbp: /mcp login datadog` — composed into `failed: datadog — …` at 56 cells, so a 19-cell device name still fits whole (55); a longer server name keeps the OWNING DEVICE and the command's head, shedding the server name the command repeats from the row's own label (`failed: launchdarkly — damians-MacBook-Pro: /mcp login …`, design round 1 D1), and only below that does the command outrank the owner (`failed: linear — /mcp login line…`, D2 — the row base printed; `/mcp` and the durable notice carry the sentence whole) Owner: the `credential.report` audit record (`lop network log`). |
 | 4.8 | **A remote session needs a `lop secret` value** | Not brokered, by design. The `bash` command runs on the peer, so the value must exist there; the session-scoped `/credential <key> <value>` verb (routed to the runtime, `session/credential_ops.py:1-26`) writes it there, on the peer, in the peer's store. A `$(lop secret get X)` in a peer session retrieves from the peer's broker, whose consent model is peer *process ancestry* on that host (`secrets/peer.py:421`) and therefore works exactly as it does locally. | If absent: `The secret 'X' is not stored on gpu-pod-3, where this session runs. Set it there: /credential X <value> (or 'lop secret set X' on gpu-pod-3).` |
-| 4.9 | **Owner's row is quota-blocked** | The owner's `_resolve` excludes blocked rows (`is_blocked_for_model`, `auth_store.py:79-80` region) and either picks a sibling or returns nothing. A *sibling pick* is a real behaviour change for a remote session and must be visible: the grant's `credential_ref.credential_id` changes, and the requester writes a `mesh_credential_binding.v1` row with a new `credential_id` only when the *owner* changed — never silently re-binding to a different account for the same provider. | If a sibling exists: `Openai quota is exhausted on damian-mbp; this turn is running on its other openai login.` If not: the existing no-credential sentence, plus `(openai is rate-limited on damian-mbp until 14:20).` |
+| 4.9 | **Owner's row is quota-blocked** | The owner's `_resolve` excludes blocked rows (`is_blocked_for_model`, `auth_store.py:79-80` region) and either picks a sibling or returns nothing. A *sibling pick* is a real behaviour change for a remote session and must be visible: the grant's `credential_ref.credential_id` changes, so the requester appends a new `mesh_credential_binding.v1` row recording that id and emits ONE operator-visible notice (§2.4 as-built; the earlier "only when the *owner* changed" reading is superseded — a same-owner sibling pick is a recorded, announced change, never a silent re-bind to another account for the same provider). The shipped sentence (design round 1, D1) states the FACT of the rotation without naming a cause, because the row cannot tell the block writers apart. | If a sibling exists: `The {provider} login on {owner} went out of rotation, and the next turn ran on another {provider} login ({label}).` If not: the existing no-credential sentence, plus `(openai is rate-limited on damian-mbp until 14:20).` |
 
 **Failure attribution goes home.** When a *borrowed* bearer is rejected by the
 provider (401, 429, a rotation error), `MeshAwareAuthStore.rotate_sibling`
@@ -933,6 +979,15 @@ present in the destination transcript and byte-identical to the source's, (b)
 the destination's resolve picks the same `owner_device`, and (c) the source
 device's `AuthStore` never sees a `force_refresh` as a result of the move — a
 move is not a credential event.
+
+**Harness note (as built 2026-09-30).** The assertion is exercised in-tree by
+`tests/unit/network/test_credential_binding_two_root.py::test_e2_...`
+(parametrized over `--keep` off/on on the mobility rig: the row LINE compared
+byte-for-byte — not the whole file — the destination's next resolve driven
+through the real store and asserted to reach the same owner via the owner's
+`credential.grant` audit, and the source's `auth.db` dump plus the stub IdP's
+POST counter asserted unmoved across the move). §9.2's CLI harness remains the
+operator-facing end-to-end form; the in-tree cell is the CI form.
 
 ### 5.6 The full local matrix still passes
 
@@ -1202,8 +1257,8 @@ mid-grant. Evidence: the commands, their actual output, and on each side the
 | `local_operator/network/credentials/client.py` | `MeshCredentialClient` — leg-1 dial, leg-2 forward, `report`, `repair` (§3.6b) |
 | `local_operator/network/credentials/owner.py` | `MeshCredentialBroker` — authorise, coalesce, resolve, audit, reply (§3.6c) |
 | `local_operator/network/credentials/messages.py` | `render_broker_error()` — the one home for §4's sentences |
-| `local_operator/session/spend.py` | `serving_identity` gains `credential_owner` / `credential_ref` (§6.3) |
-| `local_operator/session/session.py` | new custom type `mesh_credential_binding.v1`, added to `_PERSISTABLE_CUSTOM_TYPES` (`:772`) |
+| `local_operator/session/spend.py` | `serving_identity` gains `credential_owner` / `credential_ref` (§6.3) — **not shipped as built** (see §2.4 as-built) |
+| `local_operator/session/session.py` | new custom type `mesh_credential_binding.v1`, added to `_PERSISTABLE_CUSTOM_TYPES` (as built; the row's module is `session/credential_binding.py`, and the account-change notice joined too — §2.4 as-built) |
 | `local_operator/session_factory.py` | `:3398` → `build_auth_store(credential_manager)` |
 | `local_operator/mcp/auth.py` | `ensure_mcp_oauth_fresh` (`:3996`) mesh branch before the lock; no write on the borrower |
 | `local_operator/mcp/grants.py` | nothing changes for the verb (`REMOTE_GRANT_NOTICE` stays); the repair notice is raised by the relay, not here |
