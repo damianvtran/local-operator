@@ -36,9 +36,10 @@ export const iceberg: ThemeDefinition = {
 		// ground and 11.2:1 on the lightest.
 		ink: "#33374C",
 		inkMuted: "#4A4E64",
-		// Upstream sub colour, carried verbatim; it clears 4.87:1 on sunken, which
-		// is the binding ground for a dark ink in a light theme.
-		inkDim: "#5B5F74",
+		// Upstream sub colour, darkened one step: verbatim it cleared 4.87:1 on
+		// sunken, the binding ground for a dark ink in a light theme, but only
+		// 4.49:1 on the accent wash the selected quick-pick paints it on (D3).
+		inkDim: "#5A5E73",
 		inkDisabled: "#A0A4B8",
 
 		hairline: "#CBCCD2",

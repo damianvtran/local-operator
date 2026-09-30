@@ -33,8 +33,10 @@ export const everforestLight: ThemeDefinition = {
 		ink: "#394347",
 		// Upstream grey2 #829181 is 3.08:1 on bg0.
 		inkMuted: "#545F5A",
-		// Upstream grey1 #939F91 is 2.56:1 on bg0.
-		inkDim: "#546058",
+		// Upstream grey1 #939F91 is 2.56:1 on bg0; darkened one step further so
+		// the danger wash clears too (4.57:1 — the failed tool row paints dim
+		// ink on it; D3).
+		inkDim: "#535F57",
 		// Upstream grey0, the scheme's own inert-hint grey.
 		inkDisabled: "#A6B0A0",
 

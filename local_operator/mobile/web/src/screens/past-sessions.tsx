@@ -17,6 +17,7 @@
 import { useEffect, useRef, useState } from "react";
 import { resumeSession, searchSessions } from "../api";
 import { formatRelative } from "../lib/format";
+import { resumeRefusalText } from "../lib/refusal";
 import { navigate } from "../router";
 import type { PastSession } from "../types";
 
@@ -60,7 +61,8 @@ export function PastSessionsScreen() {
 			const r = await resumeSession(id);
 			navigate(`/s/${encodeURIComponent(r.session_id)}`);
 		} catch (e) {
-			setResumeError(String((e as Error).message ?? e));
+			/* The same refusal voice the ended strip paints (design round 1, D5). */
+			setResumeError(resumeRefusalText(e));
 			setResumingId("");
 		}
 	};
