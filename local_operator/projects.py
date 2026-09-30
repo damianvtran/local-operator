@@ -125,15 +125,31 @@ ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024
 #: (the kinds renderers branch on, so the classification is stated once).
 _IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"})
 
-#: How long a progress snippet stays "fresh". ONE constant, read by the
-#: view/route payloads and by the completion-time check, so the stale badge and
-#: the nudge can never disagree about a record: a work turn yielding within this
-#: window of the last report is not asked to re-report; anything older is. Four
-#: hours is the operator's window ("stale only when not updated in more than 4
-#: hours"), and only the LIVE statuses (``planning``/``active``/``qa``/
-#: ``validation`` — :data:`PROJECT_LIVE_STATUSES`) are ever stale at all (see
-#: :func:`progress_is_stale`: settled rows never read stale).
+#: How long a progress snippet stays "fresh" when the operator has not said
+#: otherwise. The live threshold is the settings key ``projects.stale_after_hours``
+#: (int hours, default 4, bounds 1–168), resolved in ONE place —
+#: :func:`stale_after_s` — which :func:`progress_is_stale` reads, so the badge,
+#: the tool rows, the store payloads, the completion check and the wake-trigger
+#: snapshot can never disagree about the window: a work turn yielding within it
+#: of the last report is not asked to re-report; anything older is. This
+#: constant stays as the code's DEFAULT (the settings registry's row is pinned
+#: against it by ``tests/unit/test_settings_io.py``), and only the LIVE statuses
+#: (``planning``/``active``/``qa``/``validation`` — :data:`PROJECT_LIVE_STATUSES`)
+#: are ever stale at all (see :func:`progress_is_stale`: settled rows never read
+#: stale).
 PROJECT_PROGRESS_STALE_S: float = 14400.0
+
+#: The settings key that configures the window. Spelled once; the resolver
+#: below is its only reader, and the settings registry row carries the same
+#: spelling.
+STALE_AFTER_HOURS_KEY = "projects.stale_after_hours"
+
+#: ``config.yml`` mtime (ns) per config dir → the resolved window. Read inside
+#: per-row loops, so this must not re-parse the config per call, while an edit
+#: must still land "at the next computation" (the section's LIVE promise): one
+#: stat per call, a re-read only when the file actually moved. Bounded because
+#: tests and multi-root callers each mint a key.
+_STALE_AFTER_CACHE: dict[str, tuple[int | None, float]] = {}
 
 #: Registry mutation lock budget: a bounded waiter, so a dead peer can never
 #: park a tool call forever (the ``teams`` constants' shape).
@@ -843,13 +859,69 @@ class ProjectUpdate:
         self.refreshed = refreshed
 
 
+def stale_after_s(config_dir: Path | str | None = None) -> float:
+    """The configured staleness window, in SECONDS.
+
+    THE single reader of ``projects.stale_after_hours`` (int hours, default
+    :data:`PROJECT_PROGRESS_STALE_S` worth of hours, bounds 1–168 enforced by
+    the settings registry). Every staleness consumer — the badge, the tool
+    rows, the store payloads, the completion check and the wake trigger's
+    snapshot — resolves through :func:`progress_is_stale` and here, so they
+    cannot disagree about the number; the wake-trigger side evaluates against
+    the same key through the trigger settings snapshot.
+
+    Never raises: an unreadable config, an unregistered key or a malformed
+    value falls back to :data:`PROJECT_PROGRESS_STALE_S`. Cached per config dir
+    by the config file's mtime — the read sits inside per-row loops and must
+    not re-parse the config per call, while an edit must still land at the
+    next computation. One stat per call is the price of that promise.
+    """
+    try:
+        from local_operator.paths import config_dir as resolve_config_dir
+
+        root = Path(config_dir) if config_dir is not None else resolve_config_dir()
+        key = str(root)
+        try:
+            mtime: int | None = (root / "config.yml").stat().st_mtime_ns
+        except OSError:
+            mtime = None
+        cached = _STALE_AFTER_CACHE.get(key)
+        if cached is not None and cached[0] == mtime:
+            return cached[1]
+        value = PROJECT_PROGRESS_STALE_S
+        if mtime is not None:
+            # Only when a config file EXISTS: constructing a ConfigManager on
+            # a directory whose config.yml is absent would create the
+            # directory, and a read path must stay a read path. The registry
+            # reads the value through the same reader the settings page uses,
+            # so a hand-rolled YAML scan cannot silently disagree with it.
+            from local_operator import settings_io
+            from local_operator.config import ConfigManager
+
+            setting = settings_io.resolve_key(STALE_AFTER_HOURS_KEY)
+            if setting is not None:
+                hours = settings_io.read_setting(ConfigManager(config_dir=root), setting)
+                if isinstance(hours, (int, float)) and not isinstance(hours, bool) and hours > 0:
+                    value = float(hours) * 3600.0
+        if len(_STALE_AFTER_CACHE) > 16:
+            _STALE_AFTER_CACHE.clear()
+        _STALE_AFTER_CACHE[key] = (mtime, value)
+        return value
+    except Exception:  # noqa: BLE001 — a read path must never raise on its config
+        logger.warning(
+            "projects: could not read the staleness window; using the default", exc_info=True
+        )
+        return PROJECT_PROGRESS_STALE_S
+
+
 def progress_is_stale(project: Project, *, now: float | None = None) -> bool:
     """Whether the project's recorded progress needs refreshing.
 
     THE single staleness rule: no report yet is stale by construction (the
-    first honest line is still owed), and a report older than
-    :data:`PROJECT_PROGRESS_STALE_S` is stale. Computed here so the tool, the
-    routes and the completion check cannot disagree about one record.
+    first honest line is still owed), and a report older than the CONFIGURED
+    window (:func:`stale_after_s`, default :data:`PROJECT_PROGRESS_STALE_S`)
+    is stale. Computed here so the tool, the routes and the completion check
+    cannot disagree about one record.
 
     ONLY ``planning``, ``active``, ``qa`` AND ``validation`` RECORDS CAN READ
     STALE — the statuses that are work in flight. Paused, done and archived are
@@ -866,7 +938,7 @@ def progress_is_stale(project: Project, *, now: float | None = None) -> bool:
     if project.progress_updated_at is None:
         return True
     moment = time.time() if now is None else now
-    return (moment - project.progress_updated_at) > PROJECT_PROGRESS_STALE_S
+    return (moment - project.progress_updated_at) > stale_after_s()
 
 
 def age_text(updated_at: float | None, *, now: float | None = None) -> str | None:

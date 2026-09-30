@@ -2910,6 +2910,18 @@ class RuntimeServer:
                     await self._handle_call_on_session_loop(rearm_goal_judge)
                 except Exception:  # noqa: BLE001 — additive, never a boot gate
                     logger.debug("goal judge re-arm probe failed", exc_info=True)
+            # AIDA'S SERVING-START TRIGGER DRAIN, probed like the judge above
+            # and hopped for the same reason. A pending wake-trigger check-in
+            # is consumed into her schedule list here, so the row the record
+            # exists for fires inside THIS engagement rather than waiting for
+            # her next persist, config change or turn (see
+            # ``ServingSessionHandle.aida_reconcile_on_serve``).
+            aida_drain = getattr(self._handle, "aida_reconcile_on_serve", None)
+            if callable(aida_drain):
+                try:
+                    await self._handle_call_on_session_loop(aida_drain)
+                except Exception:  # noqa: BLE001 — additive, never a boot gate
+                    logger.debug("aida serving-start reconcile failed", exc_info=True)
             # v4: hosts that can serialize their event stream feed the relay.
             # Probed, not required — a handle without the capability leaves
             # attach clients on v3 projection-only behaviour, never broken.

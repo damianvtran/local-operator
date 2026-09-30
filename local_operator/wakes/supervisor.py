@@ -163,6 +163,15 @@ STALE_AFTER_S = 7 * 24 * 3600.0
 #: that for a class of process measured in hours.
 RESIDENCY_SWEEP_INTERVAL_S = 300.0
 
+#: How often the wake-trigger evaluation pass may run, in seconds. NOT a
+#: config key — the operator-facing tunables are the trigger budget keys
+#: (``wakes.triggers.*``); this is the loop's own throttle, sized so the pass's
+#: file reads amortise while a project that just crossed its staleness window
+#: is still noticed within minutes. It deliberately does NOT bound the loop's
+#: sleep (see :class:`_TriggerSweep`): the possibility of a future trigger must
+#: never keep the supervisor resident.
+TRIGGER_EVAL_INTERVAL_S = 300.0
+
 #: How often the machine memory pass runs (see :class:`_MachineMemorySweep`).
 #:
 #: WHY NOT THE RESIDENCY CADENCE (300 s): that pass forks two external tools and
@@ -397,6 +406,7 @@ def _due_sessions(
     *,
     deliveries: Mapping[str, dict[str, Any]] | None = None,
     spooled: Mapping[str, dict[str, Any]] | None = None,
+    triggers: Mapping[str, dict[str, Any]] | None = None,
 ) -> list[tuple[str, str, int]]:
     """``(session_id, cwd, due_ms)`` for every session with a wake due now.
 
@@ -423,7 +433,14 @@ def _due_sessions(
     session that is already firing a due wake this pass is not listed twice, and
     a DORMANT one is skipped exactly as its schedules are: the kill switch is
     the user's, and a spooled turn is not an exception to it.
+
+    A PENDING TRIGGER RECORD joins for the same reason a spooled turn does: it
+    is an owed check-in with no index row of its own (the target's engine arms
+    the row once an engagement makes a runtime exist), so it earns an
+    engagement too — and a paused/stopped target is skipped exactly like its
+    schedules, which is the no-engagement half of the suppression matrix.
     """
+    from local_operator.wakes import triggers as trigger_mod
     from local_operator.wakes.spooled import next_attempt_at_ms
     from local_operator.wakes.store import is_held, next_due_at
 
@@ -558,6 +575,27 @@ def _due_sessions(
                 int(noted) if isinstance(noted, int) and not isinstance(noted, bool) else now_ms,
             )
         )
+    # TRIGGER CHECK-INS, last so a session owed both ways is engaged once (the
+    # first row wins and the later kind does not duplicate it). The cwd prefers
+    # the target's own index entry when one exists; a target with no entry at
+    # all — her session with no armed rows — still engages, from the home
+    # directory, which is what the spooled path does too.
+    already = {row[0] for row in due}
+    for session_id, record in (triggers or {}).items():
+        if not isinstance(record, dict) or session_id in already or session_id in dormant:
+            continue
+        if trigger_mod.next_attempt_at_ms(record) > now_ms:
+            continue
+        entry = index.get(session_id)
+        cwd = entry.get("cwd") if isinstance(entry, dict) else None
+        noted = record.get("noted_at_ms")
+        due.append(
+            (
+                session_id,
+                cwd if isinstance(cwd, str) and cwd else os.path.expanduser("~"),
+                int(noted) if isinstance(noted, int) and not isinstance(noted, bool) else now_ms,
+            )
+        )
     due.sort(key=lambda row: row[2])
     return due
 
@@ -591,21 +629,29 @@ def _session_exists(config_dir: Path, session_id: str) -> bool:
 
 def _load_and_reconcile_state(
     config_dir: Path,
-) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-    """Read the index and the ledger in ONE thread hop, RECONCILED here.
+) -> tuple[
+    dict[str, dict[str, Any]],
+    dict[str, dict[str, Any]],
+    dict[str, dict[str, Any]],
+    dict[str, dict[str, Any]],
+]:
+    """Read the index and the ledgers in ONE thread hop, RECONCILED here.
 
     ONE hop, not two. This runs once per slice pass, in a process whose whole
-    justification is staying cheap, and the two reads must agree anyway: the
+    justification is staying cheap, and the reads must agree anyway: each
     ledger is reconciled against the index it was read WITH, so reading them
     apart would let a pass decide on an index its records were not checked
-    against. The ledger is one small file per session with an undelivered fire —
-    an empty directory on a healthy machine.
+    against. Each ledger is one small file per session — an empty directory on
+    a healthy machine.
 
     The NAME carries the reconciliation because it DELETES (review round 1,
     NIT 1): a helper called like a read, from a retirement predicate, must not
-    quietly unlink files. What it drops is only ever a record whose occurrence is
-    no longer owed — an entry that is gone, or a schedule that has moved past it.
+    quietly unlink files. What it drops is only ever a record whose cause is
+    gone — an entry that is gone, an occurrence that has moved past its fire,
+    a spool that no longer owes a turn, or a pending trigger record whose
+    target session does not exist.
     """
+    from local_operator.wakes import triggers as trigger_mod
     from local_operator.wakes.deliveries import read_deliveries
     from local_operator.wakes.spooled import read_spooled
     from local_operator.wakes.store import read_index
@@ -613,9 +659,11 @@ def _load_and_reconcile_state(
     index = read_index(config_dir)
     deliveries = read_deliveries(config_dir)
     spooled = read_spooled(config_dir)
+    pending_triggers = trigger_mod.read_pending(config_dir)
     _reconcile_deliveries(config_dir, index, deliveries)
     _reconcile_spooled(config_dir, spooled)
-    return index, deliveries, spooled
+    trigger_mod.reconcile(config_dir, pending_triggers)
+    return index, deliveries, spooled, pending_triggers
 
 
 def _reconcile_spooled(config_dir: Path, spooled: dict[str, dict[str, Any]]) -> None:
@@ -1325,6 +1373,7 @@ class _Sweeper:
                 that did not happen, which is exactly what ``failed`` means.
                 """
                 _note_spooled_attempt(config_dir, session_id, reason=reason)
+                _note_trigger_attempt(config_dir, session_id, reason=reason)
 
             try:
                 started = await _engage_one(
@@ -1415,15 +1464,126 @@ class _Sweeper:
         *,
         deliveries: Mapping[str, dict[str, Any]] | None = None,
         spooled: Mapping[str, dict[str, Any]] | None = None,
+        triggers: Mapping[str, dict[str, Any]] | None = None,
     ) -> int:
         """Start an engagement for every due session. Returns how many started."""
         launched = 0
         for session_id, cwd, due_ms in _due_sessions(
-            index, moment, deliveries=deliveries, spooled=spooled
+            index, moment, deliveries=deliveries, spooled=spooled, triggers=triggers
         ):
             if self.engage(config_dir, session_id, cwd, due_ms, moment):
                 launched += 1
         return launched
+
+
+class _TriggerSweep:
+    """The trigger pass's seat: the throttle, the detached task, nothing else.
+
+    **WHY A SEAT AND NOT A NEW LOOP.** The wake triggers' evaluation pass (see
+    :mod:`local_operator.wakes.triggers`) rides the iteration of an existing
+    process — this one — because the supervisor is the only always-on process
+    that exists for wakes, and a second daemon for a few hundred ms a minute is
+    exactly what the residency sweep's comment already rejected a sweep for.
+
+    **IT DOES NOT BOUND THE SLEEP, DELIBERATELY.** The residency and machine
+    sweeps bound the loop's sleep because they catch conditions that persist
+    between passes; this cadence must NOT, or the *possibility* of a future
+    trigger would keep the supervisor resident — converting it into a cron.
+    On an aida-enabled install her daily cadence row (and any pending record)
+    already keeps the loop moving; when it sleeps toward a far wake a pass
+    happens at most :data:`MAX_SLEEP_S` later, and the threshold check is not
+    sampled — age is computed at evaluation time — so a late tick fires a
+    trigger late, never wrongly.
+
+    **THE PASS IS DETACHED, ON A WORKER THREAD.** It reads project rows and
+    session-directory stats; a slow filesystem must never delay the wake path,
+    and the pass is best-effort by contract — the module returns silently on
+    every suppression and the seat never lets its failure reach the loop.
+    """
+
+    def __init__(self, config_dir: Path) -> None:
+        self.config_dir = config_dir
+        #: ``None`` until the first pass, so a fresh supervisor evaluates at
+        #: once — a START is the moment a machine most needs looking at.
+        self.next_at: float | None = None
+        self._task: "asyncio.Task[Any] | None" = None
+
+    def seconds_until(self, now: float | None = None) -> float:
+        """How long until the pass is due. NOT used to bound the loop's sleep.
+
+        ``due()`` uses it, and tests read it; the sleep decision deliberately
+        ignores it (see the class docstring).
+        """
+        moment = time.monotonic() if now is None else now
+        if self.next_at is None:
+            return 0.0
+        return max(0.0, self.next_at - moment)
+
+    def due(self, now: float | None = None) -> bool:
+        return self.seconds_until(now) <= 0.0
+
+    def kick(self) -> None:
+        """Start a pass if one is due, WITHOUT holding this loop for it.
+
+        A pass already in flight is left alone, and the next one is armed from
+        here rather than from the completion, so a slow filesystem cannot make
+        the loop evaluate every slice waiting for it.
+        """
+        if self._task is not None and not self._task.done():
+            return
+        if not self.due():
+            return
+        self.next_at = time.monotonic() + TRIGGER_EVAL_INTERVAL_S
+        self._task = asyncio.ensure_future(asyncio.to_thread(self._evaluate))
+        self._task.add_done_callback(self._finished)
+
+    async def run_once(self) -> None:
+        """One pass, awaited — the ``--once`` diagnostic's inline trigger eval.
+
+        Inline rather than detached so the SAME pass's state load sees the
+        record it wrote and engages it, which is what makes
+        ``lop wake serve --once`` deterministic about a trigger. The pending
+        count is logged on this path for observability parity with the other
+        work kinds (design §1.6).
+        """
+        self.next_at = time.monotonic() + TRIGGER_EVAL_INTERVAL_S
+        try:
+            await asyncio.to_thread(self._evaluate)
+            from local_operator.wakes import triggers as trigger_mod
+
+            pending = len(trigger_mod.read_pending(self.config_dir))
+            logger.info("trigger sweep: %d record(s) pending", pending)
+        except Exception:  # noqa: BLE001 — the diagnostic must still print
+            logger.warning("the trigger pass failed", exc_info=True)
+
+    def _evaluate(self) -> list[str]:
+        from local_operator.wakes import triggers as trigger_mod
+
+        return trigger_mod.sweep(self.config_dir)
+
+    def _finished(self, task: "asyncio.Task[Any]") -> None:
+        """Log a finished pass. Never raises out of a done-callback."""
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.warning("the trigger pass failed", exc_info=error)
+            return
+        written = task.result() or []
+        if written:
+            logger.info("trigger: %d record(s) written or merged", len(written))
+
+    async def shutdown(self) -> None:
+        """Drop an in-flight pass at teardown (the ``_Sweeper.shutdown`` shape).
+
+        Cancelling a ``to_thread`` task does not stop the thread, which is
+        fine: the pass reads files and writes small records, and waiting for
+        it would make teardown wait on the filesystem. The reason to cancel is
+        the loop's own bookkeeping — a task left pending at loop close logs a
+        spurious error.
+        """
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
 
 
 async def fire_due_wakes(config_dir: Path, *, now_ms: int | None = None) -> int:
@@ -1435,9 +1595,18 @@ async def fire_due_wakes(config_dir: Path, *, now_ms: int | None = None) -> int:
     the loop (see that class for why).
     """
     moment = now_ms if now_ms is not None else int(time.time() * 1000)
-    index, deliveries, spooled = await asyncio.to_thread(_load_and_reconcile_state, config_dir)
+    index, deliveries, spooled, pending_triggers = await asyncio.to_thread(
+        _load_and_reconcile_state, config_dir
+    )
     sweeper = _Sweeper()
-    sweeper.sweep(config_dir, index, moment, deliveries=deliveries, spooled=spooled)
+    sweeper.sweep(
+        config_dir,
+        index,
+        moment,
+        deliveries=deliveries,
+        spooled=spooled,
+        triggers=pending_triggers,
+    )
     return await sweeper.drain()
 
 
@@ -1448,6 +1617,7 @@ def _has_fireable_wakes(
     now_ms: int | None = None,
     deliveries: Mapping[str, dict[str, Any]] | None = None,
     spooled: Mapping[str, dict[str, Any]] | None = None,
+    triggers: Mapping[str, dict[str, Any]] | None = None,
 ) -> bool:
     """Whether anything in the index could ever cause THIS process to fire.
 
@@ -1503,6 +1673,21 @@ def _has_fireable_wakes(
     moment = now_ms if now_ms is not None else int(time.time() * 1000)
     if spooled:
         for session_id, record in spooled.items():
+            if not isinstance(record, dict):
+                continue
+            entry = index.get(session_id)
+            if isinstance(entry, dict) and _is_held_entry(entry):
+                continue
+            if config_dir is not None and not _session_exists(config_dir, session_id):
+                continue
+            return True
+    if triggers:
+        # A PENDING TRIGGER RECORD IS WORK THIS PROCESS CAN DO, exactly as a
+        # lone spooled turn is: engaging its target is what makes a runtime
+        # exist to consume it. The dormant skip agrees with ``_due_sessions``
+        # (a held target's record is deliberately not fireable), and ghosts are
+        # already dropped by the reconciler that ran beside the read.
+        for session_id, record in triggers.items():
             if not isinstance(record, dict):
                 continue
             entry = index.get(session_id)
@@ -1611,6 +1796,24 @@ def _note_spooled_attempt(config_dir: Path, session_id: str, *, reason: str) -> 
         )
 
 
+def _note_trigger_attempt(config_dir: Path, session_id: str, *, reason: str) -> None:
+    """Record an attempt on ``session_id``'s pending trigger record, when it has one.
+
+    The same contract as :func:`_note_spooled_attempt`: a no-op for a session
+    with no record, never raises, and only ``wedged``/``failed``/``raised``
+    move the walk (``triggers.note_attempt`` owns that vocabulary and the
+    backoff). A ``started`` engage is the success case and the record is then
+    cleared by the target's own consume — the supervisor must not decide that a
+    check-in it did not deliver has been delivered.
+    """
+    try:
+        from local_operator.wakes import triggers as trigger_mod
+
+        trigger_mod.note_attempt(config_dir, session_id, reason=reason)
+    except Exception:  # noqa: BLE001 — bookkeeping must never stop an engagement
+        logger.warning("could not record the trigger attempt for %s", session_id, exc_info=True)
+
+
 def _retirement_reason(config_dir: Path) -> str:
     """Why nothing is fireable, in the terms the operator can act on.
 
@@ -1690,9 +1893,15 @@ async def _should_retire(config_dir: Path) -> bool:
     genuinely empty index is still prompt.
     """
     await asyncio.sleep(min(SLICE_S, MAX_SLEEP_S))
-    index, deliveries, spooled = await asyncio.to_thread(_load_and_reconcile_state, config_dir)
+    index, deliveries, spooled, pending_triggers = await asyncio.to_thread(
+        _load_and_reconcile_state, config_dir
+    )
     return not _has_fireable_wakes(
-        index, config_dir=config_dir, deliveries=deliveries, spooled=spooled
+        index,
+        config_dir=config_dir,
+        deliveries=deliveries,
+        spooled=spooled,
+        triggers=pending_triggers,
     )
 
 
@@ -1712,17 +1921,31 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
     owes and returns; the loop keeps slicing while they run (see
     :class:`_Sweeper`). Awaiting them here is what made a 6-session
     all-timeout sweep block for 540 s in round 1.
+
+    **The trigger pass rides the top of each iteration** (:class:`_TriggerSweep`),
+    before the state load, so a record it writes is engaged within the same
+    pass or the next one (≤ ``SLICE_S``). ``--once`` awaits the pass inline for
+    the same reason.
     """
     sweeper = _Sweeper()
+    triggers_seat = _TriggerSweep(config_dir)
     residency = _ResidencySweep(config_dir)
     memory_sweep = _MachineMemorySweep(config_dir)
     try:
         while True:
-            index, deliveries, spooled = await asyncio.to_thread(
+            if once:
+                await triggers_seat.run_once()
+            else:
+                triggers_seat.kick()
+            index, deliveries, spooled, pending_triggers = await asyncio.to_thread(
                 _load_and_reconcile_state, config_dir
             )
             if not _has_fireable_wakes(
-                index, config_dir=config_dir, deliveries=deliveries, spooled=spooled
+                index,
+                config_dir=config_dir,
+                deliveries=deliveries,
+                spooled=spooled,
+                triggers=pending_triggers,
             ):
                 if once:
                     # `--once` IS THE DIAGNOSTIC, so it must not be the quiet
@@ -1763,7 +1986,12 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
                 continue
 
             sweeper.sweep(
-                config_dir, index, int(time.time() * 1000), deliveries=deliveries, spooled=spooled
+                config_dir,
+                index,
+                int(time.time() * 1000),
+                deliveries=deliveries,
+                spooled=spooled,
+                triggers=pending_triggers,
             )
             if once:
                 await sweeper.drain()
@@ -1772,11 +2000,15 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
             # Recomputed from the index AFTER the sweep started, so a schedule
             # an already-finished runtime advanced is reflected rather than
             # re-read stale.
-            index, deliveries, spooled = await asyncio.to_thread(
+            index, deliveries, spooled, pending_triggers = await asyncio.to_thread(
                 _load_and_reconcile_state, config_dir
             )
             if not _has_fireable_wakes(
-                index, config_dir=config_dir, deliveries=deliveries, spooled=spooled
+                index,
+                config_dir=config_dir,
+                deliveries=deliveries,
+                spooled=spooled,
+                triggers=pending_triggers,
             ):
                 continue  # retirement is decided at the top, with its grace
 
@@ -1839,10 +2071,11 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
         # A cancelled or retiring supervisor must not leave engage tasks
         # pending: they hold a semaphore slot and an event loop reference, and
         # an un-awaited task destroyed at loop close logs a spurious error. The
-        # residency pass is the same shape of background work and is dropped the
-        # same way.
+        # residency, machine-memory and trigger passes are the same shape of
+        # background work and are dropped the same way.
         await residency.shutdown()
         await memory_sweep.shutdown()
+        await triggers_seat.shutdown()
         await sweeper.shutdown()
 
 

@@ -110,6 +110,39 @@ request that did not take effect or was handed to another writer, and `lop
 serve` configures its console logging at WARNING by default — info-level lines
 were exactly the lines a default-daemon operator could not see.
 
+## Trigger check-ins (project staleness)
+
+The cadence is not her only reason to wake. A generic **wake-trigger layer**
+(`local_operator/wakes/triggers/`) evaluates named sources for "something has
+gone stale", records a pending check-in, and lets the wake supervisor engage
+her exactly as a scheduled wake would. The first source watches PROJECT
+STALENESS: a project in `planning`/`active`/`qa`/`validation` whose last
+progress line is older than `projects.stale_after_hours` (default 4) earns one
+check-in — she messages the linked sessions (or the project's manager) for a
+status update and a `project` progress refresh, makes ONE bounded resume
+attempt for a session that looks dead or stalled, and surfaces a sessionless
+project to you instead of spawning work. **She never does the update work
+herself.**
+
+Bounds, all configurable in `/settings` (section "Wake triggers"):
+
+- `wakes.triggers.enabled` (default `true`) — the master switch,
+- `wakes.triggers.max_per_day` (default 6) — a per-target rolling-24 h budget;
+  `0` disables,
+- `wakes.triggers.min_gap_minutes` (default 60) — minimum spacing between two
+  trigger wakes to the same target,
+- `wakes.triggers.project_staleness.enabled` (default `true`) — the source's
+  own switch.
+
+One wake per stale EPISODE: the identity is the project's
+`(id, status, progress_updated_at)` fingerprint — the same latch the
+completion-time check uses — so a record that stays stale earns nothing more,
+and a new progress line (or a status move) is a fresh episode. Done, paused
+and archived projects are never candidates, and a paused/disabled/reactive
+Aida suppresses trigger wakes exactly as she suppresses her cadence. The
+supervisor evaluates on its own ~5-minute throttle; the published settings
+snapshot it reads is written on every settings edit and on her boot/reconcile.
+
 ## Pausing
 
 `/aida pause` (or the desktop's Aida control) sets `aida.cadence.paused = true`:
@@ -181,6 +214,11 @@ settings a user authors.
 | `aida.cadence.max_extra_per_day` | `2` | escalation budget (`0` disables escalation) |
 | `aida.cadence.min_gap_minutes` | `90` | minimum spacing between Aida wakes |
 | `aida.onboarding.nudge_days` | `14` | integration-nudge window length, read by the cadence engine (R25) |
+| `projects.stale_after_hours` | `4` | a project's progress older than this reads stale (badge, tool rows and the trigger all resolve through the same reader) |
+| `wakes.triggers.enabled` | `true` | master switch for wake triggers |
+| `wakes.triggers.max_per_day` | `6` | per-target rolling 24 h trigger budget (`0` disables) |
+| `wakes.triggers.min_gap_minutes` | `60` | minimum spacing between trigger wakes to one target |
+| `wakes.triggers.project_staleness.enabled` | `true` | the project-staleness source's own switch |
 
 All seven are editable from `/settings` (section "Aida") and `lop config`.
 Renames made through `/aida rename` or a conversation rename also write
