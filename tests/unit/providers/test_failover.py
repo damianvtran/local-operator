@@ -57,6 +57,7 @@ from local_operator.providers.failover import (
     is_fast_mode_refusal,
     is_fast_mode_refusal_for,
     is_image_rejection,
+    is_rotation_eligible,
     is_transient_error,
     is_usage_limit_error,
     resolve_chain,
@@ -109,6 +110,27 @@ async def test_refresh_step_then_sibling_rotation() -> None:
     second = await resolve_next_key(state, resolver, error)
     assert second == "key-b"  # (c) sibling
     assert any(ctx.last_chance for ctx in contexts)
+
+
+def test_the_rotation_class_is_the_one_predicate_both_callers_share() -> None:
+    """The failure classes credential rotation may act on, and nothing else.
+
+    ONE definition serves two callers — the ordinary turn's rotation and the
+    isolated errand's single extra attempt — precisely so an errand cannot
+    recover somewhere its turn would not (or fail where the turn recovers). A
+    request the provider READ and refused is the boundary: the same bytes fail
+    identically on every account, so there is nothing to rotate to.
+    """
+    assert is_rotation_eligible(ProviderError(429, "quota", retryable=True))
+    assert is_rotation_eligible(ProviderError(500, "overloaded", retryable=True))
+    assert is_rotation_eligible(ProviderError(408, "timeout", retryable=True))
+    assert is_rotation_eligible(ProviderError(401, "invalid api key", auth_error=True))
+    assert is_rotation_eligible(ProviderError(403, "permission denied"))
+    # A refusal of the request itself, and the two ends that are not provider
+    # failures at all.
+    assert not is_rotation_eligible(ProviderError(400, "unsupported field"))
+    assert not is_rotation_eligible(ProviderError(404, "no such model"))
+    assert not is_rotation_eligible(RuntimeError("not a provider error"))
 
 
 async def test_usage_limit_skips_refresh_step() -> None:
@@ -3608,6 +3630,284 @@ class TestAnIsolatedRequestCannotDegradeTheTurnBesideIt:
         assert slept, "no backoff was spent"
         assert client.calls > 1, "only one attempt was made"
         assert state.active is not None, "no route was pinned"
+
+
+def _revoked() -> ProviderError:
+    """The refusal a revoked-but-still-stored OAuth bearer earns."""
+    return ProviderError(401, "invalid api key", auth_error=True)
+
+
+class TestAnIsolatedErrandRepairsItsOwnAccountTheWayTheTurnDoes:
+    """The residual PR #1032 left behind: its one auth re-resolve can only ask
+    the store for a SIBLING, and a pool of one has no sibling to ask.
+
+    A stored OAuth bearer can be fresh by the store's own reckoning and still be
+    refused by the wire — the token was revoked or rotated out of band, so the
+    row's ``expires`` says nothing about it. The TURN repairs that with its first
+    rotation leg (``resolve_next_key``'s step (b): force-refresh the account it
+    was on) and the conversation stays healthy; the errand could not, because
+    its one sanctioned re-resolve only ever hid the rejected row and looked for
+    someone else. On a single-account pool that made ``/title --refresh`` fail
+    deterministically with "could not reach the model" on a session whose turns
+    ran fine — the reported symptom.
+
+    Every test here runs the REAL ``AuthStore`` cascade, because the leg under
+    test is the store's own (the exclusion machinery and the refresh lease), and
+    a fake's answer would say nothing about it.
+    """
+
+    #: Far enough out that no resolve would refresh the row on its own: the
+    #: stored bearer is current by the store's reckoning, and only the WIRE can
+    #: discover it was revoked.
+    _FUTURE = int(time.time() * 1000) + 3_600_000
+
+    @staticmethod
+    def _isolated(provider: str = "openai", model_id: str = "gpt-4o") -> ChatRequest:
+        return ChatRequest(model=ModelSpec(provider=provider, model_id=model_id), isolated=True)
+
+    def _oauth_row(self, store: AuthStore, provider: str, access: str, label: str):
+        return store.upsert_credential(
+            provider,
+            {
+                "refresh": f"r-{label}",
+                "access": access,
+                "expires": self._FUTURE,
+                "account_id": f"acct-{label}",
+            },
+        )
+
+    def _refreshing_client(
+        self, store: AuthStore, rejects: dict[str, ProviderError], wire: list[str | None]
+    ) -> tuple[Any, list[str]]:
+        """A client that answers ``rejects`` for named bearers and a title otherwise.
+
+        The patched refresh function mints a NEW bearer for whatever row it is
+        asked about, which is what a real token endpoint does — and what makes
+        the repair visible on the wire rather than only in the store.
+        """
+        issued: list[str] = []
+
+        async def refresh(creds: dict[str, Any]) -> dict[str, Any]:
+            issued.append(str(creds.get("account_id")))
+            return {
+                **creds,
+                "access": f"{creds.get('access')}-retokened",
+                "expires": self._FUTURE,
+            }
+
+        store._refresh_fn = lambda provider: refresh  # type: ignore[method-assign]
+        client_for = self._client(rejects, wire)
+        return client_for, issued
+
+    @staticmethod
+    def _client(rejects: dict[str, ProviderError], wire: list[str | None]) -> Any:
+        async def client_for(spec: ModelSpec) -> Any:
+            def wrapper(
+                request: ChatRequest, api_key: str | None, oauth_access: Any = None
+            ) -> AsyncIterator[Any]:
+                wire.append(api_key)
+                if api_key in rejects:
+                    return ScriptedClient(rejects[api_key]).stream(request, api_key)
+                return ScriptedClient(
+                    [StreamTextDelta(delta="<title>x</title>"), StreamEndEvent(stop_reason="stop")]
+                ).stream(request, api_key)
+
+            return _FnClient(wrapper)
+
+        return client_for
+
+    async def test_a_lone_row_the_wire_rejects_still_gets_its_title(self, tmp_path) -> None:
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        session_id = "session-on-a-revoked-token"
+        row = self._oauth_row(store, "openai", "revoked-a", "a")
+        wire: list[str | None] = []
+        client_for, issued = self._refreshing_client(store, {"revoked-a": _revoked()}, wire)
+
+        try:
+            # CONTROL FIRST: this is the turn the reporter says runs fine. It
+            # spends the SAME two wire steps the errand is about to be asked
+            # for — the stored bearer is presented and refused, the account is
+            # force-refreshed, the new bearer is presented and answers. Run
+            # before the errand because the repair persists the rotated token.
+            _ = [
+                event
+                async for event in stream_with_failover(
+                    _request(), store, None, client_for, session_id=session_id
+                )
+            ]
+            assert wire == ["revoked-a", "revoked-a-retokened"], (
+                "the turn did not repair its own revoked bearer, so this test "
+                "proves nothing about a healthy session"
+            )
+            assert store._sticky[("openai", session_id)] == row.id, (
+                "the turn's resolve writes stickiness — the state the errand's "
+                "own call must leave exactly as it found it"
+            )
+
+            # Put the store back on the revoked bearer so the ERRAND meets the
+            # situation the turn just repaired: the row is still fresh to the
+            # store, and only the wire knows the token is dead. The sticky
+            # pointer is dropped for the same reason — a pool of ONE has only
+            # one pick, so clearing it lets the errand's own write (if it made
+            # one) show up instead of being shadowed by the value the turn had
+            # already put there.
+            again = self._oauth_row(store, "openai", "revoked-a", "a")
+            assert again.id == row.id, "the reset created a second row"
+            store._sticky.clear()
+            wire.clear()
+            issued.clear()
+
+            got = [
+                event
+                async for event in stream_with_failover(
+                    self._isolated(), store, None, client_for, session_id=session_id
+                )
+            ]
+            assert [e for e in got if isinstance(e, StreamTextDelta)], "no title came back"
+            assert wire == ["revoked-a", "revoked-a-retokened"], (
+                "the errand did not spend its one extra attempt on the same repair "
+                "the turn makes: a forced refresh of the account it was on"
+            )
+            assert issued == ["acct-a"], "the repair did not come from a refresh"
+            # The repair is the ACCOUNT's own bookkeeping (the rotated token is
+            # persisted); nothing else moved. That is what makes the extra
+            # attempt safe next to a live turn.
+            assert store.get_credential(row.id).data["access"] == "revoked-a-retokened"
+            assert store._sticky == {}, "the errand repointed the session's sticky credential"
+            assert not store.is_blocked(row.id, "openai"), "the errand blocked the row"
+            assert store._active_demotions("openai") == set(), "the errand demoted the row"
+        finally:
+            store.close()
+
+    async def test_a_refused_request_keeps_the_exactly_one_attempt_rule(self, tmp_path) -> None:
+        """A 4xx the provider READ and refused is DETERMINISTIC in its bytes: the
+        same request fails identically on every other account, so there is
+        nothing to rotate to and nothing for an errand to ask. This is the test
+        that fails if the recovery is ever widened past the class the turn
+        itself rotates on."""
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        session_id = "session-on-a-bad-request"
+        row = self._oauth_row(store, "openai", "bad-request-a", "a")
+        self._oauth_row(store, "openai", "healthy-b", "b")
+        wire: list[str | None] = []
+        client_for, issued = self._refreshing_client(
+            store, {"bad-request-a": ProviderError(400, "unsupported field")}, wire
+        )
+
+        try:
+            # The session is stuck on the account whose request is refused, so
+            # the sibling is genuinely available and would serve a rotated
+            # request — which is what makes the one-attempt assertion below
+            # mean "the errand declined to rotate" rather than "there was
+            # nothing to rotate to".
+            store._sticky[("openai", session_id)] = row.id
+            with pytest.raises(ProviderError):
+                _ = [
+                    event
+                    async for event in stream_with_failover(
+                        self._isolated(), store, None, client_for, session_id=session_id
+                    )
+                ]
+            assert wire == [
+                "bad-request-a"
+            ], "a deterministic request defect bought the errand a second attempt"
+            assert issued == [], "a request defect spent a token refresh"
+            assert not store.is_blocked(row.id, "openai")
+        finally:
+            store.close()
+
+    async def test_a_provider_side_fault_lets_the_errand_reach_a_sibling(self, tmp_path) -> None:
+        """The other half of issue #1814's class, and the reason the recovery is
+        keyed on the TURN's rotation predicate rather than on auth alone.
+
+        A session sticky to an account the provider is currently refusing — a
+        spent weekly window (429) or a server-side fault — keeps working: the
+        turn rotates to a sibling and is served. The errand used to raise after
+        ONE attempt, forever, because its gate admitted auth-shaped failures
+        only. The account is not at fault, so the errand must reach the sibling
+        without demoting it and without moving the session's sticky pointer —
+        both of which are routing decisions belonging to the turn, which is
+        exactly what the ordinary control below does.
+        """
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        session_id = "session-on-a-throttled-account"
+        throttled = self._oauth_row(store, "openai", "throttled-a", "a")
+        self._oauth_row(store, "openai", "healthy-b", "b")
+        wire: list[str | None] = []
+        client_for, _issued = self._refreshing_client(
+            store,
+            {
+                "throttled-a": ProviderError(
+                    429, "usage limit reached for this window", retryable=True
+                )
+            },
+            wire,
+        )
+
+        try:
+            store._sticky[("openai", session_id)] = throttled.id
+            got = [
+                event
+                async for event in stream_with_failover(
+                    self._isolated(), store, None, client_for, session_id=session_id
+                )
+            ]
+            assert [e for e in got if isinstance(e, StreamTextDelta)], "no title came back"
+            assert wire == ["throttled-a", "healthy-b"], "the errand did not reach the sibling"
+            assert store._sticky == {
+                ("openai", session_id): throttled.id
+            }, "the errand moved the session's sticky credential"
+            assert (
+                store._active_demotions("openai") == set()
+            ), "the errand demoted the throttled row"
+
+            # CONTROL: the turn beside it walks the same two bearers and DOES
+            # take the routing decision — which is what keeps the session
+            # healthy while the errand previously failed.
+            wire.clear()
+            _ = [
+                event
+                async for event in stream_with_failover(
+                    _request(), store, None, client_for, session_id=session_id
+                )
+            ]
+            assert wire[0] == "throttled-a" and "healthy-b" in wire, "the turn did not rotate"
+            assert store._active_demotions("openai") or store._sticky != {
+                ("openai", session_id): throttled.id
+            }, "the turn took no routing decision, so the contrast proves nothing"
+        finally:
+            store.close()
+
+    async def test_a_sibling_is_still_preferred_over_refreshing_the_rejected_row(
+        self, tmp_path
+    ) -> None:
+        """The widening must not invert the order the errand's sibling leg exists
+        for: a refreshed token on the row the provider just rejected is the
+        candidate LEAST likely to work while a healthy sibling is sitting right
+        there. On the real store the sibling answers and no refresh is spent."""
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        session_id = "session-with-a-sibling"
+        dead = self._oauth_row(store, "openai", "dead-a", "a")
+        self._oauth_row(store, "openai", "good-b", "b")
+        wire: list[str | None] = []
+        client_for, issued = self._refreshing_client(store, {"dead-a": _revoked()}, wire)
+
+        try:
+            store._sticky[("openai", session_id)] = dead.id
+            got = [
+                event
+                async for event in stream_with_failover(
+                    self._isolated(), store, None, client_for, session_id=session_id
+                )
+            ]
+            assert [e for e in got if isinstance(e, StreamTextDelta)], "no title came back"
+            assert wire == ["dead-a", "good-b"], "the errand did not ask the healthy sibling"
+            assert issued == [], "the errand refreshed the rejected row with a sibling available"
+            assert store._sticky == {
+                ("openai", session_id): dead.id
+            }, "the errand moved the session's sticky credential"
+        finally:
+            store.close()
 
 
 class TestProviderOutageWalksTheWholePool:

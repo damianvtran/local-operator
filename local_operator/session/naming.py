@@ -808,7 +808,8 @@ async def _ask_for_title(
     Shared by :func:`generate_title`, :func:`generate_retitle` and
     :func:`refresh_title` so they have exactly one error policy between them.
     There is no retry here. Underneath there is the failover driver's single
-    auth-class re-resolve, and the pre-existing fast-mode-refusal re-ask (see
+    rotation-class re-resolve (a sibling if the pool has one, otherwise the same
+    account force-refreshed), and the pre-existing fast-mode-refusal re-ask (see
     :attr:`~local_operator.harness.types.ChatRequest.isolated`); the timeout
     spans all of them, so it remains the entire budget either way.
 

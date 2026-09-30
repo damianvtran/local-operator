@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from local_operator.providers.failover import ProviderError
 from local_operator.session import naming
 
 
@@ -149,6 +150,30 @@ async def test_generate_title_returns_none_on_provider_failure() -> None:
         raise RuntimeError("429 rate limited")
 
     assert await naming.generate_title("fix the login redirect loop", boom) is None
+
+
+@pytest.mark.asyncio
+async def test_an_errand_that_cannot_be_repaired_still_reports_the_honest_receipt() -> None:
+    """The still-legitimate half of issue #1814's receipt.
+
+    The failover driver now repairs an errand exactly where it repairs the turn
+    beside it, so ``/title --refresh`` stopped saying this on a healthy session.
+    Where nothing can be repaired — the session's only account is refused and a
+    force-refresh cannot mint a working bearer — the errand still fails, and the
+    user is still owed the difference between "the name still fits" and "the
+    model could not be reached" rather than a silent no-op.
+    """
+
+    async def dead(system: str, prompt: str) -> str:
+        raise ProviderError(401, "invalid api key", auth_error=True)
+
+    result = await naming.refresh_title(
+        "Fix the login flow", dead, turns=_theme_rows(), newest="and the signup flow"
+    )
+    assert result.outcome == naming.TITLE_UNAVAILABLE
+    assert naming.refresh_receipt(result, "Fix the login flow") == (
+        "could not reach the model — the title is unchanged"
+    )
 
 
 @pytest.mark.asyncio
