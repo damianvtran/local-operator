@@ -181,6 +181,15 @@ class SessionNaming:
     last_titled_turn_count: int = 0
     refresh_count: int = 0
     pending_text: str = ""
+    #: Opener of a first-name attempt that ended in the Tier 3 opener fallback
+    #: (or with no title at all). A fallback is a STORE, so it releases every
+    #: other retry latch — a once-only latch stays spent and ``pending_text``
+    #: was cleared on the store — and the session would wear an opener quote
+    #: forever. This is the single-shot self-heal the NEXT COMPLETED TURN
+    #: spends, re-running the acceptance pipeline once to upgrade the quote to
+    #: a generated title. In-memory like its siblings; a reload cancels naming
+    #: and clears it (see ``OperatorApp._cancel_naming_attempt``).
+    heal_text: str = ""
 
 
 @dataclass
