@@ -282,16 +282,21 @@ def test_http_gate_and_login_flow() -> None:
     authed = client.get("/api/sessions")
     assert authed.status_code == 200
     # The listing carries the durable-read marker beside the rows (present on
-    # every frame, empty when everything was read) and the capabilities block
-    # the phone renders the voice mic from (mobile STT) — the same builder
-    # serves both transports, so its keys are asserted in full here. The top
-    # level is asserted BY KEY so a field appearing there is a decision this
-    # test sees; `features` is a build fact (an object), and `stt` is the
-    # availability probe, pinned to the isolated fixture's answer (no
-    # credentials are stored there).
+    # every frame, empty when everything was read), the badge block (push/ack
+    # S1: ``unread`` -- see ``test_attention_unread.py`` for its population),
+    # and the capabilities block the phone renders the voice mic from (mobile
+    # STT) — the same builder serves both transports, so its keys are asserted
+    # in full here. The top level is asserted BY KEY so a field appearing there
+    # is a decision this test sees; `features` is a build fact (an object), and
+    # `stt` is the availability probe, pinned to the isolated fixture's answer
+    # (no credentials are stored there).
     payload = authed.json()
-    assert sorted(payload) == ["capabilities", "degraded", "sessions"]
+    assert sorted(payload) == ["capabilities", "degraded", "sessions", "unread"]
     assert payload["sessions"] == [] and payload["degraded"] == []
+    # No store exists in this fixture, which is an EMPTY pile, not an
+    # unreadable one: the healthy shape with a zero count — proof the degraded
+    # branch is not the default.
+    assert payload["unread"] == {"count": 0, "revision": [0, 0, 0], "degraded": []}
     capabilities = payload["capabilities"]
     assert sorted(capabilities) == ["features", "stt"]
     assert isinstance(capabilities["features"], dict)
@@ -1985,8 +1990,10 @@ async def test_a_deferred_attention_read_degrades_the_listing_instead_of_raising
 
     Injected at the CLASS, which pins THIS call site rather than the store: an
     edit that removes the ``except`` re-raises out of ``summaries`` and fails
-    here. The store's own retry and its typed verdict are pinned separately in
-    ``tests/unit/session/test_attention_lock_contention.py``.
+    here. The seam is the build's ONE store read (``state_many_and_revision`` --
+    push/ack-sync S1 made the states and the revision token share a connection,
+    see its docstring). The store's own retry and its typed verdict are pinned
+    separately in ``tests/unit/session/test_attention_lock_contention.py``.
     """
     from local_operator.session.attention import AttentionReadDeferred, AttentionStore
 
@@ -2003,12 +2010,12 @@ async def test_a_deferred_attention_read_degrades_the_listing_instead_of_raising
     assert [row["unseen"] for row in healthy] == [True], healthy
     assert table.listing_degraded() == []
 
-    real_state_many = AttentionStore.state_many
+    real_read = AttentionStore.state_many_and_revision
 
     def defers(_store, _conversations):
         raise AttentionReadDeferred("attention store stayed busy through 2 attempts")
 
-    monkeypatch.setattr(AttentionStore, "state_many", defers)
+    monkeypatch.setattr(AttentionStore, "state_many_and_revision", defers)
     table.invalidate_summaries_cache()
     degraded = await table.summaries()
 
@@ -2027,7 +2034,7 @@ async def test_a_deferred_attention_read_degrades_the_listing_instead_of_raising
     # is what lets a client's "couldn't refresh" go away on its own. The seam is
     # healed by hand rather than with ``monkeypatch.undo()``, which would drop
     # the config-dir isolation patch too and walk the operator's real store.
-    monkeypatch.setattr(AttentionStore, "state_many", real_state_many)
+    monkeypatch.setattr(AttentionStore, "state_many_and_revision", real_read)
     table.invalidate_summaries_cache()
     healed = await table.summaries()
     assert [row["unseen"] for row in healed] == [True]
@@ -2059,7 +2066,7 @@ def test_the_listing_route_serves_a_deferred_attention_read(tmp_path, monkeypatc
     def defers(_store, _conversations):
         raise AttentionReadDeferred("attention store stayed busy through 2 attempts")
 
-    monkeypatch.setattr(AttentionStore, "state_many", defers)
+    monkeypatch.setattr(AttentionStore, "state_many_and_revision", defers)
     daemon.table.invalidate_summaries_cache()
     response = client.get("/api/sessions")
 

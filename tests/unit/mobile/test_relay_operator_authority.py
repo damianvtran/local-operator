@@ -454,6 +454,10 @@ def test_the_route_table_names_the_paths_this_build_actually_serves(
     app = build_app(daemon)
     paths = {getattr(route, "path", "") for route in app.routes}
     assert "/api/sessions/{session_id:str}/operator/challenge" in paths
+    # The badge read (push/ack-sync S1): pinned here with the rest, because a
+    # second namespace invented to match the ADR's example would be exactly the
+    # drift this test exists to catch.
+    assert "/api/attention/unread" in paths
     assert "/api/pair" in paths
     assert "/api/pair/{device_id:str}" in paths
     assert not [path for path in paths if path.startswith("/v1/")], paths

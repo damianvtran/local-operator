@@ -84,8 +84,21 @@ async def test_summary_receipts_are_one_batch_off_the_event_loop(monkeypatch) ->
         return dict.fromkeys(ids)
 
     monkeypatch.setattr(table, "_refresh_durable_rows", durable_rows)
+    # ROW-SHAPED, because that is ``_merge_summaries``'s contract and the build's
+    # unread aggregate consumes this output (push/ack-sync S1): one read of the
+    # states serves both the rows' ``unseen`` marks and the aggregate, so a fake
+    # that returned the raw state dicts would no longer stand in for the real
+    # thing. The states still give the 40 marks the assertions below read.
     monkeypatch.setattr(
-        table, "_merge_summaries", lambda rows: list(table._attention_states.values())
+        table,
+        "_merge_summaries",
+        lambda durable: [
+            {
+                "session_id": state["conversation_id"].split("/", 1)[1],
+                "unseen": state["unseen"],
+            }
+            for state in table._attention_states.values()
+        ],
     )
     original = sqlite3.connect
     threads: list[int] = []

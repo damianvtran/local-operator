@@ -580,6 +580,14 @@ class SessionTable:
         self._summaries_at = 0.0
         self._summaries_task: asyncio.Task[list[dict[str, Any]]] | None = None
         self._attention_states: dict[str, dict[str, Any]] = {}
+        #: The unread aggregate of the most recent listing build (see
+        #: :meth:`unread_snapshot` and :meth:`_unread_aggregate`). WRITTEN ONLY
+        #: BY ``_build``, from the SAME rows and states the build publishes, so
+        #: the badge and the list cannot be built from two different snapshots
+        #: -- the equality the mobile lane's S1 freezes as a test rather than a
+        #: claim. ``None`` until the first build: nothing has been READ then,
+        #: and an unread count is a read of ``attention.db``.
+        self._unread_snapshot: dict[str, Any] | None = None
         self._creation_dates: dict[str, float] = {}
         #: The sidebar's durable pinned session ids, newest pin first, read by
         #: ``_merge_summaries``. Kept as table state rather than read per row so
@@ -727,6 +735,14 @@ class SessionTable:
         vocabulary may not have to learn a second word for one thing, and the
         two read failures are independent, so both can be present at once.
 
+        The attention word is shared with the build's OTHER attention read --
+        the aggregate's revision token (push/ack-sync S1), which rides the same
+        failure domain so this marker and the ``unread`` block's own
+        ``degraded`` cannot disagree about whether the store was read. The
+        widening is the safe direction deliberately: a client that repairs on
+        this word over-repairs, where the opposite asymmetry would let a badge
+        be cleared from a listing whose token was never read.
+
         The decoration name is looked up from ``session.catalog`` AT THE FAILURE
         rather than re-spelled here, and only in the degraded branch: importing
         the catalogue costs ~26 ms (measured), which a healthy phone listing must
@@ -809,15 +825,26 @@ class SessionTable:
             # subclasses ``OperationalError`` so the store's code rides
             # through), and a store that cannot be OPENED is an ``OSError``.
             try:
-                self._attention_states = await asyncio.to_thread(
-                    AttentionStore().state_many, identities
+                # ONE store call, ONE connection, ONE snapshot: the aggregate
+                # needs the states AND the change token together, and this
+                # build's connection cost is pinned at one
+                # (``test_summary_receipts_are_one_batch_off_the_event_loop``,
+                # the read every phone repaint pays). ``state_many_and_revision``
+                # states the pairing rationale; sharing the try block keeps the
+                # listing's ``degraded`` and the aggregate's own marker from
+                # disagreeing about whether the store was read.
+                self._attention_states, revision = await asyncio.to_thread(
+                    AttentionStore().state_many_and_revision, identities
                 )
             except (sqlite3.Error, OSError):
                 logger.warning("phone listing could not read attention state", exc_info=True)
                 self._attention_listing_degraded = True
+                revision = None
             else:
                 self._attention_listing_degraded = False
-            return self._merge_summaries(rows)
+            out = self._merge_summaries(rows)
+            self._unread_snapshot = await self._unread_aggregate(out, rows, revision)
+            return out
 
         task = asyncio.ensure_future(_build())
         self._summaries_task = task
@@ -830,6 +857,147 @@ class SessionTable:
         self._summaries_cache = out
         self._summaries_at = time.monotonic()
         return out
+
+    async def _unread_aggregate(
+        self,
+        rows: list[dict[str, Any]],
+        durable: dict[str, Any],
+        revision: tuple[int, int, int] | None,
+    ) -> dict[str, Any]:
+        """The ONE unread-aggregate implementation behind both read surfaces.
+
+        ``GET /api/attention/unread`` (the badge route) and the top-level
+        ``unread`` block on the list payload are built from THIS result of THIS
+        build, so they cannot disagree [ADR 0006 §1.1/§1.2 @22e2cce2, and its
+        equality test: the route count equals the number of rows carrying
+        ``unseen: true`` in the ``/api/sessions`` body captured in the same
+        pass].
+
+        ``rows`` is the merged listing the build is publishing, in its final
+        order, so the aggregate's population is the listing's own rows -- never
+        a second scan or a store-side census, which on a real machine counts
+        subagent receipts and ``agent/<id>`` namespaces the app never shows
+        [ADR §1.2; review M8 / QA Q1].
+
+        The population is then FILTERED TO THE USER'S OWN CONVERSATIONS, the
+        rule the mobile lane froze as ``_durable_user_session_dir`` /
+        ``is_user_session`` -- the same gate ``/seen``, ``/pin``, the history
+        route and the attention bootstrap already apply before they let an id
+        name a conversation:
+
+        * a row the durable scan returned is the user's own BY THE SCAN'S
+          VERDICT (``_is_hidden_origin`` read the origin and dropped the rest),
+          so it is never re-probed here -- a second opinion here would be a
+          second syscall cost on every build for an answer the scan already
+          gave, and this listing measures its syscalls;
+        * a row that exists only as a LIVE generation is probed, because a
+          record carries no origin and its session's origin marker is the only
+          truth. The probe is ``_durable_user_session_dir``, which also
+          requires ``transcript.jsonl`` -- harmless for these rows, because a
+          row is probed only when ``unseen`` is true and a completion implies a
+          materialised transcript. Subagent and ``agent-config`` (scheduled)
+          origins fail it, and so does a conversation with no directory (a
+          deleted one, or one that never materialised) -- exactly the
+          exclusions §1.2 names.
+
+        The probe runs in a worker: it stats and reads origin markers, and the
+        merge path this method extends is deliberately pure in-memory work on
+        the loop.
+
+        ``revision is None`` means the build's attention read FAILED; the
+        aggregate is then the degraded shape and nothing else. The
+        absences are load-bearing: ``count`` must never be 0 here (a store that
+        could not be read is not an empty pile [docs/ATTENTION.md]), and
+        ``revision``/``conversations`` are absent for the same reason -- this
+        shape claims nothing it could not read, and every client's remedy for
+        "unknown" is the one §1.4 states: do not touch the badge.
+        """
+        if revision is None:
+            # The catalogue's word for this failure, looked up AT THE FAILURE
+            # like ``listing_degraded`` does and for the same measured reason
+            # (importing the catalogue costs ~26 ms a healthy repaint must not
+            # pay). It is the ONE vocabulary the catalogue and the desktop
+            # listing already name this read's failure with.
+            from local_operator.session.catalog import DECORATION_ATTENTION
+
+            return {"degraded": [DECORATION_ATTENTION]}
+        unread = [row for row in rows if row["unseen"]]
+        live_only = [row["session_id"] for row in unread if row["session_id"] not in durable]
+        user_facing: dict[str, bool] = {}
+        if live_only:
+
+            def resolve() -> dict[str, bool]:
+                return {
+                    session_id: _durable_user_session_dir(session_id) is not None
+                    for session_id in live_only
+                }
+
+            user_facing = await asyncio.to_thread(resolve)
+        conversations: list[dict[str, Any]] = []
+        for row in unread:
+            session_id = row["session_id"]
+            if session_id not in durable and not user_facing[session_id]:
+                continue
+            state = self._attention_states.get(f"session/{session_id}", {})
+            conversations.append(
+                {
+                    "session_id": session_id,
+                    "completion_token": state.get("completion_token"),
+                    "kind": state.get("kind"),
+                    # The row's existing pair [sequence, acknowledged], never
+                    # widened (unlike the store-wide triple above): the mobile
+                    # client mirrors this shape [ADR §1.1].
+                    "revision": list(state.get("revision") or (0, 0)),
+                }
+            )
+        return {
+            "count": len(conversations),
+            "revision": list(revision),
+            "degraded": [],
+            "conversations": conversations,
+        }
+
+    def unread_snapshot(self) -> dict[str, Any]:
+        """The unread aggregate of the listing snapshot last built.
+
+        Read it right after awaiting :meth:`summaries` -- the two are the same
+        build, which is what makes the badge number and the in-app count one
+        fact instead of two. Both surfaces do exactly that: ``_list_frame``
+        embeds the result as the top-level ``unread`` block, and
+        ``api_attention_unread`` serves it as the route's whole body.
+
+        Before the first build nothing has been read, so the answer claims
+        nothing: the degraded shape, whose ``count`` absence is the same signal
+        the app already handles -- do not touch the badge, try again later.
+        That state is unreachable through either route (both build first), and
+        it exists for a direct caller rather than as a contract.
+        """
+        snapshot = self._unread_snapshot
+        if snapshot is None:
+            # See the docstring: nothing has been read yet, so the shape claims
+            # nothing and names the same failed-read word the degraded branch
+            # uses.
+            from local_operator.session.catalog import DECORATION_ATTENTION
+
+            return {"degraded": [DECORATION_ATTENTION]}
+        return snapshot
+
+    def unread_block(self) -> dict[str, Any]:
+        """The list payload's ``unread`` block: the aggregate minus its rows.
+
+        The block is a SIBLING of ``degraded`` on the list payload, not a
+        member of ``capabilities``: that dict is a feature-flag bag where a
+        missing key means "this build does not have it", so an unread count
+        living there would be read as absent-by-construction on every older
+        relay -- where absence must mean "unknown, do not touch the badge".
+        The per-conversation list stays off the block because the payload's
+        ``sessions`` rows are already the same conversations -- the block
+        carries the number and the token, which is what the badge and its
+        change detector need.
+        """
+        return {
+            key: value for key, value in self.unread_snapshot().items() if key != "conversations"
+        }
 
     def set_pins(self, session_id: str, pinned: bool) -> bool:
         """Set one session's durable pin and refresh the table's copy.
@@ -3519,12 +3687,25 @@ def build_app(daemon: MobileDaemon):
         credential-store read cadence. An OLD daemon omits the key entirely, and
         the web's rule for absence is the same as for ``available: false``:
         hide the mic.
+
+        ``unread`` rides beside ``degraded`` for the same single-source reason
+        (push/ack-sync S1 [ADR 0006 §1.1 @22e2cce2]): it is the SAME aggregate
+        ``GET /api/attention/unread`` serves, so the badge number and the rows
+        the app paints cannot disagree. It is a SIBLING of ``degraded`` -- not
+        inside ``capabilities``, whose rule is that a missing key means "this
+        build does not have it": a badge read from there would be
+        absent-by-construction on every older relay, where absence must mean
+        "unknown, do not touch the badge".
         """
         from local_operator.mobile.stt import stt_availability
 
         return {
             "sessions": await daemon.table.summaries(),
             "degraded": daemon.table.listing_degraded(),
+            # Read bare-observer, NOT awaited: it is the aggregate THIS build
+            # computed (see ``unread_snapshot``), so the block cannot be served
+            # from a later rebuild than the rows it sits beside.
+            "unread": daemon.table.unread_block(),
             "capabilities": {
                 "features": _feature_flags(),
                 "stt": await stt_availability(),
@@ -3536,6 +3717,33 @@ def build_app(daemon: MobileDaemon):
         if denied is not None:
             return denied
         return JSONResponse(await _list_frame())
+
+    async def api_attention_unread(request: Request) -> Response:
+        """The badge number: conversations with unread completions, one read.
+
+        Push/ack-sync S1 [ADR 0006 §1.1/§1.2 @22e2cce2]: ``count`` counts
+        CONVERSATIONS -- a conversation with three unread completions counts
+        once -- over exactly the rows the list serves, filtered to the user's
+        own conversations (``SessionTable._unread_aggregate`` states the
+        population and the exclusions). ``revision`` is
+        ``AttentionStore.revision()``: an equality token, and never an order.
+        ``degraded: ["attention"]`` means the store could not be read, and
+        then ``count`` is ABSENT rather than 0 -- a store that could not be
+        read is not an empty pile, and clearing the badge on it is the lie the
+        absence exists to prevent [docs/ATTENTION.md].
+
+        Auth-gated exactly like ``/api/sessions`` (same ``gate``, same 401
+        shape), and additive: a client that never calls it is unaffected, and
+        one calling an older relay gets its 404 and falls back to the rows it
+        already holds.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        # Build (or join) the listing snapshot first: the aggregate IS that
+        # build's, so this route and the payload block cannot be two answers.
+        await daemon.table.summaries()
+        return JSONResponse(daemon.table.unread_snapshot())
 
     async def api_session_events(request: Request) -> Response:
         """SSE repaint stream for one session — the phone's only realtime
@@ -4691,6 +4899,10 @@ def build_app(daemon: MobileDaemon):
         Route("/login", login_submit, methods=["POST"]),
         Route("/logout", logout),
         Route("/api/sessions", api_sessions),
+        # The badge read (push/ack-sync S1): the same aggregate the list payload
+        # carries as its top-level ``unread`` block, served on its own so a
+        # client can refresh the number without pulling the rows.
+        Route("/api/attention/unread", api_attention_unread),
         Route("/api/sessions/start", api_start_session, methods=["POST"]),
         Route("/api/sessions/events", api_list_events),
         Route("/api/directories", api_directories),
