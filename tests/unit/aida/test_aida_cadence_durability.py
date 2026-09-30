@@ -30,6 +30,7 @@ from typing import Any
 import pytest
 
 from local_operator import aida
+from local_operator.action_class import class_from_tags
 from local_operator.agent_profiles import (
     SEED_ORIGIN_PREFIX,
     SEED_SHA256_PREFIX,
@@ -490,6 +491,141 @@ async def test_a_stopped_session_is_left_dormant_by_the_boot_arm(isolated_root: 
     assert stopped is not None
     assert [row["id"] for row in stopped["schedules"]] == ["w1"]
     assert wake_store.is_held(stopped)
+
+
+# -- the switch must survive the editing path (agent review round 1, R1) --
+
+
+def test_an_ordinary_role_edit_cannot_strip_a_deliberate_reactive_switch(
+    isolated_root: Path,
+) -> None:
+    """The switch has to outlive a typo fix in the role's own prompt.
+
+    The repair keys on an ABSENT class tag meaning "never classified", so
+    anything that can strip a deliberate ``class:reactive`` back off a row
+    re-opens the ambiguity and can silently re-arm this agent's check-in. The
+    ordinary role-editing path is exactly such a writer (it rebuilds a row's
+    tags from the profile), and the operator's own row is in the state that
+    makes it bite: a stale install fingerprint, so the repair's last narrowing
+    step does not exclude it. Measured before the fix — switch, then edit,
+    then boot → ``class:proactive`` and an armed cadence.
+    """
+    from local_operator.action_class import (
+        PROACTIVE,
+        REACTIVE,
+        set_registered_action_class,
+    )
+    from local_operator.agent_profiles import AgentProfile, seed_tags
+    from local_operator.tools.agent_tool import AgentParams, write_profile
+
+    # The unit half: the ONE encoder of a profile's role fields writes the
+    # class for a reactive profile too, so no caller can forget it.
+    assert f"class:{REACTIVE}" in seed_tags(AgentProfile(name="x", action_class=REACTIVE))
+    assert f"class:{PROACTIVE}" in seed_tags(AgentProfile(name="x", action_class=PROACTIVE))
+
+    registry = _install_aida_row(isolated_root, _pre_class_tags())
+    set_registered_action_class(registry, "aida", REACTIVE)
+    switched = registry.get_agent_by_name("aida")
+    assert switched is not None and "class:reactive" in switched.tags
+
+    # An ordinary edit that names no class — the accidental shape, and the one
+    # the live row was one typo away from: ``action_class`` is preserved from
+    # the row, so the edit must PRESERVE the explicit tag rather than drop it.
+    write_profile(
+        registry,
+        AgentParams(op="update", name="aida", description="a typo fix in her prompt"),
+        creating=False,
+    )
+    edited = AgentRegistry(isolated_root).get_agent_by_name("aida")
+    assert edited is not None
+    assert "class:reactive" in edited.tags, "an ordinary edit stripped the switch"
+    assert class_from_tags(edited.tags) == REACTIVE
+
+    # And the repair, which is what a stripped tag would have let through:
+    # nothing to classify, because the row says reactive in so many words.
+    assert backfill_seed_action_class(isolated_root, registry=registry) == ()
+
+
+@pytest.mark.asyncio
+async def test_a_switched_off_agent_is_not_re_armed_by_a_boot_after_an_edit(
+    isolated_root: Path,
+) -> None:
+    """The same sequence through the real boot seam, on a stale-fingerprint row."""
+    from local_operator.action_class import REACTIVE, set_registered_action_class
+    from local_operator.tools.agent_tool import AgentParams, write_profile
+
+    registry = _install_aida_row(isolated_root, _pre_class_tags())
+    set_registered_action_class(registry, "aida", REACTIVE)
+    write_profile(
+        registry,
+        AgentParams(op="update", name="aida", description="a prompt fix"),
+        creating=False,
+    )
+
+    session_dir = isolated_root / "sessions" / "439818272d84"
+    session_dir.mkdir(parents=True)
+    from local_operator.resume import write_session_attachment
+
+    write_session_attachment(session_dir, team="", agent="aida", goal="")
+    state.update_state(isolated_root, session_id="439818272d84")
+
+    # The migration runs on every launch, so it runs here too — and must leave
+    # the switch alone.
+    from local_operator import config_migrations
+
+    config_migrations.run_startup_migrations(isolated_root)
+    after_migration = AgentRegistry(isolated_root).get_agent_by_name("aida")
+    assert after_migration is not None
+    assert class_from_tags(after_migration.tags) == REACTIVE
+
+    assert await _her_session(isolated_root) == "439818272d84"
+    assert _cadence_row(isolated_root, "439818272d84") is None
+    assert await proactive.ensure_armed(isolated_root, "439818272d84") == "reactive"
+
+
+def test_a_stopped_entry_does_not_drain_the_escalation_tray(isolated_root: Path) -> None:
+    """QA round 1, Q1: the held gate has to cover the TRAY, not just the arm.
+
+    The normal post-``/stop`` state keeps the entry's rows and parks it, so the
+    held check that used to sit inside the "is the cadence missing?" branch was
+    skipped by exactly the case that matters — and the tray drain below it wrote
+    new rows onto a session the platform had declared inert
+    (``triggers.declines`` answers "held" for that same entry).
+    """
+    import asyncio
+
+    from local_operator.harness.wake_types import WakeSchedule
+    from local_operator.resume import write_session_attachment
+
+    session_id = "0123456789ab"
+    session_dir = isolated_root / "sessions" / session_id
+    session_dir.mkdir(parents=True)
+    write_session_attachment(session_dir, team="", agent="aida", goal="")
+    state.update_state(isolated_root, session_id=session_id)
+    wake_store.write_entry(
+        isolated_root,
+        session_id,
+        cwd=str(isolated_root),
+        schedules=[
+            WakeSchedule(
+                id=proactive.CADENCE_ID,
+                kind="scheduled",
+                message="her check-in",
+                next_due_at=int(datetime(2026, 9, 30, 9, 0).timestamp() * 1000),
+            )
+        ],
+        preserve={"stopped_at": 1},
+    )
+    assert wake_store.is_held(wake_store.read_entry(isolated_root, session_id))
+    _escalate(isolated_root)
+
+    assert asyncio.run(proactive.ensure_armed(isolated_root, session_id)) == "held"
+    # The tray is untouched: no row was armed onto a stopped session...
+    entry = wake_store.read_entry(isolated_root, session_id)
+    assert entry is not None
+    assert [row["id"] for row in entry["schedules"]] == [proactive.CADENCE_ID]
+    # ...and the request is still there for whenever the session is reopened.
+    assert state.escalate_path(isolated_root).exists()
 
 
 # -- the escalation tray's own symptom -----------------------------------

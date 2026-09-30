@@ -1260,21 +1260,25 @@ async def ensure_armed(
             if not pol.enabled:
                 return "disabled"
             return "paused" if pol.paused else "reactive"
+        # AN EXPLICIT STOP IS A GATE ON THE WHOLE PASS, which is why it sits
+        # ABOVE the id check rather than inside it. ``is_held`` covers both
+        # markers a user lever writes — ``stopped_at`` (``/stop``, stamped by
+        # the TUI on the same entry) and ``held_at`` (pause) — and the
+        # supervisor and the trigger layer's own gate already read it that way
+        # (``triggers.declines`` answers "held"). Two things hang off it: the
+        # ARM (a stopped session must not come back with its check-in, or the
+        # boot arm this change adds would walk straight past a stop the
+        # operator asked for) and the TRAY DRAIN below, which writes new rows
+        # — consuming a request for a session the platform has declared inert
+        # is the same mistake in the other direction (QA round 1, Q1: an entry
+        # parked by ``/stop`` WITH its rows kept still drained). Nothing is
+        # cancelled here either — a dormant entry's rows are the ones that come
+        # back when the session is reopened (``_rebuild_wake_index_entry``
+        # clears ``stopped_at``).
+        if wake_store.is_held(entry):
+            return "held"
         result = "present"
         if CADENCE_ID not in ids:
-            # AN EXPLICIT STOP IS A GATE TOO. ``is_held`` covers both markers a
-            # user lever writes — ``stopped_at`` (``/stop``, stamped by the TUI
-            # on the same entry) and ``held_at`` (pause) — and the supervisor
-            # and the trigger layer's own gate both already read it that way
-            # (``triggers.declines`` answers "held"). Without this, the boot arm
-            # this change adds would walk straight past a stop the operator
-            # asked for and put her check-in back: the requirement is that she
-            # never drops her cadence by ACCIDENT, and a stop is not an
-            # accident. Nothing is cancelled here either — a dormant entry's
-            # rows are the ones that come back when the session is reopened
-            # (``_rebuild_wake_index_entry`` clears ``stopped_at``).
-            if wake_store.is_held(entry):
-                return "held"
             try:
                 await arm_wake(
                     root,

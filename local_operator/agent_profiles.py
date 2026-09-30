@@ -994,24 +994,27 @@ def seed_tags(profile: AgentProfile) -> tuple[str, ...]:
         tags.append(f"effort:{profile.effort}")
     if profile.may_delegate:
         tags.append("delegate:yes")
-    # INSTALL WRITES NO CLASS TAG FOR A REACTIVE PROFILE, and that is safe in
-    # a way the switch's own encoding is not: this helper only ever writes the
-    # tags of a row it is creating, and the backfill that repairs rows missing
-    # a class tag (``backfill_seed_action_class``) asks whether the PACKAGED
-    # STARTER declares a class before touching anything — a starter with no
-    # ``class:`` frontmatter can therefore never be re-classed by it. So the
-    # absence here means "the starter declares nothing", not "the operator
-    # asked for silence", which is the distinction ``action_class``
-    # ``with_class_tag`` spells out for the path where it matters.
-    if normalize_action_class(profile.action_class) == PROACTIVE_CLASS:
-        tags.append(f"{CLASS_TAG_KEY}:{PROACTIVE_CLASS}")
+    # THE CLASS IS WRITTEN FOR EVERY PROFILE, ``reactive`` INCLUDED, and that is
+    # not symmetry for its own sake: this helper is the ONE encoder of a row's
+    # role fields, and the paths that rebuild a row from a profile — an ordinary
+    # role edit (``tools/agent_tool.write_profile``), the desktop profile route,
+    # ``install_seed`` — all come through it. While it omitted the tag for a
+    # reactive profile, ANY such edit STRIPPED an explicit ``class:reactive``
+    # back off the row, restoring the very ambiguity the repair for pre-class
+    # rows keys on: the operator's own ``/agent class aida reactive`` stayed
+    # durable only until someone fixed a typo in her prompt (agent review round
+    # 1, R1 — measured on his own row, which carries a stale install
+    # fingerprint and so was one edit away from a silent re-arm). Writing it
+    # here means no caller can forget: an absent tag then means exactly one
+    # thing, "never classified", which is the state pre-class installs are in.
+    tags.append(f"{CLASS_TAG_KEY}:{normalize_action_class(profile.action_class)}")
     return tuple(tags)
 
 
-#: The class a packaged starter declares when it declares none. Kept as a
-#: literal spelling beside the tagging helpers so the backfill's "does this
-#: starter want a class?" question reads the same string the install path
-#: writes.
+#: The class a packaged starter declares, when it declares one at all. The
+#: backfill's whole question is "does this starter want a class?" — a starter
+#: with no ``class:`` frontmatter never does, which is what keeps the repair off
+#: the ten seeds that carry none.
 SEED_CLASS_PROACTIVE = PROACTIVE_CLASS
 
 

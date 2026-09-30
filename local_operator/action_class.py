@@ -10,13 +10,24 @@ surface; Aida is simply the agent that ships in the proactive class.
 
 WHERE IT LIVES IN DATA. ``AgentProfile.action_class``, parsed from a seed's
 ``class:`` frontmatter and encoded on installed registry rows as a
-``class:proactive`` tag — the exact precedent ``delegate:yes`` / ``tools:…`` /
+``class:<value>`` tag — the exact precedent ``delegate:yes`` / ``tools:…`` /
 ``effort:…`` already set (``agent_profiles.seed_tags`` / ``profile_from_agent``;
 the tag rides in ``AgentData.tags`` so no schema migration is needed). Python
 cannot name an attribute ``class``, hence ``action_class`` in code; the
-user-facing word stays "class". The encoding is deliberately SPARING —
-``reactive`` is the ABSENT tag, so a row with no class tag reads reactive and
-old rows need no migration.
+user-facing word stays "class".
+
+BOTH VALUES ARE WRITTEN OUT, and an ABSENT tag means exactly one thing: *this
+row has never been classified*. That distinction is load-bearing rather than
+bookkeeping, because the class gates PERSISTENT schedules (Aida's cadence, the
+trigger check-ins) instead of one turn. The feature shipped into installs that
+already had rows, so those rows carry no tag; a repair for them
+(``agent_profiles.backfill_seed_action_class``) must be able to tell "never
+classified" from "the operator switched this off", or it would re-arm a
+check-in the user stopped — which is precisely why ``reactive`` is recorded
+instead of implied, and why :func:`with_class_tag` and ``seed_tags`` both write
+it. (An earlier revision of this feature left ``reactive`` absent as a "sparing"
+encoding; that is what made the ambiguity above possible, and agent review
+round 1 R1 measured the defect it caused.)
 
 THE EFFECTIVE CLASS OF A SESSION is its attached profile's class, read through
 the existing attachment-restore path: the ``attachment.json`` sidecar names the
