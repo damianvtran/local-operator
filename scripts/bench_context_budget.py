@@ -805,7 +805,40 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: gap has moved for reasons unrelated to this diff, CI's own reading is the
 #: one that decides, and it prints the number to set — and the 55-token band is
 #: the reason the field can grow by its own 111 without the ceiling chasing it.
-BUDGET_BILLED_TOKENS = 37_300
+#:
+#: RAISED 37,300 -> 37,378 for the ``tool://`` on-demand tool reference (PR-A
+#: of the prompt/tool-surface audit; design note in the audit session's
+#: scratchpad, ``audit/mechanism_design.md``). The mechanism's own wire cost is
+#: deliberately ZERO — a doc renders only when ``read tool://<name>`` asks for
+#: it — so the raise is the always-loaded pieces that make it reachable, plus
+#: two cue fixes co-landed with it and one duplication cut:
+#:
+#:   base (origin/main a2dbe29cc)       104,304 chars = ~37,519 billed
+#:   head (this branch)                 104,521 chars = ~37,597 billed
+#:     = +217 chars = +78 billed, across four edits:
+#:       + the ``tool://`` cue in system.md's Tools section, +211 chars
+#:         (already tightened once against the design draft)
+#:       + C1, so listing or inspecting a peer no longer reads as gated
+#:         behind "when the user asked" — only spawning is, +30
+#:       + C4, the restart/update cause in the incident list, +46
+#:       + the read description's one-word scheme list, +9
+#:       - MINUS the console description's restatement of system.md's own
+#:         prose: the "cannot wedge on a prompt" tail and its clause go, the
+#:         boundary and the pinned "`bash` returns output directly"
+#:         consequence stay, -79
+#:
+#: Both sides measured with THIS script on this machine (the base in a
+#: detached checkout of origin/main), so the recorded local-vs-CI gap cancels
+#: out of the subtraction: CI head is 104,521 - the 762-char gap = 103,759
+#: chars = ~37,323 billed, and the ceiling is CI head + 55 (the band this file
+#: keeps) = 37,378. The remaining cue cost is the price of making the
+#: reference discoverable at all — with no cue, no agent knows it exists,
+#: which is exactly the op-ambiguity failure the audit measured. The
+#: schema-slimming wave (audit fix list item 2) works this surface next and
+#: should ratchet the ceiling back down. A local run still reads above the
+#: ceiling by the same recorded 762-char gap (37,597 vs 37,378), so CI remains
+#: the binding reading, and the tighten band below (1,200) is not in play.
+BUDGET_BILLED_TOKENS = 37_378
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
