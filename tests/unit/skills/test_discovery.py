@@ -6,6 +6,7 @@ import importlib.util
 import os
 import types
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -253,6 +254,22 @@ class TestDiscoverSkills:
         assert len(warnings) == 1
         assert "dup" in warnings[0]
         assert "shadowed" in warnings[0]
+
+    def test_the_warning_names_the_rule_that_actually_decided(self, tmp_path: Path) -> None:
+        # Two different losers, two different rules (QA round 1, O1): across
+        # roots the earliest root wins, within one root the shallower skill
+        # does, and the message must not send a reader to the root list for a
+        # collision the root list had no part in.
+        project, home = tmp_path / "project", tmp_path / "home"
+        _plant(project, "AAA/dup")  # depth 2, sorts first by NAME
+        _plant(project, "zzz", name="dup")  # depth 1 -> wins
+        _plant(home, "dup")
+        skills, warnings = discover_skills([project, home])
+        assert [s.file_path for s in skills] == [project / "zzz" / "SKILL.md"]
+        assert len(warnings) == 2
+        assert "same root: the shallower skill wins" in warnings[0]
+        assert "earlier root wins" not in warnings[0]
+        assert "earlier root wins" in warnings[1]
 
     def test_missing_roots_skipped_silently(self, tmp_path: Path) -> None:
         root = tmp_path / "real"
@@ -704,6 +721,19 @@ def _plant(
     return _write_skill(base, leaf, description=description, **kw)  # type: ignore[arg-type]
 
 
+def _fingerprint_paths(fingerprint: tuple[object, ...]) -> list[str]:
+    """The path each :func:`roots_fingerprint` entry names, as strings.
+
+    The function is typed ``tuple[object, ...]`` on purpose: an entry is
+    ``(root, mtime_ns)`` for a root and ``(dir, mtime_ns, size)`` for a skill,
+    and nothing in the signature can say which. The cast lives here rather than
+    as an untyped index at each call site, so the heterogeneous shape is
+    acknowledged once (``pyright`` rejects indexing ``object``).
+    """
+    entries = cast("tuple[tuple[object, ...], ...]", fingerprint)
+    return [str(entry[0]) for entry in entries]
+
+
 class TestSkillMaxDepth:
     """``LOCAL_OPERATOR_SKILL_MAX_DEPTH``: default, override, clamp, never raises."""
 
@@ -846,7 +876,97 @@ class TestBoundedDepthWalk:
         _plant(root, "group/real")
         (root / "group" / "loop").symlink_to(root, target_is_directory=True)
         assert [s.name for s in scan_skills_dir(root, "t")] == ["real"]
-        roots_fingerprint([root])  # must not raise or hang
+        # Not merely "must not raise or hang": the cycle is CUT, so the reading
+        # stays the root plus the one real skill instead of re-walking the tree
+        # (agent review round 1, MINOR-4).
+        entries = roots_fingerprint([root])
+        assert _fingerprint_paths(entries) == [
+            str(root),
+            str(root / "group" / "real"),
+        ]
+
+    def test_a_dangling_skill_md_symlink_is_a_boundary_not_a_group(self, tmp_path: Path) -> None:
+        """The ``os.path.lexists`` arm: a broken link to a SKILL.md is still a claim.
+
+        A directory whose ``SKILL.md`` is a dangling symlink must not become a
+        grouping folder just because its marker cannot be stat'd -- descending
+        would leak whatever sits under it (the codex#22275 hazard, one layer in).
+        """
+        root = tmp_path / "skills"
+        claim = root / "claims-to-be-a-skill"
+        _plant(claim, "references/inner")
+        (claim / "SKILL.md").symlink_to(tmp_path / "nowhere")
+
+        assert scan_skills_dir(root, "t") == []
+        assert [p for p in _fingerprint_paths(roots_fingerprint([root])) if "inner" in p] == []
+
+    def test_an_unstatable_skill_md_is_a_boundary_not_a_group(self, tmp_path: Path) -> None:
+        """The ``except OSError`` arm: a stat that fails for any other reason.
+
+        PINNED WITH A SYMLINK LOOP, not a chmod: ``os.stat`` needs no read
+        permission ON THE FILE, so ``chmod 000 SKILL.md`` succeeds and takes the
+        regular-file path (covered by the test below). A ``SKILL.md`` pointing at
+        itself raises ``ELOOP``, which is what this arm exists for. Named to sort
+        FIRST so the ``st`` binding is provably fresh on this path.
+        """
+        root = tmp_path / "skills"
+        claim = root / "aaa-looping-marker"
+        _plant(claim, "references/inner")
+        (claim / "SKILL.md").symlink_to(claim / "SKILL.md")
+
+        assert scan_skills_dir(root, "t") == []
+        assert [p for p in _fingerprint_paths(roots_fingerprint([root])) if "inner" in p] == []
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+    def test_an_unreadable_skill_md_is_a_boundary_that_never_registers(
+        self, tmp_path: Path
+    ) -> None:
+        """A SKILL.md that cannot be READ is still a boundary.
+
+        It IS part of the fingerprint -- ``os.stat`` needs search permission on
+        the directories, never read permission on the file, so this file stats
+        cleanly and the walk prices it like any other skill. The watch entry is
+        what keeps the repaired frontmatter detectable, and the skill still never
+        registers, so its ``references/`` cannot leak.
+        """
+        root = tmp_path / "skills"
+        claim = root / "unreadable"
+        _plant(claim, "references/inner")
+        marker = claim / "SKILL.md"
+        marker.write_text("---\ndescription: locked\n---\n")
+        marker.chmod(0)
+        try:
+            assert [s.name for s in scan_skills_dir(root, "t")] == []
+            watched = _fingerprint_paths(roots_fingerprint([root]))
+            assert str(claim) in watched
+            assert not any("inner" in entry for entry in watched)
+        finally:
+            marker.chmod(0o644)
+
+    def test_ancestor_symlinks_are_never_re_walked(self, tmp_path: Path) -> None:
+        """The cycle cut: a ``loop -> <root>`` in each group must cost nothing.
+
+        Measured before the cut (agent review round 1, MINOR-3; re-measured here
+        on this tree: 22 entries / 8.5 s per fingerprint, 4.4 s per scan, for 1
+        real skill; 2 entries / 4 ms after). ``max_depth`` bounds depth, not
+        work, and this runs on the per-message path. The assertion below is
+        structural -- no entry may carry a ``loop`` component, and the count is
+        exactly the root plus the one real skill -- rather than a time bound.
+        """
+        root = tmp_path / "skills"
+        _plant(root, "g00/real")
+        for i in range(20):
+            group = root / f"g{i:02d}"
+            group.mkdir(parents=True, exist_ok=True)
+            (group / "loop").symlink_to(root, target_is_directory=True)
+
+        assert [s.name for s in scan_skills_dir(root, "t")] == ["real"]
+        entries = roots_fingerprint([root])
+        assert not any("loop" in path for path in _fingerprint_paths(entries))
+        assert _fingerprint_paths(entries) == [
+            str(root),
+            str(root / "g00" / "real"),
+        ]
 
     def test_unreadable_group_is_tolerated(self, tmp_path: Path) -> None:
         root = tmp_path / "skills"
@@ -1076,6 +1196,26 @@ class TestDiagnoseNestedSkills:
         _plant(root, "twin", enabled=False)  # depth 1 now
         message = diagnose_missing_skill("twin", [root])
         assert message is not None and str(root / "twin" / "SKILL.md") in message
+
+    def test_a_direct_child_without_skill_md_defers_to_a_broken_nested_candidate(
+        self, tmp_path: Path
+    ) -> None:
+        """The deferral branch: an empty direct child must not mask a nested cause.
+
+        ``<root>/x`` with no ``SKILL.md`` answers "has no SKILL.md" -- unless a
+        NESTED ``x`` exists and is itself broken, in which case that is the file
+        the author has to fix and the direct child is simply not what they meant
+        (agent review round 1, MINOR-2).
+        """
+        root = tmp_path / "skills"
+        (root / "x").mkdir(parents=True)  # direct child, no SKILL.md
+        _plant(root, "g/x", description=None)
+
+        message = diagnose_missing_skill("x", [root])
+        assert message is not None
+        assert str(root / "g" / "x" / "SKILL.md") in message
+        assert "no 'description'" in message
+        assert "has no SKILL.md" not in message
 
     def test_root_precedence_beats_depth(self, tmp_path: Path) -> None:
         first, second = tmp_path / "first", tmp_path / "second"
