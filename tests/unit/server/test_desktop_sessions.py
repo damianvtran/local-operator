@@ -5160,6 +5160,41 @@ async def test_a_move_keeps_the_drafts_stored_model(move_api) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_move_keeps_the_configuration_run_purpose(move_api) -> None:
+    """The marker has TWO writers, and the second must not erase what only the first knows.
+
+    ``purpose`` is what tells a runtime child that a session is a configuration
+    run — it keys the run's tool declaration AND its preamble. A move that dropped
+    it would leave a session that is still HIDDEN from every listing (its
+    ``origin.json`` is untouched) and no longer BOUNDED: the next boot would build
+    the full builtin inventory, shell and file tools included, with nothing
+    anywhere saying so. That is the failure mode this pins — not a lost field, a
+    lost boundary on the one session nobody can see.
+    """
+    from local_operator.session.retention import AGENTS_CONFIG_PURPOSE
+
+    client, app, root = move_api
+    before, after = root / "before", root / "after"
+    before.mkdir()
+    after.mkdir()
+    sid = await app.state.desktop_sessions.create(str(before), purpose=AGENTS_CONFIG_PURPOSE)
+    marker = _marker_path(root, sid)
+    assert json.loads(marker.read_text())["purpose"] == AGENTS_CONFIG_PURPOSE
+
+    response = await client.post(
+        f"/v1/desktop/sessions/{sid}/working-directory", json=_move_body(str(after))
+    )
+
+    assert response.status_code == 200, response.text
+    stored = json.loads(marker.read_text())
+    assert stored["cwd"] == str(after)
+    assert stored["purpose"] == AGENTS_CONFIG_PURPOSE, (
+        "the move dropped the purpose, which would boot the run unbounded while it "
+        "stayed hidden from every listing"
+    )
+
+
+@pytest.mark.asyncio
 async def test_a_latched_daemon_gets_no_successor_from_the_retire_frame(tmp_path) -> None:
     """The retire frame must not spawn into a daemon that is being REPLACED.
 

@@ -766,6 +766,7 @@ def build_system_blocks(
     credentials: Sequence[str] | None = None,
     team_brief: str = "",
     agent_brief: str = "",
+    run_brief: str = "",
     model_label: str = "",
     interactive: bool | None = None,
     channel: str | None = None,
@@ -982,6 +983,15 @@ def build_system_blocks(
         # the more recent, more specific instruction, and later placement is
         # how the model reads precedence when the two briefs disagree.
         tail = f"{tail}\n\n<agent>\n{agent_brief.strip()}\n</agent>"
+    if run_brief.strip():
+        # A configuration run's server-owned remit, LAST in the tail: it is the
+        # narrowest statement here ("this session may edit these registries and
+        # nothing else") and the one the model must not read as superseded by a
+        # profile or a team brief layered above it. Its own element rather than
+        # folding into `<agent>` because the two have different authors — see
+        # ``session.goal.GoalState.run_brief`` — and a reader must be able to
+        # tell the operator's persona from the harness's boundary.
+        tail = f"{tail}\n\n<configuration-run>\n{run_brief.strip()}\n</configuration-run>"
     if interactive is not None:
         # WHO CAN ANSWER, stated in BOTH directions rather than only the negative
         # one. A question asked now is answered when the operator LOOKS, not when
@@ -1093,6 +1103,7 @@ _TAIL_SECTION_MARKERS: tuple[tuple[str, str], ...] = (
     ("goal", "<goal>"),
     ("team", "<team>"),
     ("agent", "<agent>"),
+    ("run", "<configuration-run>"),
     ("interactivity", "<interactivity>"),
     ("credentials", "<session-credentials>"),
 )
@@ -1124,6 +1135,7 @@ STATE_SECTION_HEADINGS: dict[str, str] = {
     "goal": "Goal",
     "team": "Team",
     "agent": "Agent",
+    "run": "Configuration run",
     "interactivity": "Interactivity",
     "credentials": "Session credentials",
     "session": "Session state",

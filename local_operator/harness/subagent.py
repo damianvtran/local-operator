@@ -2986,11 +2986,21 @@ async def _construct_child_session(
     # Read through ``getattr`` because not every session shape is a real
     # ``Session`` (reduced test doubles and the resume path construct children
     # around hosts that predate this attribute).
+    #
+    # THE OP SCOPE RIDES ALONG WITH THE NAMES, and it is not an optional extra:
+    # a declaration's reach is the names AND the ops a scoped name is cut down
+    # to, so passing the names alone would hand a child the whole of a tool its
+    # parent was declared not to have in full — ``agent sync`` and ``agent
+    # reset`` behind a parent that may only author, which is the sentence above
+    # ("a declared session cannot reach an excluded tool one hop down") being
+    # false one hop down. Read the same way, and ``None`` for a parent that
+    # declared no scope means "every op", exactly as it does on the parent.
     declared = getattr(parent_session, "_declared_tools", None)
     if declared is not None and hasattr(child, "set_tool_inventory"):
         child.set_tool_inventory(
             declared,
             unattended=bool(getattr(parent_session, "_declared_tools_unattended", False)),
+            ops=getattr(parent_session, "_declared_tool_ops", None),
         )
     # Record the denial on the child so its OWN children inherit it (see the
     # ``restricted`` computation above). Set UNCONDITIONALLY, outside the
