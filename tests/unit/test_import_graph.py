@@ -370,6 +370,79 @@ def test_spooled_turn_store_import_is_stdlib_only(spooled_store_modules: set[str
     assert ours == ["local_operator", "local_operator.wakes", "local_operator.wakes.spooled"], ours
 
 
+@pytest.fixture(scope="module")
+def trigger_layer_modules() -> set[str]:
+    """Modules loaded by importing the wake-trigger layer."""
+    return _imported_modules("local_operator.wakes.triggers")
+
+
+@pytest.fixture(scope="module")
+def trigger_source_modules() -> set[str]:
+    """Modules loaded by importing the trigger SOURCES (the sweep's path)."""
+    return _imported_modules("local_operator.wakes.triggers.sources")
+
+
+def test_wake_trigger_layer_import_is_stdlib_only(trigger_layer_modules: set[str]) -> None:
+    """The fourth member of the wake store family, on the resident set for the
+    same reason: the supervisor reads and writes trigger records inside its own
+    serve loop, so the layer must not drag the harness in at import.
+
+    Pinned in its OWN cell — and, below, the SOURCES separately — because the
+    sweep (which runs in the supervisor process) imports the source modules
+    lazily, and a future edit reaching into ``session.runtime.registry`` at a
+    MODULE scope would not show in this cell at all. The two cells together
+    cover both the layer the supervisor always loads and the modules the sweep
+    loads on its evaluation path; a heavy import in either fails a test whose
+    message names it.
+    """
+    _assert_absent(trigger_layer_modules, "asyncio", "the layer is plain synchronous I/O")
+    _assert_absent(trigger_layer_modules, "pydantic", "records are plain dicts")
+    _assert_absent(
+        trigger_layer_modules, "local_operator.session", "the layer never opens a session"
+    )
+    _assert_absent(trigger_layer_modules, "local_operator.harness", "no schedule models")
+    _assert_absent(trigger_layer_modules, "local_operator.mobile", "no runtime, no daemon")
+    _assert_absent(trigger_layer_modules, "local_operator.tui", "no front end")
+    _assert_absent(trigger_layer_modules, "textual", "no front end")
+    _assert_absent(trigger_layer_modules, "httpx", "no provider layer")
+    ours = sorted(m for m in trigger_layer_modules if m.startswith("local_operator"))
+    assert ours == [
+        "local_operator",
+        "local_operator.wakes",
+        "local_operator.wakes.triggers",
+    ], ours
+
+
+def test_wake_trigger_sources_import_is_stdlib_only(trigger_source_modules: set[str]) -> None:
+    """The sources load on the SWEEP's path, inside the supervisor process.
+
+    The source modules read project rows as JSON and session stats as stats —
+    deliberately NOT through ``local_operator.projects`` or the session layer —
+    so importing them must be as cheap as importing the layer. The heavier
+    reads they legitimately do (the runtime registry scan for liveness, the
+    projects store for the consume-time re-verify) are FUNCTION-LOCAL imports
+    on the consuming side, where a failure costs one pass; if one of them ever
+    moves to a module scope, this cell fails by name.
+    """
+    _assert_absent(trigger_source_modules, "asyncio", "the sweep is synchronous")
+    _assert_absent(trigger_source_modules, "pydantic", "rows are plain dicts here")
+    _assert_absent(
+        trigger_source_modules, "local_operator.session", "only a function-local registry scan"
+    )
+    _assert_absent(trigger_source_modules, "local_operator.harness", "no schedule models")
+    _assert_absent(trigger_source_modules, "local_operator.mobile", "no runtime, no daemon")
+    _assert_absent(trigger_source_modules, "local_operator.tui", "no front end")
+    _assert_absent(trigger_source_modules, "local_operator.projects", "rows are read as JSON")
+    ours = sorted(m for m in trigger_source_modules if m.startswith("local_operator"))
+    assert ours == [
+        "local_operator",
+        "local_operator.wakes",
+        "local_operator.wakes.triggers",
+        "local_operator.wakes.triggers.sources",
+        "local_operator.wakes.triggers.sources.project_staleness",
+    ], ours
+
+
 def test_wake_delivery_ledger_import_is_stdlib_only() -> None:
     """The same contract as the index, for the same processes.
 

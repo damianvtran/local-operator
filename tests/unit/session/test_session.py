@@ -6675,3 +6675,207 @@ async def test_the_loss_is_announced_once_per_session(tmp_path, monkeypatch):
     await wait_for(lambda: any(event.text == MISSING_MEDIA_NOTICE for event in notices))
 
     assert [event.text for event in notices] == [MISSING_MEDIA_NOTICE]
+
+
+async def _dispose_with_flagged_run(
+    directory: Path, *, after_success: bool, produced: bool, dispatched: bool, carried: bool
+) -> Path:
+    """Boot a real session with a turn parked in ``_prepare_system_blocks``,
+    stamp the v3 decision inputs, then dispose it.
+
+    The parked state is the deterministic in-flight one: token minted,
+    ``attention_started`` written, ``_turn_task`` live, no request built and no
+    prompt-provenance race (``is_streaming`` flips before the pump's first
+    iteration — see ``test_cut_off_turns``'s helper for the measured reason the
+    wait must not be on it). The three inputs are stamped directly because this
+    matrix pins the DECISION — which arm the disposal takes for a given set of
+    facts — while the e2e cells pin the real machinery that produces them
+    (``tests/e2e/test_delivery_during_leave_e2e.py``; v3, 2026-09-30).
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    session = make_session(directory, ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
+    await session.async_init()
+    parked = asyncio.Event()
+    release = asyncio.Event()
+    original = session._prepare_system_blocks
+
+    async def gated(*args: Any, **kwargs: Any) -> Any:
+        parked.set()
+        await release.wait()
+        return await original(*args, **kwargs)
+
+    session._prepare_system_blocks = gated  # type: ignore[method-assign]
+    task = asyncio.ensure_future(session.prompt("a run the disposal meets"))
+    await asyncio.wait_for(parked.wait(), timeout=10)
+    session._attention_run_after_settled_success = after_success
+    session._attention_run_produced = produced
+    session._attention_run_request_dispatched = dispatched
+    session._attention_run_carried_prompt = carried
+    dispose_task = asyncio.ensure_future(session.dispose())
+    # The parked run only unwinds once the abort lands; release it there so the
+    # disposal's bounded wait sees a turn that is really ending.
+    while not (session._signal is not None and session._signal.aborted):
+        await asyncio.sleep(0.005)
+    release.set()
+    await asyncio.wait_for(dispose_task, timeout=10)
+    await asyncio.wait_for(asyncio.shield(task), timeout=10)
+    return session._transcript.directory
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("after_success", "produced", "dispatched", "carried", "expected_kind", "expected_cause"),
+    [
+        # v3 (2026-09-30): a post-completion admission that produced nothing
+        # settles SILENTLY even though its request reached the provider — no
+        # verdict is assertable about a run that was cut before it did anything
+        # (the nine exec teardowns).
+        (True, False, True, False, None, ""),
+        # …or CLOSES neutrally when it carried a person's/peer's ask, because
+        # that ask was real even though nothing was spent on it. The closure
+        # OUTRANKS the dispatched arm above it in the chain, which is the
+        # point: the run followed a delivered completion, so there is nothing
+        # to cut off on the reader's screen.
+        (True, False, True, True, "closed", "disposed"),
+        # A run that PRODUCED something keeps the honest error: the arm must
+        # never widen into "any disposal after a completion is neutral".
+        (True, True, True, False, "error", "disposed"),
+        # No settled success behind it: the v2 arms decide, unchanged.
+        (False, False, True, False, "error", "disposed"),
+        # The v2 carried arm itself (pre-dispatch, no settled success): still
+        # the neutral closure — this matrix only moved the NEW arm in.
+        (False, False, False, True, "closed", "disposed"),
+    ],
+)
+async def test_the_post_completion_dispose_decision_matrix(
+    tmp_path: Path,
+    after_success: bool,
+    produced: bool,
+    dispatched: bool,
+    carried: bool,
+    expected_kind: str | None,
+    expected_cause: str,
+) -> None:
+    """The v3 decision matrix, read off the store a successor reads.
+
+    The new arm sits AFTER the deliberate-stop clause and BEFORE the dispatched
+    one (``Session.dispose``): a post-completion admission that produced
+    nothing settles neutral whether or not its request reached the provider —
+    which is the whole case-3 point, because the cancelled-in-flight request IS
+    a dispatch — while a produced run, and any run with no settled success
+    behind it, keeps the previous verdicts.
+    """
+    from local_operator.session.attention import AttentionStore, conversation_identity
+
+    directory = tmp_path / "sessions" / f"matrix-{after_success}-{produced}-{dispatched}-{carried}"
+    transcript_dir = await _dispose_with_flagged_run(
+        directory,
+        after_success=after_success,
+        produced=produced,
+        dispatched=dispatched,
+        carried=carried,
+    )
+
+    # ``make_session`` roots the transcript at ``tmp_path/"sess"``; the store
+    # row is keyed by THAT identity, not by the sessions root this matrix
+    # creates for the disposal.
+    state = AttentionStore().state(conversation_identity(transcript_dir))
+    assert state["kind"] == expected_kind, state
+    assert state["cause"] == expected_cause, state
+
+
+def test_the_run_output_predicate_counts_readers_visible_output_only() -> None:
+    """``_arms_attention_run_output`` — the one definition of "produced".
+
+    The disposal's neutral arm reads this mark, so each exclusion is load
+    bearing: the cancelled-before-anything tail is an assistant message with an
+    EMPTY content list and no calls (never a reader-visible word), the run's own
+    markers are custom entries that never pass through ``_persist_new_messages``
+    at all, and a user message is an input. A tool result counts however small —
+    a result IS output.
+    """
+    from local_operator.session.session import _arms_attention_run_output
+
+    empty_tail = Message(role="assistant", content=[])
+    prose = Message(role="assistant", content=[TextContent(text="partial")])
+    calling = Message(role="assistant", content=[], tool_calls=[ToolCall(id="c1", name="view")])
+    result = Message(role="tool", content=[TextContent(text="ok")], tool_call_id="c1")
+    ask = Message(role="user", content=[TextContent(text="do the thing")])
+
+    assert not _arms_attention_run_output(empty_tail)
+    assert _arms_attention_run_output(prose)
+    assert _arms_attention_run_output(calling)
+    assert _arms_attention_run_output(result)
+    assert not _arms_attention_run_output(ask)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("predecessor_kind", "expected"),
+    [
+        # Only a SETTLED SUCCESS arms the post-completion arm: the masking
+        # problem is a disposal superseding a delivered completion.
+        ("complete", True),
+        # Every non-complete settlement is a cut receipt, not a success — and a
+        # run that follows one must keep the v2 verdicts (agent review round 1,
+        # MINOR-2: this pin was missing; the gate was exercised only through
+        # ``complete``).
+        ("error", False),
+        ("closed", False),
+        ("retired", False),
+    ],
+)
+async def test_the_after_settled_success_snapshot_reads_complete_only(
+    tmp_path: Path, predecessor_kind: str, expected: bool
+) -> None:
+    """The snapshot gate, read at the pipeline head where the arm reads it.
+
+    A ``completion_attention`` marker is seeded as the conversation's newest
+    settlement — the ``error|disposed`` predecessor is the case-3 shape's
+    honest sibling and the one a widening bug would mis-arm — and a run is then
+    started and parked in ``_prepare_system_blocks``. The head has already
+    appended this run's own ``attention_started``, so the read below is exactly
+    the one ``Session.dispose`` will later consume.
+    """
+    from local_operator.session.attention import (
+        ATTENTION_CUSTOM_TYPE,
+        conversation_identity,
+    )
+
+    directory = tmp_path / "sessions" / f"snapshot-{predecessor_kind}"
+    directory.mkdir(parents=True, exist_ok=True)
+    session = make_session(directory, ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
+    await session.async_init()
+    await session._transcript.append_custom(
+        ATTENTION_CUSTOM_TYPE,
+        {
+            "conversation_id": conversation_identity(session._transcript.directory),
+            "token": "predecessor-token",
+            "anchor": "predecessor-anchor",
+            "kind": predecessor_kind,
+            "cause": "disposed" if predecessor_kind in ("error", "closed", "retired") else "",
+            "reason": "",
+            "notify": False,
+        },
+    )
+    parked = asyncio.Event()
+    release = asyncio.Event()
+    original = session._prepare_system_blocks
+
+    async def gated(*args: Any, **kwargs: Any) -> Any:
+        parked.set()
+        await release.wait()
+        return await original(*args, **kwargs)
+
+    session._prepare_system_blocks = gated  # type: ignore[method-assign]
+    task = asyncio.ensure_future(session.prompt("a run that follows a settlement"))
+    await asyncio.wait_for(parked.wait(), timeout=10)
+    # READ LEVEL: the snapshot was taken at the head, before this run's own
+    # marker — see the cell's docstring for which marker is newest here.
+    assert session._attention_run_after_settled_success is expected
+    dispose_task = asyncio.ensure_future(session.dispose())
+    while not (session._signal is not None and session._signal.aborted):
+        await asyncio.sleep(0.005)
+    release.set()
+    await asyncio.wait_for(dispose_task, timeout=10)
+    await asyncio.wait_for(asyncio.shield(task), timeout=10)

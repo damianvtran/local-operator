@@ -282,4 +282,22 @@ describe("SessionCard attention ladder", () => {
 		expect(marker.className).toContain("bg-transparent");
 		expect(slot(card).getAttribute("aria-hidden")).toBe("true");
 	});
+
+	it("keeps a blank on an empty second line so the card height cannot collapse", () => {
+		/* Round-1 design review D1: a row whose second line has NOTHING on it
+		   rendered 44.00px against its neighbours' 50.89px — a 6.89px density
+		   break for every card below it. The line now always carries at least
+		   one blank; the fix is structural (a blank's line box is whatever the
+		   reader's type scale makes it), not a magic min-height. */
+		sessionList = [
+			summary({ session_id: "e1", conversation_name: "Echo" }),
+			summary({ session_id: "b1", conversation_name: "Beta", cwd: "~" }),
+		];
+		render(<SessionListScreen />);
+		const echoLine = cardByName("Echo").children[1] as HTMLElement;
+		expect(echoLine.textContent).toBe("\u00a0");
+		/* A row with content is untouched: no phantom blank after it. */
+		const betaLine = cardByName("Beta").children[1] as HTMLElement;
+		expect(betaLine.textContent).toBe("~");
+	});
 });

@@ -540,6 +540,21 @@ async def run_print_mode(
     """
     renderer = PrintRenderer(stream_text=False, json_mode=json_mode)
     unsubscribe = renderer.attach(session)
+    # ONE-SHOT DECLARATION (v3, 2026-09-30): this function disposes the session
+    # itself (below), and its OWN arming of the departure pair lands
+    # ~100-160 ms after the last turn's ``finally`` — too late for an arrival
+    # queued on ``_turn_lock`` at the release, which was admitted 6-14 ms after
+    # the final completion and cut, cancelled, by the disposal (nine exec
+    # sessions on 0.64.8/0.64.9). The declaration lets the session arm the
+    # same latches inside the last turn's own ``finally`` (``Session._run_turn``,
+    # one host-hop earlier than this function's); the arming below stays as the
+    # belt. ``--loop``/goal runs
+    # (``continuation`` set) are excluded: their turns are the run's own work,
+    # not teardown leftovers.
+    if continuation is None:
+        declare = getattr(session, "declare_one_shot_exit", None)
+        if callable(declare):
+            declare()
     try:
         for message in messages:
             # A handler may REPORT a failed turn rather than raise, because the

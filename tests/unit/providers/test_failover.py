@@ -5676,6 +5676,9 @@ _AGGREGATOR_UPSTREAM_CUT_SHAPES = (
     "stream error: h2 protocol error",
     "Network connection lost",
     "JSON error injected into SSE stream",
+    # The gateway's idle timer killing a stalled upstream host — the F2 arm's
+    # recorded 504 wording, same class as the shapes above.
+    "Upstream idle timeout exceeded",
 )
 
 
@@ -5858,6 +5861,58 @@ def test_a_relayed_5xx_with_an_OPAQUE_upstream_body_is_resumable() -> None:
     # absence: the identical body under a 400 stays a request defect.
     refusal = _compat_stream_error({"error": {**opaque, "code": 400}})
     assert not is_aggregator_upstream_stream_failure(refusal, "openrouter")
+
+
+def test_the_recorded_idle_timeout_chunk_is_resumable() -> None:
+    """The F2 arm's wording, same class as the sentinel pass's 502.
+
+    OpenRouter answers an in-band 504 ``Upstream idle timeout exceeded`` when a
+    chosen upstream host stalls mid-generation — the control-repeat episode of
+    the F2 arm (``runs/a1796-c1-task_010-20260930-034755``) died holding a
+    partial answer because the walk had no marker for the words. The record
+    kept the RENDERED message ("provider timeout (HTTP 504): Upstream idle
+    timeout exceeded"), not the raw chunk, so this fixture reconstructs the
+    chunk the client composes for it and asserts through the real
+    ``_compat_stream_error``/predicate pair rather than on a hand-typed string.
+    """
+    from local_operator.providers.clients import _compat_stream_error
+
+    error = _compat_stream_error(
+        {"error": {"code": 504, "message": "Upstream idle timeout exceeded"}}
+    )
+
+    assert error.status == 504
+    assert error.kind == "timeout"
+    assert error.message == "Upstream idle timeout exceeded"
+    assert is_aggregator_upstream_stream_failure(error, "openrouter")
+    # The gates, on the same composed message: a direct provider has no
+    # sibling host to re-route to, and a 4xx is not a routing failure.
+    assert not is_aggregator_upstream_stream_failure(error, "openai")
+    refusal = _compat_stream_error(
+        {"error": {"code": 400, "message": "Upstream idle timeout exceeded"}}
+    )
+    assert not is_aggregator_upstream_stream_failure(refusal, "openrouter")
+
+
+async def test_an_idle_timeout_cut_continues_through_the_driver() -> None:
+    """The driver must MARK the recorded 504, not only classify it.
+
+    Same property ``test_an_opaquely_worded_relay_5xx_continues_through_the_driver``
+    pins for the envelope arm: the classification is inert unless the
+    forwarded-any raise marks the error, and only the driver can do that.
+    """
+    forwarded, error = await _drive_until_error(
+        lambda: ProviderError(504, "Upstream idle timeout exceeded", retryable=True),
+        deltas=2,
+        request=_request("openrouter", "qwen/qwen3.8-max-0902"),
+    )
+
+    assert len(forwarded) == 2, "the partial answer really was forwarded first"
+    assert error is not None
+    assert error.connectivity_loss, (
+        "the gateway's own words say its upstream host stalled mid-answer; the "
+        "loop must be allowed to continue the turn instead of ending the episode"
+    )
 
 
 async def test_an_opaquely_worded_relay_5xx_continues_through_the_driver() -> None:

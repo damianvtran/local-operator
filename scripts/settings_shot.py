@@ -58,6 +58,12 @@ rail capture's SURFACE documents after a caller sent a state name into THEME
     retired    scrolled to the retired section — the read-only bottom row the
                clamp now parks users on, whose footer must not advertise keys
                that cannot act on it
+    projects   the Projects section (the staleness window) scrolled into view.
+               Added with the wake-trigger slice: on the BEFORE side of that
+               pair the section does not exist, which is exactly the case
+               `_select_section` documents its header-lift for
+    wakes      the Wake triggers section (the master switch, the daily budget
+               and gap, and the source's own switch) scrolled into view
     top        TRAVELLED back to the first row by held `up`, which is the frame
                that shows whether the section header owning it is on screen
     fork       the Fork section's rows, scrolled into view
@@ -616,6 +622,14 @@ async def main() -> None:
             await pilot.pause()
             for _ in range(80):
                 view.action_move(-1)
+            await pilot.pause()
+            save_capture(app, out)
+        elif state in ("projects", "wakes"):
+            # A state per section the wake-trigger slice added: the pair's
+            # before side has no such section at all, so the frame is framed
+            # by the five rows themselves (see `_select_section`, which the
+            # subagents state already uses for the same reason).
+            _select_section(view, state)
             await pilot.pause()
             save_capture(app, out)
         elif state == "overview":

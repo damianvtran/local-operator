@@ -18,11 +18,17 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from local_operator.wakes.store import write_entry
-from local_operator.wakes.supervisor import fire_due_wakes, serve
+from local_operator.wakes.store import read_index, write_entry
+from local_operator.wakes.supervisor import (
+    _due_sessions,
+    _has_fireable_wakes,
+    fire_due_wakes,
+    serve,
+)
 
 NOW_MS = int(time.time() * 1000)
 
@@ -1683,3 +1689,205 @@ async def test_an_unwritable_ledger_does_not_claim_durability(
     assert "STILL OWED" not in caplog.text, caplog.text
     assert "lop wake status' reports it" not in caplog.text, caplog.text
     assert "cannot record the failed attempt" in caplog.text, caplog.text
+
+
+# --- Wake triggers: a pending record is owed work -------------------------------
+#
+# The layer's own IO, dedupe and bounds are pinned in ``test_triggers.py``; the
+# source's rule in ``test_trigger_project_staleness.py``. What these cells pin
+# is the SUPERVISOR half: a pending record enters the due set and the fireable
+# check exactly as a spooled turn does, and ``serve(once=True)`` runs one
+# trigger evaluation and engages what it wrote.
+
+
+def _trigger_root(tmp_path: Path, *, stale: bool = True) -> tuple[Path, str]:
+    """An isolated root: her state, her session, and one project row."""
+    root = tmp_path / "config"
+    session_id = "aida00000001"
+    session_dir = root / "sessions" / session_id
+    session_dir.mkdir(parents=True)
+    (session_dir / "transcript.jsonl").write_text("")
+    (session_dir / "attachment.json").write_text(
+        json.dumps({"team": "", "agent": "aida", "goal": ""})
+    )
+    (root / "aida").mkdir()
+    (root / "aida" / "state.json").write_text(
+        json.dumps({"schema_version": 1, "session_id": session_id})
+    )
+    stamp = time.time() - (6 * 3600 if stale else 60)
+    (root / "projects").mkdir()
+    (root / "projects" / "atlas.json").write_text(
+        json.dumps(
+            {
+                "id": "atlas",
+                "name": "atlas",
+                "status": "active",
+                "progress": "x",
+                "progress_updated_at": stamp,
+                "sessions": [],
+            }
+        )
+    )
+    return root, session_id
+
+
+def _pending_record(root: Path, session_id: str, *, next_attempt_ms: int = 0) -> dict[str, Any]:
+    from local_operator.wakes import triggers
+
+    record = {
+        "schema_version": 1,
+        "target": session_id,
+        "noted_at_ms": NOW_MS,
+        "updated_at_ms": NOW_MS,
+        "next_attempt_ms": next_attempt_ms,
+        "attempts": 0,
+        "instances": [
+            {
+                "source": "project_staleness",
+                "key": "atlas",
+                "fingerprint": ["atlas", "active", 1],
+                "age_s": 21600,
+                "payload": {
+                    "display_name": "atlas",
+                    "status": "active",
+                    "progress_age_s": 21600,
+                    "sessions": [],
+                },
+            }
+        ],
+    }
+    path = triggers.pending_path(root, session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record))
+    return record
+
+
+def test_due_sessions_includes_a_pending_trigger_target(tmp_path: Path) -> None:
+    root, session_id = _trigger_root(tmp_path)
+    record = _pending_record(root, session_id)
+
+    due = _due_sessions({}, NOW_MS, triggers={session_id: record})
+    assert due == [(session_id, os.path.expanduser("~"), NOW_MS)]
+
+    # The cwd prefers her own index entry when one exists.
+    write_entry(root, session_id, cwd=str(root), schedules=[_schedule(NOW_MS + 60_000)])
+    due = _due_sessions(read_index(root), NOW_MS, triggers={session_id: record})
+    assert due[0][1] == str(root)
+
+
+def test_due_sessions_honours_the_attempt_backoff_and_holds(tmp_path: Path) -> None:
+    root, session_id = _trigger_root(tmp_path)
+    backing_off = _pending_record(root, session_id, next_attempt_ms=NOW_MS + 60_000)
+    assert _due_sessions({}, NOW_MS, triggers={session_id: backing_off}) == []
+
+    # A held target (``/aida pause``) is skipped exactly as its schedules are.
+    held = _pending_record(root, session_id)
+    (root / "wakes").mkdir(exist_ok=True)
+    (root / "wakes" / f"{session_id}.json").write_text(
+        json.dumps({"schema": 1, "session_id": session_id, "held_at": NOW_MS, "schedules": []})
+    )
+    assert _due_sessions(read_index(root), NOW_MS, triggers={session_id: held}) == []
+
+
+def test_has_fireable_wakes_counts_a_pending_record(tmp_path: Path) -> None:
+    root, session_id = _trigger_root(tmp_path)
+    record = _pending_record(root, session_id)
+    assert _has_fireable_wakes({}, config_dir=root, triggers={session_id: record}) is True
+
+    (root / "wakes").mkdir(exist_ok=True)
+    (root / "wakes" / f"{session_id}.json").write_text(
+        json.dumps({"schema": 1, "session_id": session_id, "held_at": NOW_MS})
+    )
+    assert (
+        _has_fireable_wakes(read_index(root), config_dir=root, triggers={session_id: record})
+        is False
+    )
+
+
+def test_due_sessions_and_residency_skip_a_declined_target(tmp_path: Path, monkeypatch) -> None:
+    """A record that predates a decline is NOT owed work (review round 1, R1).
+
+    ``_due_sessions`` counted a pending record as due and ``_has_fireable_wakes``
+    as fireable regardless of ``aida.enabled``, a settings-surface pause, a
+    class flip, the env switch or the trigger master switch — the supervisor
+    stayed resident for a disabled assistant and re-engaged her every time she
+    was cold, up to the record's 72 h TTL. Both now ask ``triggers.declines``,
+    the one gate, through the published snapshot the supervisor can read.
+    """
+    root, session_id = _trigger_root(tmp_path)
+    record = _pending_record(root, session_id)
+
+    # Sanity: with no decline anywhere the record is due and fireable (the
+    # pre-gate behaviour these cells must not lose).
+    assert _due_sessions({}, NOW_MS, config_dir=root, triggers={session_id: record})
+    assert _has_fireable_wakes({}, config_dir=root, triggers={session_id: record}) is True
+
+    settings = root / "wakes" / "triggers" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    for key, value in (
+        ("aida.enabled", False),
+        ("aida.cadence.paused", True),
+        ("wakes.triggers.enabled", False),
+    ):
+        settings.write_text(json.dumps({"schema_version": 1, "values": {key: value}}))
+        assert _due_sessions({}, NOW_MS, config_dir=root, triggers={session_id: record}) == []
+        assert _has_fireable_wakes({}, config_dir=root, triggers={session_id: record}) is False
+
+    # The env kill switch gates the same two calls.
+    settings.unlink()
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_AIDA", "1")
+    assert _due_sessions({}, NOW_MS, config_dir=root, triggers={session_id: record}) == []
+    assert _has_fireable_wakes({}, config_dir=root, triggers={session_id: record}) is False
+    monkeypatch.delenv("LOCAL_OPERATOR_NO_AIDA")
+
+    # A class flip on a leftover record: same answer, fail-closed.
+    row = root / "agents" / "aid1"
+    row.mkdir(parents=True)
+    (row / "agent.yml").write_text("name: aida\ntags:\n- role\n- class:reactive\n")
+    assert _due_sessions({}, NOW_MS, config_dir=root, triggers={session_id: record}) == []
+    assert _has_fireable_wakes({}, config_dir=root, triggers={session_id: record}) is False
+    (row / "agent.yml").unlink()
+
+    # Callers with NO root keep the pre-gate behaviour (documented on the
+    # function): the gate cannot be asked without a directory, and the one
+    # production caller always passes one.
+    assert _due_sessions({}, NOW_MS, triggers={session_id: record})
+
+
+@pytest.mark.asyncio
+async def test_serve_once_evaluates_a_trigger_and_engages(
+    tmp_path: Path, engagements, no_live_runtimes, monkeypatch
+) -> None:
+    """The integration cell: a real supervisor pass, an isolated root.
+
+    ONE ``serve(once=True)`` runs the trigger evaluation inline, writes the
+    pending record, and engages the target the record names — with no second
+    daemon and no new firing path (the engagement is the ordinary one).
+    """
+    from local_operator.wakes import triggers
+
+    monkeypatch.delenv("LOCAL_OPERATOR_NO_AIDA", raising=False)
+    root, session_id = _trigger_root(tmp_path, stale=True)
+
+    assert await serve(root, once=True) == 0
+
+    assert [call["session_id"] for call in engagements] == [session_id]
+    record = triggers.read_pending_record(root, session_id)
+    assert record is not None
+    assert [i["key"] for i in record["instances"]] == ["atlas"]
+
+
+@pytest.mark.asyncio
+async def test_serve_once_is_silent_for_a_fresh_project(
+    tmp_path: Path, engagements, no_live_runtimes, monkeypatch
+) -> None:
+    """The quiet case, asserted on the FILE SET: fresh ⇒ no record, no engage."""
+    monkeypatch.delenv("LOCAL_OPERATOR_NO_AIDA", raising=False)
+    root, _session_id = _trigger_root(tmp_path, stale=False)
+    before = sorted(str(p.relative_to(root)) for p in root.rglob("*"))
+
+    assert await serve(root, once=True) == 0
+
+    assert engagements == []
+    assert not (root / "wakes" / "triggers").exists()
+    assert sorted(str(p.relative_to(root)) for p in root.rglob("*")) == before
