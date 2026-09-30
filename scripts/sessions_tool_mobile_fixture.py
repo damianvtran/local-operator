@@ -244,7 +244,7 @@ def _seed_stacked_neighbour(daemon: MobileDaemon) -> None:
                     TodoItem(
                         text="fold the docs pass", status="blocked", reason="waiting on review"
                     ),
-                    TodoItem(text="push the bump", status="completed"),
+                    TodoItem(text="push the bump", status="done"),
                 ],
             )
         ],
