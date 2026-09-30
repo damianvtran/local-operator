@@ -69,7 +69,7 @@ import time
 import uuid
 import zlib
 from collections import OrderedDict
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -436,6 +436,49 @@ class StoredCredential:
     identity_key: str | None = None
     created_at: int = 0
     updated_at: int = 0
+
+
+#: How much of an identity label a surface may show. Long enough for a real
+#: email or an org name, short enough that a pathological payload cannot push
+#: a row's layout around; the census has published this bound since its first
+#: release (``/v1/auth/status``'s ``identity_label``).
+IDENTITY_LIMIT = 256
+
+
+def credential_identity(credential: "StoredCredential | Mapping[str, Any]") -> str | None:
+    """The account label a credential carries, or ``None`` when it has none.
+
+    ONE derivation, because it had been spelled inline wherever a human needed
+    to tell two accounts apart -- the census's account list, the CLI's status
+    listing and its login receipt, and (this change) the provider view that
+    puts the label on a ``/logout`` row.
+
+    ``email -> account_id -> org_name``, each truncated to
+    :data:`IDENTITY_LIMIT`. The order is the one those call sites already used
+    and the one a person recognises: an email names an account where an opaque
+    id does not.
+
+    Deliberately NOT ``identity_key``: that column is the DEDUPE key (see
+    ``_identity_key_for``), and for an OAuth payload with no IdP identity it is
+    the synthetic constant ``oauth:<provider>`` -- a fact about storage, not a
+    fact about whose account this is.
+
+    Accepts a bare credential mapping as well as a row, because the login
+    receipt derives the label from the payload BEFORE the row exists (the
+    fresh grant is stamped and stored in the same breath). Duck-typed on
+    ``.data`` for a NON-``StoredCredential`` row shape (the tests' fakes, an
+    embedding front end's) rather than falling into the mapping branch and
+    raising ``AttributeError``.
+    """
+    if isinstance(credential, StoredCredential):
+        data: Mapping[str, Any] = credential.data
+    else:
+        data = getattr(credential, "data", credential)
+    for field in ("email", "account_id", "org_name"):
+        value = data.get(field)
+        if value:
+            return str(value)[:IDENTITY_LIMIT]
+    return None
 
 
 @dataclasses.dataclass(frozen=True)

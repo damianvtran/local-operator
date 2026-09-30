@@ -12,13 +12,13 @@ from pydantic import BaseModel, ConfigDict, SecretStr
 from local_operator.config import ConfigManager
 from local_operator.model.defaults import SuggestedModel, suggested_model_for
 from local_operator.providers import key_check
-from local_operator.providers.auth_store import AuthStore
+from local_operator.providers.auth_store import AuthStore, credential_identity
 from local_operator.providers.registry import (
     PROVIDER_REGISTRY,
     credential_provider_id,
     env_key_name,
     get_provider_definition,
-    resolve_env_key,
+    provider_brand,
 )
 from local_operator.server.dependencies import get_config_manager
 from local_operator.server.desktop import require_desktop
@@ -114,8 +114,26 @@ def _secret(body: SecretInput) -> str:
 async def providers(host: DesktopAuth = Depends(get_desktop_auth)):
     controller = host.controller()
     try:
+        # The registry VIEW, assembled once (``ProviderController.view_rows``),
+        # rather than derived per field here: `configured`, `has_credential`,
+        # `stored_credentials`, `state` and `identity` are one credential read,
+        # and the TUI's pickers render the same row -- so the census cannot
+        # answer "needs login" where `/login ` says "env key".
+        view = controller.view_rows()
+        if view is None:
+            # No degradation exists for this route: the census IS a credential
+            # read, so "cannot tell" has to be an error rather than an empty
+            # list that reads as "no credentials anywhere". 503 rather than the
+            # 500 this used to raise through the stack: a locked or missing
+            # store is an environment fact the client may retry, not a bug it
+            # should report.
+            raise HTTPException(
+                503,
+                "The credential store could not be read — the provider census needs it.",
+            )
         rows = []
-        for provider in PROVIDER_REGISTRY:
+        for view_row in view:
+            provider = view_row.definition
             storage_id = credential_provider_id(provider.id)
             if storage_id != provider.id or provider.wire == "mock":
                 continue
@@ -173,6 +191,24 @@ async def providers(host: DesktopAuth = Depends(get_desktop_auth)):
                 {
                     "id": provider.id,
                     "name": provider.name,
+                    # The clean title, server-owned: a client shows `brand`
+                    # beside the id without re-deriving it from `name` (the
+                    # parenthetical is a login-flavour qualifier, not a brand).
+                    "brand": provider_brand(provider),
+                    # The registry's WIRE fact, sorted for a stable wire (the
+                    # field is a frozenset, whose iteration order is not).
+                    "capabilities": sorted(provider.capabilities),
+                    # The MACHINE state of the TUI's three-plus-two states (see
+                    # `ProviderController.view_rows`): copy stays per-surface,
+                    # the fact does not.
+                    "state": view_row.state,
+                    # The stored account's label, when there is EXACTLY one
+                    # credential row; null for multi-account and for anything
+                    # unknown -- never invented from the dedupe key.
+                    "identity": view_row.identity,
+                    # Same count as `stored_credentials`, under the name the
+                    # account list reads.
+                    "account_count": view_row.account_count,
                     "auth_methods": methods,
                     "storage_id": storage_id,
                     "search_aliases": list(provider.search_aliases),
@@ -184,7 +220,7 @@ async def providers(host: DesktopAuth = Depends(get_desktop_auth)):
                     "paste_supported": provider.accepts_paste_prompt,
                     # Configured is not verified: this census never refreshes a
                     # grant or contacts a provider just because Settings opened.
-                    "configured": controller.is_usable(provider.id),
+                    "configured": view_row.usable,
                     # `configured` for a LOCAL provider means only "needs no
                     # credential", which is not "reachable" -- nothing here has
                     # contacted the server. Rendering the two as one fact put a
@@ -196,9 +232,8 @@ async def providers(host: DesktopAuth = Depends(get_desktop_auth)):
                     # OR the environment -- `stored_credentials` counts only the
                     # store, so an env-key provider reads as 0 while being fully
                     # usable, and grouping on that count alone would mislabel it.
-                    "has_credential": controller.has_any_credential(provider.id)
-                    or bool(resolve_env_key(storage_id)),
-                    "stored_credentials": len(host.store.list_credentials(storage_id)),
+                    "has_credential": view_row.has_credential,
+                    "stored_credentials": view_row.stored_credentials,
                     "base_url": provider.base_url,
                     # The model a first sign-in here will set as the default (API
                     # key spelling; each method carries its own), or null for a
@@ -221,13 +256,16 @@ async def account_status(host: DesktopAuth = Depends(get_desktop_auth)):
             continue
         # Select fields explicitly. StoredCredential.data contains full grants;
         # dataclass/asdict serialization here would turn status into a token API.
-        label = row.data.get("email") or row.data.get("account_id") or row.data.get("org_name")
+        #
+        # The label comes from the ONE derivation (``credential_identity``),
+        # shared with the CLI's listings and the provider view; the fallback is
+        # this route's own copy for a payload carrying no IdP identity at all.
         accounts.append(
             {
                 "id": row.id,
                 "provider": row.provider,
                 "type": row.credential_type,
-                "identity_label": str(label)[:256] if label else "Stored credential",
+                "identity_label": credential_identity(row) or "Stored credential",
                 "source": "oauth" if row.credential_type == "oauth" else "api_key",
                 "state": (
                     "refresh_due"
