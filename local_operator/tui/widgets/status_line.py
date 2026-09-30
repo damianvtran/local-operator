@@ -38,7 +38,11 @@ from rich.style import Style
 from rich.text import Text
 from textual.widgets import Static
 
-from local_operator.harness.jobs import model_fallback_badge
+from local_operator.harness.jobs import (
+    FALLBACK_MARKER,
+    is_model_fallback,
+    model_fallback_badge,
+)
 from local_operator.herdr.reporter import HerdrReporter, state_from_title
 from local_operator.model.naming import model_label as model_label_forms
 from local_operator.session.frontend_state import (
@@ -1796,23 +1800,35 @@ class StatusLine:
     def _shown_model_display(self, *, short: bool) -> str:
         """The model segment's text: the pin-fallback badge while off the pin.
 
-        The badge SHORT-CIRCUITS :func:`format_model_label` deliberately: its
-        text is TWO selectors joined by ``→ ⚠ fallback``, which the naming
-        resolver would parse as one provider and one runaway model id, and
-        any "resolved" name for that pair would be a fiction. The badge is
-        already the shortest honest spelling of the fact it carries (see
-        ``jobs.model_fallback_badge``); the effective label's own display name
-        remains the path for everything else, resolved exactly as before.
+        The badge short-circuits :func:`format_model_label` for the PAIR — its
+        text is two selectors joined by ``→``, which the naming resolver would
+        parse as one provider and one runaway model id. The effective half is
+        resolved INSIDE ``jobs.model_fallback_badge`` (the vocabulary every
+        sibling surface uses) and the requested half stays the pin selector;
+        see that function for why each.
+
+        ``short`` is the ``shorten-model`` rung, and for a badge it keeps a
+        SHED-SURVIVING marker instead of shrinking the pair: `⚠ <effective>`,
+        the effective half's compact form. The 64-cell pair is what made the
+        whole ladder unreachable below ~88 columns and evicted cwd and the
+        context reading the base row kept (design D1 / UX U2) — the pin is
+        recoverable from the notice and the parent, but "which model is
+        actually replying" is not, so that is the half the shed keeps.
         """
         model_label = self._shown_model_label()
         if not model_label:
             return ""
-        if self._subagent is not None:
-            badge = model_fallback_badge(
-                self._subagent.requested_model_label, self._subagent.model_label
-            )
-            if badge:
-                return badge
+        if self._subagent is not None and is_model_fallback(
+            self._subagent.requested_model_label, self._subagent.model_label
+        ):
+            if not short:
+                return model_fallback_badge(
+                    self._subagent.requested_model_label,
+                    self._subagent.model_label,
+                    effective_name=self._shown_model_name(),
+                )
+            shown = format_model_label(model_label, short=True, name=self._shown_model_name())
+            return f"{FALLBACK_MARKER} {shown}"
         return format_model_label(model_label, short=short, name=self._shown_model_name())
 
     def _shown_model_name(self) -> str:
@@ -2042,11 +2058,35 @@ class StatusLine:
             # attributed to nobody, which is worse than dropping the model
             # with it. The docstring on the wide path calls this segment
             # never-dropped; below 48 columns that was a claim and not a fact.
+            #
+            # A PINNED CHILD OFF ITS MODEL rides this rung as `⚠ <effective>`
+            # (design D1): this is the last width at which any model can paint
+            # under the child's name, and dropping the badge here is how the
+            # fallback state ended up LESS informative than the base row it
+            # replaced. The suffix is charged BEFORE the label is truncated —
+            # the same reservation the dock's marks use — so no width can eat
+            # the marker: the name yields cells first.
+            fallback_name = ""
+            if is_model_fallback(self._subagent.requested_model_label, self._subagent.model_label):
+                fallback_name = format_model_label(
+                    self._subagent.model_label, short=True, name=self._shown_model_name()
+                )
+            suffix = f" {FALLBACK_MARKER} {fallback_name}" if fallback_name else ""
             tail.append(f"{ICON_AGENTS} ", style=dim)
             tail.append(
-                truncate_cells(self._subagent.label, max(1, width - cell_len(tail.plain))),
+                truncate_cells(
+                    self._subagent.label,
+                    max(1, width - cell_len(tail.plain) - cell_len(suffix)),
+                ),
                 style=Style(color=theme_mod.semantic_color("label")),
             )
+            if fallback_name:
+                # D3, additive: the glyph carries the app's `warning` semantic
+                # while the words stay this band's foreground — exactly the
+                # park alarm's two-span treatment, and legible without colour.
+                tail.append(" ", style=dim)
+                tail.append(FALLBACK_MARKER, style=Style(color=theme_mod.semantic_color("warning")))
+                tail.append(f" {fallback_name}", style=Style(color=theme_mod.semantic_color("fg")))
             tail.truncate(width, overflow="ellipsis")
             return tail
         model_label = self._shown_model_label()
@@ -2236,17 +2276,27 @@ class StatusLine:
         # (icon, value, value style, icon style) — the icon style is None for
         # every segment whose glyph is pure framing, and set only where the
         # glyph itself is the signal.
-        parts: list[tuple[str, str, Style, Style | None]] = []
+        parts: list[tuple[str, str | Text, Style, Style | None]] = []
         model_text = self._shown_model_display(short="model" in short)
         if model_text and "model" not in dropped:
-            parts.append(
-                (
-                    ICON_MODEL,
-                    model_text,
-                    Style(color=theme_mod.semantic_color("fg")),
-                    None,
+            fg_model = Style(color=theme_mod.semantic_color("fg"))
+            if FALLBACK_MARKER in model_text:
+                # D3: the marker carries the app's `warning` semantic as an
+                # ADDITIVE cue — the badge's text cues (`→`, `⚠`, `fallback`)
+                # stay exactly as legible without colour, so this is emphasis
+                # and never load-bearing, which is the only way a colour cue
+                # may ride here. One span cannot carry two inks, so the
+                # segment is built as a Text (the one part that needs it).
+                segment = Text()
+                head, _, rest = model_text.partition(FALLBACK_MARKER)
+                segment.append(head, style=fg_model)
+                segment.append(
+                    FALLBACK_MARKER, style=Style(color=theme_mod.semantic_color("warning"))
                 )
-            )
+                segment.append(rest, style=fg_model)
+                parts.append((ICON_MODEL, segment, fg_model, None))
+            else:
+                parts.append((ICON_MODEL, model_text, fg_model, None))
         effort = self._shown_effort()
         if effort and "effort" not in dropped:
             parts.append(
@@ -2366,7 +2416,13 @@ class StatusLine:
             if index:
                 left.append(f" {_SEP_LEFT} ", style=seam)
             left.append(f"{icon} ", style=icon_style or dim)
-            left.append(text, style=style)
+            if isinstance(text, Text):
+                # The model segment while a fallback badge rides it: already
+                # composed span by span (the `⚠` takes the warning ink), so it
+                # is appended whole rather than flattened to one style.
+                left.append_text(text)
+            else:
+                left.append(text, style=style)
         # `getattr`, not `self._starting`: `_render` is called UNBOUND against
         # lightweight stub bands in the fork tests (`StatusLine._render(band,
         # 120)`), which carry only the fields their case is about. Reading a

@@ -16,7 +16,11 @@ ink law — that overturn (see `tool_card.py`) was deliberately bounded to the
 TOOL LEDGER; `status_glyph` keeps this panel's ✓ dim on completion, the same
 as ✗ and every other settled state, because a subagent's own transcript
 already carries the colour and this row is a job-manager summary, not the
-ledger.
+ledger. The dock's ONE other colour site is the pin-fallback marker — a `⚠`
+in the app's `warning` ink beside the label of a child a fallback took off
+its pinned model (see ``_label_marks`` / ``compose_row``): a substitution is
+the failure this roster exists to make scannable, and the glyph carries the
+fact where colour cannot.
 """
 
 from __future__ import annotations
@@ -36,6 +40,7 @@ from textual.containers import Container, VerticalScroll
 from textual.widgets import Static
 
 from local_operator.ansi import strip_control_sequences
+from local_operator.harness.jobs import FALLBACK_MARKER, is_model_fallback
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import BLURRED_SPINNER_INTERVAL_S, animation_focused
 from local_operator.tui.costs import job_cost
@@ -690,6 +695,15 @@ class RowFacts:
     #: facts it is given; ``0`` means "no mark", and that is also what an
     #: unknown count means.
     child_count: int = 0
+    #: True while this child is off the pin its launch resolved
+    #: (``requested_model_label != model_label``) — the SAME divergence rule
+    #: the band's badge renders from (``jobs.is_model_fallback``), so the dock
+    #: and the band cannot disagree about whether a substitution happened,
+    #: and a row restored from the roster snapshot carries it without needing
+    #: the runtime-only flag. Drives the ``⚠`` on the label; see
+    #: :func:`_label_marks` for where it is charged and
+    #: :func:`compose_row` for its ink.
+    model_fallback: bool = False
 
 
 def row_facts(
@@ -752,6 +766,12 @@ def _read_row(
     queued = bool(getattr(job, "queued", False))
     running = status == "running" and not queued
     cut_off = bool(getattr(job, "cut_off_cause", ""))
+    # The pin-integrity marker's fact, read here beside the rest so a duck
+    # host that predates the fields degrades to "no marker" through the same
+    # ``getattr`` defaults as everything else.
+    model_fallback = is_model_fallback(
+        getattr(job, "requested_model_label", ""), getattr(job, "model_label", "")
+    )
     details = getattr(job, "latest_details", None)
     if not isinstance(details, Mapping):
         details = {}
@@ -867,6 +887,7 @@ def _read_row(
         current=current,
         agent_role=agent_role,
         child_count=child_count,
+        model_fallback=model_fallback,
     )
 
 
@@ -1081,6 +1102,26 @@ def _role_cells(rung: int, role: str, role_column: int) -> int:
     return len(STATS_SEAM) + width if width else 0
 
 
+def _label_marks(facts: RowFacts) -> str:
+    """The RESERVED tail of a label: the children mark and/or the fallback
+    marker, in paint order (`` ⊞N`` first, then `` ⚠``), each a one-cell glyph
+    with no wide characters, so ``len`` and ``cell_len`` agree on it.
+
+    ONE builder for the reservation (:func:`_lay_out`) and the painter
+    (:func:`compose_row`): the cells the label budget withholds and the cells
+    the row draws must not be able to drift apart, and both marks follow the
+    same contract — charged to the budget BEFORE the name is, so the name
+    yields and the mark survives (which is why the children mark was never a
+    column; see its note in ``_lay_out``).
+    """
+    marks = ""
+    if facts.child_count > 0:
+        marks += f" {CHILDREN_MARKER}{facts.child_count}"
+    if facts.model_fallback:
+        marks += f" {FALLBACK_MARKER}"
+    return marks
+
+
 def _lay_out(
     facts: RowFacts,
     stats: JobStats,
@@ -1156,9 +1197,16 @@ def _lay_out(
     # name keeps 9 of the floor's 12 cells and no marked row is wider than an
     # unmarked one.
     budget = budget if budget is not None else max(LABEL_FLOOR, width // 3)
-    if facts.child_count > 0:
-        mark = f" {CHILDREN_MARKER}{facts.child_count}"
-        label = truncate_cells(facts.label, budget - cell_len(mark)) + mark
+    # The pin-integrity marker (design D2 / UX U1) rides the SAME reservation
+    # the lineage mark does, and for its reason: the LABEL is the field this
+    # panel keeps down every rung — the role column is already shed at 80x24 —
+    # so the `⚠` is charged out of the label budget before the name is, and no
+    # width can truncate it away while a label still paints. Unlike the
+    # lineage mark it must never be spent on a hidden state: the two marks
+    # coexist (``name ⊞2 ⚠``) and both survive the floor.
+    marks = _label_marks(facts)
+    if marks:
+        label = truncate_cells(facts.label, budget - cell_len(marks)) + marks
     else:
         label = truncate_cells(facts.label, budget)
     head = (
@@ -1311,16 +1359,15 @@ def compose_row(
     number is which; here a percentage, a dollar sign and a duration each name
     themselves, and two icons would cost four of the cells this row is
     fighting over. Nor do they take the band's ``signal``/``warning`` inks:
-    this panel's ink law spends colour on failure and on nothing else (see the
-    module docstring), and N rows of warning-coloured money in the dock would
-    be N false alarms.
+    this panel's ink law spends colour on failure and on nothing else (the
+    pin-fallback `⚠` is the second and last site; see the module docstring),
+    and N rows of warning-coloured money in the dock would be N false alarms.
 
     They are ``muted`` and not ``dim``, which is a separate decision from the
     colour one and was got wrong first time round: measured against this
     panel's ground, ``dim`` is 4.18:1 — under WCAG AA — and it was carrying
     every number this surface exists to add, while the label the reader
     already knows sat at 13.76:1. ``muted`` is 7.93:1 and spends no colour.
-
     ``column`` pads the label to the panel's shared width; zero means "lay
     this row out alone", which is what a test measuring one row wants.
     """
@@ -1349,7 +1396,19 @@ def compose_row(
 
     row = Text(no_wrap=True, overflow="ellipsis")
     row.append("• ", style=dim)
-    row.append(label, style=fg)
+    # The reserved marks (_label_marks) are painted by KIND rather than as one
+    # run: the lineage mark is a fact about the name (`review-301-r2 ⊞3`) and
+    # keeps the label's ink, while the fallback marker is an alarm and takes
+    # the panel's warning ink with its glyph. The `⚠` itself is the cue that
+    # survives a colourless terminal, so nothing here is legible ONLY by
+    # colour — the ink is additive, exactly as design D2 asked.
+    marks = _label_marks(facts)
+    row.append(label[: len(label) - len(marks)] if marks else label, style=fg)
+    if facts.child_count > 0:
+        row.append(f" {CHILDREN_MARKER}{facts.child_count}", style=fg)
+    if facts.model_fallback:
+        row.append(" ", style=dim)
+        row.append(FALLBACK_MARKER, style=Style(color=theme_mod.semantic_color("warning")))
     row.append(" " * max(0, column - cell_len(label)), style=dim)
     row.append("  ", style=dim)
     if facts.current:

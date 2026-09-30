@@ -81,6 +81,7 @@ from local_operator.harness.jobs import (
     JOB_RESULT_MESSAGE_TYPE,
     AsyncJob,
     AsyncJobManager,
+    is_model_fallback,
 )
 from local_operator.harness.loop import AgentLoop, LoopContext, _materialize_asides
 
@@ -13427,10 +13428,30 @@ class Session:
         summary = (text or "").strip()
         if len(summary) > 2000:
             summary = summary[:2000] + "…[truncated; full result via jobs/wait]"
+        # THE PIN CLAUSE (UX round 1, U1). The durable row the walk-away
+        # operator reads back is this completion delivery: the transcript
+        # notice is a LIVE row no replay carries, and the roster row tells a
+        # completed pinned-fallback child from a never-pinned one only via the
+        # dock marker. A result whose pin was quietly abandoned says so HERE.
+        # Selectors, not display names: this text is handed to the MODEL as
+        # well as shown, and the ``wait``/``jobs`` receipt beside it speaks
+        # the same spelling (``model=X (pinned Y)``). The clause keys on the
+        # same divergence rule every other surface uses (``is_model_fallback``)
+        # so a recovered child (labels back in agreement) stays silent, and
+        # the RUNTIME-only reason rides along when the live row still carries
+        # one — after a restart it is gone and the labels still answer (see
+        # ``AsyncJob.model_fallback_reason``).
+        requested = str(getattr(job, "requested_model_label", "") or "").strip()
+        effective = str(getattr(job, "model_label", "") or "").strip()
+        pin_clause = ""
+        if is_model_fallback(requested, effective):
+            reason = str(getattr(job, "model_fallback_reason", "") or "").strip()
+            cause = f" — {reason}" if reason else ""
+            pin_clause = f" (pinned {requested}, ran on {effective}{cause})"
         delivery = (
-            f"background job '{label}' {status}:\n{summary}"
+            f"background job '{label}' {status}{pin_clause}:\n{summary}"
             if summary
-            else f"background job '{label}' {status}."
+            else f"background job '{label}' {status}{pin_clause}."
         )
         details: dict[str, Any] = {"job_id": job_id, "text": delivery}
         if held:

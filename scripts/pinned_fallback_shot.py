@@ -288,7 +288,16 @@ async def main(out: str, size: tuple[int, int], *, notice: bool, dock: bool) -> 
         save_capture(app, out)
 
         band = app.query_one("#band")
-        width = int(app.size.width)
+        # THE BAND'S OWN WIDTH, not the grid's (UX round 1, U4). The ladder
+        # decides "does the badge fit" against the width ``StatusLine.refresh``
+        # hands ``_render`` — ``#status-band``'s size — and the grid is 5 cells
+        # wider at every size measured here, so a grid-width reading logged the
+        # badge as present at widths whose painted frame showed it absent
+        # (over-reported by 5 cells at 88x40). The honest number is the width
+        # the band is actually asked to paint at; `grid` still rides the log
+        # so the delta between the two is visible.
+        status_band_widget = app.query_one("#status-band")
+        width = int(status_band_widget.size.width)
         band_text = app._status.render_text(width).plain if app._status is not None else ""
         screen = app.screen
         mode = "notice" if notice else ("dock" if dock else "page")
@@ -298,6 +307,7 @@ async def main(out: str, size: tuple[int, int], *, notice: bool, dock: bool) -> 
                     "tree": local_operator.__file__,
                     "mode": mode,
                     "grid": [int(app.size.width), int(app.size.height)],
+                    "band_width": width,
                     "band_region": list(band.region),
                     "band_text": band_text,
                     "band_cells": len(band_text),
