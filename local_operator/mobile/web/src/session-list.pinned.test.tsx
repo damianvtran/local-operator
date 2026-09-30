@@ -91,6 +91,18 @@ function longPress(card: HTMLElement) {
 		vi.advanceTimersByTime(600);
 	});
 	vi.useRealTimers();
+	/* Then the browser's own tail, faithfully: the finger LIFTS — the sheet
+	   opened on the hold and stays open, the release is not a click — and the
+	   platform follows the release with a synthetic click at the lift point,
+	   which hit-tests to the sheet's scrim and is swallowed by the sheet's
+	   release-click guard (U1). BOTH halves matter to this harness: the lift
+	   ends the list's frame hold (rows freeze only while a pointer is down),
+	   and the swallowed click consumes the guard's arming — a helper that
+	   stopped at the lift left the guard armed and ATE the test's own next
+	   action click (measured: `applySessionPin` never called in
+	   "opens the pin action sheet on a long-press"). */
+	fireEvent.pointerUp(card);
+	fireEvent.click(screen.queryByRole("button", { name: "close" }) ?? card);
 }
 
 /* The same, but the finger travels before the hold elapses — a scroll. */
@@ -102,6 +114,8 @@ function scrollDuringPress(card: HTMLElement) {
 		vi.advanceTimersByTime(600);
 	});
 	vi.useRealTimers();
+	/* The lift; a scroll synthesises no click. It ends the frame hold. */
+	fireEvent.pointerUp(card);
 }
 
 afterEach(() => {
@@ -442,7 +456,10 @@ describe("a pin press reorders nothing until the daemon confirms (Q13/Q14/Q15/D1
 	/* One list frame, exactly as the daemon writes it. Awaited `act`, because the
 	   store hands the frame to React from outside React's own event handling and a
 	   synchronous `act` scope does not flush that update before the next assertion
-	   (measured: the DOM still showed the previous frame's ★ after the push). */
+	   (measured: the DOM still showed the previous frame's ★ after the push). And
+	   then `settled()`: the SCREEN hands the store's frame to its rows on the next
+	   animation frame (the hand-off in `usePaintedRows`), so the DOM a frame
+	   describes is exactly one flush further away. */
 	async function pushFrame(sessions: SessionSummary[]) {
 		await act(async () => {
 			for (const source of opened) {
@@ -451,6 +468,7 @@ describe("a pin press reorders nothing until the daemon confirms (Q13/Q14/Q15/D1
 				}
 			}
 		});
+		await settled();
 	}
 
 	function mainScroller(): HTMLElement {
@@ -811,12 +829,13 @@ describe("a refused pin says why, in the sheet that asked (design round 11, D25)
 		await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 
 		/* The daemon's confirming frame is the only thing that moves a row, and
-		   the mocked hook reads the list live, so re-rendering is that frame. */
+		   the mocked hook reads the list live, so re-rendering is that frame —
+		   handed to the rows on the next animation frame, hence the wait. */
 		sessionList = [
 			summary({ session_id: "a1", conversation_name: "Alpha", pinned: true }),
 		];
 		view.rerender(<SessionListScreen />);
-		expect(screen.getByText("★ Pinned")).toBeTruthy();
+		await waitFor(() => expect(screen.getByText("★ Pinned")).toBeTruthy());
 		expect(cardByName("Alpha").querySelector("[aria-label=\"pinned\"]")).toBeTruthy();
 	});
 });
