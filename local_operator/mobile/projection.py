@@ -37,7 +37,7 @@ from local_operator.harness.comms import extract_parent_message
 # ``job_result`` is declared beside the job manager that writes it, not with the
 # harness markers above — imported from its own home so this fold cannot drift
 # from the type the writer stamps on the row.
-from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE
+from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE, model_fallback_badge
 from local_operator.harness.message_types import (
     HUB_MESSAGE_TYPE,
     PEER_MESSAGE_MESSAGE_TYPE,
@@ -2640,7 +2640,22 @@ class ProjectionFold:
                 if peer.job_id != node.job_id
             ]
             row.agent = str(getattr(job, "agent_role", None) or node.agent_role or "task")
-            row.model_label = str(getattr(job, "model_label", None) or "")
+            # The BADGE, not the bare label, while the child is off its pin: the
+            # wire carries the same string the TUI band paints (see
+            # ``jobs.model_fallback_badge``), so a client rendering a child's
+            # model shows the substitution without re-deriving the rule — and a
+            # restored row, which has no runtime flag, still shows it from the
+            # two labels. "" (no pin recorded) leaves the effective label.
+            requested = str(getattr(job, "requested_model_label", "") or "")
+            effective = str(getattr(job, "model_label", None) or "")
+            badge = model_fallback_badge(requested, effective)
+            row.model_label = badge or effective
+            # The marker's boolean, derived from the SAME comparison as the
+            # badge string — a client that wants "is this child off its pin"
+            # (e.g. the phone roster row's inline marker) must not have to
+            # parse the badge's prose back out of ``model_label``, and the
+            # two can never disagree because one is the other's emptiness.
+            row.model_fallback = bool(badge)
             if lifecycle is not None:
                 # SubagentComms owns the merge between the live manager row and
                 # its durable record. Consuming that resolved view here prevents

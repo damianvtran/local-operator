@@ -155,6 +155,13 @@ export interface SubagentRow {
 	 * that number (design round 3, D8). Withholding is now expressible. */
 	elapsed_s: number | null;
 	model_label: string;
+	/** True while the child is off the pin its launch resolved: the projection
+	 * composes `model_label` into the `A → B ⚠ fallback` badge on the SAME
+	 * comparison (see `projection.py`), and the roster row paints its fallback
+	 * line from THIS rather than parsing the badge back out of the string.
+	 * Optional because a payload from a runtime that predates the field must
+	 * read as "no substitution" — the historical behaviour — rather than fail. */
+	model_fallback?: boolean;
 	/** Settled outcome, one line. */
 	result_text: string;
 	error_text: string;

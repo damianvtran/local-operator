@@ -21567,7 +21567,20 @@ def _job_summary(job: Any, context: ToolContext | None = None) -> tuple[str, dic
     text = f"job {job.id} ({job.label}) [{job.status}]"
     model_label = str(getattr(job, "model_label", "") or "").strip()
     if getattr(job, "type", None) == "task" and model_label:
-        text += f" model={model_label}"
+        requested = str(getattr(job, "requested_model_label", "") or "").strip()
+        if requested and requested != model_label:
+            # Pin integrity: a child pinned to one model and now serving on
+            # another says BOTH, so the launcher cannot read the effective
+            # label as the pin it asked for. Divergence is the test rather
+            # than the runtime-only ``model_fallback`` flag for the same
+            # reason the TUI badge uses it (``jobs.model_fallback_badge``):
+            # a row restored from the roster snapshot has labels but no flag,
+            # and "was this the model the launch asked for" must stay
+            # answerable — the two surfaces must not disagree about whether a
+            # substitution happened.
+            text += f" model={model_label} (pinned {requested})"
+        else:
+            text += f" model={model_label}"
     if job.status == "completed" and job.result_text:
         text += f"\n{job.result_text}"
     if job.status == "failed" and job.error_text:
