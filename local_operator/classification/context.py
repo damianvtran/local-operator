@@ -40,6 +40,15 @@ the compact form httpx puts on the wire. That direction is deliberate: the
 budget is a cap, so measuring with the more pessimistic serializer can only
 make us send less, never more.
 
+THE PER-KIND CAP, AFTER THE ROSTER AND BEFORE THE LADDER
+========================================================
+
+The roster is bounded TWICE. ``DEFAULT_MAX_CANDIDATES`` keeps the most relevant
+rows per kind first, and which rows those are is a scoring decision — not a
+truncation — so it lives in ``shortlist`` below, with its own WHY sections
+(plural-folded word overlap plus a name bonus). The ladder in this docstring is
+the second bound: it shapes the state those survivors land in.
+
 A kind with no candidates is omitted from the mapping rather than sent as an
 empty list: the ladder drops kinds entirely at rung 3, and keeping the key with
 ``[]`` would pay tokens to say nothing.
@@ -249,6 +258,29 @@ def _tokens(text: str) -> set[str]:
 _WORD_RE = re.compile(r"[a-z0-9]+")
 
 
+def _stem(token: str) -> str:
+    """A trailing plural ``s`` off a token long enough for it to be a suffix.
+
+    WHY ONLY THIS, AND WHY BOTH SIDES: this scorer's contract is deterministic
+    and hand-checkable, and the misses ground truth found (2026-09-30) are
+    singular/plural splits — "restart a peer session" against a guide NAMED
+    "sessions", "skill" against a blurb that says "skills", "credential"
+    against "credentials" (see ``shortlist``). A real stemming library would add
+    a dependency and conflations a reviewer cannot recompute; one strip at
+    length ≥ 4 fixes the plural class alone, which is the class the catalogue
+    actually loses on. The length floor keeps three-letter words whose final
+    ``s`` is part of the word ("its", "was") out of it, and stripping BOTH sides
+    is what lets a word ending in ``s`` still match itself ("harness" ↔
+    "harness").
+    """
+    return token[:-1] if len(token) >= 4 and token.endswith("s") else token
+
+
+def _stems(text: str) -> set[str]:
+    """``_tokens``, plural-folded — the word sets a score is computed over."""
+    return {_stem(token) for token in _tokens(text)}
+
+
 def shortlist(
     candidates: Sequence[CandidateT],
     query: str,
@@ -275,12 +307,29 @@ def shortlist(
       (§5a rule 1); a second embedding request per message is not affordable, and
       the embedder's own selection is a different question (it picks what the
       PROMPT should carry, this picks what the classifier should judge).
-    * **Deterministic and inspectable.** A Jaccard overlap over lowercase word
-      sets, plus a literal-name bonus, answers "is this resource's text about what
+    * **Deterministic and inspectable.** A Jaccard overlap over plural-folded
+      lowercase word sets, plus a name bonus (raw substring, or a name token
+      that folds to a query token), answers "is this resource's text about what
       the user just asked?" with numbers a reviewer can recompute by hand.
     * **Cheap at catalogue scale.** Word sets are built once per (roster, query);
       hundreds of candidates cost well under a millisecond of set arithmetic,
       against a 50 ms turn budget.
+
+    WHY PLURALS ARE FOLDED, AND WHY NOTHING MORE
+    --------------------------------------------
+    Ground-truth traces (2026-09-30) caught two rows whose ONLY signal was a
+    singular/plural split — "restart a peer session" against the guide named
+    "sessions" (no substring, and a description whose every word missed), and
+    "how do I install a skill in this harness?" against "extensions", whose
+    blurb says "skills" — so both sides fold a trailing "s" off tokens of
+    length ≥ 4 before computing the overlap and the name-token check
+    (``_stem``). Only that: it is the miss class the catalogue actually loses
+    on, it needs no dependency, every number stays recomputable by hand, and
+    the fold is a pure function of the text, so cache-key stability is kept.
+    The raw-substring half of the name bonus is deliberately unchanged —
+    tightening it to word boundaries is a separate decision with its own
+    evidence ("agents" matching inside "subagents" is what keeps the agents
+    guide on today's row 5).
 
     The order of the RETURNED rows is the caller's (discovery) order, not the
     score order — the state's line order and the question's option order are part
@@ -315,7 +364,7 @@ def shortlist(
             return cast(tuple[CandidateT, ...], candidates)
         return tuple(candidates)
 
-    query_tokens = _tokens(query)
+    query_stems = _stems(query)
     lowered_query = query.lower()
     keep: list[int] = []
     for rows in per_kind.values():
@@ -325,13 +374,20 @@ def shortlist(
         scored: list[tuple[float, int]] = []
         for position, roster_index in enumerate(rows):
             item = candidates[roster_index]
-            line_tokens = _tokens(candidate_line(item))
-            union = query_tokens | line_tokens
-            overlap = len(query_tokens & line_tokens) / len(union) if union else 0.0
+            line_stems = _stems(candidate_line(item))
+            union = query_stems | line_stems
+            overlap = len(query_stems & line_stems) / len(union) if union else 0.0
             # A resource whose NAME the user typed is the strongest signal this
             # scorer has, and Jaccard alone can bury it under a long shared
             # description ("deploy the service" against a deploy skill's blurb).
+            # "Typed" has two spellings: the raw substring as before, or a name
+            # TOKEN that folds to a query token — "restart a peer session"
+            # reaches "sessions" only through the second (no substring, no
+            # description overlap), and "minerva-credentials" reaches
+            # "credential" the same way.
             named = 1.0 if item.name and item.name.lower() in lowered_query else 0.0
+            if item.name and _stems(item.name) & query_stems:
+                named = 1.0
             scored.append((overlap + named, position))
         # Highest score first, discovery order as the tie-break, then the survivors
         # go back in the caller's order — this decides WHICH rows travel, not how
