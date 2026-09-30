@@ -10235,7 +10235,8 @@
           "language_code": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "pattern": "^[a-z]{2}$"
               },
               {
                 "type": "null"
@@ -20498,7 +20499,8 @@
           "language_code": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "pattern": "^[a-z]{2}$"
               },
               {
                 "type": "null"

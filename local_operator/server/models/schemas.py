@@ -1021,14 +1021,25 @@ class ExecutionVariablesResponse(BaseModel):
 
 #: ISO 639-1 codes are exactly two lowercase ASCII letters; the hub validates
 #: the same shape (``omitempty,len=2,lowercase``), so this is what keeps a code
-#: the daemon accepts from being one the hub refuses downstream.
+#: the daemon accepts from being one the hub refuses downstream. The same shape
+#: rides on the field itself as a JSON-schema ``pattern`` so a client generated
+#: from the OpenAPI snapshot learns the constraint too (QA round 2, NIT 1).
 _ISO_639_1_CODE = re.compile(r"\A[a-z]{2}\Z")
 
 
-def _validate_language_code(value: Optional[str]) -> Optional[str]:
-    """Validate an optional ISO 639-1 language code (two lowercase letters)."""
-    if value is None:
-        return None
+def _validate_language_code(value: Any) -> Any:
+    """Validate an optional ISO 639-1 language code (two lowercase letters).
+
+    Runs as a ``mode="before"`` field validator so the designed sentence below
+    answers an invalid value before the field's schema-level pattern can reply
+    with pydantic's generic "String should match pattern ..." -- without the
+    ordering, the clear message the constraint exists for is lost.
+    """
+    if value is None or not isinstance(value, str):
+        # None and non-strings are the core schema's questions; returning them
+        # unchanged keeps its standard answers (the Optional null branch,
+        # "Input should be a valid string") rather than pre-empting them.
+        return value
     if not _ISO_639_1_CODE.match(value):
         raise ValueError(
             'language_code must be a two-letter ISO 639-1 code in lowercase (e.g. "en").'
@@ -1065,15 +1076,16 @@ class SpeechRequest(BaseModel):
     )
     language_code: Optional[str] = Field(
         None,
+        pattern=r"^[a-z]{2}$",
         description=(
             'Optional ISO 639-1 language code (e.g. "es") for the speech synthesis. '
             "Omitted when unset so the provider can auto-detect."
         ),
     )
 
-    @field_validator("language_code")
+    @field_validator("language_code", mode="before")
     @classmethod
-    def _check_language_code(cls, value: Optional[str]) -> Optional[str]:
+    def _check_language_code(cls, value: Any) -> Any:
         return _validate_language_code(value)
 
 
@@ -1092,15 +1104,16 @@ class AgentSpeechRequest(BaseModel):
     )
     language_code: Optional[str] = Field(
         None,
+        pattern=r"^[a-z]{2}$",
         description=(
             'Optional ISO 639-1 language code (e.g. "es") for the speech synthesis. '
             "Omitted when unset so the provider can auto-detect."
         ),
     )
 
-    @field_validator("language_code")
+    @field_validator("language_code", mode="before")
     @classmethod
-    def _check_language_code(cls, value: Optional[str]) -> Optional[str]:
+    def _check_language_code(cls, value: Any) -> Any:
         return _validate_language_code(value)
 
 
