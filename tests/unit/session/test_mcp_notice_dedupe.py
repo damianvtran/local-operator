@@ -7,9 +7,12 @@ that re-attempted a dead server appended the card again — 96 identical
 four-card cluster inside seven minutes (the operator's "four identical cards
 stacked", 2026-09-30). The rule (``session/notice_guard.py`` plus
 ``Session.journal_mcp_unavailable``): suppress an identical card while it is
-outstanding — the in-process guard, else a durable transcript scan for a fresh
-boot — and re-emit only on a changed card, on a re-failure after a LIVE
-recovery, or after the 24 h staleness reminder.
+outstanding in the replay — the in-process guard, else a durable transcript
+scan for a fresh boot — and re-emit on a changed card, on a re-failure after
+a LIVE recovery, or after the 24 h staleness reminder. Both halves are
+bounded at the latest compaction cut, so a card no surface still shows
+re-arms the next identical failure rather than suppressing it silently
+(review round 1, M1).
 
 The session-level tests drive the REAL sink the MCP manager is wired to
 (``Session._on_mcp_incident`` / ``_on_mcp_recovery``) over real session
@@ -32,6 +35,7 @@ from local_operator.harness.message_types import (
 )
 from local_operator.harness.types import (
     ChatRequest,
+    Message,
     ModelSpec,
     StreamEndEvent,
     StreamEvent,
@@ -143,6 +147,45 @@ def _backdate_unavailable_row(session_dir: Path, *, by: float) -> None:
     )
 
 
+def _model_warnings(replayed: list[Any]) -> list[Any]:
+    """The model-visible ``[session warning]`` injections in a replay."""
+    rendered = _default_convert_to_llm(replayed)
+    return [
+        message
+        for message in rendered
+        if "[session warning]"
+        in " ".join(getattr(part, "text", "") for part in getattr(message, "content", []) or [])
+    ]
+
+
+async def _tui_warnings(replayed: list[Any]) -> list[Any]:
+    """The TUI fold of ``replayed``: one real-app boot, no manual fold.
+
+    The real ``OperatorApp`` (production stylesheet) over a ``FakeSession``
+    carrying the replay, read back as the painted warning blocks — the
+    surface the operator sees rather than a fold helper's output. Filtered
+    to the ``[session warning]`` card by TEXT: compaction markers are also
+    ``NoticeBlock`` subclasses, and this helper must count the warning, not
+    the fold's bookkeeping.
+    """
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    shell = FakeSession()
+    shell._history = list(replayed)
+    app = OperatorApp(lambda: _factory(shell))
+    async with app.run_test(size=(100, 30)) as pilot:
+        # No manual fold: the app's own boot replays `session.history()`.
+        await pilot.pause()
+        return [
+            block
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock)
+            and str(getattr(block, "_text", "")).startswith("[session warning]")
+        ]
+
+
 class TestNoticeGuard:
     """The guard's own algebra, without a Session."""
 
@@ -229,6 +272,65 @@ class TestNoticeGuard:
         guard.note_recovered("a")
         assert guard.should_emit("a", card, now=1.0) is True
         assert guard.should_emit("b", card, now=1.0) is False
+
+    def test_a_void_record_is_dropped_and_a_shown_one_still_suppresses(self) -> None:
+        """``record_visible`` re-validates the live record (review round 1, M1).
+
+        A caller whose store can RETIRE an emission it once showed (the MCP
+        replay drops rows below a compaction cut) must be able to void the
+        record — otherwise the guard keeps suppressing a card no surface
+        shows. A record the caller still shows keeps its suppression, and the
+        callback is not consulted at all for a changed card.
+        """
+        guard = NoticeGuard(remind_after_s=100.0)
+        card = fingerprint_text("card")
+        guard.note_emitted("s", card, now=0.0)
+
+        # A record the caller still SHOWS keeps suppressing...
+        calls: list[tuple[str, str]] = []
+
+        def shown(subject: str, fingerprint: str) -> bool:
+            calls.append((subject, fingerprint))
+            return True
+
+        assert guard.should_emit("s", card, record_visible=shown, now=1.0) is False
+        assert calls == [("s", card)]
+
+        # ...but a record it no longer shows is VOID: dropped, and it must emit.
+        seen: list[tuple[str, str]] = []
+
+        def gone(subject: str, fingerprint: str) -> bool:
+            seen.append((subject, fingerprint))
+            return False
+
+        assert (
+            guard.should_emit("s", card, record_visible=gone, now=2.0) is True
+        ), "a record the caller no longer shows must not suppress"
+        assert seen == [("s", card)]
+        assert guard._outstanding.get("s") is None, "the void record must be dropped"
+
+        # A changed card emits without consulting the callback at all.
+        calls.clear()
+        assert (
+            guard.should_emit("s", fingerprint_text("other"), record_visible=shown, now=3.0) is True
+        )
+        assert calls == []
+
+    def test_a_void_record_hands_the_decision_to_the_durable_lookup(self) -> None:
+        """With the record dropped, ``find_previous`` decides as on a fresh boot."""
+        guard = NoticeGuard(remind_after_s=100.0)
+        card = fingerprint_text("card")
+        guard.note_emitted("s", card, now=0.0)
+        assert (
+            guard.should_emit(
+                "s",
+                card,
+                find_previous=lambda *_: 5.0,
+                record_visible=lambda *_: False,
+                now=6.0,
+            )
+            is False
+        ), "the durable row is fresh; the void record falls through to it"
 
 
 class TestSessionJournalDedupe:
@@ -330,6 +432,98 @@ class TestSessionJournalDedupe:
             await second.dispose()
 
     @pytest.mark.asyncio
+    async def test_a_compaction_cut_re_emits_on_resume(self, tmp_path: Path) -> None:
+        """A row the replay no longer shows must not suppress a fresh process.
+
+        Review round 1, M1: the durable scan used to reach rows below the
+        latest compaction cut — rows both the model replay and the TUI fold
+        have dropped — so a resumed session kept the card suppressed with
+        NOTHING visible on any surface. Bounded at the cut: the re-fire emits.
+        """
+        session_dir = tmp_path / "sess"
+        first = _make_session(session_dir)
+        try:
+            await _fire(first)
+            filler = await first._transcript.append_message(Message.user("filler after fire"))
+            await first._transcript.append_compaction("cut above the notice", filler.id, 0)
+        finally:
+            await first.dispose()
+
+        # The premise the finding measured: no surface shows the card any more.
+        assert _model_warnings(Transcript(session_dir).build_llm_history()) == []
+
+        resumed = _make_session(session_dir)
+        try:
+            await _fire(resumed)
+        finally:
+            await resumed.dispose()
+
+        assert len(_unavailable_rows(session_dir)) == 2, (
+            "the resume re-fire was suppressed although no visible card was "
+            "outstanding; suppression must not outlive visibility"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_mid_process_compaction_re_arms_the_live_guard(self, tmp_path: Path) -> None:
+        """The in-memory record must not suppress on a row that just vanished.
+
+        Review round 1, M1 (in-process arm): fire -> append_compaction cutting
+        the row -> re-fire in the SAME process. The guard's own record is
+        re-validated against the cut (``record_visible``) instead of trusting
+        a row the replay no longer shows.
+        """
+        session_dir = tmp_path / "sess"
+        session = _make_session(session_dir)
+        try:
+            await _fire(session)
+            filler = await session._transcript.append_message(Message.user("filler after fire"))
+            await session._transcript.append_compaction("cut above the notice", filler.id, 0)
+            await _fire(session)
+            assert len(_unavailable_rows(session_dir)) == 2, (
+                "a mid-process compaction left the guard suppressing a card that "
+                "no longer replays; it must re-emit"
+            )
+        finally:
+            await session.dispose()
+
+    @pytest.mark.asyncio
+    async def test_a_row_below_the_cut_never_suppresses_a_re_flag(self, tmp_path: Path) -> None:
+        """No scan may reach a row below the cut, matching row or not (M1).
+
+        The store here carries several rows for the one server and the newest
+        of them sits below the eventual cut: an unbounded scan finds it (the
+        pre-fix defect), the cut-bounded scan must not — "outstanding" is a
+        row the replay still shows, and the re-fire emits.
+        """
+        session_dir = tmp_path / "sess"
+        first = _make_session(session_dir)
+        try:
+            await _fire(first)
+            await _fire(first, reason="MCP authorization failed")
+            await _fire(first)  # the card again: the newest row for the server
+            filler = await first._transcript.append_message(Message.user("filler after fires"))
+            await first._transcript.append_compaction("cut above every notice", filler.id, 0)
+
+            card = fingerprint_text(
+                format_mcp_unavailable_message(SCREENSHOT_SERVER, SCREENSHOT_REASON)
+            )
+            assert (
+                first._mcp_unavailable_previous_ts(SCREENSHOT_SERVER, card) is None
+            ), "the scan reached a row below the cut"
+        finally:
+            await first.dispose()
+
+        resumed = _make_session(session_dir)
+        try:
+            await _fire(resumed)
+        finally:
+            await resumed.dispose()
+
+        assert (
+            len(_unavailable_rows(session_dir)) == 4
+        ), "a row below the compaction cut suppressed the re-flag"
+
+    @pytest.mark.asyncio
     async def test_the_notice_dedupes_across_a_turn_boundary(self, tmp_path: Path) -> None:
         """Cross-turn persistence: a repeat after a completed turn is the same card."""
         session_dir = tmp_path / "sess"
@@ -372,7 +566,13 @@ class TestSessionJournalDedupe:
 
     @pytest.mark.asyncio
     async def test_every_surface_shows_exactly_one_notice(self, tmp_path: Path) -> None:
-        """Parity: one transcript row -> one model warning -> one TUI block."""
+        """Parity: one transcript row -> one model warning -> one TUI block.
+
+        Extended for review round 1 (M1): when a compaction drops the card
+        from every replay surface at once, the next identical failure must
+        RE-EMIT — a suppressed silence with no visible card is the defect the
+        guard may not produce.
+        """
         session_dir = tmp_path / "sess"
         for _ in range(4):
             session = _make_session(session_dir)
@@ -386,32 +586,40 @@ class TestSessionJournalDedupe:
 
         # (2) The model's render pass, over a fresh replay of that transcript.
         replayed = Transcript(session_dir).build_llm_history()
-        rendered = _default_convert_to_llm(replayed)
-        injected = [
-            message
-            for message in rendered
-            if "[session warning]"
-            in " ".join(getattr(part, "text", "") for part in getattr(message, "content", []) or [])
-        ]
+        injected = _model_warnings(replayed)
         assert len(injected) == 1, f"the model is injected {len(injected)} warnings"
 
         # (3) The TUI fold, through the real app: one warning NoticeBlock.
-        from local_operator.tui.app import OperatorApp
-        from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
-        from tests.unit.tui.test_app_pilot import FakeSession, _factory
-
-        shell = FakeSession()
-        shell._history = list(replayed)
-        app = OperatorApp(lambda: _factory(shell))
-        async with app.run_test(size=(100, 30)) as pilot:
-            # No manual fold: the app's own boot replays `session.history()`.
-            await pilot.pause()
-            notices = [
-                block
-                for block in app.query_one(TranscriptView).blocks()
-                if isinstance(block, NoticeBlock)
-            ]
-
+        notices = await _tui_warnings(replayed)
         assert len(notices) == 1, f"the TUI painted {len(notices)} notices"
         assert notices[0]._token == "warning"
+        assert notices[0]._text.startswith("[session warning] MCP server 'minerva-qa'")
+
+        # (4) The cut case (M1): a compaction whose cut keeps only newer rows
+        # drops the card from the replay every surface is fed from...
+        cut_session = _make_session(session_dir)
+        try:
+            filler = await cut_session._transcript.append_message(Message.user("filler after fire"))
+            await cut_session._transcript.append_compaction("cut above the notice", filler.id, 0)
+        finally:
+            await cut_session.dispose()
+
+        replayed = Transcript(session_dir).build_llm_history()
+        assert _model_warnings(replayed) == [], "a pre-cut card must leave the model replay"
+        assert await _tui_warnings(replayed) == [], "a pre-cut card must leave the TUI fold"
+
+        # ...so the SAME card's next failure must re-emit on every surface.
+        resumed = _make_session(session_dir)
+        try:
+            await _fire(resumed)
+        finally:
+            await resumed.dispose()
+
+        rows = _unavailable_rows(session_dir)
+        assert len(rows) == 2, "append-only history keeps the old row; the re-fire adds a new one"
+        replayed = Transcript(session_dir).build_llm_history()
+        injected = _model_warnings(replayed)
+        assert len(injected) == 1, f"the model is injected {len(injected)} warnings"
+        notices = await _tui_warnings(replayed)
+        assert len(notices) == 1, f"the TUI painted {len(notices)} notices"
         assert notices[0]._text.startswith("[session warning] MCP server 'minerva-qa'")

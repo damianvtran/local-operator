@@ -264,6 +264,7 @@ from local_operator.session.transcript import (
     ENTRY_CUSTOM,
     ENTRY_MESSAGE,
     Transcript,
+    context_cut_index,
 )
 from local_operator.session.usage_seed import seed_reported_usage
 from local_operator.stt import AudioPath
@@ -3590,10 +3591,12 @@ class Session:
         #: a live recovery or a changed card, with a 24 h reminder window.
         #: Deliberately IN-MEMORY: the durable half of "already outstanding" is
         #: the transcript scan in :meth:`_mcp_unavailable_previous_ts`, which is
-        #: what survives a restart, and the recovery half is live-only by design
-        #: (``journal_mcp_recovery``); ``NoticeGuard`` documents the
-        #: cross-process blind spot that leaves, ``MCP_UNAVAILABLE_REMIND_S``
-        #: the bound on it.
+        #: what survives a restart — both halves bounded at the latest
+        #: compaction cut ("outstanding" means a row the replay still shows;
+        #: see :meth:`_mcp_unavailable_record_visible`) — and the recovery half
+        #: is live-only by design (``journal_mcp_recovery``); ``NoticeGuard``
+        #: documents the cross-process blind spot that leaves,
+        #: ``MCP_UNAVAILABLE_REMIND_S`` the bound on it.
         self._mcp_notice_guard = NoticeGuard(remind_after_s=MCP_UNAVAILABLE_REMIND_S)
         # (new_label, transient) of the last model switch made model-visible, so
         # the two edges that can both fire for one change (``set_model`` and a
@@ -13260,9 +13263,18 @@ class Session:
         wrote, so the transcript — the one store every surface reads — is asked
         directly. Only the NEWEST ``session_mcp_unavailable`` row for the
         server is consulted, and it answers ``None`` when that row's card
-        differs: the newest row is the state the operator last saw, so a card
-        that does not match it IS a change (or an unreadable legacy row), and
-        the caller must emit rather than suppress.
+        differs: the newest visible row is the state the operator last saw, so
+        a card that does not match it IS a change (or an unreadable legacy
+        row), and the caller must emit rather than suppress.
+
+        The scan is BOUNDED AT THE LATEST COMPACTION CUT
+        (:func:`context_cut_index`): rows below the cut are what the context
+        replay dropped — the model's ``build_llm_history`` and the operator's
+        display window both start at the cut — so a matching row no surface
+        still shows must NOT suppress, or a resumed session would keep a card
+        suppressed with none visible anywhere (review round 1, M1,
+        reproduced). The in-memory half of the dedupe is re-validated the
+        same way; see :meth:`_mcp_unavailable_record_visible`.
 
         Both custom spellings are matched, the same pair
         ``transcript._is_bookkeeping_batch`` admits: ``append_message`` writes a
@@ -13275,7 +13287,15 @@ class Session:
         """
         from local_operator.incidents import format_mcp_unavailable_message
 
-        for entry in reversed(self._transcript.entries()):
+        entries = self._transcript.entries()
+        # VISIBILITY BOUND (review round 1, M1): scan only at/above the latest
+        # compaction cut. Rows below it were dropped from the context replay —
+        # the model's ``build_llm_history`` and the operator's display window
+        # both start at the cut — so a row no surface still shows must not
+        # suppress the next identical failure: "outstanding" means "a row the
+        # replay still shows", and suppression must never outlive visibility.
+        cut = context_cut_index(entries, quiet=True)
+        for entry in reversed(entries[cut:]):
             payload = entry.payload
             if str(payload.get("custom_type", "")) != SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE:
                 continue
@@ -13296,6 +13316,21 @@ class Session:
                 return entry.ts
             return None
         return None
+
+    def _mcp_unavailable_record_visible(self, server: str, fingerprint: str) -> bool:
+        """Whether the guard's recorded emission is still on a replay surface.
+
+        The live half of the dedupe (``NoticeGuard``'s record) can outlive
+        what it stands for: a compaction cut drops older rows from every
+        replay — the model's ``build_llm_history`` and the display window
+        both start at the cut — while the record keeps suppressing. So the
+        record is re-validated through the SAME cut-bounded scan the durable
+        half uses (:meth:`_mcp_unavailable_previous_ts`): a record whose row
+        the cut dropped is void, and the next identical failure re-emits
+        rather than staying silent with no card anywhere (review round 1,
+        M1, reproduced).
+        """
+        return self._mcp_unavailable_previous_ts(server, fingerprint) is not None
 
     async def journal_mcp_unavailable(self, server: str, reason: str) -> None:
         """Tell the MODEL an MCP server's tools are gone — a WARNING, not a failure.
@@ -13334,7 +13369,11 @@ class Session:
         fresh process boots against (:meth:`_mcp_unavailable_previous_ts`), and
         up to the ``MCP_UNAVAILABLE_REMIND_S`` (24 h) staleness reminder —
         after which the same card re-emits, so a condition the operator has
-        scrolled away re-surfaces rather than going silent forever. A changed
+        scrolled away re-surfaces rather than going silent forever.
+        Outstanding means a row the REPLAY still shows: both halves of the
+        dedupe are bounded at the latest compaction cut, so a compaction that
+        drops the card re-arms the next identical failure instead of keeping
+        it suppressed with nothing visible (review round 1, M1). A changed
         card — a new reason, or a re-failure after a live recovery
         (:meth:`journal_mcp_recovery`) — always emits. Measured motivation: 96
         byte-identical ``minerva-qa`` rows for one expired grant over ~29 h on
@@ -13396,6 +13435,7 @@ class Session:
                 server,
                 fingerprint,
                 find_previous=self._mcp_unavailable_previous_ts,
+                record_visible=self._mcp_unavailable_record_visible,
             ):
                 logger.debug(
                     "suppressed a repeated MCP-unavailable notice for %r (card unchanged)",
