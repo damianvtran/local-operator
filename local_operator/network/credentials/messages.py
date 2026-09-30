@@ -23,7 +23,12 @@ tells the operator nothing is the failure mode this module exists to prevent.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from local_operator.network.credentials.types import BrokerError
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from local_operator.session.credential_binding import CredentialBinding
 
 
 def _owner_name(error: BrokerError, fallback: str) -> str:
@@ -294,4 +299,111 @@ def render_repair_notice(peer_name: str, key: str) -> str:
     return (
         f"{peer_name} needs '{repair_command(key)}' here — "
         "its borrowed credential cannot be refreshed"
+    )
+
+
+#: The head every account-change notice carries. The '[session …]' form is this
+#: tree's convention for session records that are not conversation (incidents,
+#: the MCP warning), and the text is also what a raw `grep` over a transcript
+#: finds — so the two words a reader searches for lead the sentence.
+_BINDING_NOTICE_HEAD = "[session credential binding] "
+
+
+def _device_phrase(name: str, fallback: str) -> str:
+    """The owner as a person reads it: the operator's name for the device.
+
+    §2.5's rule — never a device id in a person-facing sentence; the id is
+    meaningless to a reader, and when no name is known the sentence says WHAT
+    the thing is ("another device") rather than inventing a name for it.
+    """
+    return name.strip() or fallback
+
+
+def render_binding_change_notice(
+    binding: CredentialBinding,
+    previous: CredentialBinding,
+    *,
+    self_device: str,
+) -> str:
+    """The ONE operator-visible notice for an account change (memo D1, M3-M6).
+
+    Written once per appended change row by the recorder's ``on_change`` seam
+    (``Session.journal_credential_binding_change``); the row persists it to the
+    transcript, and it is deliberately NOT model-visible (see
+    ``SESSION_BINDING_NOTICE_MESSAGE_TYPE``).
+
+    Returns ``""`` — "nothing a person must be told", a label-only refinement
+    of the same account — and the caller journals nothing; the ROW still
+    records the refinement, because the replacement-state rule keeps the
+    newest snapshot complete.
+
+    ``self_device`` is the recording device's id, which the row cannot carry:
+    it is what lets M4 ("it is now using your login on this device") be told
+    apart from M6 ("the owner moved"). The sentences are the memo's first cut —
+    the sibling-pick line is §4.9's own wording — and the design round owns the
+    final copy; the STRUCTURE (which change produces which sentence, and that
+    a change is never silent) is what the cells pin.
+    """
+    provider = binding.provider or "credential"
+    prov = provider.capitalize()
+    owner_changed = binding.owner_device != previous.owner_device
+    id_changed = binding.credential_id != previous.credential_id
+    if not owner_changed and not id_changed:
+        # A label refinement, or nothing at all: the same account still serves.
+        return ""
+
+    if owner_changed and binding.owner_device == self_device:
+        # M4 — this device gained its own login and the local-first cascade
+        # took the session back. Names the account it came FROM; the new side
+        # is "your login", which needs no name.
+        where = _device_phrase(previous.owner_device_name, "another device")
+        was = (
+            f"using {previous.identity_label} on {where}"
+            if previous.identity_label
+            else f"using {provider} on {where}"
+        )
+        return (
+            f"{_BINDING_NOTICE_HEAD}This session was {was}; "
+            "it is now using your login on this device."
+        )
+
+    if owner_changed and previous.owner_device == self_device:
+        # M4's mirror — the local login the session was using is gone (deleted,
+        # or no longer resolvable), so the borrow rung answers now.
+        who = _device_phrase(binding.owner_device_name, "another device")
+        now = (
+            f"served {provider} by {binding.identity_label} on {who}"
+            if binding.identity_label
+            else f"served {provider} by {who}"
+        )
+        return (
+            f"{_BINDING_NOTICE_HEAD}This session was running on your login on "
+            f"this device; it is now being {now}."
+        )
+
+    if owner_changed:
+        # M6 — an ownership move (the placement ceremony ran elsewhere). Names
+        # the NEW owner once, with the old one as context.
+        was_owner = _device_phrase(previous.owner_device_name, "another device")
+        now_owner = _device_phrase(binding.owner_device_name, "another device")
+        return (
+            f"{_BINDING_NOTICE_HEAD}This session's {provider} account moved: "
+            f"it is now served by {now_owner} (previously {was_owner})."
+        )
+
+    if binding.owner_device == self_device:
+        # Same device, different row: the local walk re-picked (a re-login, or a
+        # sibling the operator added). Rare, and still an account change.
+        return (
+            f"{_BINDING_NOTICE_HEAD}This session is now using a different "
+            f"{provider} login on this device."
+        )
+
+    # M3 — the owner-side sibling pick: same owner, a different row. §4.9's
+    # sentence; the trigger the owner's resolve has for a sibling is a blocked
+    # (quota/rate-limited) row for the model in use.
+    owner = _device_phrase(previous.owner_device_name, "the owner device")
+    return (
+        f"{_BINDING_NOTICE_HEAD}{prov} quota is exhausted on {owner}; "
+        f"this turn is running on its other {provider} login."
     )
