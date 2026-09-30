@@ -21,6 +21,7 @@
  * section.
  */
 import {
+	useCallback,
 	useEffect,
 	useLayoutEffect,
 	useRef,
@@ -251,6 +252,9 @@ function SessionCard({
 	const queued = typeof s.subagents_queued === "number" ? s.subagents_queued : null;
 	const children = (running ?? 0) + (queued ?? 0);
 	const delegating = !leaving && children >= 1;
+	/* The second line's cwd half, computed once so the D1 reservation below can
+	   test emptiness against exactly what is rendered. */
+	const cwdText = home ? shortenHome(s.cwd, home) : s.cwd;
 	return (
 		<button
 			ref={ref}
@@ -459,7 +463,16 @@ function SessionCard({
 			</div>
 			<div className="flex items-baseline gap-2">
 				<span className="min-w-0 truncate font-mono text-mono-sm text-ink-dim">
-					{home ? shortenHome(s.cwd, home) : s.cwd}
+					{cwdText}
+					{/* D1 (round-1 design review): a second line with NOTHING on it
+					    rendered 44.00px against its neighbours' 50.89px — a 6.89px
+					    density break for every row below it. No live or durable row
+					    was measured rendering that shape (both carry
+					    `cwd`/`model_label`), so this is the structural fix at no
+					    cost: the line always carries at least one blank, whose line
+					    box is the height of a full line at whatever type scale the
+					    reader has chosen. */}
+					{cwdText === "" && s.model_label === "" ? "\u00a0" : null}
 				</span>
 				{/* D1 (mobile UX batch): the model label YIELDS like the cwd does.
 				    `shrink-0` made it unable to shrink and unable to ellipsize, so a
@@ -523,8 +536,251 @@ function ThemePicker({
 /* The daemon's own words for a refused pin come from `lib/pin-refusal` — shared
    with the session view so one refusal cannot grow two sentences (batch 2, U2). */
 
+/* ------------------------------------------------------------------ */
+/* The frame hand-off and the FLIP settle                              */
+/* ------------------------------------------------------------------ */
+
+/** A card's top in LAYOUT space: `offsetTop` summed up the offsetParent chain.
+
+    WHY NOT `getBoundingClientRect`. A rect is where the card is PAINTED, so it
+    includes the CSS transform the settle itself is running — on a commit
+    inside the 180ms window, re-measuring the rect read the settle's own
+    in-flight transform as movement (the mirrored jump this change removes) —
+    and it moves with the reader's scroll, which must not read as a layout
+    change either. Layout offsets cannot see either: measured on the jitter
+    rig, a 173px scroll moved a card's rect (397.2 → 224.2) and left its
+    offset chain at 397.0. */
+function layoutTop(el: HTMLElement): number {
+	let top = 0;
+	let node: HTMLElement | null = el;
+	while (node) {
+		top += node.offsetTop;
+		node = node.offsetParent as HTMLElement | null;
+	}
+	return top;
+}
+
+/** The card's CURRENT translateY in px, mid-transition value included (the
+    computed matrix interpolates while a settle runs). 0 when nothing is set,
+    and in non-DOM environments, where DOM geometry does not exist. */
+function translateYOf(el: HTMLElement): number {
+	if (typeof DOMMatrixReadOnly === "undefined") return 0;
+	const transform = getComputedStyle(el).transform;
+	if (!transform || transform === "none") return 0;
+	try {
+		return new DOMMatrixReadOnly(transform).f;
+	} catch {
+		return 0;
+	}
+}
+
+/** The settle's own transition, in one place: the invert, a touch's resume and
+    the shared duration/easing can never drift apart. */
+const SETTLE_TRANSITION =
+	"transform var(--transition-duration-base, 180ms) var(--ease-out-quart, ease-out)";
+
+/** Plays a card from its current pose — the settle's inversion, or the pose a
+    touch froze it at — back to its layout slot. The transition is stripped on
+    `transitionend` so a later settle starts from a clean element, and the
+    handler checks the TARGET because `transitionend` BUBBLES: the `new` word's
+    opacity fade inside the card also ends, and acting on that event would
+    strip the transform transition mid-settle. */
+function releaseCard(el: HTMLButtonElement): void {
+	el.style.transition = SETTLE_TRANSITION;
+	el.style.transform = "";
+	const done = (event: TransitionEvent) => {
+		if (event.target !== el) return;
+		el.style.transition = "";
+		el.removeEventListener("transitionend", done);
+	};
+	el.addEventListener("transitionend", done);
+}
+
+/** Writes ONE settle on one card: invert the move with no transition, force
+    the inverted position to commit as a style, then play it back to zero. */
+function settleCard(el: HTMLButtonElement, dy: number): void {
+	el.style.transition = "none";
+	el.style.transform = `translateY(${dy}px)`;
+	/* Force the inverted position to commit as a style before the
+	   transition property returns, or the browser collapses both
+	   writes and the card jumps straight to its new slot. */
+	void el.offsetHeight;
+	releaseCard(el);
+}
+
+/** The rows the list PAINTS: every store frame lands in a one-slot buffer,
+    applied on the next animation frame — at most one application per frame —
+    and NOT AT ALL while a pointer is down on the list.
+
+    WHY BOTH PROPERTIES (both operator-reported, both measured on this
+    change's own rig):
+
+    * A frame applied between `pointerdown` and `pointerup` reorders the DOM
+      under the finger; the row slides out, and the tap's synthesised click
+      then resolves to whatever is underneath — the container — so the tap
+      opens nothing. Measured on the rig: a reorder plus two frames landing
+      mid-touch moved the tapped row 51px and `location.hash` stayed `#/`;
+      with the buffer held it does not move during the touch and the tap
+      navigates. The buffer is applied on the NEXT ANIMATION FRAME after the
+      release, not inside the pointerup handler: a reorder applied in that
+      handler re-renders before the browser dispatches the tap's click,
+      which puts the moved target back in the click's path one event later.
+
+    * The daemon pushes a list frame per projection update — ~24-30/s while a
+      runtime streams (30.4/s measured over 60s on this rig) — each a new
+      array, so applying them the instant they arrive re-rendered (and, before
+      the settle's own fix, re-settled a moving row) several times between two
+      painted frames. One application per animation frame coalesces a burst
+      into one.
+
+    A finger that lifts where the list never hears it must not freeze the
+    list forever: the release listens on `window` for `pointerup` /
+    `pointercancel`, and on `blur` / `visibilitychange` for a browser that
+    takes the gesture away (a call, a tab switch) without a cancel. Pointer
+    ids are tracked in a Set so the hold ends when the LAST finger lifts.
+
+    THE HOLD COVERS MOTION, NOT JUST FRAMES (UX round 1, U32). The buffer
+    stops moves a NEW frame would start; a settle already gliding when the
+    finger lands is still a moving target under it — measured on the rig,
+    presses landing while a multi-slot settle glided opened the WRONG session
+    (the pressed row travelled 16.9-196.0px under a 120-300ms press, on every
+    try; 0 of 10 wrong on a settled list), and the tap is right once the row
+    cannot move at all. `onHoldChange` is the screen's cue: on the first
+    finger down it pins every mid-settle card where it currently paints, and
+    the release plays each its one remaining glide. The screen's settle
+    effect pins too, for a settle that would otherwise START mid-hold — one
+    invariant under both: a row cannot move under a finger, whatever started
+    the move. */
+function usePaintedRows(
+	sessions: SessionSummary[],
+	onHoldChange: (held: boolean) => void,
+): {
+	rows: SessionSummary[];
+	onListPointerDown: (event: { pointerId: number }) => void;
+} {
+	const [rows, setRows] = useState(sessions);
+	const latest = useRef(sessions);
+	latest.current = sessions;
+	const pointers = useRef(new Set<number>());
+	const frame = useRef<number | null>(null);
+	/* Read through a ref: the callback closes over element state by identity,
+	   and the window listeners below are mounted once. */
+	const holdChange = useRef(onHoldChange);
+	holdChange.current = onHoldChange;
+
+	/* One scheduled application at a time. A hold BLOCKS the apply instead of
+	   rescheduling it: the release is what schedules, so everything that
+	   arrived during a touch collapses to one application on the frame after
+	   the lift. */
+	const schedule = () => {
+		if (pointers.current.size > 0 || frame.current !== null) return;
+		frame.current = requestAnimationFrame(() => {
+			frame.current = null;
+			if (pointers.current.size > 0) return;
+			setRows(latest.current);
+		});
+	};
+
+	useEffect(() => {
+		if (sessions !== rows) schedule();
+	});
+
+	useEffect(() => {
+		const release = (event: PointerEvent) => {
+			if (!pointers.current.delete(event.pointerId)) return;
+			if (pointers.current.size === 0) {
+				holdChange.current(false);
+				schedule();
+			}
+		};
+		const releaseAll = () => {
+			if (pointers.current.size === 0) return;
+			pointers.current.clear();
+			holdChange.current(false);
+			schedule();
+		};
+		window.addEventListener("pointerup", release);
+		window.addEventListener("pointercancel", release);
+		window.addEventListener("blur", releaseAll);
+		document.addEventListener("visibilitychange", releaseAll);
+		return () => {
+			window.removeEventListener("pointerup", release);
+			window.removeEventListener("pointercancel", release);
+			window.removeEventListener("blur", releaseAll);
+			document.removeEventListener("visibilitychange", releaseAll);
+			if (frame.current !== null) cancelAnimationFrame(frame.current);
+			frame.current = null;
+			pointers.current.clear();
+		};
+	}, []);
+
+	/* Stable across renders (round-1 review, N2): the handler reaches
+	   everything through refs, so `<main>`'s prop identity never churns. */
+	const onListPointerDown = useCallback((event: { pointerId: number }) => {
+		/* The FIRST finger down pauses the list — frames and motion both;
+		   later fingers join the same hold. */
+		if (pointers.current.size === 0) holdChange.current(true);
+		pointers.current.add(event.pointerId);
+	}, []);
+
+	return { rows, onListPointerDown };
+}
+
 export function SessionListScreen() {
 	const { sessions, connected } = useSessions();
+	/* FLIP settle state: per session id, the card ELEMENT measured last time and
+	   its top in LAYOUT space (see `layoutTop`). The element is part of the
+	   record because a pin LIFT remounts a card under another section — a new
+	   element must appear in place, never glide across the screen. */
+	const cardRefs = useRef(new Map<string, HTMLButtonElement>());
+	const prevCards = useRef(
+		new Map<string, { el: HTMLButtonElement; top: number }>(),
+	);
+	/* Cards a touch has PAUSED (id → the pose they were pinned at), so the
+	   release plays exactly those the rest of the way. */
+	const frozenSettles = useRef(new Map<string, number>());
+	/* Whether a finger is down RIGHT NOW. The settle effect reads it: a move
+	   that lands mid-hold is PINNED, never glided (see `freezeSettles`). */
+	const holdActive = useRef(false);
+
+	/* A FINGER PAUSES THE LIST'S MOTION, NOT JUST ITS FRAMES (UX round 1,
+	   U32). The frame hand-off stops moves a new frame would start; a settle
+	   already gliding when the finger lands is still a moving target under it —
+	   measured on the rig, presses landing while a multi-slot settle glided
+	   opened the WRONG session (the pressed row travelled 16.9-196.0px under a
+	   120-300ms press, on every try; 0 of 10 wrong on a settled list). So the
+	   first finger down pins every mid-settle card where it currently paints,
+	   and the release gives each its one remaining glide. */
+	const freezeSettles = () => {
+		for (const [id, el] of cardRefs.current) {
+			const ty = translateYOf(el);
+			if (ty === 0) continue; // at rest: nothing to pause
+			el.style.transition = "none";
+			el.style.transform = `translateY(${ty}px)`;
+			frozenSettles.current.set(id, ty);
+		}
+	};
+	const resumeSettles = () => {
+		if (frozenSettles.current.size === 0) return;
+		const frozen = [...frozenSettles.current.keys()];
+		frozenSettles.current.clear();
+		for (const id of frozen) {
+			const el = cardRefs.current.get(id);
+			if (el?.isConnected) releaseCard(el);
+		}
+	};
+	const handleHoldChange = useCallback((held: boolean) => {
+		holdActive.current = held;
+		if (held) freezeSettles();
+		else resumeSettles();
+	}, []);
+
+	/* THE ROWS BELOW RENDER `rows`, NOT `sessions`: the painted list is the
+	   hand-off's (see `usePaintedRows`), which is what keeps a touch's rows
+	   stationary and a burst to one paint. Logic that ANSWERS a press (the pin
+	   sheet's row, the refusal band) still reads live `sessions` — an answer
+	   must not be a frame behind. */
+	const { rows, onListPointerDown } = usePaintedRows(sessions, handleHoldChange);
 	const pinMarks = usePinMarks();
 	const [home, setHome] = useState("");
 	const [themeOpen, setThemeOpen] = useState(false);
@@ -570,16 +826,11 @@ export function SessionListScreen() {
 	   the effect below). Opening the sheet clears it, so what is written is always
 	   this sheet's own answer and never the last one's. */
 	const [pinNotice, setPinNotice] = useState("");
-	/* FLIP settle state: card DOM by session id, plus each card's content
-	   coordinate from the previous commit. */
-	const mainRef = useRef<HTMLElement>(null);
-	const cardRefs = useRef(new Map<string, HTMLButtonElement>());
-	const prevTops = useRef(new Map<string, number>());
 	/* The pin action itself, so a wait that ends with the sheet still open can give
 	   focus back to the control the reader pressed. */
 	const pinActionRef = useRef<HTMLButtonElement>(null);
 	const wasPinBusy = useRef(false);
-	const visible = sessions.filter((session) =>
+	const visible = rows.filter((session) =>
 		`${session.conversation_name} ${session.session_id} ${session.cwd}`
 			.toLowerCase()
 			.includes(query.toLowerCase()),
@@ -711,14 +962,16 @@ export function SessionListScreen() {
 	/* One predicate for the pin hint, used by BOTH the height class and
 	   ``aria-hidden`` — two spellings of one condition is how a control ends up
 	   painted one way and read out another (review round 3, NIT 1). Gated on what
-	   is VISIBLE (D5) and on the STORE's pins (D6): the caption names a row the
-	   reader can see, and a search that merely hides the pinned rows must not
-	   bring it back. It reads the CONFIRMED pins, so a press the daemon has not
-	   answered for leaves the caption up: the ★ Pinned section it points at does
-	   not exist until the pin is confirmed, and retiring the caption for a mark
-	   alone would take away the only thing explaining the gesture, with nothing
-	   to replace it. */
-	const showPinHint = visible.length > 0 && !sessions.some((session) => session.pinned);
+	   is VISIBLE (D5) and on the CONFIRMED pins the PAINTED rows carry (D6;
+	   round-1 review N1: the source is the hand-off's `rows`, up to a frame
+	   behind the store — the same flag, a different source than the comment here
+	   once claimed): the caption names a row the reader can see, and a search
+	   that merely hides the pinned rows must not bring it back. It is CONFIRMED
+	   pins only, so a press the daemon has not answered for leaves the caption
+	   up: the ★ Pinned section it points at does not exist until the pin is
+	   confirmed, and retiring the caption for a mark alone would take away the
+	   only thing explaining the gesture, with nothing to replace it. */
+	const showPinHint = visible.length > 0 && !rows.some((session) => session.pinned);
 
 	/* One card factory for all three sections, so a section cannot forget the FLIP
 	   ref or the long-press handler — the bug a fourth copy of this markup would
@@ -745,52 +998,62 @@ export function SessionListScreen() {
 	);
 
 	/* FLIP settle for reorders (spec §3): a card never teleports under a
-	   thumb mid-scroll. After each commit, measure every card's position in
-	   the scroll content (`rect.top - main.rect.top + scrollTop`, so a user
-	   scroll between commits never reads as movement), and where a card moved,
-	   apply the inverse translateY with no transition, force a style flush,
-	   then play it back to zero with a transform transition. Scroll offset is
-	   untouched — only transforms animate. Implemented with `transition`,
-	   never `animation`, so the global prefers-reduced-motion block caps the
-	   settle to instant for free. Runs synchronously before paint
-	   (useLayoutEffect) so the inverted frame is what the user would have
-	   seen anyway — the pre-reorder layout. */
+	   thumb mid-scroll. After each commit, measure every card's top in LAYOUT
+	   space (`layoutTop` — where neither the settle's own in-flight transform
+	   nor the reader's scroll can be seen), and where the LAYOUT moved, invert
+	   the move with no transition, force a style flush, then play it back to
+	   zero (`settleCard`).
+
+	   A commit that moved nothing leaves any in-flight settle ALONE — that
+	   guard is this change's core fix. The old code re-measured each card with
+	   `getBoundingClientRect` (which INCLUDES the settle's own transform), so a
+	   commit inside the 180ms window read the mid-flight offset as movement
+	   and wrote it back as a new settle, mirroring the card across its slot
+	   (sign-alternating per commit — at the measured ~24-30Hz frame cadence a
+	   settle's mirrored writes amplified to millions of pixels within
+	   seconds).
+
+	   A card whose layout moves again WHILE settling continues from where it
+	   currently paints — its previous layout top plus whatever transform is
+	   still in flight — so one real move reads as one settle, never a restart
+	   from stale coordinates.
+
+	   New cards — and a card that REMOUNTS because a pin lifted it into
+	   another section (React mounts a new element under the new heading) —
+	   appear in place, exactly where the reader last saw them. Scroll offset is
+	   untouched: only transforms animate, and scroll anchoring stays on.
+	   Implemented with `transition`, never `animation`, so the global
+	   prefers-reduced-motion block caps the settle to instant for free. Runs
+	   synchronously before paint (useLayoutEffect) so the inverted frame is
+	   what the user would have seen anyway — the pre-reorder layout. */
 	useLayoutEffect(() => {
-		const main = mainRef.current;
-		const origin = main
-			? main.getBoundingClientRect().top - main.scrollTop
-			: 0;
-		const nextTops = new Map<string, number>();
+		const nextCards = new Map<string, { el: HTMLButtonElement; top: number }>();
 		for (const [id, el] of cardRefs.current) {
-			nextTops.set(id, el.getBoundingClientRect().top - origin);
-		}
-		for (const [id, el] of cardRefs.current) {
-			const prev = prevTops.current.get(id);
-			const next = nextTops.get(id);
-			/* New cards have no old position and simply appear in place. */
-			if (prev === undefined || next === undefined) continue;
-			const dy = prev - next;
+			const top = layoutTop(el);
+			nextCards.set(id, { el, top });
+			const prev = prevCards.current.get(id);
+			/* No previous measurement (a new card), or a NEW ELEMENT under the
+			   same id (a section move): appear in place. */
+			if (!prev || prev.el !== el) continue;
+			/* This commit moved nothing for this card: leave any in-flight
+			   settle alone. */
+			if (prev.top === top) continue;
+			const dy = prev.top + translateYOf(el) - top;
 			if (dy === 0) continue;
-			el.style.transition = "none";
-			el.style.transform = `translateY(${dy}px)`;
-			/* Force the inverted position to commit as a style before the
-			   transition property returns, or the browser collapses both
-			   writes and the card jumps straight to its new slot. */
-			void el.offsetHeight;
-			el.style.transition =
-				"transform var(--transition-duration-base, 180ms) var(--ease-out-quart, ease-out)";
-			el.style.transform = "";
-			const done = (event: TransitionEvent) => {
-				/* transitionend BUBBLES: the `new` word's opacity fade inside the
-				   card also ends, and acting on that event would strip the
-				   transform transition mid-settle. */
-				if (event.target !== el) return;
-				el.style.transition = "";
-				el.removeEventListener("transitionend", done);
-			};
-			el.addEventListener("transitionend", done);
+			/* A finger is down right now: PIN this move where it is instead of
+			   gliding it — the row stays put for the whole hold and the release
+			   plays it home. This is `freezeSettles`' contract for a settle
+			   that would otherwise START mid-touch (the frame that caused this
+			   move arrived before the press, but its commit landed after it). */
+			if (holdActive.current) {
+				el.style.transition = "none";
+				el.style.transform = `translateY(${dy}px)`;
+				frozenSettles.current.set(id, dy);
+				continue;
+			}
+			settleCard(el, dy);
 		}
-		prevTops.current = nextTops;
+		prevCards.current = nextCards;
 	});
 	useEffect(() => {
 		getDirectories()
@@ -836,7 +1099,7 @@ export function SessionListScreen() {
 			    child it had was the refusal band, which moved to its own PR. */}
 			<div className="flex min-h-0 flex-1 flex-col">
 				<main
-					ref={mainRef}
+					onPointerDown={onListPointerDown}
 					className="flex flex-1 flex-col overflow-y-auto px-1 pb-2"
 				>
 					<input
@@ -856,7 +1119,8 @@ export function SessionListScreen() {
 					    above "no matching conversations" for a query that matched nothing, and
 					    brought it back whenever a search hid the pinned rows (design round 2,
 					    D5/D6). ``visible.length > 0`` is the honest condition; the pinned test
-					    reads the STORE so a search that hides a pin does not re-show the hint.
+					    reads the same painted `rows` as the section split above (round-1
+					    review N1), so a search that hides a pin does not re-show the hint.
 
 					    IT COLLAPSES RATHER THAN VANISHES, which is D8: removing the node
 					    outright snapped the whole list up ~23px at the exact moment the first
@@ -889,7 +1153,7 @@ export function SessionListScreen() {
 							</p>
 						</div>
 					</div>
-					{sessions.length === 0 ? (
+					{rows.length === 0 ? (
 						<div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
 							<p className="text-body text-ink-muted">
 								{connected
