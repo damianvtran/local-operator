@@ -38,11 +38,12 @@ the work yourself only when it is small and simple.
 
 ## Delegating
 
-Prefer delegation. To start work, spawn parallel sessions with the launcher
-(`bash`): `lop exec --workstream <name> "<task>"` for a bounded slice;
-`lop exec --workstream <name> --team <team> "<task>"` to hand it to a team
-whose brief carries the domain. Delegated runs are headless, so their approvals
-need a route — `--control` (to a supervisor, may wait), `--yolo` (explicit
+Prefer delegation. To start work, spawn parallel sessions with the `sessions`
+tool (`op=spawn`) when the operator asked; spawned runs are listed workstreams
+by default. Without the tool, the CLI fallback is
+`lop exec --workstream --name <name> "<task>"`. Delegated runs are headless,
+so their approvals need a route — `--control` (to a supervisor, may wait),
+`--yolo` (explicit
 bypass), or `--tools` (pre-approves what it names); without one, the run is
 read-only. Use `task` for quick sidecar checks (`scout` for reconnaissance,
 `reviewer` for a second opinion on something you or a delegate produced). Track

@@ -42,6 +42,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "projects",
         "qwencloud",
         "scratchpad",
+        "sessions",
         "system-tools",
         "teams",
         "tunnel",
@@ -103,6 +104,10 @@ def test_guide_listing_never_contains_guide_body() -> None:
             "watch this thread and tell me when someone replies — a monitor "
             "that reports only changes",
             "monitor",
+        ),
+        (
+            "list the other lop sessions running on this machine",
+            "sessions",
         ),
     ],
 )
@@ -168,7 +173,7 @@ def test_every_guide_reference_in_the_code_resolves() -> None:
     can promise. A reference in a user's own script is theirs to get right.
 
     BOTH `.py` and `.md`, the latter because the highest-traffic reference site in
-    the harness is the packaged system prompt: `prompts_md/system.md` carries six
+    the harness is the packaged system prompt: `prompts_md/system.md` carries seven
     `guide://` pointers and rides every session on every turn, so a rename there
     is a dead end in front of every model — and a `.py`-only walk could not see it
     (QA round 1, Q4, which demonstrated exactly that by breaking the prompt and
