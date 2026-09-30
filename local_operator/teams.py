@@ -574,6 +574,13 @@ def bounded_display_form(name: str, label: str, *, cap: int = _TEAM_LISTING_CAP)
     they are bounded by the name/label caps already, and ellipsizing a NAME
     would hide the very string a reader types.
 
+    When the key alone leaves no room under the cap (a name past ~44 cells),
+    the WHOLE form is returned as-is and the row wraps: there is no label cell
+    left to ellipsize, and slicing ``form[:room]`` with a negative room cut
+    INTO the keyed tail before re-appending it, duplicating the key on the
+    very rows that need it most (R2-1). A wrapped row is the honest bound here;
+    a maimed or repeated key is not.
+
     Deliberately a listing-only concern: the other sites bound themselves (the
     band truncates, chart boxes clamp) and both sides of the listing family --
     the local block and the wire's first slot -- must agree byte for byte.
@@ -583,8 +590,11 @@ def bounded_display_form(name: str, label: str, *, cap: int = _TEAM_LISTING_CAP)
     if len(form) <= cap or not form.endswith(keyed):
         return form
     room = cap - len(keyed) - 1
-    truncated = form[:room].rstrip()
-    return f"{truncated}…{keyed}" if truncated else form
+    if room >= 1:
+        truncated = form[:room].rstrip()
+        if truncated:
+            return f"{truncated}…{keyed}"
+    return form
 
 
 def _normalize_label(value: str) -> str:

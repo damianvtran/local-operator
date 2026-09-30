@@ -3344,3 +3344,29 @@ def test_bounded_display_form_keeps_the_key_on_the_line() -> None:
         teams_module.bounded_display_form("ops", "Platform Reliability")
         == "Platform Reliability (ops)"
     )
+
+
+def test_bounded_display_form_leaves_a_name_past_the_cap_whole() -> None:
+    """R2-1: with no room for a label cell the row is returned WHOLE -- the
+    negative-room slice cut into the keyed tail and the re-append duplicated
+    the key on names past ~44 cells."""
+    name = "n" * 45
+    out = teams_module.bounded_display_form(name, "X")
+    assert out == f"X ({name})"
+    assert out.count(name) == 1
+
+    # The reviewer's hub repro: a 49-char local name carrying the published
+    # spelling as its (chosen-class) label, exactly what the import writes.
+    long_name = "Quarterly-Compliance-Reporting-and-Analytics-Crew"
+    carried = "Quarterly Compliance Reporting and Analytics Crew"
+    hub_out = teams_module.bounded_display_form(long_name, carried)
+    assert hub_out == f"{carried} ({long_name})"
+    assert hub_out.count(long_name) == 1
+
+    # And the boundary stays: a name WITH room still binds under the cap.
+    bounded = teams_module.bounded_display_form(
+        "q" * 40, "Chosen Label Long Enough To Need The Bound"
+    )
+    assert len(bounded) <= teams_module._TEAM_LISTING_CAP
+    assert bounded.endswith(f" ({'q' * 40})")
+    assert "…" in bounded
