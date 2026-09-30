@@ -12220,12 +12220,27 @@ class OperatorApp(App[None]):
 
         ``source`` is accepted for symmetry with the two handlers beside it and
         guards against reporting a refusal that belongs to a session the user has
-        since left: a notice about another conversation's card is noise.
+        since left: a notice about another conversation's card is noise. A dropped
+        notice is also UN-RECORDED at the session (R1-1 = Q-1): the refusal
+        channel's one-notice-per-state dedupe records at delivery, so without the
+        un-record a drop would silence the retry and the explanation would never
+        display anywhere on this surface.
         """
         source = source or self._interaction
 
         def show() -> None:
             if not self._is_current(source):
+                # THE HOST DROPPED IT: UN-RECORD IT (agent R1-1 = QA Q-1). The
+                # state was recorded session-side when the refusal surfaced
+                # (beat-2 F-B), and a record whose notice never displayed would
+                # silence the retry — the operator returns, answers again, and
+                # the explanation shows nowhere (measured: 0 notices). Clearing
+                # it here lets the next attempt deliver and display. Optional
+                # hook, like the refusal channel itself: only a session that can
+                # have a reply refused holds a record.
+                forget = getattr(source.session, "forget_gate_refusal", None)
+                if callable(forget):
+                    forget(error)
                 return
             # A REFUSED CARD'S OWN KEYSTROKE ALREADY WROTE A RECEIPT. The dock
             # card resolves on the keypress, so "✓ allowed  bash  rm -rf build/"
@@ -31155,8 +31170,10 @@ class OperatorApp(App[None]):
           looking at the surface the notice would point them to. THE CARD IS
           THE CONDITION, not the attachment (beat-2 F-A): a viewer that holds
           the session with no card on screen is told, because silence there
-          means nobody learns the peer is parked (`_remote_park_yields_to_card`
-          is the predicate, and its docstring is the full story).
+          means nobody learns the peer is parked (`_remote_park_is_attached`
+          and `_remote_park_card_is_up` are the two halves, composed at the
+          call site — and the same attachment the copy's lead needs, design
+          round 1, D1).
 
         SILENCE IS NOT A CLEAR: `unanswered` names the devices that did not
         answer this read, and `park_edges` carries their episodes forward — a
@@ -31196,39 +31213,56 @@ class OperatorApp(App[None]):
                 if owner is not None:
                     toast.withdraw(owner)
             for park in edges:
-                if self._remote_park_yields_to_card(park):
+                # The CARD is the suppression condition; the attachment is what
+                # the attached copy's lead needs (design round 1, D1), so both
+                # halves are read here once.
+                attached = self._remote_park_is_attached(park)
+                if attached and self._remote_park_card_is_up():
                     continue
-                self._show_remote_park(park, toast)
+                self._show_remote_park(park, toast, attached=attached)
         except Exception:  # pragma: no cover - defensive; chrome must not raise
             logger.debug("remote park notice failed", exc_info=True)
 
-    def _remote_park_yields_to_card(self, park: RemotePark) -> bool:
-        """Whether THIS app is already showing ``park``'s own gate card.
+    def _remote_park_is_attached(self, park: RemotePark) -> bool:
+        """Whether THIS app's current session IS the peer session ``park`` names.
 
-        BOTH halves are required, and the second half is the fix for beat-2
-        F-A. Renamed from ``_remote_park_is_attached`` whose attachment-only
-        answer suppressed the notice for a viewer showing NO CARD AT ALL: the
-        auto-follow after a slash move rendered an empty transcript with the
-        facade holding no gate, and the origin learned nothing while the peer
-        sat parked for minutes. Attachment is the premise, not the fact; the
-        fact is the CARD — the gate card on screen, wearing the hint that says
-        where an allow happens — so the card itself is asked for here
-        (``require_card``), through the one spelling of "a mounted card
-        belongs to this source's current gate".
+        ATTACHMENT IS THE PREMISE, NOT THE ANSWER (beat-2 F-A). It is half of
+        the suppression the park notice applies — :meth:`_remote_park_card_is_up`
+        is the other, decided half — and it is also the fact the attached copy's
+        lead needs (design round 1, D1: the reader who IS this viewer must not
+        be told to open the session they are already looking at), so the park
+        loop reads it once and hands it to both.
 
         Read from `_remote_owner_facts`, the same predicate the lifecycle
         router acts on, so the two cannot disagree about which device a session
         is on; a local session answers False (it can never be a peer's park)
-        and a cold app answers False too. A read that cannot answer ANSWERS
-        THE PARK (False): a notice that fires over a duplicate is chrome, a
-        notice that never fires is the defect this method exists to close.
+        and a cold app answers False too.
         """
         owner = self._remote_owner_facts()
         if owner is None:
             return False
         session_id, device_id, _ = owner
-        if session_id != park.session_id or device_id != park.device_id:
-            return False
+        return session_id == park.session_id and device_id == park.device_id
+
+    def _remote_park_card_is_up(self) -> bool:
+        """Whether the gate card for the CURRENT session's gate is on screen.
+
+        THE CARD IS THE CONDITION, not the attachment (beat-2 F-A): an
+        attachment-only answer suppressed the notice for a viewer showing NO
+        CARD AT ALL — the auto-follow after a slash move rendered an empty
+        transcript with the facade holding no gate, and the origin learned
+        nothing while the peer sat parked for minutes. The card asked for here
+        is the gate card on screen wearing the hint that says where an allow
+        happens, through the one spelling of "a mounted card belongs to this
+        source's current gate" (``require_card``, which bypasses the
+        approve-all latch — that latch answers "no card is NEEDED", the
+        opposite question). The caller has established attachment; the source
+        guard below keeps a source for any OTHER session from answering.
+
+        A read that cannot answer ANSWERS THE PARK (False): a notice that fires
+        over a duplicate is chrome, a notice that never fires is the defect
+        this method exists to close.
+        """
         # The source that DISPLAYS this session, not merely the last one minted:
         # the card binding is checked against its token and gate generation, so a
         # source for any other session must not answer here.
@@ -31241,7 +31275,7 @@ class OperatorApp(App[None]):
             logger.debug("remote park card check failed", exc_info=True)
             return False
 
-    def _show_remote_park(self, park: RemotePark, toast: Toast) -> None:
+    def _show_remote_park(self, park: RemotePark, toast: Toast, *, attached: bool = False) -> None:
         """Raise the one card and the one banner for ``park``.
 
         Card FIRST, banner second: the card needs no OS delivery path, so a
@@ -31253,6 +31287,10 @@ class OperatorApp(App[None]):
         conversation's name when it has one, so two parks on the same device are
         tellable apart on the card itself (UX round 1, U3); the placeholder name
         a peer never chose is dropped rather than printed as a title.
+
+        ``attached`` reaches the card because the reader's position decides the
+        lead (design round 1, D1); the banner is budgeted to one OS line and
+        carries no lead at all.
         """
         label = park.device_name or park.device_id
         key = (park.device_id, park.session_id)
@@ -31261,7 +31299,7 @@ class OperatorApp(App[None]):
 
         name = "" if park.name == UNTITLED_CONVERSATION else park.name
         toast.show(
-            remote_park_card(label, park.kind, name=name),
+            remote_park_card(label, park.kind, name=name, attached=attached),
             duration_ms=TOAST_FAILURE_MS,
             owner=owner,
         )

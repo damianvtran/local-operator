@@ -260,6 +260,12 @@ async def test_an_attached_viewer_without_its_card_is_still_told() -> None:
 
         assert toast.display, "an attached viewer with no gate card still needs the park"
         assert "Waiting for approval on demo-laptop" in toast.message
+        assert (
+            "Its gate card has not reached this view — deny it here once it does." in toast.message
+        ), (
+            "the attached reader must not be told to open the session it is looking at "
+            "(design round 1, D1)"
+        )
         assert notifier.kinds == ["approval"], "the banner half must fire too"
 
 

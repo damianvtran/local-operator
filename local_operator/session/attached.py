@@ -6503,6 +6503,40 @@ class AttachedSession:
         self._gate_refusal_notified = key
         return True
 
+    def forget_gate_refusal(self, error: BaseException) -> None:
+        """Un-record a refusal whose delivery the host DROPPED, so a retry speaks.
+
+        THE RECORD IS MADE AT DELIVERY, AND THE DELIVERY CAN BE DROPPED (agent
+        review R1-1 = QA Q-1). ``_refusal_is_new_state`` records the state when
+        the refusal surfaces, but a host surface may discard a notice it cannot
+        show — the TUI drops one for a source that is not current — and without
+        this method the recorded state then silenced the RETRY: the operator
+        returned, answered again, and the explanation displayed nowhere at all
+        (measured: 0 notices). The drop path calls this with the same error it
+        dropped; the state stops counting as told, and the next attempt records
+        and speaks again.
+
+        Scoped by the sentence — the half the dropper holds — plus a re-derived
+        gate identity when the store is readable: a refusal does not resolve its
+        gate, so at drop time the parked gate IS the identity the record was
+        made under, and a record for any OTHER live gate is left standing. A
+        store that cannot answer cannot re-derive the key, and the sentence
+        alone decides; the residual is a same-sentence refusal for a different
+        gate whose cleared record makes one later repeat speak twice — a
+        duplicate notice, never a missing one, which is the direction this
+        channel errs in.
+        """
+        recorded = self._gate_refusal_notified
+        if recorded is None or recorded[1] != str(error):
+            return
+        try:
+            pending = self.pending_gate
+        except Exception:  # noqa: BLE001 — a store that cannot answer must not fail the drop
+            pending = None
+        if pending is not None and recorded[0] != self._gate_identity(pending):
+            return
+        self._gate_refusal_notified = None
+
     async def _run_approval(self, pending: PendingRequest) -> None:
         #: Whether this answer was produced WITHOUT a person (the background
         #: branch below). Read by the refusal arm, which must not re-arm in that
