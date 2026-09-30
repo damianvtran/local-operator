@@ -24,8 +24,10 @@ Two decisions look odd until the reasons are on the table:
   a stored one, so the app owns its label's whole lifecycle) — and keeps the
   ``device_id``, so a device that rotates its push token nightly cannot
   accumulate rows. ``install_id`` is validated as a UUID (ADR §3.1) and stored
-  in canonical form, and an unknown body key refuses the request — the same
-  strictness the stored records get.
+  in canonical form; matching is by PARSED identity, because a record may hold
+  any spelling a writer stored (this store never rewrites on read) and one
+  phone must not fork into two rows. An unknown body key refuses the request —
+  the same strictness the stored records get.
 
 The store is one JSON object under the config root, beside the daemon's other
 owner-private state (``mobile-seen.json``), written 0600 and atomically: temp
@@ -264,7 +266,11 @@ def _checked_registration(body: object) -> dict[str, Any]:
     # must read as a refusal, not as "admitted".
     unknown = sorted(set(body) - _REGISTER_FIELDS)
     if unknown:
-        raise PushDeviceRefusal(f"unknown field(s): {', '.join(unknown)}")
+        # The echo is BOUNDED (review round 2's N1, QA's Q2): the names are
+        # caller-chosen, and an unbounded refusal body is a caller-controlled
+        # surface — capped at the same width as every field on this route.
+        names = ", ".join(unknown)[:MAX_FIELD_CHARS]
+        raise PushDeviceRefusal(f"unknown field(s): {names}")
     platform = body.get("platform")
     if platform not in PLATFORMS:
         raise PushDeviceRefusal('platform must be "ios" or "android"')
@@ -332,9 +338,20 @@ def _bounded(value: str, field: str) -> str:
 
 
 def _find(records: list[dict[str, Any]], install_id: str, platform: str) -> dict[str, Any] | None:
-    """The record this registration identifies, if any — the idempotency key."""
+    """The record this registration identifies, if any — the idempotency key.
+
+    Matched on the PARSED UUID, not the stored spelling (review round 2's M1,
+    QA's Q1): ``_validated_record`` accepts any spelling a writer could have
+    stored — this store never rewrites on read — and a build before the
+    canonicalisation landed stored the caller's spelling verbatim, so an
+    uppercase record is a shape that exists on disk. Comparing strings there
+    forked one phone into two rows on the next launch; identities cannot fork.
+    Both sides are guaranteed parseable: the incoming value by ``_install_id``,
+    the stored one by ``_validated_record``.
+    """
+    identity = uuid.UUID(install_id)
     for record in records:
-        if record["install_id"] == install_id and record["platform"] == platform:
+        if record["platform"] == platform and uuid.UUID(record["install_id"]) == identity:
             return record
     return None
 
@@ -356,8 +373,15 @@ def _prune_locked(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if excess <= 0:
         return records
     ranked = sorted(records, key=lambda record: (record["last_seen_at"], record["registered_at"]))
-    doomed = {record["device_id"] for record in ranked[:excess]}
-    return [record for record in records if record["device_id"] not in doomed]
+    # Exactly `excess` RECORDS leave, selected by position — never by
+    # `device_id` VALUE: duplicate ids (only a foreign or hand-edited file can
+    # produce them; this store never mints one twice) would otherwise cost
+    # BOTH twin rows for one slot, over-pruning past the bound. `SeenStore`'s
+    # bound pops `ranked[:excess]` off unique dict keys; a list has no such
+    # key, so object identity is the selector that cannot collapse
+    # equal-looking records, and the survivors keep their original order.
+    doomed = {id(record) for record in ranked[:excess]}
+    return [record for record in records if id(record) not in doomed]
 
 
 # -- the file -------------------------------------------------------------------
