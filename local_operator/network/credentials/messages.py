@@ -425,10 +425,12 @@ def render_binding_change_notice(
     # M3 — the owner-side sibling pick: same owner, a different row. States the
     # FACT of the rotation, never its cause (the row cannot tell the four
     # block writers apart), and names the login it landed on when the row
-    # carries a label (design D6).
+    # carries a label (design D6). "another", not "its other": the number of
+    # logins is unknown, and a third sibling would make "other" a lie
+    # (design round 2, N2).
     owner = _device_phrase(previous.owner_device_name, "the owner device")
     landed_on = f" ({binding.identity_label})" if binding.identity_label.strip() else ""
     return (
         f"{_BINDING_NOTICE_HEAD}The {provider} login on {owner} went out of "
-        f"rotation, and the next turn ran on its other {provider} login{landed_on}."
+        f"rotation, and the next turn ran on another {provider} login{landed_on}."
     )
