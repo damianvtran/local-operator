@@ -205,6 +205,17 @@ async def test_every_session_attribute_the_tui_reads_exists_on_the_viewer(
         # control rung (`_mark_monitors_dormant`). Any projected scheduler is
         # a slice-4 surface question, not a viewer-path degradation today.
         "monitor_scheduler",
+        # The naming errand's Tier-1 fit check: an OWNER-only provider seam
+        # (the session factory wires it over the owner's shared classification
+        # service). A viewer never names — its `owns_runtime` is False, both
+        # naming owners refuse before any errand runs
+        # (`_maybe_name_conversation` / `_maybe_heal_name`), and the facade's
+        # `complete_once` raises — so the facade rightly has none. The read is
+        # the owner-only getattr probe shared with
+        # `tests/unit/session/test_viewer_protocol.py`'s exclusion set, where
+        # absence means "no classifier" and the cascade hedges rather than
+        # asking.
+        "title_fit_check",
     }
 
     source = (Path(__file__).parents[3] / "local_operator" / "tui" / "app.py").read_text(

@@ -3349,11 +3349,20 @@ async def test_naming_uses_the_supported_floor_on_every_openai_wire(
         try:
             title = await generate_title("Fix the login redirect loop", session.complete_once)
             assert title == "Fix the login redirect loop"
-            assert len(requests) == 1
-            body = requests[0]
-            effort = body.get("reasoning_effort") or body.get("reasoning", {}).get("effort")
-            assert effort == "low"
-            assert "temperature" not in body and "top_p" not in body
+            # TWO requests, by design: the canned reply IS the opener, so the
+            # Tier 0 echo rule refuses it ("no naming happened") and the
+            # corrective resample is spent — and refused again — after which
+            # the Tier 3 opener fallback lands the very string this test
+            # expects back. (With a NON-echoing reply and no fit seam the
+            # classifier-unreachable hedge would still spend two samples, so
+            # the count is the cascade's bound, not an artifact of the echo.)
+            # The intent is the WIRE FLOOR on every request the errand makes,
+            # so it is asserted per request rather than on the first alone.
+            assert len(requests) == 2
+            for body in requests:
+                effort = body.get("reasoning_effort") or body.get("reasoning", {}).get("effort")
+                assert effort == "low"
+                assert "temperature" not in body and "top_p" not in body
             assert session.effective_model.reasoning_effort == "high"
             assert list(session._transcript.entries()) == []
         finally:

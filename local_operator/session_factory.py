@@ -4311,6 +4311,7 @@ async def _prepare(
     # import the classification package at module scope (see the module's own
     # docstring for the cold-import budget).
     from local_operator.monitors.classify import monitor_classify
+    from local_operator.session.naming import title_fit_check
 
     session_kwargs: dict[str, Any] = dict(
         model=spec,
@@ -4338,6 +4339,15 @@ async def _prepare(
         # One shared classification seam for the message path AND the monitor
         # gate; see the comment above for why it resolves per call.
         monitor_classify=monitor_classify(lambda: hooks.classifier),
+        # ... and the naming errand's fit check rides the SAME seam, composed
+        # here for the same two reasons (one service per session; the lambda
+        # resolves it per call so a seam injected after construction — how the
+        # tests swap one in — is the one that answers). Its own adapter, not
+        # ``monitor_classify``: a different question over different state, and
+        # borrowing the monitor question would have the vendor answer the wrong
+        # one. ``hooks.classifier`` is ``None`` whenever the layer is off, which
+        # the adapter reports as "no classifier" rather than raising.
+        title_fit_check=title_fit_check(lambda: hooks.classifier),
         # Provenance distinguishes deliberate resume flags from persisted
         # identity; no provenance subscribes a session to mutable defaults.
         model_source=model_source,

@@ -6176,6 +6176,14 @@ class OperatorApp(App[None]):
         self._interaction.naming.pending_text = value
 
     @property
+    def _name_heal_text(self) -> str:
+        return self._interaction.naming.heal_text
+
+    @_name_heal_text.setter
+    def _name_heal_text(self, value: str) -> None:
+        self._interaction.naming.heal_text = value
+
+    @property
     def _aside_draft(self) -> str | None:
         return self._interaction.draft.aside_main_text
 
@@ -29706,6 +29714,9 @@ class OperatorApp(App[None]):
         """
         self._name_generation += 1
         self._name_requested = False
+        # The one-shot Tier 3 self-heal belongs to the conversation being torn
+        # down; the replacement session must not spend the dead one's opener.
+        self._name_heal_text = ""
         self.workers.cancel_group(self, self._interaction.worker_group("naming"))
 
     def _maybe_name_conversation(self, text: str) -> None:
@@ -29985,7 +29996,13 @@ class OperatorApp(App[None]):
                 if turns is None:
                     turns = await getattr(session, "materialize_history")()
                 title = await naming.generate_retitle(
-                    current, text, session.complete_once, turns=turns
+                    current,
+                    text,
+                    session.complete_once,
+                    turns=turns,
+                    # Same owner-only seam as the first-name path; absent →
+                    # the cascade hedges with a second independent sample.
+                    fit_check=getattr(session, "title_fit_check", None),
                 )
             except asyncio.CancelledError:
                 return
@@ -30019,6 +30036,8 @@ class OperatorApp(App[None]):
         text: str,
         generation: int,
         source: SessionInteraction | None = None,
+        *,
+        heal: bool = False,
     ) -> None:
         """Ask the model for a title NOW, alongside the turn it decorates.
 
@@ -30055,12 +30074,29 @@ class OperatorApp(App[None]):
         supersede it: this call is not in the turn's way, and the opener names
         the conversation better than the second message would. Reload and user
         rename are re-checked immediately before the store.
+
+        ACCEPTANCE happens inside the naming call (``naming.generate_title_acceptance``,
+        Tier 0-3). A wrapped or otherwise dirty reply never reaches the band, a
+        refused sample buys one corrective resample, and an attempt that
+        exhausts every sample answers with the Tier 3 opener fallback. That
+        fallback is a STORE, so it would close every retry path this worker
+        maintains; ``heal=True`` is the one-shot follow-up that replaces it
+        (armed into ``naming.heal_text`` and spent by ``_maybe_heal_name`` at
+        the next completed turn), and it never re-arms itself.
         """
         source = source or self._interactions.get(id(session), self._interaction)
         source.active_workers += 1
         try:
             try:
-                title = await naming.generate_title(text, session.complete_once)
+                acceptance = await naming.generate_title_acceptance(
+                    text,
+                    session.complete_once,
+                    # Owner-only seam, read per attempt; see
+                    # ``naming.title_fit_check`` and the owner-only probe set in
+                    # tests/unit/session/test_viewer_protocol.py. Absent → the
+                    # cascade hedges with a second independent sample.
+                    fit_check=getattr(session, "title_fit_check", None),
+                )
             except asyncio.CancelledError:
                 if (
                     generation == source.naming.generation
@@ -30072,18 +30108,40 @@ class OperatorApp(App[None]):
 
             if generation != source.naming.generation or source.retired:
                 return
-            if not title:
-                # Provider failure, cancellation, or "no topic": a later
-                # substantive message may retry while the conversation is unnamed.
-                # The opener's excerpt stays on the band and the tab meanwhile —
+            title = acceptance.title
+            existing = session.conversation_name
+            if not title or (existing and not heal):
+                # Provider failure, cancellation, "no topic", or a user/restore
+                # that named it while we were in flight: a later substantive
+                # message may retry while the conversation is unnamed. The
+                # opener's excerpt stays on the band and the tab meanwhile —
                 # that is the point of it being a stand-in and not a placeholder.
-                if not session.conversation_name:
-                    source.naming.requested = False
-                    # Remember the opener so a fallback that pins AFTER this
-                    # isolated 429 can re-fire naming on the serving model
-                    # without waiting for the next user message.
-                    source.naming.pending_text = text
+                # A HEAL run is exempt from the second arm: its whole job is to
+                # replace the standing Tier 3 fallback, which IS a stored title.
+                if not existing and not heal:
+                    if acceptance.heal:
+                        # The model answered and every sample was refused, so
+                        # the once-only latch stays spent and the retry is the
+                        # next completed turn's one-shot heal — a fallback is
+                        # about to be stored (or nothing is, if the opener is
+                        # unusable), and neither leaves another way in.
+                        source.naming.heal_text = text
+                    else:
+                        source.naming.requested = False
+                        # Remember the opener so a fallback that pins AFTER this
+                        # isolated 429 can re-fire naming on the serving model
+                        # without waiting for the next user message.
+                        source.naming.pending_text = text
                 return
+            if heal and session.conversation_name_state.user_set:
+                # A human renamed it between the arm and this run: generated
+                # titles have lost permanently, and the store would refuse.
+                return
+            if acceptance.heal and not heal:
+                # This store IS the Tier 3 opener fallback: the session is about
+                # to be named, every other retry latch releases, and only the
+                # heal can still upgrade the quote to a generated title.
+                source.naming.heal_text = text
             source.naming.pending_text = ""
             self._store_title_for(source, session, title)
         finally:
@@ -48157,6 +48215,48 @@ class OperatorApp(App[None]):
         # on its own session subscription. A follower terminal declines here —
         # the owner in the other process is the one that judges.
         self._maybe_judge_goal_turn(message)
+        # ...and the one-shot Tier 3 title self-heal, for the same reason this
+        # is the right place for the goal judge: `on_turn_ended` is a
+        # COMPLETED turn (the armed retry waits for one). A follower terminal
+        # declines inside the method; a viewer never names at all.
+        self._maybe_heal_name()
+
+    def _maybe_heal_name(self) -> None:
+        """Spend the one-shot Tier 3 title self-heal at a completed turn.
+
+        Armed by ``_name_conversation_worker`` when a first-name attempt ends
+        in the Tier 3 opener fallback (or in nothing at all): the fallback is a
+        STORE, so the once-only latch stays spent and the pending-opener retry
+        was cleared — without this, an opener quote would be the session's name
+        forever. The retry runs ONCE and never re-arms, so a model that keeps
+        leaking markup costs one extra acceptance attempt and stops.
+
+        SINGLE-SHOT by construction: the latch is consumed (cleared) before
+        the worker is spawned, and the heal run itself never writes it. Skipped
+        outright when a human renamed the conversation — generated titles have
+        lost permanently, and the store would refuse the answer anyway.
+        """
+        source = self._interaction
+        session: Any = self._session
+        if session is None:
+            return
+        text = source.naming.heal_text
+        if not text:
+            return
+        source.naming.heal_text = ""
+        if not getattr(session, "owns_runtime", False):
+            # A viewer never names: the errand belongs to the owning process
+            # (same ownership gate `_maybe_name_conversation` makes).
+            return
+        if session.conversation_name_state.user_set:
+            return
+        self.run_worker(
+            self._name_conversation_worker(
+                session, text, source.naming.generation, source=source, heal=True
+            ),
+            thread=False,
+            group=source.worker_group("naming"),
+        )
 
     def on_turn_abandoned(self, message: TurnAbandoned) -> None:
         """Retire a turn whose worker returned without a terminal ``agent_end``.

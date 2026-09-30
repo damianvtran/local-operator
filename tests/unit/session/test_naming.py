@@ -1,15 +1,19 @@
-"""Focused ``parse_title`` / generate_title coverage.
+"""Focused ``parse_title`` / generate_title / acceptance-cascade coverage.
 
 The TUI suite owns scheduling (when the call fires, what a failure costs the
 latch). This file owns the parser: tagged Claude replies, untagged Grok
 replies, leaked thinking, JSON wrappers, and the generate_title / generate_retitle
-failure modes that used to live only as comments on the TUI tests.
+failure modes that used to live only as comments on the TUI tests. It also owns
+the Tier 0-3 acceptance cascade: the structural gate's corpus (the seventeen
+wrapped forms from the operator's report), the classifier matrix, the bounded
+retry, and the Tier 3 opener fallback.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from types import SimpleNamespace
 
 import pytest
 
@@ -236,3 +240,403 @@ async def test_generate_retitle_sentinel_and_restatement_and_failure_are_none() 
         is None
     )
     assert await naming.generate_retitle("Fix the login flow", "rewrite the importer", boom) is None
+
+
+# ---------------------------------------------------------------------------
+# The acceptance cascade (Tier 0-3)
+# ---------------------------------------------------------------------------
+
+#: The five wrapped forms the operator's report carried, verbatim (plus the
+#: stale-pr twin from the same era). Every one of them reached storage through
+#: ``parse_title`` before the gate existed; all of them must be refused now.
+WRAPPED_FROM_THE_REPORT = [
+    "<Stale PR recovery task>",
+    "<stale-pr recovery local-operator-ui>",
+    "<\u56d7>Composer ArrowUp history recall UI issues",
+    "<\u56e7>Assess releasing PR 192 or close",
+    "<|\uff5cDSML\uff5c|ai_title>Minerva merge requirements before MR merge</ai_title>",
+]
+
+#: Twelve more observed forms, kept as regression fixtures.
+WRAPPED_CORPUS = [
+    "<Cabin>",
+    "<\u70ed\u70b9\u805a\u7126>Radient suggestion ordering and dedupe",
+    "<\u5212\u91cd\u70b9>revamp Agent hub teams UX layout",
+    "< Hearing loss resolution errors in tui",
+    "<\u56d7>Local operator subagent result pane takeover",
+    "< Hearing handoff documentation review request",
+    "< Bavarian International School>",
+    "< Credential tool could not be reached",
+    "<notes protocol scratch markdown files>",
+    "<L title>Local Operator UI install instructions",
+    "<\u56e7>GOAL-CONTINUATION messages visible in transcripts</\u56e7>",
+    "<\uff5c\uff5cDSML\uff5c\uff5c calls>",
+]
+
+
+class _Replies:
+    """A ``complete_once`` fake answering from a fixed list, in order.
+
+    Raises when the cascade asks for a reply the list does not hold, so every
+    test using it is also an assertion that the attempt stayed inside its
+    bound of two naming samples.
+    """
+
+    def __init__(self, *replies: str) -> None:
+        self.replies = list(replies)
+        self.calls: list[tuple[str, str]] = []
+
+    async def __call__(self, system: str, prompt: str) -> str:
+        self.calls.append((system, prompt))
+        if not self.replies:
+            raise AssertionError("the cascade spent more naming samples than its bound allows")
+        return self.replies.pop(0)
+
+
+class _FitCheck:
+    """A fit-check fake answering one verdict per call, in order.
+
+    A verdict list shorter than the calls made repeats its last entry; an
+    exhausted list answers ``None`` ("no verdict"). ``states`` records what
+    each call was shown.
+    """
+
+    def __init__(self, *verdicts: str | None) -> None:
+        self.verdicts = list(verdicts)
+        self.states: list[str] = []
+
+    async def __call__(self, state: str) -> str | None:
+        self.states.append(state)
+        if not self.verdicts:
+            return None
+        if len(self.states) <= len(self.verdicts):
+            return self.verdicts[len(self.states) - 1]
+        return self.verdicts[-1]
+
+
+def _theme_rows() -> list[SimpleNamespace]:
+    """The minimal ``(role, text)`` history the re-title/refresh samplers read."""
+    return [
+        SimpleNamespace(role="user", text="fix the login redirect loop"),
+        SimpleNamespace(role="assistant", text="done"),
+    ]
+
+
+# -- Tier 0: the structural gate -------------------------------------------
+
+
+def test_every_wrapped_form_from_the_report_fails_the_structural_gate() -> None:
+    for wrapped in WRAPPED_FROM_THE_REPORT:
+        assert naming.validate_generated_title(wrapped, "opener text") is None, wrapped
+
+
+def test_the_wider_wrapped_corpus_fails_the_gate_too() -> None:
+    for wrapped in WRAPPED_CORPUS:
+        assert naming.validate_generated_title(wrapped, "opener text") is None, wrapped
+
+
+def test_the_gate_keeps_plain_titles_unchanged() -> None:
+    opener = "please fix the redirect loop when logging in"
+    for title in (
+        "Fix the login redirect loop",
+        "Bulk export columns",
+        "Revamp Agent hub teams UX layout",
+        "The login redirect loop",
+    ):
+        assert naming.validate_generated_title(title, opener) == title, title
+
+
+def test_the_gate_refuses_damage_control_and_repetition_shapes() -> None:
+    assert naming.validate_generated_title("Fix\x00the loop", "opener") is None
+    assert naming.validate_generated_title("\u200b\u200b\u200b", "opener") is None
+    assert naming.validate_generated_title("Fix \ufffd the loop", "opener") is None
+    assert naming.validate_generated_title("Fix \uff1cthe loop\uff1e", "opener") is None
+    assert naming.validate_generated_title("Loop loop loop forever", "opener") is None
+    assert naming.validate_generated_title("aaaaaaaaaaaaaa loop", "opener") is None
+
+
+def test_the_gate_refuses_a_body_equal_to_the_opener_label() -> None:
+    opener = "fix the login redirect loop"
+    label = naming.fallback_from_opener(opener)
+    assert naming.validate_generated_title(label, opener) is None
+    # The Tier 3 derivation is exempt: it IS that label, deliberately.
+    assert naming.validate_generated_title(label, opener, allow_opener_label=True) == label
+    # ...and a body a word different from the label is not an echo.
+    assert naming.validate_generated_title("Login redirect loop fix", opener) == (
+        "Login redirect loop fix"
+    )
+
+
+# -- the cascade: retry, classifier matrix, bounds -------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrapped", WRAPPED_FROM_THE_REPORT)
+async def test_the_corrective_resample_recovers_every_reported_form(wrapped: str) -> None:
+    replies = _Replies(wrapped, "Recovered release triage")
+    acceptance = await naming.generate_title_acceptance("recover the release notes", replies)
+    assert acceptance.title == "Recovered release triage", wrapped
+    assert acceptance.tier == naming.TIER_GENERATED
+    assert acceptance.heal is False
+    assert len(replies.calls) == 2
+    assert naming.TITLE_CORRECTIVE_ADDENDUM in replies.calls[1][0]
+
+
+@pytest.mark.asyncio
+async def test_a_reachable_classifier_accepts_a_fitting_sample_without_a_retry() -> None:
+    replies = _Replies("The login redirect loop")
+    fit = _FitCheck(naming.TITLE_FITS)
+    acceptance = await naming.generate_title_acceptance(
+        "fix the login redirect loop bug", replies, fit_check=fit
+    )
+    assert acceptance.title == "The login redirect loop"
+    assert acceptance.tier == naming.TIER_GENERATED
+    assert len(replies.calls) == 1
+    assert len(fit.states) == 1
+    assert "The login redirect loop" in fit.states[0]
+
+
+@pytest.mark.asyncio
+async def test_an_unfit_sample_is_corrected_and_the_second_check_decides() -> None:
+    replies = _Replies("First candidate", "Second candidate")
+    fit = _FitCheck(naming.TITLE_DOESNT_FIT, naming.TITLE_FITS)
+    acceptance = await naming.generate_title_acceptance(
+        "recover the release notes", replies, fit_check=fit
+    )
+    assert acceptance.title == "Second candidate"
+    assert len(replies.calls) == 2
+    assert len(fit.states) == 2
+    assert naming.TITLE_CORRECTIVE_ADDENDUM in replies.calls[1][0]
+
+
+@pytest.mark.asyncio
+async def test_an_unfit_retry_ends_in_the_tier_three_fallback() -> None:
+    opener = "recover the release notes"
+    replies = _Replies("First candidate", "Second candidate")
+    fit = _FitCheck(naming.TITLE_DOESNT_FIT, naming.TITLE_DOESNT_FIT)
+    acceptance = await naming.generate_title_acceptance(opener, replies, fit_check=fit)
+    assert acceptance.title == naming.fallback_from_opener(opener)
+    assert acceptance.tier == naming.TIER_FALLBACK
+    assert acceptance.heal is True
+    assert len(replies.calls) == 2
+    assert len(fit.states) == 2, "the classifier bound is two calls per attempt"
+
+
+@pytest.mark.asyncio
+async def test_a_second_fit_check_that_cannot_answer_fails_open() -> None:
+    replies = _Replies("First candidate", "Second candidate")
+    fit = _FitCheck(naming.TITLE_DOESNT_FIT, None)
+    acceptance = await naming.generate_title_acceptance(
+        "recover the release notes", replies, fit_check=fit
+    )
+    assert acceptance.title == "Second candidate"
+    assert acceptance.tier == naming.TIER_GENERATED
+
+
+@pytest.mark.asyncio
+async def test_an_absent_classifier_hedges_with_a_plain_second_sample() -> None:
+    replies = _Replies("First candidate", "Second candidate")
+    acceptance = await naming.generate_title_acceptance("recover the release notes", replies)
+    assert acceptance.title == "Second candidate"
+    assert acceptance.tier == naming.TIER_GENERATED
+    assert len(replies.calls) == 2
+    # The hedge is the PLAIN prompt, not the corrective addendum.
+    assert replies.calls[1][0] == replies.calls[0][0]
+    assert naming.TITLE_CORRECTIVE_ADDENDUM not in replies.calls[1][0]
+
+
+@pytest.mark.asyncio
+async def test_cant_tell_hedges_like_an_absent_classifier() -> None:
+    replies = _Replies("First candidate", "Second candidate")
+    fit = _FitCheck(naming.TITLE_CANT_TELL)
+    acceptance = await naming.generate_title_acceptance(
+        "recover the release notes", replies, fit_check=fit
+    )
+    assert acceptance.title == "Second candidate"
+    assert len(fit.states) == 1
+    assert len(replies.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_an_erroring_classifier_hedges_instead_of_rejecting() -> None:
+    async def broken(state: str) -> str | None:
+        raise RuntimeError("vendor down")
+
+    replies = _Replies("First candidate", "Second candidate")
+    acceptance = await naming.generate_title_acceptance(
+        "recover the release notes", replies, fit_check=broken
+    )
+    assert acceptance.title == "Second candidate"
+
+
+@pytest.mark.asyncio
+async def test_a_dirty_hedge_keeps_the_first_accepted_sample() -> None:
+    replies = _Replies("First candidate", "<wrapped hedge>")
+    acceptance = await naming.generate_title_acceptance("recover the release notes", replies)
+    assert acceptance.title == "First candidate"
+    assert len(replies.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_both_samples_dirty_ends_in_a_bracket_free_opener_fallback() -> None:
+    opener = "recover the release notes"
+    replies = _Replies("<first wrapped>", "<second wrapped>")
+    acceptance = await naming.generate_title_acceptance(opener, replies)
+    assert acceptance.title == naming.fallback_from_opener(opener)
+    assert acceptance.tier == naming.TIER_FALLBACK
+    assert acceptance.heal is True
+    assert "<" not in acceptance.title and ">" not in acceptance.title
+    assert "\uff5c" not in acceptance.title
+    assert naming.validate_generated_title(acceptance.title, opener, allow_opener_label=True)
+
+
+@pytest.mark.asyncio
+async def test_an_unusable_opener_ends_with_nothing_and_the_heal_armed() -> None:
+    replies = _Replies("<one>", "<two>")
+    acceptance = await naming.generate_title_acceptance("<\u56d7>", replies)
+    assert acceptance.title == ""
+    assert acceptance.tier == naming.TIER_FALLBACK
+    assert acceptance.heal is True
+
+
+@pytest.mark.asyncio
+async def test_a_low_signal_opener_spends_nothing_and_arms_nothing() -> None:
+    replies = _Replies()  # any call raises AssertionError
+    acceptance = await naming.generate_title_acceptance("thanks!", replies)
+    assert acceptance.title == ""
+    assert acceptance.tier == naming.TIER_NONE
+    assert acceptance.heal is False
+    assert replies.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_sentinel_answer_is_not_corrected() -> None:
+    replies = _Replies("<title/>")
+    acceptance = await naming.generate_title_acceptance("recover the release notes", replies)
+    assert acceptance.title == ""
+    assert acceptance.heal is False
+    assert len(replies.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_call_stays_a_failure_and_spends_nothing_more() -> None:
+    async def boom(system: str, prompt: str) -> str:
+        raise RuntimeError("429 rate limited")
+
+    acceptance = await naming.generate_title_acceptance("recover the release notes", boom)
+    assert acceptance.title == ""
+    assert acceptance.heal is False
+
+
+@pytest.mark.asyncio
+async def test_generate_title_returns_the_tier_three_fallback_when_exhausted() -> None:
+    opener = "recover the release notes"
+    replies = _Replies("<first wrapped>", "<second wrapped>")
+    assert await naming.generate_title(opener, replies) == naming.fallback_from_opener(opener)
+
+
+@pytest.mark.asyncio
+async def test_the_re_title_never_falls_back_and_still_gets_the_retry() -> None:
+    replies = _Replies("<wrapped one>", "<wrapped two>")
+    assert (
+        await naming.generate_retitle(
+            "Standing title", "and now the billing importer", replies, turns=[]
+        )
+        is None
+    )
+    assert len(replies.calls) == 2
+    replies2 = _Replies("<wrapped one>", "Billing importer rewrite")
+    assert (
+        await naming.generate_retitle(
+            "Standing title", "and now the billing importer", replies2, turns=[]
+        )
+        == "Billing importer rewrite"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_wrapped_refresh_reply_is_refused_without_changing_the_title() -> None:
+    replies = _Replies("<wrapped refresh>")
+    result = await naming.refresh_title(
+        "Standing title", replies, turns=_theme_rows(), newest="and the signup flow"
+    )
+    assert result.outcome == naming.TITLE_UNCHANGED
+    assert result.title == ""
+    assert len(replies.calls) == 1, "the on-demand path takes Tier 0 only"
+
+
+@pytest.mark.asyncio
+async def test_a_wrapped_refresh_on_an_unnamed_session_reports_nothing_yet() -> None:
+    replies = _Replies("<wrapped refresh>")
+    result = await naming.refresh_title(
+        "", replies, turns=_theme_rows(), newest="and the signup flow"
+    )
+    assert result.outcome == naming.TITLE_NOTHING_YET
+
+
+@pytest.mark.asyncio
+async def test_a_clean_refresh_still_replaces_the_title() -> None:
+    replies = _Replies("Fresh clean title")
+    result = await naming.refresh_title(
+        "Standing title", replies, turns=_theme_rows(), newest="and the signup flow"
+    )
+    assert result.outcome == naming.TITLE_REFRESHED
+    assert result.title == "Fresh clean title"
+
+
+# -- the fit-check seam itself ---------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_fit_check_adapter_resolves_per_call_and_fails_open() -> None:
+    class _Answer:
+        value = naming.TITLE_DOESNT_FIT
+
+    class _Seam:
+        async def decide(self, *, state: str, question: object) -> object:
+            return _Answer()
+
+    holder: dict[str, object] = {"seam": _Seam()}
+    check = naming.title_fit_check(lambda: holder["seam"])
+    assert await check("state") == naming.TITLE_DOESNT_FIT
+
+    # Resolved PER CALL: swapping the seam after the adapter was built is the
+    # documented way tests and hosts inject one.
+    holder["seam"] = None
+    assert await check("state") is None
+
+    class _Broken:
+        async def decide(self, *, state: str, question: object) -> object:
+            raise RuntimeError("vendor down")
+
+    holder["seam"] = _Broken()
+    assert await check("state") is None
+
+    class _Unknown:
+        async def decide(self, *, state: str, question: object) -> object:
+            return SimpleNamespace(value="something_else")
+
+    holder["seam"] = _Unknown()
+    assert await check("state") is None
+
+    # A seam with no ``decide`` at all is "no classifier", not an error.
+    holder["seam"] = object()
+    assert await check("state") is None
+
+
+@pytest.mark.asyncio
+async def test_the_fit_check_question_carries_the_three_choice_ids() -> None:
+    question = naming.title_fit_question()
+    assert question.id == naming.TITLE_QUESTION_ID
+    assert set(question.criteria) == {
+        naming.TITLE_FITS,
+        naming.TITLE_DOESNT_FIT,
+        naming.TITLE_CANT_TELL,
+    }
+
+
+def test_the_fit_state_carries_the_candidate_and_a_bounded_excerpt() -> None:
+    state = naming.title_fit_state("Candidate title", "word " * 500)
+    assert "Candidate title" in state
+    assert len(state) < 1200
+    assert "\u2026" in state  # the module's one truncation marker
