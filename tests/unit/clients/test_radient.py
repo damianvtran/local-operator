@@ -1912,3 +1912,111 @@ def test_create_speech_treats_a_json_content_type_as_an_upstream_failure(
 
     assert exc_info.value.status_code == 200
     assert exc_info.value.body == "quota exceeded"
+
+
+def test_create_speech_payload_omits_none_optionals(
+    radient_client: RadientClient, real_response: Callable[[int, bytes], requests.Response]
+) -> None:
+    """Model, voice and language_code are omitted when the caller named none.
+
+    The hub owns the model choice on the ElevenLabs plane (the app deliberately
+    stops pinning ``gpt-4o-mini-tts``), and a caller that named no voice must
+    not have one invented client-side; an absent key is what makes the hub's
+    own default apply.
+    """
+    mock_post = MagicMock(return_value=real_response(200, b"fixture-audio"))
+    with patch("requests.post", mock_post):
+        audio = radient_client.create_speech(input_text="hello", provider="elevenlabs")
+
+    assert audio == b"fixture-audio"
+    assert mock_post.call_args.kwargs["json"] == {
+        "input": "hello",
+        "response_format": "mp3",
+        "speed": 1.0,
+        "provider": "elevenlabs",
+    }
+
+
+def test_create_speech_payload_carries_voice_alias_and_language_code(
+    radient_client: RadientClient, real_response: Callable[[int, bytes], requests.Response]
+) -> None:
+    """The speak-aloud fields travel verbatim: alias voice, ISO language code."""
+    mock_post = MagicMock(return_value=real_response(200, b"fixture-audio"))
+    with patch("requests.post", mock_post):
+        radient_client.create_speech(
+            input_text="hola",
+            voice="female",
+            provider="elevenlabs",
+            language_code="es",
+        )
+
+    assert mock_post.call_args.kwargs["json"] == {
+        "input": "hola",
+        "voice": "female",
+        "response_format": "mp3",
+        "speed": 1.0,
+        "provider": "elevenlabs",
+        "language_code": "es",
+    }
+
+
+def test_create_speech_maps_a_refusal_to_a_typed_error(
+    radient_client: RadientClient, real_response: Callable[[int, bytes], requests.Response]
+) -> None:
+    """A non-2xx becomes an APIError: status + the envelope's designed prose.
+
+    The raw body is deliberately NOT carried (``api_error_from_response``
+    leaves ``body`` unset for a designed envelope): the route classifies on the
+    status, and the hub's ``error`` string is the only text that travels.
+    """
+    response = real_response(
+        402, b'{"error": "insufficient credits for this request", "code": "billing"}'
+    )
+    with patch(
+        "requests.post",
+        MagicMock(side_effect=requests.exceptions.HTTPError("refused", response=response)),
+    ):
+        with pytest.raises(APIError) as exc_info:
+            radient_client.create_speech(input_text="hello", provider="elevenlabs")
+
+    exc = exc_info.value
+    assert exc.status_code == 402
+    assert "insufficient credits for this request" in str(exc)
+    assert exc.code == "billing"
+    assert exc.body is None
+
+
+def test_create_speech_refusal_prose_that_reflects_the_key_is_redacted(
+    radient_client: RadientClient, real_response: Callable[[int, bytes], requests.Response]
+) -> None:
+    """An upstream that echoes the credential into its prose cannot leak it."""
+    response = real_response(
+        400, json.dumps({"error": "Incorrect API key provided: test_api_key"}).encode()
+    )
+    with patch(
+        "requests.post",
+        MagicMock(side_effect=requests.exceptions.HTTPError("refused", response=response)),
+    ):
+        with pytest.raises(APIError) as exc_info:
+            radient_client.create_speech(input_text="hello", provider="elevenlabs")
+
+    assert "test_api_key" not in str(exc_info.value)
+    assert "[redacted]" in str(exc_info.value)
+
+
+def test_create_speech_types_a_transport_failure_without_a_status(
+    radient_client: RadientClient,
+) -> None:
+    """A call that never reached the hub is still typed: no status, no body.
+
+    The routes render it as "no response from the upstream" rather than as an
+    internal fault of the daemon's own.
+    """
+    with patch(
+        "requests.post", MagicMock(side_effect=requests.exceptions.ConnectionError("refused"))
+    ):
+        with pytest.raises(APIError) as exc_info:
+            radient_client.create_speech(input_text="hello", provider="elevenlabs")
+
+    assert exc_info.value.status_code is None
+    assert exc_info.value.body is None
