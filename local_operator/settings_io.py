@@ -1715,8 +1715,12 @@ SETTINGS: tuple[Setting, ...] = (
         # The literal is deliberate, like every default in this file; the code
         # constant is `DEFAULT_PINNED_FALLBACK` in providers/failover.py, and
         # `_consumer_defaults()` in tests/unit/test_settings_io.py pins the
-        # pair to each other.
-        default="same-family",
+        # pair to each other. "cross-family" has been the shipped default
+        # since the 2026-09-30 incident: a pinned child whose credential is
+        # unusable must still reach a configured hop, cross-vendor included
+        # as the announced last resort, rather than fail on a chain it was
+        # forbidden to walk. "same-family" remains the strict opt-in.
+        default="cross-family",
         # NOTE ON THE COPY (review round 1, D1/D3): the row's two choice
         # descriptions render ONLY on the expanded rows, where the painted
         # field — truncation ellipsis included — is 17/26 cells at 60x20 and

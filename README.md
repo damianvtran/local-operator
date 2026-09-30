@@ -587,6 +587,13 @@ per account and a hop would re-pay to rebuild it.
   does it walk your **model fallback chain** (`retry.fallbackChains` in
   `config.yml`), backing off between attempts. `/failovers` prints the
   cascade and marks which account is serving right now.
+- **Pinned subagents descend the chain cross-vendor last, and say so.** A
+  subagent launched on a resolved model (a role's effort tier, or a resumed
+  child) holds that pin until its own model cannot serve; the walk then goes
+  family-first and may land on another vendor's model, announced on the
+  child's row, the parent's notice and the completion record
+  (`pinned X, ran on Y`). `retry.pinnedFallback: same-family` restores the
+  strict refusal instead.
 - **Cache-aware stickiness.** A session prefers the account it started on,
   because the provider's prompt cache is per account and moving would rewrite
   the whole conversation prefix at cache-write price. With the default

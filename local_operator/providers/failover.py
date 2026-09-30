@@ -2799,16 +2799,21 @@ PINNED_FALLBACK_CROSS_FAMILY = "cross-family"
 PINNED_FALLBACK_VALUES = (PINNED_FALLBACK_SAME_FAMILY, PINNED_FALLBACK_CROSS_FAMILY)
 
 #: ``retry.pinnedFallback`` — what a pinned child's cascade may descend onto
-#: when no same-family route can serve it. The shipped default refuses the
-#: cross-vendor hop, trading a silent vendor substitution for a VISIBLE
-#: pinned-child failure; ``cross-family`` is the opt-in that restores the old
-#: reach (targets are still ordered same-family first, and the descent still
-#: announces itself). A module-level constant rather than a literal at the
-#: reader, because ``tests/unit/test_settings_io.py::_consumer_defaults``
+#: when no same-family route can serve it. The shipped default WALKS THE
+#: CONFIGURED CHAIN: targets are still ordered same-family first and a
+#: cross-vendor hop remains the last resort, and any descent announces itself
+#: (settle reason, parent-stream notice, job badge, completion row), so the
+#: substitution the older default refused outright is instead DISCLOSED.
+#: The refusal existed because a same-family-only walk made a pinned child
+#: whose credential is unusable fail instantly even with a working hop
+#: (2026-09-30 fleet incident: pinned sonnet roles died during the Anthropic
+#: quota outage); ``same-family`` remains as the explicit strict opt-in that
+#: keeps the visible pinned-child refusal. A module-level constant rather
+#: than a literal at the reader, because ``tests/unit/test_settings_io.py::_consumer_defaults``
 #: pins the ``/settings`` registry row to exactly this value; it IS the
-#: ``PINNED_FALLBACK_SAME_FAMILY`` member above rather than a second literal
+#: ``PINNED_FALLBACK_CROSS_FAMILY`` member above rather than a second literal
 #: for the same word (review round 1, nit F4).
-DEFAULT_PINNED_FALLBACK = PINNED_FALLBACK_SAME_FAMILY
+DEFAULT_PINNED_FALLBACK = PINNED_FALLBACK_CROSS_FAMILY
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2843,8 +2848,10 @@ class RetrySettings:
     usage_aware_account_pick: bool = True
     fallback_chains: Mapping[str, Sequence[Any]] = dataclasses.field(default_factory=dict)
     #: What a PINNED child may descend onto when no same-family route can
-    #: serve — ``DEFAULT_PINNED_FALLBACK`` (refuse the cross-vendor hop) or
-    #: ``PINNED_FALLBACK_CROSS_FAMILY`` (allow it, loudly). Read per call like
+    #: serve — ``DEFAULT_PINNED_FALLBACK`` (walk the chain family-first with
+    #: the cross-vendor hop as the announced last resort) or
+    #: ``PINNED_FALLBACK_SAME_FAMILY`` (the explicit strict opt-in: refuse the
+    #: cross-vendor hop and fail visibly instead). Read per call like
     #: every other retry field, so a config edit reaches running sessions with
     #: no ``/reload``.
     pinned_fallback: str = DEFAULT_PINNED_FALLBACK
@@ -3206,11 +3213,11 @@ def order_pinned_targets(
     """Order fallback targets for a pinned route; ``strict`` also filters.
 
     Pin-preserving first, then same-vendor, then cross-vendor; the sort is
-    stable, so targets of one rank keep their configured order. ``strict``
-    (``retry.pinnedFallback: same-family``, the default) drops cross-vendor
-    targets entirely — a pinned child must not silently land on another
-    vendor's model — while the opt-in keeps them, last, so a cross-vendor hop
-    is the last resort and still proceeds loudly.
+    stable, so targets of one rank keep their configured order. ``strict`` is
+    the explicit ``retry.pinnedFallback: same-family`` opt-in and drops
+    cross-vendor targets entirely — a pinned child must not silently land on
+    another vendor's model — while the default keeps them, last, so a
+    cross-vendor hop is the last resort and still proceeds loudly.
     """
     if strict:
         targets = [target for target in targets if is_same_family(pin_selector, target.selector)]
@@ -3253,55 +3260,96 @@ def _pinned_exhaustion_error(
     reported: ProviderError | None,
     blocked: Sequence[str],
     same_family_available: bool,
+    *,
+    strict: bool,
+    hops_tried: Sequence[str],
+    fallback_off: str | None,
 ) -> ProviderError:
-    """The legible refusal a STRICT pinned route raises when it is exhausted.
+    """The legible failure a pinned route raises when the walk ends unserved.
 
-    Names the pin, the cause and BOTH remedies, because the default
-    ``retry.pinnedFallback: same-family`` deliberately converts a silent
-    model substitution into a VISIBLE pinned-child failure — and a bare
-    provider error would leave the operator to guess that the failure is the
-    policy working as designed rather than a misconfiguration. ``kind="unknown"``
-    is explicit: the text quotes a provider message, and letting the
-    classifier re-derive a kind from that quote could dress the refusal as the
-    provider's own quota error.
+    Names the pin, the cause and the remedies, because a bare provider error
+    would leave the operator to guess that the failure is the policy working
+    as designed rather than a misconfiguration. The copy is policy-aware,
+    because the two policies fail for different reasons: under the strict
+    ``retry.pinnedFallback: same-family`` opt-in a silent model substitution
+    is deliberately converted into a VISIBLE pinned-child refusal (and the
+    refusal names the cross-vendor hops it declined), while under the default
+    the walk served nothing because every configured hop was tried and could
+    not — so the message names those hops, or says that none is configured,
+    or that fallback is switched off. ``kind="unknown"`` is explicit: the
+    text quotes a provider message, and letting the classifier re-derive a
+    kind from that quote could dress the refusal as the provider's own quota
+    error.
 
     THE FIRST SENTENCE IS THE ACTIONABLE HALF, and that is a measured layout
     constraint rather than a style choice: the failed child's dock row paints
     only its leading cells — the span is ``77 - len(label) - len(role)``,
     ~48-58 for typical child labels (design rounds 1-2, D4) — so the pin, the
-    state and both ways out LEAD, and the diagnostics follow. Wording speaks
+    state and the ways out LEAD, and the diagnostics follow. Wording speaks
     the vocabulary of the ``/settings`` page that owns these terms — "hop",
     "allow cross-vendor" — never "target" and never the raw stored value
     (design round 1, D5).
 
-    ``same_family_available`` distinguishes the three exhaustion shapes so
-    the note never lies about what was configured: same-family hops tried
-    and spent, cross-vendor hops refused by policy, or neither configured —
-    the last one reachable in its natural no-chain shape (review round 1,
-    F3).
+    The STRICT branch's ``same_family_available`` distinguishes its three
+    exhaustion shapes so the note never lies about what was configured:
+    same-family hops tried and spent, cross-vendor hops refused by policy,
+    or neither configured — the last one reachable in its natural no-chain
+    shape (review round 1, F3). The default branch reads ``hops_tried``
+    (selectors, deduped, in walk order) and ``fallback_off`` — the tail's
+    facts, passed in rather than re-derived here.
     """
     if reported is None:
         cause = "every route that could serve it failed"
     else:
         status = f" HTTP {reported.status}" if reported.status else ""
         cause = f"{reported.kind or 'failure'}{status}: {reported.message}"
-    notes: list[str] = []
-    if same_family_available:
-        notes.append("Every configured same-family hop was tried and could not serve it.")
-    if blocked:
-        notes.append(
-            f"A cross-vendor hop ({', '.join(blocked)})"
-            " is configured but refused by retry.pinnedFallback (same family only)."
+    if strict:
+        notes: list[str] = []
+        if same_family_available:
+            notes.append("Every configured same-family hop was tried and could not serve it.")
+        if blocked:
+            notes.append(
+                f"A cross-vendor hop ({', '.join(blocked)})"
+                " is configured but refused by retry.pinnedFallback (same family only)."
+            )
+        if not notes:
+            notes.append("No same-family hop is configured.")
+        return ProviderError(
+            None,
+            f"Pin {pin_selector} failed; allow cross-vendor or add a same-family hop."
+            f" Cause: {cause}."
+            f" {' '.join(notes)}"
+            " Fix: add a same-family hop to retry.fallbackChains, or set"
+            " retry.pinnedFallback to allow cross-vendor.",
+            retryable=False,
+            kind="unknown",
         )
-    if not notes:
-        notes.append("No same-family hop is configured.")
+    if fallback_off is not None:
+        return ProviderError(
+            None,
+            f"Pin {pin_selector} failed; fallback is disabled ({fallback_off} is off)."
+            f" Cause: {cause}."
+            f" Fix: fix the pinned model, or re-enable {fallback_off} in /settings.",
+            retryable=False,
+            kind="unknown",
+        )
+    if not hops_tried:
+        return ProviderError(
+            None,
+            f"Pin {pin_selector} failed; add a hop to retry.fallbackChains."
+            f" Cause: {cause}."
+            " No fallback hop is configured."
+            " Fix: add a hop to retry.fallbackChains.",
+            retryable=False,
+            kind="unknown",
+        )
     return ProviderError(
         None,
-        f"Pin {pin_selector} failed; allow cross-vendor or add a same-family hop."
+        f"Pin {pin_selector} failed; add another hop or fix its credentials."
         f" Cause: {cause}."
-        f" {' '.join(notes)}"
-        " Fix: add a same-family hop to retry.fallbackChains, or set"
-        " retry.pinnedFallback to allow cross-vendor.",
+        " Every configured hop was tried and could not serve it:"
+        f" {', '.join(hops_tried)}."
+        " Fix: check the hops' credentials, or add another hop to retry.fallbackChains.",
         retryable=False,
         kind="unknown",
     )
@@ -3755,14 +3803,15 @@ async def stream_with_failover(
     pinned = pin_selector is not None
 
     targets = [primary_target]
-    # Strict pin policy state; the tail of the walk reads it to raise a
-    # legible refusal instead of dressing a policy-forced failure as a bare
-    # provider error. STRICTNESS is a property of the (pin, policy) pair, NOT
-    # of whether a chain happens to expand: with fallbacks on, a pinned child
-    # with NO chain still fails VISIBLY, with the no-candidates note naming
-    # why (review round 1, F3). The two flags stay empty when no chain
-    # contributed candidates, which is exactly the shape
-    # `_pinned_exhaustion_error` reads.
+    # Pin policy state; the tail of the walk reads it to raise a legible
+    # failure — policy-aware copy — instead of dressing a policy-forced
+    # refusal as a bare provider error. STRICTNESS is a property of the (pin,
+    # policy) pair, NOT of whether a chain happens to expand: with fallbacks
+    # on, a pinned child with NO chain still fails VISIBLY with copy that
+    # names the policy in force (review round 1, F3). The two flags stay
+    # empty when no chain contributed candidates, which is exactly the shape
+    # the strict branch of `_pinned_exhaustion_error` reads; the default
+    # branch reads `full_targets` and the retry switches instead.
     pinned_strict = False
     pinned_blocked: list[str] = []
     pinned_family_available = False
@@ -3775,13 +3824,14 @@ async def stream_with_failover(
                 primary_selector, chain, primary_effort=request.model.reasoning_effort
             )
             if pinned and pin_selector is not None:
-                # A PINNED child descends in same-family order and, under the
-                # default policy, never enters a cross-vendor target at all.
-                # ORDER and FILTER both go through the one predicate in
-                # `pinned_family_rank`, shared with the quota preflight
-                # (`model.configure._first_available_fallback`), so the walk
-                # and the message boundary cannot form two opinions about
-                # which targets may serve a pinned child.
+                # A PINNED child descends in same-family order; under the
+                # explicit strict opt-in it never enters a cross-vendor
+                # target at all, while the default keeps them — last,
+                # announced. ORDER and FILTER both go through the one
+                # predicate in `pinned_family_rank`, shared with the quota
+                # preflight (`model.configure._first_available_fallback`), so
+                # the walk and the message boundary cannot form two opinions
+                # about which targets may serve a pinned child.
                 pinned_family_available = any(
                     is_same_family(pin_selector, candidate.selector) for candidate in candidates
                 )
@@ -4759,13 +4809,27 @@ async def stream_with_failover(
         await _abortable_sleep(delay_ms, signal)
         pending = revisit
 
-    if pinned and pinned_strict and pin_selector is not None:
-        # A strict pinned route exhausted without ever entering a cross-vendor
-        # target: the child fails VISIBLY on its pin instead of silently
-        # running on another vendor's model. The refusal names the pin, the
-        # cause and both remedies (see `_pinned_exhaustion_error`).
+    if pinned and pin_selector is not None:
+        # A pinned child that ends the walk without serving fails LEGIBLY,
+        # never with a bare provider error: under strict the refusal says the
+        # cross-vendor hop was declined by policy; under the default the
+        # message names the configured hops that were tried and could not
+        # serve (or that none is configured / fallback is off). See
+        # `_pinned_exhaustion_error` for the copy and its layout constraint.
         error = _pinned_exhaustion_error(
-            pin_selector, reported, pinned_blocked, pinned_family_available
+            pin_selector,
+            reported,
+            pinned_blocked,
+            pinned_family_available,
+            strict=pinned_strict,
+            hops_tried=tuple(
+                dict.fromkeys(t.selector for t in full_targets if t != primary_target)
+            ),
+            fallback_off=(
+                "retry.enabled"
+                if not retry.enabled
+                else "retry.modelFallback" if not retry.model_fallback else None
+            ),
         )
         if reported is not None:
             raise error from reported

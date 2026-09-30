@@ -521,9 +521,12 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     ),
     # Read per call by both pin-policy entry points (the walk and the quota
     # preflight), so the rebound mapping is the whole contract — the same
-    # shape as `modelFallback` above.
+    # shape as `modelFallback` above. Probed with the STRICT opt-in because
+    # `cross-family` is the shipped default (2026-09-30): like the probes
+    # above, the value written must be a NON-default one, or there is no
+    # change for the watch to observe.
     "retry.pinnedFallback": (
-        "cross-family",
+        "same-family",
         lambda s, w: RetrySettings.from_settings(s.routing_settings).pinned_fallback,
     ),
     # Observed on the auth STORE, deliberately (review round 2, B1). Every
