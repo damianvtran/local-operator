@@ -40,6 +40,7 @@ from local_operator.update import (
 )
 
 _REAL_SERVICES_REFUSAL = update_mod._services_refusal
+_REAL_REPAIR_REFUSAL = update_mod._repair_refusal
 
 
 def _install_kind_double(kind: InstallKind):
@@ -89,6 +90,25 @@ def _owns_this_machines_services(monkeypatch: pytest.MonkeyPatch) -> None:
     `monkeypatch` runs after this fixture, so it wins.
     """
     monkeypatch.setattr(update_mod, "_services_refusal", lambda *a, **k: None)
+
+
+@pytest.fixture(autouse=True)
+def _may_touch_the_plists(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default to "this process may rewrite the plists" for every test in this module.
+
+    THE SAME SHAPE AND THE SAME REASON as the services fixture above: a pytest
+    process inside this worktree reports ``install_kind() == EDITABLE``, so the
+    real plist guard refuses every spawn — and since round 1's finding 1 the
+    mobile half ASKS that guard before spawning, so without this every test that
+    drives a bounce would be asserting against a refusal instead of against the
+    thing it was written for.
+
+    The guard has its own tests: the two refusal tests in
+    ``TestServiceDaemonRefresh`` restore ``_REAL_REPAIR_REFUSAL`` explicitly, and
+    the tests that pin a refusal patch over this fixture (a test's own monkeypatch
+    runs after it, so it wins).
+    """
+    monkeypatch.setattr(update_mod, "_repair_refusal", lambda *a, **k: None)
 
 
 def _pypi_transport(
@@ -712,7 +732,13 @@ def test_update_command_already_latest(capsys: pytest.CaptureFixture[str]) -> No
         assert update_command(check=False) == 0
         perform.assert_not_called()
         stage.assert_called_once_with()
-    assert capsys.readouterr().out.strip() == "local-operator 0.27.0 is the latest"
+    out = capsys.readouterr().out.strip().splitlines()
+    assert out[0] == "local-operator 0.27.0 is the latest"
+    # The machine-readable report line rides AFTER every human line (additive:
+    # the desktop app parses it; see update._emit_update_report).
+    report = json.loads(out[-1])["update_report"]
+    assert report["install_version"] == "0.27.0"
+    assert report["target"] == "0.27.0"
 
 
 def test_update_command_upgrades(capsys: pytest.CaptureFixture[str]) -> None:
@@ -746,6 +772,7 @@ def test_main_dispatches_update_check(monkeypatch: pytest.MonkeyPatch) -> None:
             check=True,
             refresh_daemons=False,
             services_only=False,
+            refresh_mobile=False,
             from_snapshot=None,
             services=True,
         )
@@ -761,6 +788,7 @@ def test_main_dispatches_update(monkeypatch: pytest.MonkeyPatch) -> None:
             check=False,
             refresh_daemons=False,
             services_only=False,
+            refresh_mobile=False,
             from_snapshot=None,
             services=True,
         )
@@ -783,6 +811,31 @@ def test_main_dispatches_the_service_only_repair(monkeypatch: pytest.MonkeyPatch
             check=False,
             refresh_daemons=True,
             services_only=True,
+            refresh_mobile=False,
+            from_snapshot=None,
+            services=True,
+        )
+
+
+def test_main_dispatches_the_mobile_repair(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--refresh-mobile`` reaches the repair — the mobile half's own child.
+
+    Hidden like its sibling: ``lop update`` spawns it from the newly installed
+    wheel so the mobile daemon's own LaunchAgent is rendered by THIS build and
+    the daemon is bounced right after (one actor, one bounded retry). Wired end
+    to end (parse → dispatch), because a flag the child is spawned with and the
+    parser does not accept is an unhandled-argument crash on every upgrade.
+    """
+    from local_operator.cli import main
+
+    monkeypatch.setattr("sys.argv", ["lop", "update", "--refresh-mobile"])
+    with patch("local_operator.update.update_command", return_value=0) as cmd:
+        assert main() == 0
+        cmd.assert_called_once_with(
+            check=False,
+            refresh_daemons=False,
+            services_only=False,
+            refresh_mobile=True,
             from_snapshot=None,
             services=True,
         )
@@ -799,6 +852,7 @@ def test_main_dispatches_from_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
             check=False,
             refresh_daemons=False,
             services_only=False,
+            refresh_mobile=False,
             from_snapshot="main",
             services=True,
         )
@@ -825,6 +879,7 @@ def test_main_dispatches_no_services(monkeypatch: pytest.MonkeyPatch) -> None:
             check=False,
             refresh_daemons=False,
             services_only=False,
+            refresh_mobile=False,
             from_snapshot=None,
             services=False,
         )
@@ -1207,8 +1262,8 @@ def test_refresh_restarts_via_new_distribution(branded_image) -> None:
         SAFE_PATH_FLAG,
         "-m",
         "local_operator.cli",
-        "mobile",
-        "restart",
+        "update",
+        "--refresh-mobile",
     ]
     # The image travels BESIDE the label and is always a real file — never the
     # label itself, which the kernel would try to execute. It is the branded
@@ -1441,8 +1496,9 @@ class TestServiceDaemonRefresh:
         ``text=True`` (measured), which is why the fixture below is bytes.
         """
         stdout = (
-            "refreshing: mobile :: lop mobile install\n"
+            "refreshing: browser bridge :: lop browser install\n"
             "refreshing: tunnel :: lop tunnel install\n"
+            'daemon_report: {"name":"browser bridge","status":"already"}\n'
         )
         expired = subprocess.TimeoutExpired(cmd="x", timeout=1, output=stdout.encode())
         with (
@@ -1453,7 +1509,29 @@ class TestServiceDaemonRefresh:
         warning = refresh.warnings[0]
         assert "while the tunnel daemon was being repaired" in warning
         assert "run `lop tunnel install` to bring it back" in warning
-        assert "mobile" not in warning, "the LAST announcement is the one in flight"
+        assert "browser" not in warning, "a completed daemon is not claimed in flight"
+
+    def test_the_bound_names_every_daemon_left_in_flight(self) -> None:
+        """Concurrent repairs: the sentence names the SET still in flight.
+
+        With the steps running concurrently a kill can land mid-repair on more
+        than one daemon; naming only the newest (the serial rule) would leave a
+        possibly-stopped daemon unmentioned, so the one sentence names all of
+        them and each one's own recovery command.
+        """
+        stdout = (
+            "refreshing: browser bridge :: lop browser install\n"
+            "refreshing: tunnel :: lop tunnel install\n"
+        )
+        expired = subprocess.TimeoutExpired(cmd="x", timeout=1, output=stdout.encode())
+        with (
+            patch.object(update_mod, "_installed_daemon_plists", return_value=[Path("/tmp/x")]),
+            patch("subprocess.run", side_effect=expired),
+        ):
+            refresh = update_mod.refresh_service_daemons_after_upgrade()
+        warning = refresh.warnings[0]
+        assert "while the browser bridge, tunnel daemons were being repaired" in warning
+        assert "`lop browser install`, `lop tunnel install`" in warning
 
     def test_a_half_written_announcement_names_no_daemon(self) -> None:
         """A marker the child was killed mid-write must not become a daemon's name.
@@ -1516,29 +1594,42 @@ class TestServiceDaemonRefresh:
         for the daemon that was actually down. Checked by snapshotting what the child
         had WRITTEN at the moment each repair ran, which is what the parent sees when
         it kills the pipe.
+
+        THE STEPS RUN CONCURRENTLY, and that is proven STRUCTURALLY: all three
+        repairs must be inside their bodies at once (a barrier), so a serial
+        implementation breaks the barrier into the timeout and fails — no
+        wall-clock makes this pass by luck. The same run pins the machine line of
+        every daemon (the completion marker the parent's kill attribution reads
+        and the report parses).
         """
         import io
+        import threading
         from contextlib import redirect_stdout
 
         from local_operator import launchd
         from local_operator.browser_bridge import install as browser_install
-        from local_operator.mobile import install as mobile_install
         from local_operator.tunnels import install as tunnel_install
         from local_operator.wakes import install as wakes_install
 
-        written: list[str] = []
+        written: dict[str, str] = {}
         buffer = io.StringIO()
+        barrier = threading.Barrier(3)
+        breached: list[bool] = []
 
         def repair_for(name: str):
             def repair() -> launchd.PlistRefresh:
-                written.append(buffer.getvalue())
+                written[name] = buffer.getvalue()
+                try:
+                    barrier.wait(timeout=5)
+                    breached.append(True)
+                except threading.BrokenBarrierError:
+                    breached.append(False)
                 return launchd.PlistRefresh(name=name, kind="current")
 
             return repair
 
         monkeypatch.setattr(update_mod, "_repair_refusal", lambda: None)
         for module, name in (
-            (mobile_install, "mobile"),
             (browser_install, "browser bridge"),
             (tunnel_install, "tunnel"),
             (wakes_install, "wakes supervisor"),
@@ -1550,45 +1641,75 @@ class TestServiceDaemonRefresh:
 
         steps = update_mod._refresh_steps()
         names = tuple(name for name, _recovery, _repair in steps)
-        assert names == ("mobile", "browser bridge", "tunnel", "wakes supervisor")
-        assert len(written) == len(names), "every daemon was repaired once"
-        announcements = [
-            update_mod._refresh_announcement(name, recovery) for name, recovery, _repair in steps
-        ]
-        for index, announcement in enumerate(announcements):
-            # Already written when THIS repair runs, and no later daemon announced
-            # yet: the marker is a position, and a position read out of order would
-            # name the wrong daemon in the killed child's report.
-            assert f"{announcement}\n" in written[index]
-            for later in announcements[index + 1 :]:
-                assert later not in written[index]
-        assert buffer.getvalue().splitlines() == announcements
+        assert names == ("browser bridge", "tunnel", "wakes supervisor")
+        assert sorted(written) == sorted(names), "every daemon was repaired"
+        assert len(breached) == len(names), "every repair reached the barrier"
+        assert all(breached), "the repairs did not run concurrently"
 
-    def test_the_services_run_before_the_mobile_bounce(self) -> None:
-        """The order the plist repair makes load-bearing.
+        announcements = {
+            name: update_mod._refresh_announcement(name, recovery)
+            for name, recovery, _repair in steps
+        }
+        for name in names:
+            # Already written when THIS repair runs: the marker is a position, and
+            # a position read out of order would name the wrong daemon in the
+            # killed child's report. With concurrent repairs a LATER daemon's
+            # announcement may already be in the buffer (another thread), so only
+            # the daemon's own line is asserted here.
+            assert f"{announcements[name]}\n" in written[name]
 
-        The service child REWRITES plists; the mobile bounce must restart from a
-        plist that is already current, or it restarts the previous definition and
-        the second start is the only one on the new shape.
+        lines = buffer.getvalue().splitlines()
+        for name in names:
+            assert announcements[name] in lines
+        machine = {
+            line[len(update_mod._DAEMON_REPORT_PREFIX) :]
+            for line in lines
+            if line.startswith(update_mod._DAEMON_REPORT_PREFIX)
+        }
+        assert machine == {
+            update_mod._daemon_report_line(name, "already")[len(update_mod._DAEMON_REPORT_PREFIX) :]
+            for name in names
+        }
+
+    def test_the_two_halves_run_concurrently(self) -> None:
+        """One stage: the services child and the mobile half start together.
+
+        THE OLD SERIAL ORDER IS GONE (2026-09-30 design); what is kept is the
+        per-daemon order — each daemon's plist before that daemon's bounce —
+        which now holds by construction because each plist has one actor (the
+        mobile child refreshes its own before bouncing; see
+        ``test_the_mobile_unit_refreshes_its_own_plist_before_it_bounces``).
+
+        Concurrency is proven STRUCTURALLY — both units started before either
+        completes — because a wall-clock assertion would be a bet on machine
+        load (AGENTS.md, "Timing, flakes"). A serial implementation deadlocks
+        into the barrier timeout and fails. Both units are asserted to receive
+        the SAME stage deadline, which is the mechanism the stage bounds itself
+        with.
         """
-        order: list[str] = []
+        import threading
+
+        started = threading.Barrier(2)
+        seen: list[float] = []
+
+        def services(*, deadline: float) -> update_mod.DaemonRefresh:
+            seen.append(deadline)
+            started.wait(timeout=5)
+            return update_mod.DaemonRefresh("s")
+
+        def mobile(*, deadline: float) -> update_mod.MobileRefresh:
+            seen.append(deadline)
+            started.wait(timeout=5)
+            return update_mod.MobileRefresh(kind="restarted")
+
         with (
-            patch.object(
-                update_mod,
-                "refresh_service_daemons_after_upgrade",
-                side_effect=lambda: order.append("services") or update_mod.DaemonRefresh("s"),
-            ),
-            patch.object(
-                update_mod,
-                "refresh_mobile_after_upgrade",
-                side_effect=lambda: order.append("mobile")
-                or update_mod.MobileRefresh(kind="restarted"),
-            ),
+            patch.object(update_mod, "refresh_service_daemons_after_upgrade", side_effect=services),
+            patch.object(update_mod, "refresh_mobile_after_upgrade", side_effect=mobile),
         ):
             refreshes = update_mod.refresh_daemons_after_upgrade()
-        assert order == ["services", "mobile"]
         assert [refresh.name for refresh in refreshes] == ["s", "mobile"]
         assert refreshes[1].lines == ("mobile daemon restarted — refresh the phone UI",)
+        assert len(seen) == 2 and seen[0] == seen[1], "both halves share the stage deadline"
 
     def test_only_the_installed_plists_are_probed(self, tmp_path, monkeypatch) -> None:
         """A pure filesystem probe, and one that a redirected HOME turns off."""
@@ -1664,7 +1785,7 @@ class TestServiceDaemonRefresh:
         mobile.assert_not_called()
         assert capsys.readouterr().out == ""
 
-    def test_the_child_refuses_to_rewrite_from_a_checkout(self, capsys) -> None:
+    def test_the_child_refuses_to_rewrite_from_a_checkout(self, capsys, monkeypatch) -> None:
         """The rule the upgrade path already enforces, at the point that WRITES.
 
         A source checkout's interpreter is not the daemon's, so a repair from
@@ -1672,6 +1793,9 @@ class TestServiceDaemonRefresh:
         visible entry points cannot reach this (an editable install is refused
         before the refresh); the hidden flag can.
         """
+        # The module's autouse fixture hides the guard (this venv IS an editable
+        # checkout, which is exactly what the test needs to see), so restore it.
+        monkeypatch.setattr(update_mod, "_repair_refusal", _REAL_REPAIR_REFUSAL)
         with (
             patch.object(update_mod, "install_kind", return_value=InstallKind.EDITABLE),
             patch.object(update_mod, "installer_argv", side_effect=AssertionError("must not run")),
@@ -1681,7 +1805,9 @@ class TestServiceDaemonRefresh:
         assert captured.out == ""
         assert "source checkout" in captured.err
 
-    def test_the_child_refuses_to_rewrite_a_foreign_non_editable_install(self, capsys) -> None:
+    def test_the_child_refuses_to_rewrite_a_foreign_non_editable_install(
+        self, capsys, monkeypatch
+    ) -> None:
         """A hand-made venv may not repoint the operator's daemons at itself.
 
         THE INVARIANT: a repair may change how a daemon is NAMED, never WHICH
@@ -1694,6 +1820,7 @@ class TestServiceDaemonRefresh:
         """
         from local_operator import launchd
 
+        monkeypatch.setattr(update_mod, "_repair_refusal", _REAL_REPAIR_REFUSAL)
         plists = [Path("/Users/x/Library/LaunchAgents/com.local-operator.mobile.plist")]
         with (
             patch.object(update_mod, "install_kind", return_value=InstallKind.PIP),
@@ -1711,7 +1838,7 @@ class TestServiceDaemonRefresh:
         assert "another installation" in captured.err, captured.err
         assert "/opt/other-venv" in captured.err, captured.err
 
-    def test_the_child_repairs_a_pip_install_of_its_own_prefix(self, capsys) -> None:
+    def test_the_child_repairs_a_pip_install_of_its_own_prefix(self, capsys, monkeypatch) -> None:
         """The same guard, on the machine it must NOT block.
 
         Both plist shapes are exercised: the legacy ``ProgramArguments[0]``
@@ -1724,6 +1851,8 @@ class TestServiceDaemonRefresh:
         from local_operator.mobile import install as mobile_install
         from local_operator.tunnels import install as tunnel_install
         from local_operator.wakes import install as wakes_install
+
+        monkeypatch.setattr(update_mod, "_repair_refusal", _REAL_REPAIR_REFUSAL)
 
         plists = [
             Path("/Users/x/Library/LaunchAgents/com.local-operator.mobile.plist"),
@@ -1755,33 +1884,38 @@ class TestServiceDaemonRefresh:
                 )
             assert update_mod.daemons_refresh_command() == 0
         captured = capsys.readouterr()
-        # NOTHING was repaired, so the child's only output is its per-daemon
-        # announcements — the progress lines the upgrade summary strips. The
-        # contract this test has always asserted (no repair, no line about one)
-        # is unchanged; what the run says out loud is now pinned exactly.
-        assert captured.out.splitlines() == [
-            update_mod._refresh_announcement(name, recovery)
-            for name, recovery, _repair in update_mod._refresh_steps()
-        ]
+        # NOTHING was repaired, so there are no human summary lines. What the run
+        # says out loud is now pinned exactly: the per-daemon announcements (the
+        # progress lines a healthy summary strips) plus the per-daemon machine
+        # lines (completion markers the parent reads back and the report parses).
+        # The order is a SET because the repairs run concurrently; mobile is no
+        # longer walked by this child (its own unit owns that plist), so its
+        # patched repair must not appear at all.
+        steps = update_mod._refresh_steps()
+        expected = [
+            update_mod._refresh_announcement(name, recovery) for name, recovery, _repair in steps
+        ] + [update_mod._daemon_report_line(name, "already") for name, _recovery, _repair in steps]
+        assert sorted(captured.out.splitlines()) == sorted(expected)
+        assert "mobile" not in captured.out
         assert captured.err == ""
 
     def test_the_child_repairs_every_daemon_and_reports_each(self, capsys) -> None:
         """One line per daemon that CHANGED; silence for one already current.
 
         Each daemon is ANNOUNCED before it is repaired (the line the parent reads
-        back out of a killed child — see ``update._PROGRESS_PREFIX``), so the pinned
-        output below is announcement, report, announcement, … The summary's lines
-        are still only the daemons that CHANGED: the browser bridge and the tunnel
-        were current and failed respectively, and neither gets one.
+        back out of a killed child — see ``update._PROGRESS_PREFIX``) and each
+        daemon that completes emits a machine line (the completion marker, and
+        the report's per-daemon source). The summary's lines are still only the
+        daemons that CHANGED: the browser bridge and the tunnel were current and
+        failed respectively, and neither gets one. The assertions are set-based
+        because the repairs run concurrently — order is nobody's contract here.
         """
         from local_operator import launchd
         from local_operator.browser_bridge import install as browser_install
-        from local_operator.mobile import install as mobile_install
         from local_operator.tunnels import install as tunnel_install
         from local_operator.wakes import install as wakes_install
 
         outcomes = (
-            (mobile_install, launchd.PlistRefresh("mobile", "repaired")),
             (browser_install, launchd.PlistRefresh("browser bridge", "current")),
             (tunnel_install, launchd.PlistRefresh("tunnel", "failed", "boom")),
             (wakes_install, launchd.PlistRefresh("wakes supervisor", "repaired")),
@@ -1796,15 +1930,408 @@ class TestServiceDaemonRefresh:
                 )
             assert update_mod.daemons_refresh_command() == 0
         captured = capsys.readouterr()
-        assert captured.out.splitlines() == [
-            update_mod._refresh_announcement("mobile", "lop mobile install"),
-            "mobile daemon: refreshed a stale LaunchAgent and restarted it",
-            update_mod._refresh_announcement("browser bridge", "lop browser install"),
-            update_mod._refresh_announcement("tunnel", "lop tunnel install"),
-            update_mod._refresh_announcement("wakes supervisor", "lop wake install"),
+        steps = update_mod._refresh_steps()
+        announcements = {
+            update_mod._refresh_announcement(name, recovery) for name, recovery, _repair in steps
+        }
+        assert set(captured.out.splitlines()) == announcements | {
             "wakes supervisor daemon: refreshed a stale LaunchAgent and restarted it",
-        ]
+            update_mod._daemon_report_line("browser bridge", "already"),
+            update_mod._daemon_report_line("tunnel", "failed"),
+            update_mod._daemon_report_line("wakes supervisor", "refreshed"),
+        }
         assert captured.err.splitlines() == ["warning: tunnel daemon was not refreshed: boom"]
+
+    def test_the_mobile_unit_refreshes_its_own_plist_before_it_bounces(self, monkeypatch) -> None:
+        """The per-daemon plist-before-bounce order, kept with ONE actor.
+
+        The mobile child refreshes the daemon's own LaunchAgent FIRST and only
+        then bounces it, so the bounce can never restart the previous
+        definition — the reason the old serial composition ran the plist child
+        first. Asserted by order of calls, never by timing.
+        """
+        from local_operator import launchd
+        from local_operator.mobile import install as mobile_install
+
+        order: list[str] = []
+        monkeypatch.setattr(update_mod, "_repair_refusal", lambda: None)
+        monkeypatch.setattr(
+            mobile_install,
+            "refresh_plist_if_stale",
+            lambda: order.append("plist") or launchd.PlistRefresh(name="mobile", kind="current"),
+        )
+        monkeypatch.setattr(
+            mobile_install,
+            "service_action",
+            lambda action: order.append(f"bounce:{action}") or {"ok": True, "error": ""},
+        )
+        assert update_mod.mobile_refresh_command() == 0
+        assert order == ["plist", "bounce:restart"]
+
+    def test_the_mobile_unit_retries_the_bounce_once(self, monkeypatch) -> None:
+        """ONE bounded retry, for the 2026-09-30 failure mode.
+
+        The bounce's ``kickstart`` was refused once because a concurrent wave
+        held the job mid-bootout, and nothing retried it — the relay recovered
+        only when a foreign wave arrived ~4 minutes later. One retry after
+        ``_MOBILE_RETRY_DELAY_S`` rides out exactly that window.
+        """
+        from local_operator import launchd
+        from local_operator.mobile import install as mobile_install
+
+        attempts: list[str] = []
+        slept: list[float] = []
+
+        def action(name: str) -> dict[str, object]:
+            attempts.append(name)
+            return {"ok": len(attempts) > 1, "error": "" if len(attempts) > 1 else "refused"}
+
+        monkeypatch.setattr(update_mod, "_repair_refusal", lambda: None)
+        monkeypatch.setattr(
+            mobile_install,
+            "refresh_plist_if_stale",
+            lambda: launchd.PlistRefresh(name="mobile", kind="current"),
+        )
+        monkeypatch.setattr(mobile_install, "service_action", action)
+        monkeypatch.setattr(update_mod.time, "sleep", lambda seconds: slept.append(seconds))
+        assert update_mod.mobile_refresh_command() == 0
+        assert attempts == ["restart", "restart"], "exactly one retry"
+        assert slept == [update_mod._MOBILE_RETRY_DELAY_S]
+
+    def test_the_mobile_unit_stops_after_one_failed_retry(self, monkeypatch, capsys) -> None:
+        """The retry is BOUNDED: a second failure is reported, not retried again."""
+        from local_operator import launchd
+        from local_operator.mobile import install as mobile_install
+
+        attempts: list[str] = []
+        monkeypatch.setattr(update_mod, "_repair_refusal", lambda: None)
+        monkeypatch.setattr(
+            mobile_install,
+            "refresh_plist_if_stale",
+            lambda: launchd.PlistRefresh(name="mobile", kind="current"),
+        )
+        monkeypatch.setattr(
+            mobile_install,
+            "service_action",
+            lambda action: attempts.append(action) or {"ok": False, "error": "not loaded"},
+        )
+        monkeypatch.setattr(update_mod.time, "sleep", lambda seconds: None)
+        assert update_mod.mobile_refresh_command() == 1
+        assert attempts == ["restart", "restart"]
+        assert "not loaded" in capsys.readouterr().err
+
+    def test_the_mobile_unit_refuses_a_repair_it_is_not_allowed_to_make(
+        self, monkeypatch, capsys
+    ) -> None:
+        """The hidden flag is hand-reachable, so the identity guard runs here too.
+
+        The same refusal, asked in the same place, as ``daemons_refresh_command``:
+        a checkout must not rewrite the operator's plist or bounce their daemon,
+        and the refusal is PRINTED (the difference between "nothing needed
+        repairing" and "this process is not allowed to").
+        """
+        from local_operator.mobile import install as mobile_install
+
+        monkeypatch.setattr(update_mod, "_repair_refusal", lambda: "a source checkout")
+        monkeypatch.setattr(
+            mobile_install, "refresh_plist_if_stale", lambda: pytest.fail("must not run")
+        )
+        monkeypatch.setattr(
+            mobile_install, "service_action", lambda action: pytest.fail("must not run")
+        )
+        assert update_mod.mobile_refresh_command() == 0
+        assert "a source checkout" in capsys.readouterr().err
+
+    def test_a_refused_mobile_half_claims_nothing(self, monkeypatch, capsys) -> None:
+        """A caller the plist guard refuses must not be TOLD the relay bounced.
+
+        REPRODUCED on the round-1 head (finding 1): the child exited 0 on its
+        refusal (nothing touched) and this half mapped rc 0 onto ``restarted``,
+        so ``lop services restart`` from a checkout claimed a bounce that never
+        happened — and the update report said ``refreshed``. The parent now asks
+        the same guard BEFORE spawning: a refusal is a silent skip, with no line,
+        no warning and no report status (the child keeps its own guard for direct
+        runs of the hidden flag).
+        """
+        with (
+            patch.object(update_mod, "_mobile_plist_path", return_value=_FakePlist(True)),
+            patch.object(update_mod, "_repair_refusal", return_value="a source checkout"),
+            patch("subprocess.run") as run,
+        ):
+            result = update_mod.refresh_mobile_after_upgrade()
+            run.assert_not_called()
+        assert result.kind == "skipped"
+        refresh = update_mod._mobile_daemon_refresh(result)
+        assert refresh.lines == ()
+        assert refresh.warnings == ()
+        assert refresh.statuses == ()
+        assert capsys.readouterr().out == ""
+
+    def test_a_repaired_mobile_plist_reaches_the_summary_lines(self) -> None:
+        """End to end: the child's line → ``MobileRefresh.lines`` → the summary.
+
+        The stale-LaunchAgent sentence used to be printed by the plist child;
+        it now belongs to the mobile child, and losing it would be a copy
+        regression on exactly the machine class the repair exists for.
+        """
+        completed = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout="mobile daemon: refreshed a stale LaunchAgent and restarted it\n",
+        )
+        with (
+            patch.object(update_mod, "_mobile_plist_path", return_value=_FakePlist(True)),
+            patch("subprocess.run", return_value=completed),
+        ):
+            result = update_mod.refresh_mobile_after_upgrade()
+        assert result.kind == "restarted"
+        assert result.lines == ("mobile daemon: refreshed a stale LaunchAgent and restarted it",)
+        refresh = update_mod._mobile_daemon_refresh(result)
+        assert refresh.lines == (
+            "mobile daemon: refreshed a stale LaunchAgent and restarted it",
+            "mobile daemon restarted — refresh the phone UI",
+        )
+
+
+def test_the_child_statuses_are_parsed_and_killed_daemons_are_marked_failed() -> None:
+    """The parent's read of the machine channel: parsed lines + synthesized failures.
+
+    A daemon whose ``daemon_report:`` line arrived is COMPLETE (the marker is
+    printed after its repair), so it is never claimed in flight; a daemon
+    announced but not completed gets a synthetic ``failed``, because the kill
+    may have left its LaunchAgent mid-rewrite. A line whose status the
+    vocabulary does not know is declined rather than forced into a word that
+    would be wrong — while still counting as completed, because the repair did
+    finish.
+    """
+    stdout = (
+        "refreshing: browser bridge :: lop browser install\n"
+        'daemon_report: {"name":"browser bridge","status":"refreshed"}\n'
+        "refreshing: tunnel :: lop tunnel install\n"
+        'not a report line: {"name": "x"}\n'
+        'daemon_report: {"name":"tunnel","status":"nonsense"}\n'
+        "refreshing: wakes supervisor :: lop wake install\n"
+    )
+    statuses = update_mod._child_daemon_statuses(stdout, "")
+    assert statuses == (
+        update_mod.DaemonStatus("browser bridge", "refreshed"),
+        update_mod.DaemonStatus("wakes supervisor", "failed"),
+    )
+
+
+def test_unmapped_plist_kinds_still_complete_and_are_declined() -> None:
+    """The vocabulary pin AND the non-claiming path (round 1 review, finding 4).
+
+    Every kind the repair can return today maps to a report status — pinned as a
+    set so a fifth kind cannot ship unmapped silently. If one ever does, its
+    daemon must still be marked COMPLETE (or the parent's killed-child
+    attribution would synthesize a false ``failed`` for a repair that finished)
+    while the report declines to invent a verdict for it.
+    """
+    from typing import get_args
+
+    assert set(update_mod._PLIST_STATUS) == set(get_args(update_mod.launchd.PlistRefreshKind))
+    assert update_mod._plist_status("brand-new-kind") is None
+    stdout = (
+        "refreshing: tunnel :: lop tunnel install\n"
+        f"{update_mod._daemon_report_line('tunnel', 'brand-new-kind')}\n"
+    )
+    assert update_mod._child_daemon_statuses(stdout, "") == ()
+
+
+def test_the_update_report_is_one_line_with_the_frozen_keys(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The report contract: ONE line, top-level ``update_report``, frozen keys.
+
+    The desktop app parses this line to decide whether its backend provably moved
+    (``serve``) and whether every supervised daemon is refreshed/already
+    (``daemons``); the schema token names itself so a breaking change cannot ship
+    silently, and the four status words are pinned against a stage built from
+    every one of them.
+    """
+    stage = update_mod.StageReport(
+        serve=(
+            update_mod.ServeMove(
+                pid=111, before="0.1.0", after="0.2.0", moved=True, instance="abc"
+            ),
+            update_mod.ServeMove(
+                pid=222, before="0.2.0", after="0.2.0", moved=False, instance="def"
+            ),
+        ),
+        daemons=(
+            update_mod.DaemonStatus("browser bridge", "refreshed"),
+            update_mod.DaemonStatus("tunnel", "already"),
+            update_mod.DaemonStatus("mobile", "failed"),
+            update_mod.DaemonStatus("wakes supervisor", "unsupervised"),
+        ),
+    )
+    update_mod._emit_update_report(install_version="0.2.0", target="0.2.0", stage=stage)
+    out = capsys.readouterr().out
+    assert out.endswith("\n") and out.count("\n") == 1, "exactly one line"
+    report = json.loads(out)["update_report"]
+    assert report["schema"] == "update.report.v1"
+    assert report["install_version"] == "0.2.0"
+    assert report["target"] == "0.2.0"
+    assert report["serve"] == [
+        {"pid": 111, "from": "0.1.0", "to": "0.2.0", "moved": True, "instance": "abc"},
+        {"pid": 222, "from": "0.2.0", "to": "0.2.0", "moved": False, "instance": "def"},
+    ]
+    assert report["daemons"] == [
+        {"name": "browser bridge", "status": "refreshed", "version": "0.2.0"},
+        {"name": "tunnel", "status": "already", "version": "0.2.0"},
+        {"name": "mobile", "status": "failed", "version": ""},
+        {"name": "wakes supervisor", "status": "unsupervised", "version": ""},
+    ]
+
+
+def test_the_snapshot_path_emits_the_report_line(capsys: pytest.CaptureFixture[str]) -> None:
+    """The THIRD exit the design names: ``--from-snapshot`` emits the line last.
+
+    The snapshot's own pyproject names the version being installed, so both
+    ``install_version`` and ``target`` are that version — the app-side flow's
+    blocking end (``install_version == target``) — and the emission is the last
+    thing the path prints (round 1 review, finding 3).
+    """
+    with (
+        patch.object(update_mod, "_print_current_generation"),
+        patch.object(update_mod, "prune_generations", return_value=[]),
+        patch.object(update_mod, "prune_notice_lines", return_value=[]),
+        patch.object(update_mod, "referenced_install_roots", return_value=[]),
+        patch.object(update_mod, "refresh_daemons_after_upgrade", return_value=[]),
+    ):
+        assert (
+            update_mod._generation_upgrade(
+                0, services=False, install_version="0.64.9", target="0.64.9"
+            )
+            == 0
+        )
+    lines = capsys.readouterr().out.strip().splitlines()
+    report = json.loads(lines[-1])["update_report"]
+    assert report["install_version"] == "0.64.9"
+    assert report["target"] == "0.64.9"
+    assert report["serve"] == []
+
+
+def test_plist_outcomes_map_onto_the_report_vocabulary() -> None:
+    """The four-word vocabulary, per outcome kind (see ``_PLIST_STATUS``).
+
+    ``already`` is the bucket for "left alone and not a failure" — already
+    current, absent, unaddressable from here, or deliberately left stopped — and
+    an unknown kind is left OUT rather than forced into a wrong word.
+    """
+    assert update_mod._plist_status("repaired") == "refreshed"
+    assert update_mod._plist_status("restarted") == "refreshed"
+    assert update_mod._plist_status("revived") == "refreshed"
+    assert update_mod._plist_status("current") == "already"
+    assert update_mod._plist_status("left-stopped") == "already"
+    assert update_mod._plist_status("unsupported") == "already"
+    assert update_mod._plist_status("not-addressable") == "already"
+    assert update_mod._plist_status("not-installed") == "already"
+    assert update_mod._plist_status("failed") == "failed"
+    assert update_mod._plist_status("something-new") is None
+
+
+def test_the_bound_label_rounds_to_readable_seconds() -> None:
+    """A bound's label is whole seconds; only a sub-second bound keeps decimals.
+
+    Round 1 review, finding 5: a stage-shortened bound is a float difference, and
+    the killed-child sentence was rendering it raw (``29.9999s``; QA saw
+    ``within 1.99992s``). ``60.0`` must stay byte-for-byte what the sentence
+    printed before the label became a function.
+    """
+    assert update_mod._bound_label(60.0) == "60s"
+    assert update_mod._bound_label(30.0) == "30s"
+    assert update_mod._bound_label(29.9999) == "30s"
+    assert update_mod._bound_label(1.99992) == "2s"
+    assert update_mod._bound_label(0.2) == "0.2s"
+    assert update_mod._bound_label(0.0) == "0s"
+
+
+def test_the_stage_budget_never_replaces_a_units_own_bound() -> None:
+    """``_bounded_timeout``: None keeps the standalone bound; a deadline caps it."""
+    assert update_mod._bounded_timeout(60.0, None) == 60.0
+    assert update_mod._bounded_timeout(30.0, None) == 30.0
+    deadline = time.monotonic() + 5.0
+    assert update_mod._bounded_timeout(60.0, deadline) <= 5.0
+    assert update_mod._bounded_timeout(3.0, deadline) == 3.0, "the smaller bound wins"
+    assert (
+        update_mod._bounded_timeout(60.0, time.monotonic() - 1.0) == update_mod._MIN_STAGE_BOUND_S
+    )
+
+
+def test_the_stage_deadline_words_an_overrun(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The stage deadline fires with the remedy text (2026-09-30 design).
+
+    STRUCTURAL, not a scheduling window (round 1 review, finding 2): the deadline
+    is patched to the PAST, so the stage's joins return immediately and both units
+    are provably still inside their bodies — they cannot return until the test
+    releases them, and the test releases them only after OBSERVING both inside.
+    Nothing here measures machine speed, and the straggler naming cannot race the
+    release. The exact sentence text is pinned separately by
+    ``test_the_stage_overrun_sentence_names_the_stragglers``.
+    """
+    import threading
+
+    seen: list[float] = []
+    release = threading.Event()
+    inside = {name: threading.Event() for name in ("services", "mobile")}
+
+    def services(*, deadline: float) -> update_mod.DaemonRefresh:
+        seen.append(deadline)
+        inside["services"].set()
+        release.wait(timeout=5)
+        return update_mod.DaemonRefresh("s")
+
+    def mobile(*, deadline: float) -> update_mod.MobileRefresh:
+        seen.append(deadline)
+        inside["mobile"].set()
+        release.wait(timeout=5)
+        return update_mod.MobileRefresh(kind="restarted")
+
+    monkeypatch.setattr(update_mod, "_STAGE_DEADLINE_S", 0.0)
+    results: list[list[update_mod.DaemonRefresh]] = []
+    with (
+        patch.object(update_mod, "refresh_service_daemons_after_upgrade", side_effect=services),
+        patch.object(update_mod, "refresh_mobile_after_upgrade", side_effect=mobile),
+    ):
+        stage_thread = threading.Thread(
+            target=lambda: results.append(update_mod.refresh_daemons_after_upgrade())
+        )
+        stage_thread.start()
+        assert inside["services"].wait(timeout=5)
+        assert inside["mobile"].wait(timeout=5)
+        release.set()
+        stage_thread.join(timeout=5)
+    assert not stage_thread.is_alive()
+    assert len(seen) == 2 and seen[0] == seen[1], "both units share one deadline"
+    refreshes = results[0]
+    assert [refresh.name for refresh in refreshes[:2]] == ["s", "mobile"]
+    stage_entry = refreshes[2]
+    assert stage_entry.name == "daemon refresh stage"
+    assert len(stage_entry.warnings) == 1
+    warning = stage_entry.warnings[0]
+    assert warning.startswith("warning: the daemon refresh stage did not finish within 0s")
+    assert "run `lop services status`" in warning
+
+
+def test_the_stage_overrun_sentence_names_the_stragglers() -> None:
+    """The naming text, pinned without a schedule (round 1 review, finding 2).
+
+    The overrun test above proves the warning FIRES; this pins what it SAYS —
+    the straggler units by name when there are any, and no name when there are
+    none (the stage can exceed its budget with everything already returned, e.g.
+    a join that drained just past the deadline).
+    """
+    assert update_mod._stage_overrun_sentence(["services child", "mobile half"]) == (
+        "warning: the daemon refresh stage did not finish within 30s — the services "
+        "child, mobile half had not returned; run `lop services status` to see what "
+        "is still moving"
+    )
+    assert update_mod._stage_overrun_sentence([]) == (
+        "warning: the daemon refresh stage did not finish within 30s; run `lop services "
+        "status` to see what is still moving"
+    )
 
 
 def test_update_command_no_plist_prints_only_install_lines(
@@ -1828,11 +2355,18 @@ def test_update_command_no_plist_prints_only_install_lines(
         assert update_command(check=False) == 0
     captured = capsys.readouterr()
     run.assert_not_called()
-    assert captured.out.splitlines() == [
+    lines = captured.out.strip().splitlines()
+    assert lines[:3] == [
         "local-operator 0.27.0 (latest is 0.28.0)",
         "upgrading via uv tool…",
         "installed 0.28.0",
     ]
+    # The machine-readable report rides AFTER every human line; this run moved
+    # nothing (no plists, no serves), and the report says exactly that.
+    report = json.loads(lines[-1])["update_report"]
+    assert report["install_version"] == "0.28.0"
+    assert report["target"] == "0.28.0"
+    assert report["serve"] == []
     assert captured.err == ""
 
 
@@ -1854,8 +2388,8 @@ def test_update_command_restarted_prints_phone_line(
         SAFE_PATH_FLAG,
         "-m",
         "local_operator.cli",
-        "mobile",
-        "restart",
+        "update",
+        "--refresh-mobile",
     ]
     # The image travels BESIDE the label and is always a real file — never the
     # label itself, which the kernel would try to execute. It is the branded

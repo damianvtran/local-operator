@@ -301,11 +301,18 @@ def test_the_killed_refresh_reports_the_vocabulary_this_file_pins() -> None:
     daemon it is about to repair, and the parent reads that announcement out of a
     child its bound has just killed, so the daemon's name and its installer are
     printed by code that a second spelling could drift away from.
+
+    THE MOBILE DAEMON IS NOT IN THIS TABLE ANY MORE (2026-09-30 design): its own
+    unit (``update.mobile_refresh_command``) owns that daemon's plist and its
+    bounce, so a second writer here would race it. Its recovery spelling is
+    still pinned — by this file's per-daemon failure sentences and by the mobile
+    unit's own failure copy in ``tests/unit/test_update.py`` — so the guarantee
+    that a summary sends the operator to a command that exists survives the move.
     """
     from local_operator import update as update_mod
 
     pinned = {name: recovery for name, recovery, _repair in update_mod._refresh_steps()}
-    assert pinned == _RECOVERY
+    assert pinned == {name: recovery for name, recovery in _RECOVERY.items() if name != "mobile"}
 
 
 @pytest.mark.parametrize("name", ["mobile", "browser bridge", "tunnel", "wakes supervisor"])

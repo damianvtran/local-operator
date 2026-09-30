@@ -524,17 +524,17 @@ def test_a_guard_that_refuses_silences_every_promise(
     # which happens whatever this caller is (measured by bouncing the real daemon from
     # a checkout), nor about the serve half, which never consults the guard.
     monkeypatch.setattr(services, "_install_may_repoint_daemons", lambda: False)
-    # Only BROWSER is installed here, so nothing bounces: `refresh_mobile_after_upgrade`
-    # returns without a bounce when there is no mobile plist, and naming a bounce would
-    # over-warn about a daemon the reader does not have (round 13 R13-1, design D21).
+    # THE MOBILE CLAUSE IS RETIRED (round 1 review, finding 1): the bounce is no
+    # longer caller-independent — the mobile unit refreshes its own plist and
+    # consults the same guard — so a refused caller repoints nothing AND bounces
+    # nothing, and no mobile-specific promise may print whatever is installed.
     lines = services.status_lines()
     joined = " ".join(lines)
     assert "puts them on the current build" not in joined
     assert not any("bounces the mobile relay" in line for line in lines)
     assert any("repoints them only from the" in line for line in lines)
 
-    # With the mobile plist present the bounce DOES happen whatever this caller is
-    # (measured by bouncing the real daemon from a checkout), so the note says so.
+    # Present or absent, the mobile plist changes nothing about that narrowing.
     monkeypatch.setattr(
         services,
         "_supervised_daemon_plists",
@@ -544,8 +544,8 @@ def test_a_guard_that_refuses_silences_every_promise(
         ],
     )
     lines = services.status_lines()
-    assert any("still bounces the mobile relay" in line for line in lines)
-    assert any("repointed only by the install that owns them" in line for line in lines)
+    assert not any("bounces the mobile relay" in line for line in lines)
+    assert any("repoints them only from the" in line for line in lines)
 
     monkeypatch.setattr(services, "_install_may_repoint_daemons", lambda: True)
     permitted = " ".join(services.status_lines())
@@ -698,3 +698,24 @@ def test_a_non_positive_wait_is_a_usage_error() -> None:
     # A positive one is accepted, and the documented default is the one used.
     assert parser.parse_args(["services", "restart", "--wait", "0.5"]).wait == 0.5
     assert parser.parse_args(["services", "restart"]).wait is None
+
+
+def test_restart_services_carries_the_daemon_statuses_through(monkeypatch) -> None:
+    """The supervised-daemons half's machine statuses ride this return.
+
+    ``update._services_stage`` builds the process's report line from this list;
+    without the pass-through it would have to compose the same repairs a second
+    time. The serve reload's own entries carry no daemon statuses.
+    """
+    from local_operator import update as update_mod
+
+    statuses = (update_mod.DaemonStatus("tunnel", "refreshed"),)
+    monkeypatch.setattr(
+        update_mod,
+        "refresh_daemons_after_upgrade",
+        lambda: [update_mod.DaemonRefresh("service daemons", statuses=statuses)],
+    )
+    monkeypatch.setattr(services, "reload_serve_daemons", lambda *, wait_s: [])
+    refreshes = services.restart_services()
+    assert refreshes[0].statuses == statuses
+    assert refreshes[0].name == "service daemons"
