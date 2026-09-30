@@ -514,6 +514,15 @@ class SessionSidebar(Widget, can_focus=True):
         #: would reinterpret a dead-space press against cells the user never
         #: saw — measured during the click-to-focus reconciliation: a press one
         #: cell left of the unfocused chip flipped the layer.
+        #:
+        #: Deliberately NOT cleared where `_pressed_chip` is (`on_mouse_up`,
+        #: `on_click`, `set_open`): no route to a stale read was found — the
+        #: walk rewrites it on every MouseDown this widget receives, before any
+        #: handler can read it, and Textual synthesizes a Click only when down
+        #: and up resolve to the SAME widget (which re-armed the stash for that
+        #: widget's own press), while a release outside the region cancels
+        #: `_pressed_chip`. The asymmetry is recorded so the next reader does
+        #: not have to rebuild that analysis.
         self._press_chip_hit = False
         self._deferred: tuple[CatalogEntry, ...] | None = None
         #: Row under the pointer, by identity rather than by row index: a

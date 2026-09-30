@@ -576,10 +576,10 @@ async def test_the_footer_chip_is_exempt_from_the_press_focus() -> None:
     no keyboard; this pins the same press against THIS slice's focus walk and
     pairs it with the other half of the reconciliation, so the exemption
     cannot widen: a press on a footer cell that is not the chip is a normal
-    press on the panel and focuses the list. The chip's cells come from its
-    own painted footer (`_chip_span`, the chip slice's own helper), never from
-    the widget's hit-test, so the pair still discriminates if the hit-test
-    drifts.
+    press on the panel and focuses the list — and flips nothing. The chip's
+    cells come from its own painted footer (`_chip_span`, the chip slice's own
+    helper), never from the widget's hit-test, so the pair still discriminates
+    if the hit-test drifts.
     """
     app = _app()
     async with app.run_test(size=(100, 30)) as pilot:
@@ -610,6 +610,7 @@ async def test_the_footer_chip_is_exempt_from_the_press_focus() -> None:
         await _click_footer_cell(pilot, app, sidebar, max(0, first - 1))
         for _ in range(3):
             await pilot.pause()
+        assert sidebar.show_subagents is False, "a press off the chip flipped the layer"
         assert sidebar.has_focus, "a press off the chip no longer focuses the panel"
 
 

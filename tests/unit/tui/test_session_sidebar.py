@@ -4728,9 +4728,11 @@ async def test_the_chip_press_works_while_the_list_is_focused():
     """The pointer route is an ADDITION to the chord, never a replacement.
 
     With the list focused (F9 mode) the same press flips the same flag, and
-    the keyboard does not move: a press never changes focus on this panel
-    (``FOCUS_ON_CLICK = False``), so the chord and the pointer stay
-    independent ways to the same flip.
+    the keyboard does not move: the chip's cells are exempt from the
+    click-to-focus walk (the reconciliation with that slice), so the chord and
+    the pointer stay independent ways to the same flip. That exemption is what
+    keeps this true now — the retired `FOCUS_ON_CLICK = False` no longer does,
+    since a row or dead-space press does take the keyboard.
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
