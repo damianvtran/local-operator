@@ -744,11 +744,13 @@ def test_send_to_a_different_pid_is_not_a_self_send(capsys) -> None:
         ),
     ):
         rc = send_command(_send_args())
-    # Delivery was attempted (the guard did not short-circuit) and failed
-    # softly — the exact "could not deliver" path, not the self-send refusal.
+    # Delivery was attempted (the guard did not short-circuit) and settled as
+    # unconfirmed. The discriminator is the SELF-SEND refusal's own sentence:
+    # the receipt legitimately names the target, so a bare "this session" match
+    # would now be satisfied by the delivery line itself.
     assert rc == 1
     assert red.called
-    assert "this session" not in red.call_args[0][0]
+    assert "use the composer to message yourself" not in red.call_args[0][0]
 
 
 def test_self_send_is_refused_through_a_multi_hop_ancestry(capsys) -> None:
@@ -856,18 +858,16 @@ def test_a_live_refusal_is_not_converted_into_a_stored_send(capsys, tmp_path, mo
 def test_a_timed_out_dial_is_not_reported_as_a_failed_delivery() -> None:
     """R4: a deadline expiry is not proof the message did not land.
 
-    ``_dial_or_explain`` gives the message-less ``TimeoutError`` a sentence, and
-    it re-raises the SAME exception class on purpose: both callers branch on the
-    type to choose their wording, and the confident "could not deliver" arm is
-    reserved for ``RuntimeError`` — the peer ANSWERING no. Reporting a timeout
-    that way asserts a non-delivery this side cannot know (the op is already in
-    the owner's socket buffer, and the receiver commits before it acks), and a
-    sender who believes it duplicates the steer or the wake.
+    The sender reports it as ``unconfirmed`` — a state, not a failure — because
+    the op is already in the owner's socket buffer and the receiver commits
+    before it acks, so a sender who believes it duplicates the steer or the
+    wake. The confident "could not deliver" arm is reserved for a PROVEN
+    non-delivery (a dial that never opened, or the peer answering no).
 
-    The retry half of R4 is asserted too, because the wording alone is not the
-    guarantee: a timed-out dial may have LANDED, so a second submission is the
-    duplicate the sentence warns about. One dial, one failure, no automatic
-    re-send — the sender decides, and the sentence tells them what they know.
+    The retry half of R4 is asserted too, because the copy alone is not the
+    guarantee: a timed-out dial may have LANDED, so the second submission is
+    only safe against a receiver that advertises ``peer-message-id-v1`` and can
+    dedupe it. Against one that does not, there is exactly one dial.
     """
     other_pid = os.getppid() + 9999
     with (
@@ -884,10 +884,10 @@ def test_a_timed_out_dial_is_not_reported_as_a_failed_delivery() -> None:
     assert rc == 1
     assert red.called
     line = red.call_args[0][0]
-    assert line.startswith("no delivery confirmation:"), line
+    assert "delivery UNCONFIRMED" in line, line
     assert "could not deliver" not in line, line
-    assert "delivery is UNCONFIRMED" in line, line
-    assert "do not send it again" in line, line
+    assert "peer-" in line, line
+    assert "before resending" in line, line
 
 
 def test_a_partly_delivered_broadcast_reports_the_skipped_matches(monkeypatch, capsys) -> None:
@@ -920,10 +920,21 @@ def test_a_partly_delivered_broadcast_reports_the_skipped_matches(monkeypatch, c
         lambda root=None: [(engaged, "live"), (fresh[0], "live"), (fresh[1], "live")],
     )
 
-    async def _deliver(_record, **_kwargs):
-        return "delivered to the mailbox (will be read on the next turn)"
+    async def _deliver(record, **kwargs):
+        # The outcome builder is what the CLI reads now; a helper returning only
+        # a sentence would no longer be on the path.
+        return peer_send_mod.DeliveryOutcome(
+            state=peer_send_mod.DELIVERY_DELIVERED,
+            detail="delivered to the mailbox (will be read on the next turn)",
+            message_id="peer-" + "0" * 32,
+            wake=peer_send_mod.WAKE_ACKED,
+            attempts=1,
+            cause="",
+            route="live",
+            target=f"{record.conversation_name} (pid {record.pid})",
+        )
 
-    monkeypatch.setattr(peer_send_mod, "deliver_peer_message", _deliver, raising=True)
+    monkeypatch.setattr(peer_send_mod, "deliver_peer_message_outcome", _deliver)
     monkeypatch.setattr(peer_send_mod, "_record_for_pid", lambda pid: None)
     monkeypatch.setattr(peer_send_mod, "_parent_pid", lambda pid: None)
 

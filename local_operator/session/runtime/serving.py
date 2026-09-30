@@ -104,6 +104,20 @@ from local_operator.session.transcript import TRANSCRIPT_FILENAME
 
 logger = logging.getLogger(__name__)
 
+#: The delivery dict for a REDUCED session that answered a plain receipt string
+#: (a stub, or one from before the carriage). Its contract is unchanged from the
+#: pre-field era -- it commits the row before it acks -- so the honest reading is
+#: "committed" rather than a ``None`` the sender would have to interpret.
+#: Module-level rather than a method for the reason the whole handle is: test
+#: hosts bind these methods onto stubs (``DrainHost``), and a bound method that
+#: reaches for a sibling on ``self`` breaks on every one of them.
+_ABSENT_PEER_DELIVERY: dict[str, Any] = {
+    "message_id": "",
+    "committed": True,
+    "queued": False,
+    "duplicate": False,
+}
+
 
 #: How many loop turns a dispatched admission is given to surface a SYNCHRONOUS
 #: refusal before it is left to run detached. ``prompt`` raises its reportable
@@ -4170,19 +4184,8 @@ class ServingSessionHandle(SessionHandle):
         return AckDetail(
             str(result),
             {},
-            {"delivery": getattr(result, "delivery", None) or self._peer_delivery_absent()},
+            {"delivery": getattr(result, "delivery", None) or _ABSENT_PEER_DELIVERY},
         )
-
-    @staticmethod
-    def _peer_delivery_absent() -> dict[str, Any]:
-        """The delivery dict for a session that answered a plain string.
-
-        A REDUCED or older Session returns the receipt alone. The honest reading
-        is unchanged from the pre-field contract -- such a receiver commits the
-        row before it acks -- so the sender is told the message is committed
-        rather than being handed a ``None`` it would have to interpret.
-        """
-        return {"message_id": "", "committed": True, "queued": False, "duplicate": False}
 
     @_on_session_loop
     async def abort(self) -> str:
