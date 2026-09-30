@@ -495,6 +495,10 @@ async def test_live_row_activity_clock_ignores_the_heartbeat(tmp_path, monkeypat
 
     cfg = tmp_path / "config"
     (cfg / "sessions").mkdir(parents=True)
+    # The row below is a LIVE generation, and a live runtime always materialises
+    # its session directory before it publishes — the merge checks exactly that
+    # (review round 1, MAJOR-1). Empty reads as the user's own.
+    (cfg / "sessions" / "live-only").mkdir()
     monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
 
     table = SessionTable()
@@ -1057,7 +1061,7 @@ def _live_entry(pid: int, session_id: str, *, streaming: bool = False) -> Any:
     return entry
 
 
-def test_a_live_session_does_not_jump_when_its_birth_resolves() -> None:
+def test_a_live_session_does_not_jump_when_its_birth_resolves(tmp_path, monkeypatch) -> None:
     """THE REPORTED JITTER, pinned at the key.
 
     The phone used to sort on a key it re-derived here, from whatever the merge
@@ -1071,7 +1075,16 @@ def test_a_live_session_does_not_jump_when_its_birth_resolves() -> None:
 
     This drives the real merge, not a copy of the key: a changed ``_rank_row``
     must move the order asserted here.
+
+    Both rows are LIVE generations with real session directories — the merge's
+    live-only filter is the same predicate the scan applies, and a conversation
+    with no directory is not a row (review round 1, MAJOR-1); empty reads as
+    the user's own.
     """
+    cfg = tmp_path / "config"
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    for session_id in ("older-live", "newest-live"):
+        (cfg / "sessions" / session_id).mkdir(parents=True, exist_ok=True)
     table = SessionTable()
     # Both idle (tier 5), so ONLY the birth term can separate them — which is
     # the term the 0.0 fallback used to corrupt.

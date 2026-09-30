@@ -1,6 +1,6 @@
 """The badge aggregate (push/ack-sync S1): one read, two surfaces, one population.
 
-WHAT THIS FILE PINS. ADR 0006 §1.1/§1.2 (@22e2cce2) freezes an additive read --
+WHAT THIS FILE PINS. ADR 0006 §1.1/§1.2 (@5acb2331) freezes an additive read --
 ``GET /api/attention/unread`` -- plus a top-level ``unread`` block on the list
 payload, ONE implementation behind both, computed over EXACTLY the rows the
 listing serves in the same snapshot. The failure modes this file exists to make
@@ -14,11 +14,17 @@ impossible, each of which was reachable in an earlier shape of the design:
   own rows filtered to the user's conversations, and pinned BY CONSTRUCTION: the
   route's count must equal the number of ``unseen: true`` rows in the
   ``/api/sessions`` body captured in the same pass, and the payload block must
-  equal the route.
-* **A store that could not be read served as an empty pile.** ``count`` is
-  ABSENT when ``degraded`` is ``["attention"]``, never 0 -- clearing a badge on
-  a read that never happened is the lie the absence exists to prevent
-  [ADR §1.4, docs/ATTENTION.md].
+  equal the route. "The user's conversations" is ONE predicate, asked by BOTH
+  halves (the scan of the durable rows and the merge of the live entries) -- the
+  divergence review round 1 (MAJOR-1) reproduced was exactly a live entry one
+  half painted and the other excluded.
+* **A store that could not be read served as an empty pile.** A non-empty
+  ``degraded`` withholds ``count``, never sends 0 -- on the route AND on the
+  block, and for EITHER failed read behind the build (the attention read's
+  ``["attention"]``, review round 1's original shape; the durable walk's
+  ``["sessions"]``, review round 1 MINOR-2, which used to answer
+  ``count: 0``). Clearing a badge on a read that never happened is the lie the
+  absence exists to prevent [ADR §1.4, docs/ATTENTION.md].
 * **The read writes.** The store's own rule: frontend reads open ``mode=ro``
   and create nothing (``attention.py:1541-1580`` pins the storage side; the
   mtime/mode cells here pin it at the daemon's seam).
@@ -202,19 +208,78 @@ def test_the_route_and_the_list_block_agree_by_construction(
     assert body["unread"] == {k: v for k, v in route.items() if k != "conversations"}
 
 
+@pytest.mark.asyncio
+async def test_overlapping_reads_publish_one_builds_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 1, MINOR-1: the rows and the block are ONE build's.
+
+    The reviewer's race: with two overlapping builds, the later-resuming caller
+    could publish build A's rows while the block still held build B's aggregate.
+    The pair is now written together, from the build the call served (joiners
+    included). This drives two concurrent callers -- the second joins the
+    in-flight build through ``summaries``' single-flight -- and asserts both
+    hold the SAME rows and that the published block names that build, tagged so
+    a split pair would name a different one. The interleave itself is
+    scheduler-ordered and not deterministically reproducible here; the
+    assignment-site structure is its guarantee, this is its observable
+    contract.
+    """
+    import asyncio
+
+    cfg, daemon = _fixture(tmp_path, monkeypatch, "aaaaaaaaaaaa")
+    table = daemon.table
+    real_merge = table._merge_summaries
+
+    def tagged(durable):
+        rows = real_merge(durable)
+        for row in rows:
+            row["session_id"] = "tagged-build"
+            row["unseen"] = True
+        return rows
+
+    monkeypatch.setattr(table, "_merge_summaries", tagged)
+    real_refresh = table._refresh_durable_rows
+    entered = asyncio.Event()
+
+    async def slow_refresh():
+        entered.set()
+        await asyncio.sleep(0.05)
+        return await real_refresh()
+
+    monkeypatch.setattr(table, "_refresh_durable_rows", slow_refresh)
+    _refresh(daemon)
+
+    first = asyncio.ensure_future(table.summaries())
+    await entered.wait()
+    second = asyncio.ensure_future(table.summaries())
+    rows_a, rows_b = await asyncio.gather(first, second)
+
+    assert rows_a is rows_b, "the second caller must join the in-flight build"
+    assert [row["session_id"] for row in rows_a] == ["tagged-build"]
+    snapshot = table.unread_snapshot()
+    assert snapshot["count"] == 1
+    assert (
+        snapshot["conversations"][0]["session_id"] == "tagged-build"
+    ), "the published block must describe the same build as the rows beside it"
+
+
 def test_exclusions_are_not_counted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Subagent/scheduled origins and deleted conversations never raise the badge.
+    """Hidden origins and deleted conversations never raise the badge -- NOR paint.
 
     Every excluded thing below carries a real unseen receipt -- each one is a
-    state a store-wide census WOULD count (6 here), and the live ones are states
-    an unfiltered row count WOULD count (3 here). The badge must be 1: only the
-    user's own conversation, which is also the only conversation the listing
-    offers as the user's.
+    state a store-wide census WOULD count (4 here), and the live ones are states
+    an unfiltered live half WOULD paint. The badge must be 1, and the assertion
+    that matters is read from the LISTING BODY: the excluded conversations do
+    not appear there either, because count and paint are one set by construction
+    (review round 1, MAJOR-1 -- the earlier round of this cell asserted only the
+    count, which is how the live-half divergence shipped).
 
     The live hidden/deleted rows are deliberately the sharp case: a record
-    carries no origin, so the aggregate must ask the session's directory (the
-    same ``_durable_user_session_dir`` gate every path route applies) rather
-    than trust that "live implies the user's".
+    carries no origin, so the live half asks the session's own marker through
+    the SAME predicate the scan applies (``resume.is_user_session_origin``),
+    and a directory that is gone is not a row -- a deleted conversation's
+    receipt must not raise the badge on either surface.
     """
     cfg, daemon = _fixture(tmp_path, monkeypatch, "aaaaaaaaaaaa")
     client = _logged_in(daemon)
@@ -244,17 +309,77 @@ def test_exclusions_are_not_counted(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     _live(daemon, "eeeeeeeeeeee", 2102)
     _refresh(daemon)
 
+    body = client.get("/api/sessions").json()
     route = client.get("/api/attention/unread").json()
+
+    # NEITHER surface offers the excluded conversations...
+    painted = [row["session_id"] for row in body["sessions"]]
+    assert painted == ["aaaaaaaaaaaa"], painted
     assert route["count"] == 1
     assert [c["session_id"] for c in route["conversations"]] == ["aaaaaaaaaaaa"]
+    # ...and the by-construction equality holds ON THIS STATE -- the state where
+    # the two sets would part if the halves asked different questions.
+    assert route["count"] == len([row for row in body["sessions"] if row["unseen"]])
+    assert body["unread"]["count"] == route["count"]
     # The degraded branch is NOT what excluded them: this is a healthy read.
     assert route["degraded"] == []
-    # Fixture sanity: all five receipts really are unseen in the store, so the
+    # Fixture sanity: the four receipts really are unseen in the store, so the
     # count above is reading the exclusion rule and not a missing state.
     states = AttentionStore().state_many(
         f"session/{sid}" for sid in ("aaaaaaaaaaaa", "cccccccccccc", "dddddddddddd", "eeeeeeeeeeee")
     )
     assert sum(1 for state in states.values() if state["unseen"]) == 4
+
+
+def test_a_hidden_live_generation_neither_paints_nor_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 1 MAJOR-1, the reviewer's reproduced state.
+
+    A live runtime with a hidden origin -- ``agent-config`` (scheduled) and
+    ``agent-shell`` are real runtimes that register a mobile record like any
+    other -- used to be PAINTED by the listing (the live half had no origin
+    filter) while the aggregate excluded it, or vice versa, so the badge and the
+    list could carry different conversation sets. The population rule now holds
+    by construction, and this pins it on the reviewer's shape: the hidden
+    runtime beside TWO ORDINARY live sessions, each with a receipt, asserting
+    absence from the LISTING BODY and the count, with the equality assertions
+    passing on the same captured pass.
+
+    The hidden session's marker is written BEFORE its record is published (the
+    ordering ``server/utils/desktop_sessions`` documents), and it keeps a real
+    directory and transcript so the ONLY reason it is excluded is its origin --
+    a cell that dropped it for a missing directory would pass for the wrong
+    reason.
+    """
+    cfg, daemon = _fixture(tmp_path, monkeypatch, "aaaaaaaaaaaa", "bbbbbbbbbbbb")
+    client = _logged_in(daemon)
+
+    hidden = cfg / "sessions" / "cccccccccccc"
+    hidden.mkdir(parents=True)
+    (hidden / "transcript.jsonl").write_text("{}\n")
+    (hidden / "origin.json").write_text('{"origin": "agent-shell"}')
+
+    for session_id in ("aaaaaaaaaaaa", "bbbbbbbbbbbb", "cccccccccccc"):
+        _publish(session_id)
+    for pid, session_id in enumerate(("aaaaaaaaaaaa", "bbbbbbbbbbbb", "cccccccccccc"), start=3101):
+        _live(daemon, session_id, pid)
+    _refresh(daemon)
+
+    body = client.get("/api/sessions").json()
+    route = client.get("/api/attention/unread").json()
+
+    painted = [row["session_id"] for row in body["sessions"]]
+    assert "cccccccccccc" not in painted, (
+        "a live generation for a hidden origin must not paint: the live half "
+        "asks the same predicate the scan applies"
+    )
+    assert set(painted) == {"aaaaaaaaaaaa", "bbbbbbbbbbbb"}
+    assert route["count"] == 2
+    assert [c["session_id"] for c in route["conversations"]] == [
+        row["session_id"] for row in body["sessions"] if row["unseen"]
+    ], "the counted set and the painted set are one set by construction"
+    assert body["unread"]["count"] == route["count"] == 2
 
 
 def test_a_live_only_conversation_the_scan_has_not_seen_yet_is_counted(
@@ -357,6 +482,53 @@ def test_a_store_that_cannot_be_read_serves_degraded_without_a_count(
     # The listing's OWN marker names the same failure, so the two markers a
     # client can read cannot disagree.
     assert listed["degraded"] == ["attention"]
+
+
+def test_a_failed_durable_walk_degrades_the_block_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 1, MINOR-2: the OTHER half's failure is not a zero either.
+
+    The reviewer's repro: with the store's directory unreadable, the build had
+    no rows and the block answered ``{"count": 0, "degraded": []}`` -- the
+    silent zero this workstream exists to eliminate, reached through the
+    durable walk. The block now seeds ``degraded`` from the build's WHOLE read
+    verdict, so this failure withholds ``count`` on both surfaces exactly as a
+    failed attention read does -- and the healing is real: once the walk reads
+    again, the same state's receipt answers with a count.
+    """
+    import errno
+
+    from tests.unit.mobile.test_daemon import _listing_rows
+    from tests.unit.session.test_catalog_read_failures import _failing_open
+
+    cfg = tmp_path / "config"
+    store = _listing_rows(cfg, "aaaaaaaaaaaa")
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+    daemon = MobileDaemon(port=0, password="pw123")
+    client = _logged_in(daemon)
+    _publish("aaaaaaaaaaaa")
+
+    _failing_open(monkeypatch, store, OSError(errno.EIO, "Input/output error"))
+    _refresh(daemon)
+
+    _resp = client.get("/api/sessions")
+    listed = _resp.json()
+    assert listed["degraded"] == ["sessions"]
+    assert "count" not in listed["unread"], listed["unread"]
+    assert listed["unread"]["degraded"] == ["sessions"], listed["unread"]
+
+    route = client.get("/api/attention/unread").json()
+    assert route["degraded"] == ["sessions"]
+    assert "count" not in route
+
+    # The seam fails once (``nth=1``), so the next walk reads: a transient
+    # failure must not latch the badge at "unknown".
+    _refresh(daemon)
+    healed = client.get("/api/sessions").json()
+    assert healed["degraded"] == []
+    assert healed["unread"]["count"] == 1
+    assert client.get("/api/attention/unread").json()["count"] == 1
 
 
 # ---------------------------------------------------------------------------

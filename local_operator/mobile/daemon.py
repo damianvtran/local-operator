@@ -578,15 +578,18 @@ class SessionTable:
         self._attention_listing_degraded = False
         self._summaries_cache: list[dict[str, Any]] | None = None
         self._summaries_at = 0.0
-        self._summaries_task: asyncio.Task[list[dict[str, Any]]] | None = None
+        self._summaries_task: asyncio.Task[tuple[list[dict[str, Any]], dict[str, Any]]] | None = (
+            None
+        )
         self._attention_states: dict[str, dict[str, Any]] = {}
         #: The unread aggregate of the most recent listing build (see
-        #: :meth:`unread_snapshot` and :meth:`_unread_aggregate`). WRITTEN ONLY
-        #: BY ``_build``, from the SAME rows and states the build publishes, so
-        #: the badge and the list cannot be built from two different snapshots
-        #: -- the equality the mobile lane's S1 freezes as a test rather than a
-        #: claim. ``None`` until the first build: nothing has been READ then,
-        #: and an unread count is a read of ``attention.db``.
+        #: :meth:`unread_snapshot` and :meth:`_unread_aggregate`). PUBLISHED BY
+        #: ``summaries`` in the SAME assignment as ``_summaries_cache``, from
+        #: the build result's own tuple -- so the badge and the list cannot be
+        #: built from two different builds, which the equality the mobile
+        #: lane's S1 freezes is a test of rather than a claim [review round 1,
+        #: MINOR-1]. ``None`` until the first build: nothing has been READ
+        #: then, and an unread count is a read of ``attention.db``.
         self._unread_snapshot: dict[str, Any] | None = None
         self._creation_dates: dict[str, float] = {}
         #: The sidebar's durable pinned session ids, newest pin first, read by
@@ -741,7 +744,11 @@ class SessionTable:
         ``degraded`` cannot disagree about whether the store was read. The
         widening is the safe direction deliberately: a client that repairs on
         this word over-repairs, where the opposite asymmetry would let a badge
-        be cleared from a listing whose token was never read.
+        be cleared from a listing whose token was never read. Since review
+        round 1 (MINOR-2) the aggregate's ``degraded`` array is a COPY of this
+        list, whole: a failed durable walk withholds the block's ``count``
+        exactly as a failed attention read does, because a listing built over
+        either failed read is not an empty pile.
 
         The decoration name is looked up from ``session.catalog`` AT THE FAILURE
         rather than re-spelled here, and only in the degraded branch: importing
@@ -771,11 +778,8 @@ class SessionTable:
         cached = self._summaries_cache
         if cached is not None and now - self._summaries_at < SUMMARIES_CACHE_TTL_S:
             return cached
-        task = self._summaries_task
-        if task is not None and not task.done():
-            return await task
 
-        async def _build() -> list[dict[str, Any]]:
+        async def _build() -> tuple[list[dict[str, Any]], dict[str, Any]]:
             rows = self._durable_rows_cache
             # The timestamp alone decides freshness, and it is stamped by a
             # FAILED attempt too: a store that cannot be walked must not be
@@ -843,101 +847,93 @@ class SessionTable:
             else:
                 self._attention_listing_degraded = False
             out = self._merge_summaries(rows)
-            self._unread_snapshot = await self._unread_aggregate(out, rows, revision)
-            return out
+            # The rows and the aggregate leave the build TOGETHER and are
+            # published by the caller in ONE assignment (review round 1,
+            # MINOR-1): a caller that resumes late must never publish build A's
+            # rows beside build B's aggregate.
+            return out, self._unread_aggregate(out, revision)
 
-        task = asyncio.ensure_future(_build())
-        self._summaries_task = task
+        task = self._summaries_task
+        if task is None or task.done():
+            # A done-but-unpublished task starts a NEW build (its own caller's
+            # tail below is what publishes IT), so no caller ever serves a
+            # build another caller has not captured yet.
+            task = asyncio.ensure_future(_build())
+            self._summaries_task = task
         try:
-            out = await task
+            out, aggregate = await task
         except BaseException:
             if self._summaries_task is task:
                 self._summaries_task = None
             raise
+        # ONE ASSIGNMENT SITE for the pair (review round 1, MINOR-1): the rows
+        # and the unread block are published TOGETHER, so a payload can never
+        # read build A's rows beside build B's aggregate -- joiners included,
+        # which is why the assignment sits after the shared await rather than
+        # inside ``_build``.
         self._summaries_cache = out
+        self._unread_snapshot = aggregate
         self._summaries_at = time.monotonic()
         return out
 
-    async def _unread_aggregate(
+    def _unread_aggregate(
         self,
         rows: list[dict[str, Any]],
-        durable: dict[str, Any],
         revision: tuple[int, int, int] | None,
     ) -> dict[str, Any]:
         """The ONE unread-aggregate implementation behind both read surfaces.
 
         ``GET /api/attention/unread`` (the badge route) and the top-level
         ``unread`` block on the list payload are built from THIS result of THIS
-        build, so they cannot disagree [ADR 0006 §1.1/§1.2 @22e2cce2, and its
+        build, so they cannot disagree [ADR 0006 §1.1/§1.2 @5acb2331, and its
         equality test: the route count equals the number of rows carrying
         ``unseen: true`` in the ``/api/sessions`` body captured in the same
         pass].
 
-        ``rows`` is the merged listing the build is publishing, in its final
-        order, so the aggregate's population is the listing's own rows -- never
-        a second scan or a store-side census, which on a real machine counts
-        subagent receipts and ``agent/<id>`` namespaces the app never shows
-        [ADR §1.2; review M8 / QA Q1].
+        ``rows`` -- the merged listing this build is publishing, in its final
+        order -- IS the population, and each half is filtered in ONE place: the
+        durable rows carry the scan's own verdict, and the live half passes
+        ``_live_generation_is_user_facing``, which asks the SAME one function of
+        a live-only id's marker (``resume.is_user_session_origin``; the scan
+        asks it of every marker it parses). So a conversation the listing does
+        not paint is a conversation this method cannot count, BY CONSTRUCTION --
+        there is deliberately no second filter here, and no store-side census,
+        which on a real machine counts subagent receipts and ``agent/<id>``
+        namespaces the app never shows [ADR §1.2's "one predicate, named once";
+        review round 1 MAJOR-1]. The per-id ``_durable_user_session_dir``
+        re-derivation this used to run is gone with it: §1.2 names that detail
+        check (transcript + name + origin) as NOT the predicate, because it
+        would put a durable-but-detail-less row -- a mail-spool conversation
+        with no transcript yet -- in one set and not the other.
 
-        The population is then FILTERED TO THE USER'S OWN CONVERSATIONS, the
-        rule the mobile lane froze as ``_durable_user_session_dir`` /
-        ``is_user_session`` -- the same gate ``/seen``, ``/pin``, the history
-        route and the attention bootstrap already apply before they let an id
-        name a conversation:
-
-        * a row the durable scan returned is the user's own BY THE SCAN'S
-          VERDICT (``_is_hidden_origin`` read the origin and dropped the rest),
-          so it is never re-probed here -- a second opinion here would be a
-          second syscall cost on every build for an answer the scan already
-          gave, and this listing measures its syscalls;
-        * a row that exists only as a LIVE generation is probed, because a
-          record carries no origin and its session's origin marker is the only
-          truth. The probe is ``_durable_user_session_dir``, which also
-          requires ``transcript.jsonl`` -- harmless for these rows, because a
-          row is probed only when ``unseen`` is true and a completion implies a
-          materialised transcript. Subagent and ``agent-config`` (scheduled)
-          origins fail it, and so does a conversation with no directory (a
-          deleted one, or one that never materialised) -- exactly the
-          exclusions §1.2 names.
-
-        The probe runs in a worker: it stats and reads origin markers, and the
-        merge path this method extends is deliberately pure in-memory work on
-        the loop.
-
-        ``revision is None`` means the build's attention read FAILED; the
-        aggregate is then the degraded shape and nothing else. The
-        absences are load-bearing: ``count`` must never be 0 here (a store that
-        could not be read is not an empty pile [docs/ATTENTION.md]), and
-        ``revision``/``conversations`` are absent for the same reason -- this
-        shape claims nothing it could not read, and every client's remedy for
-        "unknown" is the one §1.4 states: do not touch the badge.
+        ``degraded`` seeds from the build's WHOLE read verdict
+        (``listing_degraded``: the durable walk AND the attention read), never
+        from the attention read alone [review round 1, MINOR-2]: a listing
+        built over a failed durable walk is serving last-good rows, or none, and
+        ``count: 0`` beside it would clear the operator's badge on a listing
+        that was never fully read. The absences are load-bearing: ``count`` must
+        never be 0 on a degraded build (a store that could not be read is not an
+        empty pile [docs/ATTENTION.md]), and ``revision``/``conversations`` are
+        absent for the same reason -- this shape claims nothing it could not
+        read, and every client's remedy for "unknown" is the one §1.4 states:
+        do not touch the badge.
         """
-        if revision is None:
-            # The catalogue's word for this failure, looked up AT THE FAILURE
-            # like ``listing_degraded`` does and for the same measured reason
-            # (importing the catalogue costs ~26 ms a healthy repaint must not
-            # pay). It is the ONE vocabulary the catalogue and the desktop
-            # listing already name this read's failure with.
-            from local_operator.session.catalog import DECORATION_ATTENTION
+        verdict = list(self.listing_degraded())
+        if verdict or revision is None:
+            if not verdict:
+                # Defensive: a failed attention read sets the flag above, so an
+                # empty verdict with ``revision is None`` is unreachable today
+                # -- but the shape must still be the degraded one if a future
+                # edit ever separates those two plain facts.
+                from local_operator.session.catalog import DECORATION_ATTENTION
 
-            return {"degraded": [DECORATION_ATTENTION]}
-        unread = [row for row in rows if row["unseen"]]
-        live_only = [row["session_id"] for row in unread if row["session_id"] not in durable]
-        user_facing: dict[str, bool] = {}
-        if live_only:
-
-            def resolve() -> dict[str, bool]:
-                return {
-                    session_id: _durable_user_session_dir(session_id) is not None
-                    for session_id in live_only
-                }
-
-            user_facing = await asyncio.to_thread(resolve)
+                verdict = [DECORATION_ATTENTION]
+            return {"degraded": verdict}
         conversations: list[dict[str, Any]] = []
-        for row in unread:
-            session_id = row["session_id"]
-            if session_id not in durable and not user_facing[session_id]:
+        for row in rows:
+            if not row["unseen"]:
                 continue
+            session_id = row["session_id"]
             state = self._attention_states.get(f"session/{session_id}", {})
             conversations.append(
                 {
@@ -966,17 +962,19 @@ class SessionTable:
         embeds the result as the top-level ``unread`` block, and
         ``api_attention_unread`` serves it as the route's whole body.
 
-        Before the first build nothing has been read, so the answer claims
-        nothing: the degraded shape, whose ``count`` absence is the same signal
-        the app already handles -- do not touch the badge, try again later.
-        That state is unreachable through either route (both build first), and
-        it exists for a direct caller rather than as a contract.
+        Before the first build nothing has been READ AT ALL -- not a failed
+        read, a read that has not happened -- and the answer claims nothing: the
+        degraded SHAPE (``count`` absent), borrowing that vocabulary because
+        every client's remedy for it is identical (do not touch the badge, try
+        again), not because a read failed. That state is unreachable through
+        either route (both build first), and it exists for a direct caller
+        rather than as a contract.
         """
         snapshot = self._unread_snapshot
         if snapshot is None:
-            # See the docstring: nothing has been read yet, so the shape claims
-            # nothing and names the same failed-read word the degraded branch
-            # uses.
+            # See the docstring: no read has happened yet -- the shape is the
+            # degraded one because the remedy is identical, not because a read
+            # failed (review round 1, NIT-1).
             from local_operator.session.catalog import DECORATION_ATTENTION
 
             return {"degraded": [DECORATION_ATTENTION]}
@@ -1037,16 +1035,28 @@ class SessionTable:
     def _merge_summaries(self, durable: dict[str, Any]) -> list[dict[str, Any]]:
         """Merge cached durable rows with fresh live state into summary rows.
 
-        Pure in-memory work (safe on the loop); split out of ``summaries`` so
-        the cache layer and the row shape are separately testable.
+        Split out of ``summaries`` so the cache layer and the row shape are
+        separately testable, and NOT pure in-memory work any more, with the one
+        exception named: a LIVE-ONLY entry -- an id the durable scan did not
+        return -- is checked against ``_live_generation_is_user_facing`` before
+        it is merged, so the listing PAINTS exactly the set the unread
+        aggregate COUNTS (push/ack-sync S1 remediation, review round 1
+        MAJOR-1; that helper states the one-predicate rule and why a missing
+        or unreadable marker is the user's own). An id the scan DID return
+        skips the check: it is user-facing by the scan's own verdict, and
+        re-reading its marker would be a second syscall for an answer already
+        in hand.
         """
         active: dict[str, SessionEntry] = {}
         for entry in self.entries.values():
             if entry.ended:
                 continue
-            prior = active.get(entry.record.session_id)
+            session_id = entry.record.session_id
+            if session_id not in durable and not _live_generation_is_user_facing(session_id):
+                continue
+            prior = active.get(session_id)
             if prior is None or entry.record.heartbeat_at > prior.record.heartbeat_at:
-                active[entry.record.session_id] = entry
+                active[session_id] = entry
         out: list[dict[str, Any]] = []
         ranks: dict[str, tuple[tuple[int, int, float, str], bool]] = {}
         for session_id in set(durable) | set(active):
@@ -1375,6 +1385,35 @@ def _durable_user_session_dir(session_id: str) -> Path | None:
     if not (directory / "transcript.jsonl").is_file() or not is_user_session(directory):
         return None
     return directory
+
+
+def _live_generation_is_user_facing(session_id: str) -> bool:
+    """Whether a LIVE session id names a conversation the user can be shown.
+
+    THE SAME RULE THE DURABLE SCAN APPLIES, asked through the SAME function
+    (``resume.is_user_session_origin``) -- and that sameness is the point
+    (push/ack-sync S1 remediation, review round 1 MAJOR-1): a live runtime's
+    record carries no origin, so its session directory's marker is the only
+    truth, and while the two halves asked different questions the listing could
+    PAINT a live entry the aggregate excluded (an ``agent-shell`` /
+    ``agent-config`` runtime registers a mobile record like any other) -- or
+    count a row the list did not paint. One predicate, called by both halves,
+    is what makes the painted set and the counted set ONE set by construction.
+
+    A DIRECTORY THAT IS GONE IS NOT A ROW: a conversation whose directory no
+    longer exists is not offered (ADR §1.2's own exclusion), and its receipt is
+    a receipt for something that no longer exists. A directory that exists but
+    carries no READABLE marker is the user's own -- the fail-safe direction
+    :func:`session_origin` documents -- so only a marker that was read and is
+    not in ``USER_ORIGINS`` hides.
+    """
+    from local_operator.paths import config_dir
+    from local_operator.resume import is_user_session_origin, session_origin
+
+    directory = config_dir() / "sessions" / session_id
+    if not directory.is_dir():
+        return False
+    return is_user_session_origin(session_origin(directory))
 
 
 def _durable_projection(session_id: str) -> SessionProjection | None:
@@ -3721,16 +3760,17 @@ def build_app(daemon: MobileDaemon):
     async def api_attention_unread(request: Request) -> Response:
         """The badge number: conversations with unread completions, one read.
 
-        Push/ack-sync S1 [ADR 0006 §1.1/§1.2 @22e2cce2]: ``count`` counts
+        Push/ack-sync S1 [ADR 0006 §1.1/§1.2 @5acb2331]: ``count`` counts
         CONVERSATIONS -- a conversation with three unread completions counts
-        once -- over exactly the rows the list serves, filtered to the user's
-        own conversations (``SessionTable._unread_aggregate`` states the
-        population and the exclusions). ``revision`` is
-        ``AttentionStore.revision()``: an equality token, and never an order.
-        ``degraded: ["attention"]`` means the store could not be read, and
-        then ``count`` is ABSENT rather than 0 -- a store that could not be
-        read is not an empty pile, and clearing the badge on it is the lie the
-        absence exists to prevent [docs/ATTENTION.md].
+        once -- over exactly the rows the list serves, ONE population filtered
+        by the one predicate both halves call (``SessionTable._unread_aggregate``
+        states it; the painted set and the counted set are one set by
+        construction). ``revision`` is ``AttentionStore.revision()``: an
+        equality token, and never an order. A non-empty ``degraded`` means the
+        store could not be fully read, and then ``count`` is ABSENT rather
+        than 0 -- a store that could not be read is not an empty pile, and
+        clearing the badge on it is the lie the absence exists to prevent
+        [docs/ATTENTION.md].
 
         Auth-gated exactly like ``/api/sessions`` (same ``gate``, same 401
         shape), and additive: a client that never calls it is unaffected, and
