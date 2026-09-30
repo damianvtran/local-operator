@@ -1677,24 +1677,29 @@ SETTINGS: tuple[Setting, ...] = (
         # `_consumer_defaults()` in tests/unit/test_settings_io.py pins the
         # pair to each other.
         default="same-family",
+        # NOTE ON THE COPY (review round 1, D1/D3): the row's two choice
+        # descriptions render ONLY on the expanded rows, where the painted
+        # field — truncation ellipsis included — is 17/26 cells at 60x20 and
+        # 23/32 at 100x30 (captured frames), and every enum description in
+        # this registry is a short phrase for exactly that reason. So each
+        # description IS a micro-hint (the discriminating words lead), and the
+        # help — which is the sentence, read on the detail line's 93 cells at
+        # 100x30 — keeps `same-family hops only, or any vendor (announced)`,
+        # the clause the overlong predecessor clipped at every size.
         help=(
-            "What a subagent launched on a pinned model may fall back to when "
-            "its own vendor cannot serve: same-family hops only, or any vendor "
-            "(announced)."
+            "What a pinned child may fall back to: same-family hops only, or "
+            "any vendor (announced)."
         ),
         choices=(
             Choice(
                 "same-family",
                 "same family only",
-                "Refuse cross-vendor fallbacks for pinned children; the child "
-                "fails visibly instead of silently running on another vendor.",
+                "same vendor only",
             ),
             Choice(
                 "cross-family",
                 "allow cross-vendor",
-                "Let a pinned child descend onto another vendor's model as a "
-                "last resort; the descent is still ordered family-first and "
-                "announced.",
+                "any vendor (announced)",
             ),
         ),
     ),
