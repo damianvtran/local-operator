@@ -955,6 +955,7 @@ def pair_result_frame(
     members_digest: str = "",
     material: str = "",
     rotations: dict[str, str] | None = None,
+    shares: list[str] | None = None,
     reason: str = "",
 ) -> dict[str, Any]:
     """The inviter's admission answer — and the ONLY frame that carries material.
@@ -969,6 +970,11 @@ def pair_result_frame(
     key, so a joiner that received only its own row could never verify a later
     handshake from the inviter. The list is the same shape ``net_epoch`` carries,
     which also means the joiner's persistence code is one path rather than two.
+
+    ``shares`` is the FINAL granted set — the receipt the joiner shows its person
+    ("serving here: …") and the one fact that reconciles the two screens when a
+    share was dropped. Old joiners read named keys only and ignore it; it is
+    empty for mixed pairs, where no list ever travelled.
     """
     frame: dict[str, Any] = {"op": "net_pair_result", "req": req, "admit": admit}
     if admit:
@@ -978,6 +984,7 @@ def pair_result_frame(
         frame["members_digest"] = members_digest
         frame["secret"] = material
         frame["rotations"] = rotations or {}
+        frame["shares"] = list(shares or [])
     else:
         frame["reason"] = reason
     return frame

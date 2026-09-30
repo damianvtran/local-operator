@@ -729,3 +729,280 @@ def test_second_offer_is_a_protocol_error(
         )
     assert refused.value.code == "protocol_error"
     assert "second share list" in refused.value.sentence
+
+
+# ---------------------------------------------------------------------------
+# The owner's confirm screen (memo §7 cells 8 and 9)
+# ---------------------------------------------------------------------------
+
+_OWNER_ITEMS: list[dict[str, Any]] = [
+    {"key": "openai", "kind": "oauth-rotating", "label": "d***@example.com", "share": True},
+    {"key": "anthropic", "kind": "oauth-rotating", "label": "", "share": True},
+    {"key": "legacy-key", "kind": "api-key-static", "label": "", "share": False},
+]
+
+
+def _confirm_args(**overrides: Any) -> Namespace:
+    base: dict[str, Any] = {
+        "json": True,
+        "invite_id": "",
+        "list_pending": False,
+        "decline": False,
+        "sas_stdin": False,
+    }
+    base.update(overrides)
+    return Namespace(**base)
+
+
+def _pending_with_offer(
+    root: Path, *, items: list[dict[str, Any]] | None = None
+) -> types.PendingPairing:
+    """The record a relay parks once it has SENT a share list (state ``sent``)."""
+    pending = types.PendingPairing(
+        invite_id="i_offer1",
+        network_id="n_0123456789abcdef01234567",
+        network_name="home-net",
+        joiner_device_id="d_" + "b" * 32,
+        joiner_name="laptop",
+        sas="481926",
+        fingerprint="K7QM-3XPD-4WZ9-8NRB",
+        transcribed="481926",
+        peer_addr="127.0.0.1:4097",
+        expires_at=time.time() + 120,
+        prompt=(
+            'd_bbbb… ("laptop", new device) transcribed 481 926 to join home-net as drive.\n'
+            "YOUR screen shows 481 926.\n\n"
+            "Credentials this device will serve to laptop:\n"
+            "  openai (OAuth, d***@example.com)   will be served\n"
+            "  anthropic (OAuth)   will be served\n"
+            "  legacy-key (API key)   not offered\n"
+            "the list can only shrink; nothing else will be served.\n\n"
+            "Do they match? Confirm only if the other device shows the same code."
+        ),
+        offer=list(items if items is not None else _OWNER_ITEMS),
+        offer_state="sent",
+    )
+    store.save_pending_pairing(pending, root)
+    return pending
+
+
+def test_confirm_screen_shows_the_offer_and_a_reduction_lands_in_the_decision(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """§3.3: the owner's question carries the list, ``t`` unchecks a served row, and
+    ONLY the reduced set is written into the decision — the thing admission reads."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    _pending_with_offer(root)
+    monkeypatch.setattr(net_cli, "_has_terminal", lambda: True)
+    prompts: list[str] = []
+    answers = iter(["t", "openai", "y"])
+
+    def _answer(prompt: str = "") -> str:
+        prompts.append(prompt)
+        return next(answers)
+
+    monkeypatch.setattr("builtins.input", _answer)
+    assert net_cli._cmd_confirm(_confirm_args()) == 0  # noqa: SLF001
+    out = capsys.readouterr().out
+    assert "openai (OAuth, d***@example.com)   will be served" in out
+    assert any("t to change what will be served" in prompt for prompt in prompts)
+    decision = store.pair_decision("i_offer1", root)
+    assert decision is not None and decision.matched and decision.decision == "admit"
+    assert decision.shares == ["anthropic"]
+
+
+def test_confirm_refuses_an_unoffered_addition_by_name(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§3.3: nothing can be ADDED at confirm — the CLI refuses before writing
+    anything, and the relay refuses the same widening if it arrives in a frame."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    _pending_with_offer(root)
+    monkeypatch.setattr(net_cli, "_has_terminal", lambda: True)
+    answers = iter(["t", "ghost-key", "y"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    with pytest.raises(types.MeshRefusal) as refused:
+        net_cli._cmd_confirm(_confirm_args())  # noqa: SLF001
+    assert refused.value.code == "shares_not_offered"
+    assert "ghost-key" in refused.value.sentence
+    assert store.pair_decision("i_offer1", root) is None, "a refused edit wrote a decision"
+
+    # The daemon side refuses the same widening, with the same remedy.
+    server = relay.RelayServer(settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1"))
+    try:
+        with pytest.raises(types.MeshRefusal) as daemon_refusal:
+            server._ctl_pair_confirm(  # noqa: SLF001 — the relay's own control op
+                {
+                    "invite_id": "i_offer1",
+                    "decision": "admit",
+                    "matched": True,
+                    "shares": ["ghost-key"],
+                }
+            )
+        assert daemon_refusal.value.code == "shares_not_offered"
+        assert "ghost-key" in daemon_refusal.value.sentence
+        assert store.pair_decision("i_offer1", root) is None
+    finally:
+        server.stop()
+
+
+# ---------------------------------------------------------------------------
+# Admission: grants, capability, audit, receipt (memo §7 cells 10 and 11)
+# ---------------------------------------------------------------------------
+
+
+def _pair_with_credential(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Any, list[str], dict[str, Any]]:
+    """A full ceremony where A holds one oauth login and answers as its person."""
+    server_a, server_b, host, port = devices
+    _seed(
+        server_a.root,
+        "openai",
+        {"refresh": "r", "access": "a", "email": "damian@example.com"},
+    )
+    record = _init_network(server_a)
+    state = store.load_secrets(record.network_id, server_a.root)
+    minted = invite_mod.mint(record, state.secret, role="drive", ttl_s=600.0)
+    record.invites.append(minted.record)
+    store.save(record, server_a.root)
+    store.save_invite_token(minted.record.invite_id, minted.token, server_a.root)
+    _type_the_code(monkeypatch)
+    answered: dict[str, Any] = {}
+    thread = threading.Thread(
+        target=lambda: answered.update(_answer_confirmation(server_a) or {}), daemon=True
+    )
+    thread.start()
+    try:
+        import tests.unit.network.test_relay_e2e as relay_e2e
+
+        result = relay_e2e._join(
+            server_b,
+            host=host,
+            port=port,
+            token=minted.token,
+            envelope=minted.envelope,
+        )
+    finally:
+        thread.join(20)
+    assert answered, "the inviter's person never answered"
+    lines, payload = result
+    return record, lines, payload
+
+
+def test_admission_applies_the_granted_shares(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§5.3: one lock, admit THEN grant — the placement holder row, the
+    ``broker_credential`` capability, and one ``credential.placement`` audit row,
+    all from the offered set. The member row exists first; the grant rides it."""
+    server_a, server_b, _host, _port = devices
+    record, _lines, _payload = _pair_with_credential(devices, monkeypatch)
+    # The member row (admitted first) and the grant that rides it.
+    fresh = store.load(record.network_id, server_a.root)
+    member = fresh.member(server_b.identity.device_id)
+    assert member is not None and member.active
+    assert "broker_credential" in member.capabilities
+    # The placement holder: scope session — the smallest useful authority.
+    from local_operator.network.credentials import placement as placement_mod
+
+    document = placement_mod.PlacementDocument.load(
+        record.network_id, server_a.root, self_device=server_a.identity.device_id
+    )
+    entry = document.entry("openai")
+    assert entry is not None, "the admission wrote no placement for the offered key"
+    holder = entry.holder(server_b.identity.device_id)
+    assert holder is not None and holder.scope == "session"
+    # The audit trail: one placement row for the grant, and the admission itself.
+    import tests.unit.network.test_relay_e2e as relay_e2e
+
+    events = relay_e2e._events(server_a)
+    assert "credential.placement" in events
+    assert "member_admitted" in events
+    assert "pairing_confirmed" in events
+
+
+def test_result_frame_carries_the_granted_shares_and_the_receipt_shows_them(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§3.5: the joiner's receipt states the final set — the line a person reads
+    and the payload key an agent reads."""
+    _record, lines, payload = _pair_with_credential(devices, monkeypatch)
+    assert payload["shares"] == ["openai"]
+    assert "serving here: openai" in lines
+
+
+def test_a_reduction_cannot_widen_at_admission(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],  # noqa: F811
+) -> None:
+    """G4: even a decision written OUT OF BAND (shares ⊃ the offer) can only grant
+    what the wire offered — the intersection is structural, not a convention."""
+    server_a, server_b, _host, _port = devices
+    _seed(server_a.root, "openai", {"refresh": "r", "access": "a", "email": "d@e"})
+    record = _init_network(server_a)
+    decision = types.PairDecision(
+        invite_id="i_x",
+        decision="admit",
+        matched=True,
+        shares=["openai", "ghost-key"],
+    )
+    offer_items = [{"key": "openai", "kind": "oauth-rotating", "label": "", "share": True}]
+    granted = relay._grant_pair_shares(  # noqa: SLF001 — the admission helper itself
+        record,
+        joiner_id=server_b.identity.device_id,
+        decision=decision,
+        offer_items=offer_items,
+        owner_name=server_a.identity.name,
+        root=server_a.root,
+        audit=server_a.audit,
+    )
+    assert granted == ["openai"]
+    from local_operator.network.credentials import placement as placement_mod
+
+    document = placement_mod.PlacementDocument.load(record.network_id, server_a.root)
+    assert document.entry("openai") is not None
+    assert document.entry("ghost-key") is None, "an out-of-band share reached the document"
+
+
+def test_empty_and_skipped_offers_render_their_lines() -> None:
+    """§4.2/§4.4's owner-side lines, and the rows when there are any — the same
+    renderer `inviter_prompt_for` threads through all four owner surfaces."""
+    from local_operator.network.invite import inviter_prompt_for
+
+    empty = inviter_prompt_for(
+        network_name="lab",
+        role="drive",
+        device_id="d_" + "b" * 32,
+        name="laptop",
+        transcribed="481926",
+        derived="481926",
+        offer_items=[],
+        offer_state="sent",
+    )
+    assert "nothing will be served in this ceremony" in empty
+    skipped = inviter_prompt_for(
+        network_name="lab",
+        role="drive",
+        device_id="d_" + "b" * 32,
+        name="laptop",
+        transcribed="481926",
+        derived="481926",
+        offer_state="skipped_peer_unsupported",
+    )
+    assert "older build" in skipped
+    rows = inviter_prompt_for(
+        network_name="lab",
+        role="drive",
+        device_id="d_" + "b" * 32,
+        name="laptop",
+        transcribed="481926",
+        derived="481926",
+        offer_items=list(_OWNER_ITEMS),
+        offer_state="sent",
+    )
+    assert "Credentials this device will serve to laptop:" in rows
+    assert "openai (OAuth, d***@example.com)   will be served" in rows
+    assert "legacy-key (API key)   not offered" in rows
