@@ -1108,6 +1108,131 @@ def _env_details(cwd: str | None = None) -> str:
     )
 
 
+#: The SERVER-OWNED shape of a configuration run: the preamble a run is built
+#: with, and the tool declaration that gives it its reach.
+#:
+#: WHY THE SHAPE IS THE SERVER'S. A configuration run writes agent instructions
+#: that every LATER session of that profile obeys, so its authority is a
+#: persistent privilege surface. A renderer that picked the tools, or a prompt
+#: that merely ASKED the model to behave, would put that authority in the client
+#: and in the model's goodwill. Both halves below are therefore stated here, in
+#: code versioned with the backend, and applied by the composition root that
+#: builds the session -- never by a caller.
+#:
+#: WHY AN OP SCOPE AND NOT JUST TWO NAMES. ``agent`` is ONE tool with several
+#: ``op=`` values, two of which a bounded run must not have: ``reset`` overwrites
+#: instructions the operator wrote, and ``sync`` fetches from the hub using their
+#: stored credentials. Declaring ``agent`` for "add or edit a profile" without an
+#: op scope hands out both, which is the gap the op scope exists to close (see
+#: ``Session.set_tool_inventory``'s ``ops`` argument).
+#:
+#: ``team_delete`` needs no op scope -- it is its own tool and is simply not
+#: named -- and that is deliberate on the product's side too: no desktop op and no
+#: page control deletes a profile or a team today, so a conversational delete
+#: would be the first delete in the product.
+AGENTS_CONFIG_TOOLS: tuple[str, ...] = ("agent", "team")
+
+#: The ops of :data:`AGENTS_CONFIG_TOOLS` a configuration run may reach, per tool
+#: name. Every declared tool is listed: an omission would mean "every op this
+#: build's tool accepts", which is the state a declaration without a scope is in
+#: and exactly the state this mapping exists to avoid.
+AGENTS_CONFIG_TOOL_OPS: dict[str, tuple[str, ...]] = {
+    "agent": ("list", "show", "search", "install", "create", "update"),
+    "team": ("list", "show", "create", "update"),
+}
+
+#: The preamble injected as the run's ``<configuration-run>`` system block.
+#:
+#: IN CODE, NOT A SEED. A packaged seed would appear in every operator's agent
+#: list (``profile_catalogue`` is a projection over the registry, and the registry
+#: answers with the seeds), which is a product surface for something nobody chose
+#: to install; and a seed can be edited, which would make the run's boundary a
+#: thing the operator can be talked out of. The trade-off is stated rather than
+#: hidden: the operator cannot tune this.
+#:
+#: IT SAYS BOTH HALVES. What the run is for, so it does not answer the operator's
+#: question as if it were a chat; and what it may NOT do, so a refusal it earns
+#: from the declaration is explained rather than looked like a bug. The exclusion
+#: is nevertheless ENFORCED by the inventory and not by these sentences -- a
+#: prompt is a statement, and the declaration is the mechanism.
+AGENTS_CONFIG_PREAMBLE = """This session is a CONFIGURATION RUN: the operator started it from the
+Agents page to author reusable agents and teams by conversation. It is not their
+conversation with you -- they watch this run on that page, and nothing here
+reaches any other chat.
+
+What you do here: find, create and update agent profiles and teams with the
+`agent` and `team` tools, then say plainly what you changed.
+
+What you cannot do here, and must not promise: reset or sync an agent profile
+(`agent reset` / `agent sync` overwrite instructions the operator wrote or fetch
+from the hub with their credentials), delete a team, run shell commands, or read
+and write files. Those tools are genuinely unreachable in this session, not
+merely discouraged -- if a call is refused, say so and offer the manual path
+instead of retrying.
+
+Prefer the smallest change that answers the request, and prefer reporting what
+you did over asking permission you cannot be given."""
+
+
+def apply_config_run_shape(session: Any) -> bool:
+    """Apply :data:`AGENTS_CONFIG_PREAMBLE` and the tool declaration to ``session``.
+
+    WHEN A SESSION IS A CONFIGURATION RUN, and how this knows: the session's OWN
+    ``desktop.json`` marker carries ``purpose: "agents-config"`` (written by the
+    desktop ``create`` that made it). Reading the MARKER rather than a parameter
+    is the design the desktop side states and the reason it can hold: the marker
+    is the document that outlives the request, so a run RESUMED hours later -- or
+    booted by a successor daemon, or attached to by a second window -- is shaped
+    identically without anything having to remember to pass a flag. It is the
+    same read ``retention.read_desktop_purpose`` serves the origin stamp with.
+
+    THE DURABLE ORIGIN IS THE SECOND WITNESS, and it is what makes this FAIL
+    CLOSED. ``read_desktop_purpose`` is deliberately tolerant (an unreadable or
+    hand-edited marker answers "no purpose"), which on its own makes a damaged
+    marker indistinguishable from an ordinary conversation -- and the one thing
+    that must never happen is a session that every listing still HIDES (its
+    ``origin.json`` is untouched) booting UNBOUNDED, with nothing anywhere saying
+    so. So the two records are read together: a purpose this build knows, OR an
+    origin of ``agent-config``, means the run's shape applies. The origin is
+    written FIRST by the create path precisely because it is the durable record,
+    and every other half of this feature (``is_user_session``, the door,
+    ``active_config_run``) already keys on it.
+
+    Returns whether it applied anything, which is what the tests assert on --
+    the alternative is a test that inspects private state to find out whether a
+    public path ran.
+
+    NO-OP FOR EVERY OTHER SESSION: a session with neither the purpose nor the
+    origin is an ordinary conversation, and this touches nothing.
+    """
+    directory = getattr(getattr(session, "transcript", None), "directory", None)
+    if not directory:
+        return False
+    from local_operator.resume import ORIGIN_AGENT_CONFIG, session_origin
+    from local_operator.session.retention import (
+        AGENTS_CONFIG_PURPOSE,
+        read_desktop_purpose,
+    )
+
+    session_dir = Path(directory)
+    recorded = read_desktop_purpose(session_dir)
+    if recorded != AGENTS_CONFIG_PURPOSE:
+        if session_origin(session_dir) != ORIGIN_AGENT_CONFIG:
+            return False
+        # The origin says run, the marker does not carry (or no longer parses to)
+        # the purpose. Shapes the run anyway, and says so: the alternative is the
+        # fail-OPEN direction, where the same damage silently hands the run the
+        # full builtin inventory while it stays hidden from every list.
+        logger.warning(
+            "a configuration run (%s) carries no usable purpose in its marker; "
+            "shaping it from its origin instead",
+            session_dir.name,
+        )
+    session.set_run_preamble(AGENTS_CONFIG_PREAMBLE)
+    session.set_tool_inventory(AGENTS_CONFIG_TOOLS, ops=AGENTS_CONFIG_TOOL_OPS)
+    return True
+
+
 @dataclass(frozen=True)
 class InstructionSource:
     """One contributor to the assembled custom instructions, as assembled.
@@ -3175,6 +3300,7 @@ def _make_system_blocks_provider(
         goal_status = goal_state.status if goal_state is not None else ""
         team_brief = goal_state.team_brief if goal_state is not None else ""
         agent_brief = goal_state.agent_brief if goal_state is not None else ""
+        run_brief = goal_state.run_brief if goal_state is not None else ""
         names = (
             variable_store.credential_names()
             if variable_store is not None and hasattr(variable_store, "credential_names")
@@ -3204,6 +3330,7 @@ def _make_system_blocks_provider(
             goal_status,
             team_brief,
             agent_brief,
+            run_brief,
             tuple(names),
             model_label,
             interactive,
@@ -3224,6 +3351,7 @@ def _make_system_blocks_provider(
             credentials=names,
             team_brief=team_brief,
             agent_brief=agent_brief,
+            run_brief=run_brief,
             model_label=model_label,
             # Read LIVE, at turn start. Absent a runtime probe this is ``None``
             # and the block is omitted, which is the byte-shape every host that
@@ -4183,6 +4311,7 @@ async def _prepare(
     # import the classification package at module scope (see the module's own
     # docstring for the cold-import budget).
     from local_operator.monitors.classify import monitor_classify
+    from local_operator.session.naming import title_fit_check
 
     session_kwargs: dict[str, Any] = dict(
         model=spec,
@@ -4210,6 +4339,15 @@ async def _prepare(
         # One shared classification seam for the message path AND the monitor
         # gate; see the comment above for why it resolves per call.
         monitor_classify=monitor_classify(lambda: hooks.classifier),
+        # ... and the naming errand's fit check rides the SAME seam, composed
+        # here for the same two reasons (one service per session; the lambda
+        # resolves it per call so a seam injected after construction — how the
+        # tests swap one in — is the one that answers). Its own adapter, not
+        # ``monitor_classify``: a different question over different state, and
+        # borrowing the monitor question would have the vendor answer the wrong
+        # one. ``hooks.classifier`` is ``None`` whenever the layer is off, which
+        # the adapter reports as "no classifier" rather than raising.
+        title_fit_check=title_fit_check(lambda: hooks.classifier),
         # Provenance distinguishes deliberate resume flags from persisted
         # identity; no provenance subscribes a session to mutable defaults.
         model_source=model_source,
@@ -4953,7 +5091,17 @@ def attach_credential_binding(
     that serves it, off the same sticky read the boundary already takes.
     ``auth_store`` is typed loosely on purpose: on borrow-capable roots it is
     the ``MeshAwareAuthStore`` wrapper, which is not an ``AuthStore`` subclass,
-    and the seam installed is the optional ``set_serve_sink``.
+    and the seams installed are the optional ``set_serve_sink`` and
+    ``set_binding_reader``.
+
+    Slice B adds the other two directions of the same object: the store's
+    reader — resolution consults the newest row after the local tiers miss, and
+    to honour ``policy: owner`` (``store.set_binding_reader``) — and the
+    notice seam, where an account change journals ONE operator-visible row
+    through the session. The device id is bound here because it is the one fact
+    the rendering needs that neither row carries ("it is now using your login
+    on this device" vs "the owner moved"); the handler is optional for fake
+    sessions in tests.
 
     A ``None`` recorder — every root without a placement document or without an
     identity — wires nothing, so those sessions run byte-identical. Bound AFTER
@@ -4966,9 +5114,18 @@ def attach_credential_binding(
     sink = getattr(auth_store, "set_serve_sink", None)
     if callable(sink):
         sink(recorder.observe_serve)
+    reader = getattr(auth_store, "set_binding_reader", None)
+    if callable(reader):
+        reader(recorder.recall_for)
     install = getattr(stream_fn, "set_credential_binding", None)
     if callable(install):
         install(recorder)
+    notice = getattr(session, "_on_credential_binding_change", None)
+    if callable(notice):
+        # ``device_id`` is keyword-bound: the recorder's handler contract is
+        # ``(new, previous)`` — pinned by slice A's cells — and the recorder is
+        # the only object that knows which device "this device" is.
+        recorder.set_change_handler(functools.partial(notice, device_id=recorder.device_id))
     session.add_dispose_hook(recorder.drain)
 
 
@@ -5279,6 +5436,17 @@ async def create_session(
         raise
     if plan.session_lease is not None:
         session.add_dispose_hook(plan.session_lease.release)
+
+    # THE SERVER-OWNED SHAPE OF A CONFIGURATION RUN, applied here rather than passed
+    # in by the caller that asked for one: `purpose` is a fact about the SESSION
+    # (it is in the marker), and this is the one place every front end's session is
+    # built, so a run cannot be created without its shape however it was launched.
+    # Before the seams below, deliberately: the tool declaration must be in force
+    # BEFORE MCP wiring can merge anything into the inventory (the wiring happens
+    # at the bottom of this function and re-filters through the declaration
+    # anyway), and the preamble must be on the volatile tail before the first
+    # frozen prefix is taken. See `apply_config_run_shape` for what it reads.
+    apply_config_run_shape(session)
 
     # Auth seam (CL-08): the AuthStore's SQLite connection is owned by this
     # session; fold its close into dispose so every front end releases the

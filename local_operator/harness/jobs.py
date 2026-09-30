@@ -433,6 +433,48 @@ class AsyncJob(BaseModel):
     # the child had inherited when a pin had in fact been accepted. ``None`` is
     # "not recorded" and the reader falls back to comparing labels.
     owns_model: bool | None = None
+    # The label the launch's PIN resolved to (a tier or role pin), stamped at
+    # REGISTRATION beside ``owns_model`` and NEVER overwritten — the mirror of
+    # the attribution stamp for the MODEL. ``model_label`` above is deliberately
+    # overwritten by the runner (the built child's effective model) and again by
+    # every route edge the relay sees, so after those writes the pin's own label
+    # survives NOWHERE, and "pinned to X, running on Y" — the one comparison a
+    # reader needs to spot a silently substituted child — becomes unrenderable.
+    # ``None`` is "no pin chose this child" (the inherit case), the same
+    # convention as ``owns_model``.
+    #
+    # In ``_ROSTER_ROW_FIELDS``, and the version-skew consequence is worth
+    # stating where the key is declared: the roster sidecar's read models are
+    # STRICT (``extra="forbid"``, see the note on ``cut_off_cause``), so a
+    # build that predates this key meets it as an unknown field and drops the
+    # whole row at resume — logged, boot continues, the child's row is simply
+    # not shown (the same exposure ``agent_role``/``effort`` took;
+    # ``session/attached.py`` documents it). Accepted because without the
+    # stamp a restored row cannot render the badge at all, and the badge is
+    # the point. The WIRE is the tolerant side: ``JobState`` is
+    # ``extra="allow"``, so an older attached reader ignores the key.
+    requested_model_label: str | None = None
+    #: True while a route edge has taken this PINNED child off its requested
+    #: model: the child is serving on a fallback while its pin stays visible on
+    #: ``requested_model_label``. ``model_fallback_reason`` carries the edge's
+    #: own cause phrase (today the failover driver's short token, enriched to
+    #: name the refusing provider once the mechanism does).
+    #:
+    #: RUNTIME-ONLY, deliberately ABSENT from ``_ROSTER_ROW_FIELDS``. The
+    #: exclusion rests on what a restored row READS, not on keeping the strict
+    #: sidecar from meeting new keys: the drop exposure an unknown key carries
+    #: already rides on the persisted ``requested_model_label`` itself (see
+    #: its note), exactly as it did for ``agent_role``/``effort`` — so a
+    #: second copy buys nothing, and a persisted boolean whose question a
+    #: label comparison already answers (``is_model_fallback``) would be a
+    #: second source of truth free to disagree with it. A restored row renders
+    #: the badge by comparing, still and only. ``model_fallback_reason``
+    #: serves the LIVE readers — the relay's de-duplication reads the flag,
+    #: and the durable completion delivery reads the reason
+    #: (``Session._job_result_message``) — and after a restart both are
+    #: honestly gone while the comparison still holds.
+    model_fallback: bool = False
+    model_fallback_reason: str = ""
     # Cumulative provider-reported usage for the child, summed over each
     # assistant ``message_end`` — not just the final one, because a tool-using
     # child spends most of its tokens in the earlier model calls of the same
@@ -516,6 +558,76 @@ class AsyncJob(BaseModel):
     # handles continue resolving to the newest attempt.
     logical_id: str | None = None
     attempt_aliases: list[str] = Field(default_factory=list)
+
+
+#: The pin-integrity marker, one cell: "this child is not on the model its pin
+#: asked for". Defined beside the badge because the glyph is the half of the
+#: signal that survives a colourless terminal (the word `fallback` is the
+#: other), and a second spelling of it would drift.
+FALLBACK_MARKER = "⚠"
+
+
+def is_model_fallback(requested: str | None, effective: str | None) -> bool:
+    """Whether a recorded pin is not the model running — THE shared comparison.
+
+    Every pin-integrity surface keys on this one rule (the band's badge, the
+    dock roster's marker, the projection's wire boolean, the completion row's
+    clause), so none of them can disagree with another about whether a
+    substitution happened. DIVERGENCE rather than the runtime
+    ``AsyncJob.model_fallback`` flag, for the reason
+    :func:`model_fallback_badge` records: a row restored from the roster
+    snapshot has the two labels and no flag.
+    """
+    requested_s = str(requested or "").strip()
+    running = str(effective or "").strip()
+    return bool(requested_s and running and requested_s != running)
+
+
+def model_fallback_badge(
+    requested: str | None, effective: str | None, *, effective_name: str = ""
+) -> str:
+    """``requested → effective ⚠ fallback`` when a pin is not the model running.
+
+    The ONE renderer for the pin-integrity badge, shared by the TUI band and
+    the mobile projection so the two cannot drift in what a substituted child
+    looks like. Returns ``""`` when there is nothing to say: no pin (an
+    inheriting child), a missing label, or the pin serving — the recovered
+    case.
+
+    DIVERGENCE is the trigger rather than ``AsyncJob.model_fallback`` because
+    the flag is runtime-only: a row restored from the roster snapshot has
+    labels but no flag, and "was this the model the launch asked for" must
+    stay answerable after a restart. For a pinned child the only mechanism
+    that moves the effective label off the pin is a fallback, so the marker's
+    word is not an inference about a cause — the cause phrase is what the
+    flag's ``model_fallback_reason`` carries, and it is honestly absent here.
+
+    The EFFECTIVE half renders in its display-name form — the vocabulary
+    every sibling surface names a model in, resolved through
+    ``model/naming.py``'s honesty rule (a name only where it names this model
+    and no other, else the selector) — so the reader does not have to map a
+    raw selector to the name the dock band paints one row below. It is
+    resolved HERE so the TUI and the phone cannot drift; ``effective_name``
+    is the caller's own already-resolved registry name for the model, when it
+    has one (the band does; the projection does not). The REQUESTED half
+    stays the selector the pin recorded: it is the pin's identity, and it is
+    the spelling the wait receipt beside this badge carries
+    (``model=X (pinned Y)``).
+    """
+    if not is_model_fallback(requested, effective):
+        return ""
+    # DEFERRED deliberately: ``harness.jobs`` sits on the lean closure an
+    # episode renders through (``harness/render.py`` — the benchmark's
+    # transcript pass), and a top-level import of the resolver here leaked
+    # ``model.naming``, the registry and the provider table into an episode's
+    # process — caught by ``tests/unit/evaluation/runner/test_isolation.py``.
+    # The resolver is needed only where a badge actually renders.
+    from local_operator.model.naming import model_label as model_label_forms
+
+    running = str(effective).strip()
+    provider, _, model_id = running.partition("/")
+    display = model_label_forms(provider, model_id, effective_name).full
+    return f"{str(requested).strip()} → {display} {FALLBACK_MARKER} fallback"
 
 
 class AsyncJobManager:

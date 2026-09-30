@@ -466,6 +466,20 @@ class GoalState:
     #: previous agent brief, and it must never eat the roster a running
     #: ``/team`` manager is still coordinating (nor vice versa).
     agent_brief: str = ""
+    #: The SERVER-OWNED preamble of a configuration run ("this session authors
+    #: agents and teams; here is what it may not do"), empty for every other
+    #: session. Its OWN field rather than a suffix of ``agent_brief`` because the
+    #: two have different authors and lifetimes: ``agent_brief`` is stamped by the
+    #: operator's ``/agent`` (or their team's manager resolution) and is replaced
+    #: by the next one, where this is written by the composition root that built
+    #: the run and must survive anything the run's own turns do — a run that could
+    #: drop its own boundary by attaching a profile would be a run whose boundary
+    #: is a suggestion.
+    #:
+    #: Rides the volatile tail with the two briefs above, and for the same cache
+    #: reason (see ``prompts_api.build_system_blocks``): it is per-session text and
+    #: must not sit in the frozen prefix.
+    run_brief: str = ""
     #: The DISPLAY NAME of the profile ``agent_brief`` was stamped from ("" when
     #: none). Kept beside the brief rather than derived from it because the band
     #: needs to NAME the active profile (U2), and the brief is an opaque

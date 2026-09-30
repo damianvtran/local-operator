@@ -4002,6 +4002,20 @@ class SessionStreamFn:
         self._route_state.primary_retry_at_ms = int(time.time() * 1000) + 60_000
         self._primary_selector = primary_selector
 
+    def mark_launch_pin(self, selector: str) -> None:
+        """Record the model a CHILD was launched on, holding failover to it.
+
+        Called once, at child build, by ``harness/subagent.py`` — and only
+        when the launch resolved an explicit ``model_spec`` (a role tier, or a
+        resumed child's recorded tier). Parents and inherit-children never
+        call it, which is the property the whole pin policy is gated on: the
+        same-credential probation, the same-family descent order and the
+        strict cross-vendor refusal all read ``_route_state.launch_pin`` and
+        stay inert while it is ``None``. A child's run is one message, so
+        this build is the only boundary at which the fact can be recorded.
+        """
+        self._route_state.launch_pin = selector
+
     def set_fast_refused_handler(
         self, handler: Callable[[str, str], Awaitable[None] | None] | None
     ) -> None:
@@ -4207,6 +4221,24 @@ class SessionStreamFn:
             self._last_quota_state[selector] = announced
         announced.add(token)
         await self._notice(text, kind)
+
+    async def _announce_pinned_strand(self, selector: str, lead: str, pin: str) -> None:
+        """Announce that a PINNED route has no same-family fallback to move to.
+
+        The strict default (``retry.pinnedFallback: same-family``) refuses
+        cross-vendor fallbacks, so "no fallback" for a pinned route must say
+        WHY: the generic "no configured model fallback" line reads as
+        "configure one", while one may be configured and refused by policy.
+        Deduped per condition on a token of its own so it cannot alias the
+        quota notices on the same selector.
+        """
+        await self._announce_quota_change(
+            selector,
+            "pin:no-same-family",
+            f"{lead}; pinned model {pin} will not cross vendors "
+            "(retry.pinnedFallback=same-family) — add a same-family target to "
+            "retry.fallbackChains, or set retry.pinnedFallback: cross-family",
+        )
 
     def _clear_quota_latch(self, selector: str) -> None:
         """Drop every announced quota condition so a real recurrence re-announces.
@@ -4466,15 +4498,34 @@ class SessionStreamFn:
         change what a re-probe would answer. ``None`` keeps the standalone
         contract for a caller with no walk of its own.
         """
-        from local_operator.providers.failover import parse_selector
+        from local_operator.providers.failover import (
+            PINNED_FALLBACK_CROSS_FAMILY,
+            RetrySettings,
+            order_pinned_targets,
+            parse_selector,
+        )
 
         first_benched: Any | None = None
         first_depleted: Any | None = None
         if quota_cache is None:
             quota_cache = {}
-        for target in self._fallback_targets(model):
+        candidates = self._fallback_targets(model)
+        pin = self._route_state.launch_pin
+        if pin is not None:
+            # A PINNED route orders (and, by default, FILTERS) this boundary's
+            # candidates exactly as the stream walk does — one predicate, two
+            # entry points, so a same-family target activated here is the one
+            # the walk would have walked to. The ``different_provider``
+            # preference is ADVISORY beneath the policy: descending to a
+            # same-provider sibling model is the point of the pin, so the
+            # preference yields rather than forcing the hop across vendors.
+            retry = RetrySettings.from_settings(self._settings)
+            candidates = order_pinned_targets(
+                pin, candidates, strict=retry.pinned_fallback != PINNED_FALLBACK_CROSS_FAMILY
+            )
+        for target in candidates:
             provider, target_model = parse_selector(target.selector)
-            if different_provider and provider == model.provider:
+            if different_provider and pin is None and provider == model.provider:
                 continue
             if not await self._target_has_auth(target):
                 continue
@@ -4645,7 +4696,10 @@ class SessionStreamFn:
         when a sibling or configured fallback is ready, so preflight can never
         turn usable reserve capacity into a dead end.
         """
-        from local_operator.providers.failover import RetrySettings
+        from local_operator.providers.failover import (
+            PINNED_FALLBACK_SAME_FAMILY,
+            RetrySettings,
+        )
 
         selector = f"{model.provider}/{model.model_id}"
 
@@ -4806,6 +4860,18 @@ class SessionStreamFn:
                             fallback,
                             f"{model.provider} credentials temporarily unavailable",
                             quota=True,
+                        )
+                    elif (
+                        self._route_state.launch_pin is not None
+                        and retry.pinned_fallback == PINNED_FALLBACK_SAME_FAMILY
+                    ):
+                        # A pinned route with no same-family target ANNOUNCES
+                        # and stays put: entering a cross-vendor target is
+                        # exactly what the pin marker exists to prevent.
+                        await self._announce_pinned_strand(
+                            selector,
+                            f"{model.provider} credentials temporarily unavailable",
+                            self._route_state.launch_pin,
                         )
                 return
             if access.kind != "oauth" or access.credential_id in attempted_ids:
@@ -5011,6 +5077,20 @@ class SessionStreamFn:
                     usage_memo=usage_memo,
                 )
                 if fallback is None:
+                    if (
+                        self._route_state.launch_pin is not None
+                        and retry.pinned_fallback == PINNED_FALLBACK_SAME_FAMILY
+                    ):
+                        # Pinned + strict: a fallback may in fact be configured
+                        # and refused by the pin policy, so the generic "no
+                        # configured model fallback" line would be false —
+                        # announce the strand instead of the generic line.
+                        await self._announce_pinned_strand(
+                            selector,
+                            f"{model.provider} {condition}{remaining} for {model.model_id}",
+                            self._route_state.launch_pin,
+                        )
+                        return
                     # Deduped per condition: the quota is spent and nothing can
                     # take over, but the user only needs that told once per
                     # transition — not on every message while the condition
@@ -5265,6 +5345,21 @@ class SessionStreamFn:
                 )
 
         if not siblings and fallback is None:
+            from local_operator.providers.failover import PINNED_FALLBACK_SAME_FAMILY
+
+            if (
+                self._route_state.launch_pin is not None
+                and retry.pinned_fallback == PINNED_FALLBACK_SAME_FAMILY
+            ):
+                # Pinned + strict: a fallback may be configured and refused by
+                # the pin policy, so the generic line below would be false for
+                # the one reader it exists for — announce the strand instead.
+                await self._announce_pinned_strand(
+                    selector,
+                    f"{model.provider} {condition}{remaining}",
+                    self._route_state.launch_pin,
+                )
+                return False
             # Deduped per condition: spent with nowhere to fall back is worth
             # one line on the transition, not a repeat on every subsequent
             # message while the account stays spent. ``account:`` scope token,

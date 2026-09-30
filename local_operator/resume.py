@@ -122,6 +122,33 @@ ORIGIN_FORK = "fork"
 #: what every pre-existing caller gets.
 ORIGIN_AGENT_WORKSTREAM = "agent-workstream"
 
+#: ``origin`` value for a session a CONFIGURATION RUN owns: the supervised
+#: background session an operator starts from the Agents/Teams page to author
+#: agents and teams by conversation.
+#:
+#: HIDDEN, AND DELIBERATELY NOT IN :data:`USER_ORIGINS`. A configuration run is
+#: the operator's work in the sense that they asked for it, but it is the wrong
+#: disposition for every listing that predicate feeds: ``/resume``, the desktop
+#: sidebar, the phone list, the first-run scan and ``lop sessions`` all answer
+#: "which of my conversations exist", and a config run is a chore that was
+#: asked for *from* the Agents page and is watched *on* the Agents page. Listing
+#: it in the sidebar would put a throwaway run beside the conversations it is
+#: configuring, and the run's own watcher is the page's strip.
+#:
+#: The value is nevertheless ADMITTED THROUGH THE DESKTOP DOOR for exactly one
+#: origin (:func:`local_operator.server.utils.desktop_sessions.DesktopSessions`),
+#: because "hidden" must mean "unlisted" rather than "unreachable": the run is
+#: a real session with a transcript the server owns, and the page reaches it by
+#: id to watch it, prompt it, interrupt it and re-attach after a reload. The two
+#: halves are one decision stated twice and must move together — see
+#: :data:`USER_ORIGINS` above for what leaving an origin out of THIS set means.
+#:
+#: A NEW VALUE rather than the neighbouring ones, by the rule
+#: :data:`ORIGIN_AGENT_WORKSTREAM` states: an origin is an ANSWER, and the
+#: answer here — "a run the Agents page asked for, watched on that page, never in
+#: a listing" — is one no existing value gives.
+ORIGIN_AGENT_CONFIG = "agent-config"
+
 #: Origins that are still the user's own conversation, so :func:`is_user_session`
 #: keeps listing them.
 #:
@@ -140,6 +167,10 @@ ORIGIN_AGENT_WORKSTREAM = "agent-workstream"
 #: saying "and workstreams too" would be the drift this constant exists to
 #: prevent.
 USER_ORIGINS: frozenset[str] = frozenset({ORIGIN_FORK, ORIGIN_AGENT_WORKSTREAM})
+#: ``ORIGIN_AGENT_CONFIG`` is deliberately ABSENT above, and the absence is the
+#: mechanism rather than an omission: this predicate is what the catalogue, the
+#: desktop feed, the mobile list, the first-run scan and ``/resume`` all read, so
+#: keeping a configuration run out of this set keeps it out of all five at once.
 
 #: Memoised ``origin.json`` verdicts for :func:`recent_sessions`, keyed on each
 #: marker's own ``(mtime, size)``.

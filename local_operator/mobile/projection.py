@@ -37,7 +37,7 @@ from local_operator.harness.comms import extract_parent_message
 # ``job_result`` is declared beside the job manager that writes it, not with the
 # harness markers above — imported from its own home so this fold cannot drift
 # from the type the writer stamps on the row.
-from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE
+from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE, model_fallback_badge
 from local_operator.harness.message_types import (
     HUB_MESSAGE_TYPE,
     PEER_MESSAGE_MESSAGE_TYPE,
@@ -56,6 +56,7 @@ from local_operator.harness.rows import (
     is_harness_chrome,
     is_harness_notice_row,
     output_limit_call_receipt,
+    sessions_row_summary,
     turn_cut_tool_call,
     user_row_text,
     wake_receipt_headline,
@@ -350,6 +351,19 @@ def _summarize_args(tool_name: str, args: dict[str, Any]) -> str:
     The ordering below is the TUI's priority: what a reader scans for first
     is the file or command being touched, not the options around it.
     """
+    if tool_name == "sessions":
+        # The same shared decision the TUI draws (`harness/rows.py` —
+        # `sessions_row_summary`), so the phone and the terminal say the same
+        # thing about one call; compacted to this module's uniform row cap
+        # like every other summary here. The op leads on both because both
+        # rows shed from the right, and the generic `op=…` fallback this
+        # replaces dropped the op entirely — a `stop` and a `peek` on one
+        # session painted identical rows. A degenerate call (no readable op)
+        # falls back to the tool NAME, the substitution the shared contract
+        # documents and the TUI's row performs — without the `or tool_name`
+        # the phone painted a blank summary cell while the terminal painted
+        # `sessions` for the same call (round-1 review, R2).
+        return _compact(sessions_row_summary(args), 80) or tool_name
     for key in ("path", "file_path", "file", "command", "pattern", "query", "url"):
         value = args.get(key)
         if isinstance(value, str) and value:
@@ -2640,7 +2654,22 @@ class ProjectionFold:
                 if peer.job_id != node.job_id
             ]
             row.agent = str(getattr(job, "agent_role", None) or node.agent_role or "task")
-            row.model_label = str(getattr(job, "model_label", None) or "")
+            # The BADGE, not the bare label, while the child is off its pin: the
+            # wire carries the same string the TUI band paints (see
+            # ``jobs.model_fallback_badge``), so a client rendering a child's
+            # model shows the substitution without re-deriving the rule — and a
+            # restored row, which has no runtime flag, still shows it from the
+            # two labels. "" (no pin recorded) leaves the effective label.
+            requested = str(getattr(job, "requested_model_label", "") or "")
+            effective = str(getattr(job, "model_label", None) or "")
+            badge = model_fallback_badge(requested, effective)
+            row.model_label = badge or effective
+            # The marker's boolean, derived from the SAME comparison as the
+            # badge string — a client that wants "is this child off its pin"
+            # (e.g. the phone roster row's inline marker) must not have to
+            # parse the badge's prose back out of ``model_label``, and the
+            # two can never disagree because one is the other's emptiness.
+            row.model_fallback = bool(badge)
             if lifecycle is not None:
                 # SubagentComms owns the merge between the live manager row and
                 # its durable record. Consuming that resolved view here prevents

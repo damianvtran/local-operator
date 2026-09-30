@@ -994,6 +994,7 @@ def project_settled_rows(
     from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE
     from local_operator.harness.message_types import (
         PEER_MESSAGE_MESSAGE_TYPE,
+        SESSION_BINDING_NOTICE_MESSAGE_TYPE,
         SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
         SESSION_INCIDENT_MESSAGE_TYPE,
         SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
@@ -1320,6 +1321,24 @@ def project_settled_rows(
             # it. Do not move this back down without taking D1's argument apart
             # first.
             if getattr(message, "custom_type", None) == SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE:
+                details = getattr(message, "details", None) or {}
+                text = str(details.get("text", "")).strip()
+                if text:
+                    self._append_block(NoticeBlock(text, kind="warning", fold_width=fold_width))
+                    appended = True
+                continue
+            # An ACCOUNT CHANGE: the account serving this session moved to a
+            # different one (mesh credential binding, slice B). Its own branch
+            # for the MCP warning's reason — the record is its own type,
+            # nothing FAILED, and the incident branch's failure shape would be
+            # a lie. `warning`, not `note`: it is a state the operator must
+            # know about and may have to act on (the session is now spending a
+            # different login, possibly someone else's quota), which is the
+            # tier the MCP branch above reserved for exactly this shape of
+            # row. The text is rendered at the writer
+            # (``network/credentials/messages.py``) and replayed verbatim, so
+            # live and replay read the same sentence.
+            if getattr(message, "custom_type", None) == SESSION_BINDING_NOTICE_MESSAGE_TYPE:
                 details = getattr(message, "details", None) or {}
                 text = str(details.get("text", "")).strip()
                 if text:

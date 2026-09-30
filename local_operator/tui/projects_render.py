@@ -38,7 +38,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Any, Callable, NamedTuple, cast
+from typing import Any, Callable, NamedTuple, Sequence, cast
 
 from rich.cells import cell_len
 from rich.style import Style
@@ -1761,21 +1761,45 @@ def section_ruler(
                     cursor_label = label
                 break
 
+    return _ruler_line(
+        label_at, count=str(count_at), sel=cursor_label, width=width, resolver=resolver
+    )
+
+
+def _ruler_line(
+    label: str,
+    *,
+    count: str | None,
+    sel: str | None,
+    width: int,
+    resolver: Callable[[str], Style],
+    count_paren: bool = False,
+) -> Text:
+    """One section-ruler line, shed to fit — the ladder BOTH rulers share.
+
+    Candidates in shed order: count + `sel` clause → count → bare label →
+    truncated label; the name never simply vanishes and the fill always lands
+    on the row's own width (design §6). The canvas form's count is the dot
+    clause (` · 4 `); the detail page's is the parenthesised one the spec's
+    sketch shows (`── updates (3) ──`), toggled by ``count_paren``. The canvas
+    form's `· sel` clause is UX round 1's U3 remainder.
+    """
+
     def fill(line: Text) -> Text:
         pad = width - cell_len(line.plain)
         if pad > 0:
             line.append("─" * pad, style=resolver("dim"))
         return line
 
-    def build(*, with_sel: bool, with_count: bool, label_text: str) -> Text:
+    def build(*, with_sel: bool, with_count: bool) -> Text:
         line = Text(no_wrap=True)
         line.append("── ", style=resolver("dim"))
-        line.append(label_text, style=resolver("name"))
+        line.append(label, style=resolver("name"))
         tail = ""
-        if with_count:
-            tail += f" · {count_at} "
-        if with_sel and cursor_label is not None:
-            tail += f"· sel {cursor_label} "
+        if with_count and count is not None:
+            tail += f" ({count}) " if count_paren else f" · {count} "
+        if with_sel and sel is not None:
+            tail += f"· sel {sel} "
         if not tail:
             # With the count (and sel) shed, keep a space so the label does
             # not run into the fill (`── core───` reads as one word).
@@ -1783,11 +1807,12 @@ def section_ruler(
         line.append(tail, style=resolver("dim"))
         return fill(line)
 
-    for candidate in (
-        build(with_sel=True, with_count=True, label_text=label_at),
-        build(with_sel=False, with_count=True, label_text=label_at),
-        build(with_sel=False, with_count=False, label_text=label_at),
-    ):
+    candidates: list[Text] = []
+    if sel is not None:
+        candidates.append(build(with_sel=True, with_count=True))
+    candidates.append(build(with_sel=False, with_count=True))
+    candidates.append(build(with_sel=False, with_count=False))
+    for candidate in candidates:
         if cell_len(candidate.plain) <= width:
             return candidate
     room = width - cell_len("── ") - 1
@@ -1795,9 +1820,38 @@ def section_ruler(
         return fill(Text(no_wrap=True))
     line = Text(no_wrap=True)
     line.append("── ", style=resolver("dim"))
-    line.append(truncate_row(label_at, cap=room), style=resolver("name"))
+    line.append(truncate_row(label, cap=room), style=resolver("name"))
     line.append(" ", style=resolver("dim"))
     return fill(line)
+
+
+def detail_ruler(
+    sections: Sequence[tuple[int, str, str | None]],
+    top_row: int,
+    *,
+    width: int,
+    style_for: StyleFor | None = None,
+) -> Text | None:
+    """The detail page's rule row: the in-page section at the viewport top.
+
+    ``sections`` is ``(start_row, label, count)`` in paint order — the ruler
+    names the LAST section that starts at or above ``top_row`` (design §6:
+    "on the detail page the same row names the current in-page section"),
+    shedding its count before the name through the canvas ruler's own ladder.
+    ``None`` (no sections) leaves the caller painting the plain rule.
+    """
+    resolver = _styles(style_for)
+    hit: tuple[int, str, str | None] | None = None
+    for start, label, count in sections:
+        if start <= top_row:
+            hit = (start, label, count)
+        else:
+            break
+    if hit is None:
+        return None
+    return _ruler_line(
+        hit[1], count=hit[2], sel=None, width=width, resolver=resolver, count_paren=True
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1806,19 +1860,23 @@ def section_ruler(
 
 
 def today_iso(now: float | None = None) -> str:
-    """Today as ISO, from the same clock ``age_text`` reads.
+    """Today as ISO, on the SAME basis the store stamps ``completed_at`` from.
 
-    ``now=None`` uses the UTC date — the same basis ``projects._utc_today``
-    stamps milestone completion from — so "overdue" and "done today" cannot
-    disagree about which day it is.
+    Delegates to :func:`local_operator.projects._local_today` — the operator's
+    LOCAL day — so the footer's ``[overdue]``/``[completed]`` and the page
+    rows, the tool receipt and the stored stamp cannot disagree about which
+    day it is (agent review round 5: this was the last UTC reader, and an
+    evening probe had the footer call a milestone overdue while the rows and
+    the tool called it upcoming). ``now`` is a POSIX timestamp, kept for the
+    freshness callers; it is converted on the same local basis.
     """
-    if now is None:
-        import datetime as _datetime
-
-        return _datetime.datetime.now(tz=_datetime.timezone.utc).date().isoformat()
     import datetime as _datetime
 
-    return _datetime.datetime.fromtimestamp(now, tz=_datetime.timezone.utc).date().isoformat()
+    from local_operator.projects import _local_today
+
+    if now is None:
+        return _local_today().isoformat()
+    return _datetime.datetime.fromtimestamp(now).date().isoformat()
 
 
 def milestone_state(milestone: dict[str, Any], *, today: str | None = None) -> str:
@@ -2029,6 +2087,260 @@ def detail_footer(
         if cell_len(fitted.plain) > width:
             fitted.truncate(width, overflow="ellipsis")
     return fitted
+
+
+# ---------------------------------------------------------------------------
+# The detail page (S6d parity P2): pure text for its rows, heading and footer
+# ---------------------------------------------------------------------------
+
+
+def format_short_date(value: str | None, *, today: str | None = None) -> str | None:
+    """``2026-10-04`` → ``4 Oct`` (the year appended only across a boundary).
+
+    The detail's prose contexts state a date the way a person says it; a date
+    in another year carries the year, because "4 Oct" alone would read as the
+    next one. Unparseable values come back untouched — a store row is data,
+    never a crash (the read-side rule :func:`milestone_state` states).
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        day = date.fromisoformat(text[:10])
+    except ValueError:
+        return text
+    label = f"{day.day} {day.strftime('%b')}"
+    basis = str(today or today_iso())[:10]
+    try:
+        if day.year != date.fromisoformat(basis).year:
+            label += f" {day.year}"
+    except ValueError:
+        pass
+    return label
+
+
+def detail_section_heading(name: str, count: str | None = None) -> tuple[str, str]:
+    """The detail page's two-line section heading: text + its dash underline.
+
+    ``milestones (1/3)`` / ``sessions (3)``; the underline is exactly as wide
+    as the heading, so it reads as an underline rather than as a rule.
+    """
+    head = f"{name} ({count})" if count else name
+    return head, "─" * cell_len(head)
+
+
+def detail_meta_line(
+    view: dict[str, Any], *, width: int, style_for: StyleFor | None = None
+) -> Text:
+    """The overview sentence, fitted by shedding WHOLE clauses.
+
+    Absent fields drop out; nothing set reads the shipped sentence ``no
+    estimate or dates``. Shed order drops the sentence's TAIL first (tags,
+    est, completed, start, target, team), so the deadline survives the start
+    date and "which stream, and is it current" survives longest (design
+    review round 1, D2).
+    """
+    resolver = _styles(style_for)
+    project = _row(view)
+    clauses: list[tuple[str, str]] = []
+    if view.get("progress_stale"):
+        clauses.append(("[stale]", "stale"))
+    owner = str(project.get("owner") or "")
+    if owner:
+        clauses.append((f"owner: {owner}", "dim"))
+    team = str(project.get("team") or "")
+    if team:
+        clauses.append((f"team: {team}", "dim"))
+    # The TARGET leads its start: the deadline is the "is this on track" fact,
+    # and whole-clause shedding pops from the tail — putting start last means
+    # the deadline outlives it at narrow widths (design review round 1, D2;
+    # the canvas rows lead with `→{target}` for the same reason).
+    target = format_short_date(project.get("target_date"))
+    if target:
+        clauses.append((f"target {target}", "dim"))
+    start = format_short_date(project.get("start_date"))
+    if start:
+        clauses.append((f"start {start}", "dim"))
+    completed = format_short_date(project.get("completed_at"))
+    if completed:
+        clauses.append((f"completed {completed}", "dim"))
+    estimate = estimate_text(project)
+    if estimate:
+        clauses.append((estimate, "dim"))
+    tags = [str(tag) for tag in project.get("tags") or [] if str(tag)]
+    if tags:
+        clauses.append((f"tags {' · '.join(tags)}", "dim"))
+
+    def compose(kept: list[tuple[str, str]]) -> Text:
+        line = Text(no_wrap=True)
+        for index, (text, key) in enumerate(kept):
+            if index:
+                line.append(" · ", style=resolver("dim"))
+            line.append(text, style=resolver(key))
+        return line
+
+    if not clauses:
+        return Text("no estimate or dates", style=resolver("dim"), no_wrap=True)
+    kept = list(clauses)
+    while True:
+        line = compose(kept)
+        if cell_len(line.plain) <= width or len(kept) == 1:
+            return line
+        kept.pop()
+
+
+def detail_progress_line(
+    view: dict[str, Any], *, width: int, style_for: StyleFor | None = None
+) -> Text:
+    """The detail page's pinned footer: freshness attributed, or recorded absent.
+
+    ``progress reported 2h ago by session ab12cd34ef56 · updated 17:52`` (``by
+    the operator`` when the store says so). Fitted by shedding the update
+    stamp first, then the attribution — the age is the point of the line. No
+    record: ``no progress recorded``.
+    """
+    resolver = _styles(style_for)
+    project = _row(view)
+    age = progress_age_text(view)
+    if age is None:
+        return Text("no progress recorded", style=resolver("dim"), no_wrap=True)
+    reporter = str(project.get("progress_reported_by") or "")
+    attribution = ""
+    if reporter and reporter != "operator":
+        attribution = f" by session {reporter}"
+    elif reporter == "operator":
+        attribution = " by the operator"
+    stamp = ""
+    updated = project.get("updated_at")
+    if isinstance(updated, (int, float)) and updated:
+        import time as _time
+
+        stamp = f" · updated {_time.strftime('%H:%M', _time.localtime(float(updated)))}"
+    base = f"progress reported {age} ago"
+    for text in (base + attribution + stamp, base + attribution, base):
+        if cell_len(text) <= width or text == base:
+            return Text(text, style=resolver("dim"), no_wrap=True)
+    return Text(base, style=resolver("dim"), no_wrap=True)
+
+
+#: Detail session-row state → style key. ``wedged``/``stale`` read the warning
+#: tone the canvases already use for the same runtime states; ``missing`` is
+#: the receipt's word for a gone directory, styled like the other caveats.
+_SESSION_STATE_STYLES: dict[str, str] = {
+    "live": "live",
+    "wedged": "stale",
+    "stale": "stale",
+    "stopped": "dim",
+    "missing": "stale",
+}
+
+
+def detail_session_state(row: dict[str, Any]) -> str:
+    """One session row's state word — ``missing`` from ``exists``, like the jump.
+
+    The composed row carries ``stopped`` for a record-less link; the receipt's
+    word for a directory that is gone is ``missing``, and the two surfaces
+    must not disagree (the rule ``action_jump``'s message states).
+    """
+    if row.get("exists") is False:
+        return "missing"
+    runtime_value = row.get("runtime")
+    runtime = runtime_value if isinstance(runtime_value, dict) else {}
+    return str(runtime.get("state") or "stopped")
+
+
+def detail_milestone_row_text(
+    row: dict[str, Any], *, selected: bool, style_for: StyleFor | None = None
+) -> Text:
+    """``{▸} ◆ groundwork · 2026-09-20 · completed`` — glyph trio from the timeline."""
+    resolver = _styles(style_for)
+    line = Text(no_wrap=True)
+    for glyph, key in _marker_cells(selected=selected, associated=False):
+        line.append(glyph, style=resolver(key) if key != "dim" else Style())
+    state = milestone_state(row)
+    glyph = {"completed": "◆", "overdue": "!", "upcoming": "◇"}.get(state, "◇")
+    line.append(glyph, style=_milestone_style(resolver, state))
+    line.append(f" {str(row.get('name') or '')}", style=resolver("name"))
+    target = str(row.get("target_date") or "")
+    if target:
+        line.append(f" · {target}", style=resolver("dim"))
+    line.append(f" · {state}", style=resolver("dim"))
+    return line
+
+
+def detail_session_row_text(
+    row: dict[str, Any],
+    *,
+    selected: bool,
+    own_session: str | None,
+    style_for: StyleFor | None = None,
+) -> Text:
+    """``{▸}◆ ab12cd34ef56 [stopped] · "title" · 2 running/1 settled · todos 1/4``.
+
+    ``◆`` marks the calling process's OWN session (the canvas marker column's
+    convention); the counts appear only when the store knows them (``null``
+    counts are omitted, never zeroed).
+    """
+    resolver = _styles(style_for)
+    line = Text(no_wrap=True)
+    session_id = str(row.get("session_id") or "")
+    own = bool(own_session) and session_id == own_session
+    for glyph, key in _marker_cells(selected=selected, associated=own):
+        line.append(glyph, style=resolver(key) if key != "dim" else Style())
+    line.append(session_id, style=resolver("name"))
+    state = detail_session_state(row)
+    line.append(f" [{state}]", style=resolver(_SESSION_STATE_STYLES.get(state, "dim")))
+    title = str(row.get("title") or "")
+    if title:
+        line.append(f' · "{title}"', style=resolver("dim"))
+    subagents = row.get("subagents")
+    if isinstance(subagents, dict):
+        running = subagents.get("running")
+        settled = subagents.get("settled")
+        if isinstance(running, int) and isinstance(settled, int):
+            line.append(f" · {running} running/{settled} settled", style=resolver("dim"))
+    todos = row.get("todos")
+    if isinstance(todos, dict):
+        open_count = todos.get("open")
+        total = todos.get("total")
+        if isinstance(open_count, int) and isinstance(total, int):
+            line.append(f" · todos {open_count}/{total}", style=resolver("dim"))
+    return line
+
+
+def detail_todo_lines(
+    view: dict[str, Any], *, own_session: str | None, style_for: StyleFor | None = None
+) -> list[Text]:
+    """The ``todos`` section: one line per session that ever snapshotted, or the
+    single honest sentence when none did (``null`` counts are omitted, never
+    zeroed). The calling session's line is labelled ``own session`` and carries
+    its next items when the live overlay knows them."""
+    resolver = _styles(style_for)
+    lines: list[Text] = []
+    for row in view.get("sessions") or []:
+        if not isinstance(row, dict):
+            continue
+        todos = row.get("todos")
+        if not isinstance(todos, dict):
+            continue
+        open_count = todos.get("open")
+        total = todos.get("total")
+        if not isinstance(open_count, int) or not isinstance(total, int):
+            continue
+        session_id = str(row.get("session_id") or "")
+        own = bool(own_session) and session_id == own_session
+        line = Text(no_wrap=True)
+        line.append("own session" if own else session_id, style=resolver("name"))
+        line.append(": ", style=resolver("dim"))
+        line.append(f"{open_count} open / {total}", style=resolver("dim"))
+        next_items = todos.get("next")
+        if own and isinstance(next_items, list) and next_items:
+            joined = ", ".join(f'"{str(item)}"' for item in next_items[:3])
+            line.append(f" — next: {joined}", style=resolver("dim"))
+        lines.append(line)
+    if not lines:
+        lines.append(Text("todo snapshots: none yet", style=resolver("dim"), no_wrap=True))
+    return lines
 
 
 def aggregate_footer(

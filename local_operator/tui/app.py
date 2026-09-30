@@ -391,6 +391,7 @@ from local_operator.tui.widgets.projects_view import (
     ProjectsView,
     ProjectsViewDismissed,
     ProjectsViewJumpRequested,
+    ProjectsViewMilestoneToggled,
     ProjectsViewRefreshRequested,
 )
 from local_operator.tui.widgets.reasoning import DEFAULT_REASONING, ReasoningBlock
@@ -6173,6 +6174,14 @@ class OperatorApp(App[None]):
     @_pending_name_text.setter
     def _pending_name_text(self, value: str) -> None:
         self._interaction.naming.pending_text = value
+
+    @property
+    def _name_heal_text(self) -> str:
+        return self._interaction.naming.heal_text
+
+    @_name_heal_text.setter
+    def _name_heal_text(self, value: str) -> None:
+        self._interaction.naming.heal_text = value
 
     @property
     def _aside_draft(self) -> str | None:
@@ -19255,12 +19264,20 @@ class OperatorApp(App[None]):
             return None
         open_count = 0
         total = 0
+        next_items: list[str] = []
         for phase in todos:
             for item in getattr(phase, "items", None) or ():
                 total += 1
                 if getattr(item, "status", "") == "pending":
                     open_count += 1
-        return {session_id: {"todos": {"open": open_count, "total": total}}}
+                    text = str(getattr(item, "text", "") or "")
+                    # The detail page's `— next: …` clause: the first three
+                    # PENDING items in phase order, from this process's own
+                    # state — fresher than the persisted snapshot the counts
+                    # would otherwise come from (P2, spec §7.2 row 5).
+                    if text and len(next_items) < 3:
+                        next_items.append(text)
+        return {session_id: {"todos": {"open": open_count, "total": total, "next": next_items}}}
 
     def _cmd_team(
         self,
@@ -29697,6 +29714,9 @@ class OperatorApp(App[None]):
         """
         self._name_generation += 1
         self._name_requested = False
+        # The one-shot Tier 3 self-heal belongs to the conversation being torn
+        # down; the replacement session must not spend the dead one's opener.
+        self._name_heal_text = ""
         self.workers.cancel_group(self, self._interaction.worker_group("naming"))
 
     def _maybe_name_conversation(self, text: str) -> None:
@@ -29976,7 +29996,13 @@ class OperatorApp(App[None]):
                 if turns is None:
                     turns = await getattr(session, "materialize_history")()
                 title = await naming.generate_retitle(
-                    current, text, session.complete_once, turns=turns
+                    current,
+                    text,
+                    session.complete_once,
+                    turns=turns,
+                    # Same owner-only seam as the first-name path; absent →
+                    # the cascade hedges with a second independent sample.
+                    fit_check=getattr(session, "title_fit_check", None),
                 )
             except asyncio.CancelledError:
                 return
@@ -30010,6 +30036,8 @@ class OperatorApp(App[None]):
         text: str,
         generation: int,
         source: SessionInteraction | None = None,
+        *,
+        heal: bool = False,
     ) -> None:
         """Ask the model for a title NOW, alongside the turn it decorates.
 
@@ -30046,12 +30074,29 @@ class OperatorApp(App[None]):
         supersede it: this call is not in the turn's way, and the opener names
         the conversation better than the second message would. Reload and user
         rename are re-checked immediately before the store.
+
+        ACCEPTANCE happens inside the naming call (``naming.generate_title_acceptance``,
+        Tier 0-3). A wrapped or otherwise dirty reply never reaches the band, a
+        refused sample buys one corrective resample, and an attempt that
+        exhausts every sample answers with the Tier 3 opener fallback. That
+        fallback is a STORE, so it would close every retry path this worker
+        maintains; ``heal=True`` is the one-shot follow-up that replaces it
+        (armed into ``naming.heal_text`` and spent by ``_maybe_heal_name`` at
+        the next completed turn), and it never re-arms itself.
         """
         source = source or self._interactions.get(id(session), self._interaction)
         source.active_workers += 1
         try:
             try:
-                title = await naming.generate_title(text, session.complete_once)
+                acceptance = await naming.generate_title_acceptance(
+                    text,
+                    session.complete_once,
+                    # Owner-only seam, read per attempt; see
+                    # ``naming.title_fit_check`` and the owner-only probe set in
+                    # tests/unit/session/test_viewer_protocol.py. Absent → the
+                    # cascade hedges with a second independent sample.
+                    fit_check=getattr(session, "title_fit_check", None),
+                )
             except asyncio.CancelledError:
                 if (
                     generation == source.naming.generation
@@ -30063,18 +30108,40 @@ class OperatorApp(App[None]):
 
             if generation != source.naming.generation or source.retired:
                 return
-            if not title:
-                # Provider failure, cancellation, or "no topic": a later
-                # substantive message may retry while the conversation is unnamed.
-                # The opener's excerpt stays on the band and the tab meanwhile —
+            title = acceptance.title
+            existing = session.conversation_name
+            if not title or (existing and not heal):
+                # Provider failure, cancellation, "no topic", or a user/restore
+                # that named it while we were in flight: a later substantive
+                # message may retry while the conversation is unnamed. The
+                # opener's excerpt stays on the band and the tab meanwhile —
                 # that is the point of it being a stand-in and not a placeholder.
-                if not session.conversation_name:
-                    source.naming.requested = False
-                    # Remember the opener so a fallback that pins AFTER this
-                    # isolated 429 can re-fire naming on the serving model
-                    # without waiting for the next user message.
-                    source.naming.pending_text = text
+                # A HEAL run is exempt from the second arm: its whole job is to
+                # replace the standing Tier 3 fallback, which IS a stored title.
+                if not existing and not heal:
+                    if acceptance.heal:
+                        # The model answered and every sample was refused, so
+                        # the once-only latch stays spent and the retry is the
+                        # next completed turn's one-shot heal — a fallback is
+                        # about to be stored (or nothing is, if the opener is
+                        # unusable), and neither leaves another way in.
+                        source.naming.heal_text = text
+                    else:
+                        source.naming.requested = False
+                        # Remember the opener so a fallback that pins AFTER this
+                        # isolated 429 can re-fire naming on the serving model
+                        # without waiting for the next user message.
+                        source.naming.pending_text = text
                 return
+            if heal and session.conversation_name_state.user_set:
+                # A human renamed it between the arm and this run: generated
+                # titles have lost permanently, and the store would refuse.
+                return
+            if acceptance.heal and not heal:
+                # This store IS the Tier 3 opener fallback: the session is about
+                # to be named, every other retry latch releases, and only the
+                # heal can still upgrade the quote to a generated title.
+                source.naming.heal_text = text
             source.naming.pending_text = ""
             self._store_title_for(source, session, title)
         finally:
@@ -32573,6 +32640,7 @@ class OperatorApp(App[None]):
                     view=view,
                     associated=associated if associated is not None else frozenset(),
                     updated_at=_time.time(),
+                    own_session=self._own_session_id(),
                 )
             elif highlight:
                 self._projects_view.focus_project(highlight)
@@ -32603,6 +32671,7 @@ class OperatorApp(App[None]):
             view=view,
             associated=associated if associated is not None else frozenset(),
             updated_at=_time.time(),
+            own_session=self._own_session_id(),
         )
 
     def _close_projects_view(self) -> bool:
@@ -32654,14 +32723,16 @@ class OperatorApp(App[None]):
         remote-owner guard, the local attach, the full reboot), so the page
         adds no second way to change sessions. Anything else is answered
         honestly — the states that exist, and the command that starts one —
-        never a silent no-op. The page closes first in both cases: the notice
-        lands in the transcript that the mode was hiding.
+        never a silent no-op. A live jump leaves the mode (the reader goes to
+        the conversation); a DEAD link keeps the page and lands its sentence
+        on the page's own footer — the transcript the mode hides is not a
+        surface (UX round 1, U4).
         """
         message.stop()
         live = [session_id for session_id, state in message.sessions if state == "live"]
         current = str(getattr(self._session, "session_id", "") or "") if self._session else ""
-        self._close_projects_view()
         if live:
+            self._close_projects_view()
             # The terminal's OWN session is checked FIRST (review r1 NIT 6):
             # when it is one of several live links, whether `↵` says "already
             # in" or switches to a sibling must not depend on the store's link
@@ -32673,9 +32744,11 @@ class OperatorApp(App[None]):
                 return
             self._resume_session(live[0], self._notice)
             return
-        self._system_notice(
-            project_jump_no_live_text(message.project_name, message.sessions), "info"
-        )
+        # No live session: the page KEEPS the reader and says so on its own
+        # footer; the copy is the shipped one.
+        view = self._projects_view
+        if view is not None:
+            view.show_notice(project_jump_no_live_text(message.project_name, message.sessions))
 
     def on_projects_view_refresh_requested(self, message: ProjectsViewRefreshRequested) -> None:
         """``r`` on the page — recompose HERE and hand the widget fresh data.
@@ -32691,7 +32764,66 @@ class OperatorApp(App[None]):
             return
         import time as _time
 
-        view.load(views=self._projects_payload(), updated_at=_time.time())
+        view.load(
+            views=self._projects_payload(),
+            updated_at=_time.time(),
+            own_session=self._own_session_id(),
+        )
+
+    def on_projects_view_milestone_toggled(self, message: ProjectsViewMilestoneToggled) -> None:
+        """`↵` on a milestone row: flip completion through the store, re-show.
+
+        The SAME core the tool and the API use (``registry.set_milestone``),
+        so the page adds no second write path (spec §10.5). The recomposition
+        that follows is what makes the row, the header count and the footer
+        rollup agree — every derived fact comes from the store, never from an
+        optimistic guess in the widget. A refusal is never a silent no-op: it
+        lands on the PAGE's own footer line, where the reader pressed — the
+        transcript the mode hides is not asked to carry it (UX round 1, U1).
+        """
+        message.stop()
+        view = self._projects_view
+        registry = self._project_registry()
+        if view is None or registry is None:
+            return
+        from local_operator.projects import MilestoneEdit, store_error_text
+
+        try:
+            registry.set_milestone(
+                message.project_id,
+                MilestoneEdit(name=message.name, completed=message.completed),
+            )
+        except Exception as exc:  # noqa: BLE001 — a keystroke never crashes the app
+            if isinstance(exc, KeyError):
+                # The store grew one: the project is gone (this path's only
+                # KeyError source). Human words with the project NAME — the
+                # raw store message carries a UUID (UX round 1, U1).
+                name = message.project_name or "that project"
+                view.show_notice(
+                    f"'{name}' is no longer in the store — the milestone was not updated"
+                )
+            else:
+                view.show_notice(f"could not update the milestone: {store_error_text(exc)}")
+            return
+        import time as _time
+
+        view.load(
+            views=self._projects_payload(),
+            updated_at=_time.time(),
+            own_session=self._own_session_id(),
+        )
+
+    def _own_session_id(self) -> str | None:
+        """THIS process's session id, or ``None`` — the detail page's anchor.
+
+        The `◆` marker and `own session` label on the detail page follow this
+        id, and only when it is actually linked to the project shown.
+        """
+        session = self._session
+        if session is None:
+            return None
+        session_id = str(getattr(session, "session_id", "") or "")
+        return session_id or None
 
     def on_settings_capture(self, message: SettingsCapture) -> None:
         """Arm or disarm the binding gate a hotkey row needs to listen.
@@ -32941,7 +33073,13 @@ class OperatorApp(App[None]):
                     getattr(job, "model_label", "")
                     or getattr(self._session, "model_label", "")
                     or ""
-                )
+                ),
+                # The badge needs the pin beside the effective label; carried
+                # here for the same reason as the label itself — both are
+                # plain attribute reads, and a stale or absent stats reading
+                # must not strip the one comparison that makes a substitution
+                # visible.
+                requested_model_label=str(getattr(job, "requested_model_label", "") or ""),
             )
         # `job_cost` answers None both for "no price for this model" and for
         # "no usage recorded yet". The band distinguishes them: a child that
@@ -32959,6 +33097,7 @@ class OperatorApp(App[None]):
         self._status.set_subagent(
             SubagentBand(
                 model_label=stats.model_label,
+                requested_model_label=stats.requested_model_label,
                 label=strip_control_sequences(str(getattr(job, "label", "") or "")),
                 context_tokens=stats.context_tokens,
                 context_window=stats.context_window,
@@ -48083,6 +48222,48 @@ class OperatorApp(App[None]):
         # on its own session subscription. A follower terminal declines here —
         # the owner in the other process is the one that judges.
         self._maybe_judge_goal_turn(message)
+        # ...and the one-shot Tier 3 title self-heal, for the same reason this
+        # is the right place for the goal judge: `on_turn_ended` is a
+        # COMPLETED turn (the armed retry waits for one). A follower terminal
+        # declines inside the method; a viewer never names at all.
+        self._maybe_heal_name()
+
+    def _maybe_heal_name(self) -> None:
+        """Spend the one-shot Tier 3 title self-heal at a completed turn.
+
+        Armed by ``_name_conversation_worker`` when a first-name attempt ends
+        in the Tier 3 opener fallback (or in nothing at all): the fallback is a
+        STORE, so the once-only latch stays spent and the pending-opener retry
+        was cleared — without this, an opener quote would be the session's name
+        forever. The retry runs ONCE and never re-arms, so a model that keeps
+        leaking markup costs one extra acceptance attempt and stops.
+
+        SINGLE-SHOT by construction: the latch is consumed (cleared) before
+        the worker is spawned, and the heal run itself never writes it. Skipped
+        outright when a human renamed the conversation — generated titles have
+        lost permanently, and the store would refuse the answer anyway.
+        """
+        source = self._interaction
+        session: Any = self._session
+        if session is None:
+            return
+        text = source.naming.heal_text
+        if not text:
+            return
+        source.naming.heal_text = ""
+        if not getattr(session, "owns_runtime", False):
+            # A viewer never names: the errand belongs to the owning process
+            # (same ownership gate `_maybe_name_conversation` makes).
+            return
+        if session.conversation_name_state.user_set:
+            return
+        self.run_worker(
+            self._name_conversation_worker(
+                session, text, source.naming.generation, source=source, heal=True
+            ),
+            thread=False,
+            group=source.worker_group("naming"),
+        )
 
     def on_turn_abandoned(self, message: TurnAbandoned) -> None:
         """Retire a turn whose worker returned without a terminal ``agent_end``.

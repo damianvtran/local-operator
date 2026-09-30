@@ -584,13 +584,15 @@ async def test_enter_asks_the_host_to_open_the_selected_project(
 
 @pytest.mark.asyncio
 async def test_jump_with_no_live_session_names_what_exists(tmp_path: Path) -> None:
-    """`↵` on a stopped link: the page closes and the notice says what exists."""
+    """`↵` on a stopped link: the page KEEPS the reader; its own footer
+    names what exists (UX round 1, U4 — the transcript the mode hides is not
+    asked to carry the sentence)."""
     session = _ProjectSession()
     session.project_registry = _registry(tmp_path, "alpha")
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 32)) as pilot:
         await _boot(pilot, app)
-        await _open(pilot, app, "alpha")
+        view = await _open(pilot, app, "alpha")
         app.on_projects_view_jump_requested(
             ProjectsViewJumpRequested(
                 project_id="alpha-id",
@@ -599,8 +601,8 @@ async def test_jump_with_no_live_session_names_what_exists(tmp_path: Path) -> No
             )
         )
         await pilot.pause()
-        assert app._projects_view is None
-        notice = _notices(app)[-1]
+        assert app._projects_view is view  # the mode was not left
+        notice = view.rendered_rows()[-1]
         assert "no live session to open for 'alpha'" in notice
         assert f"{SESSION_ID} [stopped]" in notice
         # ONE linked session: the notice spells the concrete command (UX r1, U4).

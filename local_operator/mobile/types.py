@@ -658,6 +658,13 @@ class SubagentRow:
     #: unknown.
     elapsed_s: float | None = None
     model_label: str = ""
+    #: True while this child is off the pin its launch resolved: the phone's
+    #: roster row paints its fallback line from THIS rather than parsing the
+    #: badge prose back out of ``model_label`` — the two are written by one
+    #: comparison in ``projection.py`` and cannot disagree. Additive on the
+    #: wire; an absent value must read as False ("no substitution"), which is
+    #: exactly the historical behaviour for a row that never had one.
+    model_fallback: bool = False
     result_text: str = ""  # settled outcome, one line
     error_text: str = ""
     parent_job_id: str | None = None

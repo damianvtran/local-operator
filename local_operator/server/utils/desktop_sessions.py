@@ -31,9 +31,11 @@ from fastapi import HTTPException
 from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
 from local_operator.harness.types import ModelSpec
 from local_operator.resume import (
+    ORIGIN_AGENT_CONFIG,
     ORIGIN_SUBAGENT,
     SessionRow,
     is_user_session,
+    mark_session_origin,
     read_session_attachment,
     session_origin,
     session_preview,
@@ -101,7 +103,12 @@ from local_operator.session.page_cache import load_transcript_page
 # already carries the whole desktop bridge (mesh-session-mobility.md §9.2).
 from local_operator.session.placement import local_placement, read_stamp
 from local_operator.session.restored_rows import record_field, roster_records
-from local_operator.session.retention import DESKTOP_MARKER_NAME, session_activity
+from local_operator.session.retention import (
+    DESKTOP_MARKER_NAME,
+    DESKTOP_PURPOSE_KEY,
+    read_desktop_purpose,
+    session_activity,
+)
 from local_operator.session.runtime import registry
 from local_operator.session.session_search import search_store
 from local_operator.session.transcript import (
@@ -405,6 +412,33 @@ DRAFT_MODEL_KEY = "model"
 DRAFT_MODEL_FIELDS = ("provider", "model_id", "reasoning_effort")
 
 
+def _door_may_open(path: Path) -> bool:
+    """Whether the desktop door may open the session directory ``path``.
+
+    THE DOOR's admission predicate, factored out of ``locate`` so the widening
+    below is stated once and can be asserted on its own (the pairing of "a run is
+    reachable" with "a subagent is still refused" is the whole safety of it).
+
+    ``is_user_session`` is the historical rule and stays the first arm. The second
+    arm is the ONE-ORIGIN WIDENING a configuration run needs: its origin is
+    deliberately kept out of ``USER_ORIGINS`` (so it is absent from every listing,
+    the attention feed, the phone and the first-run scan), and the desktop door is
+    the one place where "hidden" must mean "unlisted" rather than "unreachable" —
+    the run is a real session the page watches by id.
+
+    IT MUST NOT GENERALISE, and that is a property of its SHAPE rather than of a
+    list someone has to maintain: the arm names exactly one origin, so
+    ``subagent``, ``agent-shell`` and every future hidden value are refused by
+    construction. A rewrite to ``session_origin(path) not in HIDDEN`` or any
+    "hidden but reachable" catch-all would silently admit every machine-made
+    session in the store, which is why the equality is spelled out here rather
+    than expressed as a negation.
+    """
+    if is_user_session(path):
+        return True
+    return session_origin(path) == ORIGIN_AGENT_CONFIG
+
+
 def read_desktop_marker(session_dir: Path) -> dict[str, Any] | None:
     """Parse ``desktop.json``, or ``None`` when it is absent or unusable.
 
@@ -536,7 +570,11 @@ def draft_birth_selection(root: Path, session_id: str) -> ModelSpec | None:
 
 
 def write_desktop_marker(
-    path: Path, directory: Path, *, model: dict[str, Any] | None = None
+    path: Path,
+    directory: Path,
+    *,
+    model: dict[str, Any] | None = None,
+    purpose: str | None = None,
 ) -> None:
     """Write the desktop draft marker in the session directory ``path``.
 
@@ -565,6 +603,16 @@ def write_desktop_marker(
     payload: dict[str, Any] = {"version": 1, "cwd": str(directory)}
     if model is not None:
         payload[DRAFT_MODEL_KEY] = {field: model.get(field) for field in DRAFT_MODEL_FIELDS}
+    if purpose is not None:
+        # ADDITIVE, exactly like the model above: a marker written without it is
+        # the document every earlier build wrote, and the marker's readers take
+        # the keys they know. This is the key the RUNTIME reads to learn that it
+        # is a configuration run (`retention.read_desktop_purpose`), and it
+        # travels here rather than through the spawn environment because the
+        # document outlives the request: a run resumed hours later, or booted by
+        # a successor daemon, is shaped identically without anyone having to
+        # remember to pass a flag.
+        payload[DESKTOP_PURPOSE_KEY] = purpose
     # ATOMIC, and the mode is applied BEFORE publication (review R2). The old
     # ``write_text`` then ``chmod`` truncated the authoritative file in place,
     # so a failure between the two left a world-readable marker and a crash
@@ -998,12 +1046,29 @@ async def _move_session(bridge: DesktopSessionBridge, requested: str) -> MoveRec
     # for a conversation that has not run yet (``draft_birth_selection``). Read
     # through the same helpers every other marker reader uses, so a marker this
     # route could not parse degrades here exactly as it does there.
+    #
+    # ``purpose`` IS CARRIED FOR THE SAME REASON AND AT HIGHER STAKES. This is the
+    # marker's SECOND writer (the create site is the first), and the purpose key is
+    # what tells the runtime child that a session is a configuration run — the run's
+    # tool declaration and preamble are keyed on it. A move that dropped it would
+    # leave a session that is still HIDDEN from every listing (its ``origin.json`` is
+    # untouched) and no longer BOUNDED: the next boot would build the full builtin
+    # inventory, shell and file tools included, with nothing anywhere saying so.
+    # The bytes are the contract the two writers share; a field only one of them
+    # knows about is a field the other silently erases.
     previous_model = await asyncio.to_thread(
         lambda: stored_draft_model(read_desktop_marker(marker_dir))
     )
+    previous_purpose = await asyncio.to_thread(read_desktop_purpose, marker_dir)
     previous_marker = await asyncio.to_thread(read_marker)
     try:
-        await asyncio.to_thread(write_desktop_marker, marker_dir, directory, model=previous_model)
+        await asyncio.to_thread(
+            write_desktop_marker,
+            marker_dir,
+            directory,
+            model=previous_model,
+            purpose=previous_purpose or None,
+        )
     except OSError as error:
         # THE FIRST MUTATION REFUSES WITH ITS REAL CAUSE, and there is nothing
         # to roll back (review R2). ``_stage_and_replace`` writes the whole
@@ -5960,6 +6025,7 @@ class DesktopSessions:
         target: dict[str, str] | None = None,
         model: dict[str, str | None] | None = None,
         draft_id: str | None = None,
+        purpose: str | None = None,
     ) -> str:
         """Create a draft session's record, optionally materialising a warm draft.
 
@@ -5982,6 +6048,12 @@ class DesktopSessions:
         in the session's own marker so the FIRST turn can be born on it. It is
         additive and optional: an omitted ``model`` writes the marker byte-for-byte
         as before, which is what makes an older client's create identical.
+
+        ``purpose`` stamps the session's HIDDEN ORIGIN and records the purpose in
+        the marker, in that order (see ``persist`` below for why the order is the
+        contract). It is additive in the same way ``model`` is: omitted, this
+        method writes exactly the bytes it wrote before, and every existing caller
+        passes nothing.
         """
         self.assert_admitting()
         directory = resolve_working_directory(cwd)
@@ -6031,6 +6103,36 @@ class DesktopSessions:
             # MATERIALISES the session. A fresh id keeps today's exclusivity
             # and refuses a directory it did not expect.
             path.mkdir(parents=True, mode=0o700, exist_ok=from_draft)
+            if purpose is not None:
+                # ORIGIN **FIRST**, AND THIS ORDER IS THE CONTRACT.
+                #
+                # The desktop marker is what MATERIALISES a session (see the
+                # draft branch above: "the MARKER, not the registry entry, is what
+                # makes an id materialised"), and the machine's listing surfaces
+                # memoise the user-session verdict per id (``desktop_feed``'s
+                # ``_user_cache``, the catalogue's row scan). So a session whose
+                # origin is written SECOND can be classified as the operator's own
+                # by a scan or a feed tick that lands in the gap — and that
+                # verdict is then CACHED, which is what makes the race permanent
+                # rather than self-correcting. One file below is unreadable by any
+                # of them during the window; the marker is the publication.
+                #
+                # The stamp is best-effort by its own contract
+                # (``resume.mark_session_origin``), so its RESULT is checked
+                # here rather than assumed: a configuration run exists precisely
+                # by being hidden, and a run that could not be stamped would be
+                # listed among the operator's conversations... which is the leak
+                # the whole mechanism exists to prevent. The check turns "hidden
+                # failed" into a refusal instead of into a visible session. It
+                # is reached only on a partial write failure (the marker write
+                # below fails on the same read-only storage and refuses anyway),
+                # and the refusal rides the route ladder's ValueError arm.
+                mark_session_origin(path, ORIGIN_AGENT_CONFIG)
+                if session_origin(path) != ORIGIN_AGENT_CONFIG:
+                    raise ValueError(
+                        "This run could not be hidden from your session lists, so it was "
+                        "not created. Retry after checking storage."
+                    )
             if target:
                 write_session_attachment(path, **binding, goal="")
                 stored = read_session_attachment(path)
@@ -6055,7 +6157,7 @@ class DesktopSessions:
             # Through the shared writer, which carries the model key too, so the
             # MOVE route's second call site and this one cannot disagree about
             # the bytes, the mode or the fields.
-            write_desktop_marker(path, directory, model=model)
+            write_desktop_marker(path, directory, model=model, purpose=purpose)
 
         try:
             await asyncio.to_thread(persist)
@@ -6130,6 +6232,41 @@ class DesktopSessions:
             created=time.monotonic(),
         )
         return draft_id
+
+    def active_config_run(self) -> str | None:
+        """The live CONFIGURATION RUN for this config root, or ``None``.
+
+        THE SINGLE-FLIGHT READ, and the answer to both questions the feature asks
+        of it: a second create is refused with this id (409, so a second window
+        joins the run instead of starting a rival), and a page that mounts
+        mid-run asks the same question to re-attach. Nothing is persisted on the
+        renderer side — the run is a real session this server owns — so this
+        method is where both answers come from.
+
+        TWO TERMS, each excluding a way of being wrong:
+
+        * the session's ORIGIN is ``agent-config``, read through the same
+          predicate the door and every listing read (``session_origin``), so this
+          cannot disagree with them about which sessions are runs;
+        * its owner RECORD is live and ``busy`` — a turn is in flight. Busy
+          rather than merely "resident", because what a second run would race is
+          a WRITE, and a runtime sitting between turns is not writing: a run whose
+          turn has settled frees the flight, which is what makes the page's
+          "start a new one" a real action rather than one the previous run has to
+          be stopped to allow.
+
+        Stale and absent records are skipped alike: a run whose runtime has
+        exited is over. Read-only, and cheap by the standard of the sidebar's own
+        poll — one registry scan plus one marker read per LIVE record (the scan
+        is what the picker pays anyway).
+        """
+        for record, state in registry.scan(self.root):
+            if state == "stale" or not record.busy:
+                continue
+            directory = self.root / "sessions" / record.session_id
+            if session_origin(directory) == ORIGIN_AGENT_CONFIG:
+                return record.session_id
+        return None
 
     def assert_draft_unmaterialised(self, draft_id: str) -> None:
         """Refuse a ``draft_id`` that names an ALREADY-MATERIALISED session.
@@ -7068,7 +7205,7 @@ class DesktopSessions:
                         socket, so an unknown id still costs one ``is_dir`` and still
                         answers the shared 404.
                         """
-                        if path.is_dir() and is_user_session(path):
+                        if path.is_dir() and _door_may_open(path):
                             # Through the TOLERANT reader, not ``json.loads``: a marker this
                             # code cannot parse (a hand edit, an interrupted write, a
                             # directory where the document should be) is a document with no

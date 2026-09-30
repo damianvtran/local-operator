@@ -333,6 +333,26 @@ def feature_flags() -> dict[str, Any]:
         # to remove. Nothing else in the renderer is gated on it, so
         # gating anything else here would hide a working surface.
         "session_interrupt": 1,
+        # A CONFIGURATION RUN can be started from the Agents/Teams page: an
+        # additive ``purpose: "agents-config"`` on ``POST
+        # /v1/desktop/sessions`` (stamped with the hidden ``agent-config``
+        # origin) plus the server-owned tool declaration and preamble that give
+        # the run its reach.
+        #
+        # ITS OWN KEY, not a bump of an existing one, by the rule
+        # ``interrupt-turn`` states for ``session_interrupt`` above: an older
+        # backend answers an unknown field on ``CreateSession`` with a 422
+        # (``Input`` is ``extra="forbid"``), so a renderer that sent the body
+        # ungated would turn "this backend cannot do it" into a broken create.
+        # The page reads this key and, without it, keeps the structured editor
+        # as the only path — which is exactly the release-skew property the
+        # sibling UI PR is built to rely on.
+        #
+        # The run ALSO needs ``session_interrupt`` (to stop a turn) and the two
+        # catalogue keys (to show what a run changed). Those are existing keys
+        # and are deliberately not re-declared here: a client requires the
+        # conjunction, it does not get a second spelling of the same fact.
+        "agents_config": 1,
         # Durable conversation pins: the `pinned` flag on every catalogue
         # row, and POST /v1/desktop/sessions/{id}/pin.
         #

@@ -1,7 +1,7 @@
 """Conversation auto-naming — a short title derived from the opening message.
 
 A conversation with no name is a row of timestamps in a picker, so a message
-buys a cheap title. Five properties govern the design, and each one exists
+buys a cheap title. Six properties govern the design, and each one exists
 because the obvious implementation gets it wrong:
 
 - **It must never cost a turn.** The title is a nicety; the turn is the
@@ -42,6 +42,20 @@ because the obvious implementation gets it wrong:
   current-title anchor, and the caller's growth-gated refresh schedule — each
   fail alone; see :func:`build_theme_context`, :data:`THEME_SYSTEM_PROMPT`,
   and :func:`should_refresh_theme`.
+- **A reply is a CANDIDATE, not a title.** What the model MEANS to send and
+  what actually arrives differ on real sessions: the operator's report shows
+  seventeen of them renamed `<Stale PR recovery task>`,
+  `<囧>Assess releasing PR 192 or close`, or
+  `<|｜DSML｜|ai_title>Minerva merge requirements before MR merge</ai_title>` —
+  the raw reply, stored forever because the naming errand is one-shot. The
+  parser is deliberately lenient and must stay so (it is how Grok/DeepSeek
+  replies get titles at all), so the repair lives at ACCEPTANCE instead:
+  :func:`validate_generated_title` is the structural gate every generated
+  candidate must pass, and the bounded Tier 0-3 cascade (:func:`_accept_generated_title`)
+  re-asks once — corrective or hedged — before a first-name attempt falls
+  back to the opener. Bounded by construction: at most two naming samples and
+  at most two fit-check calls per attempt, every failure open. See the
+  acceptance section below :func:`_errand_prompt`.
 
 The holder (:class:`ConversationName`) mirrors ``GoalState``: a small mutable
 object the session and its host share, so a name that lands asynchronously is
@@ -54,11 +68,21 @@ later re-title.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass
-from typing import Any, Awaitable, Sequence, cast
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Sequence, cast
+
+if TYPE_CHECKING:
+    # For the fit-check question's annotation only. The RUNTIME import is
+    # function-local on purpose: ``local_operator.classification`` costs a
+    # measured cold import (~1.8 s cumulative; see ``monitors/classify.py``),
+    # and this module is imported by every session whether or not the
+    # classification layer is switched on.
+    from local_operator.classification.types import Question
 
 #: Naming never speaks to the terminal: it is decoration running beside a live
 #: turn, so its failures go to the log file and its outcomes to a receipt.
@@ -850,6 +874,646 @@ def _errand_prompt(text: str) -> str:
     return " ".join((text or "").split())[:MAX_PROMPT_CHARS]
 
 
+# ---------------------------------------------------------------------------
+# Title acceptance: the Tier 0-3 cascade
+# ---------------------------------------------------------------------------
+#
+# THE DEFECT THIS REPAIRS, in one line: the model's raw reply was stored as
+# the title, so a reply that arrived wrapped in markup renamed the session
+# `<Stale PR recovery task>` and stayed that way forever (the errand is
+# one-shot). Reproduced end-to-end before this code existed: an isolated
+# `lop exec --workstream` boot with `Session.complete_once` answering
+# `<PROBE#1>Probe session title` stored exactly that string, written through
+# `serving.py::_name_conversation_worker` with no gate anywhere in the path.
+#
+# The parser stays lenient — it is how Grok/DeepSeek untagged replies become
+# titles at all — so acceptance is where a candidate is checked. Four tiers,
+# all inside the existing detached naming task (async, zero delay to the
+# turn), all failing OPEN (naming must never break a turn):
+#
+#   Tier 0  the structural gate below: pure, deterministic, zero tokens.
+#   Tier 1  the fit check: one typed question through the session's shared
+#           ClassificationService (the same cascade the message path uses),
+#           when one is reachable. Absent/unusable -> tier 2 hedges instead.
+#   Tier 2  one bounded second sample: CORRECTIVE when Tier 0/1 rejected the
+#           first, HEDGED (plain re-ask) when the classifier could not answer
+#           an otherwise clean first sample.
+#   Tier 3  the terminal opener fallback for a first-name attempt.
+#
+# BOUNDED BY CONSTRUCTION: at most two naming samples and at most two fit-check
+# calls per attempt, no loops, no backoff. The controller refuses a class of
+# bug that decodes as a tokenizer artifact (markup, special tokens, wrapper
+# glyphs); the fit check refuses a class that decodes as "the model answered a
+# different question" (a reply that does not name the conversation); the
+# second sample covers the case where either refusal is a false positive.
+
+#: Angle-bracket characters banned by the gate. The operator asked for a
+#: BLANKET ban rather than a list of the shapes seen so far: each observed
+#: wrapped title is a model leaking reply scaffolding into a field that holds
+#: one row of a status band, and a candidate that still parses as markup is the
+#: same defect whether or not it matches one of the seventeen forms that
+#: prompted the gate. The fullwidth forms ride along because the tokenizers
+#: that emit them use both interchangeably.
+_ANGLE_BRACKET_CHARS = "<>\uff1c\uff1e"  # < > ＜ ＞
+
+#: Model special-token leakage: the fullwidth vertical bar that brackets
+#: ``DSML`` in `<|｜DSML｜|ai_title>`, or the token text itself. Both are
+#: checked because a reply that lost one bar still keeps the other evidence.
+_FULLWIDTH_BAR = "\uff5c"  # ｜
+_DSML_TOKEN = "dsml"
+
+#: U+FFFD: the reply was damaged in transit. A damaged title is worth less
+#: than the opener fallback, so this is a rejection and not a repair.
+_REPLACEMENT_CHAR = "\ufffd"
+
+#: Decorative wrapper glyphs observed leading the leaked forms (囗 U+56D7,
+#: 囧 U+56E7, □ U+25A1). The trade actually taken: a LEADING glyph is refused
+#: (the observed leak shape — `<囗>Composer …`, `囧>…`) and an interior
+#: occurrence is kept unless it sits directly against markup punctuation, so a
+#: title that merely uses the character mid-sentence survives. In practice the
+#: adjacency arm catches bracketed spellings (`[囧] …`), since bare angle
+#: brackets are rejected outright above.
+_DECORATIVE_GLYPHS = "\u56d7\u56e7\u25a1"
+_MARKUP_PUNCTUATION = "<>\uff1c\uff1e[]{}()\uff08\uff09\u3010\u3011"
+
+#: Zero-width characters. A body that is ONLY these (or whitespace plus these)
+#: is not a title; a body that merely CONTAINS one is left alone — that shows
+#: up in paste-adjacent titles and rejecting it would be a false positive the
+#: operator did not ask for.
+_ZERO_WIDTH_CHARS = "\u200b\u200c\u200d\ufeff"
+
+#: A character run longer than this is the duplication-explosion guard
+#: (`aaaaaaaaaaaa`). Strictly greater than, so eight is allowed.
+_MAX_REPEATED_RUN_CHARS = 8
+
+#: Rejection reasons, named so the log line says WHAT was wrong without the
+#: candidate itself ever being logged (the module logs no user text; see
+#: `_ask_for_title`).
+_TITLE_REJECT_ANGLE = "angle-bracket markup"
+_TITLE_REJECT_DSML = "model special-token leakage"
+_TITLE_REJECT_REPLACEMENT = "replacement character (U+FFFD)"
+_TITLE_REJECT_GLYPH = "decorative wrapper glyph"
+_TITLE_REJECT_CONTROL = "control character or lone surrogate"
+_TITLE_REJECT_ZERO_WIDTH = "empty or zero-width-only body"
+_TITLE_REJECT_ECHO = "echo of the opener-derived label"
+_TITLE_REJECT_LOW_SIGNAL = "low-signal body"
+_TITLE_REJECT_REPETITION = "degenerate repetition"
+
+
+def _reject_generated_title(reason: str) -> None:
+    """Log ONE rejection at INFO and return ``None`` for the gate's caller.
+
+    The reason and nothing else, deliberately: this module's logging contract
+    is that no prompt, opener or transcript text of ours reaches the log file,
+    and a rejected candidate is usually a slice of one of those. The reason
+    string is enough to tell a model that regressed from a rule that misfired.
+    """
+    logger.info("generated title rejected by the structural gate: %s", reason)
+    return None
+
+
+def _fold_title_for_compare(text: str) -> str:
+    """Case- and whitespace-normalised form, the gate's echo comparison key."""
+    return " ".join((text or "").split()).casefold()
+
+
+def _has_control_or_surrogate(text: str) -> bool:
+    """``True`` for C0/C1 controls and lone surrogates anywhere in ``text``.
+
+    The gate runs on the post-normalisation body (first line only, quotes and
+    punctuation handled), so no legitimate newline or tab can appear here — a
+    control character means a tokenizer or encoding fault, either of which a
+    title may not carry.
+    """
+    return any(unicodedata.category(ch) in ("Cc", "Cs") for ch in text)
+
+
+def _has_degenerate_repetition(text: str) -> bool:
+    """The duplication-explosion guard: a stuck decoder, not a title.
+
+    Two shapes, both measured on small-model replies: one word repeated three
+    or more times consecutively (case-insensitively, because `You you YOU` is
+    the same stall) and one character run longer than eight. Neither can be a
+    real title, and both are common enough on the cheap local models this
+    errand reads that they get their own rule rather than the length caps.
+    """
+    words = text.split()
+    run = 1
+    for previous, current in zip(words, words[1:]):
+        run = run + 1 if current.casefold() == previous.casefold() else 1
+        if run >= 3:
+            return True
+    for _, group in itertools.groupby(text):
+        if sum(1 for _ in group) > _MAX_REPEATED_RUN_CHARS:
+            return True
+    return False
+
+
+def _decorative_glyph_breaks_title(text: str) -> bool:
+    """Whether a wrapper glyph LEADS the body or sits against markup punctuation.
+
+    The two placements the observed replies used (`<囗>Composer …`,
+    `囧>…`), and deliberately not a blanket ban — see :data:`_DECORATIVE_GLYPHS`
+    for why. Bare angle brackets can no longer reach this check (the gate
+    rejects them first), so in practice this catches the square/round bracket
+    spellings (`[囧] …`) and a leading glyph with no bracket at all.
+    """
+    stripped = text.strip()
+    if stripped and stripped[0] in _DECORATIVE_GLYPHS:
+        return True
+    for index, ch in enumerate(text):
+        if ch not in _DECORATIVE_GLYPHS:
+            continue
+        before = text[index - 1] if index else ""
+        after = text[index + 1] if index + 1 < len(text) else ""
+        if (before and before in _MARKUP_PUNCTUATION) or (after and after in _MARKUP_PUNCTUATION):
+            return True
+    return False
+
+
+def validate_generated_title(
+    candidate: str, opener: str = "", *, allow_opener_label: bool = False
+) -> str | None:
+    """Tier 0: the structural gate. Returns the accepted body, or ``None``.
+
+    Pure, deterministic and token-free by design: it runs on EVERY generated
+    candidate (first name, re-title, on-demand refresh) AFTER tag extraction
+    and the existing quote/punct/length normalisation, so what it sees is
+    exactly what would have been stored. Rejection, never truncation — the
+    module's convention — because a title cut to fit reads like a bug while an
+    absent one reads like an unnamed conversation.
+
+    ``opener`` enables the "no naming happened" check: a candidate equal to
+    the sanitised opener-derived label (casefold + whitespace-normalised) is
+    the model echoing its input, not naming the conversation. It is skipped
+    when no opener is known (the on-demand refresh), and
+    ``allow_opener_label`` exempts Tier 3, whose whole job is to produce that
+    label deliberately — see :func:`fallback_from_opener`.
+    """
+    body = candidate or ""
+    if any(ch in body for ch in _ANGLE_BRACKET_CHARS):
+        return _reject_generated_title(_TITLE_REJECT_ANGLE)
+    if _FULLWIDTH_BAR in body or _DSML_TOKEN in body.casefold():
+        return _reject_generated_title(_TITLE_REJECT_DSML)
+    if _REPLACEMENT_CHAR in body:
+        return _reject_generated_title(_TITLE_REJECT_REPLACEMENT)
+    if _decorative_glyph_breaks_title(body):
+        return _reject_generated_title(_TITLE_REJECT_GLYPH)
+    if _has_control_or_surrogate(body):
+        return _reject_generated_title(_TITLE_REJECT_CONTROL)
+    if not body.strip(_ZERO_WIDTH_CHARS).strip():
+        return _reject_generated_title(_TITLE_REJECT_ZERO_WIDTH)
+    if not allow_opener_label and opener:
+        label = fallback_from_opener(opener)
+        if label and _fold_title_for_compare(body) == _fold_title_for_compare(label):
+            return _reject_generated_title(_TITLE_REJECT_ECHO)
+    if is_low_signal(body):
+        return _reject_generated_title(_TITLE_REJECT_LOW_SIGNAL)
+    if _has_degenerate_repetition(body):
+        return _reject_generated_title(_TITLE_REJECT_REPETITION)
+    return body
+
+
+#: Markup spans stripped from an opener before Tier 3 derives a label from it.
+#: The span rule matches the paired forms the leaks use (`<…>`, `＜…＞`); the
+#: residue rules then clear whatever an unbalanced span left behind, the
+#: fullwidth bars and the bare token, and the wrapper glyphs. Order matters:
+#: spans first, so a `<|｜DSML｜|ai_title>` wrapper is removed whole rather than
+#: scattered into fragments for the residue passes to sweep.
+_OPENING_SPAN_RE = re.compile("[<\uff1c][^<>\uff1c\uff1e]*[>\uff1e]")
+_ANGLE_RESIDUE_RE = re.compile("[<>\uff1c\uff1e]")
+_FULLWIDTH_BAR_RUN_RE = re.compile("[\uff5c]+")
+_DSML_TOKEN_RE = re.compile("dsml", re.IGNORECASE)
+_DECORATIVE_RUN_RE = re.compile("[\u56d7\u56e7\u25a1]+")
+
+
+def _sanitise_opener_text(text: str) -> str:
+    """Strip the markup family the gate rejects from ``text``, in place.
+
+    Used ONLY to derive labels (:func:`fallback_from_opener`) — never applied
+    to stored text or to anything the model sent, so a false strip here costs
+    a few words in a fallback label and nothing else. ``DSML`` is stripped like
+    the gate rejects it: an opener that discusses the token itself ("write a
+    DSML parser") must still yield a gate-clean label, and dropping one token
+    beats losing the whole fallback. U+FFFD is dropped for the same reason.
+    """
+    cleaned = _OPENING_SPAN_RE.sub(" ", text or "")
+    cleaned = _ANGLE_RESIDUE_RE.sub(" ", cleaned)
+    cleaned = _FULLWIDTH_BAR_RUN_RE.sub(" ", cleaned)
+    cleaned = _DSML_TOKEN_RE.sub(" ", cleaned)
+    cleaned = _DECORATIVE_RUN_RE.sub(" ", cleaned)
+    cleaned = cleaned.replace(_REPLACEMENT_CHAR, " ")
+    return " ".join(cleaned.split())
+
+
+def fallback_from_opener(opener: str) -> str:
+    """Tier 3: the terminal opener-derived label for a first-name attempt.
+
+    Sanitise the opener first (the label must be able to pass the gate even
+    when the opener it quotes is itself dirty), then derive the label exactly
+    as :func:`provisional_title` does — low-signal yields nothing, the cut is
+    on a word boundary with the module's ellipsis, the casing is sentence
+    case. The result is re-checked against the gate STRUCTURALLY (its echo rule
+    exempted, because the label IS the opener's echo by construction): if
+    anything unusable remains, the result is ``""`` and the caller stores
+    nothing — an empty name is honest, a dirty one is the reported bug.
+    NEVER a constant string: the whole point is that the session keeps a label
+    that describes THIS conversation. Returns ``""`` when nothing is usable.
+    """
+    label = provisional_title(_sanitise_opener_text(opener))
+    if not label:
+        return ""
+    checked = validate_generated_title(label, opener, allow_opener_label=True)
+    return checked or ""
+
+
+#: The fit check's choice ids, vendor-facing spellings. The cascade treats
+#: anything else — including ``None`` — as "no verdict", which HEDGES rather
+#: than rejects: a classifier that cannot answer must never be the reason a
+#: conversation loses its name (fail open).
+TITLE_FITS = "fits"
+TITLE_DOESNT_FIT = "doesnt_fit"
+TITLE_CANT_TELL = "cant_tell"
+
+#: The fit question's id — one stable string, for the reason
+#: ``monitors/classify.py`` states for its own: the service disables a question
+#: id for the whole session on a schema rejection, and a stable id disables the
+#: shape once rather than once per spelling.
+TITLE_QUESTION_ID = "title_fit"
+
+#: The question's instructions and criteria. Not measured like the monitor
+#: gate's (§17) — this question was written with the cascade, and its job is
+#: narrow: refuse markup/decoration/echoes, refuse a title about the wrong
+#: subject, and say so when the excerpt is too thin to judge.
+TITLE_QUESTION_INSTRUCTIONS = (
+    "Decide whether the candidate conversation title faithfully names the conversation.\n"
+    "FITS = the title is a plain, accurate name for the conversation's subject.\n"
+    "DOESNT_FIT = the title is markup, decoration, a quote of the opening message "
+    "rather than a name, or names the wrong subject.\n"
+    "CANT_TELL = the excerpt is too unclear to judge."
+)
+TITLE_QUESTION_CRITERIA: dict[str, str] = {
+    TITLE_FITS: "a plain, accurate name for the conversation's subject",
+    TITLE_DOESNT_FIT: "markup, decoration, a quote of the opening message, or the wrong subject",
+    TITLE_CANT_TELL: "the excerpt is too unclear to judge",
+}
+
+#: How much of the opener rides the fit check's state. The same budget the
+#: naming prompt itself uses (:data:`MAX_PROMPT_CHARS`), for the same reason —
+#: a pasted log must not be re-billed — and the excerpt is cut on a word
+#: boundary with the module's ellipsis so the model can see it was cut.
+TITLE_FIT_EXCERPT_CHARS = MAX_PROMPT_CHARS
+
+#: The fit-check seam: bounded state -> one of the three choice ids, or ``None``
+#: for "no classifier". Mirrors ``MonitorClassify`` in ``monitors/classify.py``
+#: (the same shape, the same fail-open meaning) so a session wires both halves
+#: from one resolver and neither can drift into a second opinion.
+TitleFitCheck = Callable[[str], Awaitable[str | None]]
+
+
+def title_fit_question() -> "Question":
+    """The one typed question, built on demand (its text is constant).
+
+    A plain function rather than a module constant because the constant would
+    need ``Question`` at import time, and this module is on every session's
+    import graph whether or not the classification layer is switched on (see
+    the TYPE_CHECKING note at the top). Four field assignments; the cascade
+    builds one per check.
+    """
+    from local_operator.classification.types import Question
+
+    return Question(
+        id=TITLE_QUESTION_ID,
+        kind="choice",
+        instructions=TITLE_QUESTION_INSTRUCTIONS,
+        criteria=dict(TITLE_QUESTION_CRITERIA),
+    )
+
+
+def title_fit_state(candidate: str, opener: str) -> str:
+    """The bounded state for one fit check: the candidate plus an excerpt.
+
+    Deliberately not the whole opener: the question is "does this title name
+    what this message is about", and the opening message is the one part of
+    the conversation the naming errand already has in bounded form. The cut
+    uses :func:`cut_on_a_word`, so a truncated excerpt carries the module's
+    ellipsis — the model is told the preview is incomplete rather than left to
+    guess where the sentence went.
+    """
+    excerpt = cut_on_a_word(" ".join((opener or "").split()), TITLE_FIT_EXCERPT_CHARS)
+    return f"candidate title: {candidate}\nopening message: {excerpt}"
+
+
+def title_fit_check(resolve: Callable[[], Any | None]) -> TitleFitCheck:
+    """Wrap a per-call seam resolver into the cascade's fit-check callback.
+
+    ``resolve`` returns the session's shared ``ClassificationService`` (or
+    anything with the same ``decide``), resolved PER CALL — the seam is an
+    injectable attribute on the host's side (tests swap it after session
+    construction, and the composition root resolves it the same way for the
+    message path), so a captured service would pin whichever object happened
+    to be there first. A ``None`` seam, or one without ``decide`` (a host's
+    own classifier: the published seam is ``recommend_resources`` and nothing
+    here may require more), returns ``None`` — the cascade's "no verdict",
+    which hedges instead of rejecting.
+
+    The question is built inside the call for the import-graph reason the
+    module docstring states; ``Question`` construction is four fields. A seam
+    that RAISES is wrapped to ``None`` as well: the decider's own contract is
+    that it never raises (see ``ClassificationService.decide``), so a raise
+    here is a host's classifier misbehaving and must not cost a title.
+    """
+
+    async def check(state: str) -> str | None:
+        seam = resolve()
+        decide = getattr(seam, "decide", None)
+        if decide is None:
+            return None
+        try:
+            answer = await decide(state=state, question=title_fit_question())
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — a host seam may raise; fail open
+            logger.debug("title fit check call failed", exc_info=True)
+            return None
+        value = getattr(answer, "value", None)
+        if value in (TITLE_FITS, TITLE_DOESNT_FIT, TITLE_CANT_TELL):
+            return str(value)
+        return None
+
+    return check
+
+
+#: The corrective system addendum (Tier 2, trigger A). Appended to whichever
+#: system block the attempt used, so it corrects the first-name call and the
+#: theme re-title call with one spelling. "3 to 7 words" repeats the base
+#: instruction deliberately: the model that just leaked markup is being told,
+#: in the same breath, what the reply should have been instead.
+TITLE_CORRECTIVE_ADDENDUM = (
+    "Your previous reply could not be used: it contained markup or decoration. "
+    "Reply with plain words only — no tags, no brackets, no decorations; 3 to 7 words."
+)
+
+#: Tier ids for :class:`TitleAcceptance`. ``generated`` means a model sample
+#: was accepted; ``fallback`` means the attempt exhausted its samples and Tier
+#: 3 produced the opener label (or nothing, when the opener was unusable);
+#: ``none`` means nothing was accepted and nothing will be stored.
+TIER_GENERATED = "generated"
+TIER_FALLBACK = "fallback"
+TIER_NONE = "none"
+
+
+@dataclass(frozen=True)
+class TitleAcceptance:
+    """What one Tier 0-3 acceptance attempt settled on.
+
+    ``title`` is what the caller should store, ``""`` when nothing should be:
+    a gate-clean generated sample, or the Tier 3 opener label. ``tier`` names
+    which of those it is, and ``heal`` is the derived first-name-only fact the
+    OWNERS act on: a fallback is provisional by nature — the one-shot errand
+    has already spent its once — so the host arms a single-shot self-heal that
+    re-runs this pipeline once at the next completed turn (see the owners:
+    ``serving.py`` and the TUI). A generated title never heals; a re-title
+    never falls back and so never heals either.
+    """
+
+    title: str = ""
+    tier: str = TIER_NONE
+
+    @property
+    def heal(self) -> bool:
+        """``True`` when the host owes this attempt one self-heal run."""
+        return self.tier == TIER_FALLBACK
+
+
+async def _title_fit_verdict(
+    fit_check: TitleFitCheck | None, candidate: str, excerpt: str
+) -> str | None:
+    """Ask the Tier-1 question once. ``None`` covers every unusable answer.
+
+    ``excerpt`` is what the state carries about the conversation (the opener
+    for a first-name attempt, the newest message for a re-title — see
+    :func:`title_fit_state`). ``None`` is the cascade's "no verdict": no seam
+    wired, a seam that could not answer (the service's own guards return
+    ``None`` for disabled, no leg, breaker-open, timeout and transport
+    failures), ``cant_tell``, or anything else a host's seam says that is not
+    one of our two verdicts. The caller decides what an absent verdict means
+    per position — hedge on a first sample, fail open on a gate-clean retry.
+    Cancellation still propagates: a superseded or shut-down naming task must
+    stay cancelled.
+    """
+    if fit_check is None:
+        return None
+    state = title_fit_state(candidate, excerpt)
+    try:
+        verdict = await fit_check(state)
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 — the seam's contract says never raise; belt only
+        logger.debug("title fit check failed", exc_info=True)
+        return None
+    if verdict == TITLE_FITS:
+        return TITLE_FITS
+    if verdict == TITLE_DOESNT_FIT:
+        return TITLE_DOESNT_FIT
+    return None
+
+
+async def _hedged_acceptance(
+    system: str,
+    prompt: str,
+    opener: str,
+    complete_fn: Any,
+    timeout: float,
+    first_clean: str,
+) -> TitleAcceptance:
+    """Tier 2, trigger B: one independent second sample, plain system prompt.
+
+    The hedge exists for the classifier-unreachable case, and it is the
+    operator's explicit requirement that a title must not depend on any single
+    login: when the fit check cannot answer, the verification it would have
+    given is replaced by a SECOND, independent naming sample — accepted when
+    gate-clean (the verified sample; deterministic from the caller's point of
+    view), with the first kept when the hedge is dirty, absent or failed. No
+    further retry either way: the attempt's budget is spent.
+    """
+    second = await _ask_for_title(system, prompt, complete_fn, timeout)
+    if second is CALL_CANCELLED:
+        return TitleAcceptance()
+    if isinstance(second, str):
+        second_clean = validate_generated_title(second, opener)
+        if second_clean is not None:
+            return TitleAcceptance(title=second_clean, tier=TIER_GENERATED)
+    logger.info("hedged naming sample was unusable; keeping the first accepted sample")
+    return TitleAcceptance(title=first_clean, tier=TIER_GENERATED)
+
+
+async def _corrective_acceptance(
+    system: str,
+    prompt: str,
+    opener: str,
+    complete_fn: Any,
+    timeout: float,
+    fit_check: TitleFitCheck | None,
+    *,
+    first_fit_answered: bool,
+    opener_fallback: bool,
+    excerpt: str,
+) -> TitleAcceptance:
+    """Tier 2, trigger A: one corrective resample, then Tier 3.
+
+    Reached when Tier 0 rejected the first sample or Tier 1 said
+    ``doesnt_fit``. The retry carries the corrective addendum; if it is still
+    dirty (or failed, or absent) the attempt is exhausted and Tier 3 lands.
+    When the first fit check answered, ONE more fit check is allowed on the
+    clean retry (the cascade's cap of two) — that is also why the gate-clean
+    retry of a dirty FIRST sample is accepted without a check: no first
+    fit-check answered, and the cap is not to be raised by the back door.
+    """
+    corrective_system = f"{system}\n{TITLE_CORRECTIVE_ADDENDUM}"
+    second = await _ask_for_title(corrective_system, prompt, complete_fn, timeout)
+    if second is CALL_CANCELLED:
+        return TitleAcceptance()
+    second_clean = validate_generated_title(second, opener) if isinstance(second, str) else None
+    if second_clean is None:
+        return _tier_three(opener, opener_fallback)
+    if first_fit_answered and fit_check is not None:
+        verdict = await _title_fit_verdict(fit_check, second_clean, excerpt)
+        if verdict == TITLE_DOESNT_FIT:
+            return _tier_three(opener, opener_fallback)
+        if verdict != TITLE_FITS:
+            # The second call could not answer: fail OPEN at the last gate and
+            # take the gate-clean retry. The alternative — Tier 3 — would
+            # discard a clean title on the strength of a classifier that just
+            # proved it cannot speak.
+            logger.info("second fit check did not answer; accepting the corrected sample")
+    return TitleAcceptance(title=second_clean, tier=TIER_GENERATED)
+
+
+def _tier_three(opener: str, opener_fallback: bool) -> TitleAcceptance:
+    """Tier 3: the terminal opener fallback — first-name attempts only.
+
+    ``opener_fallback`` separates the two callers' terminal states. A
+    FIRST-NAME attempt falls back to the opener label (or to nothing when the
+    opener is unusable); a RE-TITLE never does, because the conversation
+    already wears a title a human can read and replacing it with a quote of
+    the opener would be the downgrade the re-title contract exists to prevent
+    (``generate_retitle``'s "only repaint on a genuinely new name"). The
+    fallback tier is what arms the host's self-heal, so a re-title exhausts to
+    ``TIER_NONE`` and heals nothing.
+    """
+    if not opener_fallback:
+        return TitleAcceptance()
+    return TitleAcceptance(title=fallback_from_opener(opener), tier=TIER_FALLBACK)
+
+
+async def _accept_generated_title(
+    *,
+    system: str,
+    prompt: str,
+    opener: str,
+    complete_fn: Any,
+    timeout: float,
+    fit_check: TitleFitCheck | None,
+    opener_fallback: bool,
+    fit_excerpt: str = "",
+) -> TitleAcceptance:
+    """The Tier 0-3 controller described in the section header.
+
+    One first sample, at most one second sample, at most two fit checks; see
+    the individual tiers for the decision at each step. Returns what to store
+    (or that nothing should be), and never raises except for cancellation.
+
+    ``fit_excerpt`` is what the fit check is shown about the conversation and
+    defaults to ``opener``; the re-title path passes the newest message, which
+    is the thing that moved the theme. It is separate from ``opener`` because
+    the two are genuinely different facts there: the echo rule and the Tier 3
+    fallback both speak of the opener, and a re-title has neither.
+    """
+    excerpt = fit_excerpt or opener
+    first = await _ask_for_title(system, prompt, complete_fn, timeout)
+    if first is CALL_CANCELLED or first is CALL_FAILED:
+        # A cancelled or failed call is not a candidate: nothing to correct,
+        # nothing to fall back from. The automatic callers already treat this
+        # as "no title" (the latch/pending retries in the owners), unchanged.
+        return TitleAcceptance()
+
+    if isinstance(first, str):
+        first_clean = validate_generated_title(first, opener)
+    else:
+        first_clean = None
+
+    if first_clean is not None:
+        verdict = await _title_fit_verdict(fit_check, first_clean, excerpt)
+        if verdict == TITLE_FITS:
+            return TitleAcceptance(title=first_clean, tier=TIER_GENERATED)
+        if verdict != TITLE_DOESNT_FIT:
+            return await _hedged_acceptance(
+                system, prompt, opener, complete_fn, timeout, first_clean
+            )
+        return await _corrective_acceptance(
+            system,
+            prompt,
+            opener,
+            complete_fn,
+            timeout,
+            fit_check,
+            first_fit_answered=True,
+            opener_fallback=opener_fallback,
+            excerpt=excerpt,
+        )
+
+    if isinstance(first, str):
+        # Gate-rejected (dirty): the corrective retry is the whole point of
+        # having a second sample. The first fit check never ran on this reply.
+        return await _corrective_acceptance(
+            system,
+            prompt,
+            opener,
+            complete_fn,
+            timeout,
+            fit_check,
+            first_fit_answered=False,
+            opener_fallback=opener_fallback,
+            excerpt=excerpt,
+        )
+
+    # ``None``: the sentinel ("no topic"), an over-cap essay, an unclosed
+    # thinking envelope — the model answered, and the answer is "nothing to
+    # title". There is no candidate to correct and none to fall back from
+    # beyond the owners' existing retries, so the attempt ends here.
+    return TitleAcceptance()
+
+
+async def generate_title_acceptance(
+    text: str,
+    complete_fn: Any,
+    *,
+    timeout: float = TITLE_TIMEOUT_S,
+    fit_check: TitleFitCheck | None = None,
+) -> TitleAcceptance:
+    """The first-name acceptance cascade for ``text`` (see the section header).
+
+    What the owners call when they need the TIER (a fallback arms their
+    self-heal) rather than just a string; :func:`generate_title` is this same
+    pipeline with the tier dropped. The low-signal pre-gate is repeated here
+    rather than trusted to callers, exactly as it is on :func:`generate_title`:
+    a greeting must not spend a call, and every caller passing through one
+    function is what makes that auditable.
+    """
+    if is_low_signal(text):
+        return TitleAcceptance()
+    return await _accept_generated_title(
+        system=TITLE_SYSTEM_PROMPT,
+        prompt=_errand_prompt(text),
+        opener=text,
+        complete_fn=complete_fn,
+        timeout=timeout,
+        fit_check=fit_check,
+        opener_fallback=True,
+    )
+
+
 #: Growth-gated refresh schedule, ported from omp's ``session-titling``. These
 #: three numbers together produce a geometric spacing: with the transcript
 #: turn-count stamped at each titling, a session is titled at turn 1, then
@@ -991,22 +1655,24 @@ async def generate_title(
     complete_fn,
     *,
     timeout: float = TITLE_TIMEOUT_S,
+    fit_check: TitleFitCheck | None = None,
 ) -> str | None:
-    """One cheap naming call for ``text``; ``None`` when there is no title.
+    """The accepted first-name title for ``text``; ``None`` when there is none.
 
     ``complete_fn(system, prompt)`` is any awaitable one-shot completion (the
-    session's :meth:`complete_once`). Every failure mode — low-signal input,
-    a raising callable, a hanging callable, a thinking preamble, or an
-    over-long answer — resolves to ``None``. The caller therefore needs no
-    error handling at all, which is the point: naming is decoration, and
-    decoration that can break a turn is a defect.
+    session's :meth:`complete_once`). This runs the Tier 0-3 cascade
+    (:func:`generate_title_acceptance`): a gate-clean generated sample, or the
+    Tier 3 opener fallback when every sample was rejected. A failed or absent
+    call still collapses onto ``None`` — this caller has no user waiting and no
+    receipt to write, so every non-title is one instruction to it.
+
+    Hosts that need to know WHICH of those they got — the owners arm a
+    self-heal on a fallback — call :func:`generate_title_acceptance` directly.
     """
-    if is_low_signal(text):
-        return None
-    title = await _ask_for_title(TITLE_SYSTEM_PROMPT, _errand_prompt(text), complete_fn, timeout)
-    # A failed call collapses back onto "no title": this caller has no user
-    # waiting and no receipt to write, so the two are one instruction to it.
-    return title if isinstance(title, str) else None
+    acceptance = await generate_title_acceptance(
+        text, complete_fn, timeout=timeout, fit_check=fit_check
+    )
+    return acceptance.title or None
 
 
 async def generate_retitle(
@@ -1016,6 +1682,7 @@ async def generate_retitle(
     *,
     turns: Sequence[_Turn] | None = None,
     timeout: float = TITLE_TIMEOUT_S,
+    fit_check: TitleFitCheck | None = None,
 ) -> str | None:
     """A REPLACEMENT title when the THEME has moved; else ``None``.
 
@@ -1055,8 +1722,28 @@ async def generate_retitle(
     context = build_theme_context(turns or (), text, current_title=current)
     if not context:
         return None
-    title = await _ask_for_title(THEME_SYSTEM_PROMPT, context, complete_fn, timeout)
-    if not isinstance(title, str):
+    # The same Tier 0-3 cascade as the first name, with two differences, and
+    # both are the re-title contract rather than an omission. (1) No opener:
+    # there is nothing the reply could be an echo OF that is not already
+    # handled — a restatement of the standing title is folded below, and the
+    # "opening message" this conversation had is no longer what it is about.
+    # (2) NO Tier 3 fallback: the conversation already wears a readable title,
+    # and replacing it with a quote of the opener would be exactly the
+    # misidentification this path exists to prevent. An exhausted re-title
+    # therefore leaves the title alone, which is the same instruction ``None``
+    # already carried for "no change" and "the call failed".
+    acceptance = await _accept_generated_title(
+        system=THEME_SYSTEM_PROMPT,
+        prompt=context,
+        opener="",
+        complete_fn=complete_fn,
+        timeout=timeout,
+        fit_check=fit_check,
+        opener_fallback=False,
+        fit_excerpt=text,
+    )
+    title = acceptance.title
+    if not title:
         # Both "no change" and a failed call: the same instruction to an
         # automatic caller, which is why this path keeps the collapse.
         return None
@@ -1303,6 +1990,14 @@ async def refresh_title(
       verbatim restatement of the anchor onto ``None`` because both mean "do
       not repaint". A user who asked is owed the distinction, so it comes back
       as :data:`TITLE_UNCHANGED` and the receipt can say the name still fits.
+    * **The reply is gated, but never retried.** A candidate that still parses
+      as markup (the wrapped-title defect this module's acceptance section is
+      about) is refused by :func:`validate_generated_title` instead of being
+      stored. ONE bounded call answers a command: a corrective resample would
+      put a second provider round trip in front of someone waiting on a
+      keystroke, so this path takes Tier 0 only. A refused reply lands where
+      the model's own decline lands — the standing name if one is in force,
+      nothing-yet if none is — and the gate logs the reason.
     * **The question is asked with its OWN system block and a tail-heavy
       sample.** :data:`REFRESH_SYSTEM_PROMPT` and
       :data:`REFRESH_HEAD_TURNS` / :data:`REFRESH_TAIL_TURNS` replace the
@@ -1352,9 +2047,15 @@ async def refresh_title(
         return TitleRefresh(TITLE_UNCHANGED if current else TITLE_NOTHING_YET)
     # narrowed: CALL_CANCELLED, CALL_FAILED and None all returned above
     assert isinstance(title, str)
-    if current and title.casefold() == current.casefold():
+    # Tier 0, and only Tier 0 — see the bullet in the docstring for why this
+    # path does not cascade. The gate has already logged its reason; the
+    # outcome here is the same instruction the model's own decline carries.
+    checked = validate_generated_title(title)
+    if checked is None:
+        return TitleRefresh(TITLE_UNCHANGED if current else TITLE_NOTHING_YET)
+    if current and checked.casefold() == current.casefold():
         return TitleRefresh(TITLE_UNCHANGED, current)
-    return TitleRefresh(TITLE_REFRESHED, title)
+    return TitleRefresh(TITLE_REFRESHED, checked)
 
 
 async def routed_refresh(current: str, session: Any) -> TitleRefresh:

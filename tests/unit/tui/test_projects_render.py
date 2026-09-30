@@ -9,12 +9,15 @@ canvas to these numbers) is asserted in ``test_projects_view.py``.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any
 
+import pytest
 from rich.cells import cell_len
 from rich.style import Style
 
+from local_operator import projects as projects_mod
+from local_operator.tui import projects_render
 from local_operator.tui.projects_render import (
     BOARD_CARDS_MAX,
     BOARD_COLUMN_WIDTH,
@@ -24,6 +27,7 @@ from local_operator.tui.projects_render import (
     auto_timeline_tier,
     board_position,
     detail_footer,
+    detail_milestone_row_text,
     list_position,
     project_at,
     render_project_board,
@@ -378,6 +382,43 @@ def test_timeline_empty_store_uses_the_shared_sentence() -> None:
 
 
 # -- the pinned footer -------------------------------------------------------
+
+
+def test_the_footer_rows_and_tool_share_one_local_day_on_an_evening_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Agent review round 5: ONE basis, or the footer contradicts the rest.
+
+    Evening probe, west of Greenwich: the local day is the 29th while UTC has
+    rolled to the 30th. ``projects_render.today_iso`` was the last UTC reader,
+    so the footer called a 2026-09-30 milestone ``[overdue]`` while the page
+    rows and the tool receipt called it ``upcoming``. The fake clock keeps the
+    two days distinct whatever the wall clock says, so a revert to UTC fails
+    here.
+    """
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return datetime(2026, 9, 29, 20, 55)
+            return datetime(2026, 9, 30, 0, 55, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(projects_mod, "datetime", FakeDatetime)
+
+    milestone = {"name": "spec shipped", "target_date": "2026-09-30", "completed_at": None}
+    footer = detail_footer(_view(milestones=[milestone])).plain
+    assert "[upcoming]" in footer
+
+    row = detail_milestone_row_text(milestone, selected=False).plain
+    assert "upcoming" in row
+
+    assert projects_mod.milestone_state(None, "2026-09-30") == "upcoming"
+
+    # One basis, pinned against a revert: both readers must say the LOCAL 29th,
+    # never UTC's 30th.
+    assert projects_render.today_iso() == "2026-09-29"
+    assert projects_mod._today_iso() == "2026-09-29"
 
 
 def test_detail_footer_names_progress_reporter_and_staleness() -> None:

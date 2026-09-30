@@ -16,6 +16,7 @@ from local_operator import resume
 from local_operator.network import audit as audit_mod
 from local_operator.network import cli as net_cli
 from local_operator.network import readiness, relay, store, types, wire
+from local_operator.network.credentials import offers
 from tests.unit.network import conftest as net_fixtures
 
 NETWORK = "n_0123456789abcdef01234567"
@@ -1789,8 +1790,11 @@ def test_a_refused_share_does_not_create_a_store(
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
     assert not (root / "auth.db").exists()
-    # (1) The shape read the share verb runs first.
-    shape = net_cli._credential_shape(f"mcp:{NOTION_URL}")  # noqa: SLF001
+    # (1) The shape read the share verb runs first. The classifier moved to
+    # ``credentials.offers`` (one implementation for the ledger, the share verb
+    # and the join-time offer); its read-only promise is the same one this cell
+    # has always pinned.
+    shape = offers.shape_for_key(f"mcp:{NOTION_URL}", root)
     assert shape == ("mcp-rotating", "mcp-oauth", "")
     assert not (root / "auth.db").exists(), "the shape read wrote a store"
     # (2) The refusal itself.
@@ -1799,7 +1803,7 @@ def test_a_refused_share_does_not_create_a_store(
     assert "no MCP login" in refusal.value.sentence
     assert not (root / "auth.db").exists(), "the refusal wrote a store"
     # (3) The provider read both halves of the verb share.
-    assert net_cli._provider_rows("openai", root) == []  # noqa: SLF001
+    assert offers.provider_rows("openai", root) == []
     assert not (root / "auth.db").exists(), "the provider read wrote a store"
 
 
@@ -1826,12 +1830,12 @@ def test_a_damaged_store_degrades_instead_of_raising(
             database.write_bytes(b"")
             os.chmod(database, 0o000)
         try:
-            shape = net_cli._credential_shape(f"mcp:{NOTION_URL}")  # noqa: SLF001
+            shape = offers.shape_for_key(f"mcp:{NOTION_URL}", root)
             assert shape == ("mcp-rotating", "mcp-oauth", ""), kind
             with pytest.raises(types.MeshRefusal) as refusal:
                 net_cli._require_local_credential(f"mcp:{NOTION_URL}", "mcp-oauth")  # noqa: SLF001
             assert "no MCP login" in refusal.value.sentence, kind
-            assert net_cli._provider_rows("openai", root) == [], kind  # noqa: SLF001
+            assert offers.provider_rows("openai", root) == [], kind
         finally:
             if database.exists():
                 os.chmod(database, 0o600)

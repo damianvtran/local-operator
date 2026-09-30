@@ -117,6 +117,7 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     "compute-pool-v1",
     "peer-readiness-v1",
     "mcp-defs-v1",
+    "pair-offer-v1",
 )
 MESH_NET_V1 = "mesh-net-v1"
 #: The peer-readiness op's capability (``readiness.py``). It is advertised by
@@ -132,6 +133,15 @@ PEER_READINESS_V1 = "peer-readiness-v1"
 #: did not ask to make. Named here so the tuple above, the push's ask condition
 #: and the tests read ONE spelling of the string.
 MCP_DEFS_V1 = "mcp-defs-v1"
+#: The pair ceremony's share list (``handshake.pair_offer_frame``). Advertised by
+#: every build that SENDS or READS ``net_pair_offer``; the owner checks it against
+#: the joiner's hello before sending, and the joiner's bounded drain checks it
+#: against the owner's challenge before reading — so a build that never heard of
+#: it both sends and reads NOTHING, and the ceremony is byte-identical to today's.
+#: That both-sides rule is the whole version gate (``MESH_PROTOCOL_VERSION`` does
+#: not move); an old peer ignores the unknown string, which the mixed-build cells
+#: pin.
+PAIR_OFFER_V1 = "pair-offer-v1"
 
 
 # ---------------------------------------------------------------------------

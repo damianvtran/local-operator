@@ -81,6 +81,7 @@ from local_operator.harness.jobs import (
     JOB_RESULT_MESSAGE_TYPE,
     AsyncJob,
     AsyncJobManager,
+    is_model_fallback,
 )
 from local_operator.harness.loop import AgentLoop, LoopContext, _materialize_asides
 
@@ -93,6 +94,7 @@ from local_operator.harness.message_types import (
     HUB_MESSAGE_TYPE,
     PEER_MESSAGE_MESSAGE_TYPE,
     PROJECT_REMINDER_MESSAGE_TYPE,
+    SESSION_BINDING_NOTICE_MESSAGE_TYPE,
     SESSION_CREDENTIAL_MESSAGE_TYPE,
     SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
     SESSION_INCIDENT_MESSAGE_TYPE,
@@ -219,7 +221,10 @@ from local_operator.prompts_api import (
 )
 from local_operator.redaction_shapes import ShapeReport
 from local_operator.references import expand_references
-from local_operator.session.credential_binding import SESSION_BINDING_CUSTOM_TYPE
+from local_operator.session.credential_binding import (
+    SESSION_BINDING_CUSTOM_TYPE,
+    CredentialBinding,
+)
 from local_operator.session.goal import GoalHistoryEntry, GoalJudgeState, GoalState
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.model_selection import SELECTED_MODEL_CUSTOM_TYPE
@@ -227,6 +232,7 @@ from local_operator.session.naming import (
     CONVERSATION_NAME_CUSTOM_TYPE,
     MAX_TITLE_CHARS,
     ConversationName,
+    TitleFitCheck,
 )
 from local_operator.session.protocol import (
     CompactionOutcome,
@@ -578,7 +584,99 @@ SESSION_CAPABILITY_TOOLS: tuple[str, ...] = (
     "monitor",
     "hub",
     "ask",
+    # The sessions tool is gated on `subagent_launcher` — a field only a real
+    # Session's per-turn context carries — so the merge below is what puts it
+    # on a live session's inventory (and `harness/subagent`'s derived prune is
+    # what keeps it off a child that may not delegate). Last, so the appended
+    # end of the provider-visible array stays appended (design
+    # sessions-tool.md §3.3).
+    "sessions",
 )
+
+#: Tag put on a tool executor that :func:`_op_scoped_execute` already wrapped, so
+#: a second pass over the same tool object cannot wrap it again. A double wrap is
+#: not harmless: the outer one would refuse a call the inner one admitted only if
+#: the two disagree, and the day they do is the day the refusal has no author.
+_OP_SCOPE_TAG = "_lop_op_scoped"
+
+
+def _narrow_op_enum(parameters: dict[str, Any], allowed: frozenset[str]) -> dict[str, Any]:
+    """``parameters`` with the ``op`` property's ``enum`` cut to ``allowed``.
+
+    A COPY, and shallow — the caller's schema dict belongs to the tool the
+    registry built and may be shared with a sibling session in the same process
+    (``create_tools`` runs per session, but a host may reuse one tool list).
+
+    Silent when there is no ``op`` enum to narrow: this runs on EVERY declared
+    tool, and most of them multiplex nothing (``read``, ``write``, ``bash``). A
+    tool whose ``op`` is a free string keeps it — the wrapper is the authoritative
+    half and a schema with no enum states no promise to narrow.
+    """
+    properties = parameters.get("properties")
+    if not isinstance(properties, dict):
+        return parameters
+    op = properties.get("op")
+    if not isinstance(op, dict) or not isinstance(op.get("enum"), list):
+        return parameters
+    narrowed = [value for value in op["enum"] if value in allowed]
+    if len(narrowed) == len(op["enum"]):
+        return parameters
+    copied = dict(parameters)
+    copied["properties"] = {**properties, "op": {**op, "enum": narrowed}}
+    return copied
+
+
+def _op_scoped_execute(execute: Any, tool_name: str, allowed: frozenset[str]) -> Any:
+    """Wrap ``execute`` so an ``op`` outside ``allowed`` never reaches the tool.
+
+    THE ENFORCEMENT HALF of the op scope (see
+    :meth:`Session._scope_declared_ops` for why the schema alone is not enough).
+    The refusal is a normal, non-throwing tool result — the harness contract every
+    builtin keeps (tools never throw into the loop) — and it names the tool and
+    the op, because the reader is the model and the useful sentence is "not this
+    one", not "something went wrong".
+
+    Only the ``op`` argument is inspected, and only its STRING value: a call whose
+    ``args`` is not a mapping, or whose ``op`` is absent, is passed straight
+    through. That direction is deliberate — this wrapper must never be the reason
+    a legitimately permitted call fails to run, and a malformed ``op`` is the
+    tool's own validation to refuse, with its own message.
+    """
+    if getattr(execute, _OP_SCOPE_TAG, False):
+        return execute
+
+    async def scoped(
+        tool_call_id: str,
+        args: dict[str, Any],
+        signal: Any = None,
+        on_update: Any = None,
+        context: Any = None,
+    ) -> Any:
+        requested = args.get("op") if isinstance(args, Mapping) else None
+        if isinstance(requested, str) and requested not in allowed:
+            from local_operator.harness.types import TextContent, ToolResult
+
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                content=[
+                    TextContent(
+                        text=(
+                            f"{tool_name} {requested!r} is not available in this session. "
+                            f"Available ops: {', '.join(sorted(allowed))}."
+                        )
+                    )
+                ],
+                is_error=True,
+            )
+        return await execute(tool_call_id, args, signal, on_update, context)
+
+    setattr(scoped, _OP_SCOPE_TAG, True)
+    # ``functools.wraps``-style identity for anything that reads the executor's
+    # own name (traces, the approval describe hook's fallback): a wrapper that
+    # renamed the callable would make a log line lie about which tool ran.
+    scoped.__name__ = getattr(execute, "__name__", tool_name)
+    return scoped
 
 
 def _splice_in_registry_order(existing: Sequence[Any], fresh: Sequence[Any]) -> list[Any]:
@@ -1001,6 +1099,16 @@ _PERSISTABLE_CUSTOM_TYPES: frozenset[str] = frozenset(
         # cannot silently drop the row. The MODEL is kept out of it by the
         # renderer's allow-list, not by this one.
         SESSION_BINDING_CUSTOM_TYPE,
+        # SESSION_BINDING_NOTICE_MESSAGE_TYPE is the account-change notice that
+        # rides the same seam (slice B, D1). Journaled by
+        # ``journal_credential_binding_change`` through ``append_message``
+        # directly, so membership is again not what persists it today; the line
+        # is kept for the same future-proofing reason as its row's — a durable
+        # record of a switch must not be droppable by a predicate that has not
+        # been written yet. The MODEL is kept out of it by the renderer's
+        # allow-list, not by this one: the notice is deliberately
+        # operator-facing (see its note in ``harness/message_types.py``).
+        SESSION_BINDING_NOTICE_MESSAGE_TYPE,
         # SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE IS persisted, and it is the
         # member whose persistence is easiest to mistake for an oversight: the
         # record is operator-facing and enters no model context (see its own
@@ -2124,6 +2232,14 @@ _ROSTER_ROW_FIELDS = frozenset(
         # uses ``registrant_id`` so the old key ages out with the sidecars.
         "registrant_id",
         "model_label",
+        # The pin the launch resolved, when one did — registration-stamped and
+        # never overwritten, so a row restored from the snapshot can still
+        # render the fallback badge from ``model_label !=
+        # requested_model_label``. The runtime-only ``model_fallback``/reason
+        # pair is deliberately NOT persisted beside it (see ``AsyncJob``): the
+        # reason is not re-derivable but IS replaceable by a comparison, and a
+        # strict reader that meets an unknown key drops the whole row.
+        "requested_model_label",
         "context_window",
         "usage",
         # Bounded by distinct provider/model/accounting-mode tuples, not child
@@ -2371,6 +2487,17 @@ class Session:
         #: ``None`` on a session built without one (tests, embedders): the gate
         #: then never calls anything and every change is delivered.
         monitor_classify: MonitorClassify | None = None,
+        #: The naming errand's Tier-1 fit check (``naming.title_fit_check``):
+        #: bounded state → verdict, or ``None`` = "no classifier". A second
+        #: adapter over the SAME shared ``ClassificationService`` as the two
+        #: callables above — one cascade, one breaker, one credential memo —
+        #: rather than a service of its own. ``None`` is a supported state
+        #: (every session built without the classification layer, and every
+        #: reduced host): the acceptance cascade then hedges with an
+        #: independent second naming sample instead of asking. Read per call by
+        #: the naming owners; a captured answer would pin a seam hosts and tests
+        #: swap after construction.
+        title_fit_check: TitleFitCheck | None = None,
         # Called each turn with the session's live ``model_label`` so the env
         # block names the running model; accepts it positionally (``...``) and
         # may return sync or async. A provider that ignores the argument is
@@ -2857,6 +2984,13 @@ class Session:
         #: runtime rather than a trusted one — an unattended compliance worker
         #: that must reach its screening tools and nothing else.
         self._declared_tools: frozenset[str] | None = None
+        #: The OPS a declared tool may reach, for the few tools whose reach is not
+        #: its name. ``None`` means "every op this build's tool accepts", which is
+        #: the state every declaration without an op scope is in — see
+        #: :meth:`set_tool_inventory` for why a per-tool NAME allow-list is not
+        #: enough to state this run's reach (``agent reset``/``agent sync`` are
+        #: ``op=`` values of the ``agent`` tool, not tools).
+        self._declared_tool_ops: dict[str, frozenset[str]] | None = None
         #: Whether the declaration above also stands as the APPROVAL for its own
         #: members. Set with it, never implied by it: see
         #: :meth:`set_tool_inventory` for why an interactive host that narrows a
@@ -3449,6 +3583,16 @@ class Session:
             index_writable=lambda: not self._monitor_index_write_failed,
             classify=monitor_classify,
         )
+        #: Stored, not merely consumed: the naming OWNERS (the TUI's naming
+        #: workers and the runtime's) reach the fit check through the session
+        #: they are naming, because that is the only object both of them hold
+        #: (`self._session` on the runtime handle, the app's current session).
+        #: The read is a `getattr(..., None)` probe on the owner side rather
+        #: than a hard access: a reduced session built by a test or an embedder
+        #: without the classification layer is a supported state, and the
+        #: cascade hedges rather than asking. See
+        #: ``tests/unit/session/test_viewer_protocol.py``'s owner-only probe set.
+        self.title_fit_check = title_fit_check
         #: Whether this session is AIDA's (``local_operator.aida``), resolved
         #: once per open by :meth:`_aida_is_hers` — one stat of
         #: ``<config>/aida/state.json`` on every session that is not hers, and
@@ -3534,6 +3678,13 @@ class Session:
         # display spec from the pin, and the derivation's input is the target,
         # not the previous derivation.
         self._active_route: tuple[str, str | None] | None = None
+        # WHY the route last moved — the settle reason the stream fn reported
+        # ("provider failure: quota HTTP 429", a recovery text, ...). Persisted
+        # beside the pin in the ``active_model_route`` row so a later reader
+        # can answer "why is this session on another model": the row used to
+        # record only WHICH model served, and the pin-integrity investigation
+        # could not reconstruct the why from a transcript at all.
+        self._active_route_reason: str | None = None
         # AFTER the wake/name restores, same transcript, same reason: a
         # resumed session must come back on the model that was really
         # answering when it closed, not silently re-route the first prompt to
@@ -5431,6 +5582,7 @@ class Session:
         """
         self._active_fallback = None
         self._active_route = None
+        self._active_route_reason = None
         self._spawn_background(self._persist_active_route(primary))
         self._spawn_model_change(primary, reason)
 
@@ -6352,6 +6504,32 @@ class Session:
         self._persist_attachment()
         self.refresh_frontend_state()
         return display_name
+
+    def set_run_preamble(self, text: str) -> None:
+        """Install the SERVER-OWNED preamble of a configuration run.
+
+        The counterpart of :meth:`attach_agent_profile` for text that has no
+        profile behind it: the run's boundary and remit are written by the
+        composition root that created the run (see
+        ``session_factory.AGENTS_CONFIG_PREAMBLE``), not by the operator and not
+        by the model, and they describe authority rather than a persona.
+
+        RIDES THE VOLATILE TAIL, not the frozen prefix, exactly as the two
+        briefs beside it do — so the session that reads it is told at every turn
+        rather than once at birth, and so a session that was already running
+        when the preamble arrived is not made to re-send a whole cached prompt.
+
+        DELIBERATELY NOT PERSISTED, and that half is load-bearing: a
+        configuration run's remit is a property of the run's ORIGIN, and the
+        composition root re-applies it on every boot that finds that origin in
+        the marker (``retention.read_desktop_purpose``). Journalling it into
+        ``attachment.json`` the way an attached profile is journalled would make
+        it look like the operator's own choice — the file's schema has one
+        ``agent`` slot and it means a resolvable profile name — and a later
+        manual edit of that file could then drop the boundary.
+        """
+        self._goal_state.run_brief = text
+        self.refresh_frontend_state()
 
     @property
     def variables(self) -> Any:
@@ -8316,11 +8494,70 @@ class Session:
         :func:`local_operator.agent_profiles.filter_tools` treats the same case
         for a role. It fails CLOSED, which is the right direction for a security
         control.
+
+        THE OP SCOPE IS APPLIED HERE TOO, and for the reason the paragraph above
+        gives: a declaration that named a tool whose reach is not its name would
+        otherwise hand the run every op that tool carries. `agent` is the case
+        that forced it — `reset` and `sync` are ``op=`` values of it, so declaring
+        `agent` granted a network fetch with credentials and an overwrite of
+        instructions the operator wrote. Both halves of that narrowing live in
+        :meth:`_scope_declared_ops`; this method is where every inventory writer
+        passes, so this is where the two cannot be applied apart.
         """
         if self._declared_tools is None:
             return list(tools)
         allowed = self._declared_tools
-        return [tool for tool in tools if getattr(tool, "name", None) in allowed]
+        return self._scope_declared_ops(
+            [tool for tool in tools if getattr(tool, "name", None) in allowed]
+        )
+
+    def _scope_declared_ops(self, tools: Sequence[AgentTool]) -> list[AgentTool]:
+        """Narrow declared tools to the OPS this session's declaration admits.
+
+        WHY OP-LEVEL SCOPE EXISTS AT ALL. A tool's reach is its ``op`` argument
+        for the tools that multiplex several operations — and one of them,
+        ``agent``, carries both an ordinary authoring surface and two ops a
+        bounded run must not have: ``reset`` overwrites instructions the operator
+        wrote (it prints the replaced text back precisely so the write is
+        recoverable), and ``sync`` fetches from the hub with the operator's
+        stored credentials. Declaring ``agent`` for "add or edit agents" without
+        a scope therefore hands out all three, which is the gap this closes.
+
+        BOTH HALVES, because either alone is a half-answer:
+
+        * the SCHEMA's ``op`` enum is narrowed, so the model is told the truth
+          about what this session can do rather than discovering it by refusal
+          (the same rule the role allow-lists state: a surface that cannot
+          resolve should not be advertised);
+        * ``execute`` is WRAPPED, so a call that names an excluded op anyway is
+          refused before the tool's own dispatch — by name and by op, which is
+          the property ``set_tool_inventory`` sells ("the excluded tools are not
+          reachable"), applied one level down. This is the authoritative half:
+          the enum is a hint the model can lie about, and a caller that supplies
+          a fallback resolver or a raw args dict reaches the tool regardless.
+
+        Never narrows a tool the declaration did not scope, and never narrows
+        twice (the wrapper is tagged, see :func:`_op_scoped_execute`), because a
+        double wrap would refuse a call the inner wrapper had already admitted.
+        """
+        scoped = self._declared_tool_ops
+        if not scoped:
+            return list(tools)
+        narrowed: list[AgentTool] = []
+        for tool in tools:
+            allowed = scoped.get(getattr(tool, "name", ""))
+            if allowed is None:
+                narrowed.append(tool)
+                continue
+            narrowed.append(
+                tool.model_copy(
+                    update={
+                        "parameters": _narrow_op_enum(tool.parameters, allowed),
+                        "execute": _op_scoped_execute(tool.execute, tool.name, allowed),
+                    }
+                )
+            )
+        return narrowed
 
     def set_tool_confinement(self, root: str | Path | None) -> None:
         """Confine this session's local tool reach to ``root``, or lift it.
@@ -8358,6 +8595,7 @@ class Session:
         names: Sequence[str] | None,
         *,
         unattended: bool = False,
+        ops: Mapping[str, Sequence[str]] | None = None,
     ) -> None:
         """Declare — and ENFORCE — the set of tools THIS session may reach.
 
@@ -8390,6 +8628,16 @@ class Session:
         per call (see ``attach_agent_profile``), which is why the two are separate
         arguments and not one behaviour.
 
+        ``ops`` narrows a NAMED tool's own operations, for the tools whose reach
+        is not their name: ``{("agent"): ("list", "show", ...)}``. It exists
+        because one of them, ``agent``, multiplexes ``reset`` (overwrites
+        instructions the operator wrote) and ``sync`` (fetches from the hub with
+        the operator's stored credentials) behind the same tool that authors a
+        profile — so a caller whose authority is "add or edit" and who names
+        ``agent`` would otherwise be handed both. A tool the mapping does not
+        name is left whole; see :meth:`_scope_declared_ops` for the two halves of
+        how the scope is enforced.
+
         Invariants a caller can rely on:
 
         * every tool a declared run reaches is named in ``names``;
@@ -8409,8 +8657,19 @@ class Session:
           same way: a later call may turn the declaration's auto-approval OFF
           (``unattended=False``) but never ON. A narrowing call cannot be the
           loosening one.
+          * the ``ops`` scope is one-way by the SAME rule, per tool: a later call
+        may narrow a tool's admitted ops but never widen them, and the refusal is
+        the same ``ValueError``. Stated because the hole it closes is otherwise
+        invisible — a second call is the one place a run's op scope could be
+        lifted after the fact, and the invariant that makes the names meaningful
+        would read as though it covered this too. OMITTING a tool from ``ops`` is
+        not a way around it either: a scope in force is carried forward, so the
+        only directions left are "the same" and "narrower".
         """
         incoming = None if names is None else frozenset(names)
+        incoming_ops = (
+            None if ops is None else {name: frozenset(values) for name, values in ops.items()}
+        )
         in_force = self._declared_tools
         if in_force is not None:
             # THE one-way invariant, where a caller can actually break it. The
@@ -8437,7 +8696,39 @@ class Session:
                     "a tool declaration is one-way for the life of a session: refusing to "
                     f"widen {sorted(in_force)} with {widened}"
                 )
+        # THE OP SCOPE'S OWN ONE-WAY CHECK, beside the names' and for the same
+        # reason: a later call naming an op a tool was declared not to have is a
+        # width increase one level down, and it is the only way to reach for it
+        # after the fact. ``None`` ("no op scope stated") is read as "no change"
+        # rather than "lift the scope", matching ``names=None`` in the branch
+        # above — the value an absent scope has must never be the loosening one.
+        #
+        # IN-FORCE SCOPES ARE CARRIED FORWARD BEFORE ANYTHING IS COMPARED, and
+        # that merge is not a convenience: this mapping is REPLACED at the end of
+        # this method, so a call that restated one tool's scope and said nothing
+        # about another would otherwise DROP the second's — the omission shape of
+        # exactly the width increase the check below refuses. It is the same hole
+        # as ``names=None`` one level up, arrived at by saying less rather than by
+        # saying more, and it is reachable in product code because the wrap that
+        # enforces a scope lives on the tool OBJECT while the scope itself is
+        # re-derived from every pristine rebuild (``create_tools``).
+        in_force_ops = self._declared_tool_ops
+        if in_force_ops is not None:
+            incoming_ops = {**in_force_ops, **(incoming_ops or {})}
+            widened_ops = {
+                name: sorted(values - in_force_ops.get(name, values))
+                for name, values in incoming_ops.items()
+                if name in in_force_ops
+            }
+            widened_ops = {name: extra for name, extra in widened_ops.items() if extra}
+            if widened_ops:
+                raise ValueError(
+                    "a tool declaration's op scope is one-way for the life of a "
+                    f"session: refusing to widen {widened_ops}"
+                )
         self._declared_tools = incoming
+        if incoming_ops is not None:
+            self._declared_tool_ops = incoming_ops
         # ``unattended`` is one-way in the direction that matters, for the same
         # reason the reach above is: whoever can reach this method must not be
         # able to LOOSEN what a declaration in force granted. Before this, the
@@ -10576,6 +10867,7 @@ class Session:
         if target is None:
             self._active_fallback = None
             self._active_route = None
+            self._active_route_reason = None
             await self._persist_active_route(self._model)
             await self._emit(
                 ModelChangeEvent(
@@ -10606,6 +10898,7 @@ class Session:
             return
         self._active_fallback = spec
         self._active_route = (selector, target_effort)
+        self._active_route_reason = reason
         await self._persist_active_route(self._model)
         await self._emit(
             ModelChangeEvent(
@@ -12225,11 +12518,38 @@ class Session:
         """
         wanted = effort
         if wanted is None and agent and agent != "task":
-            try:
-                from local_operator.agent_profiles import resolve_profile
+            from local_operator.agent_profiles import resolve_profile
 
-                profile = resolve_profile(agent, registry=self.agent_registry)
-            except Exception:  # noqa: BLE001 - tier lookup must not fail a spawn
+            registry = self.agent_registry
+            try:
+                # FRESH at spawn/resume: the registry's cached view is up to
+                # ``AgentRegistry._refresh_interval`` stale, and a role PIN
+                # written after this session started must reach the NEXT
+                # spawn — the resolution requirement this read exists to
+                # honour.
+                refresh = getattr(registry, "refresh_now", None)
+                if callable(refresh):
+                    refresh()
+                profile = resolve_profile(agent, registry=registry, strict_registry=True)
+            except Exception as exc:  # noqa: BLE001
+                # An unreadable registry is NOT "no role of that name": the
+                # old swallow sent this down the seed path (a packaged seed
+                # carries no operator pin) and then inherited the session
+                # model with no trace — precisely the silent substitution the
+                # strict tier path refuses one layer up. Surface it instead.
+                if strict:
+                    raise SubagentModelUnavailable(
+                        agent,
+                        f"the agent registry could not be read ({exc}); refusing to "
+                        "inherit the session model for a role whose pin cannot be "
+                        "resolved",
+                    ) from exc
+                logger.warning(
+                    "agent registry could not be read while resolving role %r (%s); "
+                    "using the session model",
+                    agent,
+                    exc,
+                )
                 profile = None
             if profile is not None:
                 wanted = profile.effort
@@ -13009,6 +13329,84 @@ class Session:
         """
         self._spawn_background(self.journal_mcp_recovery(server, tool_count))
 
+    def _on_credential_binding_change(
+        self,
+        binding: CredentialBinding,
+        previous: CredentialBinding | None,
+        *,
+        device_id: str,
+    ) -> None:
+        """Recorder hook (``set_change_handler``): announce an account change.
+
+        Fire-and-forget on the session's background machinery, matching
+        :meth:`_on_mcp_incident`: the recorder calls this from its own write
+        task, where a raise must never fail the bookkeeping write that is
+        already on disk. ``previous is None`` marks the FIRST serve — nothing
+        to compare, so nothing to announce (memo M1) — and journals nothing.
+        ``device_id`` is the recording device's id, keyword-bound by
+        ``attach_credential_binding`` because the recorder's own handler
+        contract is ``(new, previous)`` and neither row can carry "this
+        device".
+        """
+        if previous is None:
+            return
+        self._spawn_background(
+            self.journal_credential_binding_change(binding, previous, device_id=device_id)
+        )
+
+    async def journal_credential_binding_change(
+        self,
+        binding: CredentialBinding,
+        previous: CredentialBinding,
+        *,
+        device_id: str,
+    ) -> None:
+        """Persist and surface ONE notice that the serving account changed (D1).
+
+        THE NON-SILENCE HALF OF THE BINDING (design §2.4; memo D1). The row
+        records the change; this is the operator-visible announcement of it,
+        written once per appended change row by the recorder's ``on_change``
+        seam, and it is deliberately NOT model-visible (see
+        ``SESSION_BINDING_NOTICE_MESSAGE_TYPE`` for why that exclusion is a
+        feature). The sentence comes from ``network/credentials/messages.py`` —
+        the one home for credential copy — and an empty render (nothing the
+        operator must be told) journals nothing.
+
+        Persisted like the MCP-unavailable warning and for the same reason: the
+        row is a historical fact a resume must still be able to answer "was
+        this session switched, and when?" from, and ``preserve_mtime`` keeps
+        the notice from restamping the activity clock (the type is bookkeeping
+        in ``transcript.BOOKKEEPING_CUSTOM_TYPES``). Parked, never spliced
+        (``_append_or_park_journal``); ``_journal_lock`` so two changes landing
+        together cannot invert against the row write they narrate.
+        """
+        from local_operator.network.credentials.messages import (
+            render_binding_change_notice,
+        )
+
+        if self._disposed:
+            return
+        text = render_binding_change_notice(binding, previous, self_device=device_id)
+        if not text:
+            return
+        message = CustomMessage(
+            custom_type=SESSION_BINDING_NOTICE_MESSAGE_TYPE,
+            attribution="system",
+            details={
+                "text": text,
+                "provider": binding.provider,
+                "owner_device": binding.owner_device,
+                "owner_device_name": binding.owner_device_name,
+                "credential_id": binding.credential_id,
+            },
+        )
+        try:
+            async with self._journal_lock:
+                await self._transcript.append_message(message, preserve_mtime=True)
+                self._append_or_park_journal(message)
+        except OSError:
+            logger.warning("could not journal credential binding change", exc_info=True)
+
     async def _on_job_completed(self, job_id: str, text: str, job: Any) -> None:
         """Auto-deliver one settled model-owned job back into the conversation.
 
@@ -13419,10 +13817,30 @@ class Session:
         summary = (text or "").strip()
         if len(summary) > 2000:
             summary = summary[:2000] + "…[truncated; full result via jobs/wait]"
+        # THE PIN CLAUSE (UX round 1, U1). The durable row the walk-away
+        # operator reads back is this completion delivery: the transcript
+        # notice is a LIVE row no replay carries, and the roster row tells a
+        # completed pinned-fallback child from a never-pinned one only via the
+        # dock marker. A result whose pin was quietly abandoned says so HERE.
+        # Selectors, not display names: this text is handed to the MODEL as
+        # well as shown, and the ``wait``/``jobs`` receipt beside it speaks
+        # the same spelling (``model=X (pinned Y)``). The clause keys on the
+        # same divergence rule every other surface uses (``is_model_fallback``)
+        # so a recovered child (labels back in agreement) stays silent, and
+        # the RUNTIME-only reason rides along when the live row still carries
+        # one — after a restart it is gone and the labels still answer (see
+        # ``AsyncJob.model_fallback_reason``).
+        requested = str(getattr(job, "requested_model_label", "") or "").strip()
+        effective = str(getattr(job, "model_label", "") or "").strip()
+        pin_clause = ""
+        if is_model_fallback(requested, effective):
+            reason = str(getattr(job, "model_fallback_reason", "") or "").strip()
+            cause = f" — {reason}" if reason else ""
+            pin_clause = f" (pinned {requested}, ran on {effective}{cause})"
         delivery = (
-            f"background job '{label}' {status}:\n{summary}"
+            f"background job '{label}' {status}{pin_clause}:\n{summary}"
             if summary
-            else f"background job '{label}' {status}."
+            else f"background job '{label}' {status}{pin_clause}."
         )
         details: dict[str, Any] = {"job_id": job_id, "text": delivery}
         if held:
@@ -17870,6 +18288,10 @@ class Session:
             {
                 "primary": f"{primary.provider}/{primary.model_id}",
                 "active": (None if route is None else {"selector": route[0], "effort": route[1]}),
+                # ADDITIVE key, deliberately: the route's settle reason. Older
+                # rows lack it and older readers ignore it; a reader that
+                # wants to say why the session moved can now answer.
+                "reason": self._active_route_reason,
             },
         )
 
@@ -18125,6 +18547,11 @@ class Session:
             return
         raw_effort = active.get("effort")
         effort = str(raw_effort) if isinstance(raw_effort, str) and raw_effort else None
+        raw_reason = details.get("reason")
+        if isinstance(raw_reason, str) and raw_reason:
+            # Older rows predate the key; a restored session keeps the reason
+            # for the next rewrite of the same row.
+            self._active_route_reason = raw_reason
         spec = self._spec_for_route(selector, effort)
         if spec is None:
             logger.warning("dropping unresolvable persisted fallback route: %r", selector)

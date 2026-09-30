@@ -131,9 +131,10 @@ place.
 
 **A session killed before it finished has no terminal intent, and cleanup will
 refuse it forever — correctly, because a live owner must not be closed behind
-its back.** The route out is not `cleanup`: resume that session
-(`lop exec --resume <session_id>`) and let the owner `close` the tab or finalize
-the scope. An agent reader's route is that `exec` form — the bare
+its back.** The route out is not `cleanup`: resume that session — the
+`sessions` tool's `resume`, or `lop exec --resume <session_id>` where the tool
+is absent — and let the owner `close` the tab or finalize the scope. An agent
+reader's route is that resume form — the bare
 `lop --resume <session_id>` belongs to the OPERATOR, typed at their own terminal,
 where the interactive path is open; from inside an agent shell it is refused
 (see `docs/EXEC.md`). The listing says this on the row itself.

@@ -45,6 +45,7 @@ from local_operator.slash_commands import SLASH_COMMANDS
 from local_operator.tui import app as app_module
 from local_operator.tui.app import RETITLE_MIN_GAP_S, OperatorApp
 from local_operator.tui.autocomplete import ArgumentChoice
+from local_operator.tui.events import TurnEnded
 from local_operator.tui.terminal_title import TerminalTitle
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
@@ -63,6 +64,15 @@ class _GatedSession(FakeSession):
         super().__init__()
         self.gate = asyncio.Event()
         self.title = ""
+        #: Per-call replies, consumed in order BEFORE ``title``. The acceptance
+        #: cascade spends up to two samples per attempt (sample + corrective or
+        #: hedged resample), so a test that wants a wrapped FIRST sample spells
+        #: the second reply out — see the cascade tests at the end of the file.
+        self.title_replies: list[str] = []
+        #: The owner-only fit-check seam the app reads per attempt. ``None``
+        #: (the default) is "no classifier", which the cascade answers by
+        #: hedging; a test that pins the classifier path sets a callable here.
+        self.title_fit_check: naming.TitleFitCheck | None = None
         self.name_gate: asyncio.Event | None = None
         # The two "this worker got here" barriers. `_settle` yields for a fixed
         # number of ticks, which is a guess about the scheduler rather than a
@@ -89,6 +99,8 @@ class _GatedSession(FakeSession):
             except asyncio.CancelledError:
                 self.timeline.append("name:cancel")
                 raise
+        if self.title_replies:
+            return self.title_replies.pop(0)
         return self.title
 
     def grow_transcript(self, turns: int) -> None:
@@ -186,8 +198,11 @@ async def test_the_title_is_generated_DURING_the_live_turn() -> None:
         # The turn has not finished and never will until the gate opens.
         assert session.prompts == ["fix the login redirect loop"]
         assert not session.gate.is_set()
-        # ...and the title is already stored and painted.
-        assert len(session.completions) == 1, "the title call waited for the turn"
+        # ...and the title is already stored and painted. TWO calls, both
+        # during the parked turn: the acceptance cascade's first sample, then
+        # the hedged second sample this fake draws because it wires no fit
+        # check (see naming's acceptance section for the bounded cascade).
+        assert len(session.completions) == 2, "the title call waited for the turn"
         assert session.conversation_name == "Fix the login flow"
         assert app._status is not None
         assert app._status._conversation_name == "Fix the login flow"
@@ -280,7 +295,9 @@ async def test_failed_attempt_releases_the_latch_for_a_retry() -> None:
         session.title = "<title>Bulk export columns</title>"
         app._maybe_name_conversation("also add the assignee email column")
         await _settle()
-        assert len(session.completions) == 2, "retry did not fire on the next message"
+        # Three: the failed first attempt (one call), then the retry's accepted
+        # sample plus its classifier-less hedge (see the acceptance cascade).
+        assert len(session.completions) == 3, "retry did not fire on the next message"
         assert session.conversation_name == "Bulk export columns"
 
 
@@ -304,7 +321,14 @@ async def test_landed_title_paints_the_band_and_keeps_the_latch() -> None:
         session.title = "<title>A different title</title>"
         app._maybe_name_conversation("now something else entirely")
         await _settle()
-        assert len(session.completions) == 1
+        # TWO, not one: this opener ("fix the login flow") and this reply
+        # ("Fix the login flow") are the same string after normalisation, so
+        # the Tier 0 echo rule refuses the first sample as "no naming happened"
+        # and the corrective resample is spent... and refuses again, after
+        # which the Tier 3 fallback stores that same opener label. The NAME is
+        # what this test pins, and it is unchanged; the pair is the cascade
+        # working as designed on a title-shaped opener.
+        assert len(session.completions) == 2
         assert session.conversation_name == "Fix the login flow"
 
 
@@ -670,11 +694,14 @@ async def test_a_material_change_of_subject_retitles_both_surfaces() -> None:
         app._submit_prompt("forget that, rewrite the billing importer instead")
         await _settle()
 
-        assert len(session.completions) == 2, "no re-title check was made"
+        # Four: the first-name pair (sample + classifier-less hedge, as
+        # everywhere in this file), then the re-title pair the cascade spends
+        # on its own clean-but-unclassified sample.
+        assert len(session.completions) == 4, "no re-title check was made"
         # The re-title call now carries the theme prompt, and the current title
         # rides the DATA as the `<current-title>` anchor rather than the system
         # block — the whole point of titling the trajectory, not the message.
-        retitle_system, retitle_data = session.completions[1]
+        retitle_system, retitle_data = session.completions[2]
         assert retitle_system == naming.THEME_SYSTEM_PROMPT
         assert "<current-title>\nFix the login flow\n</current-title>" in retitle_data
         assert retitle_data.startswith("<chat>")
@@ -709,7 +736,9 @@ async def test_the_sentinel_answer_leaves_the_title_and_the_band_alone() -> None
         app._submit_prompt("and make the redirect preserve the query string")
         await _settle()
 
-        assert len(session.completions) == 2, "the model was never asked"
+        # Three: the first-name pair, then the ONE re-title call — the sentinel
+        # answer spends no hedge (there is nothing to correct).
+        assert len(session.completions) == 3, "the model was never asked"
         assert session.conversation_name == "Fix the login flow"
         assert painted == [], "the band repainted on a no-change answer"
 
@@ -728,7 +757,9 @@ async def test_a_human_rename_is_never_overwritten_by_a_retitle() -> None:
         await _settle()
 
         assert session.conversation_name == "Ledger reconciliation"
-        assert len(session.completions) == 1, "a renamed conversation spent a re-title call"
+        # The pair is the first-name attempt (sample + classifier-less hedge);
+        # the re-title spent none because user_set outranks it.
+        assert len(session.completions) == 2, "a renamed conversation spent a re-title call"
 
 
 @pytest.mark.asyncio
@@ -756,7 +787,8 @@ async def test_a_settled_session_does_not_even_spend_a_check_on_an_in_goal_step(
         app._submit_prompt("now find me some good Port Credit restaurants to try it out")
         await _settle()
 
-        assert len(session.completions) == 1, "a settled session spent a re-title check"
+        # The pair is the first-name attempt; the declined re-title added none.
+        assert len(session.completions) == 2, "a settled session spent a re-title check"
         assert session.conversation_name == "Fix the login flow"
 
 
@@ -783,7 +815,8 @@ async def test_the_refresh_budget_stops_re_titling_after_the_cap() -> None:
         app._submit_prompt("forget all that, rewrite the billing importer instead")
         await _settle()
 
-        assert len(session.completions) == 1, "a capped session spent a re-title check"
+        # The pair is the first-name attempt; the capped budget spent no check.
+        assert len(session.completions) == 2, "a capped session spent a re-title check"
         assert session.conversation_name == "Fix the login flow"
 
 
@@ -872,7 +905,9 @@ async def test_a_typed_rename_outranks_a_later_material_change() -> None:
         assert session.conversation_name == "Ledger reconciliation"
         assert app._status is not None
         assert app._status._conversation_name == "Ledger reconciliation"
-        assert len(session.completions) == 1, "a renamed conversation spent a re-title call"
+        # The pair is the first-name attempt; the re-title spent none because
+        # user_set outranks it (the gate is what this test pins).
+        assert len(session.completions) == 2, "a renamed conversation spent a re-title call"
 
 
 @pytest.mark.asyncio
@@ -935,7 +970,9 @@ async def test_a_chatty_follow_up_makes_no_call_at_all() -> None:
             app._submit_prompt(chatter)
         await _settle()
 
-        assert len(session.completions) == 1, "a pleasantry spent a provider call"
+        # The two are the first-name attempt's bounded pair (sample + hedge);
+        # no chatter message spent a call of its own.
+        assert len(session.completions) == 2, "a pleasantry spent a provider call"
         assert session.conversation_name == "Fix the login flow"
 
 
@@ -965,7 +1002,10 @@ async def test_a_burst_of_substantive_follow_ups_costs_exactly_one_check() -> No
             app._submit_prompt(follow_up)
             await _settle()
 
-        assert len(session.completions) == 2, "the burst was not throttled to one check"
+        # Three: the first-name pair, plus exactly ONE re-title check for the
+        # whole burst (the first follow-up's sentinel asks; the rest are
+        # declined by the growth gate).
+        assert len(session.completions) == 3, "the burst was not throttled to one check"
 
 
 @pytest.mark.asyncio
@@ -989,14 +1029,17 @@ async def test_the_time_floor_defends_against_a_same_breath_burst() -> None:
         session.title = "<title>Billing importer rewrite</title>"
         app._submit_prompt("forget that, rewrite the billing importer instead")
         await _settle()
-        assert len(session.completions) == 1, "a one-second-old title was up for replacement"
+        # The pair is the first-name attempt; the in-floor message spent none.
+        assert len(session.completions) == 2, "a one-second-old title was up for replacement"
         assert session.conversation_name == "Fix the login flow"
 
         # Past the floor the model does get asked, and its answer is taken.
         now[0] += RETITLE_MIN_GAP_S + 1
         app._submit_prompt("forget that, rewrite the billing importer instead")
         await _settle()
-        assert len(session.completions) == 2
+        # Four: the first-name pair, then the re-title pair the cascade spends
+        # on its clean-but-unclassified sample.
+        assert len(session.completions) == 4
         assert session.conversation_name == "Billing importer rewrite"
 
 
@@ -1410,9 +1453,11 @@ async def test_typing_the_advertised_flag_runs_the_refresh_and_writes_a_receipt(
         await pilot.press("enter")
         await _settle()
 
-        # The refresh branch ran, and asked with the on-demand prompt.
-        assert len(session.completions) == 2, "the flag spelling spent no call"
-        system, _data = session.completions[1]
+        # The refresh branch ran, and asked with the on-demand prompt. Three
+        # calls: the first-name pair, then the ONE refresh call (the refresh
+        # path takes Tier 0 only — no hedge, see naming.refresh_title).
+        assert len(session.completions) == 3, "the flag spelling spent no call"
+        system, _data = session.completions[2]
         assert system == naming.REFRESH_SYSTEM_PROMPT
         # ...and the user is told what happened, on the surface they typed into.
         assert session.conversation_name == "Billing importer rewrite"
@@ -1793,8 +1838,10 @@ async def test_a_refresh_retitles_a_session_the_growth_gate_would_decline() -> N
         app._run_slash_command("/title refresh")
         await _settle()
 
-        assert len(session.completions) == 2, "the refresh spent no call"
-        system, data = session.completions[1]
+        # The pair is the first-name attempt; the refresh adds exactly one
+        # call (Tier 0 only — no hedge on the on-demand path).
+        assert len(session.completions) == 3, "the refresh spent no call"
+        system, data = session.completions[2]
         assert system == naming.REFRESH_SYSTEM_PROMPT
         assert "<current-title>\nFix the login flow\n</current-title>" in data
         assert session.conversation_name == "Billing importer rewrite"
@@ -2463,3 +2510,123 @@ async def test_an_unknown_title_option_notices_instead_of_renaming() -> None:
         assert session.conversation_name == "Fix the login flow"
         assert not session.conversation_name_state.user_set
         assert any("unknown title option" in notice for notice in _notices(app))
+
+
+# -- the acceptance cascade and the Tier 3 self-heal ---------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_wrapped_reply_never_reaches_the_band_and_the_retry_lands() -> None:
+    """The operator's defect, pinned at the TUI worker.
+
+    Sampled from the live report (the naming reply arrived wrapped in the
+    probe tag): the wrapped string must reach neither the store nor the band,
+    and the corrective resample's clean answer must land on both.
+    """
+    app, session = await _boot(title="")
+    session.title_replies = ["<PROBE#1>Probe session title", "Probe title recovered"]
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        app._maybe_name_conversation("recover the stale PR work")
+        await _settle()
+
+        assert session.conversation_name == "Probe title recovered"
+        assert app._status is not None
+        assert app._status._conversation_name == "Probe title recovered"
+        assert len(session.completions) == 2
+        assert naming.TITLE_CORRECTIVE_ADDENDUM in session.completions[1][0]
+        assert app._name_heal_text == ""
+
+
+@pytest.mark.asyncio
+async def test_an_exhausted_attempt_lands_the_fallback_and_the_turn_heal_upgrades_it() -> None:
+    """Both samples refused -> the opener fallback stores, and the NEXT
+    COMPLETED TURN spends the one-shot heal (the harness's fake never posts
+    ``TurnEnded``, so the exact message the live controller posts is posted)."""
+    app, session = await _boot(title="")
+    opener = "recover the stale PR work"
+    session.title_replies = [
+        "<PROBE#1>Probe session title",
+        "<PROBE#2>Probe session title",
+        "Probe title upgraded",
+        "Probe title upgraded",  # the heal attempt's classifier-less hedge
+    ]
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        app._maybe_name_conversation(opener)
+        await _settle()
+
+        assert session.conversation_name == naming.fallback_from_opener(opener)
+        assert app._name_heal_text == opener
+
+        app.post_message(TurnEnded(aborted=False, error=None, context_tokens=1000))
+        await _settle()
+        assert session.conversation_name == "Probe title upgraded"
+        assert app._name_heal_text == ""
+        assert len(session.completions) == 4
+
+        # SINGLE-SHOT: another completed turn spends nothing further.
+        app.post_message(TurnEnded(aborted=False, error=None, context_tokens=1000))
+        await _settle()
+        assert session.conversation_name == "Probe title upgraded"
+        assert len(session.completions) == 4
+
+
+@pytest.mark.asyncio
+async def test_the_heal_never_displaces_a_human_rename() -> None:
+    app, session = await _boot(title="")
+    session.title_replies = ["<first wrapped>", "<second wrapped>"]
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        app._maybe_name_conversation("recover the stale PR work")
+        await _settle()
+        assert app._name_heal_text == "recover the stale PR work"
+
+        session.set_conversation_name("Ledger reconciliation", user_set=True)
+        app.post_message(TurnEnded(aborted=False, error=None, context_tokens=1000))
+        await _settle()
+
+        assert session.conversation_name == "Ledger reconciliation"
+        assert app._name_heal_text == "", "the latch is consumed, never left armed"
+        assert len(session.completions) == 2, "the rename spent no further call"
+
+
+@pytest.mark.asyncio
+async def test_an_unusable_opener_arms_the_heal_with_an_empty_store() -> None:
+    """Tier 3 with nothing usable to fall back to: nothing is stored, and the
+    one-shot latch STILL arms with the opener — the retry the next completed
+    turn spends (and the only path the opener-filtered provisional left).
+    """
+    app, session = await _boot(title="")
+    opener = "<\u56d7>"
+    session.title_replies = ["<first wrapped>", "<second wrapped>"]
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        app._maybe_name_conversation(opener)
+        await _settle()
+
+        assert session.conversation_name == "", "nothing usable -> nothing stored"
+        assert app._name_heal_text == opener, "the heal survives an empty fallback"
+        assert len(session.completions) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_reachable_classifier_refuses_an_unfit_sample_and_the_retry_lands() -> None:
+    """The owner-only fit-check seam is threaded through and consulted: an
+    unfit first sample buys the corrective resample, not the store."""
+    app, session = await _boot(title="")
+    verdicts = iter([naming.TITLE_DOESNT_FIT, naming.TITLE_FITS])
+
+    async def fit(state: str) -> str | None:
+        return next(verdicts, None)
+
+    session.title_fit_check = fit
+    session.title_replies = ["Wrong subject shown", "Probe title recovered"]
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _ready(pilot, app)
+        app._maybe_name_conversation("recover the stale PR work")
+        await _settle()
+
+        assert session.conversation_name == "Probe title recovered"
+        assert len(session.completions) == 2
+        assert naming.TITLE_CORRECTIVE_ADDENDUM in session.completions[1][0]
