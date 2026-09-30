@@ -416,3 +416,20 @@ async def test_an_unpinned_launch_records_no_requested_model(tmp_path, monkeypat
     await wait_for(lambda: job.status == "completed")
     assert job.requested_model_label is None
     await session.dispose()
+
+
+def test_the_wire_row_carries_the_pin_to_an_attached_viewer() -> None:
+    """An attached viewer builds its job rows via ``JobState.from_job``; the
+    band there must be able to render the same badge, and an unpinned row's
+    ``None`` must survive the strict validation (the sidecar shape)."""
+    from local_operator.session.frontend_state import JobState
+
+    job = _pinned_job()
+    job.model_label = EFFECTIVE  # the route has moved it off the pin
+    wire = JobState.from_job(job)
+    assert wire.requested_model_label == PIN
+    assert wire.model_label == EFFECTIVE
+    assert model_fallback_badge(wire.requested_model_label, wire.model_label) != ""
+
+    unpinned = JobState.from_job(SimpleNamespace(model_label="test/m"))
+    assert unpinned.requested_model_label is None
