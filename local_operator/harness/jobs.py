@@ -30,7 +30,6 @@ from typing import Any, Awaitable, Callable, Literal, Mapping
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from local_operator.harness.types import AbortSignal, Usage
-from local_operator.model.naming import model_label as model_label_forms
 
 logger = logging.getLogger(__name__)
 
@@ -617,6 +616,14 @@ def model_fallback_badge(
     """
     if not is_model_fallback(requested, effective):
         return ""
+    # DEFERRED deliberately: ``harness.jobs`` sits on the lean closure an
+    # episode renders through (``harness/render.py`` — the benchmark's
+    # transcript pass), and a top-level import of the resolver here leaked
+    # ``model.naming``, the registry and the provider table into an episode's
+    # process — caught by ``tests/unit/evaluation/runner/test_isolation.py``.
+    # The resolver is needed only where a badge actually renders.
+    from local_operator.model.naming import model_label as model_label_forms
+
     running = str(effective).strip()
     provider, _, model_id = running.partition("/")
     display = model_label_forms(provider, model_id, effective_name).full

@@ -1728,6 +1728,12 @@ def _elide_row_facts_in_place(job: dict[str, Any]) -> None:
     the same class guard 4 KB over the line on its own. Its non-empty value is a
     single token from ``incidents.CUT_OFF_CAUSES``, so the field costs nothing at
     rest and tens of bytes on the handful of rows that carry it.
+    ``requested_model_label`` is the same shape again — None on every row whose
+    launch resolved no pin (every bash job, every unpinned child: the great
+    majority of any roster) and one short selector on a role-pinned child — and
+    landed with the same measurement: the ``ran all year`` guard sat 4,951 bytes
+    over the line with the null riding on its 200 rows, and dropping it puts the
+    ceiling back within reach while the pin that MATTERS still travels.
 
     Omission is exactly equivalent to sending those empty values: ``JobState``
     defaults all three, a delta rebuilds each row by revalidating the raw dict
@@ -1799,6 +1805,8 @@ def _elide_row_facts_in_place(job: dict[str, Any]) -> None:
         job.pop("launch_prompts", None)
     if not job.get("cut_off_cause"):
         job.pop("cut_off_cause", None)
+    if not job.get("requested_model_label"):
+        job.pop("requested_model_label", None)
     # Unconditional, unlike the three above: an ABSENT fact is dropped to save
     # bytes, this one is dropped because no reader exists for it. ``true`` is the
     # informative value and it is exactly the value that costs 25 B/row, so
