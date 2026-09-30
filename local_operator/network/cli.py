@@ -5088,8 +5088,7 @@ def _cmd_confirm(args: argparse.Namespace) -> int:
     admitted = (
         f"admitted {chosen.get('joiner_device_id')} to {chosen.get('network_name')}"
         if admit
-        else f"refused the pairing with {chosen.get('joiner_device_id')}; the "
-        "invite is burned"
+        else f"refused the pairing with {chosen.get('joiner_device_id')}; the " "invite is burned"
     )
     # U6 (design-confirmed fold, round 2): the owner's own receipt names what it
     # served, from the shares list the payload already carries — but ONLY when an
