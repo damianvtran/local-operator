@@ -1732,6 +1732,52 @@ def test_the_makefile_typed_gate_is_the_same_command_as_the_job() -> None:
     assert job_tokens[-1] == ".", "both spellings stay whole-tree"
 
 
+def test_the_makefile_typecheck_recipe_raises_the_node_heap_only_when_needed() -> None:
+    """A18. The heap branch's CONDITION, driven through /bin/sh.
+
+    A17 pins the recipe's strings — the `NODE_OPTIONS=` prefix, the 6144
+    literal, its equality with ci.yml — and a mutant that keeps all of them
+    while gutting the branch logic stays green there: `if true;` (raise always,
+    so a LARGER operator value gets a smaller one appended after it) or a
+    `-z`-only condition (never raise a smaller caller value). So this drives
+    the REAL preamble text, exactly as make hands it to the shell (`$$`
+    expanded, continuations joined), with a probe printing what the branch left
+    in `node_opts`, and asserts the three behaviours the branch exists for:
+    absent -> set, smaller -> raised (appended last: V8 resolves the flag
+    last-wins), larger -> untouched.
+
+    Mutations that must fail this: `if true;`; `-z` without the `-lt 6144`
+    arm; deleting the branch; dropping the caller's value from the append.
+    """
+    preamble, marker, _ = _makefile_recipe_blocks()["type-check"].partition(
+        'NODE_OPTIONS="$$node_opts" .venv/bin/python'
+    )
+    assert marker, "the recipe no longer exports NODE_OPTIONS for the wrapped gate"
+    # What make does before /bin/sh sees the recipe: `$$` -> `$`, and the
+    # `\`+newline continuations are one logical line. The probe prints exactly
+    # what the export uses.
+    script = preamble.replace("$$", "$").replace("\\\n", "\n") + "\nprintf '%s' \"$node_opts\"\n"
+
+    def effective(node_options: str | None) -> str:
+        env = dict(os.environ)
+        env.pop("NODE_OPTIONS", None)
+        if node_options is not None:
+            env["NODE_OPTIONS"] = node_options
+        proc = subprocess.run(["/bin/sh", "-c", script], capture_output=True, text=True, env=env)
+        assert proc.returncode == 0, (proc.returncode, proc.stderr)
+        return proc.stdout
+
+    assert (
+        effective(None) == "--max-old-space-size=6144"
+    ), "an unset NODE_OPTIONS must get ci.yml's heap headroom"
+    assert effective("--max-old-space-size=2048") == (
+        "--max-old-space-size=2048 --max-old-space-size=6144"
+    ), "a smaller caller value must be raised (appended last: V8 last-wins)"
+    assert (
+        effective("--max-old-space-size=8192") == "--max-old-space-size=8192"
+    ), "a larger operator value must pass through untouched"
+
+
 def test_ci_and_make_share_one_classifier_module() -> None:
     """A12. Two hand-written mappings are how CI and the local gate drift apart.
 
