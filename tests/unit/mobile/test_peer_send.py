@@ -1643,9 +1643,7 @@ async def test_the_receipt_line_is_unchanged_for_a_plain_delivery(
     assert outcome.cause == ""
     assert outcome.is_error is False
     assert outcome.partial is False
-    assert outcome.text == (
-        f"→ probe-target (pid {os.getpid()}): delivered and woke the session"
-    )
+    assert outcome.text == (f"→ probe-target (pid {os.getpid()}): delivered and woke the session")
 
 
 def test_the_delivered_line_is_the_receipt_and_the_failed_line_is_the_only_claim() -> None:

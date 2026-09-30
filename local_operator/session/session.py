@@ -253,6 +253,7 @@ from local_operator.session.protocol import (
 # (`AttachedSession._restore_cold_subagents`) cannot drift into two opinions
 # about one persisted row (UX review round 1, U2).
 from local_operator.session.restored_rows import resolve_restored_rows, roster_records
+from local_operator.session.runtime.types import PeerReceiveDetail
 from local_operator.session.spend import (
     SESSION_SPEND_CUSTOM_TYPE,
     SessionSpend,
@@ -261,7 +262,6 @@ from local_operator.session.spend import (
     price_rows,
 )
 from local_operator.session.spend import recall as recall_spend
-from local_operator.session.runtime.types import PeerReceiveDetail
 from local_operator.session.spend import serving_identity, writer_stamp
 from local_operator.session.transcript import (
     CUSTOM_KIND_CUSTOM,
@@ -8364,6 +8364,7 @@ class Session:
                     "duplicate": False,
                 },
             )
+
         busy = self._is_streaming
         if mode == "steer":
             if busy:

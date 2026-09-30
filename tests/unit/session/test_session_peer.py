@@ -890,9 +890,7 @@ def _notice_rows(session) -> list[Any]:
 
 
 @pytest.mark.asyncio
-async def test_the_send_notice_is_written_once_and_only_when_enabled(
-    tmp_path, monkeypatch
-) -> None:
+async def test_the_send_notice_is_written_once_and_only_when_enabled(tmp_path, monkeypatch) -> None:
     """``send.journal_unconfirmed`` is read HERE, and the row id is derived from
     the send's own message id -- so a retried tool call collides instead of
     filing a second notice."""
