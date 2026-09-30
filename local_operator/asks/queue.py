@@ -362,23 +362,30 @@ class AskQueue:
 
     # -- delivery ----------------------------------------------------------
 
-    async def reconcile(self, now_ms: int | None = None) -> list[str]:
+    async def reconcile(self, now_ms: int | None = None, *, load_time: bool = False) -> list[str]:
         """Deliver every transcript row the current fold calls for; return their ids.
 
         Idempotent and level-triggered: call it at boot, at every turn start,
         after every answer/decline/dismiss, and from the deadline tick. It
         delivers at most one row per (ask, kind) because the row IS the marker.
+
+        ``load_time`` IS THE REOPEN FACT, and it is the only caller that arms the
+        stop annotation (review round 2, M1). The design scopes the "lapsed while
+        the session was stopped" sentence to the reopen (§2.2, §7: "on reopen the
+        load-time reconcile delivers overdue notices annotated…"), and this is the
+        same call on three other paths where the session is RUNNING by definition —
+        the deadline tick (``arm``), the wake fire
+        (:meth:`Session._deliver_wake`) and every turn start. A deadline that
+        elapses on any of those did not lapse while anything was stopped, so
+        annotating it would be false in both halves: nothing was lapsed by the
+        stop, and no notice was withheld.
         """
         if self._disposed:
             return []
         now = now_ms if now_ms is not None else self._now()
-        # The stop rule (design §2.2): an ask whose deadline passed while the
-        # session was STOPPED gets its notice annotated, because "Timed out"
-        # arriving at reopen reads as the agent having been slow rather than as
-        # nothing having been running. Read once per reconcile; ``None`` on the
-        # ordinary path, so the flag-off behaviour and the live behaviour are the
-        # same bytes.
-        stopped_at = self._deliberate_stop_ms()
+        # Read ONLY on the load-time reconcile; ``None`` everywhere else, which is
+        # what keeps the live paths off the marker read entirely.
+        marker = self._deliberate_stop_marker() if load_time else None
         records, present = self._fold_state(now)
         timeouts: list[tuple[int, CustomMessage]] = []
         responses: list[tuple[int, CustomMessage]] = []
@@ -416,7 +423,9 @@ class AskQueue:
                         self._timeout_message(
                             record,
                             now,
-                            lapsed_while_stopped=_lapsed_while_stopped(record, stopped_at),
+                            lapsed_while_stopped=_lapsed_while_stopped(
+                                record, marker, self._session_id
+                            ),
                         ),
                     )
                 )
@@ -473,35 +482,52 @@ class AskQueue:
         except Exception:  # noqa: BLE001 — a paint event must never fail a delivery
             logger.warning("ask: could not emit delivery event", exc_info=True)
 
-    def _deliberate_stop_ms(self) -> int | None:
-        """When this session was last deliberately stopped, in ms, or ``None``.
+    def _deliberate_stop_marker(self) -> dict[str, Any] | None:
+        """This conversation's DELIBERATE stop marker, in ms-stamped form, or ``None``.
 
-        ``runtime-stop.json`` is the durable evidence the stop leaves in the
-        conversation directory (``registry.STOP_MARKER_NAME``, written by the
-        party that acts), and it is the ONE artifact available at boot that says
-        the session was stopped at a known time: the wake index's ``stopped_at``
-        is cleared by the open-time rewrite, so a boot reconcile cannot read it.
+        ``runtime-stop.json`` is the durable evidence a stop leaves in the
+        conversation directory (``registry.STOP_MARKER_NAME``, written by the party
+        that acts), and it is the ONE artifact available at boot that says the
+        session was stopped at a known time: the wake index's ``stopped_at`` is
+        cleared by the open-time rewrite, so a boot reconcile cannot read it.
 
         ``deliberate`` is required and that is not pedantry: the same file also
         records INvoluntary deaths (a supervisor's reap, a stray kill), and telling
         a user their session "was stopped" when what happened was a crash is the
-        kind of wrong sentence that makes the honest ones worthless. The read is
-        lazy and total: a missing module or a malformed marker is "no evidence",
-        never an exception on a delivery path.
+        kind of wrong sentence that makes the honest ones worthless.
+
+        THE SESSION KEY IS CHECKED HERE, and it is the run-covers rule the
+        classification reader applies (``attention._stop_marker_covers_run``): a
+        marker is keyed to a conversation and to a RUN, so a marker belonging to
+        another conversation must never narrate this one's ask — which matters
+        because the file is read from a directory the queue was merely handed.
+        Nothing else is left once the load-time gate has excluded the live paths,
+        and that residue is stated at :func:`_lapsed_while_stopped` rather than
+        implied.
+
+        The read is lazy and total: a missing module or a malformed marker is "no
+        evidence", never an exception on a delivery path.
         """
         try:
             from local_operator.session.runtime.registry import read_stop_marker
 
-            marker = read_stop_marker(self.session_dir)
+            raw = read_stop_marker(self.session_dir)
         except Exception:  # noqa: BLE001 — no evidence, not a delivery failure
             logger.debug("ask: could not read the stop marker", exc_info=True)
             return None
-        if not isinstance(marker, Mapping) or not marker.get("deliberate"):
+        if not isinstance(raw, Mapping) or not raw.get("deliberate"):
+            return None
+        if str(raw.get("session_id") or "") != str(self._session_id or ""):
             return None
         try:
-            return int(float(marker.get("at") or 0) * 1000)
+            at_ms = int(float(raw.get("at") or 0) * 1000)
         except (TypeError, ValueError):
             return None
+        # ``session_id`` rides along so the decision site can re-assert the same
+        # clause against the id the QUEUE was built with, rather than trusting a
+        # reader that already passed it: the two spellings of one check are what
+        # makes a future second caller safe.
+        return {"at_ms": at_ms, "session_id": str(raw.get("session_id") or "")}
 
     def _response_message(self, record: Mapping[str, Any]) -> CustomMessage:
         lost = self._secret_answer_lost(record)
@@ -870,21 +896,50 @@ def _partial_answer_error(missing: Sequence[str]) -> str:
     )
 
 
-def _lapsed_while_stopped(record: Mapping[str, Any], stopped_at_ms: int | None) -> bool:
-    """Whether this ask's DEADLINE fell inside a deliberate stop (design §2.2).
+def _lapsed_while_stopped(
+    record: Mapping[str, Any], marker: Mapping[str, Any] | None, session_id: str
+) -> bool:
+    """Whether this ask's DEADLINE fell inside a deliberate, THIS-conversation stop.
 
-    The window is the ask's own: it has to have been created before the stop (or
+    Three facts, and the caller supplies the fourth. ``marker`` is the run-covers
+    checked marker (:meth:`AskQueue._deliberate_stop_marker`): deliberate, and
+    named for this conversation. ``session_id`` is passed again so the check is
+    visible at the decision site rather than only at the reader.
+
+    THE WINDOW IS THE ASK'S OWN: it has to have been created before the stop (or
     the stop did not interrupt it) and its deadline has to fall after the stop
     began (or the session was running again before the window closed). Both ends
     matter — the marker is durable and outlives the stop, so "a marker exists" is
     not the question, and neither is "the marker is recent".
 
-    The false positives this could still admit need a deliberate stop INSIDE the
-    ask's window, and then a second outage in which the deadline passed: the
-    sentence is true in that case too, and the notice is owed at boot exactly
-    because no live runtime delivered it.
+    THE FOURTH FACT IS THE LOAD-TIME GATE, and it is held by the CALLER rather
+    than here (``reconcile(load_time=True)``): the sentence is owed only on the
+    reopen, so this predicate is never consulted on the live deadline tick, the
+    wake-fire path or a turn start — where the session is running by definition
+    and the deadline therefore did not lapse while anything was stopped. With that
+    gate in place the two remaining ends bracket the deadline into the stopped
+    interval: created no later than the stop, deadline no later than the reopen
+    (which is the moment the load-time reconcile is running).
+
+    WHAT IS NOT CHECKED, stated so it is a boundary rather than a surprise. A
+    marker is not withdrawn by a successful reopen, so a marker from an EARLIER
+    stop survives into later runs; if a run in between passed through the deadline
+    and the session then booted again, both window ends still hold and this would
+    annotate a lapse that was actually live. The queue has no run key to close
+    that: the marker's ``pid``/``started_at`` name a process the queue never saw,
+    and the alternative — the transcript's per-run ``attention_started`` entry —
+    would put the attention classifier on this package's import path, which
+    ``asks/__init__`` and the import-graph pin exist to keep off. Recorded as a
+    known residue rather than papered over; the common shape (stop → reopen → pick
+    up) is covered, and the reviewer's false case (stop → reopen before the
+    deadline → deadline elapses live) is excluded by the gate.
     """
-    if stopped_at_ms is None:
+    if marker is None:
+        return False
+    if str(marker.get("session_id") or "") != str(session_id or ""):
+        return False
+    stopped_at_ms = marker.get("at_ms")
+    if not isinstance(stopped_at_ms, int) or not stopped_at_ms:
         return False
     created_at = int(record.get("created_at") or 0)
     expires_at = int(record.get("expires_at") or 0)

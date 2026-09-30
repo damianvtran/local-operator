@@ -12,8 +12,10 @@ that must ask it are pinned here rather than trusted to have been found.
 from __future__ import annotations
 
 import ast
+import asyncio
 import inspect
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -284,6 +286,98 @@ def test_the_cap_still_refuses_the_seventeenth_real_wake():
     outcome = build_wake_schedule({"message": "standup", "in": "1h"}, rows, 1_700_000_000_000)
     assert "error" in outcome
     assert str(MAX_WAKE_SCHEDULES) in outcome["error"]
+
+
+def test_rapid_ask_wake_arms_all_survive_the_full_list_writer():
+    """M3 (review round 2): the regression pin for the arm/retire serialization.
+
+    ``arm_ask_wake``/``retire_ask_wake`` are read-modify-write over a FULL-LIST
+    writer, so a snapshot taken before an ``await`` loses every row but the last:
+    three arms in a row all read the pre-yield list and the final write carried
+    only ``ask-timeout-c``. The loss degrades SILENTLY to the in-runtime timer,
+    which is exactly the cold durability the deadline row exists to provide.
+
+    The real methods are called unbound on a stub: they touch only
+    ``_ask_wake_lock``, ``_wake.schedules``, ``_wake.update`` and
+    ``_spawn_background``, and pinning the SHIPPED code is the point — a
+    re-implementation here would pass while the session lost rows. The ``update``
+    double yields before it reads, which is what makes the race reachable.
+    """
+    from local_operator.session.session import Session
+
+    class _Wake:
+        def __init__(self) -> None:
+            self.schedules: list[Any] = []
+            self.writes: list[list[str]] = []
+
+        async def update(self, rows: list[Any]) -> None:
+            # The yield IS the defect's window: a caller that snapshots before
+            # awaiting has already built its list by the time this runs.
+            await asyncio.sleep(0)
+            self.schedules = list(rows)
+            self.writes.append([str(getattr(r, "id", "")) for r in rows])
+
+    class _Stub:
+        def __init__(self) -> None:
+            self._wake = _Wake()
+            self._ask_wake_lock = asyncio.Lock()
+            self.tasks: list[asyncio.Task[Any]] = []
+
+        def _spawn_background(self, coro: Any) -> Any:
+            task = asyncio.ensure_future(coro)
+            self.tasks.append(task)
+            return task
+
+    def row(row_id: str) -> WakeSchedule:
+        return WakeSchedule(
+            id=row_id,
+            message=f"ask {row_id} deadline",
+            next_due_at=1_700_000_000_000,
+            created_at=1_700_000_000_000,
+            kind="ask_timeout",
+        )
+
+    async def scenario() -> _Stub:
+        stub = _Stub()
+        # ``__get__`` binds the SHIPPED method to the double (the spelling the TUI
+        # suites use for the same job), so the code under test is the session's
+        # own rather than a copy of it.
+        arm = Session.arm_ask_wake.__get__(stub)
+        stub._wake.schedules = [row("user-wake")]
+        # NO await between the three: the reviewer's P2 shape, and the shape the
+        # in-process queue actually produces (three enqueues in one turn).
+        arm(row("ask-timeout-a"))
+        arm(row("ask-timeout-b"))
+        arm(row("ask-timeout-c"))
+        await asyncio.gather(*stub.tasks)
+        return stub
+
+    stub = asyncio.run(scenario())
+    assert [str(r.id) for r in stub._wake.schedules] == [
+        "user-wake",
+        "ask-timeout-a",
+        "ask-timeout-b",
+        "ask-timeout-c",
+    ]
+    assert stub._wake.writes[-1] == [
+        "user-wake",
+        "ask-timeout-a",
+        "ask-timeout-b",
+        "ask-timeout-c",
+    ]
+
+    async def interleaved() -> _Stub:
+        stub = _Stub()
+        stub._wake.schedules = [row("user-wake"), row("ask-timeout-a")]
+        Session.arm_ask_wake.__get__(stub)(row("ask-timeout-b"))
+        Session.retire_ask_wake.__get__(stub)("ask-timeout-a")
+        await asyncio.gather(*stub.tasks)
+        return stub
+
+    # The retire rides the same lock, so it sees the arm's write rather than the
+    # list the arm started from: the LAST state wins in both orders.
+    stub = asyncio.run(interleaved())
+    assert [str(r.id) for r in stub._wake.schedules] == ["user-wake", "ask-timeout-b"]
 
 
 def test_the_delivery_path_still_routes_ask_timeout_rows():

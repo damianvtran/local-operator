@@ -8324,7 +8324,7 @@ class Session:
             return
         self._spawn_background(self._prompt_messages(list(messages)))
 
-    async def reconcile_asks(self, now_ms: int | None = None) -> None:
+    async def reconcile_asks(self, now_ms: int | None = None, *, load_time: bool = False) -> None:
         """Level-triggered: deliver whatever the ask log says is owed.
 
         Called at runtime boot (beside ``process._drain_inbox_into``), at turn
@@ -8332,11 +8332,16 @@ class Session:
         deadline tick, and on every answer/decline/dismiss op. Idempotent by
         construction — the transcript row IS the delivery marker — so calling it
         an extra time costs one log read and nothing else.
+
+        ``load_time`` is the REOPEN fact and only the boot drain passes it: it is
+        what arms the "lapsed while the session was stopped" annotation, which the
+        design scopes to the reopen (review round 2, M1). Every other caller is a
+        path where the session is running, so the annotation cannot be true there.
         """
         queue = self.ask_queue()
         if queue is None:
             return
-        await queue.reconcile(now_ms)
+        await queue.reconcile(now_ms, load_time=load_time)
 
     def arm_ask_wake(self, row: Any) -> None:
         """Add or replace one internal ``ask_timeout`` row and re-arm wakes.
