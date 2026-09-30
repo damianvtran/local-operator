@@ -4,9 +4,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
-from local_operator.agents import AgentData
+from local_operator.agents import AgentData, AgentRegistry
 from local_operator.clients._http import APIError
 from local_operator.server.models.schemas import AgentSpeechRequest, SpeechRequest
 from local_operator.server.routes.speech import create_agent_speech, create_speech
@@ -266,23 +266,29 @@ async def test_create_agent_speech_uses_the_elevenlabs_contract():
 
 
 @pytest.mark.asyncio
-async def test_create_agent_speech_404_for_an_unknown_agent():
+async def test_create_agent_speech_404_for_an_unknown_agent(tmp_path):
+    """The 404 comes from the registry's real miss path, not a mocked fiction.
+
+    ``AgentRegistry.get_agent`` raises ``KeyError`` for an id it does not hold;
+    driving the real registry here is what makes this the regression test for
+    that miss having surfaced as a 500.
+    """
+    registry = AgentRegistry(tmp_path)
     radient_client = _credentialed_client()
-    agent_registry = MagicMock()
-    agent_registry.get_agent.return_value = None
 
     with pytest.raises(HTTPException) as exc_info:
         await create_agent_speech(
-            "missing",
+            "missing-agent",
             _agent_speech_request(),
             radient_client,
-            agent_registry,
+            registry,
             MagicMock(),
             MagicMock(),
             MagicMock(),
         )
 
     assert exc_info.value.status_code == 404
+    assert exc_info.value.detail == "Agent with ID missing-agent not found"
     radient_client.create_speech.assert_not_called()
 
 
@@ -349,3 +355,23 @@ async def test_create_agent_speech_passes_refusals_through():
     assert exc_info.value.detail == (
         "Your Radient credit balance is too low for speech. Add credits to continue."
     )
+
+
+@pytest.mark.parametrize("bad", ["EN", "En", "en-US", "e", "eng", "1a", " e", "éé"])
+def test_language_codes_must_be_iso639_1(bad):
+    """Anything but two lowercase letters is refused at the schema boundary.
+
+    Mirrors the hub's own ``omitempty,len=2,lowercase`` on this field, so a
+    code the daemon accepts cannot be one the hub refuses downstream.
+    """
+    with pytest.raises(ValidationError) as exc_info:
+        _speech_request(language_code=bad)
+    assert "two-letter ISO 639-1" in str(exc_info.value)
+    with pytest.raises(ValidationError):
+        _agent_speech_request(language_code=bad)
+
+
+@pytest.mark.parametrize("good", ["en", "es", "zh", "ar"])
+def test_language_codes_accept_iso639_1(good):
+    assert _speech_request(language_code=good).language_code == good
+    assert _agent_speech_request(language_code=good).language_code == good
