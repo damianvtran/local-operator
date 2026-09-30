@@ -1422,13 +1422,21 @@ async def _open_list(pilot: Any, app: OperatorApp, *session_ids: str) -> Any:
 
 
 @pytest.mark.asyncio
-async def test_a_click_on_the_list_does_not_move_the_keyboard() -> None:
-    """D1: the panel's dead space and its rows alike leave focus where it was.
+async def test_a_click_on_the_list_moves_the_keyboard() -> None:
+    """T1/T3: the panel's dead space and its rows alike hand it the keyboard.
 
-    Both halves matter. The keyboard staying put is the user-visible repair; the
-    row click still moving the list's cursor is the proof that the click was not
-    swallowed — the gesture acts, it just no longer has anything to do with the
-    keys afterwards.
+    REVERSED BY DESIGN (issue #1357 decision, `### lopdev — design decision:
+    click-to-focus`). This test used to pin D1 — "a click on the list does not
+    move the keyboard". The old rule's safety property moved to the widget:
+    ``SessionSidebar.on_key``/``on_paste`` hand the first printable character
+    (or paste) to the composer, so the list can never swallow text — which is
+    what lets a press act like every other press on the panel. A row gives the
+    list the keyboard AND still moves its cursor; dead space gives it the
+    keyboard without acting on anything.
+
+    The keystrokes at the end are the typing-home guard: after a row press the
+    list owns the keyboard, and the next character must still be typed into the
+    composer (T12/G1) rather than swallowed or recalled as composer history.
     """
     app = _app()
     async with app.run_test(size=(120, 40)) as pilot:
@@ -1441,12 +1449,15 @@ async def test_a_click_on_the_list_does_not_move_the_keyboard() -> None:
         await pilot.pause()
         assert editor.text == "A", "premise: the composer takes typed text"
 
-        # The dead space below the rows. Derived from the region, not hardcoded:
+        # The dead space below the rows: the list takes the keyboard and
+        # nothing else happens (T3). Derived from the region, not hardcoded:
         # the panel's height depends on the terminal.
         await pilot.click(offset=(sidebar.region.x + 5, sidebar.region.bottom - 3))
         for _ in range(3):
             await pilot.pause()
-        assert app.focused is editor, f"the panel's dead space took the keyboard: {app.focused!r}"
+        assert (
+            app.focused is sidebar
+        ), f"the panel's dead space left the keyboard on {app.focused!r}"
 
         # A row: the click still acts on it … and one cell past the pin cell,
         # which toggles a pin instead (issue #1357 slice 2a).
@@ -1456,22 +1467,34 @@ async def test_a_click_on_the_list_does_not_move_the_keyboard() -> None:
         for _ in range(4):
             await pilot.pause()
         assert sidebar.cursor_id == "sess-b", "the row click no longer acts on the list"
-        # … and the keyboard has not moved for it.
-        assert app.focused is editor, f"a row click took the keyboard: {app.focused!r}"
+        # … and the press is what focused the list.
+        assert app.focused is sidebar, f"a row click left the keyboard on {app.focused!r}"
 
+        # Typing-home: the next character is typed, not swallowed.
         await pilot.press("B")
         await pilot.pause()
         assert editor.text == "AB", "the key after a list click never reached the composer"
+        assert editor.has_focus
 
 
 @pytest.mark.asyncio
-async def test_a_click_on_the_switched_session_ends_with_the_keyboard_in_the_composer() -> None:
-    """D1 for the SWITCHING branch — the case the design round could not render.
+async def test_a_click_on_the_switched_session_leaves_the_keyboard_on_the_list() -> None:
+    """T1 for the SWITCHING branch — measured here as the design round asked.
 
-    Its harness's fake session cannot bind, so it left this path reasoned from
-    the code (:meth:`OperatorApp.on_session_sidebar_selected` focuses the editor
-    only on the attached-row branch and leaves focus alone on the switch branch)
-    rather than measured, and asked for it to be measured here.
+    REVERSED BY DESIGN (issue #1357 decision): this test used to pin "the
+    switch click ends with the keyboard in the composer". Under T1 a docked row
+    press gives the list the keyboard and the press's own handling must not
+    take it back, so the switch branch — which never moved focus either way —
+    now starts with the keyboard on the list, and the next key is typing-home
+    rather than composer history (the F2 symptom, inverted).
+
+    What this pins is the PRESS-TIME outcome. The switch's ARRIVAL placement is
+    a separate lifecycle step, untouched by this slice: when the prepared
+    conversation commits, `_commit_sidebar_session` places focus in the new
+    frame (the composer, or the transcript when the draft's focus says so)
+    exactly as it does for the keyboard route (F9 then Enter) — measured with
+    the real prepare/commit pair while the list held the keyboard, and stated
+    on the PR. See `test_sidebar_click_focus.py` for the gesture-level suite.
 
     The switch itself is stubbed — a real binding needs a runtime socket, and it
     is not what this test is about — while the GESTURE and the handler it reaches
@@ -1506,10 +1529,12 @@ async def test_a_click_on_the_switched_session_ends_with_the_keyboard_in_the_com
             app._sidebar_navigation.select = real_select  # type: ignore[method-assign]
 
         assert started, "premise: the click did not take the switch branch"
-        assert app.focused is editor, f"the switch left the keyboard on {app.focused!r}"
+        assert app.focused is sidebar, f"the switch left the keyboard on {app.focused!r}"
+        assert not editor.has_focus, "the switch must not hand the composer the keys back"
         await pilot.press("C")
         await pilot.pause()
         assert editor.text == "C", "the key after a switch click never reached the composer"
+        assert editor.has_focus, "typing-home did not give the composer the keyboard"
 
 
 def _visible_rows(app: OperatorApp, sidebar: Any) -> list[tuple[int, Any]]:

@@ -21,13 +21,17 @@ True while an approval, an ask picker, the aside, or the focused sidebar owns
 the keyboard — so those four surfaces are unprotected on the click and Tab
 routes.
 
-WHAT CHANGED FOR THE SIDEBAR AFTERWARDS (design round D1/D2). The list is no
-longer one of the surfaces that must keep the keyboard: a pointer press on it
-never moves focus (``SessionSidebar.FOCUS_ON_CLICK = False``), and its claim in
+WHAT CHANGED FOR THE SIDEBAR AFTERWARDS (design round D1/D2, then issue #1357).
+The list is not one of the surfaces that must keep the keyboard: its claim in
 ``_focus_is_claimed()`` is SOFT, so the composer's own chrome may take the
-keyboard back from it. The test below that used to assert the opposite now pins
-the new rule; the live-prompt, pushed-screen, full-page-mode and read-only cases
-are unchanged and still refuse.
+keyboard back from it — the test below that used to assert the opposite pins
+that rule. The PRESS rule itself has since been revised by the click-to-focus
+decision: a press on the list does move the keyboard to it, and the
+anti-swallow safety moved to the widget (``SessionSidebar.on_key`` hands the
+first printable character — or a paste — to the composer), so a press no longer
+has to leave focus alone to keep typed text from vanishing. The live-prompt,
+pushed-screen, full-page-mode and read-only cases are unchanged and still
+refuse, now including the press route itself (``focus_on_click``).
 
 WHY THE DOCK CLICK REACHES A LIVE PROMPT AT ALL. ``#prompt-host`` is mounted
 INSIDE ``#input-dock`` (app.py, ``compose``), so the approval card and the ask
