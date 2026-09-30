@@ -1151,14 +1151,62 @@ class Command(Input):
 
 
 class Answer(Input):
-    epoch: str = Field(min_length=1, max_length=128)
-    request_id: str = Field(min_length=1, max_length=128)
+    """Answer a gate, or a QUEUED ask (design ``docs/design/ask-nonblocking.md`` §4).
+
+    Three shapes share one body, which is why the fields are all optional and the
+    ``one_answer`` validator is what decides which one was sent:
+
+    * ``{epoch, request_id, approved}`` — an approval;
+    * ``{epoch, request_id, value, question_index}`` — the live single-slot ask
+      picker (today's shape, unchanged);
+    * ``{ask_id, answers}`` or ``{ask_id, decline}`` — a QUEUED ask, addressed by
+      its own id. ``epoch`` is IGNORED for this shape and it is not sloppiness:
+      an ask outlives the owner that queued it, so requiring an epoch would
+      refuse exactly the case the feature exists for — a cold session whose asks
+      are still open. The single-winner rule that replaces the epoch check lives
+      on the ask log (the first ``answered`` event wins), so a stale screen
+      cannot settle a question twice.
+    """
+
+    #: The owner epoch, for the two gate shapes. Defaulted rather than required
+    #: because a queued-ask answer has no epoch to give; the validator requires
+    #: it whenever ``ask_id`` is absent, so nothing about the gate contract
+    #: loosened.
+    epoch: str = Field(default="", max_length=128)
+    request_id: str = Field(default="", max_length=128)
     value: str | None = Field(default=None, max_length=32768)
     approved: StrictBool | None = None
     question_index: int | None = Field(default=None, ge=0, strict=True)
+    #: A queued ask's id (``a-3f9c``). Its presence selects the third shape.
+    ask_id: str | None = Field(default=None, max_length=128)
+    #: The WHOLE ask's answers, keyed by question id, each a list because a
+    #: question may be multi-select. One atomic body rather than a per-question
+    #: stream: the blocking path answered one question at a time over the wire,
+    #: and a client that died mid-way left an ask half-settled.
+    answers: dict[str, list[str]] | None = None
+    #: "No answer — decide yourself", the explicit form of today's Esc.
+    decline: StrictBool | None = None
 
     @model_validator(mode="after")
     def one_answer(self):
+        if self.ask_id is not None:
+            if not self.ask_id:
+                raise ValueError("ask_id must be a non-empty string")
+            if self.decline is None and self.answers is None:
+                raise ValueError("A queued-ask answer needs answers or decline")
+            if self.answers is not None:
+                if not self.answers:
+                    raise ValueError("answers must name at least one question")
+                for key, values in self.answers.items():
+                    if not isinstance(values, list) or not all(
+                        isinstance(item, str) for item in values
+                    ):
+                        raise ValueError("answers values must be lists of strings")
+            return self
+        if not self.epoch:
+            raise ValueError("An epoch is required to answer a gate")
+        if not self.request_id:
+            raise ValueError("A request_id is required to answer a gate")
         if (self.value is None) == (self.approved is None):
             raise ValueError("Supply either value or approved")
         if self.value is not None and self.question_index is None:
@@ -3398,6 +3446,27 @@ async def answer(session_id: str, body: Answer, request: Request):
     """
     async with errors(request), host(request).session(session_id) as bridge:
         assert bridge.remote is not None
+        if body.ask_id is not None:
+            # A QUEUED ASK (design §2.4/§4). Answered by id, BEFORE the epoch
+            # comparison and deliberately not subject to it: asks outlive owner
+            # epochs, and a client that came back after the runtime was reaped
+            # holds a stale epoch by construction — refusing it here would be
+            # refusing the durability the feature is built on. The runtime (or,
+            # for a cold session, the runtime this bind STARTS) validates against
+            # the log instead, whose first ``answered`` event wins.
+            #
+            # The refusal is the ASK'S OWN sentence (``asks/render.refusal_copy``:
+            # expired, already answered by <surface>, already declined) rather
+            # than this route's generic "no longer pending", because unlike a
+            # gate the ask is still there and the user's next move depends on
+            # which of those it is.
+            try:
+                detail = await bridge.remote.ask_respond(
+                    body.ask_id, body.answers, decline=bool(body.decline)
+                )
+            except ValueError as error:
+                raise HTTPException(409, str(error)) from None
+            return reply({"detail": detail})
         if body.epoch != bridge.remote.frontend_state.epoch:
             raise HTTPException(409, "This answer belongs to an earlier session owner")
         try:
@@ -3423,6 +3492,43 @@ async def answer(session_id: str, body: Answer, request: Request):
         except RuntimeError:
             raise HTTPException(409, "This question or approval is no longer pending") from None
         return reply({"detail": detail})
+
+
+class AskAggregate(Input):
+    """Every open or recently settled queued ask, across the operator's sessions.
+
+    A LIST OF DICTS rather than a modelled row ON PURPOSE: the rows ARE the
+    frozen wire shape (``PendingAsk``) that the frontend state and the phone
+    projection already publish, and re-declaring those fields here would be a
+    third copy to keep in step with §4 — the single place a wire change is
+    allowed to start. Each row carries two extra keys a cross-session view needs
+    (``session_id``, ``cwd``) so the caller can name the conversation without
+    opening it.
+    """
+
+    asks: list[dict[str, Any]] = Field(default_factory=list)
+
+
+@router.get("/v1/desktop/asks", response_model=CRUDResponse[AskAggregate])
+async def asks(request: Request):
+    """Open and recently settled asks, from the DERIVED INDEX (design §4).
+
+    Index-backed on purpose, and the reason is the feature's whole durability
+    claim: an ask outlives the runtime that queued it, so the cross-session view
+    cannot be built from live sessions — it has to be answerable with nothing
+    running, which is what ``<config_dir>/asks/<sid>.json`` exists for. This
+    route therefore reads no session, dials no owner and starts no runtime.
+
+    The read is a directory scan plus one small file per session with anything to
+    show, so it runs off the event loop like every other store walk. A machine
+    with no asks at all answers ``{"asks": []}``: absence of the directory is the
+    ordinary state (``read_index``) and not an error.
+    """
+    async with errors(request):
+        from local_operator.asks.store import index_asks
+
+        rows = await asyncio.to_thread(index_asks, store_root(request))
+        return reply({"asks": rows})
 
 
 @router.post("/v1/desktop/sessions/{session_id}/seen", response_model=CRUDResponse[AttentionState])
