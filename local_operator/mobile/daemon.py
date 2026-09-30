@@ -57,6 +57,7 @@ from local_operator.harness.approval import (
 )
 from local_operator.mobile import projects as mobile_projects
 from local_operator.mobile import push_devices as mobile_push_devices
+from local_operator.mobile import push_handles
 from local_operator.mobile.auth import (
     COOKIE_NAME,
     check_password,
@@ -852,7 +853,7 @@ class SessionTable:
             # published by the caller in ONE assignment (review round 1,
             # MINOR-1): a caller that resumes late must never publish build A's
             # rows beside build B's aggregate.
-            return out, self._unread_aggregate(out, revision)
+            return out, await self._unread_aggregate(out, revision)
 
         task = self._summaries_task
         if task is None or task.done():
@@ -877,7 +878,7 @@ class SessionTable:
         self._summaries_at = time.monotonic()
         return out
 
-    def _unread_aggregate(
+    async def _unread_aggregate(
         self,
         rows: list[dict[str, Any]],
         revision: tuple[int, int, int] | None,
@@ -918,6 +919,12 @@ class SessionTable:
         absent for the same reason -- this shape claims nothing it could not
         read, and every client's remedy for "unknown" is the one §1.4 states:
         do not touch the badge.
+
+        Each included row also carries push/ack-sync S2's ``push_handle``
+        (ADR §4), minted in ONE batched key read per build -- the one I/O
+        this method does, which is why it is async. See
+        :mod:`local_operator.mobile.push_handles` for the mint, the key
+        refusal, and the documented rotation.
         """
         verdict = list(self.listing_degraded())
         if verdict or revision is None:
@@ -947,6 +954,30 @@ class SessionTable:
                     "revision": list(state.get("revision") or (0, 0)),
                 }
             )
+        if conversations:
+            # Push/ack-sync S2 [ADR 0006 §4 @22e2cce2]: each served row carries
+            # its conversation handle, minted in ONE key read for the whole
+            # build, off the loop (the first build CREATES the key file). The
+            # mint is deterministic and the key persists under the
+            # config root, so a later completion -- or a daemon restart --
+            # serves the SAME handle for the same conversation; nothing here
+            # remints (push_handles states the refusal and the documented
+            # rotation). The failure stays additive like the field itself: a
+            # key this build cannot use leaves the rows without handles rather
+            # than failing S1's read.
+            from local_operator.paths import config_dir
+
+            try:
+                handles = await asyncio.to_thread(
+                    push_handles.conversation_handles,
+                    config_dir(),
+                    [conversation["session_id"] for conversation in conversations],
+                )
+            except (push_handles.PushHandleKeyCorrupt, OSError):
+                logger.warning("push handles unavailable for the unread aggregate", exc_info=True)
+            else:
+                for conversation, handle in zip(conversations, handles, strict=True):
+                    conversation["push_handle"] = handle
         return {
             "count": len(conversations),
             "revision": list(revision),
@@ -3786,6 +3817,45 @@ def build_app(daemon: MobileDaemon):
         await daemon.table.summaries()
         return JSONResponse(daemon.table.unread_snapshot())
 
+    async def api_push_conversation(request: Request) -> Response:
+        """Resolve a push deep-link handle to its conversation.
+
+        Push/ack-sync S2 [ADR 0006 §3.1/§4 @22e2cce2]: a push carries only the
+        opaque handle, so the cold tap -- the conversation is not in the unread
+        set any more, or never was on this client -- lands through here. The
+        handle is deliberately NOT checked against the unread aggregate:
+        resolving an already-acknowledged conversation is the whole point.
+
+        A handle this machine cannot mint for a conversation it still offers
+        -- unknown, stale after a key rotation, or naming a conversation that
+        no longer exists -- is a clean 404 (never a 500), shaped like the
+        other ``unknown session`` refusals. The gate is the SAME one predicate
+        the listing and the aggregate already share
+        (``_live_generation_is_user_facing`` -> ``is_user_session_origin``),
+        deliberately NOT the transcript-detail check: a mail-spool
+        conversation with no transcript yet IS a row the aggregate mints a
+        handle for, and a second, stricter predicate here would 404 it [S1
+        remediation, review round 1 MAJOR-1]. Auth-gated exactly like
+        ``/api/sessions``.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.paths import config_dir
+
+        handle = str(request.path_params["handle"])
+
+        def resolve() -> str | None:
+            session_id = push_handles.resolve_conversation(config_dir(), handle)
+            if session_id is None or not _live_generation_is_user_facing(session_id):
+                return None
+            return session_id
+
+        session_id = await asyncio.to_thread(resolve)
+        if session_id is None:
+            return JSONResponse({"error": "unknown conversation handle"}, status_code=404)
+        return JSONResponse({"session_id": session_id})
+
     async def api_session_events(request: Request) -> Response:
         """SSE repaint stream for one session — the phone's only realtime
         channel. Opens with the current projection so a reconnecting phone
@@ -5019,6 +5089,10 @@ def build_app(daemon: MobileDaemon):
         # carries as its top-level ``unread`` block, served on its own so a
         # client can refresh the number without pulling the rows.
         Route("/api/attention/unread", api_attention_unread),
+        # The handle resolver (push/ack-sync S2): a push deep link carries only
+        # the opaque handle, so the cold-tap case -- the conversation is no
+        # longer unread -- needs one route to name its session again.
+        Route("/api/push/conversation/{handle:str}", api_push_conversation),
         Route("/api/sessions/start", api_start_session, methods=["POST"]),
         Route("/api/sessions/events", api_list_events),
         Route("/api/directories", api_directories),
