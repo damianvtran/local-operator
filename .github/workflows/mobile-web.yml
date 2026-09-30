@@ -65,6 +65,17 @@ jobs:
       - name: Install mobile web dependencies
         run: pnpm install --frozen-lockfile
 
+      # THE THEME CONTRACT, on its own step: the generated CSS must be current
+      # AND every palette pair the phone paints must clear its floor
+      # (scripts/contrast-contract.mjs, the same file `pnpm check-themes` runs
+      # locally). Neither fact shows up in tsc or vitest — a palette is data,
+      # and a pair at 4.2:1 compiles and tests exactly as green as one at 7:1 —
+      # so without this step an unreadable palette reaches the phone. Batch-2
+      # D3/D4: six palettes were 0.01-0.28 under their floors with no gate to
+      # say so.
+      - name: Check the theme contract (freshness + contrast floors)
+        run: pnpm check-themes
+
       # Build FIRST and separately from the tests. `pnpm build` is `tsc -b &&
       # vite build`, so this step is the typecheck the vitest suite does not
       # perform — the failure this workflow exists to catch surfaces here, with

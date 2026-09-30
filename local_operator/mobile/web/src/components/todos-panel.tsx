@@ -95,11 +95,29 @@ export function TodosPanel({
 			   the list. */
 			defaultOpen={false}
 			forceClosed={forceCollapsed}
+			/* ONE STAND-DOWN RULE FOR THE PAIR (design round 1, D6). This row's own
+			   phrase fits at every width, but it sits directly above the subagents
+			   row while both are held shut, and at 320 the two disagreed — this
+			   one showing `· answer first`, the neighbour hiding it. The same
+			   threshold the roster needs to keep its label readable (385; see
+			   `subagents-panel.tsx`) therefore applies here too, so the adjacent
+			   rows state the held-shut rule as one thing. */
+			hintClassName="max-[385px]:hidden"
 			className={cn(
 				"border-t border-hairline",
-				/* `min-h-0` so this panel can give space back to the column rather
-				   than pushing a sibling past its clipped foot (D1). */
-				"min-h-0",
+				/* `min-h-11`, not `min-h-0`: the collapsed header is this panel's
+				   FLOOR. `min-h-0` let the column's negative space squeeze the
+				   container below its own 44px header row, and the row then
+				   overflowed — painting over its sibling and the pending card
+				   (measured at 320x568: tasks y128-172 and subagents y129-173 over
+				   a card top of 129, a ~44px interleave; mobile UX batch 2, D1).
+				   The panel's give-back is still real — the EXPANDED body is
+				   capped at 40% of the column and scrolls internally, and the
+				   container may still shrink to its header — but the header a
+				   reader needs to tap can no longer be squeezed away. The card
+				   yields instead (see `pending-card.tsx`), which is the right
+				   order of pain: the card scrolls, a truncated header does not. */
+				"min-h-11",
 				embedded ? "pt-1" : "px-4",
 			)}
 			header={

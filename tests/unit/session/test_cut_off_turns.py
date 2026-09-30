@@ -697,32 +697,69 @@ def test_a_tear_reported_from_a_record_names_the_pair(monkeypatch) -> None:
 # on observable rather than assumed.
 
 
-async def _dispose_with_unsent_run(directory: Path, *, deliberate: bool) -> None:
+async def _dispose_with_unsent_run(
+    directory: Path, *, deliberate: bool, dispatched: bool, carried: bool | None = None
+) -> None:
     """Boot a real session with a turn IN FLIGHT, then dispose it.
 
-    The turn is parked in the provider stream rather than staged by state, and
-    the difference is load-bearing: a run left UNSETTLED is *what* the disposal
-    publisher reports, while a live ``_turn_task`` is *whether this disposal cut
-    anything*. A helper that minted the token by hand could not tell a teardown
-    that cut work from a run whose outcome never landed, and those are opposite
-    verdicts — the second is the shape of the operator's spurious rows, where a
-    session that had simply gone quiet was reported as an error for work that
-    had finished (2026-09-17).
+    ``dispatched`` picks WHICH in-flight state the disposal meets, and the choice
+    is made DETERMINISTICALLY rather than by racing ``is_streaming`` (which flips
+    before the pump's first iteration — agent review round 1, MAJOR-1):
+
+    * ``dispatched=False`` parks the run in ``_prepare_system_blocks`` — the
+      token minted, ``attention_started`` written, ``_turn_task`` live, and NO
+      request built — which is the exact zero-round-trip shape the disposal's
+      evidence gate must tell apart (and the BLOCKER-1 shape for a deliberate
+      stop);
+    * ``dispatched=True`` waits for ``_attention_run_request_dispatched``, the
+      flag the pump sets when it consumes the request, so the disposal meets
+      work that reached the provider.
+
+    The turn is parked rather than staged by hand because a run left UNSETTLED
+    is *what* the disposal publisher reports, while a live ``_turn_task`` is
+    *whether this disposal cut anything*: the operator's spurious rows were the
+    shape where a session that had gone quiet was reported as an error for work
+    that had finished (2026-09-17).
+
+    ``carried`` overrides the run's prompt PROVENANCE while it is parked — the
+    ``False`` value a harness-opened wake/job-delivery run carries — so the
+    third-shape cell pins the disposal's DECISION without racing a real
+    delivery through the park (agent review round 2, MINOR-1).
     """
     directory.mkdir(parents=True, exist_ok=True)
     session = _make_session(directory, stream=_never_yielding_stream())
     await session.async_init()
-    # What `_run_turn` does at the head of a turn: a token is minted and the run
-    # is left UNSETTLED, so the dispose publisher sees a turn that never
-    # reported an outcome.
+    parked = asyncio.Event()
+    release = asyncio.Event()
+    original = session._prepare_system_blocks
+
+    async def gated(*args: Any, **kwargs: Any) -> Any:
+        if not dispatched:
+            parked.set()
+            await release.wait()
+        return await original(*args, **kwargs)
+
+    session._prepare_system_blocks = gated  # type: ignore[method-assign]
     task = asyncio.ensure_future(session.prompt("a turn that will be cut"))
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline and not session.is_streaming:
-        await asyncio.sleep(0.01)
-    assert session.is_streaming, "the turn never reached the provider stream"
+    if dispatched:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not session._attention_run_request_dispatched:
+            await asyncio.sleep(0.005)
+        assert session._attention_run_request_dispatched, "the turn never reached the provider"
+    else:
+        await asyncio.wait_for(parked.wait(), timeout=10)
+    if carried is not None:
+        session._attention_run_carried_prompt = carried
     if deliberate:
         session.note_deliberate_stop()
-    await session.dispose()
+    dispose_task = asyncio.ensure_future(session.dispose())
+    if not dispatched:
+        # The parked run only unwinds once the abort lands; release it there so
+        # the disposal's bounded wait sees a turn that is really ending.
+        while not (session._signal is not None and session._signal.aborted):
+            await asyncio.sleep(0.005)
+        release.set()
+    await asyncio.wait_for(dispose_task, timeout=30)
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await task
@@ -746,9 +783,15 @@ def _never_yielding_stream() -> Any:
 async def test_the_dispose_route_publishes_the_users_own_stop_as_an_interruption(
     tmp_path: Path,
 ) -> None:
-    """BLOCKER-1: the TUI's `/stop` must not come back as `kind=error`."""
+    """BLOCKER-1: the TUI's `/stop` must not come back as `kind=error`.
+
+    The pre-dispatch shape is the one BLOCKER-1 was raised on: with the run
+    parked BEFORE its first request, the carried-prompt arm claimed it for the
+    neutral closure while the user had asked for the stop. The recorded stop
+    outranks that arm, and this cell pins the verdict on the real ``dispose()``.
+    """
     directory = tmp_path / "sessions" / "stopped"
-    await _dispose_with_unsent_run(directory, deliberate=True)
+    await _dispose_with_unsent_run(directory, deliberate=True, dispatched=False)
 
     state = AttentionStore().state(conversation_identity(directory))
     assert state["kind"] == "interrupted", state
@@ -760,6 +803,26 @@ async def test_the_dispose_route_publishes_the_users_own_stop_as_an_interruption
         if entry.payload.get("custom_type") == "session_incident"
     ]
     assert incidents == [], "the user's own stop is not a failure to explain"
+
+
+@pytest.mark.asyncio
+async def test_a_deliberate_stop_of_a_non_carried_zero_work_run_is_still_an_interruption(
+    tmp_path: Path,
+) -> None:
+    """The THIRD shape, kept and pinned (manager decision, round 2, MINOR-1).
+
+    A zero-work run that carried NO prompt — the harness-opened shapes (a wake,
+    a job delivery) — stopped deliberately publishes ``interrupted|user-stop``
+    once the deliberate clause leads the disposition chain, where v1 settled it
+    silently. Decided KEEP: the user's act outranks the silence the same way it
+    outranks the closure, and narrowing the clause to the carried shape would
+    reintroduce the asymmetry this round was raised on. This cell is the pin.
+    """
+    directory = tmp_path / "sessions" / "not-carried"
+    await _dispose_with_unsent_run(directory, deliberate=True, dispatched=False, carried=False)
+    state = AttentionStore().state(conversation_identity(directory))
+    assert state["kind"] == "interrupted", state
+    assert state["cause"] == "user-stop", state
 
 
 @pytest.mark.asyncio
@@ -777,9 +840,14 @@ async def test_an_unnoted_dispose_of_a_LIVE_turn_is_still_a_cut_off_error(tmp_pa
     live, which is the same evidence the abort below it uses, so "disposed while
     this turn was running" is a fact about this disposal rather than a hope
     about which run end comes next.
+
+    The helper WAITS FOR THE DISPATCH EVIDENCE (agent review round 1, MAJOR-1),
+    so this cell pins the dispatched case deterministically: the previous
+    ``is_streaming`` wait raced the pump's first iteration and the assertion
+    flipped between the closed arm and this one run to run.
     """
     directory = tmp_path / "sessions" / "torn"
-    await _dispose_with_unsent_run(directory, deliberate=False)
+    await _dispose_with_unsent_run(directory, deliberate=False, dispatched=True)
 
     state = AttentionStore().state(conversation_identity(directory))
     assert state["kind"] == "error", state

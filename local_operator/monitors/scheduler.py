@@ -437,7 +437,14 @@ class MonitorScheduler:
                     # (round-1 review F4).
                     "next_due_at": entry.counters.get("next_due_at"),
                 }
-            return {"duplicate": True, "spec": entry.spec}
+            # The due instant rides the outcome like the created/reactivated
+            # branches' (§4.5): the watch this arm found IS armed, and a
+            # receipt that rendered it as due-less would say otherwise.
+            return {
+                "duplicate": True,
+                "spec": entry.spec,
+                "next_due_at": entry.counters.get("next_due_at"),
+            }
 
         if len(entries) >= self._settings.max_monitors:
             return {

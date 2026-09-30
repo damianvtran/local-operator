@@ -883,6 +883,35 @@ class SessionTable:
         ranks: dict[str, tuple[tuple[int, int, float, str], bool]] = {}
         for session_id in set(durable) | set(active):
             entry = active.get(session_id)
+            # THE SESSION-HEALTH RECEIPTS (mobile UX batch 2, U7). The phone used
+            # to render an ended or degraded session exactly like a live one —
+            # the summary carried no flag, and the projection's own fields were
+            # never True on any wire path. This is the daemon half of the fix:
+            #
+            # * ``ended`` — an entry for THIS id exists and is ended, and no
+            #   non-ended entry does (``active`` holds only the latter). That
+            #   ended entry is the receipt of a death THIS daemon observed, and
+            #   the row itself keeps its place via the durable listing. A pure
+            #   durable-only row (nothing registered since boot) reports False:
+            #   the daemon has not observed this conversation end, and claiming
+            #   it would be guessing.
+            # * ``degraded`` — the live entry's own dial is down (``_dial`` sets
+            #   it on a failed connect, the reader loop on a dropped one):
+            #   "record fresh but socket unreachable". False for a durable-only
+            #   row by construction.
+            #
+            # Both are additive and defaulted, the same rolling-upgrade rule
+            # the counts follow: an older client ignores them and renders
+            # exactly as before.
+            ended = False
+            degraded = False
+            if entry is None:
+                ended = any(
+                    candidate.ended and candidate.record.session_id == session_id
+                    for candidate in self.entries.values()
+                )
+            else:
+                degraded = bool(entry.degraded)
             counts = _advertisable_counts(entry)
             p = entry.projection if entry else None
             row = durable.get(session_id)
@@ -989,6 +1018,8 @@ class SessionTable:
                     # (see ``session-list.tsx``).
                     "subagents_running": counts[0],
                     "subagents_queued": counts[1],
+                    "ended": ended,
+                    "degraded": degraded,
                     "todos_open": sum(
                         1
                         for phase in (p.todos if p else [])
@@ -1533,6 +1564,9 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
         )
     except OSError:
         entry.degraded = True
+        # Keep the payload a phone would be served honest too — see
+        # ``_mirror_dial_health``.
+        _mirror_dial_health(entry)
         entry.next_dial_at = time.monotonic() + REDIAL_BACKOFF_S
         return
     entry.ready.clear()
@@ -1667,6 +1701,7 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
             entry.ready.clear()
         entry.next_dial_at = time.monotonic() + REDIAL_BACKOFF_S
         entry.degraded = not entry.ended
+        _mirror_dial_health(entry)
         _fan_out(entry, daemon)
 
 
@@ -1821,7 +1856,7 @@ def _projection_frame(projection: SessionProjection) -> dict[str, Any]:
     # EMPTY field there silently withheld the button from a deliberate stop.
     if not projection.streaming and projection.stop_reason != "aborted":
         kind = str(attention.get("kind") or "")
-        if kind in {"error", "interrupted"}:
+        if kind in {"error", "interrupted", "retired"}:
             from local_operator.incidents import is_deliberate_cause
 
             data["stop_reason"] = "aborted"
@@ -1829,11 +1864,18 @@ def _projection_frame(projection: SessionProjection) -> dict[str, Any]:
             # ``error`` kind that is not a recorded deliberate act is the
             # involuntary one. ``error`` with no cause at all is still a cut-off
             # — that is the "cause could not be determined" row, whose notice
-            # above already says so.
-            data["cut_off"] = kind == "error" and not is_deliberate_cause(
+            # above already says so. ``retired`` follows the same involuntary
+            # rule (a build drain cut the turn — nothing the user asked for),
+            # so resuming it is the offered action.
+            data["cut_off"] = kind in {"error", "retired"} and not is_deliberate_cause(
                 str(attention.get("cause") or "")
             )
-    if not projection.streaming and attention.get("kind") in {"error", "interrupted"}:
+    if not projection.streaming and attention.get("kind") in {
+        "error",
+        "interrupted",
+        "closed",
+        "retired",
+    }:
         # The sentence AND its severity come from `harness/rows.py`, which owns
         # row decisions for both surfaces: the phone's `NoticeRow` picks its
         # glyph and ink from `details.severity`, so a frame that carried an empty
@@ -1983,6 +2025,21 @@ def _fan_out(entry: SessionEntry, daemon: "MobileDaemon | None" = None) -> None:
                     queue.get_nowait()
                 except asyncio.QueueEmpty:
                     break  # racing consumer drained it; retry the put
+
+
+def _mirror_dial_health(entry: SessionEntry) -> None:
+    """Mirror ``entry.degraded`` onto the payload peers are served.
+
+    THE PHONE READS THE FLAG OFF THE PAYLOAD, not off this entry (mobile UX
+    batch 2, U7): the session view renders its "not answering" strip from
+    ``projection.degraded``, and a dial that drops while a phone watches must
+    make the next frame say so — the reader loop's ``_fan_out`` sends what
+    ``entry.projection`` holds, so it has to hold the truth. The next live
+    frame clears the flag again (``incoming.degraded = False`` arrives with
+    every projection), so a mirror never outlives a working socket.
+    """
+    if entry.projection is not None:
+        entry.projection.degraded = bool(entry.degraded)
 
 
 # ---------------------------------------------------------------------------
@@ -2356,6 +2413,8 @@ class MobileDaemon:
         *,
         record: SessionRecord | None = None,
         terminal: bool = False,
+        ended: bool = False,
+        degraded: bool = False,
     ) -> SessionProjection | None:
         """Fold ``session_id`` from disk, then capture it for a phone route.
 
@@ -2372,6 +2431,13 @@ class MobileDaemon:
         stamp check and this returns ``None`` — the caller serves no frame
         rather than retaining a payload the follower has already dropped.
 
+        ``ended``/``degraded`` are the CALLER's knowledge about the session's
+        life (mobile UX batch 2, U7): a death the scan just proved, a dial the
+        relay cannot raise. The fold itself has no opinion — a disk rebuild
+        alone is not evidence about a process — so the flags ride the repaint
+        the caller is building, set before the capture so its summary carries
+        them.
+
         Extra folds are only paid by a fold that actually raced a display write;
         no lock or new cache. Loop-thread only: every caller runs on the loop,
         and the generation is bumped on the loop (``config_watch``'s listener
@@ -2383,6 +2449,10 @@ class MobileDaemon:
             generation = self.display_generation
             projection = await asyncio.to_thread(_durable_projection, session_id)
         if projection is not None:
+            if ended:
+                projection.ended = True
+            if degraded:
+                projection.degraded = True
             try:
                 projection = self.capture_subagent_details(
                     projection,
@@ -2526,8 +2596,11 @@ class MobileDaemon:
                         record.pid,
                     )
                 self.table.provisional_active.discard(record.session_id)
+                # `ended=True`: the scan just PROVED this pid dead, and that
+                # receipt is what the phone's ended state + resume affordance
+                # render on (U7). Terminal fences the route; ended describes it.
                 projection = await self._capture_durable_projection(
-                    record.session_id, record=record, terminal=True
+                    record.session_id, record=record, terminal=True, ended=True
                 )
                 if projection is not None:
                     for queue in self.table.session_subscribers.get(record.session_id, set()):
@@ -2567,8 +2640,11 @@ class MobileDaemon:
                     changed = True
                     session_id = entry.record.session_id
                     self.table.provisional_active.discard(session_id)
+                    # `ended=True` — same receipt as the stale branch above: the
+                    # record vanished entirely, so nothing is running for this
+                    # conversation any more (U7).
                     projection = await self._capture_durable_projection(
-                        session_id, record=entry.record, terminal=True
+                        session_id, record=entry.record, terminal=True, ended=True
                     )
                     if projection is not None:
                         for queue in self.table.session_subscribers.get(session_id, set()):
@@ -2689,7 +2765,13 @@ class MobileDaemon:
                 await self._scan_once()
                 if _entry_for_session(self, session_id) is None:
                     self.table.provisional_active.discard(session_id)
-                    projection = await self._capture_durable_projection(session_id, terminal=True)
+                    # The wake settled into a durable (or dead) session. The
+                    # frame is terminal — nothing is live to answer — so it
+                    # carries the ended receipt too (U7); a registration that
+                    # merely ran late clears it with its next live frame.
+                    projection = await self._capture_durable_projection(
+                        session_id, terminal=True, ended=True
+                    )
                     if projection is not None:
                         for queue in self.table.session_subscribers.get(session_id, set()):
                             try:
@@ -3472,7 +3554,20 @@ def build_app(daemon: MobileDaemon):
                     # payload on every reconnect. A refusal just skips the seed
                     # frame — the next live repaint or keepalive carries the
                     # view rather than tearing down the handshake.
-                    projection = await daemon._capture_durable_projection(session_id)
+                    #
+                    # U7: carry the health this daemon knows onto the rebuilt
+                    # frame. No live entry: the session has ended iff an ended
+                    # entry for it exists — the same receipt rule the summaries
+                    # state. Live but payload-less: the dial's own flag.
+                    ended = live is None and any(
+                        candidate.ended and candidate.record.session_id == session_id
+                        for candidate in daemon.table.entries.values()
+                    )
+                    projection = await daemon._capture_durable_projection(
+                        session_id,
+                        ended=ended,
+                        degraded=live is not None and bool(live.degraded),
+                    )
                 if projection is not None:
                     yield _sse("projection", _projection_frame(projection))
                 while True:
@@ -5127,7 +5222,12 @@ def _list_models() -> list[dict[str, Any]]:
 #: The login page is server-rendered (not part of the SPA) so the auth gate
 #: has zero client-side surface: no bundle, no router state, no way for a
 #: stale cached SPA to sit in front of a password form.
-_LOGIN_ERROR = '<p class="error">Wrong password.</p>'
+#:
+#: `role="alert"` on the refusal is the whole fix for U3 (mobile UX batch 2):
+#: a bad POST re-renders this page with the field refocused and cleared, and
+#: without a live region a screen-reader user was told nothing about the
+#: failed attempt (measured: `role` null, parent `aria-live` null).
+_LOGIN_ERROR = '<p class="error" role="alert">Wrong password.</p>'
 
 _LOGIN_HTML = """<!doctype html>
 <html lang="en">

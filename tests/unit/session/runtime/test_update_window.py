@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -39,6 +41,7 @@ from typing import Any, cast
 import pytest
 
 from local_operator import buildwatch
+from local_operator.session.goal_judge import goal_continuation_prompt
 from local_operator.session.runtime import process as child_mod
 from local_operator.session.runtime.inbox import (
     SOURCE_USER,
@@ -150,6 +153,326 @@ async def test_a_steer_during_the_window_is_queued_not_lost(tmp_path: Path) -> N
     assert receipt == SPOOL_RECEIPT_PROMPT, receipt
     assert session.steered == [], "a steer was queued against a turn nobody will run"
     assert len(peek_inbox(session.transcript.directory)) == 1
+
+
+# -- the harness stamp across the spool (the goal judge's continuation) ------------
+#
+# A GOAL-CONTINUATION row ("Continue working toward this goal: …") is persisted as a
+# ``role="user"`` message and told apart from the operator's own words by the
+# STRUCTURAL stamp (``provider_payload["harness_injected"]``). The spool boundary
+# used to drop it: ``InboxLine`` had no field for it, so a continuation the window
+# queued replayed as an unstamped user row — invisible to the marker-only surfaces
+# and painted as the operator's own words on the desktop (measured on a live
+# session: 10 such rows across one afternoon).
+#
+# Three layers are pinned below: the WRITE (the row the window spools), the DELIVERY
+# (what ``process._run_owner_prompt`` hands the handle, both the ordinary and the
+# mid-turn steer arm), and the REPLAYED row of a real Session.
+
+
+@pytest.mark.asyncio
+async def test_a_harness_continuation_during_the_window_keeps_its_stamp(tmp_path: Path) -> None:
+    """The row the window spools must carry the marker, or the replay loses it.
+
+    The receipt is the successor's promise, and the successor replays the row as
+    the owner's own prompt — so "harness chrome, never painted as the user's
+    words" has to ride the row itself.
+    """
+    host, session = _window_host(tmp_path)
+    host._updating = PAIR
+    continuation = goal_continuation_prompt("Ship it")
+
+    receipt = await host.prompt(continuation, command_id="g" * 8, harness_injected=True)
+
+    assert receipt == SPOOL_RECEIPT_PROMPT, receipt
+    rows = peek_inbox(session.transcript.directory)
+    assert len(rows) == 1, rows
+    assert rows[0].harness_injected is True, (
+        "the stamp was dropped at the spool boundary, so the successor replays "
+        "harness chrome as the operator's own words"
+    )
+    # Negative control: an ordinary prompt's row is NOT chrome — the carriage
+    # must not manufacture a stamp for a person's message.
+    host._updating = PAIR
+    await host.prompt("now summarise the build staleness fix", command_id="p" * 8)
+    rows = peek_inbox(session.transcript.directory)
+    assert [row.harness_injected for row in rows] == [True, False], rows
+
+
+class _StampHandle:
+    """The successor's delivery seam, recording the provenance it is handed.
+
+    ``prompt``/``steer`` take ``harness_injected`` exactly as
+    ``ServingSessionHandle`` does, so ``process._run_owner_prompt``'s probes
+    exercise real signature discovery rather than a double that accepts
+    everything. ``busy`` makes the prompt refuse the way a live mid-turn
+    admission does — the arm that steers.
+    """
+
+    def __init__(self, directory: Path, *, busy: bool = False) -> None:
+        self._session = SimpleNamespace(transcript=SimpleNamespace(directory=directory))
+        self.directory = directory
+        self.busy = busy
+        self.prompt_calls: list[tuple[str, bool]] = []
+        self.steer_calls: list[tuple[str, bool]] = []
+
+    def has_admitted_command(self, command_id: str) -> bool:
+        return False
+
+    async def prompt(
+        self,
+        text: str,
+        images: Any = None,
+        command_id: str | None = None,
+        *,
+        wait_for_turn: bool = True,
+        harness_injected: bool = False,
+    ) -> str:
+        if self.busy:
+            from local_operator.session.errors import TurnInFlight
+
+            raise TurnInFlight("session is already streaming; use steer() to inject mid-turn")
+        self.prompt_calls.append((text, harness_injected))
+        return "prompt admitted"
+
+    async def steer(
+        self,
+        text: str,
+        images: Any = None,
+        command_id: str | None = None,
+        *,
+        harness_injected: bool = False,
+    ) -> str:
+        self.steer_calls.append((text, harness_injected))
+        return "steering queued"
+
+
+@pytest.mark.asyncio
+async def test_the_replayed_owner_prompt_is_handed_its_harness_stamp(tmp_path: Path) -> None:
+    """The successor's delivery must carry the row's provenance to the handle."""
+    directory = tmp_path / "sessions" / "s1"
+    directory.mkdir(parents=True, exist_ok=True)
+    handle = _StampHandle(directory)
+    continuation = goal_continuation_prompt("Ship it")
+    append_inbox(
+        directory,
+        InboxLine(
+            text=continuation,
+            sender={},
+            wake=True,
+            source=SOURCE_USER,
+            command_id="c" * 8,
+            harness_injected=True,
+        ),
+    )
+
+    delivered = await child_mod._drain_inbox_into(handle)
+
+    assert delivered == 1
+    assert handle.prompt_calls == [(continuation, True)]
+
+
+@pytest.mark.asyncio
+async def test_the_replay_reads_a_legacy_row_as_unstamped(tmp_path: Path) -> None:
+    """Back-compat: a row without the field replays as today — no stamp."""
+    directory = tmp_path / "sessions" / "s1"
+    directory.mkdir(parents=True, exist_ok=True)
+    handle = _StampHandle(directory)
+    # The flag left at its default: a pre-stamp build's absent key and a fixed
+    # build's unflagged row (False) must read the same — not chrome.
+    append_inbox(
+        directory,
+        InboxLine(
+            text="deploy the fix", sender={}, wake=True, source=SOURCE_USER, command_id="l" * 8
+        ),
+    )
+
+    delivered = await child_mod._drain_inbox_into(handle)
+
+    assert delivered == 1
+    assert handle.prompt_calls == [("deploy the fix", False)]
+
+
+@pytest.mark.asyncio
+async def test_a_replayed_continuation_steered_mid_turn_keeps_its_stamp(tmp_path: Path) -> None:
+    """The mid-turn arm is the same row's other delivery, so it carries it too.
+
+    Rows are delivered in write order and a peer wake drives a turn, so an owner
+    row lands mid-turn routinely (``_run_owner_prompt`` documents it) — the
+    steer must not be the hop that drops the marker.
+    """
+    directory = tmp_path / "sessions" / "s1"
+    directory.mkdir(parents=True, exist_ok=True)
+    handle = _StampHandle(directory, busy=True)
+    continuation = goal_continuation_prompt("Ship it")
+    append_inbox(
+        directory,
+        InboxLine(
+            text=continuation,
+            sender={},
+            wake=True,
+            source=SOURCE_USER,
+            command_id="c" * 8,
+            harness_injected=True,
+        ),
+    )
+
+    delivered = await child_mod._drain_inbox_into(handle)
+
+    assert delivered == 1
+    assert handle.prompt_calls == [], "premise: the prompt refused mid-turn"
+    assert handle.steer_calls == [(continuation, True)]
+
+
+# -- the stamp across the spool, end to end over a real Session --------------------
+
+
+def _stamp_stream(requests: list[Any]) -> Any:
+    """One scripted turn per call; records every request the model is asked."""
+
+    def stream(request: Any, signal: Any = None):
+        from local_operator.harness.types import StreamEndEvent, StreamTextDelta
+
+        requests.append(request)
+
+        async def gen():
+            yield StreamTextDelta(delta="continued")
+            yield StreamEndEvent(stop_reason="stop")
+
+        return gen()
+
+    return stream
+
+
+def _stamp_session(directory: Path) -> tuple[Any, Any, list[Any]]:
+    """A real Session plus a real ServingSessionHandle over ``directory``."""
+    from local_operator.harness.types import ModelSpec
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+
+    requests: list[Any] = []
+    session = Session(
+        model=ModelSpec(provider="test", model_id="m", context_window=100_000),
+        stream_fn=_stamp_stream(requests),
+        tools=[],
+        transcript=Transcript(directory),
+        system_blocks_provider=lambda: ["stable", "env"],
+    )
+    # Named up front: naming is a second provider call this file is not about.
+    session.set_conversation_name("spool stamp fixture", user_set=True)
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd="/tmp")
+    return session, handle, requests
+
+
+def _history_user_rows(session: Any) -> list[Any]:
+    from local_operator.harness.types import Message
+
+    return [
+        row
+        for row in session.history()
+        if isinstance(row, Message) and getattr(row, "role", "") == "user"
+    ]
+
+
+async def _settle_drain(handle: Any) -> None:
+    if handle._prompt_drain_task is not None:
+        await asyncio.wait_for(asyncio.shield(handle._prompt_drain_task), timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_the_stamp_survives_the_spool_into_the_replayed_row(tmp_path: Path) -> None:
+    """END TO END: the marker rides spool → boot drain → durable row.
+
+    The row stays a ``role="user"`` message — the transcript records why the
+    conversation continued, and the MODEL still reads it (the request below
+    carries it) — while the stamp is what tells every human surface this row
+    was not typed. Before the carriage this replay minted an unstamped row.
+    """
+    from local_operator.harness.rows import is_harness_injection
+
+    directory = tmp_path / "sess"
+    directory.mkdir(parents=True, exist_ok=True)
+    session, handle, requests = _stamp_session(directory)
+    continuation = goal_continuation_prompt("Ship it")
+
+    handle._updating = PAIR
+    receipt = await handle.prompt(continuation, command_id="c" * 8, harness_injected=True)
+    assert receipt == SPOOL_RECEIPT_PROMPT, receipt
+    handle._updating = ""
+
+    delivered = await child_mod._drain_inbox_into(handle)
+    assert delivered == 1
+    await _settle_drain(handle)
+
+    user_rows = _history_user_rows(session)
+    assert [row.text for row in user_rows] == [continuation]
+    assert user_rows[-1].provider_payload == {"harness_injected": True}
+    assert is_harness_injection(user_rows[-1]) is True
+    # …and the row is STILL model-bound: the replayed turn's request carried it.
+    texts = [message.text or "" for message in requests[-1].messages]
+    assert continuation in texts, "the replayed row left the model's context"
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_spooled_row_replays_exactly_as_today(tmp_path: Path) -> None:
+    """Back-compat over the real session: no field ⇒ no stamp ⇒ same admission.
+
+    The row a pre-stamp build spooled must come through the old way: same text,
+    same command identity, and no ``provider_payload`` a surface could read as
+    provenance.
+    """
+    directory = tmp_path / "sess"
+    directory.mkdir(parents=True, exist_ok=True)
+    session, handle, _requests = _stamp_session(directory)
+    continuation = goal_continuation_prompt("Ship it")
+
+    # The spool row as the old format wrote it: no ``harness_injected`` key at all.
+    inbox = directory / "inbox.jsonl"
+    inbox.write_text(
+        json.dumps(
+            {
+                "text": continuation,
+                "sender": {},
+                "mode": "mailbox",
+                "written_at": time.time(),
+                "wake": True,
+                "source": SOURCE_USER,
+                "command_id": "l" * 8,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    delivered = await child_mod._drain_inbox_into(handle)
+    assert delivered == 1
+    await _settle_drain(handle)
+
+    user_rows = _history_user_rows(session)
+    assert [row.text for row in user_rows] == [continuation]
+    unstamped = user_rows[-1].provider_payload or {}
+    assert not unstamped, "a legacy row must replay unstamped — exactly the old reading"
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_spooled_prompt_replays_unstamped(tmp_path: Path) -> None:
+    """Negative control: the carriage cannot stamp a person's message."""
+    directory = tmp_path / "sess"
+    directory.mkdir(parents=True, exist_ok=True)
+    session, handle, _requests = _stamp_session(directory)
+
+    handle._updating = PAIR
+    await handle.prompt("summarise the build staleness fix", command_id="p" * 8)
+    handle._updating = ""
+
+    delivered = await child_mod._drain_inbox_into(handle)
+    assert delivered == 1
+    await _settle_drain(handle)
+
+    user_rows = _history_user_rows(session)
+    assert [row.text for row in user_rows] == ["summarise the build staleness fix"]
+    unstamped = user_rows[-1].provider_payload or {}
+    assert not unstamped, "an ordinary prompt must never carry the chrome stamp"
 
 
 @pytest.mark.asyncio

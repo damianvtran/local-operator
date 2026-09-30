@@ -742,6 +742,11 @@ COMPLETION_MARKERS: dict[str, tuple[str, str]] = {
     "complete": ("✓", "success"),
     "error": ("✗", "danger"),
     "interrupted": ("⊘", "warning"),
+    # The retire-for-build arm (2026-09-29): the warning slash, not ✗ and not
+    # ✓ — a turn cut by a routine update is unfinished work like an
+    # interruption rather than a failure, and the desktop's own ``status_code``
+    # mapping normalizes it the same way. One cell, per the rule above.
+    "retired": ("⊘", "warning"),
 }
 
 #: Cells reserved for the live-state column when ANY row in the result set

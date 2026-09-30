@@ -22,8 +22,8 @@
  * pinned height as a custom property gives those caps the same unit as the
  * box they are bounded by, so they tighten exactly when the space does.
  */
-import { useEffect, useRef, useState } from "react";
-import { setSessionPin } from "../api";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { resumeSession, setSessionPin } from "../api";
 import { ModelSheet } from "../components/model-sheet";
 import { Composer } from "../components/composer";
 import { GateSheet } from "../components/gate-sheet";
@@ -36,6 +36,8 @@ import { WorkingLine } from "../components/working-line";
 import { cn } from "../lib/cn";
 import { COLUMN_HEIGHT_VAR } from "../lib/column";
 import { navigate } from "../router";
+import { pinRefusalText } from "../lib/pin-refusal";
+import { resumeRefusalText } from "../lib/refusal";
 import { useCompletionView } from "../use-completion-view";
 import { usePendingEchoes } from "../pending-echo";
 import { AgentScreen } from "./agent-view";
@@ -46,6 +48,7 @@ import {
 	retainSessionListStream,
 	usePinMarks,
 	useProjection,
+	useRouteTitle,
 	useSessions,
 } from "../store";
 import type { SessionProjection } from "../types";
@@ -103,6 +106,24 @@ function Header({
 	   an earlier version set it inside the sheet, which unmounted before it could
 	   paint (design round 6, D2). */
 	const [gateReceipt, setGateReceipt] = useState("");
+	/* THE PIN REFUSAL'S OWN RECEIPT (mobile UX batch 2, U2). The ★ used to flip
+	   back with no word — measured on a folder-less session: POST `/pin` → 409
+	   `no saved messages yet — pin it after you send one`, and the only
+	   user-visible outcome was "tap does nothing". The sentence is the daemon's
+	   own, composed by the SAME helper the list's sheet uses (`lib/pin-refusal`)
+	   so one refusal cannot grow two wordings.
+
+	   IT CARRIES THE CLAIM IT WAS RAISED UNDER, so it can retire exactly when
+	   that claim stops being true (U17). The 409 above is a statement about the
+	   transcript being EMPTY — "pin it after you send one" — and the reader who
+	   follows it saw the stale line sit above their new message until the next
+	   pin gesture. `empty` records whether this refusal was that one; the effect
+	   below clears it on the next projection that carries a message, and leaves
+	   refusals that were never about emptiness (a network failure on a
+	   conversation with history) alone. */
+	const [pinRefusal, setPinRefusal] = useState<{ text: string; empty: boolean } | null>(
+		null,
+	);
 	/* THE PIN STATE COMES FROM THE LIST STORE, which is the same row the daemon
 	   serves on the list frame — so this control and the list's ★ agree by
 	   construction rather than by two reads of the pin file. `undefined` (an
@@ -121,6 +142,7 @@ function Header({
 	const pinned = pinMarks.get(sessionId) ?? Boolean(row?.pinned);
 	const togglePin = async () => {
 		const next = !pinned;
+		setPinRefusal(null);
 		/* Optimistic mark, then confirmed: the ★ flips at once and the daemon's
 		   next repaint is the authority for the list. */
 		applySessionPin(sessionId, next);
@@ -132,16 +154,25 @@ function Header({
 			   so a disagreeing one never settles and the ★ would stay on a row the
 			   daemon never pinned. */
 			if (saved.pinned !== next) clearSessionPinMark(sessionId);
-		} catch {
-			/* A refusal takes the mark back with it, and that is the whole of the
-			   response this screen shows: the reason the daemon gave is not rendered
-			   here (the refusal band was removed from this change and is being rebuilt
-			   on its own PR). The list would otherwise keep showing a ★ the daemon
-			   never accepted until its next repaint, which is the one thing this
-			   screen cannot promise. */
+		} catch (error) {
+			/* A refusal takes the mark back with it AND says why, in the strip
+			   under this header: the list already renders the daemon's reason for
+			   the same refusal, and a silent flip-back here read as a dead
+			   control (U2). The mark still has to go now — the list would
+			   otherwise keep showing a ★ the daemon never accepted until its next
+			   repaint, which is the one thing this screen cannot promise. */
 			clearSessionPinMark(sessionId);
+			setPinRefusal({
+				text: pinRefusalText(error),
+				empty: projection.transcript.length === 0,
+			});
 		}
 	};
+	/* The 409's own exit, taken as soon as it is true (U17): the next projection
+	   whose transcript carries a row — the message the refusal asked for. */
+	useEffect(() => {
+		if (pinRefusal?.empty && projection.transcript.length > 0) setPinRefusal(null);
+	}, [pinRefusal, projection.transcript.length]);
 	return (
 		<>
 		<header className="flex items-center gap-2 border-b border-hairline px-1 py-1 pt-[max(env(safe-area-inset-top),0.25rem)]">
@@ -207,6 +238,137 @@ function Header({
 				{gateReceipt}
 			</p>
 		) : null}
+		{pinRefusal ? (
+			/* The same in-flow strip pattern as the receipt above, in the danger ink
+			   the list's refusal uses: it takes layout space so it cannot cover a
+			   control, and `role="alert"` announces it when it appears. */
+			<p
+				role="alert"
+				className="border-b border-hairline bg-elevated px-2 py-1 text-meta break-words text-danger"
+			>
+				{pinRefusal.text}
+			</p>
+		) : null}
+		</>
+	);
+}
+
+/** The documented resume affordance for an ENDED session (mobile UX batch 2,
+    U7). docs/mobile.md: "the phone card flips to *ended*, offering resume" and
+    "the session is shown as ended (its history stays resumable)". A tap reopens
+    the conversation as a NEW live session — the same route the past-sessions
+    screen uses (`POST /api/sessions/resume`: the daemon spawns a child that
+    resumes the transcript) — and the router takes the phone to it. Local state
+    so the button can say `resuming…` and a refusal renders its sentence instead
+    of a dead control. */
+
+/* THE ACCEPTANCE LINE'S TWO SPELLINGS (UX round 2, U24). The first is what a
+   cold child start honestly looks like; the second is the same fact once "a
+   few seconds" has stopped describing it — the session still has not come
+   back, which is what the reader needs to decide to wait or retry. 20s is
+   generous for the ordinary respawn (the live leg's own real child took ~2s)
+   and short enough that a stuck one is not dressed up as a normal start. */
+const REOPENING = "reopening — this can take a few seconds";
+const STILL_REOPENING = "still reopening — it has not come up yet";
+const REOPEN_REPORT_MS = 20_000;
+
+function EndedSessionStrip({ sessionId }: { sessionId: string }) {
+	const [busy, setBusy] = useState(false);
+	const [error, setError] = useState("");
+	/* THE ACCEPTANCE LINE (UX round 2, U24). A resume whose POST succeeds but
+	   whose session does not come back live ends the same way it started
+	   otherwise — one click, no word — and the reader cannot tell accepted
+	   from failed from still-coming-up. The line says which; the strip
+	   unmounting (a live frame flips `ended`, which is what removes this
+	   component and its notice) is what ends it. It is also capped: "a few
+	   seconds" stops being true long before the strip does, and a stale
+	   acceptance reads like a promise the daemon is not keeping — past the
+	   cap the sentence says what is actually true instead. */
+	const [notice, setNotice] = useState("");
+	const resume = async () => {
+		if (busy) return;
+		setBusy(true);
+		setError("");
+		setNotice("");
+		try {
+			const r = await resumeSession(sessionId);
+			/* THE SAME-ROUTE NO-OP (UX round 1, U16 / agent-review MINOR 1). The
+			   route echoes the id it was given, so this navigation usually lands on
+			   the route that is ALREADY mounted — this component, and its `busy`,
+			   survive it. Until this reset, a POST that succeeded against a session
+			   that did not come back live left `resuming…` disabled forever, with no
+			   way out short of leaving the screen. Retrying is safe: `spawn_session`
+			   coalesces concurrent resumes onto one constructor and a later attempt
+			   reattaches the same owner. */
+			setBusy(false);
+			setNotice(REOPENING);
+			navigate(`/s/${encodeURIComponent(r.session_id)}`);
+		} catch (e) {
+			/* One refusal voice (design round 1, D5): prefixed like the pin's,
+			   instead of the raw daemon string. */
+			setError(resumeRefusalText(e));
+			setBusy(false);
+		}
+	};
+	useEffect(() => {
+		if (notice !== REOPENING) return;
+		const t = setTimeout(() => setNotice(STILL_REOPENING), REOPEN_REPORT_MS);
+		return () => clearTimeout(t);
+	}, [notice]);
+	return (
+		<>
+			<div className="flex items-center gap-2 border-b border-hairline bg-elevated px-2 py-1">
+				<div className="min-w-0 flex-1">
+					{/* THE TITLE, ONE TEXT LINE AT EVERY WIDTH (design round 3, D10).
+					    `this session has ended — its history is kept` dropped its last
+					    word onto a second line at 320 and made the strip 63.17px where
+					    one line does the job; the shorter sentence keeps the promise
+					    (`history kept`) in the same register. */}
+					<p role="status" className="text-meta text-ink-muted">
+						session ended — history kept
+					</p>
+					{/* WHERE IT REOPENS (UX round 1, U18; the words in round 2, U25 =
+					    D8). The daemon resumes the transcript in the owner's home — the
+					    durable directory does not record a cwd to resume into — so the
+					    strip says so before the tap rather than letting a project session
+					    quietly come back in `~`. The PATH IS SPELLED OUT: a bare `~` is
+					    shell shorthand a phone reader should not have to decode
+					    (measured at 390 fitting beside the button, and at 320 on its own
+					    line inside the row). Inside the row's text cell: at 390 it costs
+					    no height at all beside the 44px button, and the row's growth at
+					    320 is bounded by the sentence it belongs to. */}
+					<p className="mt-0.5 text-meta text-ink-dim">
+						resume reopens it in your home folder
+					</p>
+				</div>
+				{/* A real 44px target inside a `pointer-events-none` overlay: the
+				    row's dead space passes touches through to the transcript, and
+				    only this control claims them. */}
+				<button
+					type="button"
+					disabled={busy}
+					onClick={() => void resume()}
+					className="pointer-events-auto min-h-11 shrink-0 rounded-sm border border-control px-3 text-body-sm active:bg-surface disabled:opacity-50"
+				>
+					{busy ? "resuming…" : "resume"}
+				</button>
+			</div>
+			{notice ? (
+				<p
+					role="status"
+					className="border-b border-hairline bg-elevated px-2 py-1 text-meta text-ink-dim"
+				>
+					{notice}
+				</p>
+			) : null}
+			{error ? (
+				<p
+					role="alert"
+					className="border-b border-hairline bg-elevated px-2 py-1 text-meta break-words text-danger"
+				>
+					{error}
+				</p>
+			) : null}
 		</>
 	);
 }
@@ -219,6 +381,23 @@ export function SessionScreen({
 	jobId?: string;
 }) {
 	const { projection, connected } = useProjection(sessionId);
+	/* THE ROUTE'S OWN TAB TITLE (U4, batch 2). A phone's task switcher and share
+	 * sheet read `document.title`, and a session wearing the list's `(3) local
+	 * operator` described the wrong screen. The session route names the
+	 * conversation; the agent route names the child (the roster row's label is
+	 * the best identity available before the detail fetch lands). `null` while
+	 * nothing is known yet, which leaves the list aggregate in place — the store
+	 * owns that half and releases it when this unmounts (see `useRouteTitle`). */
+	const agentLabel = jobId
+		? projection?.subagents.find((row) => row.job_id === jobId)?.label
+		: undefined;
+	useRouteTitle(
+		jobId
+			? `${agentLabel || "agent"} — local operator`
+			: projection
+				? `${projection.conversation_name || "untitled"} — local operator`
+				: null,
+	);
 	/* Commands this device has sent that the session has not written a row for
 	 * yet. Read above the `!projection` return because hooks cannot be called
 	 * after it, and resolved against the transcript by id — see `pending-echo.ts`. */
@@ -226,6 +405,32 @@ export function SessionScreen({
 	const [modelsOpen, setModelsOpen] = useState(false);
 	const [effortOpen, setEffortOpen] = useState(false);
 	const rootRef = useRef<HTMLDivElement>(null);
+	/* THE RUNG'S HEIGHT, MEASURED BECAUSE IT IS THE OVERLAY'S (round 2,
+	   U23 = D7). The ladder is an overlay (round 1, U19/D4) so the column's
+	   geometry never moves when a rune appears — but an overlay that nothing
+	   compensates for is a strip painted OVER the transcript, and on a
+	   transcript that does not scroll (a short ended session: `scrollHeight ==
+	   clientHeight`) no gesture can reveal what it covers: measured 28 of the
+	   first row's 35px at 390 and 38 of 56px at 320, under a strip whose own
+	   sentence says "its history is kept". The rune's height is handed to the
+	   transcript, which reserves the same amount INSIDE its scroller (see
+	   `topInset` there), so the first row sits under the strip and the strip
+	   alone moves nothing. A callback ref rather than an effect on mount,
+	   because the ladder only exists once a projection does — `[ladderEl]`
+	   attaches the observer exactly when the node arrives. Measured instead
+	   of pinned to a constant: the ended strip wraps (52px at 390, 63px at
+	   320) and its refusal/acceptance lines have heights of their own. */
+	const [ladderEl, setLadderEl] = useState<HTMLDivElement | null>(null);
+	const [ladderInset, setLadderInset] = useState(0);
+	useLayoutEffect(() => {
+		if (!ladderEl) return;
+		const measure = () => setLadderInset(ladderEl.getBoundingClientRect().height);
+		measure();
+		if (typeof ResizeObserver === "undefined") return;
+		const ro = new ResizeObserver(measure);
+		ro.observe(ladderEl);
+		return () => ro.disconnect();
+	}, [ladderEl]);
 
 	useEffect(() => retainProjectionStream(sessionId), [sessionId]);
 	/* THE LIST STREAM TOO, so the header's ☆/★ reflects the shared pin
@@ -327,11 +532,64 @@ export function SessionScreen({
 					connected={connected}
 				/>
 			) : <>
-			<Header projection={projection} sessionId={sessionId} />
-			{/* The spend + context glance (phase 1), read-only and self-hiding:
-			    it renders nothing until either reading has something to state. */}
-			<SessionStatus projection={projection} />
-
+			{/* THE HEADER, THE GLANCE ROW AND THE STATE LADDER SHARE ONE RELATIVE
+			    WRAPPER, because the ladder is an OVERLAY that rides UNDER both (UX
+			    round 1, U19 = design round 1, D4; anchor moved in round 2, D9).
+			    Every rung used to be an in-flow row, so each appearance/clear pushed
+			    the whole column down and back — before the overlay: +26px when the
+			    degraded/reconnect strip appeared and +53px for the ended strip, on
+			    every flap of a flaky link. Reserved space would have paid the same
+			    pixels permanently (52px on a 320-wide phone, for a strip most
+			    sessions never show); the overlay keeps the column's geometry fixed
+			    for all three rungs. Round 2 D9 moved the anchor from the header to
+			    the WRAPPER'S bottom: at the header it painted over the spend/context
+			    glance (6.2%/200k · $1.25 — the numbers a reader most wants when a
+			    session is struggling) — and round 2 U23 = D7 pays for the rest of
+			    the cover: the transcript reserves the rung's height inside its own
+			    scroller, so nothing under a rung is unreachable. `pointer-events-none`
+			    hands touches back to the transcript underneath — scrolling from the
+			    strip's own row must keep working — and the rung's interactive part
+			    (the ended strip's resume) opts back in with `pointer-events-auto`.
+			    Sheets are `fixed z-50`; this overlay sits at `z-10`, under them. */}
+			<div className="relative">
+				<Header projection={projection} sessionId={sessionId} />
+				{/* The spend + context glance (phase 1), read-only and self-hiding:
+				    it renders nothing until either reading has something to state. */}
+				<SessionStatus projection={projection} />
+				{/* SESSION HEALTH, AS ONE LADDER (mobile UX batch 2, U7 + U11). Each
+				    rung is a different fact and the later ones are only worth stating
+				    while the earlier are untrue, so at most ONE strip shows — three
+				    stacked on a 320-wide phone would spend the vertical budget the
+				    batch-1 work just bought back. `ended` (the process is gone; the
+				    resume affordance lives in the strip) outranks `degraded` (the
+				    relay's dial is down — sends will fail until it answers) outranks
+				    the phone's own link being down (`connected === false`, the store's
+				    flag; the retained view is what the reader is looking at). Each
+				    clears itself when the daemon's next projection (or the SSE's own
+				    reopen) says otherwise. */}
+				<div
+					ref={setLadderEl}
+					className="pointer-events-none absolute inset-x-0 top-full z-10"
+				>
+					{projection.ended ? (
+						<EndedSessionStrip sessionId={sessionId} />
+					) : projection.degraded ? (
+						<p
+							role="status"
+							className="border-b border-hairline bg-warning-wash px-2 py-1 text-meta text-warning"
+						>
+							not answering — showing its last synced view
+						</p>
+					) : !connected ? (
+						<p
+							role="status"
+							className="border-b border-hairline bg-elevated px-2 py-1 text-meta text-ink-muted"
+						>
+							reconnecting — showing the last synced view
+						</p>
+					) : null}
+				</div>
+			</div>
 			{showEmptyState ? (
 				/* A just-started session has no messages yet. An empty scroll
 				   area reads as "did it break?"; this placeholder says the
@@ -350,6 +608,7 @@ export function SessionScreen({
 					entries={projection.transcript}
 					pending={pendingEchoes}
 					streaming={projection.streaming}
+					topInset={ladderInset}
 				/>
 			)}
 

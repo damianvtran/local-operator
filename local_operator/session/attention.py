@@ -1148,7 +1148,7 @@ def _import_transcript_outcome(
                 # behaviour, exactly.
                 notify=bool(saved.get("notify", True)),
             )
-            if kind == "error" and is_cut_off_cause(cause):
+            if kind in {"error", "retired"} and is_cut_off_cause(cause):
                 # A CUT-OFF the dying runtime could not narrate itself. Its own
                 # `_journal_cut_off_once` is refused by `journal_incident`'s
                 # `_disposed` guard — the dispose rung sets that flag before
@@ -2039,7 +2039,12 @@ class AttentionStore:
         this method used to give a daemon request handler, which answered the
         phone with an ASGI abort (2026-09-20, see ``_BUSY_TIMEOUT_MS``).
         """
-        if kind not in {"complete", "error", "interrupted"} or not anchor:
+        # ``closed`` is the NEUTRAL CLOSURE (v2 directive, 2026-09-29): a
+        # disposal caught a run that spent no provider round-trip but carried a
+        # real ask. It is a receipt, not a verdict — deliberately NOT a key of
+        # ``CUT_OFF_CAUSES`` — and accepting it here is what lets the row reach
+        # every reader (TUI poller, phone projection, desktop bridge).
+        if kind not in {"complete", "error", "interrupted", "closed", "retired"} or not anchor:
             raise ValueError("invalid completion")
         reason = str(reason or "")[:REASON_WIRE_CHARS]
         if str(uuid.UUID(token)) != token:

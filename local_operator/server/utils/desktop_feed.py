@@ -404,6 +404,21 @@ class FeedSubscription:
     overflow: bool = False
 
 
+def scheduled_wake_rows(schedules: Any) -> list[Any]:
+    """The SCHEDULED rows of an index entry — hidden patience waits removed.
+
+    A count that included them would show "1 wake" for a session with nothing
+    the user can see or manage (design §8.2.2 item 5). Delegates to the one
+    shared filter beside the index readers
+    (:func:`local_operator.wakes.store.scheduled_rows`), so this feed, the
+    sidebar's count, the desktop listing and the CLI cannot drift; every OTHER
+    reader of the index (the supervisor, the session) stays unfiltered.
+    """
+    from local_operator.wakes.store import scheduled_rows
+
+    return list(scheduled_rows(schedules))
+
+
 class DesktopFeed:
     """The process singleton behind ``GET /v1/desktop/events``.
 
@@ -1834,7 +1849,7 @@ class DesktopFeed:
             leaving=leaving,
             subagents_running=subagents_running,
             subagents_queued=subagents_queued,
-            wakes=len(schedules),
+            wakes=len(scheduled_wake_rows(schedules)),
             wakes_dormant=bool(
                 isinstance(entry, dict) and (entry.get("stopped_at") or entry.get("held_at"))
             ),

@@ -3443,6 +3443,13 @@ class SessionStreamFn:
         # notice handler above — the stream owns routing, the session owns
         # ordered event delivery.
         self._route_handler: Callable[[Any, str], Awaitable[None] | None] | None = None
+        # The mesh credential binding recorder, installed by the session factory
+        # (``set_credential_binding``): every request boundary notes the
+        # credential serving this session, so the durable binding row tracks the
+        # account it is actually transacting on. ``None`` wherever it was not
+        # wired — every stream built without a session transcript — and then
+        # ``_note_serving_binding`` is a single attribute read per request.
+        self._credential_binding: Any | None = None
         # The fast-mode refusal bridge, installed by the owning Session like
         # the two above. Called once per selector, the first time a provider
         # refuses a fast request and the driver serves it at standard speed.
@@ -3946,6 +3953,19 @@ class SessionStreamFn:
         fallback after the primary has recovered.
         """
         self._route_handler = handler
+
+    def set_credential_binding(self, recorder: Any | None) -> None:
+        """Install the mesh credential binding recorder for this session.
+
+        The plain-store half of the binding's local feed
+        (``session/credential_binding.py``): with a recorder installed,
+        :meth:`_note_serving_binding` reads the same per-session sticky that
+        ``preflight_usage`` reads at its boundary and reports the serving
+        credential after every request. Optional by design — a stream built
+        without a session transcript (exec preflight, Radient, every 0-peer
+        root) never calls it.
+        """
+        self._credential_binding = recorder
 
     def restore_fallback(self, selector: str, effort: str | None, primary_selector: str) -> None:
         """Re-pin a fallback route persisted by a previous run of this session.
@@ -5026,6 +5046,32 @@ class SessionStreamFn:
                 continue
             return
 
+    def _note_serving_binding(self, model: ModelSpec) -> None:
+        """Note the credential serving ``model`` for the binding recorder, if any.
+
+        Driven off the SAME sticky read ``preflight_usage`` takes at its
+        boundary (the precedent is the ``session_credential_id`` read there):
+        by the time a request reaches the provider, every resolve has re-pinned
+        the session to whatever row it landed on, so the sticky names the
+        serving credential — and after the boundary above ran, that is the row
+        this request will be served with, which is what "the first serve each
+        turn" needs recorded before the turn's first request.
+
+        A NEGATIVE id is a borrow; the store's own sink already reported it
+        (the grant ref is the only place the owner's real id is in hand), and
+        the recorder skips synthetic ids by construction. This path therefore
+        exists for the PLAIN-store direction — an owner device that borrows
+        nothing — and costs one dict read when nothing changed. No round trips,
+        never a raise; a missing recorder is a single attribute read.
+        """
+        recorder = self._credential_binding
+        if recorder is None:
+            return
+        credential_id = self._auth_store.session_credential_id(model.provider, self._session_id)
+        if credential_id is None:
+            return
+        recorder.observe_local(provider=model.provider, credential_id=credential_id)
+
     async def _apply_account_health(
         self,
         model: ModelSpec,
@@ -5843,6 +5889,12 @@ class SessionStreamFn:
         # boundary (which owns quota recovery and auto-effort classification).
         if request.purpose == "turn":
             await self.preflight_usage(request.model)
+        # The binding boundary (``_note_serving_binding``): after the preflight
+        # above has settled and pinned the session's credential, note it for the
+        # recorder. Outside the purpose gate on purpose — a helper's request is
+        # served on the same credential, and the note is an in-process read that
+        # reports nothing when the account has not changed.
+        self._note_serving_binding(request.model)
         async for event in self._record_stream(
             request,
             stream_with_failover(

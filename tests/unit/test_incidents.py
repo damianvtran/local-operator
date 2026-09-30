@@ -725,6 +725,41 @@ def test_an_mcp_mention_no_longer_earns_an_incident_category() -> None:
     assert classify_incident("model context protocol connection lost").category == "network"
 
 
+def test_a_closed_closure_is_not_a_cut_off_cause() -> None:
+    """v2: ``closed`` is a neutral receipt and must never narrate a cut-off.
+
+    The successor narration is gated on ``kind in {"error", "retired"} and
+    is_cut_off_cause(cause)`` (``attention._import_transcript_outcome``), so the
+    way a closure stays silent is by being OUTSIDE this vocabulary: if
+    ``closed`` ever entered ``CUT_OFF_CAUSES``, a reader that folds the two — or
+    a future gate that drops the kind check — would tell the next turn its
+    finished work was cut off.
+    """
+    from local_operator.incidents import (
+        CUT_OFF_CAUSES,
+        is_cut_off_cause,
+        is_deliberate_cause,
+    )
+
+    assert "closed" not in CUT_OFF_CAUSES
+    assert not is_cut_off_cause("closed")
+    assert not is_deliberate_cause("closed")
+
+
+def test_the_retire_for_build_arm_still_narrates_its_cut() -> None:
+    """The arm changes the FRAMING, never the fact (retire-for-build, 2026-09-29).
+
+    The successor journal gate admits ``retired`` BESIDE ``error`` — a turn cut
+    for an update still opens the next turn's context with ``[session
+    incident]`` — and the cause keeps its cut-off vocabulary: only the KIND
+    changed, so ``retired`` itself must never leak in as a cause either.
+    """
+    from local_operator.incidents import CUT_OFF_CAUSES, is_cut_off_cause
+
+    assert is_cut_off_cause("runtime-retired") is True
+    assert "retired" not in CUT_OFF_CAUSES
+
+
 def test_a_fired_stall_bound_has_a_class_of_its_own() -> None:
     """The bound's exit is a NAMED death, not an unattributed one.
 

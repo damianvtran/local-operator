@@ -2166,6 +2166,7 @@ class ServingSessionHandle(SessionHandle):
         sender: dict[str, Any],
         source: str = SOURCE_PEER,
         command_id: str = "",
+        harness_injected: bool = False,
     ) -> str:
         """Spool one message for the successor runtime, and receipt it.
 
@@ -2209,6 +2210,17 @@ class ServingSessionHandle(SessionHandle):
         from the same vehicle — a peer's message is held for the next runtime, a
         user's own prompt is queued onto it, and only the second one is the same
         admission their composer was refused a moment ago.
+
+        ``harness_injected`` is the OWNER row's structural provenance and rides
+        the row for the same reason ``wake`` does: it is what the producer knew
+        and the successor cannot re-derive. The prompt this vehicle carries may
+        be harness chrome — the goal judge's continuation is the producer — and
+        the successor replays it through the ordinary admission
+        (``process._run_owner_prompt``), so a dropped stamp minted an UNSTAMPED
+        user row there: invisible to the marker-only surfaces and painted as
+        the operator's own words on the desktop (measured on a live session: 10
+        such rows). Defaults False so every peer caller and every row an older
+        build wrote reads exactly as before.
         """
         from local_operator.session.runtime.inbox import (
             SOURCE_USER,
@@ -2236,6 +2248,7 @@ class ServingSessionHandle(SessionHandle):
                     wake=wake,
                     source=source,
                     command_id=command_id,
+                    harness_injected=harness_injected,
                 ),
             )
         except Exception:  # noqa: BLE001 — a broken spool is a refusal, not a crash
@@ -2969,6 +2982,7 @@ class ServingSessionHandle(SessionHandle):
                     sender={},
                     source=SOURCE_USER,
                     command_id=command_id,
+                    harness_injected=harness_injected,
                 )
             finally:
                 # Rejected on both outcomes, for the reason the refusal below
@@ -3014,6 +3028,7 @@ class ServingSessionHandle(SessionHandle):
                         sender={},
                         source=SOURCE_USER,
                         command_id=command_id,
+                        harness_injected=harness_injected,
                     )
                 finally:
                     # Rejected on BOTH outcomes, and for the same reason the
@@ -3809,6 +3824,7 @@ class ServingSessionHandle(SessionHandle):
         input_mode: str | None = None,
         input_path: str | None = None,
         audio: list[dict[str, str]] | list["AudioContent"] | None = None,
+        harness_injected: bool = False,
     ) -> str:
         self._check_loop_thread()
         command_id = command_id or str(uuid.uuid4())
@@ -3861,6 +3877,7 @@ class ServingSessionHandle(SessionHandle):
                     sender={},
                     source=SOURCE_USER,
                     command_id=command_id,
+                    harness_injected=harness_injected,
                 )
             finally:
                 # A spooled steer is not in this session's transcript, so its
@@ -3889,6 +3906,14 @@ class ServingSessionHandle(SessionHandle):
         # keyword it would drop.
         if "audio" in parameters:
             fields["audio"] = audio_blocks_decoded
+        # The structural stamp rides the steer for the same reason it rides a
+        # prompt: a MID-TURN delivery is one of the two ways a spooled owner
+        # prompt replays (``process._run_owner_prompt``'s steer fallback), and
+        # without this hop the replayed continuation would mint an unstamped
+        # row the marker-only surfaces paint. Probed like the two above, so a
+        # session that predates the keyword never receives it.
+        if "harness_injected" in parameters:
+            fields["harness_injected"] = harness_injected
         try:
             self._session.steer(text, blocks, **fields)
         except Exception:
@@ -5901,7 +5926,7 @@ class ServingSessionHandle(SessionHandle):
         if command == "team":
             return self._team_slash(session, args, SlashResult)
         if command == "agent":
-            return self._agent_slash(session, args, SlashResult)
+            return await self._agent_slash(session, args, SlashResult)
         if command == "project":
             # Every reserved verb runs (slice 3), through the same runner the
             # TUI's own `_cmd_project` calls. A command advertised as
@@ -5963,6 +5988,8 @@ class ServingSessionHandle(SessionHandle):
             return self._compact_slash(session, SlashResult)
         if command == "wake":
             return await self._wake_slash(session, args, SlashResult)
+        if command == "monitor":
+            return await self._monitor_slash(session, args, SlashResult)
         if command == "loop":
             from local_operator.slash_commands import unknown_flag_refusal
 
@@ -6257,6 +6284,117 @@ class ServingSessionHandle(SessionHandle):
 
     @staticmethod
     def _wake_failure(SlashResult: Any, text: str, code: str) -> Any:
+        """One shape for every refusal this command produces, so the route can
+        map a code to a status without reading prose."""
+        return SlashResult(kind="error", text=text, data={"code": code})
+
+    async def _monitor_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+        """Run one monitor mutation INSIDE the session that owns the schedules.
+
+        Reached from the desktop by ``POST/DELETE /v1/desktop/monitors`` when
+        a live runtime holds the session (see ``routes/desktop_monitors``),
+        never by a user typing ``/monitor``: the name is a routed-command word
+        in the ladder above, not a registry entry, so no palette row exists
+        for it and no terminal offers it — the ``_wake_slash`` shape.
+
+        WHY THIS PATH EXISTS AT ALL. ``Session._persist_monitor_schedules`` is
+        the one writer of monitor state, and a live session republishes its
+        WHOLE in-memory list on any change. An external write that appended a
+        transcript row would therefore be overwritten by the session's next
+        persist — and until then nothing would tick the watch either. That is
+        a silently dead watch with a 200 response (the wound
+        ``monitors/arm._refuse_if_owned`` names), so the mutation has to
+        happen in this process.
+
+        ARM and CANCEL run the SAME helpers the agent's ``monitor`` tool runs
+        (``tools/builtin``), so a monitor armed here and one armed by the
+        model are validated, allocated, deduped and persisted identically;
+        they end in ``scheduler.create``/``scheduler.cancel`` ->
+        ``scheduler.update`` -> ``_persist_monitor_schedules``, which appends
+        the transcript, rewrites the derived index and re-arms the timer under
+        the scheduler's lock.
+        """
+        import json
+
+        from local_operator.tools.builtin import (
+            FAULT_INVALID_ARGUMENTS,
+            FAULT_KEY,
+            MonitorParams,
+            _monitor_cancel,
+            _monitor_create,
+        )
+
+        try:
+            payload = json.loads(arg) if arg and arg.strip() else {}
+            if not isinstance(payload, dict):
+                raise ValueError("monitor payload must be an object")
+        except (TypeError, ValueError):
+            # The caller is our own route, so this is a protocol bug rather
+            # than user input; refusing in the same typed shape keeps the
+            # route's error mapping in one place instead of adding a case.
+            return self._monitor_failure(
+                SlashResult, "The monitor request could not be read.", "monitor_invalid"
+            )
+
+        op = str(payload.get("op") or "")
+        request = payload.get("request") or {}
+        if not isinstance(request, dict):
+            return self._monitor_failure(
+                SlashResult, "The monitor request could not be read.", "monitor_invalid"
+            )
+        monitor_id = str(payload.get("monitor_id") or "")
+        scheduler = getattr(session, "monitor_scheduler", None)
+        if scheduler is None:
+            return self._monitor_failure(
+                SlashResult,
+                "Monitor scheduling is not available in this session (no scheduler attached).",
+                "monitor_unavailable",
+            )
+        known_ids = {row.id for row in scheduler.monitors}
+
+        # The cwd is the SESSION's — the same value the tool's own context
+        # carries (``Session._build_tool_context``), so a watch armed from
+        # the desktop records the directory its checks run in identically.
+        cwd = str(getattr(session, "_cwd", "") or "")
+        # A synthetic call id: nothing here came from a model, so there is no
+        # real tool call to correlate with. Deliberately not shaped like one.
+        tool_call_id = "desktop-monitor"
+        if op == "create":
+            try:
+                params = MonitorParams.model_validate({**request, "op": "create"})
+            except Exception:  # noqa: BLE001 — a malformed body, refused below
+                return self._monitor_failure(
+                    SlashResult, "The monitor request was not a valid create.", "monitor_invalid"
+                )
+            result = await _monitor_create(tool_call_id, params, scheduler, cwd)
+        elif op == "cancel":
+            params = MonitorParams.model_validate({"op": "cancel", "id": monitor_id})
+            result = await _monitor_cancel(tool_call_id, params, scheduler)
+        else:
+            return self._monitor_failure(
+                SlashResult, f"Unknown monitor operation {op!r}.", "monitor_invalid"
+            )
+
+        if result.is_error:
+            details = result.details or {}
+            malformed = details.get(FAULT_KEY) == FAULT_INVALID_ARGUMENTS
+            code = "monitor_invalid" if malformed else "monitor_refused"
+            # A refused cancel may be refused because the handle does not
+            # exist, which the route answers 404 for. Asked of the scheduler
+            # rather than matched out of the helper's sentence: the sentence
+            # is shared prose that may be reworded, and a status decided by
+            # prose is a status that silently changes meaning one edit later
+            # (the wake twin's rule).
+            if op == "cancel" and monitor_id and monitor_id not in known_ids:
+                code = "monitor_not_found"
+            return self._monitor_failure(SlashResult, result.text, code)
+        # ``notice`` rather than ``block``: the caller is a route that reads
+        # ``data``, and a notice is what the frontier renderer prints for a
+        # receipt it has nothing special to do with.
+        return SlashResult(kind="notice", text=result.text, data=dict(result.details or {}))
+
+    @staticmethod
+    def _monitor_failure(SlashResult: Any, text: str, code: str) -> Any:
         """One shape for every refusal this command produces, so the route can
         map a code to a status without reading prose."""
         return SlashResult(kind="error", text=text, data={"code": code})
@@ -6739,8 +6877,8 @@ class ServingSessionHandle(SessionHandle):
             },
         )
 
-    def _agent_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
-        """The routed ``/agent``: list in the invoker, ATTACH here.
+    async def _agent_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+        """The routed ``/agent``: list in the invoker, ATTACH and CLASS here.
 
         The listing stays ``noop`` on purpose: its rows carry role/specialist
         facts assembled by the frontend's own profile resolver, and a second
@@ -6750,11 +6888,32 @@ class ServingSessionHandle(SessionHandle):
         ``_team_slash``: attaching a profile mutates session state (the
         instructions ride the volatile tail) and nothing consumed the
         ``agent_mutate`` receipt, so `/agent <name>` on a viewer was silent.
+
+        ``class`` is a RESERVED first token here for the same reason it is one
+        in ``tui/app.py::_cmd_agent``: ``/agent`` is authoritative-session, so
+        a live (attached) terminal's command lands in THIS method — the
+        TUI-local branch only runs where nothing routes. The two implement one
+        grammar (review/UX round 1, U1: the switch was unreachable live because
+        only the local half existed).
         """
         if not arg:
             return SlashResult(kind="noop", data={"type": "agent_list", "args": arg})
+        first, _, rest = arg.partition(" ")
+        if first.strip().casefold() == "class":
+            return await self._agent_class_slash(session, rest.strip(), SlashResult)
         name, _, request = arg.partition(" ")
         name = name.strip()
+        # The ``=`` escape, mirroring ``_team_attach_slash`` and the TUI-local
+        # ``_cmd_agent``: the strip removes exactly ONE ``=`` and the remainder
+        # is looked up literally, so the escape is the way to reach an agent
+        # literally named ``class`` (the first token then no longer matches the
+        # reserved word above) AND any name that itself starts with ``=``
+        # (addressed by doubling it — ``=`` is not a reserved name character;
+        # review round 4, R4-2). The local seam has had this since U1; without
+        # it here the routed owner refused ``/agent =class`` while the same
+        # command worked locally — the drift class U1 found.
+        if name.startswith("="):
+            name = name[1:]
         request = request.strip()
         # ``clear``/``none`` is the DETACH verb, mirroring ``_cmd_agent``: only
         # the bare verb detaches, so ``/agent clear <text>`` stays a (mistyped)
@@ -6795,6 +6954,22 @@ class ServingSessionHandle(SessionHandle):
             style="info",
             data={"type": "agent_attached", "agent": resolved, "request": request},
         )
+
+    async def _agent_class_slash(self, session: Any, rest: str, SlashResult: Any) -> Any:
+        """``/agent class …`` on the OWNER: the shared grammar, run here.
+
+        This method exists for its LOCATION, not its logic: ``/agent`` is
+        authoritative-session, so a live terminal's command lands in this
+        process — the one that owns the registry the tag lands in, the session
+        whose pending patience rows the cleanup cancels, and the package whose
+        cadence the flip reconciles (R36). The grammar and the receipts
+        themselves live ONCE, in ``action_class.class_switch_receipt``
+        (review/UX round 1, U1: only the TUI-local half existed, so the switch
+        was unreachable from the seam every attached terminal actually uses).
+        """
+        from local_operator.action_class import class_switch_receipt
+
+        return await class_switch_receipt(session, rest, SlashResult)
 
     async def _mcp_slash(
         self,

@@ -94,10 +94,17 @@ function slashQuery(text: string): string | null {
 
 /** True while the draft is still just the command TOKEN — no arguments yet.
 
-    U5 (mobile UX batch): the sheet opens on the token and yields the composer
+    U5 (mobile UX batch 1): the sheet opens on the token and yields the composer
     the moment a space arrives — `/delete x` is the user composing arguments,
     not a sheet query, and re-opening the sheet over that keystroke stole focus
-    (and the keyboard) mid-typing. */
+    (and the keyboard) mid-typing.
+
+    U13 (batch 2): "the moment a space arrives" covers both arrival paths. On a
+    phone the space usually arrives in the SHEET'S FILTER (focus lives there
+    after typing `/`), which used to strand the arguments in a filter matching
+    nothing; the filter's onChange now hands the composed line back to the
+    composer (see `onSlashSpace`), so both paths converge on the same draft and
+    this predicate stays the single rule. */
 function slashTokenOnly(text: string): boolean {
 	return slashQuery(text) !== null && !text.includes(" ");
 }
@@ -147,12 +154,16 @@ function SlashSheet({
 	open,
 	onClose,
 	onPick,
+	onSpace,
 	query,
 }: {
 	open: boolean;
 	onClose: () => void;
 	/** fill: text to place in the composer; submit: send immediately. */
 	onPick: (fill: string, submit: boolean) => void;
+	/** A space typed in the FILTER — the composed line belongs to the
+	    composer now (U13, batch 2). Receives the filter's full value. */
+	onSpace: (value: string) => void;
 	/** The token after `/` in the composer — seeds the filter. */
 	query: string;
 }) {
@@ -198,7 +209,17 @@ function SlashSheet({
 				<input
 					ref={filterRef}
 					value={filter}
-					onChange={(e) => setFilter(e.target.value)}
+					onChange={(e) => {
+						const next = e.target.value;
+						setFilter(next);
+						/* U13 (batch 2): a space means the reader is composing
+						   ARGUMENTS, which the filter cannot match (measured:
+						   `delete x` → "no matching commands", the text surviving
+						   only here, discarded on dismissal). Close and hand the
+						   line back — the hand-off the sheet's contract already
+						   promises for the draft path. */
+						if (next.includes(" ")) onSpace(next);
+					}}
 					placeholder="filter commands"
 					spellCheck={false}
 					autoCapitalize="off"
@@ -296,6 +317,16 @@ function EffortSheet({
 
 const MAX_TEXTAREA_PX = 6 * 22; /* six lines at body line-height */
 const CONTINUATION_ERROR = "Couldn’t continue this conversation. Try again.";
+/* U15's other half (UX round 1, U20): on an ENDED session the generic line's
+   `Try again.` is not true advice — the runtime is gone and no retry of this
+   control can land — and it sat directly under a strip naming the one path that
+   does work. The honest sentence names it instead. (The composer is NOT
+   disabled for an ended session by this batch: a disabled composer would
+   change the draft, attachment and retained-envelope flows for a state whose
+   refusal the daemon already words, and the gate above removes the affordance
+   that motivated the finding.) */
+const ENDED_CONTINUATION_ERROR =
+	"This session has ended — tap resume to continue.";
 const STEER_ERROR = "Couldn’t send this instruction. Try again.";
 /* U5: one vocabulary for the retained instruction across the alert, the retry
    button, and the delivered acknowledgement — "earlier" throughout, matching
@@ -448,8 +479,17 @@ export function Composer({
 
 	/* The resume affordance is driven by the WIRE fact (stop_reason), not an
 	   inference from the streaming flag: a turn that completes also flips
-	   streaming off, and only an aborted turn should offer "resume". */
-	const showResume = projection.stop_reason === "aborted";
+	   streaming off, and only an aborted turn should offer "resume".
+
+	   AN ENDED SESSION YIELDS TO THE STRIP'S RESUME (UX round 1, U15). `ended`
+	   and `stop_reason="aborted"` coexist on the shape the daemon serves after
+	   a mid-turn death (the terminal repaint fills the end from the durable
+	   record), and this button was the SECOND resume path — the prominent one,
+	   in the thumb zone — sending `continue` to a runtime that is gone, over
+	   and over. On an ended session the strip's `resume` is the one action: it
+	   is the path that respawns the session, and one act must not read as two
+	   different controls. */
+	const showResume = projection.stop_reason === "aborted" && !projection.ended;
 
 	/* WHICH word, when it does, follows the verdict the notice above it states.
 	   `aborted` covers a deliberate stop and a harness cut-off alike, and the
@@ -871,7 +911,13 @@ export function Composer({
 				setText(submitted.echo.text);
 			}
 			setRetryEnvelope(getPendingContinuation(pid));
-			setError(projection.streaming ? STEER_ERROR : CONTINUATION_ERROR);
+			setError(
+				projection.ended
+					? ENDED_CONTINUATION_ERROR
+					: projection.streaming
+						? STEER_ERROR
+						: CONTINUATION_ERROR,
+			);
 		} finally {
 			setSending(false);
 		}
@@ -896,10 +942,21 @@ export function Composer({
 	/* The sheet ALSO watches the value, because driver/IME paths set it without
 	   an onChange. The only piece of retained state is the DISMISSAL: a draft
 	   that stops being a slash draft at all (emptied, or the slash deleted)
-	   clears it, so the next fresh `/` opens — while within one slash draft,
-	   closing the sheet (Escape, scrim, ✕, a pick) keeps it closed (U5). */
+	   clears it, and so does a bare `/` — while within one slash draft, closing
+	   the sheet (Escape, scrim, ✕, a pick, the filter's space hand-off) keeps
+	   it closed (U5).
+
+	   THE BARE SLASH IS A FRESH QUERY (batch 2, agent review MINOR 2). The
+	   dismissal used to outlive the draft's own token: after a pick or Escape
+	   on `/delete`, backspacing `/delete` → `/` left the sheet shut, so wanting
+	   a different command meant deleting the slash itself. Deciding this
+	   together with U13 settled it: the space hand-off parks arguments in the
+	   composer for the CURRENT command, and the moment that draft returns to
+	   just `/` the reader is starting over — which is what typing `/` fresh
+	   does. Mid-token drafts stay dismissed (the strict half U5 pinned). */
 	useEffect(() => {
-		if (slashQuery(text) === null) setSlashDismissed(false);
+		const q = slashQuery(text);
+		if (q === null || q === "") setSlashDismissed(false);
 	}, [text]);
 
 
@@ -915,6 +972,20 @@ export function Composer({
 		} else {
 			textareaRef.current?.focus();
 		}
+	};
+
+	/* U13 (batch 2): a space typed while the FILTER has focus hands the composed
+	   line back to the composer. The filter holds the command as typed
+	   (`delete`), so the composed draft is `/` + that value including the space
+	   the reader just typed; focus returns to the field they will keep typing
+	   in, and the dismissal covers the backspace that removes the space again
+	   (no mid-edit re-open) until the draft is a bare `/`. */
+	const onSlashSpace = (value: string) => {
+		const composed = `/${value}`;
+		applyUserEdit(composed);
+		setText(composed);
+		setSlashDismissed(true);
+		textareaRef.current?.focus();
 	};
 
 	return (
@@ -1202,6 +1273,7 @@ export function Composer({
 				open={slashOpen && !disabled}
 				onClose={() => setSlashDismissed(true)}
 				onPick={onSlashPick}
+				onSpace={onSlashSpace}
 				query={slashQuery(text) ?? ""}
 			/>
 			<EffortSheet

@@ -302,7 +302,21 @@ export function PendingCard({
 			<div
 				data-testid="pending-card"
 			style={columnCap(PENDING_CARD_FRACTION)}
-			className="border-accent bg-accent-wash mx-2 flex shrink-0 flex-col rounded-md border p-2.5"
+			/* THE CARD YIELDS (mobile UX batch 2, D1). It used to be
+			   `shrink-0`, and on a 320x568 column the negative space then had
+			   nowhere to come from but the two collapsed panel headers, which
+			   overflowed and overprinted each other and this card's header
+			   (tasks y128-172, subagents y129-173, card top 129). Removing it
+			   lets the column take the deficit from the element that can
+			   afford it: this card scrolls internally, and `min-h-0` lets the
+			   scroller collapse toward the card's pinned meta row and controls
+			   instead of the card holding its content height and pushing the
+			   composer under the column's clipped foot (measured: the same
+			   320x568 state, card 341px fixed, put the composer's bottom at
+			   664 in a 568 column). The `max-height` above still caps it on
+			   tall columns — the two bounds compose (cap when there is room,
+			   shrink when there is not), which neither bound alone does. */
+			className="border-accent bg-accent-wash mx-2 flex min-h-0 flex-col rounded-md border p-2.5"
 		>
 			{/* PINNED meta row (D2). One line, fixed height, cannot outgrow
 			    anything — so pinning it costs no reachability while keeping the

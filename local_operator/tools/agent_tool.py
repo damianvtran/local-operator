@@ -214,6 +214,16 @@ class AgentParams(BaseModel):
             "only coordinating roles should."
         ),
     )
+    action_class: Literal["reactive", "proactive"] | None = Field(
+        default=None,
+        description=(
+            "create/update: the agent's class. 'reactive' (default) is ordinary "
+            "behaviour. 'proactive' lets it attach hidden patience waits and run "
+            "proactive deliveries — set it ONLY when the user clearly asked for a "
+            "proactive use case (companion agents are the canonical one); it can "
+            "message them unprompted, so it is sparing by default."
+        ),
+    )
     kind: Literal["role", "specialist"] | None = Field(
         default=None,
         description=(
@@ -361,7 +371,25 @@ def _field_rows(profile: AgentProfile, seed: AgentProfile) -> list[tuple[str, st
             _format_field(seed.effort, absent=no_tier),
         ),
         ("delegate", _format_field(profile.may_delegate), _format_field(seed.may_delegate)),
+        (
+            "class",
+            _class_label(profile.action_class),
+            _class_label(seed.action_class),
+        ),
     ]
+
+
+def _class_label(value: object) -> str:
+    """The class as the human reader meets it (``proactive`` ⇒ "proactive
+    (may message unprompted)"). One spelling for ``show``'s header and the
+    divergence rows, so a reader cannot get two names for the same field.
+    """
+    from local_operator.action_class import PROACTIVE, normalize
+
+    resolved = normalize(value)
+    if resolved == PROACTIVE:
+        return "proactive (may message unprompted)"
+    return "reactive"
 
 
 def _instruction_diff(mine: str, packaged: str) -> tuple[str, bool]:
@@ -584,6 +612,7 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
         f"{profile.name} — {origin}",
         f"when to use: {profile.when_to_use or profile.description or '(unstated)'}",
         f"tools: {', '.join(profile.tools) if profile.tools else 'full inventory'}",
+        f"class: {_class_label(profile.action_class)}",
     ]
     if profile.effort:
         header.append(f"effort: {profile.effort}")
@@ -1115,7 +1144,7 @@ async def _op_sync(
     return _text(tool_call_id, "agent", text, details=spill or None)
 
 
-def write_profile(registry: Any, params: AgentParams, *, creating: bool) -> tuple[str, str]:
+def write_profile(registry: Any, params: AgentParams, *, creating: bool) -> tuple[str, str, str]:
     """Shared tool/HTTP mutation; preserve omitted policy fields and provenance.
 
     Returning structured identity keeps transport adapters out of tool prose.
@@ -1206,6 +1235,15 @@ def write_profile(registry: Any, params: AgentParams, *, creating: bool) -> tupl
     else:
         may_delegate = current.may_delegate if current is not None else False
 
+    # The class merges the same way (an omitted field never clears): R37's
+    # creation default is reactive because ABSENT means reactive everywhere
+    # downstream, and an explicit ``proactive`` is the only way to get the
+    # proactive surface — a deliberate act, guided by the field description.
+    if params.action_class is not None:
+        action_class = str(params.action_class).strip().lower()
+    else:
+        action_class = current.action_class if current is not None else "reactive"
+
     description = (params.description or "").strip()
     if not description and current is not None:
         description = current.description
@@ -1223,8 +1261,17 @@ def write_profile(registry: Any, params: AgentParams, *, creating: bool) -> tupl
         # here must also be ABLE to coordinate, which previously required
         # hand-editing the tags.
         may_delegate=may_delegate,
+        action_class=action_class,
     )
     tags = list(seed_tags(profile)) if kind == "role" else []
+    # SPECIALISTS have no seed_tags (their rows carry no role fields), but the
+    # class is a platform mechanism for any agent — so encode/decode it here
+    # too, preserving an existing class when this call did not name one. A
+    # flip to reactive REMOVES the tag (sparing encoding; absent = reactive).
+    if kind != "role":
+        from local_operator.action_class import with_class_tag
+
+        tags = list(with_class_tag(tags, action_class))
     # PRESERVE provenance across an edit. `seed_tags` encodes the profile's own
     # fields and knows nothing about where the row came from, so rebuilding from
     # it alone silently un-marks an installed role the moment anyone edits it —
@@ -1300,7 +1347,7 @@ def write_profile(registry: Any, params: AgentParams, *, creating: bool) -> tupl
         registry.update_agent(agent.id, _fields(**overrides))
     if instructions:
         registry.set_agent_system_prompt(agent.id, instructions)
-    return name, kind
+    return name, kind, action_class
 
 
 async def _op_write(
@@ -1311,7 +1358,7 @@ async def _op_write(
     creating: bool,
 ) -> ToolResult:
     try:
-        name, kind = write_profile(_registry(context), params, creating=creating)
+        name, kind, action_class = write_profile(_registry(context), params, creating=creating)
     except ValueError as error:
         return _error(tool_call_id, "agent", str(error))
     verb = "created" if creating else "updated"
@@ -1322,10 +1369,24 @@ async def _op_write(
             f"launch with --agent {name}, or put it on a team roster; "
             "its instructions are the reusable base, not a team brief"
         )
+    # R37: a proactive class is LOUD in the receipt — it is the difference
+    # between an agent that answers and one that messages the user unprompted,
+    # and this line is the only surface that says so at creation time. A flip
+    # TO reactive is named too, because "stop messaging" deserves the same
+    # acknowledgement as the start.
+    class_clause = ""
+    if action_class == "proactive":
+        class_clause = (
+            " Class: proactive — it may send proactive messages and attach hidden "
+            "patience waits."
+        )
+    elif params.action_class == "reactive":
+        class_clause = " Class: reactive — proactive behaviour stopped."
     return _text(
         tool_call_id,
         "agent",
-        f"{verb} {kind} {name!r}; {how}.",
+        f"{verb} {kind} {name!r}; {how}.{class_clause}",
+        details={"name": name, "kind": kind, "class": action_class},
     )
 
 

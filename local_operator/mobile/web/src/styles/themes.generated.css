@@ -81,8 +81,8 @@
 	--lo-elevated: #FFFFFF;
 	--lo-sunken: #DBE4EB;
 	--lo-ink: #45494D;
-	--lo-ink-muted: #62656A;
-	--lo-ink-dim: #5B6676;
+	--lo-ink-muted: #606368;
+	--lo-ink-dim: #596473;
 	--lo-ink-disabled: #9AA3AF;
 	--lo-hairline: #DCE3E8;
 	--lo-border-control: #758295;
@@ -206,7 +206,7 @@
 	color-scheme: dark;
 	--lo-canvas: #282A36;
 	--lo-surface: #2F3146;
-	--lo-elevated: #3D4055;
+	--lo-elevated: #383B50;
 	--lo-sunken: #21222C;
 	--lo-ink: #F8F8F2;
 	--lo-ink-muted: #BFBFBF;
@@ -225,7 +225,7 @@
 	--lo-warning: #FFB86C;
 	--lo-warning-wash: #423B3C;
 	--lo-warning-border: #9E7854;
-	--lo-danger: #FF7171;
+	--lo-danger: #FF8383;
 	--lo-danger-wash: #422F3A;
 	--lo-danger-border: #BE6368;
 	--lo-info: #8BE9FD;
@@ -338,7 +338,7 @@
 	--lo-sunken: #DCD7BC;
 	--lo-ink: #394347;
 	--lo-ink-muted: #545F5A;
-	--lo-ink-dim: #546058;
+	--lo-ink-dim: #535F57;
 	--lo-ink-disabled: #A6B0A0;
 	--lo-hairline: #DFDAC0;
 	--lo-border-control: #6E7D6D;
@@ -370,7 +370,7 @@
 	--lo-sunken: #FBEFBD;
 	--lo-ink: #3C3836;
 	--lo-ink-muted: #665C54;
-	--lo-ink-dim: #776A60;
+	--lo-ink-dim: #73665D;
 	--lo-ink-disabled: #A89984;
 	--lo-hairline: #DFD4B1;
 	--lo-border-control: #7C6F64;
@@ -402,7 +402,7 @@
 	--lo-sunken: #E1E2E7;
 	--lo-ink: #33374C;
 	--lo-ink-muted: #4A4E64;
-	--lo-ink-dim: #5B5F74;
+	--lo-ink-dim: #5A5E73;
 	--lo-ink-disabled: #A0A4B8;
 	--lo-hairline: #CBCCD2;
 	--lo-border-control: #787D97;
@@ -433,7 +433,7 @@
 	--lo-elevated: #F2ECBC;
 	--lo-sunken: #D3CB9C;
 	--lo-ink: #363658;
-	--lo-ink-muted: #545464;
+	--lo-ink-muted: #535363;
 	--lo-ink-dim: #57544F;
 	--lo-ink-disabled: #8A8980;
 	--lo-hairline: #D3CB9E;
@@ -577,7 +577,7 @@
 	--lo-warning: #FD971F;
 	--lo-warning-wash: #413522;
 	--lo-warning-border: #A76C22;
-	--lo-danger: #FB6097;
+	--lo-danger: #FC81AC;
 	--lo-danger-wash: #40282C;
 	--lo-danger-border: #D04573;
 	--lo-info: #66D9EF;
@@ -609,7 +609,7 @@
 	--lo-warning: #FFA500;
 	--lo-warning-wash: #261E15;
 	--lo-warning-border: #90600B;
-	--lo-danger: #FF00A0;
+	--lo-danger: #FF1AAA;
 	--lo-danger-wash: #260B28;
 	--lo-danger-border: #C00784;
 	--lo-info: #00EFFF;

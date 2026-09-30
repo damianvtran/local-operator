@@ -88,6 +88,10 @@ def _engine_context(**kwargs) -> ToolContext:
     base: dict[str, Any] = dict(
         wake_scheduler=_FakeScheduler(),
         monitor_scheduler=_FakeMonitorScheduler(),
+        # The proactive class is a capability the default surface reads now:
+        # ``patience`` is createIf-gated on it, and this factory's contract is
+        # "every capability attached" so the whole table builds.
+        action_class="proactive",
         subagent_launcher=_launcher,
         jobs=_FakeJobs(),
         subagent_comms=_FakeComms(),
@@ -133,10 +137,12 @@ def test_default_set_builds_all_builtin_tools() -> None:
 
 
 def test_default_set_drops_wake_without_scheduler() -> None:
-    # createIf: no scheduler -> no wake tool (never a tool that can only error).
+    # createIf: no scheduler -> no wake tool, and no patience tool either (its
+    # gate reads the same scheduler beside the class) — never a tool that can
+    # only error.
     tools = create_tools(_engine_context(wake_scheduler=None))
     names = [tool.name for tool in tools]
-    assert names == [name for name in DEFAULT_TOOL_NAMES if name != "wake"]
+    assert names == [name for name in DEFAULT_TOOL_NAMES if name not in {"wake", "patience"}]
 
 
 def test_default_set_drops_monitor_without_scheduler() -> None:

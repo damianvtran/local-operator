@@ -5,7 +5,9 @@ implementation that follows. Scope: two repos — `local-operator` (the Python
 seam, the shared policy modules, the protocol generator, the vendored bundle)
 and `local-operator-ui` (the Electron host, the tab, its chrome, the profile,
 the extensions directory). Seven PRs. No `pyproject.toml` or `package.json`
-version bump — the release owner handles that.
+version bump — the release owner handles that. **AMENDED BY
+`local-operator-ui` PR #662 (2026-09-29): §7.2/§7.3, the owner semantics at the
+restore boundary — see the amendment blocks there.**
 
 ## 0. How to read this document, and what changed in this revision
 
@@ -1100,6 +1102,42 @@ inside the browser profile and not in lop's config dir:
   startup** — one `try`/`catch` around the whole read, and a log line, exactly as
   `_bridge_liveness` guards a diagnostic (`builtin.py:8555-8562`).
 
+**AMENDED (2026-09-29, `local-operator-ui` PR #662): `owner` is not
+diagnostics — it decides restorability.** The reader restores a row only when it
+is the user's (`owner: "user"`) or it was the ACTIVE tab at the capture
+(`active: true`); an agent-owned row that was not active is skipped, with a
+counted log line. This is the restore-boundary sweep that ends the accumulation
+of abandoned agent tabs across restarts — each one used to be restored as a user
+tab and rewritten as the user's by the capture that followed, one unattributed
+chip per launch. Two consequences are part of the rule rather than artifacts of
+it:
+
+- **The hand-over exception:** `captureTabs` writes a row `owner: "user"` when
+the tab's owner BEFORE its hand-over was the user's — the owner pinned at the
+first hand-over (`TabRecord.handedFrom`), not `handedTo` — although the registry
+records `"agent"` for such a tab (§6.3). The row records who owns the TAB, not
+who held its handle, and without this the skip would lose the user's own tab.
+The pin is load-bearing rather than incidental: `handOver` also accepts an AGENT
+tab re-handed to a second session (§6.3, the cap does not change), so a predicate
+keyed on `handedTo !== null` would write that tab as the user's and launder agent
+cruft past the sweep (round-1 review of `local-operator-ui` PR #662, m-2), and a
+re-hand must not move the pin. `revokeHandOver` clears it with the capability,
+so the next hand-over pins the owner from whatever the tab is then.
+- **The laundering boundary, stated rather than implied:** the skip catches only
+a row written by a quit that still saw the tab as agent-owned. A restored tab is
+created user-owned (§7.3), so one capture after a restore rewrites the row as
+the user's and it is indistinguishable from a tab the user opened; rows already
+written that way are not recovered by an owner check. The rule protects forward.
+
+**A failed row is skipped, and the mark now has two writers**
+(`local-operator-ui` PR #624, registered here because the shape above omits it;
+the second writer arrives with PR #662): `lastLoadFailed: true` is written for a
+tab that was showing a load failure at the capture — and, since PR #662, for a
+restored tab whose hydration failed without committing a document (the quiet
+timeout `did-fail-load` never reports). The reader skips such rows and the mark
+clears on the tab's next successful load, so it states a fact about the last
+capture rather than a verdict.
+
 ### 7.3 A restored tab and a stale agent handle — the part that must not be got wrong
 
 **A nonce is never re-issued across a restart.** On restore, every restored tab
@@ -1129,6 +1167,15 @@ gets a **fresh** `tabId` and **no** nonce, and the tab is restored as
 relaunch, confirm the tab count, order, per-tab history depth, scroll position and
 form values, and confirm an agent's stale handle produces `tab_closed` and not a
 drive of the restored tab.
+
+**AMENDED (2026-09-29, `local-operator-ui` PR #662).** The rule above — a
+restored tab is `owner: "user"` regardless of what it was — is about the RECORD
+a restore makes, and it is unchanged. What changed is the FILE's reading: a row
+that is still agent-owned at the capture and was not the active tab is not
+restored at all (§7.2's amendment), so the tab an agent session left behind does
+not come back as the user's on the next launch. An ACTIVE agent row still
+restores, and comes back `owner: "user"` with no nonce, exactly as this section
+says.
 
 ---
 

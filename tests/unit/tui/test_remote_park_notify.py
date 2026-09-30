@@ -32,10 +32,11 @@ connector); this one is the mesh half.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -118,6 +119,28 @@ def _toast(app: OperatorApp) -> Toast:
     return app.query_one(Toast)
 
 
+async def _stage_card(app: OperatorApp, pilot: Any) -> asyncio.Task[Any]:
+    """Put the app's OWN approval card on screen for the current gate.
+
+    The REAL path rather than a hand-set ``_approval``: the park notice yields
+    to the card the app would actually have mounted, so the cells drive the
+    same mount the operator sees — and the same one the fix's predicate reads.
+    Returns the parked gate task for the caller to cancel on the way out.
+    """
+    session = cast(Any, app._session)
+    assert session is not None
+    session.pending_gate = SimpleNamespace(
+        kind="approval", request_id="req-attached", question_index=0
+    )
+    task = asyncio.create_task(app.request_tool_approval("bash", "echo park-check"))
+    for _ in range(80):
+        await pilot.pause()
+        if app._approval is not None and app._approval.is_mounted:
+            break
+    assert app._approval is not None and app._approval.is_mounted, "the card never mounted"
+    return task
+
+
 @pytest.mark.asyncio
 async def test_a_park_is_announced_once_and_withdrawn_when_it_clears() -> None:
     """One card, the device-named remedy, and it leaves when the park does."""
@@ -176,12 +199,14 @@ async def test_the_banner_names_the_device_and_the_conversation() -> None:
 
 @pytest.mark.asyncio
 async def test_an_attached_viewer_is_not_told_about_its_own_card() -> None:
-    """THIS app attached to the parked session: no card, no banner.
+    """THIS app attached to the parked session WITH its gate card up: silent.
 
-    The gate card is on screen (with the device hint on it), so a toast would
-    be the app interrupting itself — and the peer's own ladder is what stops
-    ITS banner, because a viewer is watching. The episode is still consumed:
-    the user is looking at the surface the notice would point them to.
+    The premise is the CARD: it is on screen (with the device hint on it), so
+    a toast would be the app interrupting itself — and the peer's own ladder
+    is what stops ITS banner, because a viewer is watching. The episode is
+    still consumed: the user is looking at the surface the notice would point
+    them to. The card is staged through the real mount (``_stage_card``), not
+    assumed: with no card up this app must be TOLD (the F-A cells below).
     """
     app = OperatorApp(lambda: _factory(AttachedFake()))
     async with app.run_test(size=(120, 40)) as pilot:
@@ -189,13 +214,84 @@ async def test_an_attached_viewer_is_not_told_about_its_own_card() -> None:
         notifier = RecordingNotifier()
         app._notifier = notifier  # type: ignore[assignment]
         toast = _toast(app)
+        gate_task = await _stage_card(app, pilot)
+        # Staging the card fires the app's own LOCAL waiting edge (the band's
+        # waiting phase) — that one belongs to the card, not to the park. What
+        # must not happen is a SECOND, park-shaped notice on top of it.
+        before = list(notifier.kinds)
 
         app._note_remote_parks((_parked(),))
         await pilot.pause()
 
         assert not toast.display, "the app toasted over its own parked gate"
-        assert notifier.kinds == [], "the app notified about the session it is in"
+        assert notifier.kinds == before, "the app notified about the session it is in"
         assert app._remote_park_episodes, "the suppressed episode was not consumed"
+
+        gate_task.cancel()
+        await asyncio.gather(gate_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_an_attached_viewer_without_its_card_is_still_told() -> None:
+    """F-A (beat-2): the follow view suppressed the notice with NO card on screen.
+
+    The auto-follow after a slash move attaches this app to the moved session,
+    and the notice used to yield to ATTACHMENT ALONE. The follow view rendered
+    no gate card at all — the facade held no pending gate, the band read
+    ``No owner`` — so the origin learned nothing while the peer sat parked for
+    minutes. Suppression must mean "the gate card is already on screen"; with
+    no card to point at, the park is announced, card and banner.
+    """
+    app = OperatorApp(lambda: _factory(AttachedFake()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        notifier = RecordingNotifier()
+        app._notifier = notifier  # type: ignore[assignment]
+        toast = _toast(app)
+        session = app._session
+        assert session is not None
+        assert getattr(session, "pending_gate", None) is None, (
+            "this cell is about the no-gate follow shape; the gate-present shape "
+            "has its own cell below"
+        )
+
+        app._note_remote_parks((_parked(),))
+        await pilot.pause()
+
+        assert toast.display, "an attached viewer with no gate card still needs the park"
+        assert "Waiting for approval on demo-laptop" in toast.message
+        assert (
+            "Its gate card has not reached this view — deny it here once it does." in toast.message
+        ), (
+            "the attached reader must not be told to open the session it is looking at "
+            "(design round 1, D1)"
+        )
+        assert notifier.kinds == ["approval"], "the banner half must fire too"
+
+
+@pytest.mark.asyncio
+async def test_an_attached_viewer_whose_card_never_mounted_is_still_told() -> None:
+    """F-A, the other half: a pending gate the app never mounted must not suppress.
+
+    The suppression premise is the card, so a facade that HOLDS the gate with
+    no card widget on screen — a mount dropped by the ladder, a view not yet
+    composed, a re-arm still owed — is not "already on screen": the notice
+    fires rather than being swallowed by a card that never arrived.
+    """
+    app = OperatorApp(lambda: _factory(AttachedFake()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        toast = _toast(app)
+        session = cast(Any, app._session)
+        assert session is not None
+        session.pending_gate = SimpleNamespace(
+            kind="approval", request_id="req-ghost", question_index=0
+        )
+
+        app._note_remote_parks((_parked(),))
+        await pilot.pause()
+
+        assert toast.display, "a pending gate with no card suppressed the park notice"
 
 
 @pytest.mark.asyncio

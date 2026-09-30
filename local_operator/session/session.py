@@ -122,6 +122,7 @@ from local_operator.harness.replay_bound import bound_replay_payloads
 from local_operator.harness.subagent import (
     SubagentModelUnavailable,
     read_effort_tier_selectors,
+    resolve_launch_target,
     run_subagent,
 )
 from local_operator.harness.types import (
@@ -218,6 +219,7 @@ from local_operator.prompts_api import (
 )
 from local_operator.redaction_shapes import ShapeReport
 from local_operator.references import expand_references
+from local_operator.session.credential_binding import SESSION_BINDING_CUSTOM_TYPE
 from local_operator.session.goal import GoalHistoryEntry, GoalJudgeState, GoalState
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.model_selection import SELECTED_MODEL_CUSTOM_TYPE
@@ -989,6 +991,16 @@ _PERSISTABLE_CUSTOM_TYPES: frozenset[str] = frozenset(
         "session_state",
         SESSION_INCIDENT_MESSAGE_TYPE,
         SESSION_MODEL_SWITCH_MESSAGE_TYPE,
+        # SESSION_BINDING_CUSTOM_TYPE follows the design's instruction to join
+        # (design §10): the mesh credential binding's row is bookkeeping about
+        # the session — which account served it, and when that changed — and its
+        # writer appends through ``append_custom`` directly, exactly like the
+        # spend record, so membership is NOT what persists it today. The line is
+        # kept for the reason the redaction member's comment below states: so a
+        # future path which DOES route through :func:`_is_persistable_message`
+        # cannot silently drop the row. The MODEL is kept out of it by the
+        # renderer's allow-list, not by this one.
+        SESSION_BINDING_CUSTOM_TYPE,
         # SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE IS persisted, and it is the
         # member whose persistence is easiest to mistake for an oversight: the
         # record is operator-facing and enters no model context (see its own
@@ -1745,8 +1757,11 @@ def _fit_frames_to_budget(
 
     The ladder itself lives in ``compaction.pruning.fit_frames_to_wire_budget``:
     context frames are DOWNSCALED first (kept present at a smaller
-    re-rendering; the newest frame stays full fidelity), and the oldest are
-    replaced with notices only when no rung fits. The shed's steady state
+    re-rendering), the newest frame keeping full fidelity while any rung fits
+    with it kept full and descending the same ladder — as the last thing
+    sacrificed, and only as far as the fit requires — when none does; the
+    oldest are replaced with notices only when even that cannot fit. The
+    shed's steady state
     without that step was one more frame dropped per turn with every request
     still pinned at the ceiling; the downscale is what lets a long screenshot
     history fit whole.
@@ -2498,6 +2513,17 @@ class Session:
         #: itself evidence for a cut-off verdict, even before the first
         #: round-trip is spent.
         self._attention_run_carried_prompt: bool = False
+        #: The run's NEUTRAL CLOSURE, armed by :meth:`Session.dispose` when it
+        #: meets a live run that spent no provider round-trip yet CARRIED a
+        #: person's or peer's prompt: the exit cuts a real run whose ask was
+        #: never served, and the honest record is the neutral ``closed`` kind
+        #: rather than the ``error|disposed`` this used to publish (operator
+        #: directive, 2026-09-29; session 23fc556c3799). Holds the cause token
+        #: the closure preserves — the serving rung's more specific cause when
+        #: one was noted before the handover, else ``disposed`` itself — and is
+        #: consumed by :meth:`_publish_closed_disposal` from the disposal's
+        #: synthesis.
+        self._attention_run_closed_cause: str | None = None
         #: Armed by :meth:`Session.dispose` when it meets a live run with no
         #: evidence behind it: the exit has decided that run settles with NO
         #: verdict, and an end arriving afterwards — the abort's own tail, or a
@@ -2595,6 +2621,12 @@ class Session:
         #: collaboration and project briefs without the manager restating them.
         #: ``None`` on an ordinary session.
         self.active_team: Any | None = None
+        #: Team ids from the top down, stamped on a CHILD by
+        #: ``harness.subagent._build_child_session``; ``None`` on a top session,
+        #: whose lineage is derived from ``active_team`` (BEN-7-D1).
+        self._team_lineage: tuple[str, ...] | None = None
+        #: Hops below the top session: 0 here, stamped on every child.
+        self._delegation_depth: int = 0
         #: User-facing copy explaining why a stored attachment did NOT come
         #: back ("" when it did, or when there was none). Set by
         #: :meth:`_restore_attachment` for a team or profile that failed to
@@ -3709,8 +3741,10 @@ class Session:
         # would have fit is content lost for nothing. This is the transport
         # guard — see ``_fit_frames_to_budget`` for why it belongs at the
         # render rather than in a client, and why it never touches the
-        # transcript. Older frames are downscaled and KEPT; only a rung walk
-        # that cannot fit drops any.
+        # transcript. Older frames are downscaled and KEPT; the newest keeps
+        # full fidelity until no protected rung fits, then descends the same
+        # ladder as the last thing sacrificed; only a walk that cannot fit
+        # drops any.
         rendered, downscaled, shed, rung = _fit_frames_to_budget(
             rendered, budget=self._wire_bytes_budget()
         )
@@ -3784,7 +3818,7 @@ class Session:
         self._spawn_background(self._emit(NoticeEvent(text=FRAMES_SHED_NOTICE, kind="warning")))
 
     def _announce_frames_downscaled_once(self, downscaled: int, rung: int | None) -> None:
-        """Log, once per session, that older screenshots were downscaled.
+        """Log, once per session, that screenshots were downscaled.
 
         The shed's sibling, and deliberately a LOG LINE rather than a notice:
         downscaling keeps every frame in the conversation at a smaller size,
@@ -3792,9 +3826,10 @@ class Session:
         consult it — whereas ``FRAMES_SHED_NOTICE`` exists because frames
         actually LEFT, which is news a user acts on. What this line owes is
         the next reader of an episode log: it says the request was over the
-        size limit, how many older frames were re-rendered to fit it, and at
-        which rung — the ladder's long-edge size (1024/768/512), so a mild
-        re-render is distinguishable from a floor-rung one — plus (via
+        size limit, how many frames were re-rendered to fit it (the newest
+        included once it descends the ladder), and at which rung — the
+        ladder's long-edge size (1024/768/512), so a mild re-render is
+        distinguishable from a floor-rung one — plus (via
         :meth:`_image_drop_diagnostic`) the shape of the image payload at
         that moment, so "what did the harness do to my screenshots" is
         answerable without a code read.
@@ -3816,7 +3851,7 @@ class Session:
             return
         self._frames_downscaled_announced = True
         logger.warning(
-            "downscaled %d older screenshot(s) from the rendered context at the %s px rung "
+            "downscaled %d screenshot(s) from the rendered context at the %s px rung "
             "to stay under the provider request size limit (%s)",
             downscaled,
             rung,
@@ -7232,6 +7267,13 @@ class Session:
         text = expansion.sent
         await self._turn_lock.acquire()
         try:
+            # A USER TURN IS A REPLY (R34): retire every pending patience row
+            # before anything else in this turn. Over-cancel is deliberate —
+            # the watermark at delivery time is the correctness half, this is
+            # the tidiness half; a missed cancel is a nagging bug, and an
+            # over-cancel costs one re-arm (the agent attaches a fresh wait
+            # when it responds).
+            await self.cancel_pending_patience(reason="prompt")
             # Close the narrow completion-after-final-flush race: a shell
             # receipt may have queued while the previous holder still held the
             # lock. It must be visible before this prompt builds its request.
@@ -7356,6 +7398,7 @@ class Session:
         input_mode: str | None = None,
         input_path: str | None = None,
         audio: Sequence[AudioContent] | None = None,
+        harness_injected: bool = False,
     ) -> None:
         """Inject an identified steering message into the running turn.
 
@@ -7386,6 +7429,15 @@ class Session:
         that also states ``supports_responses_api``, whose body choice is a
         process setting this layer does not read — not the mechanism this
         door relies on.
+
+        ``harness_injected`` says the row this steer queues was NOT typed by a
+        person — the same structural marker ``prompt`` stamps, carried because
+        one delivery of a spooled OWNER prompt is a STEER rather than a prompt:
+        ``_run_spooled_owner_prompt`` (the first-turn drain) and
+        ``process._run_owner_prompt``'s mid-turn fallback both reach this method
+        while the turn lock is held, and without the carriage the replayed
+        continuation would mint an UNSTAMPED user row that the marker-only
+        surfaces paint. Defaults ``False`` so no existing caller changes.
         """
         extra: dict[str, Any] = {}
         if message_id:
@@ -7399,6 +7451,13 @@ class Session:
         elif input_path is not None:
             extra["input_path"] = input_path
         message = Message.user(text, images, audio=audio, **extra)
+        if harness_injected:
+            # The stamp goes on the row THIS call mints, at the one place the
+            # row is born — the same contract ``prompt`` documents one method
+            # up, and the reason both wires need no new field: ``provider_payload``
+            # rides the live ``MessageStartEvent`` and the durable journal row
+            # alike.
+            message.provider_payload = {RENDERED_INJECTION_KEY: True}
         self._steering_queue.put_nowait(message)
         if producer_command_id is not None:
             self._steering_producers[id(message)] = producer_command_id
@@ -7778,7 +7837,12 @@ class Session:
         if command_id and self.has_admitted_command(command_id):
             logger.info("spooled prompt already in the transcript; not steering it twice")
             return
-        self.steer(line.text, [], message_id=command_id or None)
+        self.steer(
+            line.text,
+            [],
+            message_id=command_id or None,
+            harness_injected=bool(getattr(line, "harness_injected", False)),
+        )
         # AFTER the steer, for the reason ``process._run_owner_prompt`` gives:
         # the batch's repeat is the retry the at-least-once contract promises,
         # and it is only redundant once the first row landed (agent review round
@@ -7836,6 +7900,10 @@ class Session:
         # Imported in-function: `mobile.peer_send` reaches the registry and the
         # config path, and this module must not grow a module-level dependency
         # on the mobile package for a per-message nicety.
+        # ANY peer inbound is a reply for patience purposes (R34, over-cancel;
+        # per-target precision is deferred with it): retire every pending wait
+        # now. The watermark at delivery covers the cross-runtime half.
+        await self.cancel_pending_patience(reason="peer")
         from local_operator.mobile.peer_send import resolve_sender_identity
 
         sender = resolve_sender_identity(sender)
@@ -9917,6 +9985,16 @@ class Session:
             if (outcome.error or cut_off)
             else "interrupted" if outcome.aborted else "complete"
         )
+        # THE RETIRE-FOR-BUILD ARM (architect addendum, 2026-09-29; seed
+        # 7e797aaaf6e7 and its 33k/37k/40k/41k siblings): a cut caused by a
+        # build drain is TRUTHFUL but must stay DISTINGUISHED FROM A FAILURE.
+        # A sweep-bounded latched drain cut a turn that was mid-work, and
+        # "Stopped with an error" framed a routine update-phase transition as
+        # a failure on every surface. Only the KIND changes here; the cause and
+        # reason below ride along VERBATIM, so every reader still learns the
+        # turn was cut and why. Every other cut keeps ``error``.
+        if kind == "error" and cut_off and self._cut_off_cause == "runtime-retired":
+            kind = "retired"
         # §14.3: the run's ONE notify value, read off the end event the session
         # already stamped (``_emit``) — never re-derived here. A synthesised end
         # (the disposal rung) never passed ``_emit``, and its kinds are
@@ -10127,6 +10205,114 @@ class Session:
                     "eligible": False,
                 },
             )
+
+    async def _publish_closed_disposal(self, cause: str) -> None:
+        """Close a zero-work run NEUTRALLY when the exit cuts it (``closed``).
+
+        THE FOURTH DISPOSITION, added by the 2026-09-29 directive (session
+        23fc556c3799). The settle arm above silences runs that assert nothing;
+        this arm is for a run that DOES have something to say — a person or a
+        peer opened it, so it was a real ask — but spent no provider
+        round-trip before the disposal caught it. The old behaviour published
+        ``error|disposed`` for exactly this shape, and because the record
+        supersedes the previous ``complete`` row for latest-wins readers, a
+        successfully completed turn rendered as "Stopped with an error" on
+        both surfaces. The directive: any dispose that catches a run which
+        spent nothing renders NEUTRALLY.
+
+        WHY ``closed`` AND NOT ONE OF THE THREE VERDICT KINDS:
+
+        * ``error`` is the old claim, and it is the one the operator re-reported;
+          it is also shared with real mid-work cuts, so it cannot be remapped at
+          a surface without lying about those.
+        * ``interrupted`` means the deliberate stop; nobody stopped this.
+        * ``complete`` would assert an outcome the run did not produce.
+        * silence (``_settle_run_without_an_outcome``) would hide an ask that a
+          peer may still be waiting on — the run's presence is a fact worth a
+          durable row, it just is not a verdict.
+
+        ``closed`` is deliberately NOT a key of ``incidents.CUT_OFF_CAUSES``,
+        which is what keeps the successor quiet: ``bootstrap_transcript``
+        replays the row (the durable marker below re-lands it idempotently) but
+        its journaling branch requires ``kind == "error"``, so no
+        ``session_incident`` is narrated and no surface is told a finished
+        turn was cut off.
+
+        ``notify=False`` — a closure is not a result the user must be pulled
+        back for, and §14's flag is the existing gate every announce path
+        reads (the background observer skips the row, the desktop bridge's
+        ``BRIDGE_NOTIFIABLE_KINDS`` never carries it).
+
+        ORDERING, the same rule as the settle: one critical section with
+        ``_publish_attention_outcome`` (same lock) so the exit's decision
+        cannot interleave with an outcome publish — ``sequence`` is insert
+        order, and a verdict landing after this row would flip a newest-wins
+        reader back to a claim the exit refused to make. The intent armed at
+        the decision site has already dropped the abort's own tail, so this
+        method is the run's remaining writer.
+        """
+        from local_operator.session.attention import (
+            ATTENTION_CUSTOM_TYPE,
+            AttentionStore,
+            AttentionWriteDeferred,
+            conversation_identity,
+            provisional_anchor,
+        )
+
+        token = self._attention_run_token
+        if token is None:
+            return
+        kind = "closed"
+        # The closure carries no sentence of its own: the copy lives with the
+        # row decision (``harness/rows.py`` CLOSED_NOTICE_TEXT, reused by the
+        # notification vocabulary), so no reader has to render a reason here.
+        reason = ""
+        async with self._attention_publish_lock:
+            self._attention_run_settled = True
+            anchor = provisional_anchor(token)
+            # The journal precedes publication, exactly as the outcome path
+            # does: a replay re-lands the same row idempotently by token.
+            await self._transcript.append_custom(
+                ATTENTION_CUSTOM_TYPE,
+                {
+                    "conversation_id": conversation_identity(self._transcript.directory),
+                    "token": token,
+                    "anchor": anchor,
+                    "kind": kind,
+                    "cause": cause,
+                    "reason": reason,
+                    "notify": False,
+                },
+            )
+            try:
+                self._attention = await asyncio.to_thread(
+                    AttentionStore().publish,
+                    conversation_identity(self._transcript.directory),
+                    token,
+                    anchor,
+                    kind,
+                    reason=reason,
+                    cause=cause,
+                    notify=False,
+                )
+            except AttentionWriteDeferred as deferred:
+                # Same contract as the outcome path: the durable marker above
+                # keeps the closure, and the republish ladder retries it
+                # against the live store from this process.
+                logger.warning(
+                    "attention: closure for %s deferred; retrying it against "
+                    "the store in-process: %s",
+                    conversation_identity(self._transcript.directory),
+                    deferred,
+                )
+                self._schedule_attention_republish()
+            except Exception:  # noqa: BLE001 — attention is an observability nicety
+                logger.warning(
+                    "attention: could not publish the closure for %s",
+                    conversation_identity(self._transcript.directory),
+                    exc_info=True,
+                )
+        self.refresh_frontend_state()
 
     @property
     def frontend_state(self):  # type: ignore[no-untyped-def]
@@ -10683,7 +10869,11 @@ class Session:
         )
 
     async def _prompt_messages(
-        self, initial: list[AgentMessage], *, carried_prompt: bool = False
+        self,
+        initial: list[AgentMessage],
+        *,
+        carried_prompt: bool = False,
+        guard: Callable[[], bool] | None = None,
     ) -> None:
         """Shared turn runner for wake deliveries (prompt() owns its own lock
         handling so it can REJECT reentrants instead of queueing).
@@ -10692,6 +10882,15 @@ class Session:
         is a person's words at the other end of `lop send`, so a run it opens
         keeps the cut-off verdict a harness delivery does not get (see
         ``_attention_run_has_evidence``).
+
+        ``guard`` is the patience delivery's under-lock re-check: it runs once
+        the turn lock is held, and a False return retires the delivery
+        silently — no turn, no events. It exists because the watermark that
+        dispatched the fire can change while the delivery waits for the lock
+        (a reply claiming it first); repeating the check under the lock is
+        what makes the reply's effect visible even when its own cancel landed
+        after the fire was already in flight. See ``wakes/patience`` for the
+        race table. Other callers pass nothing and are unchanged.
         """
         if self._disposed:
             raise RuntimeError("session is disposed")
@@ -10715,6 +10914,9 @@ class Session:
                 # too: the arrivals are made durable and parked for the next
                 # real turn, and no run opens.
                 await self._hold_deliveries_at_admission(initial)
+                return
+            if guard is not None and not guard():
+                logger.info("patience: delivery retired under the turn lock (a reply landed)")
                 return
             # A newly ARRIVING unit of work is a fresh intent, exactly like a
             # typed prompt, so it clears the sticky abort the same way
@@ -10883,6 +11085,7 @@ class Session:
         self._attention_run_request_dispatched = False
         self._attention_run_carried_prompt = carried_prompt
         self._attention_run_settle_intent = False
+        self._attention_run_closed_cause = None
         # §14.3: the trigger record, reset per run beside the outcome and the
         # token. Populated from the opening messages here ("at admission") and
         # by ``_drain_steering`` as delivery/steer messages fold in; consumed
@@ -10954,6 +11157,10 @@ class Session:
             # sub-millisecond file work.
             if getattr(self, "_aida_duty", False):
                 await self._aida_after_turn()
+            # PATIENCE'S TURN-END FLUSH: an arm made this turn with no explicit
+            # ``after`` target attaches to the turn's OWN output; this is the
+            # seam that stamps the assistant message id it flushed against.
+            await self._flush_patience_armed_after()
             # LAST, by design: ``_run_turn``'s own ``finally`` has already
             # cleared ``_is_streaming`` on the way out of the await above, and
             # ``_flush_held_end`` has delivered the end event, so a reader
@@ -11926,6 +12133,14 @@ class Session:
             journal_credential=self.journal_credential_change,
             job_id=self._job_id,
             agent_registry=self.agent_registry,
+            # The proactive-class surface (R29–R38), resolved FRESH each turn:
+            # the ``patience`` tool's createIf reads ``action_class`` (and must
+            # flip at the next turn after a class switch), the engine hold
+            # (Aida's pause) also gates arming, and ``patience_sink`` is where
+            # an arm registers itself for the turn-end ``armed_after`` flush.
+            action_class=self._action_class_value(),
+            proactive_hold=self._proactive_hold(),
+            patience_sink=self._note_patience_armed,
             team_registry=self.team_registry,
             project_registry=self.project_registry,
             delegated_tools={
@@ -11967,13 +12182,19 @@ class Session:
         child still means "inherit the parent", which is the ordinary case
         and must keep working with no config at all.
         """
-        model_spec = self._resolve_subagent_model(agent, effort, strict=True)
+        # The target first: a ``team:pod`` launch runs as pod's MANAGER, so the
+        # tier is the manager role's, and a launch that cannot run (unknown
+        # team, cycle, depth cap) raises here before any model is priced or
+        # job registered (BEN-7-D1/D2/D3).
+        target = resolve_launch_target(agent, self)
+        model_spec = self._resolve_subagent_model(target.role, effort, strict=True)
         return run_subagent(
             label=label,
             prompt=prompt,
             parent_session=self,
             jobs_manager=self.jobs,
             model_spec=model_spec,
+            target=target,
             agent=agent,
             # Recorded on the job for the title/band to name the tier. The spec
             # above already carries the resolved MODEL; this carries the LEVEL,
@@ -16574,6 +16795,31 @@ class Session:
         # ``delivery_allowed`` in the same module for the fire-time half).
         if self._aida_duty:
             schedules = self._aida_filter_rows(schedules)
+        # PATIENCE ROWS PAST THEIR EPISODE TTL RETIRE AT LOAD (§8.2.4): the
+        # process was down past the 2 h hard stop, so the wait can never be
+        # honoured and a row left armed would fire a note nobody can act on.
+        # Silent by construction — the drop is in-memory, so the next persist
+        # writes the cancellation, and nothing renders (the row never reaches
+        # a delivery). Within-TTL overdue rows are deliberately NOT touched:
+        # load() re-armed them to now + grace and they fire hidden there.
+        from local_operator.wakes import patience as patience_engine
+        from local_operator.wakes.store import is_patience_row
+
+        if any(is_patience_row(row) for row in schedules):
+            from local_operator.paths import config_dir as _config_dir
+
+            pol = patience_engine.policy(_config_dir())
+            now_ms = int(time.time() * 1000)
+            kept = [
+                row
+                for row in schedules
+                if not patience_engine.fire_past_ttl(row, pol, now_ms=now_ms)
+            ]
+            if len(kept) != len(schedules):
+                logger.info(
+                    "patience: retired %d stale wait(s) at load", len(schedules) - len(kept)
+                )
+            schedules = kept
         self._wake.load(schedules)
 
     def _load_monitor_schedules(self) -> None:
@@ -16647,12 +16893,14 @@ class Session:
             logger.debug("aida: could not sync the display name to config", exc_info=True)
 
     def _aida_filter_rows(self, schedules: list[WakeSchedule]) -> list[WakeSchedule]:
-        """Drop her ``aida-*`` rows when she is paused or disabled."""
+        """Drop her ``aida-*`` rows when she is paused, disabled or reactive."""
         try:
             from local_operator.aida import proactive
             from local_operator.paths import config_dir
 
-            return proactive.filter_on_load(schedules, config_dir=config_dir())
+            return proactive.filter_on_load(
+                schedules, config_dir=config_dir(), class_reactive=self._class_reactive()
+            )
         except Exception:  # noqa: BLE001 — the fire-time guard still holds
             logger.warning("aida: load-time hold failed; arming unfiltered", exc_info=True)
             return schedules
@@ -16671,7 +16919,10 @@ class Session:
             from local_operator.paths import config_dir
 
             result = proactive.reconcile(
-                schedules, config_dir=config_dir(), session_id=self._session_id
+                schedules,
+                config_dir=config_dir(),
+                session_id=self._session_id,
+                class_reactive=self._class_reactive(),
             )
             if result.notes:
                 await proactive.append_notes(self._transcript, result.notes)
@@ -16911,6 +17162,14 @@ class Session:
         state exists even when no host ever calls async_init — a session that
         only runs one prompt() still owes its catch-up."""
         missed = self._wake.take_missed()
+        # Patience fires are EXCLUDED from the catch-up fold (design §8.2.4):
+        # they are hidden internal timers, and folding one into the visible
+        # catch-up prompt would render it. Their rows stay re-armed by load()
+        # to now + LOAD_GRACE_MS, so within TTL they follow the normal hidden
+        # grace path, and a stale one is retired by the delivery checks.
+        from local_operator.wakes.store import is_patience_row
+
+        missed = [entry for entry in missed if not is_patience_row(entry["schedule"])]
         if not missed:
             return
         now = int(time.time() * 1000)
@@ -17902,13 +18161,20 @@ class Session:
         this one's schedule list; the load-time filter and the supervisor skip
         cover the other two paths.
         """
+        from local_operator.wakes.store import is_patience_row
+
+        if is_patience_row(due.schedule):
+            # A patience fire is a DIFFERENT delivery: hidden, watermark-checked,
+            # and never announced. See :meth:`_deliver_patience_wake`.
+            await self._deliver_patience_wake(due)
+            return
         if getattr(self, "_aida_duty", False):
             try:
                 from local_operator.aida import proactive
                 from local_operator.paths import config_dir
 
                 if proactive.is_aida_row(due.schedule.id) and not proactive.delivery_allowed(
-                    config_dir()
+                    config_dir(), class_reactive=self._class_reactive()
                 ):
                     logger.info("aida: dropping held wake %s (%s)", due.schedule.id, "paused")
                     return
@@ -17942,14 +18208,20 @@ class Session:
         # paint the expandable wake line ahead of the work it triggered —
         # without it the transcript showed the agent starting to work with no
         # record that a wake was the cause.
-        await self._emit(
-            WakeDeliveredEvent(
-                text=text,
-                catchup=False,
-                wake_id=due.schedule.id,
-                occurrence=due.occurrence,
+        # HIDDEN deliveries never emit a receipt (design §8.2.2 item 1). The
+        # kind branch at the top of this method already routes patience fires
+        # to their own delivery, so this gate is defence in depth rather than
+        # the only guard: any row that ever carries ``hidden`` reaches the
+        # model and no front end, whichever path it arrives by.
+        if not due.schedule.hidden:
+            await self._emit(
+                WakeDeliveredEvent(
+                    text=text,
+                    catchup=False,
+                    wake_id=due.schedule.id,
+                    occurrence=due.occurrence,
+                )
             )
-        )
         if busy:
             # Busy: ride the next successful tool boundary instead of racing
             # the turn — and mark the message COURTESY so the immediate-
@@ -18083,6 +18355,277 @@ class Session:
             self._peer_arrival.mark(MONITOR_PROMPT_MESSAGE_TYPE)
             return
         self._spawn_background(self._prompt_messages([message]))
+
+    async def _deliver_patience_wake(self, due: DueWake) -> None:
+        """Deliver one fired patience wait: hidden, watermark-checked, bounded.
+
+        The rules live in ``local_operator.wakes.patience``'s module docstring;
+        this method is the session-side composition of them, in the order the
+        design fixes (§8.2.3/§8.2.4):
+
+        1. the CLASS is read first — a switch to reactive takes effect within
+           one fire even on a running session (R36);
+        2. a fire past its episode TTL retires SILENTLY (no turn, no event);
+           the pump's advance is the retire, same as every one-shot;
+        3. the reply WATERMARK retires silently too, evaluated against the
+           transcript's last REAL user/peer inbound (the trap: wake and
+           patience deliveries are themselves ``attribution="user"`` custom
+           messages — "role user" is not a reply);
+        4. an idle delivery re-checks the watermark once more under
+           ``_turn_lock`` (``_prompt_messages``'s guard) — the race where the
+           fire wins the lock probe but a reply lands before the turn;
+        5. the delivered text is the hidden note and its details carry
+           ``hidden``/``kind`` so replay surfaces skip it while the model still
+           reads it (``harness/render.py`` turns ``wake_prompt`` custom
+           messages into user turns, unchanged).
+        """
+        from local_operator.wakes import patience
+
+        if self._class_reactive():
+            logger.info("patience: %s fired while reactive; retiring", due.schedule.id)
+            return
+        if self._proactive_hold():
+            # The engine hold (Aida paused/disabled) stops proactive output even
+            # if a row survived the pause's cancel — e.g. the pause landed with
+            # a LIVE owner, whose external cancel was refused. A fire is output;
+            # it must not slip past the hold just because the row outlived it.
+            logger.info(
+                "patience: %s fired while the proactive hold is on; retiring", due.schedule.id
+            )
+            return
+        from local_operator.paths import config_dir
+
+        pol = patience.policy(config_dir())
+        now = int(time.time() * 1000)
+        if patience.fire_past_ttl(due.schedule, pol, now_ms=now):
+            logger.info(
+                "patience: %s is past its episode TTL; retiring without a turn", due.schedule.id
+            )
+            return
+        # The scan covers the whole span an un-retired episode can occupy (its
+        # TTL plus a margin for a fire that came due a little late), so every
+        # fact that could matter is in reach and the scan stays bounded on a
+        # long conversation.
+        cutoff = now - (pol.ttl_ms + 3_600_000)
+        facts = patience.scan_entries(self._transcript.entries(), cutoff_ms=cutoff)
+        if patience.fire_is_stale(due.schedule, facts):
+            logger.info(
+                "patience: %s predates the last inbound; retiring without a turn",
+                due.schedule.id,
+            )
+            return
+        text = patience.fire_note(due.schedule, pol, now_ms=now)
+        details: dict[str, Any] = {
+            "wake_id": due.schedule.id,
+            "occurrence": due.occurrence,
+            "text": text,
+            **patience.fire_details(due.schedule),
+        }
+        wake_message = CustomMessage(
+            custom_type=WAKE_PROMPT_MESSAGE_TYPE,
+            attribution="user",
+            details=details,
+        )
+        if self._is_streaming:
+            # Busy: ride the next tool boundary as a courtesy, exactly like a
+            # visible wake — the watermark was just checked, and the turn's own
+            # end will persist whatever the scheduler advanced.
+            self._courtesy_wake_count += 1
+            self._steering_queue.put_nowait(wake_message)
+            self._peer_arrival.mark(WAKE_PROMPT_MESSAGE_TYPE)
+            return
+        self._spawn_background(
+            self._prompt_messages([wake_message], guard=self._patience_guard(due.schedule, pol))
+        )
+
+    def _patience_guard(self, row: WakeSchedule, pol: Any) -> Callable[[], bool]:
+        """The under-lock re-check for an idle patience delivery.
+
+        Returns True while the fire is still fresh (no reply landed since it
+        was armed). A read failure answers True — fail OPEN, because by this
+        point the fire was already cleared once and the pump has already
+        advanced the row; eating it on a transient read would turn a hidden
+        timer into a lost follow-up.
+        """
+
+        def _guard() -> bool:
+            try:
+                from local_operator.wakes import patience
+
+                now = int(time.time() * 1000)
+                facts = patience.scan_entries(
+                    self._transcript.entries(), cutoff_ms=now - (pol.ttl_ms + 3_600_000)
+                )
+                return not patience.fire_is_stale(row, facts)
+            except Exception:  # noqa: BLE001 — documented fail-open
+                return True
+
+        return _guard
+
+    def _action_class_value(self) -> str:
+        """This session's effective action class, read at the moment it is asked.
+
+        The delivery-time read R36 rests on: a class switch lands on a RUNNING
+        session at its next decision point because nothing here is cached at
+        session build. Reads the attachment sidecar + registry (or packaged
+        seed) via ``local_operator.action_class``; anything unresolved reads
+        reactive (that module owns the fail-closed rationale).
+        """
+        try:
+            from local_operator.action_class import REACTIVE, session_action_class
+
+            return (
+                session_action_class(self._transcript.directory, registry=self.agent_registry)
+                or REACTIVE
+            )
+        except Exception:  # noqa: BLE001 — fail closed, see the module docstring
+            logger.warning("could not resolve the session action class", exc_info=True)
+            return "reactive"
+
+    def _class_reactive(self) -> bool:
+        """The bool spelling every proactive gate uses."""
+        from local_operator.action_class import PROACTIVE
+
+        return self._action_class_value() != PROACTIVE
+
+    def _proactive_hold(self) -> bool:
+        """Whether an ENGINE hold (Aida paused/disabled) suppresses arming now.
+
+        The class is a separate gate (``_class_reactive``). One config read,
+        and only on her session — every other session short-circuits on the
+        duty flag. Fail OPEN like the delivery guard it mirrors.
+        """
+        if not getattr(self, "_aida_duty", False):
+            return False
+        try:
+            from local_operator.aida import proactive
+            from local_operator.paths import config_dir
+
+            return proactive.hold_active(config_dir())
+        except Exception:  # noqa: BLE001 — fail OPEN, matching the delivery guard
+            logger.debug("could not resolve the proactive hold", exc_info=True)
+            return False
+
+    async def cancel_pending_patience(self, *, reason: str = "") -> list[str]:
+        """Best-effort retire of EVERY pending patience row (R34 over-cancel).
+
+        Called at ``prompt()``/``receive_peer_message`` entry and by the class
+        switch's cleanup. Goes through ``self._wake.update`` — the one writer —
+        so the retire persists exactly like any other schedule change. Never
+        raises: a reply must never fail because a timer could not be cancelled,
+        and the delivery-time watermark still covers a row this failed to drop.
+        """
+        try:
+            from local_operator.wakes import patience
+
+            current = list(self._wake.schedules)
+            kept, cancelled = patience.retire_all(current)
+            if cancelled:
+                await self._wake.update(kept)
+                logger.info(
+                    "patience: retired %d pending wait(s)%s",
+                    len(cancelled),
+                    f" ({reason})" if reason else "",
+                )
+            return cancelled
+        except Exception:  # noqa: BLE001 — best-effort by contract
+            logger.warning("patience: could not retire pending waits", exc_info=True)
+            return []
+
+    def _attached_profile_name(self) -> str:
+        """The profile NAME this session is attached to ("" when none).
+
+        The in-memory twin of the attachment sidecar's ``agent`` field:
+        ``_goal_state`` holds the display name and ``_unresolved_agent`` the
+        stored spelling for a profile that resolved but stamped no text, and
+        between them they answer what a class-switch cleanup needs to know.
+        """
+        return str(self._goal_state.agent_name or self._unresolved_agent or "")
+
+    async def cleanup_after_class_switch(self, profile_name: str) -> dict[str, Any]:
+        """Best-effort immediate cleanup after a class flip (R36's switch).
+
+        Scoped to THIS session on purpose: other sessions attached to the same
+        profile self-correct at their next delivery-time class read (the
+        design's stated fallback — a wake writer must not reach into a live
+        session's transcript from outside anyway). When the flipped profile is
+        the one this session attached (or this IS Aida's session and she was
+        flipped), the cleanup is: cancel every pending patience row NOW, and —
+        for Aida — reconcile her cadence rows against the new class (reactive
+        drops them; turning the class back re-arms at the next reconcile, the
+        same restore path an un-pause uses).
+
+        Never raises: the switch has already succeeded when this runs.
+        """
+        out: dict[str, Any] = {
+            "session": self._session_id,
+            "patience_cancelled": [],
+            "cadence_dropped": False,
+        }
+        try:
+            attached = self._attached_profile_name().strip().casefold()
+            flipped = attached == str(profile_name or "").strip().casefold()
+            is_hers = getattr(self, "_aida_duty", False)
+            if is_hers and str(profile_name or "").strip().casefold() == "aida":
+                flipped = True
+            if not flipped:
+                return out
+            out["patience_cancelled"] = await self.cancel_pending_patience(reason="class switch")
+            if is_hers:
+                # Reconcile now: with class_reactive read fresh, it drops her
+                # ``aida-*`` rows through the ONE writer; with a flip back to
+                # proactive it re-arms the cadence. Both are exactly what the
+                # next persist would do — this just does not wait for it.
+                await self._aida_reconcile_now()
+                out["cadence_dropped"] = self._class_reactive()
+        except Exception:  # noqa: BLE001 — best-effort by contract
+            logger.warning("patience: class-switch cleanup failed", exc_info=True)
+        return out
+
+    def _note_patience_armed(self, row_id: str) -> None:
+        """ToolContext sink: remember a row armed this turn for the turn-end flush."""
+        ids = getattr(self, "_patience_armed_ids", None)
+        if ids is None:
+            ids = []
+            self._patience_armed_ids = ids
+        ids.append(str(row_id))
+
+    async def _flush_patience_armed_after(self) -> None:
+        """Stamp ``armed_after`` with the turn's output id for waits armed this turn.
+
+        The default target of an arm is "this turn's output", which only exists
+        once the turn does — so the row ids are collected during the turn and
+        flushed here, at the single turn-end seam. A row that fired or was
+        cancelled meanwhile is simply absent from the scheduler's list; the
+        flush is a no-op for it. Best-effort by contract.
+        """
+        ids = getattr(self, "_patience_armed_ids", None)
+        if not ids:
+            return
+        self._patience_armed_ids = []
+        try:
+            message_id = ""
+            for message in reversed(self._context.messages):
+                if getattr(message, "role", None) == "assistant" and getattr(message, "id", ""):
+                    message_id = str(getattr(message, "id"))
+                    break
+            if not message_id:
+                return
+            from local_operator.wakes import patience
+
+            current = list(self._wake.schedules)
+            updated = [
+                (
+                    row.model_copy(update={"armed_after": f"message:{message_id}"})
+                    if patience.is_patience_row(row) and str(row.id) in ids and not row.armed_after
+                    else row
+                )
+                for row in current
+            ]
+            if updated != current:
+                await self._wake.update(updated)
+        except Exception:  # noqa: BLE001 — best-effort by contract
+            logger.warning("patience: could not flush armed_after", exc_info=True)
 
     @staticmethod
     def _append_busy_resume_note(
@@ -18728,6 +19271,13 @@ class Session:
         zero provider statements, and the ``error | cause=disposed`` row it
         was branded with superseded the completed turn's own marker for every
         latest-wins reader.
+
+        THE TWO TERMS ARE KEPT APART AT THE POINT OF USE (v2, 2026-09-29):
+        ``Session.dispose`` reads the flags directly because the dispositions
+        now differ by WHICH evidence there is — dispatched → the honest
+        error, carried-without-dispatch → the neutral ``closed`` closure (see
+        :meth:`_publish_closed_disposal`) — so this predicate stays the
+        documented summary of the pair rather than the decision itself.
         """
         return self._attention_run_request_dispatched or self._attention_run_carried_prompt
 
@@ -18779,9 +19329,11 @@ class Session:
                 # began dispatching inside that window had its real cut
                 # suppressed by the armed intent and was then settled as
                 # zero-work). A disposal that catches a live run publishes a
-                # cut-off only when the run has evidence behind one (see
-                # ``_attention_run_has_evidence``); without evidence it settles
-                # silently. The decision must still come before the abort for
+                # cut-off only when the run actually DISPATCHED a provider
+                # round-trip; a run that carried a prompt but spent nothing
+                # closes NEUTRALLY (``closed``, the v2 directive), and a run
+                # with neither settles silently. The decision must still come
+                # before the abort for
                 # two reasons: ``note_cut_off`` is first-writer-wins, so a
                 # note written for a settled run would brand a cause nobody
                 # may publish; and the settle intent must be armed before the
@@ -18808,13 +19360,54 @@ class Session:
                 # row preceded them by minutes (six with the retirement label,
                 # more with this one), each rendered as a cut-off of work that
                 # had finished (2026-09-17).
-                settles_silently = (
-                    self._attention_run_token is not None
-                    and not self._attention_run_settled
-                    and not self._attention_run_has_evidence()
-                )
-                if settles_silently:
-                    self._attention_run_settle_intent = True
+                if self._attention_run_token is not None and not self._attention_run_settled:
+                    if self._deliberate_stop_noted:
+                        # A STOP THE USER ASKED FOR OUTRANKS THIS EXIT'S
+                        # DISPOSITION (agent review round 1, BLOCKER-1). The
+                        # stop already cleared the cut-off note
+                        # (``note_cut_off`` refuses once one is recorded), and
+                        # it must outrank the neutral closure too: `/stop` on a
+                        # carried, not-yet-dispatched run published ``closed``
+                        # while the user had ASKED for the stop, and the honest
+                        # record for that is ``interrupted|user-stop`` — which
+                        # the run's own classify path produces once nothing
+                        # here overrides it. Nothing to decide, nothing to
+                        # note: the run's verdict is already recorded.
+                        #
+                        # ALL SHAPES, deliberately (manager decision, round 2,
+                        # MINOR-1): the NON-carried zero-work run — the
+                        # harness-opened wake/job-delivery shape — publishes
+                        # the same ``interrupted|user-stop``, where v1 settled
+                        # it silently. The user's act outranks the silence the
+                        # same way it outranks the closure; narrowing this
+                        # clause to the carried shape would reintroduce the
+                        # asymmetry this round was raised on, and
+                        # ``test_a_deliberate_stop_of_a_non_carried_zero_work_run_is_still_an_interruption``
+                        # pins the third shape.
+                        pass
+                    elif self._attention_run_request_dispatched:
+                        # EVIDENCE: work reached the provider, so a cut is a
+                        # real cut and keeps the honest verdict.
+                        self.note_cut_off("disposed")
+                    elif self._attention_run_carried_prompt:
+                        # NEUTRAL CLOSURE (operator directive, 2026-09-29;
+                        # session 23fc556c3799): the ask was real — a person
+                        # or a peer is waiting on it — but the run spent no
+                        # provider round-trip, so this exit cannot honestly
+                        # claim it was cut off mid-work. ``closed`` records the
+                        # fact without the error framing the operator
+                        # re-reported; the settle intent rides along so the
+                        # abort tail cannot republish the verdict this decision
+                        # refused (``_publish_attention_outcome``). The cause is
+                        # captured HERE because ``note_cut_off`` is
+                        # first-writer-wins and the serving rung may have noted
+                        # its more specific cause before handing over: the
+                        # closure PRESERVES that token, or names the disposal
+                        # itself when nobody did.
+                        self._attention_run_closed_cause = self._cut_off_cause or "disposed"
+                        self._attention_run_settle_intent = True
+                    else:
+                        self._attention_run_settle_intent = True
                 else:
                     self.note_cut_off("disposed")
                 self.abort("session disposed")
@@ -18867,7 +19460,16 @@ class Session:
                     # reclassifies as "the cause could not be determined"
                     # (reproduced: serving_cause_hole.py). The same clause
                     # covers the ``_deliberate_stop_noted`` variant.
-                    if self._attention_outcome is None and (
+                    # A NEUTRAL CLOSURE OWED TO THE DECISION ABOVE (v2): the
+                    # disposition chose ``closed`` before the abort; the run
+                    # reaches here unsettled and without an outcome (the intent
+                    # dropped the abort tail), so the closure is published now.
+                    if (
+                        self._attention_run_closed_cause is not None
+                        and self._attention_outcome is None
+                    ):
+                        await self._publish_closed_disposal(self._attention_run_closed_cause)
+                    elif self._attention_outcome is None and (
                         self._attention_run_settle_intent
                         or not (self._cut_off_cause or self._deliberate_stop_noted)
                     ):

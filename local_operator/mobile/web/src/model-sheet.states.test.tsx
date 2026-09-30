@@ -23,7 +23,7 @@
 // now, and each is asserted NEGATIVELY as well (the no-match copy must be
 // ABSENT while unresolved, and present only after an empty resolution) so the
 // gate itself is observable.
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ModelSheet } from "./components/model-sheet";
@@ -51,6 +51,11 @@ const DAEMON_MESSAGE =
     catalogue resolved, the fetch succeeded, and the filter really is what
     excluded everything. */
 const NO_MATCH = /no matching models/;
+
+/** The empty-catalogue copy (U9, batch 2): resolved, non-error, zero rows.
+    Distinct from NO_MATCH — filter advice cannot succeed against an empty
+    inventory, and the two facts must not render as one sentence. */
+const EMPTY_CATALOGUE = /no models available from this machine/;
 
 const ROWS: ModelEntry[] = [
 	{
@@ -96,12 +101,13 @@ describe("the in-session sheet", () => {
 		expect(screen.queryByText(NO_MATCH)).toBeNull();
 	});
 
-	it("says nothing matched only once an EMPTY catalogue has actually resolved", async () => {
+	it("a resolved catalogue with NO models says so, instead of blaming the filter (U9, batch 2)", async () => {
 		getModels.mockResolvedValue({ models: [] });
 
 		renderSheet();
 
-		expect(await screen.findByText(NO_MATCH)).toBeTruthy();
+		expect(await screen.findByText(EMPTY_CATALOGUE)).toBeTruthy();
+		expect(screen.queryByText(NO_MATCH)).toBeNull();
 		expect(screen.queryByText("loading…")).toBeNull();
 	});
 
@@ -172,12 +178,23 @@ describe("the #/new picker", () => {
 		expect(screen.getAllByText("default").length).toBeGreaterThan(0);
 	});
 
-	it("says nothing matched only once an EMPTY catalogue has actually resolved", async () => {
+	it("a resolved catalogue with NO models says so, like the sheet (U9, batch 2)", async () => {
 		getModels.mockResolvedValue({ models: [] });
 
 		await renderNewSessionPicker();
 
-		expect(await screen.findByText(NO_MATCH)).toBeTruthy();
+		expect(await screen.findByText(EMPTY_CATALOGUE)).toBeTruthy();
+		expect(screen.queryByText(NO_MATCH)).toBeNull();
 		expect(screen.queryByText("loading…")).toBeNull();
+	});
+
+	it("filters a resolved catalogue down to the no-match state", async () => {
+		getModels.mockResolvedValue({ models: ROWS });
+
+		const input = await renderNewSessionPicker();
+		expect(screen.queryByText(NO_MATCH)).toBeNull();
+
+		fireEvent.change(input, { target: { value: "zzzznomatch" } });
+		expect(screen.getByText(NO_MATCH)).toBeTruthy();
 	});
 });

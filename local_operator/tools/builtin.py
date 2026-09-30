@@ -11717,7 +11717,13 @@ def _wake_due_label(schedule: WakeSchedule) -> str:
 
 
 async def _wake_list(tool_call_id: str, scheduler: WakeSchedulerProtocol) -> ToolResult:
-    schedules = list(scheduler.schedules)
+    # Patience waits are filtered from EVERY listing surface (design §8.2.2 item
+    # 5): one shared filter with the panel and the CLI
+    # (``wakes.store.scheduled_rows``), so the model's listing and the user's
+    # panel cannot disagree. The model manages patience through its own tool.
+    from local_operator.wakes.store import scheduled_rows
+
+    schedules = list(scheduled_rows(scheduler.schedules))
     if not schedules:
         return _text(
             tool_call_id,
@@ -11776,6 +11782,17 @@ async def _wake_cancel(
 ) -> ToolResult:
     if not params.id:
         return _error(tool_call_id, "wake", "'cancel' requires the schedule id (see wake list)")
+    # A patience wait has its own cancel surface; routing it here would work
+    # but would teach the model a second way to manage the same rows (and the
+    # wake listing no longer names their ids). One sentence, before any state
+    # is touched.
+    if str(params.id).startswith("patience-"):
+        return _error(
+            tool_call_id,
+            "wake",
+            f"'{params.id}' is a patience wait; cancel it with patience(op='cancel', "
+            f"id='{params.id}')",
+        )
     existing = list(scheduler.schedules)
     remaining = [s for s in existing if s.id != params.id]
     if len(remaining) == len(existing):
@@ -12067,20 +12084,33 @@ async def _monitor_create(
             return _invalid_arguments(tool_call_id, "monitor", str(outcome["error"]))
         return _error(tool_call_id, "monitor", str(outcome["error"]))
     spec = outcome["spec"]
+    # The structured receipt facts, so a caller that is not a model reading
+    # prose (the desktop owner command, whose reply becomes an HTTP body)
+    # reads them instead of parsing the sentence back out — the
+    # ``_wake_create`` precedent. ``remaining`` is read AFTER the scheduler
+    # answered, off its own list: it is the list the persist just published.
+    facts: dict[str, Any] = {
+        "monitor_id": spec.id,
+        "name": spec.name,
+        "next_due_at": outcome.get("next_due_at"),
+        "remaining": len(scheduler.monitors),
+        "already_armed": bool(outcome.get("duplicate")),
+        "reactivated": bool(outcome.get("reactivated")),
+    }
     if outcome.get("duplicate"):
         return _text(
             tool_call_id,
             "monitor",
             f"Monitor '{spec.name}' ({spec.id}) already watches that call every "
             f"{format_duration(spec.every_ms)}.",
-            details={"monitor_id": spec.id},
+            details=facts,
         )
     if outcome.get("reactivated"):
         return _text(
             tool_call_id,
             "monitor",
             f"Reactivated monitor '{spec.id}'.",
-            details={"monitor_id": spec.id},
+            details=facts,
         )
     from local_operator.wakes.display import format_wake_time
 
@@ -12092,7 +12122,7 @@ async def _monitor_create(
         f"Armed monitor '{spec.name}' ({spec.id}): {spec.tool} {call} every "
         f"{format_duration(spec.every_ms)}, {bound}. First check in ~2s captures the "
         "baseline; you'll be told only what changes.",
-        details={"monitor_id": spec.id, "next_due_at": outcome.get("next_due_at")},
+        details=facts,
     )
 
 
@@ -12106,11 +12136,25 @@ async def _monitor_cancel(
     outcome = await scheduler.cancel(params.id)
     if "error" in outcome:
         return _error(tool_call_id, "monitor", str(outcome["error"]))
+    spec = outcome.get("spec")
     return _text(
         tool_call_id,
         "monitor",
         f"Cancelled monitor '{params.id}'.",
-        details={"monitor_id": params.id},
+        # The same structured receipt facts the arm carries (see
+        # ``_monitor_create``): a cancel's receipt names the row it removed
+        # and the count that remains.
+        details={
+            "monitor_id": params.id,
+            "name": str(getattr(spec, "name", "") or ""),
+            "remaining": len(scheduler.monitors),
+            # Present-and-null rather than absent, matching the arm's facts:
+            # the receipt contract is one shape either way (null after a
+            # cancel).
+            "next_due_at": None,
+            "already_armed": False,
+            "reactivated": False,
+        },
     )
 
 
@@ -12172,6 +12216,265 @@ async def execute_monitor(
         cwd = str(getattr(context, "cwd", "") or "")
         return await _monitor_create(tool_call_id, params, scheduler, cwd)
     return await _monitor_cancel(tool_call_id, params, scheduler)
+
+
+# patience — a hidden internal wait attached to a sent message (R30–R38)
+# ---------------------------------------------------------------------------
+#
+# Why this exists as its OWN tool rather than a flag on ``wake``: the two
+# differ in EVERY semantic — wake arms a visible recurring self-prompt that the
+# user can see and manage; patience attaches a one-shot hidden timer to a
+# message the agent already sent, is cancelled by a reply, backs off, and dies
+# at a TTL. Only the substrate is shared (``kind="patience"`` rows on the same
+# scheduler), which is exactly the split the design's §8.2.1 draws. The tool
+# is offered ONLY to a session whose attached profile is in the proactive
+# class (createIf — a reactive session sees no schema at all), and the arm
+# path re-reads the class at the moment it acts, because a class switch must
+# land on a running session (R36).
+
+
+class PatienceParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    op: Literal["arm", "cancel", "list"] = Field(
+        description=(
+            "arm: attach a hidden wait to the message you just sent (or are about "
+            "to send this turn, the default target); the wait fires only if no "
+            "reply arrives. cancel: drop one wait by id, or every pending wait "
+            "when id is omitted. list: show this session's pending waits."
+        )
+    )
+    timeout: str | None = Field(
+        default=None,
+        description=(
+            "arm: how long to wait before waking you, e.g. '5m' or '90s' "
+            "(default 5m; clamped 60s..24h). Later attempts in the same cycle "
+            "back off automatically (x3), so the default grows five, fifteen, "
+            "forty-five minutes across the cycle's three attempts."
+        ),
+    )
+    note: str | None = Field(
+        default=None,
+        description=(
+            "arm: optional reminder rendered into the wake note, so the future "
+            "you knows what to say if no reply arrived."
+        ),
+    )
+    after: str | None = Field(
+        default=None,
+        description=(
+            "arm: which outbound message the wait belongs to, e.g. "
+            "'message:<id>'. Omit for the default: this turn's output."
+        ),
+    )
+    id: str | None = Field(default=None, description="cancel: the wait id (from list).")
+
+
+async def _patience_arm(
+    context: ToolContext | None, *, requested_ms: int | None, note: str, after: str
+) -> tuple[Any, str]:
+    """The shared arm path for the ``patience`` tool and ``send(patience=…)``.
+
+    Returns ``(row, "")`` on success and ``(None, refusal)`` on any refusal —
+    the caller renders the string, because a refusal must reach the model as a
+    sentence (the wake tool's own contract). The class is re-resolved HERE, at
+    arm time, from the attachment sidecar + registry (never from a cached
+    per-turn value): R36's live-switch rule says the gate is read at the
+    delivery point of every proactive path, and arming is one.
+    """
+    from local_operator.paths import config_dir as _config_dir
+    from local_operator.wakes import patience
+
+    if context is None or context.wake_scheduler is None:
+        return None, "patience waits need a wake scheduler; this session has none attached."
+    session_dir = getattr(context, "session_dir", None)
+    if not session_dir:
+        return None, "this context has no session directory; patience waits cannot be stored."
+    from local_operator.action_class import PROACTIVE, session_action_class
+
+    current_class = session_action_class(session_dir, registry=context.agent_registry)
+    if current_class != PROACTIVE:
+        return None, (
+            "this session is reactive; switch its profile to the proactive class "
+            "first (/agent class <name> proactive) — patience waits are refused "
+            "for reactive sessions."
+        )
+    outcome = await patience.arm_patience(
+        context.wake_scheduler,
+        session_dir=session_dir,
+        config_dir=_config_dir(),
+        action_class=current_class,
+        now_ms=int(time.time() * 1000),
+        requested_ms=requested_ms,
+        note=note,
+        after=after,
+        suppressed=bool(getattr(context, "proactive_hold", False)),
+    )
+    if not outcome.ok:
+        return None, outcome.error
+    row = outcome.row
+    # The turn-end flush is only for waits with no explicit target: the default
+    # target IS this turn's output, whose id does not exist yet (the session
+    # stamps it when the turn completes).
+    if not str(getattr(row, "armed_after", "") or "") and context.patience_sink is not None:
+        try:
+            context.patience_sink(str(row.id))
+        except Exception:  # noqa: BLE001 — the sink is bookkeeping
+            logger.warning("patience: sink refused a row id", exc_info=True)
+    return row, ""
+
+
+def _patience_due_text(row: Any, *, now_ms: int) -> str:
+    from local_operator.harness.wake import format_duration
+
+    due = int(getattr(row, "next_due_at", 0) or 0)
+    return format_duration(max(due - now_ms, 0))
+
+
+@_guard("patience")
+async def execute_patience(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """Arm / cancel / list hidden patience waits for this session."""
+    try:
+        params = PatienceParams(**args)
+    except ValidationError as exc:
+        return _validation_error(tool_call_id, "patience", exc)
+    from local_operator.wakes import patience
+
+    if context is None or context.wake_scheduler is None:
+        return _error(
+            tool_call_id,
+            "patience",
+            "patience waits are not available in this session (no scheduler attached).",
+        )
+    now_ms = int(time.time() * 1000)
+    scheduler = context.wake_scheduler
+
+    if params.op == "list":
+        rows = [r for r in scheduler.schedules if patience.is_patience_row(r)]
+        if not rows:
+            return _text(
+                tool_call_id,
+                "patience",
+                "No pending patience waits.",
+                useless=True,
+                details={"useless": True},
+            )
+        lines = []
+        for row in rows:
+            target = str(getattr(row, "armed_after", "") or "") or "this turn's output"
+            note = str(getattr(row, "note", "") or "")
+            lines.append(
+                f"- {getattr(row, 'id', '')}: attempt {getattr(row, 'attempt', 1)}, "
+                f"fires in {_patience_due_text(row, now_ms=now_ms)} (target: {target}"
+                + (f"; note: {note})" if note else ")")
+            )
+        return _text(
+            tool_call_id,
+            "patience",
+            f"{len(rows)} pending patience wait(s) (hidden; no one else sees these):\n"
+            + "\n".join(lines),
+        )
+
+    if params.op == "cancel":
+        cancelled, error = await patience.cancel_patience(scheduler, row_id=params.id or "")
+        if error:
+            return _error(tool_call_id, "patience", error)
+        if not cancelled:
+            return _text(
+                tool_call_id,
+                "patience",
+                "No pending patience wait to cancel.",
+                useless=True,
+                details={"useless": True},
+            )
+        return _text(
+            tool_call_id,
+            "patience",
+            "Cancelled patience wait(s): " + ", ".join(cancelled) + ".",
+            details={"cancelled": cancelled},
+        )
+
+    # op == "arm"
+    requested_ms: int | None = None
+    if params.timeout is not None and params.timeout.strip():
+        from local_operator.harness.wake import parse_wake_duration
+
+        requested_ms = parse_wake_duration(params.timeout.strip())
+        if requested_ms is None:
+            return _invalid_arguments(
+                tool_call_id,
+                "patience",
+                f"invalid timeout {params.timeout!r}; use a duration like '5m', '90s' or '2h'.",
+            )
+    after = (params.after or "").strip()
+    if after and not after.startswith("message:"):
+        return _invalid_arguments(
+            tool_call_id,
+            "patience",
+            "'after' must be 'message:<id>' — or omit it to attach to this turn's output.",
+        )
+    row, refusal = await _patience_arm(
+        context, requested_ms=requested_ms, note=(params.note or "").strip(), after=after
+    )
+    if refusal or row is None:
+        return _error(tool_call_id, "patience", refusal or "could not arm the wait")
+    attempt = int(getattr(row, "attempt", 1) or 1)
+    return _text(
+        tool_call_id,
+        "patience",
+        f"Patience armed ({getattr(row, 'id', '')}, attempt {attempt}): "
+        f"if no reply arrives in {_patience_due_text(row, now_ms=now_ms)}, you wake "
+        "with an internal note. Hidden — nothing appears in the conversation.",
+        details={
+            "id": str(getattr(row, "id", "")),
+            "next_due_at": int(getattr(row, "next_due_at", 0) or 0),
+            "attempt": attempt,
+        },
+    )
+
+
+def build_patience_tool(context: ToolContext) -> AgentTool | None:
+    """CreateIf: proactive class + a scheduler. Reactive sessions get no schema.
+
+    Rung 3 on the tool-footprint ladder: the world pays for this only where
+    the capability exists (a proactive session), matching ``wake``'s own
+    createIf stance. The value read here is the host's per-turn resolution;
+    the ARM path re-resolves so a switch mid-session cannot be raced.
+    """
+    from local_operator.action_class import PROACTIVE
+
+    if context.wake_scheduler is None:
+        return None
+    if str(getattr(context, "action_class", "reactive")) != PROACTIVE:
+        return None
+    return AgentTool(
+        name="patience",
+        label="Patience",
+        description=(
+            "Attach a hidden internal wait to a message you sent (arm/cancel/list). "
+            "If no reply arrives by the timeout you wake with a private note so you "
+            "can decide whether to follow up; a reply cancels it. The wait and its "
+            "fire are invisible to the user."
+        ),
+        parameters=PatienceParams.model_json_schema(),
+        # read tier: arming never starts an unattended turn on its own — the
+        # fire rides the session's own wake machinery, which the operator's
+        # class choice already sanctioned, and the tool only manages a timer
+        # (the ``wake`` tool's write tier covers starting autonomous work
+        # explicitly; patience is bounded, reply-cancelled and self-retiring).
+        approval_tier="read",
+        # arm/cancel rewrite the whole schedule list; two concurrent calls
+        # would lose one, so the tool runs exclusive (the wake tool's rule).
+        concurrency="exclusive",
+        interruptible=False,
+        execute=execute_patience,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -12238,6 +12541,14 @@ class SendParams(BaseModel):
         description=(
             "Steer the peer mid-turn instead of using the mailbox; opens a turn if "
             "the peer is idle."
+        ),
+    )
+    patience: str | None = Field(
+        default=None,
+        description=(
+            "Optional hidden patience wait attached to this message, e.g. '5m' "
+            "(clamped 60s..24h). If no reply arrives you wake with a private "
+            "note. Proactive-class senders only; invisible to the peer."
         ),
     )
 
@@ -12524,6 +12835,23 @@ async def execute_send(
     if params.message is None:
         return _error(tool_call_id, "send", "pass a message (or model= to switch the peer's model)")
 
+    # Parse the optional patience duration BEFORE resolving the peer or
+    # delivering anything: a malformed timeout must refuse the whole call, not
+    # deliver the message and then discover the wait cannot be armed. The
+    # message is the primary act and cannot be un-sent, so validation-first is
+    # the only ordering in which a half-applied call is impossible.
+    patience_ms: int | None = None
+    if params.patience is not None and params.patience.strip():
+        from local_operator.harness.wake import parse_wake_duration
+
+        patience_ms = parse_wake_duration(params.patience.strip())
+        if patience_ms is None:
+            return _invalid_arguments(
+                tool_call_id,
+                "send",
+                f"invalid patience {params.patience!r}; use a duration like '5m' or '90s'.",
+            )
+
     from local_operator.mobile.peer_send import (
         candidate_lines,
         live_scan_found_nothing,
@@ -12693,10 +13021,15 @@ async def execute_send(
         )
     if record is not None:
         name = record.conversation_name or record.session_id
+        clause = ""
+        if patience_ms is not None:
+            clause = await _arm_send_patience(
+                context, requested_ms=patience_ms, target_ref=f"peer:{name}"
+            )
         return _text(
             tool_call_id,
             "send",
-            f"→ {name} (pid {record.pid}): {detail}{skipped_clause(skipped)}",
+            f"→ {name} (pid {record.pid}): {detail}{clause}{skipped_clause(skipped)}",
             details={"pid": record.pid, "mode": mode, "wake": bool(params.wake)},
         )
     # A session with no runtime: the receipt names the session rather than a
@@ -12706,15 +13039,45 @@ async def execute_send(
     # live match that was merely unengaged returns the refusal instead — but it
     # is composed once for both receipts, so a future stored delivery cannot
     # silently drop the fact that a live namesake was skipped.
+    clause = ""
+    if patience_ms is not None:
+        clause = await _arm_send_patience(
+            context, requested_ms=patience_ms, target_ref=f"peer:{cold_session_id}"
+        )
     return _text(
         tool_call_id,
         "send",
-        f"→ {cold_session_id} (not running): {detail}{skipped_clause(skipped)}",
+        f"→ {cold_session_id} (not running): {detail}{clause}{skipped_clause(skipped)}",
         details={
             "session_id": cold_session_id,
             "mode": mode,
             "wake": bool(params.wake),
         },
+    )
+
+
+async def _arm_send_patience(
+    context: ToolContext | None, *, requested_ms: int, target_ref: str
+) -> str:
+    """Arm a peer-directed patience wait after a successful send.
+
+    Returns the receipt CLAUSE (leading space) in all cases. A refusal is a
+    clause rather than a failed call because the message is already delivered —
+    the send did happen, and a receipt that says so while naming what did not
+    happen is the honest one (the alternative, refusing the whole call, would
+    have to trust that delivery can be undone, which it cannot).
+    """
+    row, refusal = await _patience_arm(
+        context, requested_ms=requested_ms, note="", after=target_ref
+    )
+    if refusal or row is None:
+        return f" (patience wait not armed: {refusal or 'unknown refusal'})"
+    from local_operator.harness.wake import format_duration
+
+    due_in = max(int(getattr(row, "next_due_at", 0) or 0) - int(time.time() * 1000), 0)
+    return (
+        f" (patience armed, {getattr(row, 'id', '')}: follow up in "
+        f"{format_duration(due_in)} if no reply)"
     )
 
 
@@ -19407,11 +19770,19 @@ def _task_tool_description(model_choice: bool) -> str:
                 "inherits this session's model and reasoning effort; do not pass "
                 "'effort'."
             )
+    # ``team:<name>`` is documented ONCE, on TaskItem.agent's description
+    # below: both ride this same tool schema on every request (and the
+    # single-task form's ``agent`` field already points at ``tasks[].agent``),
+    # so a second mention here is duplication paid per turn — which is what
+    # pushed the merge-ref over the context-budget ratchet
+    # (scripts/bench_context_budget.py) and why this wording is compressed
+    # rather than merely complete.
     return (
-        "Launch background subagents — one, or a whole concurrent batch "
-        "('tasks' + shared 'context') in a single call. 'agent' names a "
-        "role carrying vetted guidance (reviewer, coder, architect, "
-        f"manager, designer, scout — see the `agent` tool). {effort}"
+        "Launch background subagents — one, or a concurrent batch "
+        "('tasks' + shared 'context') in one call. 'agent' names a "
+        "vetted-guidance role (reviewer, coder, architect, manager, "
+        "designer, scout — see the `agent` tool). "
+        f"{effort}"
     )
 
 
@@ -19447,10 +19818,10 @@ class TaskItem(BaseModel):
     agent: str = Field(
         default="task",
         description=(
-            "Role for this subagent: 'task' (full child, no role), 'scout' "
-            "(read-only research), or any role from the `agent` tool — e.g. "
-            "'reviewer', 'coder', 'architect', 'manager', 'designer'. A role "
-            "carries vetted guidance and may restrict tools."
+            "Subagent role: 'task' (full child), 'scout' (read-only research), "
+            "any role from the `agent` tool ('reviewer', 'coder', 'architect', "
+            "'manager', 'designer'), or 'team:<name>' (starts that team's "
+            "manager). Roles carry vetted guidance and may restrict tools."
         ),
     )
     # A free string, not a Literal: the valid set is whatever the operator has
@@ -21071,6 +21442,69 @@ class HubChildParams(BaseModel):
         return value
 
 
+#: What a bare ``message`` with no ``op`` means on the lead's hub: the reply to
+#: the parent that delegated to it. Stated once because the schema patch and the
+#: executor branch have to agree on it.
+_LEAD_REPLY_SENTENCE = (
+    "Omit 'op' and pass only 'message' to answer the agent that delegated to "
+    "you (the same reply the message-only hub sends)."
+)
+
+
+def _lead_hub_schema() -> dict[str, Any]:
+    """``HubParams``' schema with ``op`` optional, for a delegating CHILD only.
+
+    WHY THE VARIANT EXISTS. The ask injection every child receives says
+    "Answer it now with the ``hub`` tool — a short, direct reply"
+    (``comms.TO_CHILD_INSTRUCTIONS``), and the loop validates a call's
+    arguments against the tool's schema BEFORE executing it
+    (``loop.validate_tool_arguments``). A lead holding the plain parent schema
+    therefore could not answer its own parent at all: ``{"message": ...}`` was
+    rejected as invalid arguments, the parent's ``ask`` burned to a timeout,
+    and the child died on the repeated-error guard. Making ``op`` nullable lets
+    that one call through to the executor's reply branch.
+
+    Rendered as the NULLABLE anyOf rather than a bare ``required`` removal so it
+    matches the shape ``message``/``to``/``steps`` already render in this
+    schema — no top-level ``type``, because ``validate_tool_arguments`` checks
+    that first and would never consult the null arm (see the ``to`` field's
+    note on non-nullable unions).
+
+    The top session keeps ``HubParams.model_json_schema()`` byte for byte: this
+    is built only for a child that holds ``task``, the same 2.1% of children
+    that already pays for the parent shape (BEN-7-D5 and its 2026-09-26
+    addendum).
+    """
+    schema = HubParams.model_json_schema()
+    properties = dict(schema.get("properties") or {})
+    op = dict(properties.get("op") or {})
+    # Rebuilt, not patched: the inherited property carries a top-level
+    # ``"type": "string"`` (and the old top-level ``enum``), and a top-level
+    # ``type`` makes ``validate_tool_arguments`` decide before it ever looks at
+    # ``anyOf`` — so the null arm was dead and ``{"op": null, ...}``, the call
+    # this variant exists to admit, was rejected. The variant must render like
+    # ``message``/``to``: a nullable anyOf with NO top-level ``type``/``enum``.
+    variant = {
+        "anyOf": [
+            {"enum": list(op.get("enum") or []), "type": "string"},
+            {"type": "null"},
+        ],
+        "default": None,
+        "description": f"{op.get('description', '')} {_LEAD_REPLY_SENTENCE}",
+        "title": op.get("title") or "Op",
+    }
+    properties["op"] = variant
+    addressed = dict(properties.get("to") or {})
+    addressed["description"] = (
+        f"{addressed.get('description', '')} "
+        '["parent"] addresses the agent that delegated to you.'
+    )
+    properties["to"] = addressed
+    schema["properties"] = properties
+    schema["required"] = [name for name in schema.get("required") or [] if name != "op"]
+    return schema
+
+
 def _describe_hub_approval(args: dict[str, Any], cwd: str) -> str:
     """``<op> <target>: <body>`` — the act, who it hits, and what it says.
 
@@ -21092,16 +21526,20 @@ def _describe_hub_approval(args: dict[str, Any], cwd: str) -> str:
     return f"{head}: {body}" if body else head
 
 
-def _hub_targets(comms: Any, raw: Any) -> tuple[list[str], list[str]]:
+def _hub_targets(comms: Any, raw: Any, scope: str | None = None) -> tuple[list[str], list[str]]:
     """Resolve the ``to`` argument to ``(job ids, errors)``, order preserved
     and duplicates dropped (``["all", "<id>"]`` must not message one child
-    twice)."""
+    twice). ``scope`` confines a delegating child to its own descendants."""
     requested = raw if isinstance(raw, list) else [raw]
     ids: list[str] = []
     seen: set[str] = set()
     errors: list[str] = []
     for item in requested:
-        resolved, error = comms.resolve(str(item))
+        # Keyword only when scoped: the top session's call is unchanged, and
+        # a reduced comms double that predates the scope keeps working there.
+        resolved, error = (
+            comms.resolve(str(item), scope=scope) if scope else comms.resolve(str(item))
+        )
         if error is not None:
             errors.append(error)
         for job_id in resolved:
@@ -21113,7 +21551,7 @@ def _hub_targets(comms: Any, raw: Any) -> tuple[list[str], list[str]]:
     return ids, errors
 
 
-def _hub_list(tool_call_id: str, comms: Any) -> ToolResult:
+def _hub_list(tool_call_id: str, comms: Any, scope: str | None = None) -> ToolResult:
     """Render the subagent roster for ``op='list'``.
 
     Every row states the one thing the caller acts on \u2014 whether the child can
@@ -21122,6 +21560,10 @@ def _hub_list(tool_call_id: str, comms: Any) -> ToolResult:
     while ``running`` is not, which is the opposite of the intuitive reading.
     """
     rows = comms.roster()
+    if scope:
+        # A pod lead lists its own subtree, not its siblings' (BEN-7-D5).
+        mine = comms.descendant_ids(scope)
+        rows = [row for row in rows if row.job_id in mine]
     if not rows:
         return _text(
             tool_call_id,
@@ -21278,6 +21720,13 @@ async def execute_hub(
             "agent messaging is not available in this session (no subagent engine).",
         )
     if comms.is_child(context.job_id if context else None):
+        # Dispatch on the SHAPE the caller holds, which ``build_hub_tool``
+        # derives from the same two facts: a child that may delegate (a pod
+        # lead) drives its own subagents, scoped to its subtree (BEN-7-D5).
+        if context is not None and context.may_delegate and context.job_id:
+            return await _execute_hub_parent(
+                tool_call_id, args, comms, context, scope=context.job_id
+            )
         return await _execute_hub_child(tool_call_id, args, comms, context)
     return await _execute_hub_parent(tool_call_id, args, comms, context)
 
@@ -21304,14 +21753,40 @@ async def _execute_hub_parent(
     args: dict[str, Any],
     comms: Any,
     context: ToolContext | None = None,
+    *,
+    scope: str | None = None,
 ) -> ToolResult:
+    """The parent-shaped hub. ``scope`` is a delegating CHILD's own job id:
+    every op is confined to its descendants, and ``to=["parent"]`` reports up."""
+    if scope and not args.get("op") and (args.get("message") or "").strip():
+        # A delegating child holds THIS shape, but answering its own parent is
+        # still the reply it makes most often — and ``{"message": ...}`` with no
+        # op is the child shape it (and every transcript it has read) knows.
+        # There is no second reading: every parent op requires ``op``. The same
+        # tolerance in the other direction is why ``HubChildParams`` drops
+        # parent-shaped keys rather than rejecting them (BEN-7-D5).
+        outcome = comms.reply_to_parent(scope, str(args["message"]))
+        return _text(tool_call_id, "hub", outcome, details={"direction": "to_parent"})
     try:
         params = HubParams(**args)
     except ValidationError as exc:
         return _validation_error(tool_call_id, "hub", exc)
 
     if params.op == "list":
-        return _hub_list(tool_call_id, comms)
+        return _hub_list(tool_call_id, comms, scope)
+
+    if scope and params.to and "parent" in params.to:
+        # A lead still reports up through the same tool it drives its pod with.
+        if params.to != ["parent"] or params.op not in ("send", "ask"):
+            return _error(
+                tool_call_id,
+                "hub",
+                "to=['parent'] takes op='send' (or 'ask') alone, with a message.",
+            )
+        if not (params.message or "").strip():
+            return _error(tool_call_id, "hub", "a message to the parent needs a message.")
+        outcome = comms.reply_to_parent(scope, params.message or "")
+        return _text(tool_call_id, "hub", outcome, details={"direction": "to_parent"})
 
     if params.op not in ("cancel", "pause", "peek") and not (params.message or "").strip():
         return _error(tool_call_id, "hub", f"op='{params.op}' needs a message.")
@@ -21323,7 +21798,7 @@ async def _execute_hub_parent(
             f"op='{params.op}' needs a 'to' target; use op='list' to see the subagents.",
         )
 
-    ids, errors = _hub_targets(comms, params.to)
+    ids, errors = _hub_targets(comms, params.to, scope)
     if not ids:
         return _error(
             tool_call_id,
@@ -21484,7 +21959,13 @@ async def _execute_hub_parent(
 def build_hub_tool(context: ToolContext) -> AgentTool | None:
     if context.subagent_comms is None:
         return None
-    if context.subagent_comms.is_child(context.job_id):
+    is_child = context.subagent_comms.is_child(context.job_id)
+    # A child that holds ``task`` (a pod lead) gets the parent shape, scoped to
+    # its own subtree by ``execute_hub``; every other child keeps the
+    # message-only tool, so the larger schema is paid only where it is used
+    # (BEN-7-D5).
+    leads = is_child and context.may_delegate
+    if is_child and not leads:
         return AgentTool(
             name="hub",
             label="Message parent",
@@ -21516,8 +21997,16 @@ def build_hub_tool(context: ToolContext) -> AgentTool | None:
             "resume a stopped, paused or failed one (or a whole batch of them at once) "
             "against its own transcript so it continues where it left off. Address them "
             'by job id, by label, or "all".'
+            + (
+                # Only a delegating child reads this; the top session's
+                # description (a cache-prefix string) is unchanged.
+                " Your scope is your own subagents, and a bare 'message' with no "
+                "'op' answers the agent that delegated to you."
+                if leads
+                else ""
+            )
         ),
-        parameters=HubParams.model_json_schema(),
+        parameters=_lead_hub_schema() if leads else HubParams.model_json_schema(),
         # Write, like 'task' and 'wake': these ops redirect, kill and restart
         # autonomous work. The gate is per TOOL, not per op, so the tier is
         # the highest any op needs — 'resume' starts a child session, which is

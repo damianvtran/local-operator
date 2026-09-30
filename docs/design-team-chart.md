@@ -15,6 +15,12 @@ precedent); `local_operator/tui/widgets/subagent_view.py`;
 `local_operator/tui/local_operator.tcss` (`Screen.subagent`, `.subagent-view*`).
 A throwaway Buchheim prototype (`scratch/tidytree_proto.py`) proves the layout math.
 
+> **Superseding note (2026-09):** the nested-team delegation runtime this
+> document scoped as a follow-up is now live — a manager launches a nested
+> team's manager, and the chart no longer tags nested teams `(declared)`. The
+> sections below keep their design-time voice; read "follow-up", "not yet
+> wired" and "declared" as historical.
+
 ---
 
 ## 1. Problem, as found
@@ -156,16 +162,16 @@ team's context — not by pre-flattening every brief into one giant preamble
 (which would blow the `MAX_TEAM_INSTRUCTIONS_CHARS` bound, `teams.py:65`, and
 duplicate context at every level).
 
-> **Design boundary for THIS feature:** the *runtime* wiring that lets a
-> manager delegate to a nested team's manager (spawning a sub-manager child that
-> attaches the sub-team) is a larger orchestration change and is called out in
-> §8 as a **follow-up**, gated behind its own review. The `/team chart` feature
-> itself needs ONLY the data model (§2.1) and the resolver (§3). The chart
-> *renders* the org that the data model describes; it does not require the
-> delegation runtime to exist first. Shipping the schema + resolver + chart is a
-> coherent, independently-valuable slice, and the doc is explicit that the
-> chart shows the *declared* org, annotating whether the delegation runtime is
-> wired yet (§4.3, "unresolved" tier).
+> **Design boundary for THIS feature (as planned):** the *runtime* wiring that
+> lets a manager delegate to a nested team's manager (spawning a sub-manager
+> child that attaches the sub-team) was a larger orchestration change, called
+> out in §8 as a **follow-up** and delivered later behind its own review. The
+> `/team chart` feature itself needed ONLY the data model (§2.1) and the
+> resolver (§3). The chart *renders* the org that the data model describes; it
+> did not require the delegation runtime to exist first. Shipping the schema +
+> resolver + chart was a coherent, independently-valuable slice, and the doc
+> was explicit that the chart showed the *declared* org, annotating whether the
+> delegation runtime was wired yet (§4.3, "unresolved" tier).
 
 ### 2.4 Cycle detection and depth bounds (in the MODEL layer)
 
@@ -363,9 +369,10 @@ the whole org — the same interaction the subagent view's brief expand/collapse
 establishes (`subagent_view.py:439`, `toggle_brief`).
 
 Ghost/annotation nodes: `unresolved` → dim box with `?`; `cycle` → box with `↩`
-and `detail`; `depth` → `⋯`. When the §2.3 delegation runtime is not yet wired,
-team-boundary nodes carry a faint `(declared)` tag so the chart never implies a
-capability that is not live.
+and `detail`; `depth` → `⋯`. While the §2.3 delegation runtime was unwired,
+team-boundary nodes carried a faint `(declared)` tag so the chart never implied
+a capability that was not live; the tag was dropped once nesting became
+executable.
 
 ---
 
@@ -700,8 +707,9 @@ sub-team and re-briefs its members (§2.3). The chart ships first and renders th
   the layout is O(n) so width, not time, is the only cost, and scroll absorbs
   width.
 - **Scope creep into the delegation runtime.** The temptation is to wire
-  execution while touching the model. Hold the line: chart PR renders the
-  declared org and tags it `(declared)`; runtime is its own reviewed PR.
+  execution while touching the model. The line held: the chart rendered the
+  declared org and tagged it `(declared)`; the runtime went out separately as
+  its own reviewed change.
 - **Terminal scroll semantics.** The chart body scrolls both axes while the
   screen must not — the exact two-cell-width / stray-scrollbar class of bug
   `AGENTS.md:172` documents. Mitigation: the §7.3 screen-virtual-size probe on

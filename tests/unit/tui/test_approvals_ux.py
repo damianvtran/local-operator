@@ -568,6 +568,66 @@ async def test_the_refused_card_notice_reaches_the_screen(config_dir: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_a_refusal_dropped_off_screen_does_not_silence_its_retry(config_dir: Path) -> None:
+    """R1-1 = Q-1: the drop path un-records, so the retry delivers and shows.
+
+    The refusal channel records the state at delivery (F-B's dedupe), but a
+    host surface can still DROP the notice — this app drops one for a source
+    that is not current, which is the operator having answered and switched
+    away before the refusal reached the peer and came back. Without an
+    un-record, the record then silenced the RETRY: the operator returned,
+    answered again, and the explanation displayed NOWHERE on this surface
+    (measured: 0 notices — the silence this cell fails on before the fix).
+
+    Both halves are the real ones: the record and its un-record live on a real
+    ``AttachedSession`` (the shipped methods, constructed bare — nothing on
+    these paths reads anything else off it), and the drop decision runs
+    through the real ``_note_gate_refusal_on_app_loop`` on a real app. The one
+    line between them — the facade surfaces a refusal only when
+    ``_refusal_is_new_state`` says so — is the refusal arm's own condition,
+    pinned over real sockets by the seam suite's
+    ``test_a_parked_card_refused_twice_tells_the_pane_once``.
+    """
+    from local_operator.mobile.types import PendingRequest
+    from local_operator.session.attached import AttachedSession
+    from local_operator.session.errors import OperatorAuthorityRequired
+    from local_operator.tui.session_interaction import SessionInteraction
+
+    remote = AttachedSession.__new__(AttachedSession)
+    remote._gate_refusal_notified = None
+    pending = PendingRequest(request_id="req-away", kind="approval", title="t", detail="d")
+    error = OperatorAuthorityRequired(trigger="approval_answer")
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+
+        source = SessionInteraction(cast("Any", remote))  # session A: the parked viewer
+        assert not app._is_current(source), "the operator starts AWAY from session A"
+
+        def refusal_lands() -> None:
+            """One refusal, surfaced exactly as the facade's arm surfaces it."""
+            if remote._refusal_is_new_state(pending, error):
+                app._note_gate_refusal_on_app_loop(error, source=source)
+
+        # Refusal #1 arrives while the operator is away: the real handler drops
+        # it (not current). The drop must un-record, or the next call below is
+        # silenced before it can display anywhere.
+        refusal_lands()
+        await pilot.pause()
+        assert _notices(app) == [], "refusal #1 must not paint for a source that is away"
+
+        # The operator returns; the retry refuses again.
+        app._interaction = source
+        refusal_lands()
+        await pilot.pause()
+
+        notices = _notices(app)
+        assert notices, "the retry's refusal never displayed — its state stayed recorded"
+        assert notices[-1].startswith("not applied — "), notices[-1]
+
+
+@pytest.mark.asyncio
 async def test_choosing_a_row_runs_the_command_it_spells(config_dir: Path) -> None:
     """The list completes into the ARGUMENT and submits the same line a typist
     would have typed — one implementation of what `/approvals default auto`

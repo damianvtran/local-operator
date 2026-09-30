@@ -41,13 +41,16 @@ import httpx
 from local_operator.harness.types import (
     AbortSignal,
     ChatRequest,
+    ImageContent,
     ModelSpec,
     RenderedStreamError,
+    StreamEndEvent,
     StreamEvent,
     StreamModelEvent,
     StreamReasoningDelta,
     StreamStartEvent,
     StreamUsageEvent,
+    TextContent,
 )
 from local_operator.model.effort import (
     EFFORT_ORDER,
@@ -489,6 +492,52 @@ _MODEL_ROUTING_FLAP_MARKERS = (
 #: written.
 MAX_MODEL_FLAP_RETRIES = 3
 MODEL_FLAP_RETRY_DELAY_MS = 2_000
+
+#: Degraded re-asks a provider INPUT refusal earns before the walk surfaces it.
+#:
+#: One per rung of the ladder (screenshots removed, then older observations
+#: removed -- see :func:`_next_input_refusal_degrade`). Two, not more: the
+#: ladder only SHRINKS the request, and after both rungs the removable text is
+#: already gone; every further attempt would re-send bytes the screen has
+#: already refused. No backoff accompanies these: the refusal is a content
+#: verdict on the BYTES (the provider's own remedy is "modify the input content
+#: and retry"), and a verdict does not clear with time -- waiting would only
+#: delay the outcome.
+MAX_INPUT_REFUSAL_RETRIES = 2
+
+#: How many of the NEWEST messages the shed rung keeps byte-identical.
+#: Everything older that is a tool row collapses to a placeholder; the model's
+#: own turns and user messages are left alone (reasoning-echo contracts and
+#: the task statement live there). A fixed recent window rather than "half the
+#: history" so the working set -- the screens the model is currently acting on
+#: -- is predictably untouched.
+INPUT_REFUSAL_KEEP_RECENT_MESSAGES = 24
+
+#: What a removed image block, and a shed tool row, become on the wire. TEXT,
+#: not a re-encoded image: the point is to change the bytes the content screen
+#: scans, and a re-encoded image is the same visual bytes. Each sentence says
+#: what happened so a reader of the request (or of a replayed transcript) can
+#: reconstruct why it is missing.
+INPUT_REFUSAL_IMAGE_PLACEHOLDER = (
+    "[screenshot removed: the provider refused the previous request as "
+    "inappropriate input content]"
+)
+INPUT_REFUSAL_OBSERVATION_PLACEHOLDER = (
+    "[earlier observation trimmed: the provider refused the previous request "
+    "as inappropriate input content]"
+)
+
+#: The clause :func:`_legible_input_refusal` appends to the provider's own
+#: words when an input refusal turns terminal. It doubles as the idempotence
+#: header: a second pass finds it and returns the error unchanged rather than
+#: stacking a second note.
+_INPUT_REFUSAL_NOTE_MARKER = "the provider refused the request's input as inappropriate content"
+
+#: Ceiling for the composed terminal message. The provider's own words are
+#: capped at ``clients.MAX_ERROR_MESSAGE_CHARS`` (500) on the way in; the note
+#: adds one bounded sentence, and this keeps the total bounded even if a
+#: future relay sends a longer body.
+_MAX_INPUT_REFUSAL_MESSAGE_CHARS = 900
 
 #: ``provider/model-id`` selectors that have served at least one request in
 #: THIS process. The evidence that turns an unknown-model 4xx from "your id
@@ -981,6 +1030,255 @@ def is_request_too_large(error: BaseException | str) -> bool:
         if not haystack.startswith(_KIND_LABELS["request"]):
             return False
     return any(marker in haystack for marker in _REQUEST_TOO_LARGE_MARKERS)
+
+
+#: The refusal CODE. Alone it is ambiguous about the side -- the same code
+#: covers the output sentence -- but the field's relays carry it with wording,
+#: and code-without-wording is treated as input-side unless the output phrase
+#: is present (see the predicate).
+_INPUT_REFUSAL_MARKERS = (
+    "datainspectionfailed",
+    "data_inspection_failed",
+)
+
+#: The INPUT-side sentences the guardrail publishes, matched as whole PHRASES
+#: rather than as loose words. The loose form ("inappropriate content" and
+#: "input" anywhere in the message) over-matched: "Output data may contain
+#: inappropriate content. Input tokens: 512" classified as an input refusal
+#: (QA Q-2), and a degrade must never start from an output-side sentence.
+#: "Input or output ..." is included on purpose: the provider documents it
+#: under the same code, and when the input MAY be the trigger a bounded
+#: degraded re-ask is the documented remedy.
+_INPUT_REFUSAL_PHRASES = (
+    "input data may contain inappropriate content",
+    "input text data may contain inappropriate content",
+    "input image data may contain inappropriate content",
+    "input audio data may contain inappropriate content",
+    "input or output data may contain inappropriate content",
+)
+
+#: The OUTPUT-side sentence, which must never classify as an input refusal even
+#: when the code rides along: an output screen's failure keeps the ordinary
+#: retry ladder, where a fresh generation can genuinely clear it.
+_OUTPUT_REFUSAL_PHRASE = "output data may contain inappropriate content"
+
+
+def is_input_refusal(error: BaseException | str) -> bool:
+    """Did the provider refuse to PROCESS the request as inappropriate input?
+
+    The class Alibaba reports as HTTP 400 ``data_inspection_failed`` ("Input
+    text data may contain inappropriate content"): a content screen refused the
+    request's INPUT before any inference, so the model never saw it. The
+    provider's documented remedy is to MODIFY the input and retry ("Replace or
+    modify the input image and retry" for the image variant); re-sending the
+    identical bytes is not a recovery, which is why this predicate drives the
+    bounded degrade ladder in :func:`stream_with_failover` rather than a retry.
+
+    Accepts the exception or its RENDERED form, like the sibling predicates:
+    the walk holds a :class:`ProviderError`, while ``AgentEndEvent.error``
+    carries the rendered ``"<kind> (HTTP <status>): <words>"`` string.
+
+    Gated on kind AND wording, both ways round, and deliberately narrow:
+
+    * the exception form must be ``kind == "request"`` -- a 4xx the provider
+      read and refused. The output-side "Output data may contain inappropriate
+      content" arrives as a retryable 5xx and must keep the ordinary retry
+      ladder, where a fresh generation can genuinely clear it;
+    * the wording must name the INPUT as a whole phrase (``_INPUT_REFUSAL_PHRASES``)
+      -- "output ... inappropriate content" with the word "input" elsewhere in
+      the message (a token count, say) is NOT this class (QA Q-2).
+    * the bare code is this class only when the output sentence is absent:
+      when no wording at all arrived there is nothing that says which side the
+      screen judged, and the bounded degraded re-ask is the safe reading;
+    * a malformed 400 without these markers is still a terminal request defect
+      and keeps today's behaviour.
+    """
+    if isinstance(error, ProviderError):
+        if error.kind != "request":
+            return False
+        haystack = error.message.lower()
+    else:
+        text = error if isinstance(error, str) else str(error)
+        haystack = text.lower()
+        if not haystack.startswith(_KIND_LABELS["request"]):
+            return False
+    if any(phrase in haystack for phrase in _INPUT_REFUSAL_PHRASES):
+        return True
+    if any(marker in haystack for marker in _INPUT_REFUSAL_MARKERS):
+        return _OUTPUT_REFUSAL_PHRASE not in haystack
+    return False
+
+
+def _request_without_images(request: ChatRequest) -> ChatRequest | None:
+    """``request`` with every image block replaced by a placeholder, or None.
+
+    ``None`` means the request carries no image, so this rung can change
+    nothing and the walk must not spend an attempt re-sending identical bytes
+    (the one thing an input refusal has already told us not to do).
+
+    Structure is preserved byte for byte otherwise -- same message objects,
+    same roles, same ids and tool-call pairings -- because the wire encoders
+    and provider-side validators read those fields, and only ``content`` is
+    this rung's business. ``model_copy`` leaves everything else (usage,
+    provider_payload, tool_call_id) untouched.
+    """
+    has_image = any(
+        isinstance(block, ImageContent) for message in request.messages for block in message.content
+    )
+    if not has_image:
+        return None
+    messages = []
+    for message in request.messages:
+        if any(isinstance(block, ImageContent) for block in message.content):
+            content = [
+                (
+                    TextContent(text=INPUT_REFUSAL_IMAGE_PLACEHOLDER)
+                    if isinstance(block, ImageContent)
+                    else block
+                )
+                for block in message.content
+            ]
+            message = message.model_copy(update={"content": content})
+        messages.append(message)
+    return request.model_copy(update={"messages": messages})
+
+
+def _request_with_shed_history(
+    request: ChatRequest, *, keep_recent: int = INPUT_REFUSAL_KEEP_RECENT_MESSAGES
+) -> ChatRequest | None:
+    """``request`` with OLD tool observations collapsed, or None if none are old.
+
+    Only ``role == "tool"`` rows older than the newest ``keep_recent``
+    messages are touched: tool rows carry the harvested environment text
+    (screens, pages) and are the likeliest carrier of a content flag, while
+    assistant turns must keep their reasoning echo on routes that require one
+    and user messages may be the task statement itself. The row SKELETON is
+    preserved -- id, tool_call_id and name stay, so call/result pairings the
+    providers validate remain intact; only the content becomes the
+    placeholder. ``None`` when nothing is old enough to shed, so the walk
+    never spends an attempt that changes nothing.
+    """
+    cutoff = len(request.messages) - keep_recent
+    if cutoff <= 0:
+        return None
+    shed = False
+    messages = []
+    for index, message in enumerate(request.messages):
+        if index < cutoff and message.role == "tool":
+            message = message.model_copy(
+                update={"content": [TextContent(text=INPUT_REFUSAL_OBSERVATION_PLACEHOLDER)]}
+            )
+            shed = True
+        messages.append(message)
+    if not shed:
+        return None
+    return request.model_copy(update={"messages": messages})
+
+
+def _next_input_refusal_degrade(
+    request: ChatRequest, applied: Sequence[str]
+) -> tuple[ChatRequest, str] | None:
+    """The next rung of the input-refusal ladder, or None when none applies.
+
+    Rungs are tried in order and each returns a request whose bytes differ
+    from what the screen refused -- ``None`` from a rung means it would change
+    nothing on THIS request, in which case the next rung gets its turn. The
+    names in ``applied`` are the tokens recorded on the end event and mapped
+    to user-facing copy by the harness loop.
+    """
+    if "screenshots_removed" not in applied:
+        stripped = _request_without_images(request)
+        if stripped is not None:
+            return stripped, "screenshots_removed"
+    if "older_observations_removed" not in applied:
+        shed = _request_with_shed_history(request)
+        if shed is not None:
+            return shed, "older_observations_removed"
+    return None
+
+
+def _request_with_degradations(request: ChatRequest, applied: Sequence[str]) -> ChatRequest:
+    """``request`` with the named rungs re-applied, in ladder order.
+
+    The walk rebuilds ``current_request`` per target; this is what keeps the
+    narrowing from being “healed” by a hop. Once one content screen has
+    refused the request's input, the narrowed bytes are the bytes this CALL
+    sends — restoring the pristine ones would re-send exactly what was refused
+    to the next provider (review B1), and the end-event stamp would describe a
+    request no attempt carried (QA Q-1). The token list only ever holds
+    ladder-order prefixes (its producer appends as rungs run), so a rung that
+    no longer applies on the rebuilt request simply keeps the prior state.
+    """
+    for name in applied:
+        if name == "screenshots_removed":
+            stripped = _request_without_images(request)
+            if stripped is not None:
+                request = stripped
+        elif name == "older_observations_removed":
+            shed = _request_with_shed_history(request)
+            if shed is not None:
+                request = shed
+    return request
+
+
+def _legible_input_refusal(
+    error: ProviderError,
+    *,
+    attempts: int,
+    degradations: Sequence[str],
+    policy_declined: bool = False,
+) -> ProviderError:
+    """``error`` with the recovery outcome appended, as the terminal message.
+
+    Without this the terminal frame was the raw relayed 400 body, and a reader
+    (a user, or a benchmark record) could not tell a content-screen refusal
+    from a malformed request -- the turn read as "the model said nothing".
+    The note keeps the provider's own words in FRONT (classifiers read the
+    message; the prefix must stay what the provider said) and appends the two
+    facts the record was missing: the request was never processed, and it was
+    not re-sent unchanged.
+
+    Idempotent on ``_INPUT_REFUSAL_NOTE_MARKER`` so a walk that surfaces the
+    same class from a second target cannot stack notes, and bounded by
+    ``_MAX_INPUT_REFUSAL_MESSAGE_CHARS`` so a long provider body cannot grow
+    the frame without limit. ``policy_declined`` names the third disposition —
+    the ladder existed and the call's retry policy declined it (M1 / Q-3) —
+    so the message can never claim "unavailable" for a policy decision.
+    """
+    if _INPUT_REFUSAL_NOTE_MARKER in error.message:
+        return error
+    if attempts and degradations:
+        steps = ", then ".join(
+            "screenshots removed" if name == "screenshots_removed" else "older observations removed"
+            for name in degradations
+        )
+        tail = f"A degraded retry ({steps}) was also refused, so it was not re-sent unchanged."
+    elif policy_declined:
+        # M1 / Q-3: this is NOT "unavailable" -- the ladder existed and the
+        # call's retry policy declined it (an isolated errand's one-attempt
+        # contract, or retries disabled outright). A future reader must be
+        # able to tell the two states apart from the message alone.
+        tail = (
+            "This call's retry policy declined a degraded retry, so it was not re-sent unchanged."
+        )
+    else:
+        tail = "No degraded retry was available for this request, so it was not re-sent unchanged."
+    message = (
+        f"{error.message} — {_INPUT_REFUSAL_NOTE_MARKER} (content screen); "
+        f"the request was never processed by the model. {tail}"
+    )
+    if len(message) > _MAX_INPUT_REFUSAL_MESSAGE_CHARS:
+        message = message[: _MAX_INPUT_REFUSAL_MESSAGE_CHARS - 1] + "…"
+    wrapped = ProviderError(
+        error.status,
+        message,
+        retryable=error.retryable,
+        retry_after_ms=error.retry_after_ms,
+        auth_error=error.auth_error,
+        kind=error.kind,
+    )
+    wrapped.__cause__ = error
+    return wrapped
 
 
 def classify_provider_error(error: BaseException) -> ProviderErrorKind:
@@ -2898,6 +3196,26 @@ def _stamp_serving_spec(event: StreamEvent, spec: ModelSpec) -> StreamEvent:
         return event
 
 
+def _stamp_input_refusal_recovery(event: StreamEvent, degradations: Sequence[str]) -> StreamEvent:
+    """Record a degraded-retry recovery on the turn's END event.
+
+    The payload key is the one durable, machine-visible trace that this turn's
+    request is NOT what the caller built: the content screen refused the
+    original bytes and the retry that answered carried a narrowed one. It
+    rides the established harness-bookkeeping home (``provider_payload`` --
+    ``pruned``/``details`` are the existing tenants; wire clients replay
+    specific keys and never this one), reaches the transcript through the
+    assistant message, and is what the loop turns into the user-facing
+    notice. A no-op when no degradation happened, so an ordinary call's events
+    stay byte-for-byte what they were.
+    """
+    if not degradations or not isinstance(event, StreamEndEvent):
+        return event
+    payload = dict(event.provider_payload or {})
+    payload["input_refusal_recovery"] = {"degradations": list(degradations)}
+    return event.model_copy(update={"provider_payload": payload})
+
+
 async def stream_with_failover(
     request: ChatRequest,
     auth: FailoverAuthStore,
@@ -3056,6 +3374,13 @@ async def stream_with_failover(
     server_faults_by_target: dict[tuple[str, str | None], int] = {}
     shortest_retry_after_ms: int | None = None
     looped_back = False
+    # Degraded re-asks a provider INPUT refusal has earned ON THIS CALL, and
+    # what each attempt removed. Call-scoped rather than per target: the
+    # ladder exists because the BYTES were refused, and the narrowing rides on
+    # the request, so a retry that continues the walk must keep spending the
+    # same allowance instead of opening a fresh ladder per target.
+    input_refusal_retries = 0
+    input_refusal_degradations: list[str] = []
     while pending:
         target = pending.pop(0)
         selector = target.selector
@@ -3091,7 +3416,13 @@ async def stream_with_failover(
         # published maximum) and kept a small primary's ask on a large fallback.
         # ``with_model`` re-derives a POLICY-filled bound against the new spec and
         # carries a caller's named ask untouched (review M1 / QA Q5).
-        current_request = request if target == primary_target else request.with_model(spec)
+        # Once this call's input has been narrowed, the narrowing follows the
+        # request wherever the walk goes: a hop to another target must not
+        # restore the bytes a content screen refused (review B1 -- a hop is
+        # not a licence to re-send them), and the end-event stamp must stay
+        # true for whichever attempt answers (QA Q-1).
+        pristine = request if target == primary_target else request.with_model(spec)
+        current_request = _request_with_degradations(pristine, input_refusal_degradations)
         if (
             route_state is not None
             and getattr(current_request.model, "fast_mode", False)
@@ -3354,6 +3685,7 @@ async def stream_with_failover(
             try:
                 async for event in client.stream(current_request, key, oauth_access=access):
                     stamped = _stamp_serving_spec(event, spec)
+                    stamped = _stamp_input_refusal_recovery(stamped, input_refusal_degradations)
                     if buffered is not None:
                         buffered.append(stamped)
                         continue
@@ -3492,6 +3824,63 @@ async def stream_with_failover(
                     await _abortable_sleep(MODEL_FLAP_RETRY_DELAY_MS, signal)
                     retry_same_key = True
                     continue
+                if exc.kind == "request" and is_input_refusal(exc):
+                    # A content screen refused the request's INPUT: the model
+                    # never saw it, and the provider's own remedy is "modify
+                    # the input content and retry" -- re-sending the SAME bytes
+                    # is not a recovery (the class is deterministic in them;
+                    # see `is_input_refusal`). Spend the bounded ladder: re-ask
+                    # the SAME target and credential with the request narrowed
+                    # -- screenshots first, then older observations.
+                    #
+                    # BEFORE `record()`, like the fast-mode and flap re-asks
+                    # above: a recovery being attempted must not occupy the
+                    # reported-error slot. Unlike those two, the LADDER is
+                    # gated on `retry.enabled` -- a decorative/isolated errand
+                    # is not worth re-sending refused bytes for -- while the
+                    # LEGIBILITY wrap below applies either way: a refusal that
+                    # cannot be recovered must never read as an empty turn.
+                    #
+                    # When the ladder is spent or unavailable the refusal is
+                    # TERMINAL FOR THE WALK, on every target (review B1 / QA
+                    # Q-1): falling through would `break` to the next provider
+                    # and hand it this request's bytes -- the exact ones a
+                    # content screen refused -- while the end event (if the
+                    # next target answered) stamped a recovery the answering
+                    # request never carried. Returning the refusal here keeps
+                    # the substitution red line, the call-scoped bound and the
+                    # terminal sentence's claim all true at once.
+                    degraded = _next_input_refusal_degrade(
+                        current_request, input_refusal_degradations
+                    )
+                    if (
+                        degraded is not None
+                        and retry.enabled
+                        and input_refusal_retries < MAX_INPUT_REFUSAL_RETRIES
+                    ):
+                        current_request, degradation = degraded
+                        input_refusal_retries += 1
+                        input_refusal_degradations.append(degradation)
+                        logger.warning(
+                            "provider refused the request's input as inappropriate content "
+                            "(%s/%s, HTTP %s); re-asking with %s (%d/%d)",
+                            spec.provider,
+                            spec.model_id,
+                            exc.status,
+                            degradation.replace("_", " "),
+                            input_refusal_retries,
+                            MAX_INPUT_REFUSAL_RETRIES,
+                        )
+                        retry_same_key = True
+                        continue
+                    exc = _legible_input_refusal(
+                        exc,
+                        attempts=input_refusal_retries,
+                        degradations=input_refusal_degradations,
+                        policy_declined=degraded is not None and not retry.enabled,
+                    )
+                    record(exc, primary=is_primary)
+                    raise exc
                 record(exc, primary=is_primary)
                 target_retry_after_ms = max(target_retry_after_ms, exc.retry_after_ms or 0)
                 # A pre-wrapped connectivity loss (a client that turns httpx into
@@ -3595,7 +3984,12 @@ async def stream_with_failover(
                             access = sibling
                             retry_same_key = True
                             continue
-                    raise
+                    # `exc` rather than a bare `raise`: an input refusal may
+                    # have been re-wrapped legible above, and a bare raise
+                    # re-raises the ORIGINAL exception object, silently
+                    # dropping that diagnosis on the one path where the retry
+                    # policy (not the ladder) declined the recovery.
+                    raise exc
                 if _same_credential_retry_allowed(
                     exc,
                     transport_retries,

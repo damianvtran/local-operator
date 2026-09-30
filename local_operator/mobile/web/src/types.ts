@@ -207,7 +207,7 @@ export interface CompletionAttention {
 	conversation_id: string;
 	completion_token: string | null;
 	anchor_id: string | null;
-	kind: "complete" | "error" | "interrupted" | null;
+	kind: "complete" | "error" | "interrupted" | "closed" | "retired" | null;
 	unseen: boolean;
 	revision: [number, number];
 }
@@ -319,6 +319,18 @@ export interface SessionSummary {
 	    (`_advertisable_counts`); this field is the second guard for a client
 	    talking to a build that predates that refusal. */
 	leaving?: string;
+	/** The daemon's receipt that this session's process is GONE: the
+	    conversation is over and its history stays resumable. Renders the row's
+	    `ended` chip; the session view reads its own projection for the same
+	    flag and offers resume there. Additive and defaulted — an older daemon
+	    omits it, and absence is `false`, exactly like `unseen`. */
+	ended?: boolean;
+	/** The relay's own dial to this session is down: the record is fresh but
+	    the socket is unreachable ("not answering"), so nothing this row shows
+	    is being confirmed right now. Same additive/defaulted rule as `ended`.
+	    The string `degraded` is the daemon's own name for the state
+	    (`types.py`); the row renders it as the word the reader needs. */
+	degraded?: boolean;
 	/** How many of this session's OWN delegated children are RUNNING. `null`
 	    means the daemon did not report a count, and MUST NOT be read as zero: a
 	    row that could not be asked must not be told "no subagents". The daemon

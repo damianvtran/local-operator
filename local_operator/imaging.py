@@ -1123,7 +1123,8 @@ def downscale_context_frame(
     result for the life of the process, which is what lets a caller treat the
     downscaled form as STABLE across turns — a frame's bytes change at most
     once per rung it renders at (the turn it stops being the newest frame, and
-    again only if a growing session steps down a rung, re-rendering every
+    again only if a growing session steps a rung — normally down, though the
+    descent entry can also step older frames one rung up — re-rendering every
     older frame): at most three changes across the ladder. The prompt-cache
     prefix is rewritten at most once per rung transition, never churned every
     render.

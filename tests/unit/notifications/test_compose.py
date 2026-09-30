@@ -172,6 +172,27 @@ def test_an_interruption_likewise_keeps_the_house_sentence(tmp_path: Path, names
     assert composed.status == CONTEXTS["interrupted"] == "Interrupted"
 
 
+def test_a_retire_for_build_cut_keeps_its_own_sentence_and_category(
+    tmp_path: Path, names_on: None
+) -> None:
+    """The retire-for-build arm (2026-09-29): distinct from BOTH neighbours.
+
+    A turn cut by a build drain must not read as a failure ("Stopped with an
+    error") nor as the user's own act ("Interrupted"). Its body and its
+    category are its own entries in the shared vocabulary, and the kind must be
+    REGISTERED: an unregistered kind resolves to "Complete"/"Task complete",
+    which would claim success about work that was lost.
+    """
+    from local_operator.harness.rows import RETIRED_NOTICE_TEXT
+
+    session = _session(tmp_path, assistant="Mid-verification.", title="Update window")
+    composed = compose("retired", session_dir=session)
+
+    assert composed.body == BODIES["retired"] == RETIRED_NOTICE_TEXT
+    assert composed.body_is_snippet is False
+    assert composed.status == CONTEXTS["retired"] == "Retired"
+
+
 def test_a_long_line_is_cut_to_the_banner_budget_on_a_word_boundary(
     tmp_path: Path, names_on: None
 ) -> None:
@@ -274,7 +295,7 @@ def test_an_unreadable_session_degrades_to_the_house_vocabulary(
     frame that asserts nothing rather than an exception.
     """
     missing = tmp_path / "sessions" / "nothinghere12"
-    for kind in ("complete", "error", "interrupted", "ask", "approval"):
+    for kind in ("complete", "error", "interrupted", "ask", "approval", "retired"):
         composed = compose(kind, session_dir=missing)
         assert composed.body == BODIES[kind]
         assert composed.status == CONTEXTS[kind]
