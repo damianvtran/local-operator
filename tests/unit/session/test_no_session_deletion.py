@@ -996,6 +996,21 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ),
     ("local_operator/mobile/seen.py::SeenStore._persist_locked", "os.replace", "temp FILE"),
     ("local_operator/mobile/seen.py::SeenStore._persist_locked", "os.unlink", "temp FILE"),
+    # The push device registry (`mobile/push_devices.py`): one JSON store at a fixed
+    # basename directly under the config root, beside mobile-seen.json. `_save`'s
+    # target and its mkstemp temp file both come from `store_path(config_dir)` — no
+    # session id and no caller input — so neither can name a path under `sessions/`.
+    (
+        "local_operator/mobile/push_devices.py::_save",
+        "os.replace",
+        "temp FILE -> <config_dir>/mobile-push-devices.json; both names are "
+        "config-root-derived with a fixed basename",
+    ),
+    (
+        "local_operator/mobile/push_devices.py::_save",
+        "os.unlink",
+        "that same temp FILE, only while the replace above is failing",
+    ),
     (
         "local_operator/multiplexer/markers.py::_FileBackend.publish",
         "os.replace",

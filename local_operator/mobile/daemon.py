@@ -56,6 +56,7 @@ from local_operator.harness.approval import (
     request_proof,
 )
 from local_operator.mobile import projects as mobile_projects
+from local_operator.mobile import push_devices as mobile_push_devices
 from local_operator.mobile.auth import (
     COOKIE_NAME,
     check_password,
@@ -4685,6 +4686,81 @@ def build_app(daemon: MobileDaemon):
             str(request.path_params["session_id"]),
         )
 
+    # -- push device registry (push/ack-sync S4, ADR 0006 §3.1) -----------------
+
+    async def _push_call(fn: Callable[..., dict[str, Any]], *args: Any) -> Response:
+        """Run one registry call off-loop; a refusal answers its JSON body.
+
+        ``mobile_push_devices``' refusals are typed: a register payload this
+        build cannot accept is the 422 the sibling routes answer, and a store
+        that cannot be read or written is an internal fault (500) whose
+        sentence names it — never a silent empty registry.
+        """
+        try:
+            payload = await asyncio.to_thread(fn, *args)
+        except mobile_push_devices.PushDeviceRefusal as exc:
+            return JSONResponse({"error": exc.message}, status_code=422)
+        except (mobile_push_devices.PushRegistryCorrupt, OSError) as exc:
+            # One warning per refusal: uvicorn runs at ``log_level="warning"``
+            # and a corrupt store refuses every registry route until someone
+            # repairs the file — a standing state that must leave a trace
+            # (review round 1, M3). No ``exc_info``: the refusal's sentence IS
+            # the diagnosis, and a retrying phone must not add a traceback per
+            # attempt.
+            store = mobile_push_devices.store_path(args[0]) if args else "unknown store"
+            logger.warning("push device registry refused an operation at %s: %s", store, exc)
+            return JSONResponse({"error": str(exc)[:300]}, status_code=500)
+        return JSONResponse(payload)
+
+    async def api_push_register(request: Request) -> Response:
+        """Record this phone's registration; idempotent on (install_id, platform).
+
+        The body is the app's register contract (ADR 0006 §3.1). ``token`` is
+        validated and deliberately dropped: the machine stores no push token
+        (§4 — the cloud's registry is where tokens live), and the forward step
+        that would hand it to the cloud is future work (S7); the store module
+        carries the full citation.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        try:
+            body: object = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            body = None
+        from local_operator.paths import config_dir
+
+        return await _push_call(mobile_push_devices.register, config_dir(), body)
+
+    async def api_push_devices(request: Request) -> Response:
+        """The devices registered for this computer — what Settings renders."""
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.paths import config_dir
+
+        return await _push_call(mobile_push_devices.list_devices, config_dir())
+
+    async def api_push_device_delete(request: Request) -> Response:
+        """Deregister one device by id — any device in this registry, not just ours.
+
+        There is no per-device caller identity to scope by (the cookie is the
+        operator's, one for the whole computer), and the stolen-phone case
+        (ADR §4) needs one device able to revoke another. An id the registry
+        does not hold stays ``{"ok": true}``: the app retries this on sign-out,
+        and a retry after a successful delete must not read as a failure.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.paths import config_dir
+
+        return await _push_call(
+            mobile_push_devices.deregister,
+            config_dir(),
+            str(request.path_params["device_id"]),
+        )
+
     routes: list[BaseRoute] = [
         Route("/healthz", healthz),
         Route("/login", login_page, methods=["GET"]),
@@ -4735,6 +4811,9 @@ def build_app(daemon: MobileDaemon):
             api_project_unlink,
             methods=["DELETE"],
         ),
+        Route("/api/push/register", api_push_register, methods=["POST"]),
+        Route("/api/push/devices", api_push_devices),
+        Route("/api/push/devices/{device_id:str}", api_push_device_delete, methods=["DELETE"]),
         Route("/mark.png", mark_png),
         Route("/", index),
     ]

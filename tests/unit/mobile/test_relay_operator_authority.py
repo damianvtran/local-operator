@@ -456,6 +456,11 @@ def test_the_route_table_names_the_paths_this_build_actually_serves(
     assert "/api/sessions/{session_id:str}/operator/challenge" in paths
     assert "/api/pair" in paths
     assert "/api/pair/{device_id:str}" in paths
+    # The push device registry (push/ack-sync S4, ADR 0006 §3.1): the paths the
+    # app's Settings and registration flows build against, pinned like the rest.
+    assert "/api/push/register" in paths
+    assert "/api/push/devices" in paths
+    assert "/api/push/devices/{device_id:str}" in paths
     assert not [path for path in paths if path.startswith("/v1/")], paths
 
 
