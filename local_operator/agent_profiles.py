@@ -65,7 +65,7 @@ from typing import TYPE_CHECKING, Any, Literal, Sequence, TypeVar
 
 from local_operator.action_class import PROACTIVE as PROACTIVE_CLASS
 from local_operator.action_class import TAG_KEY as CLASS_TAG_KEY
-from local_operator.action_class import class_from_tags
+from local_operator.action_class import class_from_tags, is_class_tag
 from local_operator.action_class import normalize as normalize_action_class
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -994,12 +994,125 @@ def seed_tags(profile: AgentProfile) -> tuple[str, ...]:
         tags.append(f"effort:{profile.effort}")
     if profile.may_delegate:
         tags.append("delegate:yes")
-    # SPARING encoding: only ``proactive`` is written; ``reactive`` is the
-    # absent tag, so pre-class rows and reactive profiles carry no marker and
-    # every read-back treats "no tag" as the default.
+    # INSTALL WRITES NO CLASS TAG FOR A REACTIVE PROFILE, and that is safe in
+    # a way the switch's own encoding is not: this helper only ever writes the
+    # tags of a row it is creating, and the backfill that repairs rows missing
+    # a class tag (``backfill_seed_action_class``) asks whether the PACKAGED
+    # STARTER declares a class before touching anything — a starter with no
+    # ``class:`` frontmatter can therefore never be re-classed by it. So the
+    # absence here means "the starter declares nothing", not "the operator
+    # asked for silence", which is the distinction ``action_class``
+    # ``with_class_tag`` spells out for the path where it matters.
     if normalize_action_class(profile.action_class) == PROACTIVE_CLASS:
         tags.append(f"{CLASS_TAG_KEY}:{PROACTIVE_CLASS}")
     return tuple(tags)
+
+
+#: The class a packaged starter declares when it declares none. Kept as a
+#: literal spelling beside the tagging helpers so the backfill's "does this
+#: starter want a class?" question reads the same string the install path
+#: writes.
+SEED_CLASS_PROACTIVE = PROACTIVE_CLASS
+
+
+def backfill_seed_action_class(
+    config_dir: Path, *, registry: "AgentRegistry | None" = None
+) -> tuple[str, ...]:
+    """Give installed rows the class tag their packaged starter declares.
+
+    THE GAP THIS CLOSES, and why it needs a repair rather than a read-side
+    default. ``class:`` frontmatter, the ``class:<value>`` tag and the readers
+    that gate on it (Aida's cadence, patience waits, the trigger layer's own
+    mirror) all arrived in ONE release, and the install path is the only writer
+    of a row's tags. Every role row installed by an earlier release therefore
+    carries no class tag at all, and every reader normalizes an absent tag to
+    ``reactive`` — so an install that had a working cadence the day before goes
+    silent on upgrade, with no user action, no message and nothing on disk to
+    say why. Measured on the operator's live install on 2026-09-30: the ``aida``
+    row was installed 2026-09-28 at ``seed_version:1.0.0``, the class feature
+    shipped in v0.64.9 that morning, and the next session open dropped her
+    cadence row (``filter_on_load``), stopped re-arming it (``reconcile``'s
+    reactive branch) and left her escalation tray unconsumed.
+
+    THE PREDICATE, in the order it is checked — every step narrows the blast
+    radius:
+
+    1. a ROLE row (only these are attachable, and only these carry a switch);
+    2. seed-origin (``seed:<name>``: the row is a copy of a packaged starter);
+    3. NO ``class:`` tag of its own — see :func:`action_class.with_class_tag`
+       for why an absence now means "never classified";
+    4. the packaged starter still exists and DECLARES a class, which today
+       means ``proactive``: a starter that declares nothing is never touched,
+       so a row in a reactive-by-nature starter cannot be re-classed;
+    5. the row records an install fingerprint, and it DIFFERS from the packaged
+       starter's — i.e. the starter has moved since this row was installed.
+       This is what keeps the repair off a deliberate switch: a switch writes
+       ``class:reactive`` (step 3 already excluded it), and a row whose
+       recorded fingerprint IS the current starter was written by code that
+       emits the tag, so a missing one there was removed by a hand edit rather
+       than by an upgrade.
+
+    Residual, stated rather than implied: a row from an OLDER starter whose
+    class was switched to reactive in the hours between the class feature
+    shipping and this backfill existing removed its tag (that was the old
+    encoding) and would be flipped back once. It is bounded by the feature's
+    own age, it is logged at INFO, and the operator's next switch — now writing
+    an explicit tag — is durable.
+
+    Idempotent: after one pass every matching row carries the tag, so a second
+    call is a read-only no-op. Best-effort per row (a locked or unreadable
+    registry answers ``()``), and it returns the names it flipped, which the
+    startup seam logs and the tests assert on.
+    """
+
+    from local_operator.action_class import PROACTIVE, set_registered_action_class
+
+    try:
+        from local_operator.agents import AgentRegistry
+
+        reg = registry if registry is not None else AgentRegistry(config_dir)
+        rows = list(reg.list_agents())
+    except Exception:  # noqa: BLE001 — no registry, no rows: nothing to repair
+        logger.debug("class backfill: no readable registry", exc_info=True)
+        return ()
+
+    changed: list[str] = []
+    for agent in rows:
+        try:
+            name = str(getattr(agent, "name", "") or "")
+            if not name or not is_role(agent):
+                continue
+            if any(is_class_tag(tag) for tag in (getattr(agent, "tags", None) or ())):
+                continue
+            origin = marker_value(agent, SEED_ORIGIN_PREFIX)
+            if not origin:
+                continue
+            seed = load_seed(origin)
+            if seed is None or normalize_action_class(seed.action_class) != SEED_CLASS_PROACTIVE:
+                continue
+            baseline = _installed_fingerprint(agent)
+            if baseline is None:
+                # No install record: "did the starter move?" is unanswerable,
+                # and the same refusal ``_sync_one_seed`` makes applies here —
+                # a row we cannot classify is left exactly as it is.
+                logger.info(
+                    "class backfill: %s has no install fingerprint; leaving its class alone",
+                    name,
+                )
+                continue
+            if baseline == seed_fingerprint(seed):
+                continue
+            set_registered_action_class(reg, name, PROACTIVE)
+            changed.append(name)
+        except Exception:  # noqa: BLE001 — one unreadable row never stops the pass
+            logger.warning("class backfill: skipping row %r", getattr(agent, "name", None))
+            logger.debug("class backfill: traceback", exc_info=True)
+    if changed:
+        logger.info(
+            "class backfill: %s gained the class tag their packaged starters declare",
+            ", ".join(sorted(changed)),
+        )
+    return tuple(changed)
 
 
 # -- update checks -----------------------------------------------------------

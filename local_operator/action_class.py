@@ -97,16 +97,33 @@ def class_from_tags(tags: Iterable[object] | None) -> str:
 def with_class_tag(tags: Iterable[object] | None, action_class: object) -> tuple[str, ...]:
     """``tags`` with exactly one ``class:`` tag carrying ``action_class``.
 
-    ``reactive`` REMOVES the tag: absent means reactive, so the encoding stays
-    sparing and a row that has never been proactive carries no class at all.
+    THE TAG IS ALWAYS WRITTEN, ``reactive`` included — and this one mechanism
+    carries the class's whole meaning on disk, so the reasoning is spelled out
+    here rather than at a caller. The complement (:func:`class_from_tags`)
+    normalizes, so a reader sees the same class either way; what changes is
+    what an ABSENT tag means. It now means exactly one thing: *this row has
+    never been classified*, which is the state every row installed before the
+    class feature existed is in — the class was added to the packaged seeds
+    after those rows were written, and the install path is the only writer of
+    a row's tags.
+
+    That distinction is load-bearing, not bookkeeping. The class gates a
+    PERSISTENT schedule (Aida's check-in cadence, the trigger check-ins) rather
+    than one turn, so an install-time accident reads as the operator having
+    asked for silence, and there is then no evidence on disk to tell the two
+    apart: a backfill that repairs the accident would equally re-arm a cadence
+    the operator had deliberately switched off — restoring messaging the user
+    stopped, which is the exact failure the class exists to prevent. Writing
+    the tag on the deliberate path is what makes the repair provably safe, so
+    ``reactive`` is recorded rather than implied. The old sparing form is what
+    ``backfill_seed_action_class`` (``agent_profiles``) exists to clean up.
+
     Every other tag — including provenance markers and the role tag — rides
     through untouched, because this helper's whole job is the class half; a
     caller that wants to rebuild a profile's fields uses ``seed_tags``.
     """
     kept = [str(tag) for tag in (tags or ()) if not is_class_tag(tag)]
-    resolved = normalize(action_class)
-    if resolved == PROACTIVE:
-        kept.append(f"{TAG_KEY}:{PROACTIVE}")
+    kept.append(f"{TAG_KEY}:{normalize(action_class)}")
     return tuple(kept)
 
 

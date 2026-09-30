@@ -1123,6 +1123,79 @@ def _iso_due(due_ms: int) -> str:
     return datetime.fromtimestamp(due_ms / 1000).isoformat()
 
 
+def reap_orphan_rows(config_dir: Path | str, *, keep: str = "") -> tuple[str, ...]:
+    """Drop the engine's rows from sessions that no longer exist on disk.
+
+    THE CHURN CASE, which is what this exists for. Her session id is minted by
+    ``bootstrap.ensure_session`` and re-minted whenever the directory ``state.json``
+    names is gone, so every re-creation leaves the PREVIOUS incarnation's armed
+    cadence behind in the wake index — a row keyed to an id with no transcript,
+    which no runtime can ever be started for. The supervisor already refuses to
+    engage one (``_session_exists``, added for exactly these ids: two of them
+    were eating a 30 s deadline per pass, forever), but nothing removed them:
+    the operator's own install had accumulated three (``0827221cce46``,
+    ``cad094a6f02b``, ``ce526344aa86``), each carrying a full check-in message,
+    and they were cleared by hand. Rows that can never fire are not neutral —
+    they are what ``lop wake status`` shows, what the picker counts, and what a
+    reader has to rule out before believing anything about her schedule.
+
+    SCOPE, deliberately narrow. Only rows this engine owns (``aida-*``, which
+    includes the trigger rows) are removed, only from entries whose session
+    TRANSCRIPT is absent (``keep``'s own entry is never touched, whether or not it
+    exists yet), and an entry left with nothing is removed through
+    ``store.write_entry``'s own empty-list rule rather than an unlink here —
+    ``test_no_session_deletion`` holds every remover outside ``session/`` to an
+    allow-list with a reason, and the store is the writer that owns that shape.
+    The entry's other keys ride through ``preserve``, so a ghost entry carrying
+    someone else's rows keeps them (a different session's wakes are not this
+    engine's to delete) and keeps its lateness stamps.
+
+    Synchronous and cheap: one directory listing plus one ``is_file`` per entry
+    carrying engine rows, and the whole scan is skipped for entries with none —
+    the only wake-carrying sessions on a typical machine are a handful. Never
+    raises; a failure to read the index answers ``()``. Returns the ids reaped,
+    so the caller and the tests can assert on what actually moved.
+    """
+    from local_operator.resume import TRANSCRIPT_NAME
+    from local_operator.wakes import store as wake_store
+
+    root = Path(config_dir)
+    try:
+        index = wake_store.read_index(root)
+    except Exception:  # noqa: BLE001 — an unreadable index reaps nothing
+        logger.warning("aida: could not read the wake index to reap orphans", exc_info=True)
+        return ()
+
+    reaped: list[str] = []
+    for session_id, entry in index.items():
+        if not session_id or session_id == keep or not isinstance(entry, Mapping):
+            continue
+        if not _aida_ids(entry):
+            continue
+        if (root / "sessions" / session_id / TRANSCRIPT_NAME).is_file():
+            continue
+        kept = [
+            row
+            for row in entry.get("schedules", []) or []
+            if not is_aida_row(str(row.get("id", "")) if isinstance(row, Mapping) else "")
+        ]
+        try:
+            wake_store.write_entry(
+                root,
+                session_id,
+                cwd=str(entry.get("cwd") or Path.home()),
+                schedules=kept,
+                preserve=entry,
+            )
+        except Exception:  # noqa: BLE001 — best-effort, like every store writer
+            logger.warning("aida: could not reap the orphan rows for %s", session_id, exc_info=True)
+            continue
+        reaped.append(session_id)
+    if reaped:
+        logger.info("aida: reaped orphaned engine rows for %s", ", ".join(sorted(reaped)))
+    return tuple(reaped)
+
+
 async def ensure_armed(
     config_dir: Path | str,
     session_id: str,
@@ -1145,15 +1218,21 @@ async def ensure_armed(
     fresh value instead.
 
     Returns ``"armed"`` (a cadence row was written), ``"present"`` (one was
-    already there), ``"paused"``/``"disabled"``/``"reactive"`` (nothing armed;
-    any existing Aida rows were best-effort cancelled), ``"owner"`` (a live
-    runtime holds the session — it will reconcile on its own watcher tick),
+    already there), ``"paused"``/``"disabled"``/``"reactive"``/``"held"``
+    (nothing armed; for the first three any existing Aida rows were best-effort
+    cancelled, and ``"held"`` leaves a stopped session dormant), ``"owner"`` (a
+    live runtime holds the session — it will reconcile on its own watcher tick),
     ``"no-session"`` (nothing on disk to arm against) or ``"failed"`` (a
     refusal/logged error). Never raises: the callers are boot paths whose
     failures must not fail them.
     """
     from local_operator.wakes import store as wake_store
-    from local_operator.wakes.arm import WakeWriteError, arm_wake
+    from local_operator.wakes.arm import (
+        STATUS_CONFLICT,
+        WakeWriteError,
+        arm_wake,
+        repair_index,
+    )
 
     root = Path(config_dir)
     now = int(time.time() * 1000) if now_ms is None else int(now_ms)
@@ -1183,6 +1262,19 @@ async def ensure_armed(
             return "paused" if pol.paused else "reactive"
         result = "present"
         if CADENCE_ID not in ids:
+            # AN EXPLICIT STOP IS A GATE TOO. ``is_held`` covers both markers a
+            # user lever writes — ``stopped_at`` (``/stop``, stamped by the TUI
+            # on the same entry) and ``held_at`` (pause) — and the supervisor
+            # and the trigger layer's own gate both already read it that way
+            # (``triggers.declines`` answers "held"). Without this, the boot arm
+            # this change adds would walk straight past a stop the operator
+            # asked for and put her check-in back: the requirement is that she
+            # never drops her cadence by ACCIDENT, and a stop is not an
+            # accident. Nothing is cancelled here either — a dormant entry's
+            # rows are the ones that come back when the session is reopened
+            # (``_rebuild_wake_index_entry`` clears ``stopped_at``).
+            if wake_store.is_held(entry):
+                return "held"
             try:
                 await arm_wake(
                     root,
@@ -1196,7 +1288,21 @@ async def ensure_armed(
                 )
                 result = "armed"
             except WakeWriteError as exc:
-                return "owner" if exc.status == 503 else "failed"
+                if exc.status == 503:
+                    return "owner"
+                if exc.status != STATUS_CONFLICT:
+                    return "failed"
+                # THE ROW IS THERE; ONLY THE DERIVED INDEX IS BEHIND. Every
+                # external arm writes transcript first and index second, so a
+                # crash, a kill or a full disk in that window leaves a row the
+                # index has never seen — and this function reads the index (the
+                # one schedule read that does not open the session), so it is
+                # looking at the wrong side of the truth. Reporting "failed"
+                # here was the silent half of the reported defect: the cadence
+                # existed and nothing could fire it until the operator happened
+                # to open the conversation. Re-project the transcript instead.
+                await repair_index(root, session_id)
+                result = "present"
         await _drain_tray_external(root, session_id, pol, now)
         return result
     except Exception:  # noqa: BLE001 — boot paths must not fail on her account
