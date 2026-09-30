@@ -6682,10 +6682,11 @@ async def test_pinned_route_fails_visibly_rather_than_crossing_vendors(
     assert "retry.fallbackChains" in message, "remedy 1"
     assert "set retry.pinnedFallback to allow cross-vendor" in message, "remedy 2"
     # The lead and the vocabulary are LAYOUT constraints, not prose taste
-    # (design round 1, D4/D5): the failed child's dock row paints ~58 cells,
-    # so remedy 1 must land inside that span, and the wording speaks the
-    # /settings page's words — "hop", never "target"; the choice label
-    # "allow cross-vendor", never the raw stored value.
+    # (design rounds 1-2, D4/D5): the failed child's dock row paints only its
+    # leading cells — a `77 - len(label) - len(role)` span, ~48-58 for typical
+    # labels — so remedy 1 must land inside the best case this pins; and the
+    # wording speaks the /settings page's words — "hop", never "target"; the
+    # choice label "allow cross-vendor", never the raw stored value.
     assert message.index("allow cross-vendor") + len("allow cross-vendor") <= 58
     assert "same-family hop" in message
     assert "target" not in message
