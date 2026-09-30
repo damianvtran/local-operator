@@ -1726,6 +1726,14 @@ class _KnowledgeHooks:
     #: simply never moves, which is the layer's pre-projects behaviour rather than
     #: a degraded one.
     project_registry: Any | None = None
+    #: The session-management tools THIS session actually holds, as roster rows
+    #: for the ``tool`` kind (see :func:`_tool_roster_rows`). Assigned once, at
+    #: session build, from the BUILT tool list — so the ``createIf`` gates and
+    #: any narrowing are answered by the same list the model receives, never by
+    #: a second predicate that could disagree with it (``sessions``, for one,
+    #: is gated on the delegation surface). A hooks object built without one
+    #: (tests) offers no tool rows and behaves as before the kind existed.
+    tool_roster: tuple[Any, ...] = ()
     #: The classification seam (docs/design/classification-layer.md §7): an
     #: object exposing ``async recommend_resources(request) -> Recommendation``.
     #: ONE method — the seam used to publish ``notice(recommendation)`` as well, and
@@ -1843,12 +1851,14 @@ class _ClassificationCandidate:
 
     ``description`` is HARNESS-OWNED text only (§6): a skill's or guide's own
     description as discovered from the local filesystem, an MCP server's name
-    plus a release-owned capability hint, or — for a ``project`` row — the
-    operator's OWN stored project metadata routed back to the operator's own
-    model (the same accepted case the package ``Candidate`` docstring names).
-    Config-authored or remote-authored prose here would re-open the
-    prompt-injection surface ``mcp/resources.py`` deliberately excludes — the
-    option text is the one part of the request the model reads as a rubric.
+    plus a release-owned capability hint, a ``project`` row's operator's-OWN
+    stored project metadata routed back to the operator's own model (the same
+    accepted case the package ``Candidate`` docstring names), or a ``tool``
+    row's registration text — the description the tool itself ships, which is
+    release-owned exactly like the schema it belongs to. Config-authored or
+    remote-authored prose here would re-open the prompt-injection surface
+    ``mcp/resources.py`` deliberately excludes — the option text is the one
+    part of the request the model reads as a rubric.
     """
 
     kind: str
@@ -2454,7 +2464,78 @@ def _build_classification_roster(hooks: _KnowledgeHooks) -> tuple[_Classificatio
             )
         )
     rows.extend(_project_roster_rows(hooks))
+    rows.extend(hooks.tool_roster)
     return tuple(rows)
+
+
+#: The session-management tools the ``tool`` kind may offer, in the order the
+#: roster carries them (``sessions`` first: the incident this kind answers was
+#: a resumed-sessions turn; then the messaging pair; then the job trio).
+#: MEMBERSHIP IS THE WHOLE GATE — a tool this session does not hold is simply
+#: not in the built list (``sessions``/``task``/``wait``/``jobs`` are gated on
+#: the delegation surface, ``hub`` on subagent comms), so the roster can never
+#: point the model at a capability the session lacks.
+_TOOL_ROSTER_NAMES: tuple[str, ...] = ("sessions", "send", "hub", "task", "wait", "jobs")
+
+#: One tool row's description bound — the same scannable-row precedent the
+#: project kind applies (``_PROJECT_ROSTER_DESCRIPTION_LIMIT``), so neither
+#: kind can crowd the others' lines out of the state before the ladder trims.
+_TOOL_ROSTER_DESCRIPTION_LIMIT = 160
+
+
+def _tool_roster_rows(tools: Sequence[Any]) -> tuple[_ClassificationCandidate, ...]:
+    """The ``tool`` kind's rows: the session-management tools this session holds.
+
+    WHY A KIND AT ALL (the incident): "the incident left sessions stopped —
+    resume them and message Aida" is exactly the shape that fails when the
+    model does not reach for ``sessions``/``send``. Making the tools part of
+    the classification state lets the decision pass offer them beside skills
+    and servers, with their own harness-owned text as the fitting evidence.
+
+    The description is the tool's OWN registration text (see
+    :func:`_tool_candidate_description`), never a prose copy kept here — a
+    tool that rewrote its description cannot drift from the row that offers
+    it. The ``tool://`` URL is what the audit lane's reader serves; until that
+    lands it is an inert pointer, which is why the block's advisory framing
+    ("may help") carries the weight and not the URL's readability.
+    """
+    by_name: dict[str, Any] = {}
+    for tool in tools:
+        name = str(getattr(tool, "name", "") or "")
+        if name:
+            by_name[name] = tool
+    rows: list[_ClassificationCandidate] = []
+    for name in _TOOL_ROSTER_NAMES:
+        tool = by_name.get(name)
+        if tool is None:
+            continue
+        rows.append(
+            _ClassificationCandidate(
+                "tool", name, _tool_candidate_description(tool), f"tool://{name}"
+            )
+        )
+    return tuple(rows)
+
+
+def _tool_candidate_description(tool: Any) -> str:
+    """``<first sentence of the tool's own description>``, collapsed and bounded.
+
+    The first sentence is what a scannable row wants — the tool's one-line
+    purpose, in the release-owned wording potential callers already read — and
+    the bound (plus the collapse) is the project kind's injection rule: a row
+    is exactly one line, so a crafted description cannot forge a block line.
+    The label is the fallback when a tool ships no usable description.
+    """
+    description = " ".join(str(getattr(tool, "description", "") or "").split())
+    text = description or " ".join(str(getattr(tool, "label", "") or "").split())
+    for terminator in (". ", "! ", "? "):
+        index = text.find(terminator)
+        if index != -1:
+            text = text[: index + 1]
+            break
+    if len(text) > _TOOL_ROSTER_DESCRIPTION_LIMIT:
+        text = text[: _TOOL_ROSTER_DESCRIPTION_LIMIT - 1].rstrip() + "…"
+    return text
 
 
 #: How many project rows one roster carries (§8): the newest twelve, by
@@ -4217,6 +4298,10 @@ async def _prepare(
         web_fetch_settings=config_manager.get_config_value("web_fetch", None),
     )
     tools = create_tools(tool_context)
+    # The classification roster's ``tool`` kind reads the tools THIS session was
+    # actually built with (``createIf`` gates included) — see the
+    # ``_KnowledgeHooks.tool_roster`` field's contract.
+    hooks.tool_roster = _tool_roster_rows(tools)
 
     from local_operator.session.goal import GoalState
     from local_operator.session.transcript import Transcript
