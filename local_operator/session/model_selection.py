@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 # The backward row walker is IMPORTED rather than re-written here. Its job —
 # splitting a journal into rows while reading toward the head, including a row
@@ -27,6 +29,46 @@ from local_operator.session.transcript import _iter_complete_lines_backward
 
 SELECTED_MODEL_CUSTOM_TYPE = "selected_model"
 SELECTION_VERSION = 2
+
+#: Memoised answers for :func:`read_model_selection` and
+#: :func:`refused_decision_only_selection`, keyed on the transcript's path plus
+#: its own ``(st_ino, st_size, st_mtime_ns)``: ONE stat per call revalidates.
+#: The key is sound by the argument the test-hosting verdict below makes — an
+#: answer read out of a file whose bytes and timestamp are unchanged cannot
+#: differ from the next read of it — and every writer here moves at least one
+#: term: an append grows ``st_size``, ``compact_file`` REPLACES the journal (a
+#: new ``st_ino``, the same term ``transcript_index``'s ``sig`` carries for
+#: exactly this reason), and the bookkeeping ``_restore_mtime`` path grew the
+#: file before restoring the clock (and cannot restore ``st_mtime_ns`` exactly
+#: — ``os.utime`` goes through float seconds). WHY MEMOISE AT ALL: both readers
+#: sit on a session OPEN (``cold_model``, ``session_factory``, the CLI's
+#: /resume), and the backward walk they share costs 34-730 ms per call on real
+#: journals (measured 2026-09-30: aida 656-732 ms, bda7 120-320 ms, 835f
+#: 43-85 ms) while the answer is a pure function of the file — so a second
+#: open paid the walk again for nothing. Process-local rather than on disk,
+#: like the verdict below: both callers are long-lived (the serve backend, a
+#: TUI's worker) and a durable copy would be derived state to invalidate for
+#: an answer that costs one stat once warm. The path half of the key is the
+#: path AS GIVEN, not ``realpath``: the budget is one stat per call, and two
+#: spellings of one store cost one extra entry each rather than a wrong answer.
+_SELECTION_MEMO: "OrderedDict[str, tuple[tuple[int, int, int], Any]]" = OrderedDict()
+_SELECTION_REFUSAL_MEMO: "OrderedDict[str, tuple[tuple[int, int, int], Any]]" = OrderedDict()
+
+#: Bound on each memo above, in entries. Why a bound: a long-lived daemon can
+#: be asked about every session in a store over its lifetime. Why 128: the
+#: WORKING set is the handful of sessions one process serves at once, and an
+#: entry is a path string plus a small tuple — bytes of headroom over anything
+#: observed, and one stat per miss once it is evicted. LRU rather than the
+#: verdict cache's FIFO because these readers are REOPEN-heavy: the session a
+#: user keeps coming back to stays hot while one-off reads pass through.
+_SELECTION_MEMO_MAX = 128
+
+#: Serialises the memos' hits, inserts and evictions: the readers run under
+#: ``asyncio.to_thread`` and two workers can race one path. Compute stays
+#: OUTSIDE the lock — a duplicate compute on a race is harmless (the second
+#: store replaces the first with the same answer), while holding the lock
+#: across a 700 ms walk would queue every other session's open behind it.
+_SELECTION_MEMO_GUARD = threading.Lock()
 
 #: Memoised test-hosting verdicts for :func:`session_uses_test_hosting`, keyed on
 #: the journal's own ``(st_mtime_ns, st_size)`` (see that function's docstring for
@@ -321,6 +363,45 @@ def _settled_selection(directory: Path) -> StoredModelSelection | None:
     return None
 
 
+def _memoised(
+    memo: "OrderedDict[str, tuple[tuple[int, int, int], Any]]",
+    path: Path,
+    compute: Callable[[], Any],
+) -> Any:
+    """``compute()``'s answer for the journal at ``path``, revalidated with ONE
+    stat per call and served from ``memo`` while that stat is unchanged.
+
+    A journal that cannot be STAT'D is never cached: there is no key to
+    revalidate, and recomputing costs one failed open. A compute that RAISES is
+    never cached either — the exception propagates untouched and the next call
+    recomputes — so a transient read failure cannot freeze an answer under the
+    file's bytes (the direction ``session_uses_test_hosting`` documents for its
+    walk). What IS cached, deliberately: a ``None``, found or folded.
+    """
+    stat_key: tuple[int, int, int] | None = None
+    try:
+        info = path.stat()
+    except OSError:
+        pass
+    else:
+        stat_key = (info.st_ino, info.st_size, info.st_mtime_ns)
+    key = str(path)
+    if stat_key is not None:
+        with _SELECTION_MEMO_GUARD:
+            entry = memo.get(key)
+            if entry is not None and entry[0] == stat_key:
+                memo.move_to_end(key)
+                return entry[1]
+    value = compute()
+    if stat_key is not None:
+        with _SELECTION_MEMO_GUARD:
+            memo[key] = (stat_key, value)
+            memo.move_to_end(key)
+            while len(memo) > _SELECTION_MEMO_MAX:
+                memo.popitem(last=False)
+    return value
+
+
 def read_model_selection(directory: Path) -> StoredModelSelection | None:
     """Read only identity rows without loading message attachments or history.
 
@@ -333,8 +414,20 @@ def read_model_selection(directory: Path) -> StoredModelSelection | None:
     (``cold_model.resolve_conversation_model``), ``draft_birth_selection`` on
     the desktop's own read path, and the CLI's /resume all call it — so the
     signature, the return type and the answers are load-bearing for callers
-    rather than free to change.
+    rather than free to change. The memo does not move any of the three: while
+    the journal's stat key is unchanged the previous answer is served, and
+    otherwise the read below recomputes exactly what it always computed.
+
+    THE MEMO IS WHY THIS IS A WRAPPER: the walk behind it is the per-OPEN cost
+    this module's audit measured (see ``_SELECTION_MEMO``'s comment).
     """
+    return _memoised(
+        _SELECTION_MEMO, directory / "transcript.jsonl", lambda: _read_selection(directory)
+    )
+
+
+def _read_selection(directory: Path) -> StoredModelSelection | None:
+    """The uncached read behind :func:`read_model_selection` (settle, then fold)."""
     settled = _settled_selection(directory)
     if settled is not None:
         return settled
@@ -370,7 +463,19 @@ def refused_decision_only_selection(directory: Path) -> str | None:
     writer today journals v2 — while a hand-edited version-less row still cannot
     become a selection at all (``_selection`` refuses it too), so the only thing
     lost on that path is the named explanation, never the refusal itself.
+
+    MEMOISED like :func:`read_model_selection`, on its own answer key: this
+    call runs exactly when the resolver above is about to explain a stored
+    refusal on a session OPEN, so it rides the same measured per-open walk (see
+    ``_SELECTION_MEMO``).
     """
+    return _memoised(
+        _SELECTION_REFUSAL_MEMO, directory / "transcript.jsonl", lambda: _read_refusal(directory)
+    )
+
+
+def _read_refusal(directory: Path) -> str | None:
+    """The uncached read behind :func:`refused_decision_only_selection`."""
     from local_operator.providers.registry import is_decision_only, is_speech_only
 
     path = directory / "transcript.jsonl"
@@ -598,3 +703,12 @@ def _read_test_hosting(directory: Path) -> bool | None:
         return settled is not None and is_mock_provider(settled.provider)
     except Exception:  # noqa: BLE001 — a banner decision never fails on a store read
         return None
+
+
+def _reset_for_tests() -> None:
+    """Drop both selection memos (test isolation; never called in production —
+    the entries revalidate themselves through their stat keys, and the LRU
+    bounds them)."""
+    with _SELECTION_MEMO_GUARD:
+        _SELECTION_MEMO.clear()
+        _SELECTION_REFUSAL_MEMO.clear()
