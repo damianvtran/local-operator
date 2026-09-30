@@ -207,6 +207,25 @@ def skill_max_depth() -> int:
     return max(_MIN_MAX_DEPTH, min(_MAX_MAX_DEPTH, value))
 
 
+def _is_ancestor_or_self(candidate: str, path: str) -> bool:
+    """Whether the realpath ``candidate`` is ``path`` itself or an ancestor of it.
+
+    Pure string work on already-resolved paths (``os.path.realpath`` upstream,
+    never ``Path.resolve`` -- that raises ``RuntimeError`` on ELOOP on 3.12, the
+    reason this module has always used the ``os.path`` spelling). ``relative_to``
+    is what makes the ``/`` root case fall out for free, where a
+    ``startswith(candidate + os.sep)`` test would not.
+
+    A path that cannot be made relative to the candidate is not under it, so the
+    ``ValueError`` is the ordinary "not an ancestor" answer rather than an error.
+    """
+    try:
+        Path(path).relative_to(candidate)
+    except ValueError:
+        return False
+    return True
+
+
 def _walk_skill_dirs(
     root: str | os.PathLike[str], max_depth: int
 ) -> Iterator[tuple[str, os.stat_result]]:
@@ -230,17 +249,35 @@ def _walk_skill_dirs(
       a skill inside it could still fall within ``max_depth``.
     * A skill's depth is its path segments below ``root`` (direct child = 1).
     * Dot-prefixed entries are skipped at every level; symlinked directories
-      are followed. Following symlinks is what makes ``max_depth`` (not
-      realpath tracking) the cycle guard: a loop is cut off at the cap.
+      are followed, so a linked-in library still registers. A symlinked child
+      that resolves to the current directory or to one of its ancestors is NOT
+      descended into (see below).
     * Breadth-first, each directory's children sorted by name. That order is
       the within-root collision precedence: shallower first, then walk order.
     * Never raises. A directory that vanishes or cannot be listed simply
       contributes nothing, matching what the scanner always tolerated.
+
+    WHY the ancestor cut, on top of the depth cap: ``max_depth`` bounds how DEEP
+    the walk goes, never how MUCH work it does, and a symlink back up to an
+    ancestor makes every level below it re-walk the whole subtree. Measured here
+    on 20 sibling groups each holding a ``loop -> <root>`` symlink, cap 5: 22
+    fingerprint entries in 8.5 s (scan 4.4 s) before the cut, against 2 entries
+    in 4 ms (scan 11 ms) after -- for ONE real skill, and on the per-message
+    path (agent review round 1, MINOR-3, measured 421 entries / 198 ms on its
+    own tree shape). The
+    cut is applied to DESCENT only: such a child is still stat'd and yielded
+    when it holds a ``SKILL.md``, so a linked-in skill stays visible; what stops
+    is the re-walk. A symlink that is not an ancestor (a linked-in library) is
+    followed exactly as before.
     """
-    level: list[str] = [os.fspath(root)]
+    # ``(path, realpath)`` pairs. The realpath is carried rather than resolved
+    # per directory: a child of a walked directory is at ``<parent-real>/<name>``
+    # by construction, so descending costs no extra syscall -- only a SYMLINKED
+    # child is resolved, and only to decide whether it loops back up.
+    level: list[tuple[str, str]] = [(os.fspath(root), os.path.realpath(root))]
     for depth in range(1, max_depth + 1):
-        next_level: list[str] = []
-        for parent in level:
+        next_level: list[tuple[str, str]] = []
+        for parent, parent_real in level:
             try:
                 with os.scandir(parent) as it:
                     children = sorted(it, key=lambda entry: entry.name)
@@ -254,6 +291,20 @@ def _walk_skill_dirs(
                         continue
                 except OSError:
                     continue
+                child_real = os.path.join(parent_real, child.name)
+                revisit = False
+                try:
+                    # ``DirEntry.is_symlink``, never ``os.path.islink(child.path)``:
+                    # the link bit is already in the directory entry, so this asks
+                    # the kernel NOTHING, and this walk runs on the per-message
+                    # fingerprint path. Only a child that IS a link is resolved.
+                    if child.is_symlink():
+                        child_real = os.path.realpath(child.path)
+                        # Ancestor-or-self: descending would re-walk the very
+                        # tree this walk is already inside.
+                        revisit = _is_ancestor_or_self(child_real, parent_real)
+                except OSError:
+                    revisit = True  # unresolvable: treat as a loop, do not descend
                 skill_md = os.path.join(child.path, _SKILL_FILE)
                 try:
                     st = os.stat(skill_md)
@@ -263,17 +314,17 @@ def _walk_skill_dirs(
                     # so it stays a boundary.
                     if os.path.lexists(skill_md):
                         continue
-                    if depth < max_depth:
-                        next_level.append(child.path)
+                    if depth < max_depth and not revisit:
+                        next_level.append((child.path, child_real))
                     continue
                 except OSError:
                     continue
                 if stat_module.S_ISREG(st.st_mode):
                     yield child.path, st
-                elif depth < max_depth:
+                elif depth < max_depth and not revisit:
                     # A directory that merely happens to be named SKILL.md is
                     # not a skill file, so this folder is still just a group.
-                    next_level.append(child.path)
+                    next_level.append((child.path, child_real))
         level = next_level
         if not level:
             return
@@ -364,10 +415,19 @@ def discover_skills(roots: Sequence[Path]) -> tuple[list[Skill], list[str]]:
     for skill in ordered:
         existing = by_name.get(skill.name)
         if existing is not None:
+            # The loser's rule is named accurately, because the two are not
+            # the same any more: across roots the earliest root wins, while
+            # WITHIN one root the walk order decides and that order is
+            # shallower-first (see :func:`scan_skills_dir`). Saying "earlier
+            # root wins" for a same-root pair, which is what the bounded-depth
+            # walk newly makes possible, would point the reader at a root list
+            # that had nothing to do with it.
+            same_root = skill.source == existing.source
+            rule = "same root: the shallower skill wins" if same_root else "earlier root wins"
             warnings.append(
                 f"Skill name conflict: '{skill.name}' from '{skill.file_path}' "
                 f"shadowed by '{existing.name}' from '{existing.file_path}' "
-                f"(earlier root wins)"
+                f"({rule})"
             )
             continue
         by_name[skill.name] = skill
