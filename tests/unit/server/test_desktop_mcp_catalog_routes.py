@@ -171,6 +171,57 @@ async def test_a_fresh_install_lists_nothing_and_needs_no_session(app_env) -> No
     assert document["project_path"] is None
 
 
+async def test_the_catalog_publishes_the_mcp_verb_table(app_env) -> None:
+    """The ``/mcp`` verb vocabulary, with and without a session.
+
+    ``verbs`` is the composer's argument list: the verb rows, and the
+    ``offers`` class each server slot filters by. It is a property of the
+    DOCUMENT rather than of a session or an overlay, so both answers carry it
+    identically — and the sessionless read is the one a draft pane (no
+    conversation, no model) has to build its rows from.
+    """
+    from local_operator.mcp.catalog import MCP_VERB_ROWS
+    from local_operator.session.frontend_state import MCP_SUBCOMMANDS
+
+    expected = [
+        {
+            "verb": row.verb,
+            "description": row.description,
+            "destructive": row.destructive,
+            "offers": row.offers,
+        }
+        for row in MCP_VERB_ROWS
+    ]
+    sessionless = _data(await app_env.client.get("/v1/desktop/mcp"))
+    assert sessionless["verbs"] == expected
+    assert [verb["verb"] for verb in sessionless["verbs"]] == list(MCP_SUBCOMMANDS)
+    assert [v["verb"] for v in sessionless["verbs"] if v["destructive"]] == [
+        "remove",
+        "logout",
+        "reauth",
+    ], "the verbs that delete something, in table order"
+    assert {v["verb"]: v["offers"] for v in sessionless["verbs"]} == {
+        "list": None,
+        "add": None,
+        "remove": "all",
+        "login": "oauth",
+        "logout": "signed_in",
+        "reauth": "oauth",
+    }
+
+    # A session id changes nothing about the verbs: this pool holds no such
+    # session, so the overlay degrades (silently, by contract) to the durable
+    # answer, which is exactly the case a composer may be in mid-draft.
+    with_session = _data(
+        await app_env.client.get(
+            "/v1/desktop/mcp",
+            params={"session_id": "sess-verbs", "cwd": str(Path.home())},
+        )
+    )
+    assert with_session["verbs"] == expected
+    assert with_session["status_source"] == "config"
+
+
 async def test_a_folder_with_its_own_file_gets_a_project_scope(app_env) -> None:
     project = app_env.tmp / "project"
     project.mkdir()

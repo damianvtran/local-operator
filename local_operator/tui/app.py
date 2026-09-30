@@ -32556,29 +32556,27 @@ class OperatorApp(App[None]):
     def _settings_provider_rows(self) -> list[tuple[str, str]]:
         """Logged-in providers as ``(id, state)`` for the settings pane.
 
-        Uses ``_credential_state`` rather than a locally-invented vocabulary,
-        so this pane, ``/provider`` and the ``/login`` picker keep describing
-        one situation with one set of words — the drift that surface already
-        records having had.
+        The states come from the controller's ONE view (``view_rows``, through
+        :data:`_VIEW_STATE_COPY`) rather than a locally-invented vocabulary, so
+        this pane, ``/provider``, the ``/login`` picker and the desktop's census
+        keep describing one situation with one set of words — the drift this
+        surface already records having had.
         """
         rows: list[tuple[str, str]] = []
         providers = self._providers
         if providers is None:
             return rows
         try:
+            view = self._provider_view()
             for definition in providers.login_providers():
-                if not providers.has_any_credential(definition.id):
+                row = view.get(definition.id) if view is not None else None
+                if row is None or row.stored_credentials <= 0:
                     # Only the providers the user actually has a credential for.
                     # The full catalogue is `/provider`'s job; this pane answers
                     # the narrower "who am I logged in as", which is the half
                     # that bears on which default model will work.
                     continue
-                rows.append(
-                    (
-                        definition.id,
-                        self._credential_state(definition.id, True),
-                    )
-                )
+                rows.append((definition.id, _VIEW_STATE_COPY[row.state]))
         except Exception:  # noqa: BLE001 — never crash the page on a store read
             logger.debug("settings: provider rows unavailable", exc_info=True)
         return rows
@@ -38480,18 +38478,28 @@ class OperatorApp(App[None]):
         prints the provider's own error (:meth:`_submit_prompt`), which is the
         message worth reading.
 
-        The three states are :meth:`_credential_state`'s, not a fourth vocabulary
-        invented here, so `/model`, `/provider` and the `/login` picker keep
+        The states are the controller's ONE view (``view_rows``, through
+        :data:`_VIEW_STATE_COPY`), not a fourth vocabulary invented here, so
+        `/model`, `/provider`, the settings pane and the `/login` picker keep
         describing one situation with one set of words.
         """
         providers = self._providers
         assert providers is not None
         try:
-            state = self._credential_state(provider, providers.has_any_credential(provider))
+            rows = providers.view_rows()
         except Exception as error:  # the STORE failed, not the provider
             # Named rather than swallowed or guessed at: "I could not check" is a
             # real answer, where a confirmation would claim access nobody verified.
             return "", f"cannot check {provider} credentials: {error}"
+        if rows is None:
+            # The controller's "cannot tell" — the same answer, from the same
+            # failure class, as the ``except`` above. Named the same way.
+            return "", f"cannot check {provider} credentials: the credential store is unreadable"
+        row = next((candidate for candidate in rows if candidate.definition.id == provider), None)
+        # A provider the registry does not know is ``needs login``: no env var
+        # resolves for it and no login flow exists, which is exactly what the
+        # old per-provider derivation answered for an unknown id.
+        state = _VIEW_STATE_COPY[row.state] if row is not None else _VIEW_STATE_COPY["needs_login"]
         if state == "needs login":
             return "", f"{provider} needs login — /login {provider}"
         return f" · {provider} {state}", None
@@ -40315,16 +40323,28 @@ class OperatorApp(App[None]):
             notice("run: local-operator provider (TUI lacks the provider facade)", "warning")
             return
         try:
+            rows = self._providers.view_rows()
+            if rows is None:
+                # The controller's "cannot tell": a locked or unreadable store.
+                # The list is not renderable from the registry alone — every row
+                # carries a state — so this is the same whole-list refusal the
+                # old unguarded read produced, with a bounded sentence instead
+                # of a sqlite message.
+                notice("provider list failed: the credential store is unreadable", "error")
+                return
+            view = {row.definition.id: row for row in rows}
             items: list[tuple[str, str]] = []
             for definition in self._providers.login_providers():
-                # ONE state vocabulary, resolved in ONE place. This line and the
-                # `/login` picker answer the same question on two surfaces, and
-                # they had already drifted: the picker said "needs login" where
-                # this said "—", so a user with no credential read a dash and had
-                # to guess whether it meant unknown, unsupported or absent.
-                state = self._credential_state(
-                    definition.id, self._providers.has_any_credential(definition.id)
-                )
+                # ONE state vocabulary, resolved in ONE place (the controller's
+                # ``view_rows``, rendered through ``_VIEW_STATE_COPY``). This
+                # line, the ``/login`` picker, the settings pane and the
+                # desktop's census answer the same question on four surfaces,
+                # and two of them had already drifted: the picker said "needs
+                # login" where this said "—", so a user with no credential read
+                # a dash and had to guess whether it meant unknown, unsupported
+                # or absent.
+                row = view.get(definition.id)
+                state = _VIEW_STATE_COPY[row.state] if row is not None else ""
                 marker = "*" if definition.store_credentials_as else " "
                 items.append((f"{marker}{definition.id}", f"{definition.name} · {state}"))
             use = self._provider_usage_state()
@@ -40364,11 +40384,18 @@ class OperatorApp(App[None]):
                 notice("no stored credentials")
                 return
             now_ms = int(self._clock_ms())
+            # The ONE label derivation (``credential_identity``, the same one the
+            # CLI's listings and the census read): one account has one name on
+            # every surface, and a row whose payload carries no identity prints
+            # "-" rather than its dedupe key (``oauth:kimi`` is a storage fact,
+            # not an account label). Imported here for the same reason
+            # ``auth_cli`` imports it locally: the store module stays off this
+            # app's import graph.
+            from local_operator.providers.auth_store import credential_identity
+
             items: list[tuple[str, str]] = []
             for row in rows:
-                identity = (
-                    row.identity_key or row.data.get("email") or row.data.get("account_id") or "-"
-                )
+                identity = credential_identity(row) or "-"
                 if row.credential_type == "oauth":
                     expires = row.data.get("expires")
                     state = "expired" if expires is not None and int(expires) < now_ms else "active"
@@ -43124,42 +43151,44 @@ class OperatorApp(App[None]):
         """
         providers = self._providers
         assert providers is not None
-        logout = command == "logout"
-        if not logout:
+        if command != "logout":
             return _ProviderRows(self._login_choices(), "")
-        # ONE store read for the KINDS, up front: `/logout` needs the kind of every
-        # credential it offers to remove, and reading them per row would re-scan
-        # the store once per provider.
-        stored_kinds = self._stored_credential_kinds()
-        if stored_kinds is None:
+        # The projection that decides which rows may exist on a DESTRUCTIVE list
+        # -- store and facade agreement, one row per storage id, environment
+        # keys excluded -- lives on the controller (``logout_rows``), beside the
+        # single store pass that feeds it, so this list and the desktop's
+        # account list cannot answer "what can be removed" two ways. Guarded
+        # here because a destructive list must never take the app down with a
+        # store read, and the failure it degrades to is "cannot tell".
+        try:
+            rows = providers.logout_rows()
+        except Exception:  # a credential read never costs the user the list
+            rows = None
+        if rows is None:
             # `/logout` asks a question only the store can answer — which
             # credentials exist. There is no degraded list to offer, so say what
             # is wrong instead of rendering an empty one that reads as "you have
             # no credentials".
             return _ProviderRows([], "credential store unreadable — /logout cannot list anything")
         choices: list[ArgumentChoice] = []
-        seen_storage: set[str] = set()
-        for definition in providers.login_providers():
-            storage = definition.store_credentials_as or definition.id
-            # BOTH reads have to agree before a destructive row is offered: the
-            # facade's predicate (whose rule about storage aliasing and disabled
-            # rows is not the UI's to re-derive) and the credential map, which is
-            # the record of what would actually be deleted. Either one alone can
-            # produce a row that promises to remove something that is not there.
-            #
-            # Guarded per row: one provider whose read blows up must not delete
-            # the rest of a list that is otherwise answerable.
-            kinds = stored_kinds.get(storage)
-            if kinds is None or not self._has_credential(definition.id):
-                # Only what can actually be removed. Offering a provider the user
-                # never logged into is a row whose only outcome is a no-op notice.
-                continue
-            # `xai` and `xai-oauth` (and openai/openai-device) share one credential
-            # row, so both would log the same account out. Two rows for one outcome
-            # is a choice the user cannot make correctly.
-            if storage in seen_storage:
-                continue
-            seen_storage.add(storage)
+        for row in rows:
+            definition = row.definition
+            detail = _removal_detail(row.credential_types)
+            if row.identity is not None:
+                # The account this row would log out, where the store holds
+                # exactly one: the missing half of "which of my two OpenAI
+                # logins is this row". A multi-account provider states the COUNT
+                # instead (``_removal_detail`` above), because one label would
+                # silently pick one of the accounts.
+                #
+                # CLIPPED to ``_IDENTITY_CELLS``: the column is sized to the
+                # WIDEST detail in the list and dropped whole when reserving it
+                # would squeeze the name, so an unbounded address on one row
+                # decides whether EVERY row still states what it removes — and
+                # this is the list that gates a credential deletion. Design
+                # review round 1 (D1) measured the cliff moving from 46 cells
+                # (no suffix) to 64 (a 25-cell work address) and past 98 (43).
+                detail = f"{detail} · {_short_identity(row.identity)}"
             choices.append(
                 ArgumentChoice(
                     name=definition.id,
@@ -43167,7 +43196,7 @@ class OperatorApp(App[None]):
                     # `claude` finds anthropic, `qwen` finds alibaba. The alias only
                     # makes the row FINDABLE — the completion is still the id.
                     aliases=tuple(definition.search_aliases),
-                    detail=_removal_detail(kinds),
+                    detail=detail,
                     # Every row on THIS list destroys a credential, so the danger
                     # tint is a property of the command rather than of a row that
                     # went wrong — the same red the tool card spends on a failed
@@ -43179,98 +43208,66 @@ class OperatorApp(App[None]):
             )
         return _ProviderRows(choices, "")
 
+    def _provider_view(self) -> dict[str, Any] | None:
+        """The controller's provider view keyed by id, or ``None`` when unreadable.
+
+        ONE guarded call for every surface that renders the view (``/login``,
+        ``/logout``, ``/provider``, the settings pane, the model access note).
+        ``None`` means "cannot tell": either the controller answered ``None``
+        (an unreadable store -- its documented contract) or the read raised
+        (anything else a store or config read can do on a keystroke). Both
+        degrade the same way at every call site, and neither may cost the user
+        the list -- the rule the old per-row guard existed for, now paid once
+        instead of once per provider.
+
+        A missing KEY is a third case -- a provider this view does not cover --
+        and each caller decides what that means for its own question.
+        """
+        providers = self._providers
+        if providers is None:
+            return None
+        try:
+            rows = providers.view_rows()
+        except Exception:  # a credential read never costs the user the list
+            return None
+        if rows is None:
+            return None
+        return {row.definition.id: row for row in rows}
+
     def _login_choices(self) -> list[ArgumentChoice]:
-        """Every loginable provider, with where the user stands on each."""
+        """Every loginable provider, with where the user stands on each.
+
+        The states come from the controller's ONE view (``view_rows``) through
+        :data:`_VIEW_STATE_COPY`, so this list, ``/provider``, the settings pane
+        and the desktop's census render one fact from one derivation — the
+        picker and ``/provider`` had drifted before ("needs login" against "—").
+        """
         providers = self._providers
         assert providers is not None
-        return [
-            ArgumentChoice(
-                name=definition.id,
-                description=_provider_summary(definition.id, definition.name),
-                aliases=tuple(definition.search_aliases),
-                # Blank when the store could not be read: the catalogue is still
-                # entirely answerable from the registry, and a row with no state
-                # claims nothing, where any of the three states would claim
-                # something the app does not know. With every detail blank the
-                # column collapses to nothing and the descriptions take the cells.
-                detail=self._stored_state(definition.id) or "",
+        view = self._provider_view()
+        choices: list[ArgumentChoice] = []
+        for definition in providers.login_providers():
+            row = view.get(definition.id) if view is not None else None
+            choices.append(
+                ArgumentChoice(
+                    name=definition.id,
+                    description=_provider_summary(definition.id, definition.name),
+                    aliases=tuple(definition.search_aliases),
+                    # Blank when the store could not be read: the catalogue is still
+                    # entirely answerable from the registry, and a row with no state
+                    # claims nothing, where any of the states would claim
+                    # something the app does not know. With every detail blank the
+                    # column collapses to nothing and the descriptions take the cells.
+                    #
+                    # "" rather than the model-access note's "needs login"
+                    # fallback for a provider MISSING from the view: here the
+                    # question is "what do I show beside this row", and a blank
+                    # is honest; there it is "what will this switch do", and the
+                    # note must SAY something (design review round 1, D4).
+                    detail=_VIEW_STATE_COPY[row.state] if row is not None else "",
+                )
             )
-            for definition in providers.login_providers()
-        ]
-
-    def _stored_state(self, provider_id: str) -> str | None:
-        """:meth:`_credential_state` for one provider, or ``None`` when it failed.
-
-        Guarded per ROW, not per list: one provider whose read blows up must not
-        delete the other eleven from a catalogue that is otherwise answerable.
-        """
-        providers = self._providers
-        assert providers is not None
-        try:
-            return self._credential_state(provider_id, providers.has_any_credential(provider_id))
-        except Exception:  # a credential read never costs the user the list
-            return None
-
-    def _has_credential(self, provider_id: str) -> bool:
-        """``has_any_credential``, guarded — a failed read offers nothing.
-
-        False rather than True on failure: `/logout` acts on what this returns,
-        and offering a row the store could not confirm invites a keystroke whose
-        only outcome is an error.
-        """
-        providers = self._providers
-        assert providers is not None
-        try:
-            return providers.has_any_credential(provider_id)
-        except Exception:  # a credential read never costs the user the list
-            return False
-
-    def _stored_credential_kinds(self) -> dict[str, tuple[str, ...]] | None:
-        """Storage id -> the ``credential_type`` of each credential filed under it.
-
-        ``None`` — distinct from an empty map — when the store could not be read
-        at all, because "you have no credentials" and "I cannot tell" are
-        different answers and only one of them is true when SQLite is locked.
-
-        A tuple per id, not one value: nothing stops a provider holding both a
-        pasted key and an OAuth login, and `/logout` removes the lot — a row that
-        named only the first would understate what the keystroke does.
-        """
-        providers = self._providers
-        assert providers is not None
-        try:
-            rows = providers.credentials()
-        except Exception:  # never crash the app on a provider read
-            return None
-        kinds: dict[str, tuple[str, ...]] = {}
-        for row in rows:
-            kinds[row.provider] = (*kinds.get(row.provider, ()), row.credential_type)
-        return kinds
-
-    def _credential_state(self, provider_id: str, stored: bool) -> str:
-        """Where the user stands with ``provider_id``, in three states not two.
-
-        An environment key is a WORKING credential — it is the tier the stream
-        cascade resolves — but it is not a login, so reporting it as one would
-        suggest a stored account that `/logout` could remove. `/provider` renders
-        the same three strings from this same method, so the two surfaces cannot
-        drift into answering one question two ways.
-
-        `/logout` does NOT use this: see :func:`_removal_detail`.
-        """
-        providers = self._providers
-        assert providers is not None
-        from local_operator.providers.local import LOCAL_PROVIDER_IDS, provider_settings
-
-        if provider_id in LOCAL_PROVIDER_IDS:
-            return (
-                "configured server"
-                if provider_settings(provider_id).get("base_url")
-                else "configure server"
-            )
-        if stored:
-            return "logged in"
-        return "env key" if providers.is_usable(provider_id) else "needs login"
+        return choices
 
     # -- /aida ----------------------------------------------------------------
 
@@ -47835,6 +47832,7 @@ class OperatorApp(App[None]):
         ready-to-run ``/mcp login notion``.
         """
         from local_operator.mcp.auth import mcp_logged_out_servers, oauth_server_names
+        from local_operator.mcp.catalog import MCP_VERB_ROWS
         from local_operator.tui.widgets.command_picker import slash_argument
 
         argument = slash_argument(
@@ -47847,29 +47845,25 @@ class OperatorApp(App[None]):
             return []
         sub, _space, _rest = argument.partition(" ")
         if not _space:
-            # ``list`` FIRST: the verbs below it destroy credentials or config
-            # entries, and the row a stray Enter lands on should be the one
-            # that only shows something.
+            # The verb rows come from the BACKEND table (``MCP_VERB_ROWS``, the
+            # one the desktop composer reads through ``GET /v1/desktop/mcp``),
+            # so "every subcommand" answers the same way on both surfaces and
+            # the descriptions cannot drift apart. ``alert`` is the table's
+            # ``destructive`` flag rather than a local literal: it is the bit
+            # the editor's gate reads to make Enter FILL instead of RUN, so a
+            # second copy here would be a safety rule with two spellings.
             return [
-                ArgumentChoice("list", "Show every configured server and its status"),
-                ArgumentChoice("add", "Configure a new server (url, or a stdio command)"),
-                ArgumentChoice(
-                    "remove", "Delete a server from local-operator's config", alert=True
-                ),
-                ArgumentChoice("login", "Authorize an OAuth server (opens the browser)"),
-                ArgumentChoice("logout", "Forget a server's stored OAuth credential", alert=True),
-                # The differentiating clause leads: at narrow widths the tail
-                # truncates, and "forget, then authorize again" is the part
-                # login does not already say.
-                ArgumentChoice(
-                    "reauth", "Forget first, then authorize — for an account or scope change"
-                ),
+                ArgumentChoice(row.verb, row.description, alert=row.destructive)
+                for row in MCP_VERB_ROWS
             ]
         verb = sub.lower()
-        # ``list`` takes no argument and ``add``'s name is new by definition,
-        # so neither has rows to offer — an empty list closes the picker and
-        # lets the user type, which is the correct affordance for both.
-        if verb not in ("remove", "login", "logout", "reauth"):
+        # The table also decides which verbs HAVE a server slot: ``offers`` is
+        # ``None`` for ``list`` (takes no argument) and ``add`` (an added name
+        # is new by definition), so neither has rows to offer — an empty list
+        # closes the picker and lets the user type, which is the correct
+        # affordance for both. An unknown verb has nothing either.
+        known = next((row for row in MCP_VERB_ROWS if row.verb == verb), None)
+        if known is None or known.offers is None:
             return []
         manager = getattr(self._session, "mcp_manager", None)
         if verb == "remove":
@@ -47983,8 +47977,10 @@ class OperatorApp(App[None]):
                     # than RUN it, so a fuzzy subsequence match (`reauth lnr`)
                     # cannot forget the credential of a server the user never
                     # named. Do not narrow this set without re-checking the
-                    # gate — the tint and the guard are the same bit.
-                    alert=verb in ("logout", "reauth"),
+                    # gate — the tint and the guard are the same bit. The flag
+                    # comes from ``MCP_VERB_ROWS`` (``known`` above), the same
+                    # table the verb rows and the desktop composer read.
+                    alert=known.destructive,
                 )
             )
         return choices
@@ -52621,7 +52617,73 @@ def _tree_listing(
 #: away from every row while `remove oauth` (12) keeps it. Losing the column at
 #: the width where the description has ALREADY collapsed would leave the row
 #: saying nothing but its id, which is the state D-06 exists to fix.
-_CREDENTIAL_KINDS = {"oauth": "oauth", "api_key": "api key"}
+#: The singular/plural labels for a stored credential's kind, keyed by the raw
+#: ``credential_type``. ONE table because its only consumer
+#: (``_removal_detail``) needs both forms: the singular for a row removing one
+#: credential, the plural for a row removing several of ONE kind
+#: (``remove 2 oauth logins`` — the count a bare kind would hide).
+_CREDENTIAL_KINDS = {"oauth": ("oauth", "oauth logins"), "api_key": ("api key", "api keys")}
+
+
+#: The WORDS for the controller's machine states (``ProviderViewRow.state``,
+#: spelled :data:`local_operator.providers.controller.VIEW_STATES`).
+#:
+#: The machine state is ONE fact and is owned by the backend, which is what
+#: lets the desktop render it as its own copy and the census publish it as an
+#: enum; this table is the TUI's copy of it, kept here rather than derived from
+#: the enum so a wording change does not silently rewrite a wire contract.
+#:
+#: The five strings are exactly the ones the TUI printed before the enum existed
+#: (``_credential_state``), pinned by ``tests/unit/tui`` so a surface can never
+#: invent a sixth vocabulary. An unknown state is a ``KeyError`` on purpose: a
+#: row that renders as blank would read as "nothing to say" when it means "this
+#: app does not understand the backend".
+_VIEW_STATE_COPY: dict[str, str] = {
+    "logged_in": "logged in",
+    "env_key": "env key",
+    "needs_login": "needs login",
+    "local_ready": "configured server",
+    "local_unconfigured": "configure server",
+}
+
+
+#: Cells an identity may spend inside a `/logout` row's detail column.
+#:
+#: Close to the longest detail the app itself generates
+#: (``remove 2 credentials``, 20 cells) so the column's measured drop-cliff — 46
+#: cells before this feature — does not move for a realistic address, while a
+#: pathologically long one (a 43-cell quoted address, a pasted token-shaped
+#: label) can no longer cost every row its consequence. Design review round 1
+#: (D1) measured the cliff at 64 cells for a 25-cell address and 98+ for 43.
+_IDENTITY_CELLS = 24
+
+
+def _short_identity(identity: str) -> str:
+    """``identity`` clipped to :data:`_IDENTITY_CELLS`, ellipsis at the tail.
+
+    The identity is the ONLY user-supplied string that can reach a picker detail
+    column: the rest is app copy from closed vocabularies. The picker sizes that
+    column to the widest detail in the list and drops it WHOLE when reserving it
+    would squeeze the name (``_detail_column`` / ``_name_floor`` in
+    ``widgets.command_picker``), so one long address would cost every row its
+    consequence — on the list whose consequence is what a keystroke deletes.
+    Bounding the suffix keeps the old cliff while still naming the account.
+
+    Tail, not middle: the local part is what tells two addresses apart at a
+    glance, and the domain is the half a row sitting beside a provider id
+    already implies. Measured with the picker's own ``cell_len`` so a wide glyph
+    costs what it really costs.
+    """
+    from rich.cells import cell_len
+
+    if cell_len(identity) <= _IDENTITY_CELLS:
+        return identity
+    clipped = ""
+    for char in identity:
+        if cell_len(clipped + char) > _IDENTITY_CELLS - 1:
+            break
+        clipped += char
+    return clipped + "…"
 
 
 def _removal_detail(kinds: tuple[str, ...]) -> str:
@@ -52637,9 +52699,17 @@ def _removal_detail(kinds: tuple[str, ...]) -> str:
     credential map has an entry for its storage id, so there is no such thing
     here as a removal with nothing to remove.
     """
-    labels = {_CREDENTIAL_KINDS.get(kind, kind) for kind in kinds}
+    labels = {_CREDENTIAL_KINDS.get(kind, (kind, f"{kind}s")) for kind in kinds}
     if len(labels) == 1:
-        return f"remove {labels.pop()}"
+        singular, plural = labels.pop()
+        if len(kinds) == 1:
+            return f"remove {singular}"
+        # Several rows of ONE kind: the count is the fact a bare kind hides —
+        # with neighbours carrying an account label, an unlabelled
+        # ``remove oauth`` read as "one credential with no label" rather than
+        # "several accounts, all of which go" (design review round 1, D2).
+        # Spelled per kind because the two labels do not pluralize alike.
+        return f"remove {len(kinds)} {plural}"
     # Both a pasted key and an OAuth login under one id: `/logout` takes the lot,
     # and a row naming only the first would understate the keystroke.
     return f"remove {len(kinds)} credentials"

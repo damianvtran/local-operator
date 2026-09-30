@@ -370,6 +370,65 @@ def _chat_providers() -> list[ProviderDefinition]:
     ]
 
 
+#: The MACHINE form of the states a provider view row can carry, in the
+#: vocabulary the wire publishes as ``state``. The TUI's own three-plus-two
+#: states (``logged in`` / ``env key`` / ``needs login`` / ``configure server``
+#: / ``configured server``) are the COPY for these; keeping copy out of the
+#: enum is what lets the desktop render the same fact its own way.
+VIEW_STATES = (
+    "logged_in",
+    "env_key",
+    "needs_login",
+    "local_ready",
+    "local_unconfigured",
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class ProviderViewRow:
+    """One provider's credential view, assembled from ONE store pass.
+
+    The single derivation behind every surface that answers "where does this
+    provider stand": the desktop's census rows (``GET /v1/auth/providers``),
+    the TUI's ``/login`` and ``/logout`` pickers, ``/provider``, the settings
+    pane and ``/model``'s access note. Each surface renders its own copy of
+    ``state`` (see :data:`VIEW_STATES`); none re-derives the state itself, which
+    is how the picker and ``/provider`` had already drifted once.
+
+    ``stored_credentials`` and ``account_count`` are the same number under two
+    names: the first is the wire's existing field, the second the
+    identity-bearing name the composer's account list reads. Both are the rows
+    under ``storage_id``, so a login flavour (``xai-oauth``) counts the
+    account its base (``xai``) holds -- one account, not two.
+    """
+
+    definition: ProviderDefinition
+    #: The id the credential is STORED under (``credential_provider_id``), which
+    #: is how a flavour and its base collapse into one account.
+    storage_id: str
+    #: One of :data:`VIEW_STATES`.
+    state: str
+    #: The stored account's label, when this provider holds EXACTLY ONE
+    #: credential row; ``None`` otherwise (multi-account -> the account-level
+    #: picker, and an unknown identity must not be invented from the dedupe
+    #: key).
+    identity: str | None
+    #: How many stored rows sit under ``storage_id``.
+    stored_credentials: int
+    #: ``stored_credentials``, under the name the account list reads.
+    account_count: int
+    #: A credential this app could actually run on -- the store OR an
+    #: environment key (never ``allows_missing_api_key``, which is ``usable``'s
+    #: business and not a credential).
+    has_credential: bool
+    #: The wider predicate the catalogue filters on: the store, an environment
+    #: key, or a provider that needs no credential at all (a local server).
+    usable: bool
+    #: The ``credential_type`` of each stored row, in store order -- what a
+    #: ``/logout`` row's detail column says it will remove.
+    credential_types: tuple[str, ...]
+
+
 class ProviderController:
     """Provider/model/credential/usage facade for interactive front ends."""
 
@@ -417,6 +476,137 @@ class ProviderController:
 
     def provider(self, provider_id: str) -> ProviderDefinition | None:
         return get_provider_definition(provider_id)
+
+    # -- provider view ------------------------------------------------------
+    def view_rows(self) -> list["ProviderViewRow"] | None:
+        """Every registry provider's credential view, in registry order.
+
+        ONE derivation and ONE store pass, replacing the per-provider reads the
+        census and the TUI pickers used to make: ``has_any_credential`` +
+        ``is_usable`` + ``list_credentials`` per row meant a picker keystroke
+        paid three scans per provider on a table that exists to answer this one
+        question. Everything the state machine needs comes from the single
+        ``list_credentials`` call plus config and environment reads that touch
+        no store at all (``resolve_env_key`` is ``os.environ``).
+
+        ``None`` -- distinct from a list -- when the store could not be read at
+        all (locked, busy, corrupt, unreadable on disk), the same contract and
+        the same deliberately narrow guard as :meth:`usable_providers`:
+        ``sqlite3.ProgrammingError`` is misuse of the sqlite API and is
+        re-raised rather than dressed up as an environment failure. A caller
+        that cannot tell "no credentials" from "I cannot tell" would offer an
+        empty logout list that reads as a finished cleanup.
+
+        The rows cover the WHOLE registry (``test`` included) so a
+        single-provider lookup -- ``/model``'s access note asks about whatever
+        provider the model spec names -- never misses; the login-only surfaces
+        (``/login``, ``/logout``, ``/provider``) filter against
+        :meth:`login_providers` themselves, and :meth:`logout_rows` does that
+        filtering where a destructive list is built.
+        """
+        from local_operator.providers.auth_store import credential_identity
+        from local_operator.providers.local import LOCAL_PROVIDER_IDS
+
+        try:
+            stored_rows = self.auth_store.list_credentials(provider=None)
+        except sqlite3.ProgrammingError:
+            # Misuse of the sqlite API -- see :meth:`usable_providers`. Re-raised
+            # BEFORE the degradation because it subclasses ``DatabaseError``.
+            raise
+        except (sqlite3.Error, OSError):
+            return None
+        by_storage: dict[str, list["StoredCredential"]] = {}
+        for row in stored_rows:
+            by_storage.setdefault(row.provider, []).append(row)
+        # ONE config read, and only when a LOCAL provider is in the registry at
+        # all -- the rule ``static_catalogue`` states: ``provider_settings``
+        # builds a ``ConfigManager`` per call otherwise, and this method runs on
+        # the keystroke that opens a picker.
+        values: Mapping[str, Any] | None = None
+        rows: list[ProviderViewRow] = []
+        for definition in PROVIDER_REGISTRY:
+            storage = credential_provider_id(definition.id)
+            mine = by_storage.get(storage, [])
+            count = len(mine)
+            env_key = bool(resolve_env_key(definition.id))
+            usable = definition.allows_missing_api_key or count > 0 or env_key
+            if definition.id in LOCAL_PROVIDER_IDS:
+                if values is None:
+                    from local_operator.providers.local import config_values
+
+                    values = config_values()
+                from local_operator.providers.local import provider_settings
+
+                # The SAME predicate ``_credential_state`` used: a local
+                # provider's state is its configured endpoint, never its store
+                # row -- an unconfigured server with a token is still unusable.
+                configured = bool(provider_settings(definition.id, values).get("base_url"))
+                state = "local_ready" if configured else "local_unconfigured"
+            elif count > 0:
+                state = "logged_in"
+            elif usable:
+                # ``usable`` with no stored row is an environment key (or a
+                # no-credential-needed provider outside ``LOCAL_PROVIDER_IDS``,
+                # the mock host): a working credential that is not a login.
+                state = "env_key"
+            else:
+                state = "needs_login"
+            rows.append(
+                ProviderViewRow(
+                    definition=definition,
+                    storage_id=storage,
+                    state=state,
+                    # EXACTLY one row, or nothing: with two accounts stored, a
+                    # label would silently pick one of them (and the identity a
+                    # row can show is the dedupe-surviving email, not the
+                    # account the user is about to remove) -- multi-account
+                    # choices stay in the account-level picker.
+                    identity=credential_identity(mine[0]) if count == 1 else None,
+                    stored_credentials=count,
+                    account_count=count,
+                    has_credential=count > 0 or env_key,
+                    usable=usable,
+                    credential_types=tuple(row.credential_type for row in mine),
+                )
+            )
+        return rows
+
+    def logout_rows(self) -> list["ProviderViewRow"] | None:
+        """The ``/logout`` projection: what a keystroke could actually remove.
+
+        Three filters, all of them rules a previous caller used to hold
+        privately:
+
+        - LOGIN providers only (:meth:`login_providers`), because ``/logout``
+          is the reverse of ``/login`` and a provider with no login flow has
+          nothing the command could name.
+        - ``stored_credentials > 0``. This is the "store AND facade agree"
+          rule the old two-read filter expressed: the store read listed what
+          would be deleted, and the facade's predicate confirmed the provider's
+          rule about storage aliasing and disabled rows. Both now come from
+          :meth:`view_rows`' single pass, so they cannot disagree -- the count
+          IS the facade's rule -- and the filter is kept here rather than
+          dropped so the rule that decides a DESTRUCTIVE row's existence has
+          one home. An environment key is excluded by construction: it cannot
+          be removed, so a row offering one would end in a no-op notice.
+        - ONE row per storage id. A flavour and its base share a credential
+          row, so both would log the same account out; two rows for one
+          outcome is a choice the user cannot make correctly.
+        """
+        rows = self.view_rows()
+        if rows is None:
+            return None
+        login_ids = {definition.id for definition in self.login_providers()}
+        seen: set[str] = set()
+        projected: list[ProviderViewRow] = []
+        for row in rows:
+            if row.definition.id not in login_ids or row.stored_credentials <= 0:
+                continue
+            if row.storage_id in seen:
+                continue
+            seen.add(row.storage_id)
+            projected.append(row)
+        return projected
 
     def credentials(self) -> list["StoredCredential"]:
         """Every active stored credential (StoredCredential rows)."""
