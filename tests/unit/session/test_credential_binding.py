@@ -348,9 +348,11 @@ async def test_u2_local_branch_records_this_device_and_the_serving_row(
 async def test_u3_sibling_pick_is_one_change_row_signalled_once(tmp_path: Path) -> None:
     """U3: same owner, new credential_id → exactly one more row, one signal.
 
-    The §4.9 sentence itself is the follow-up slice's copy; this pins the
-    CHANGE SIGNAL it will ride — exactly one append whose previous row exists,
-    so "emitted once" cannot decay into "emitted on every serve".
+    Pins the CHANGE SIGNAL — exactly one append whose previous row exists, so
+    "emitted once" cannot decay into "emitted on every serve" — and, the copy
+    now shipping here, the M3 sentence itself: the fact of the rotation, no
+    deictics. This is the arm the sibling "this turn" lived in, so a
+    re-introduction reds here (review round 2, F1).
     """
     root = tmp_path / "root"
     root.mkdir()
@@ -378,6 +380,20 @@ async def test_u3_sibling_pick_is_one_change_row_signalled_once(tmp_path: Path) 
         assert len(changes) == 2
         assert changes[0][1] is None
         assert changes[1][1] is not None and changes[1][1].credential_id == 42
+
+        # The M3 arm, rendered from exactly this change by the production
+        # renderer: sentence pinned, and the deictic guard applied to the one
+        # arm a re-introduction used to survive (review round 2, F1).
+        from local_operator.network.credentials.messages import (
+            render_binding_change_notice,
+        )
+
+        newest_row, previous_row = changes[1]
+        assert previous_row is not None
+        notice = render_binding_change_notice(newest_row, previous_row, self_device=SELF)
+        assert "went out of rotation" in notice
+        assert f"another {PROVIDER} login" in notice
+        assert "this turn" not in notice and "this device" not in notice
     finally:
         store.close()
 
