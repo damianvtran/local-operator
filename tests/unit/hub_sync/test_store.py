@@ -130,6 +130,17 @@ def test_a_signed_out_item_keeps_the_fact_until_a_fetch_succeeds() -> None:
     assert item["error_class"] is None and item["state"] == "available"
 
 
+def test_a_signed_out_read_retires_the_schedule_the_class_it_replaced_armed() -> None:
+    """M2: replacing a failure class must not leave that failure's timer behind."""
+
+    doc: dict[str, Any] = {}
+    item = _apply(doc)
+    st.record_failure(item, "hub-error", "could not reach the hub: 500")
+    assert item["next_retry_at"] is not None
+    item = _apply(doc, verdict="unavailable", reason="no-credential")
+    assert item["error_class"] == "no-credential" and item["next_retry_at"] is None
+
+
 def test_a_manual_retry_that_computed_retires_the_stale_failure() -> None:
     """U10: the retry proved the update computes, so the row must offer it, not another retry."""
 
