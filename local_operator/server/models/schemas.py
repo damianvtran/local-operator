@@ -1029,6 +1029,7 @@ class SpeechRequest(BaseModel):
         response_format: The format of the audio response. Default: "mp3".
         speed: The speed of the speech. Default: 1.0.
         provider: The provider to use for generation. Default: "openai".
+        language_code: Optional ISO 639-1 language code for the synthesis.
     """
 
     input: str = Field(..., description="The text to generate speech from.")
@@ -1044,6 +1045,13 @@ class SpeechRequest(BaseModel):
     provider: str = Field(
         "openai", description='The provider to use for generation. Default: "openai".'
     )
+    language_code: Optional[str] = Field(
+        None,
+        description=(
+            'Optional ISO 639-1 language code (e.g. "es") for the speech synthesis. '
+            "Omitted when unset so the provider can auto-detect."
+        ),
+    )
 
 
 class AgentSpeechRequest(BaseModel):
@@ -1052,11 +1060,19 @@ class AgentSpeechRequest(BaseModel):
     Attributes:
         input_text: The text to generate speech from.
         response_format: The format of the audio response. Default: "mp3".
+        language_code: Optional ISO 639-1 language code for the synthesis.
     """
 
     input_text: str = Field(..., description="The text to generate speech from.")
     response_format: str = Field(
         "mp3", description='The format of the audio response. Default: "mp3".'
+    )
+    language_code: Optional[str] = Field(
+        None,
+        description=(
+            'Optional ISO 639-1 language code (e.g. "es") for the speech synthesis. '
+            "Omitted when unset so the provider can auto-detect."
+        ),
     )
 
 
