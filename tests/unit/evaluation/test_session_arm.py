@@ -63,12 +63,15 @@ from local_operator.evaluation.protocol import (
     FrameSize,
     Observation,
 )
+from local_operator.evaluation.record_sink import RecordSinkError
 from local_operator.evaluation.session_arm import (
     BRIDGE_WEDGED_TERMINAL,
     RECOVERY_AFTER_READBACK_LOSS,
     ActionBridge,
     ObservationRenderer,
     SessionArmError,
+    _agent_stop_terminal_reason,
+    _failure_terminal_reason,
     assert_declaration_resolved,
     declare_action_server,
     open_episode_session,
@@ -78,6 +81,7 @@ from local_operator.evaluation.session_arm import (
     split_prompt_content,
 )
 from local_operator.harness.types import (
+    AgentEndEvent,
     AudioContent,
     ImageContent,
     Message,
@@ -87,6 +91,7 @@ from local_operator.harness.types import (
     ToolContext,
     TurnEndEvent,
 )
+from local_operator.incidents import classify_incident, render_cut_off_reason
 from local_operator.mcp.manager import McpManager
 from local_operator.session.spec import ApprovalPolicy, SessionRoots, SessionSpec
 from tests.unit.evaluation.runner.conftest import (
@@ -1582,7 +1587,15 @@ class _ScriptedSession:
     and the loop stops the way the real one stops -- at the post-tool
     boundary, after the driver has asked for a graceful cancel."""
 
-    def __init__(self, scratch_root: Path, script: list[list[dict[str, Any]]]) -> None:
+    def __init__(
+        self,
+        scratch_root: Path,
+        script: list[list[dict[str, Any]]],
+        *,
+        terminal_message: Message | None = None,
+        terminal_end: AgentEndEvent | None = None,
+        hold_s: float = 0.0,
+    ) -> None:
         self._scratch_root = Path(scratch_root)
         self._script = list(script)
         self._sinks: list[Any] = []
@@ -1592,6 +1605,16 @@ class _ScriptedSession:
         self.replies: list[dict[str, Any]] = []
         self.cancels: list[str] = []
         self.aborts: list[str] = []
+        self.prompts: list[tuple[str, bool]] = []
+        #: The terminal frames every ``prompt`` ends on, when a test scripts an
+        #: ending shape: the assistant message the loop folds, and the
+        #: ``agent_end`` frame that says why the turn ended. ``None`` keeps the
+        #: wedge tests' shape -- no end frames, only the batches.
+        self._terminal_message = terminal_message
+        self._terminal_end = terminal_end
+        #: How long one ``prompt`` holds before it returns. Lets the wall bound
+        #: fire mid-turn the way it does against a real provider.
+        self._hold_s = hold_s
 
     def subscribe(self, sink: Any) -> Any:
         self._sinks.append(sink)
@@ -1609,7 +1632,10 @@ class _ScriptedSession:
     async def prompt(
         self, text: str, *, images: Any = None, harness_injected: bool = False
     ) -> None:
-        del text, images, harness_injected
+        del images
+        self.prompts.append((text, harness_injected))
+        if self._hold_s:
+            await asyncio.sleep(self._hold_s)
         endpoint = next(iter(sorted(self._scratch_root.glob("b-*.sock"))))
         while self._script:
             reply = await self._call(endpoint, self._script.pop(0))
@@ -1619,6 +1645,10 @@ class _ScriptedSession:
                 break  # the post-tool boundary the real loop stops at
             if (reply.get("details") or {}).get("terminal") == BRIDGE_WEDGED_TERMINAL:
                 break
+        if self._terminal_message is not None:
+            self._emit(MessageEndEvent(message=self._terminal_message))
+        if self._terminal_end is not None:
+            self._emit(self._terminal_end)
 
     async def _call(self, endpoint: Path, actions: list[dict[str, Any]]) -> dict[str, Any]:
         reader, writer = await asyncio.open_unix_connection(str(endpoint))
@@ -1821,3 +1851,341 @@ class TestBridgeWedgeOutcome:
         # harness bridged it"), not a suspiciously clean run.
         events = (outcome.record_root / "events.jsonl").read_text(encoding="utf-8")
         assert "action_recovered" in events
+
+
+# ---------------------------------------------------------------------------
+# The agent_stop terminal reasons: the outcome names what ended the turn
+# ---------------------------------------------------------------------------
+
+
+class TestAgentStopTerminalReason:
+    """Every ending has its own token, read from the shared end-of-turn facts.
+
+    The record used to leave ``terminal_reason`` None for every ending that is
+    not a finish, a truncation or a wedge (arm 1796: 13 of 40 episodes), which
+    made the model stopping, a completion claim, an empty message, the wall
+    bound, a cut-off and a provider error indistinguishable without re-reading
+    ``events.jsonl``. These tests pin the mapping, the precedence, and the
+    diagnostic detail each reason carries.
+    """
+
+    def _message(self, text: str) -> Message:
+        return Message(
+            role="assistant",
+            content=[TextContent(text=text)] if text else [],
+            stop_reason="stop",
+        )
+
+    def test_the_wall_bound_outranks_the_end_event(self) -> None:
+        reason, detail = _agent_stop_terminal_reason(
+            wall_fired=True,
+            end=AgentEndEvent(),
+            message=self._message("still working"),
+            challenges=0,
+        )
+        assert reason == "wall-bound"
+        assert detail == "the episode wall budget aborted the turn"
+
+    def test_a_provider_error_carries_the_classified_category(self) -> None:
+        error = (
+            "invalid request (HTTP 400): tool_calls[0].function.name must be a "
+            "non-empty string (got empty string)"
+        )
+        reason, detail = _agent_stop_terminal_reason(
+            wall_fired=False,
+            end=AgentEndEvent(error=error),
+            message=self._message(""),
+            challenges=0,
+        )
+        assert reason == "provider-error"
+        assert detail == f"{classify_incident(error).category}: {error}"
+
+    def test_a_gate_stop_and_a_no_progress_limit_keep_the_loop_s_words(self) -> None:
+        assert _agent_stop_terminal_reason(
+            wall_fired=False,
+            end=AgentEndEvent(aborted=True, error="stopped by gate"),
+            message=None,
+            challenges=0,
+        ) == ("gate-stop", "stopped by gate")
+        no_progress = (
+            "No progress: apply_actions returned the same errors for 3 unchanged "
+            "tool batches. Change the arguments or resolve the reported blocker "
+            "before retrying."
+        )
+        assert _agent_stop_terminal_reason(
+            wall_fired=False,
+            end=AgentEndEvent(error=no_progress),
+            message=None,
+            challenges=0,
+        ) == ("no-progress", no_progress)
+
+    def test_a_cut_off_carries_its_cause_token_and_sentence(self) -> None:
+        reason, detail = _agent_stop_terminal_reason(
+            wall_fired=False,
+            end=AgentEndEvent(aborted=True, cut_off_cause="continuation-limit"),
+            message=None,
+            challenges=0,
+        )
+        assert reason == "continuation-limit"
+        assert detail == render_cut_off_reason("continuation-limit")
+
+    def test_an_abort_without_a_cause_is_named_an_abort(self) -> None:
+        reason, detail = _agent_stop_terminal_reason(
+            wall_fired=False, end=AgentEndEvent(aborted=True), message=None, challenges=0
+        )
+        assert reason == "aborted"
+        assert detail
+
+    def test_a_clean_stop_reads_the_terminal_message(self) -> None:
+        # No message at all, and an empty message, are the same reader signal:
+        # the model's stop has nothing to have said.
+        assert (
+            _agent_stop_terminal_reason(
+                wall_fired=False, end=AgentEndEvent(), message=None, challenges=0
+            )[0]
+            == "empty-message"
+        )
+        assert (
+            _agent_stop_terminal_reason(
+                wall_fired=False,
+                end=AgentEndEvent(),
+                message=self._message(""),
+                challenges=0,
+            )[0]
+            == "empty-message"
+        )
+
+        claim = "Done. Summary of what I determined and did: everything checks out."
+        reason, detail = _agent_stop_terminal_reason(
+            wall_fired=False,
+            end=AgentEndEvent(),
+            message=self._message(claim),
+            challenges=0,
+        )
+        assert reason == "completion-claim"
+        assert detail is not None
+        assert "claims completion" in detail
+        assert "Done. Summary" in detail
+
+        reason, detail = _agent_stop_terminal_reason(
+            wall_fired=False,
+            end=AgentEndEvent(),
+            message=self._message("I'll stop here for now."),
+            challenges=0,
+        )
+        assert reason == "no-tool-call"
+        assert detail is not None
+        assert "carries no tool call" in detail
+
+    def test_the_challenge_count_rides_the_diagnostic(self) -> None:
+        claim = "Done. Summary of what I determined and did: everything checks out."
+        for message in (self._message(claim), self._message("I'll stop here for now.")):
+            reason, detail = _agent_stop_terminal_reason(
+                wall_fired=False, end=AgentEndEvent(), message=message, challenges=1
+            )
+            assert reason in {"completion-claim", "no-tool-call"}
+            assert detail is not None
+            assert "challenged it 1 time(s)" in detail
+
+    def test_a_missing_end_event_is_stated_not_left_silent(self) -> None:
+        reason, detail = _agent_stop_terminal_reason(
+            wall_fired=False, end=None, message=None, challenges=0
+        )
+        assert reason == "stopped"
+        assert detail
+
+
+class TestFailureTerminalReason:
+    """A failed run names the phase it died in, not just ``failed``."""
+
+    def test_a_sink_refusal_is_the_record_sink(self) -> None:
+        error = RecordSinkError(
+            "the volume cannot hold the expected record plus its seal reserve",
+            path=Path("/record/root"),
+        )
+        assert _failure_terminal_reason(error) == "record-sink"
+
+    def test_the_record_sink_sentence_wins_over_its_wrapper(self) -> None:
+        # The observed shape: ``SessionArmError`` wraps the sink's own sentence.
+        error = SessionArmError("the record sink failed: OSError(28, 'No space left on device')")
+        assert _failure_terminal_reason(error) == "record-sink"
+
+    def test_an_environment_setup_death_names_the_reset(self) -> None:
+        error = RpcRemoteError(
+            "adapter_error",
+            "adapter operation failed [EnvironmentSetupError: [first reset setup attempt failed]]",
+        )
+        assert _failure_terminal_reason(error) == "environment-setup"
+
+    def test_an_allocation_refusal_names_the_allocation(self) -> None:
+        error = RpcRemoteError(
+            "adapter_error",
+            "adapter operation failed [UpstreamAllocationRefused: upstream refused]",
+        )
+        assert _failure_terminal_reason(error) == "environment-allocation"
+
+    def test_the_fallback_is_the_exception_class_kebabed(self) -> None:
+        assert _failure_terminal_reason(SessionArmError("no action tool")) == "session-arm"
+        assert _failure_terminal_reason(RuntimeError("boom")) == "runtime-error"
+
+
+class TestAgentStopOutcome:
+    """An ``agent_stop`` through ``run_session_episode`` carries its reason.
+
+    The arm-level contract: the same ending as before -- status, steps and
+    score untouched -- with the outcome naming what ended the turn, read from
+    the same events every surface consumes (never from adapter state).
+    """
+
+    def _fixture(
+        self,
+        *,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        scratch_root: Path,
+        script: list[list[dict[str, Any]]],
+        terminal_message: Message | None = None,
+        terminal_end: AgentEndEvent | None = None,
+        hold_s: float = 0.0,
+        max_wall_s: float | None = None,
+    ) -> tuple[Any, _ScriptedSession, Any]:
+        home = scratch_root / "home"
+        config_dir = home / ".local-operator"
+        agent_home = home / "local-operator-home"
+        work = home / "work"
+        for path in (config_dir, agent_home, work):
+            path.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+        monkeypatch.setenv("LOCAL_OPERATOR_HOME", str(agent_home))
+        roots = SessionRoots(
+            config_dir=config_dir, agent_home=agent_home, cwd=work, allow_volatile=True
+        )
+        spec = build_spec("ep-ending")
+        config = build_config(tmp_path, observation_retry_delay=0.0)
+        # ``_WedgeAdapter`` with its failure injection switched off is the
+        # capable fake the arm needs (``ask_user_answer_owner: adapter``) in a
+        # healthy environment; the plain ``FakeAdapter`` is refused at the
+        # handshake, which is a different test's subject.
+        adapter = _WedgeAdapter(
+            tmp_path,
+            spec.episode_id,
+            fail_executes=0,
+            recoverable=True,
+            score=ScoreArtifact(status="scored", binary=0),
+        )
+        session = _ScriptedSession(
+            scratch_root,
+            script,
+            terminal_message=terminal_message,
+            terminal_end=terminal_end,
+            hold_s=hold_s,
+        )
+        session_spec = SessionSpec(
+            hosting="test",
+            model="mock",
+            approvals=ApprovalPolicy.auto(),
+            name="arm-ending",
+        )
+
+        async def rescue(descriptor: Any, **kwargs: Any) -> Any:
+            del descriptor, kwargs
+            return SimpleNamespace(complete=True, receipts=(), rescue_required=False)
+
+        def launch(selected: Any) -> Any:
+            del selected
+            return adapter
+
+        def opener(selected: Any, *, roots: Any, mode: Any = None) -> Any:
+            del selected, roots, mode
+            return _OpenContext(session)
+
+        async def run() -> Any:
+            return await run_session_episode(
+                spec=spec,
+                config=config,
+                selector=selector(tmp_path),
+                roots=roots,
+                scratch_root=scratch_root,
+                session_spec=session_spec,
+                secrets=(),
+                launch=launch,
+                rescue=rescue,
+                session_opener=opener,
+                max_wall_s=max_wall_s,
+            )
+
+        return run, session, adapter
+
+    @pytest.mark.asyncio
+    async def test_a_provider_error_ending_names_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        error = "provider timeout (HTTP 504): Upstream idle timeout exceeded"
+        run, session, adapter = self._fixture(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            scratch_root=short_scratch,
+            script=[[{"kind": "wait", "duration_ms": 10}]],
+            terminal_message=Message(role="assistant", content=[], stop_reason="error"),
+            terminal_end=AgentEndEvent(error=error),
+        )
+        outcome = await run()
+
+        assert outcome.status == "agent_stop"
+        assert outcome.terminal_reason == "provider-error"
+        assert outcome.diagnostic == f"{classify_incident(error).category}: {error}"
+        # The ending still scores the state reached, exactly as before the label.
+        assert outcome.score is not None
+        assert outcome.steps == 1
+        assert adapter.calls.count("execute") == 1
+        assert len(session.replies) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_completion_claim_ending_says_so_after_the_challenge(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        claim = "Done. Summary of what I determined and did: everything checks out."
+        run, session, adapter = self._fixture(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            scratch_root=short_scratch,
+            script=[[{"kind": "wait", "duration_ms": 10}]],
+            terminal_message=Message(
+                role="assistant", content=[TextContent(text=claim)], stop_reason="stop"
+            ),
+            terminal_end=AgentEndEvent(),
+        )
+        outcome = await run()
+
+        assert outcome.status == "agent_stop"
+        assert outcome.terminal_reason == "completion-claim"
+        assert outcome.diagnostic is not None
+        assert "claims completion" in outcome.diagnostic
+        assert "challenged it 1 time(s)" in outcome.diagnostic
+        # The gate really delivered: the claim got its re-prompt, and the
+        # episode still ended without a batch.
+        assert [prompt[1] for prompt in session.prompts] == [False, True]
+        assert outcome.steps == 1
+        assert adapter.calls.count("execute") == 1
+
+    @pytest.mark.asyncio
+    async def test_the_wall_bound_ending_names_itself(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        run, session, adapter = self._fixture(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            scratch_root=short_scratch,
+            script=[],
+            hold_s=0.05,
+            max_wall_s=0.01,
+        )
+        outcome = await run()
+
+        assert outcome.status == "agent_stop"
+        assert outcome.terminal_reason == "wall-bound"
+        assert outcome.diagnostic == "the episode wall budget aborted the turn"
+        # The abort went through the session's normal stop path; nothing ran.
+        assert session.aborts == ["episode wall budget"]
+        assert adapter.calls.count("execute") == 0
