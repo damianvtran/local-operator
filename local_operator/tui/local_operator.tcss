@@ -2147,6 +2147,19 @@ Screen.settings #input-dock #prompt-chevron {
     height: auto;
 }
 
+/* The updates feed's child rows sit two cells in from their stamp: an entry's
+ * own paragraph break then reads as the smaller unit and a new stamp, back at
+ * column 0, as the larger one (design review round 1, D3). Horizontal padding
+ * only — the sheet declares exactly one vertical spacing rule (`.gap-above`),
+ * and a second source of row-height would be the decay the minimalism guard
+ * exists to stop. The day group's blank row rides that same `.gap-above`. */
+.projects-detail-update-body,
+.projects-detail-update-marker,
+.projects-detail-attachment,
+.projects-detail-attachment-path {
+    padding-left: 2;
+}
+
 /* One blank line before every section heading rides the sheet's single
  * sanctioned spacing declaration (`.gap-above`), applied by the page — a
  * margin here would be a second source the minimalism guard reads as a
