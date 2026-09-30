@@ -61,6 +61,7 @@ def _row(index: int, text: str) -> str:
 
 def seed(root: Path, session_id: str, *, rows: int = 3) -> Path:
     """One session with the WHOLE copy set, so a test can assert it all travels."""
+    from local_operator.asks.store import ASKS_LOG_NAME
     from local_operator.fork import (
         BOOT_PROMPT_NAME,
         FORK_BOUNDARY_NAME,
@@ -95,6 +96,39 @@ def seed(root: Path, session_id: str, *, rows: int = 3) -> Path:
     (directory / TURN_JOURNAL_NAME).write_text(json.dumps({"turn": 2}), encoding="utf-8")
     (directory / STOP_MARKER_NAME).write_text(json.dumps({"rung": "sigterm"}), encoding="utf-8")
     (directory / INBOX_NAME).write_text(json.dumps({"id": "m1"}) + "\n", encoding="utf-8")
+    # THE ASK QUEUE'S LOG (``asks/store.ASKS_LOG_NAME``): an ask still open when a
+    # session is copied has to travel with it, or the destination reads as a
+    # session nobody asked anything and refuses the answer already given. Same
+    # class as ``inbox.jsonl`` above — an append-only log the session owns — and
+    # in the fixture for the reason the KERNEL marker is: the round trip below
+    # asserts every COPY_SET_NAMES member arrives.
+    (directory / ASKS_LOG_NAME).write_text(
+        json.dumps(
+            {
+                "v": 1,
+                "kind": "queued",
+                "ask_id": "a-1234",
+                "at": 1_700_000_000_000,
+                "expires_at": 1_700_003_600_000,
+                "timeout_s": 3600,
+                "urgent": False,
+                "tool_call_id": "call-1",
+                "questions": [
+                    {
+                        "id": "q0",
+                        "question": "deploy or roll back?",
+                        "options": [],
+                        "multi": False,
+                        "secret": False,
+                        "persist": False,
+                        "recommended": None,
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     (directory / FORK_BOUNDARY_NAME).write_text(
         json.dumps({"version": FORK_BOUNDARY_VERSION}), encoding="utf-8"
     )
@@ -163,6 +197,7 @@ def test_the_copy_set_names_match_the_modules_that_own_them() -> None:
     half of that is ``test_sync_copy_set.py``, which imports the entry names from
     the modules that create them.
     """
+    from local_operator.asks.store import ASKS_LOG_NAME
     from local_operator.fork import BOOT_PROMPT_NAME, FORK_BOUNDARY_NAME
     from local_operator.resume import (
         ATTACHMENT_SIDECAR_NAME,
@@ -187,6 +222,7 @@ def test_the_copy_set_names_match_the_modules_that_own_them() -> None:
         TURN_JOURNAL_NAME,
         STOP_MARKER_NAME,
         INBOX_NAME,
+        ASKS_LOG_NAME,
         FORK_BOUNDARY_NAME,
         DESKTOP_MARKER_NAME,
         # The session's birth time: without it a moved conversation reads as

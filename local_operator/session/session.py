@@ -3656,6 +3656,12 @@ class Session:
         #: ``_ask_cwd`` is carried into the derived index so the aggregate
         #: "all my open asks" view can name a session without opening it.
         self._ask_queue: Any = None
+        # Serializes the ask queue's two wake-row writers (``arm_ask_wake`` /
+        # ``retire_ask_wake``). They are the only writers that BUILD a whole list
+        # and hand it to a full-list writer, so two of them interleaving lose one
+        # of the rows: the snapshot and the write have to happen together, which
+        # is what this lock is for (review round 1, MAJOR 4).
+        self._ask_wake_lock = asyncio.Lock()
         self._ask_reach: Callable[[], Any] | None = None
         # The monitor scheduler is the wake scheduler's twin (design
         # monitor-tool.md §5.1): in-process, one timer, a persist callback and
@@ -8340,22 +8346,48 @@ class Session:
         effort by the same contract every wake writer has: a failed index write
         must never take down the ask it describes, and the in-runtime timer still
         covers the deadline.
+
+        THE SNAPSHOT IS TAKEN INSIDE THE LOCK AND INSIDE THE COROUTINE (review
+        round 1, MAJOR 4). Building the list here and handing it to a spawned
+        ``update`` is a read-modify-write against a full-list writer, and three
+        arms in a row were therefore all built from the same pre-yield list: the
+        last write carried only the last row and the others were gone. A lost
+        deadline row degrades SILENTLY to the in-runtime timer, which is the cold
+        durability this engine exists to provide, so the loss is invisible until
+        a runtime dies with an ask open. Reading after the lock is taken also means
+        a user ``wake`` created in the gap is in the list the write carries.
         """
+
+        async def _apply() -> None:
+            async with self._ask_wake_lock:
+                rows = [r for r in self._wake.schedules if getattr(r, "id", "") != row.id]
+                rows.append(row)
+                await self._wake.update(rows)
+
         try:
-            rows = [r for r in self._wake.schedules if getattr(r, "id", "") != row.id]
-            rows.append(row)
-            self._spawn_background(self._wake.update(rows))
+            self._spawn_background(_apply())
         except Exception:  # noqa: BLE001 — degrade to the in-runtime timer
             logger.warning("ask: could not arm the deadline wake row", exc_info=True)
 
     def retire_ask_wake(self, row_id: str) -> None:
-        """Drop an internal ``ask_timeout`` row once its ask is terminal."""
+        """Drop an internal ``ask_timeout`` row once its ask is terminal.
+
+        Same lock and same reason as :meth:`arm_ask_wake`: a retire racing an arm
+        must not restore the row the arm just removed, nor drop the row the arm
+        just added. An id that is absent is not a write at all, so a retire for an
+        ask that never armed one costs no wake-list write.
+        """
+
+        async def _apply() -> None:
+            async with self._ask_wake_lock:
+                current = list(self._wake.schedules)
+                rows = [r for r in current if getattr(r, "id", "") != row_id]
+                if len(rows) == len(current):
+                    return
+                await self._wake.update(rows)
+
         try:
-            current = list(self._wake.schedules)
-            rows = [r for r in current if getattr(r, "id", "") != row_id]
-            if len(rows) == len(current):
-                return
-            self._spawn_background(self._wake.update(rows))
+            self._spawn_background(_apply())
         except Exception:  # noqa: BLE001 — best-effort, like every wake-index writer
             logger.warning("ask: could not retire the deadline wake row", exc_info=True)
 
@@ -8473,7 +8505,9 @@ class Session:
             return None
         return self._enqueue_ask
 
-    def _enqueue_ask(self, questions: list[Any], timeout: Any = None) -> dict[str, Any]:
+    def _enqueue_ask(
+        self, questions: list[Any], timeout: Any = None, tool_call_id: str = ""
+    ) -> dict[str, Any]:
         """Queue one ask and return the tool's receipt (or a refusal).
 
         Thin by design: the caps, the log write, the index and the deadline row
@@ -8483,7 +8517,7 @@ class Session:
         queue = self.ask_queue()
         if queue is None:  # pragma: no cover — the tool only calls this when set
             return {"ok": False, "error": "this session has no queued-ask engine"}
-        return queue.enqueue(questions, timeout)
+        return queue.enqueue(questions, timeout, tool_call_id=tool_call_id)
 
     def respond_ask(
         self, ask_id: str, answers: Mapping[str, Sequence[str]], *, by: str = "unknown"

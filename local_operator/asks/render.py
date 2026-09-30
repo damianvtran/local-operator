@@ -79,6 +79,16 @@ TIMEOUT_URGENT = (
     "`task` subagent with the relevant expertise and decide on its answer."
 )
 
+#: Added when the deadline passed while the session was STOPPED (design §2.2). The
+#: notice is owed either way — the agent still has to know it has no answer — but
+#: without this sentence the timing reads as the agent having been slow to notice,
+#: and the user who stopped the session gets told the agent moved on as though
+#: they had been watching.
+TIMEOUT_LAPSED_WHILE_STOPPED = (
+    "This ask lapsed while the session was stopped, so the notice could not be "
+    "delivered when the deadline passed."
+)
+
 #: A secret ask's timeout NEVER quotes the prompt text (the question may itself
 #: describe a credential) — it names the key and says the value did not arrive.
 TIMEOUT_SECRET = (
@@ -115,13 +125,21 @@ def receipt_text(record: Mapping[str, Any], reach: str | None) -> str:
     )
 
 
-def response_text(record: Mapping[str, Any]) -> str:
+def response_text(record: Mapping[str, Any], *, secret_lost: bool = False) -> str:
     """The text for an ``ask_response`` row — answered, declined, or late.
 
     All three are the SAME custom type and the same id (design §2.3): a decline
     is a response-shaped fact, and reusing the type keeps one registration, one
     render branch and one entry kind — so a miss cannot silently drop one of
     them. Only ``text`` and ``status`` differ.
+
+    ``secret_lost`` is the verify-on-delivery half of §2.4 (review round 1, MAJOR
+    3): when the caller has established that a key this row announces is no longer
+    in the session's store, :data:`SECRET_VALUE_LOST` LEADS the text. It leads
+    rather than trails because the report below is written as a delivered answer,
+    and a model that reads the bottom line into a plan has already gone wrong by
+    the time it reaches a caveat — the same reason the refusal copy for a version
+    skew leads with the refusal.
     """
     from local_operator.tools.builtin import (
         ASK_SECRET_UNANSWERED_TEXT,
@@ -142,18 +160,30 @@ def response_text(record: Mapping[str, Any]) -> str:
         )
     else:
         text = _ask_report(_question_models(questions), answers)
+    if secret_lost:
+        # The key name is not repeated here and the QUESTION TEXT is not quoted:
+        # a secret question's prompt may itself describe the credential, so this
+        # branch says only what happened and what to do about it.
+        text = f"{SECRET_VALUE_LOST}\n{text}"
     if status == "late":
         return LATE_LEAD.format(deadline=_stamp(record.get("expires_at"))) + text
     return text
 
 
-def timeout_text(record: Mapping[str, Any], *, now_ms: int) -> str:
+def timeout_text(
+    record: Mapping[str, Any], *, now_ms: int, lapsed_while_stopped: bool = False
+) -> str:
     """The text for an ``ask_timeout`` row (design §2.5).
 
     Delivered to the model as an injected user-role message with a bracketed
     header — the ``wake_prompt`` shape — and never as "the user denied": nobody
     denied anything, the window simply closed. A secret ask names the key and
     nothing else.
+
+    ``lapsed_while_stopped`` appends :data:`TIMEOUT_LAPSED_WHILE_STOPPED`, which is
+    the stop rule's copy half (§2.2): the row is delivered at reopen for a deadline
+    that passed with nothing running, and the reason it is late is the user's own
+    stop rather than the agent's inattention.
     """
     questions = list(record.get("questions") or [])
     expires_at = int(record.get("expires_at") or 0)
@@ -161,18 +191,21 @@ def timeout_text(record: Mapping[str, Any], *, now_ms: int) -> str:
     asked = _stamp(record.get("created_at"))
     if any(q.get("secret") for q in questions):
         keys = ", ".join(str(q.get("id")) for q in questions if q.get("secret")) or "requested"
-        return TIMEOUT_SECRET.format(
+        text = TIMEOUT_SECRET.format(
             ask_id=record.get("ask_id", ""), waited=waited, asked=asked, keys=keys
         )
-    listing = "; ".join(_clip(str(q.get("question") or ""), 200) for q in questions)
-    text = TIMEOUT_NOTICE.format(
-        ask_id=record.get("ask_id", ""),
-        waited=waited,
-        asked=asked,
-        questions=listing,
-    )
+    else:
+        listing = "; ".join(_clip(str(q.get("question") or ""), 200) for q in questions)
+        text = TIMEOUT_NOTICE.format(
+            ask_id=record.get("ask_id", ""),
+            waited=waited,
+            asked=asked,
+            questions=listing,
+        )
     if record.get("urgent"):
         text = f"{text}\n{TIMEOUT_URGENT}"
+    if lapsed_while_stopped:
+        text = f"{text}\n{TIMEOUT_LAPSED_WHILE_STOPPED}"
     return text
 
 

@@ -226,6 +226,17 @@ class AskErrand:
     supervisor sweep or a user reopening the session, the boot path it runs is
     the same one. ``ask_id`` is carried for the log line and the derived
     ``command_id`` only — no code branches on it.
+
+    **It has no constructor call site yet, and the DEADLINE path will never need
+    one** (review round 1, NIT 10). A due ``ask_timeout`` row IS a wake row, so the
+    supervisor engages a runtime with :class:`WakeErrand` and the boot reconcile
+    does the delivering — wiring an errand into that path would be the second
+    timer substrate the design's D10 exists to avoid. The caller this exists for is
+    the COLD ANSWER: a surface that records an answer while no runtime is running
+    and then engages one so the response is delivered, which is the desktop/relay
+    route's cold arm in A2/B (§6). Declared here so that call site passes a legal
+    payload instead of inventing one, and stated in the PR body so its absence is
+    read as deliberate rather than unwired.
     """
 
     ask_id: str = ""

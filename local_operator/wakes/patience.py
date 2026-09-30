@@ -617,7 +617,11 @@ def plan_arm(
     due = min(now_ms + wait, deadline)
 
     if existing is None:
-        if len(rows) >= MAX_WAKE_SCHEDULES:
+        # THE USER'S OWN BUDGET, not the row count (review round 1, MINOR 7):
+        # the ask deadline rows ride this same list, so counting them here would
+        # let eight open asks refuse a person the wait they asked for while the
+        # error still quoted the sixteen the switch really allows.
+        if len(scheduled_rows(rows)) >= MAX_WAKE_SCHEDULES:
             return ArmOutcome(error=f"at most {MAX_WAKE_SCHEDULES} wake schedules are allowed.")
         if len(pending) >= pol.max_pending:
             return ArmOutcome(

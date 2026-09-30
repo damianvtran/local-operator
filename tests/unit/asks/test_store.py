@@ -201,12 +201,21 @@ def test_delivered_needs_a_row_that_exists_not_a_status():
     assert delivered["delivered"] is True
 
 
-def test_expected_rows_are_per_kind_and_late_needs_both():
+def test_expected_rows_are_per_kind_and_late_needs_the_response_alone():
+    """A `late` ask owes ONE row, and that is the level-triggered rule.
+
+    The response SUPERSEDES the deadline row for good (review round 1, MAJOR 2): a
+    per-batch suppression let the next reconcile write the timeout row below the
+    answer it announced. The two rows can still both EXIST for one ask — when the
+    deadline genuinely fired first, in its own reconcile — which is why the
+    delivery marker stays per (ask, kind) rather than one boolean.
+    """
     late = {"ask_id": "a-1", "status": store.STATUS_LATE}
-    assert store.expected_row_ids(late) == [
-        store.timeout_row_id("a-1"),
-        store.response_row_id("a-1"),
-    ]
+    assert store.expected_row_ids(late) == [store.response_row_id("a-1")]
+    timed_out = {"ask_id": "a-1", "status": store.STATUS_TIMED_OUT}
+    assert store.expected_row_ids(timed_out) == [store.timeout_row_id("a-1")]
+    answered = {"ask_id": "a-1", "status": store.STATUS_ANSWERED}
+    assert store.expected_row_ids(answered) == [store.response_row_id("a-1")]
     dismissed = {"ask_id": "a-1", "status": store.STATUS_DISMISSED}
     assert store.expected_row_ids(dismissed) == []
     # A dismissed ask that HAD a row keeps its delivered flag; the row is the
