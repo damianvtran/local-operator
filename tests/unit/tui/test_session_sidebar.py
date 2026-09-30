@@ -713,10 +713,10 @@ async def test_sidebar_escape_restores_settings_and_current_narrow_selection_clo
         await pilot.pause()
         settings_focus = app.focused
         assert settings_focus is not None and settings_focus is not app._editor()
-        # Entered the list the way its own footer names (f9), not by clicking it:
-        # a pointer press on the list no longer moves the keyboard (design round
-        # D1, `SessionSidebar.FOCUS_ON_CLICK = False`), so a click could not put
-        # the sidebar in the state this test is about any more.
+        # Entered the list the way its own footer names (f9). The premise is the
+        # keyboard route, not the pointer: a press also enters this state now
+        # (issue #1357 click-to-focus), but this test's subject is the f9 entry
+        # whose Escape must restore the surface the list replaced.
         app.action_focus_sidebar()
         await pilot.pause()
         assert app._session_sidebar.has_focus, "premise: f9 focused the list"
@@ -4728,9 +4728,11 @@ async def test_the_chip_press_works_while_the_list_is_focused():
     """The pointer route is an ADDITION to the chord, never a replacement.
 
     With the list focused (F9 mode) the same press flips the same flag, and
-    the keyboard does not move: a press never changes focus on this panel
-    (``FOCUS_ON_CLICK = False``), so the chord and the pointer stay
-    independent ways to the same flip.
+    the keyboard does not move: the chip's cells are exempt from the
+    click-to-focus walk (the reconciliation with that slice), so the chord and
+    the pointer stay independent ways to the same flip. That exemption is what
+    keeps this true now — the retired `FOCUS_ON_CLICK = False` no longer does,
+    since a row or dead-space press does take the keyboard.
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:

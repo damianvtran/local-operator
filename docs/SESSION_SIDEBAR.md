@@ -4,12 +4,73 @@ The sidebar is an opt-in terminal view over existing session runtimes, not anoth
 runtime or a new scheduler. `Ctrl+B` and `/sidebar` toggle visibility without moving
 the editor caret. `F9` and `/sidebar focus` enter the list; F9 returns focus while
 leaving it open, and Escape dismisses it and returns to the last usable surface.
+A pointer press on the panel enters the list too (the `⌥` chip's own cells
+are the one exception — they run the chip's action); typed text lands in the
+composer while no hard claimant holds the keyboard — see "Click-to-focus and
+typing-home" below.
 `Ctrl+Shift+↑`/`Ctrl+Shift+↓` attach the previous/next conversation directly — the
 one-press form of F9-then-arrow-then-Enter — in the list's own ranking, wrapping
 at the ends and without moving the caret; with the list closed the catalog is read
 fresh first so "next" is what the list would show, never a stale snapshot.
 Settings control visibility and left/right placement. Narrow layouts use a drawer
 that ends above the input dock and closes after any valid selection.
+
+## Click-to-focus and typing-home
+
+A pointer press on the list — a row, the pin cell, or the panel's chrome — moves
+the keyboard to it and wears the panel's focus ground (issue #1357 principles
+1–3; decided in `### lopdev — design decision: click-to-focus` on the issue).
+The row press still does what it always did — attach/open, with the cursor moving
+to the pressed row — and the pin cell still pins without opening. A press on the
+header, the `+N more pinned` line, the dead space below the rows or the footer
+takes the keyboard without acting on any row — with ONE exception: the `⌥`
+chip's own cells, a control with its own action, run the layer flip and leave
+the keyboard where it is (see "The ⌥ subagent layer"). Pinning keeps its cell
+and `F10`; there is no plain-key mnemonic for it, so `Space` types like every
+other printable key.
+
+The list never keeps the keyboard *for text*: any printable character, or a
+bracketed paste, delivered to it is handed to the composer and the composer takes
+the keyboard back. This holds however the list's keyboard mode was entered — a
+press, `F9` or `/sidebar focus`. The one exception is a hard claimant (below):
+its keys stay with it, and `F9` can still reach that state over a live question
+even though a press cannot — a key typed there is neither delivered nor an
+answer. That corner is pre-existing and frozen by the decision, not part of this
+contract. The delivery otherwise goes through the composer's own handler (a
+fresh key/paste is posted to it after focus moves, the same forwarding the
+transcript uses), so the draft, caret, shell mode and paste machinery see
+exactly what a focused composer would.
+
+Three rules bound the press:
+
+* **A hard claimant keeps its keys.** A live approval, an ask picker, the aside,
+  a full-page mode (subagent view, org chart, settings, login prompt) or a pushed
+  screen, and a read-only composer, all refuse the press's keyboard move — the
+  press may still act on the row, but focus moves nowhere. This is the same
+  predicate the composer's own focus routes consult (`_focus_is_claimed()`), held
+  from `Screen._forward_event`'s click-to-focus walk before any handler runs.
+* **The `⌥` chip's cells are a control, not a panel press.** A press on them runs
+  the chip's action (the layer flip) and the keyboard stays where it was; one
+  cell off the chip is a normal press on the panel and takes the keyboard. The
+  chip's cells are read from the footer as painted when the press lands, because
+  the focus move itself repaints the ladder.
+* **A closed panel never holds the keyboard.** In the narrow drawer placement a
+  valid selection closes the drawer and the keyboard returns to the composer. A
+  press on a row the app cannot open (a stale row, a refused peer) is not a
+  valid selection: the drawer stays open and the list keeps the keyboard —
+  typing-home still delivers — until a valid selection or `esc` closes it.
+
+The one shipped behaviour this decision changes: pressing the *already-attached*
+session's row keeps the keyboard on the list rather than returning it to the
+composer — every row press behaves alike, and typing-home makes the cost a
+single keystroke, because the first one is typed rather than discarded.
+
+Key meanings follow the keyboard, structurally. With the list focused: `enter`
+opens the cursor row, `esc` dismisses the panel and returns the keyboard to where
+it was before the panel opened (else to the composer), `f9` toggles the list's
+keyboard mode without closing it, `f10` pins, `up`/`down`/`PageUp`/`PageDown`/
+`Home`/`End` move the list's cursor window, and `ctrl+b` hides the panel. With the
+composer focused they keep their composer meanings unchanged.
 
 ## Sections, pins and the subagent layer
 
@@ -67,7 +128,8 @@ frame — the caret keeps its own cell beside it, so a pinned row that is also
 the cursor shows both facts — and an unpinned row shows `☆` while the pointer
 rests on it. That cell is what a click toggles; clicking anywhere else on the
 row keeps the behaviour it always had (open/select), and a click meant for the
-star never opens or selects the row.
+star never opens or selects the row. Like every other press on the panel, a
+pin-cell press takes the keyboard (see "Click-to-focus and typing-home").
 
 Pinned rows are not lifted into view: a pin is a display lift, and the list
 still scrolls over the slot the row would occupy in its own section, so a
@@ -112,6 +174,12 @@ shape changes — a flip that pages the list can shift it a few cells, and a pre
 aimed where it used to sit is inert; the underline returns on the next hover,
 wherever the chip now sits. The chord and the pointer are two ways to one flip,
 never two flips.
+
+The chip is also the one footer press that leaves the keyboard alone. The
+click-to-focus rule hands the keyboard to the list on a press anywhere on the
+panel; the chip is a control with its own action, so its own cells are exempt —
+a press on them flips the layer and focus does not move, while one cell off the
+chip is a normal press on the panel.
 
 Turning the layer on costs screen space before it shows a single row. Each
 section spends a heading plus the blank line beneath it, and every heading after
