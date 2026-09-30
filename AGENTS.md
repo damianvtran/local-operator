@@ -718,7 +718,11 @@ that too, and each unresolved class has its own row in
 The local `type-check` command is spelled
 `.venv/bin/python scripts/run_bounded.py --timeout 1800 -- .venv/bin/python -m pyright …`.
 The gate itself is **whole-tree**, exactly as `ci.yml` spells it: the wrapper
-bounds and reaps, it never narrows.
+bounds and reaps, it never narrows. The recipe also gives the node child
+ci.yml's heap headroom — `NODE_OPTIONS=--max-old-space-size=6144`, raised only
+when the caller's `NODE_OPTIONS` has no `--max-old-space-size` or a smaller
+one, a larger value passing through — because a bare run otherwise inherits
+node's ~4 GB default cap, which OOMed the analyzer under fleet load.
 
 **1800 s, deliberately NOT the 900 s that would mirror that job's
 `timeout-minutes: 15`.** A whole-tree `pyright` measures **508 s on a quiet host
