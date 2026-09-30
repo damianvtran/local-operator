@@ -103,6 +103,7 @@ from local_operator.harness.message_types import (
     SESSION_MCP_RECOVERY_MESSAGE_TYPE,
     SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
     SESSION_MODEL_SWITCH_MESSAGE_TYPE,
+    SESSION_SEND_NOTICE_MESSAGE_TYPE,
     TODO_REMINDER_MESSAGE_TYPE,
 )
 from local_operator.harness.redaction import current_tool_source, set_shape_hit_reporter
@@ -1112,6 +1113,13 @@ def _project_reminder_text(stale: list[Project], *, now: float | None = None) ->
 #: time as a message replays a superseded summary back into context beside the
 #: live one. A deny-list enumerating the ephemeral types cannot see a type that
 #: does not exist yet; this one excludes it by default.
+#: Transcript entry id prefix for the send tool's delivery notice. The id is
+#: ``send-notice-<message_id>`` -- derived from the SEND's own identity, so two
+#: notices for one send collide on the transcript's ``has_entry`` check instead
+#: of stacking, and a notice can always be traced back to the message it names.
+_SEND_NOTICE_ENTRY_PREFIX = "send-notice-"
+
+
 _PERSISTABLE_CUSTOM_TYPES: frozenset[str] = frozenset(
     {
         "session_state",
@@ -1169,6 +1177,15 @@ _PERSISTABLE_CUSTOM_TYPES: frozenset[str] = frozenset(
         # consequence is the one ``journal_mcp_recovery``'s docstring already
         # documents: the un-superseded warning does still persist.
         SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
+        # SESSION_SEND_NOTICE_MESSAGE_TYPE is persisted for its own reason: the
+        # row is a fact about this session's OWN outbound traffic -- a message
+        # left with a peer that never acknowledged it -- and a resumed session
+        # must not re-send a duplicate on the strength of having forgotten. It
+        # is written through ``_append_or_park_journal`` like every other
+        # journal row in this frozenset, so the line here is the same
+        # future-proofing the credential records state: a predicate that has not
+        # been written yet must not be able to drop it.
+        SESSION_SEND_NOTICE_MESSAGE_TYPE,
         # SESSION_CREDENTIAL_MESSAGE_TYPE is deliberately absent: a credential
         # announcement asserts a LIVE capability ("$KEY is injected into every
         # bash command") against a store that is process-memory-only. A
@@ -13059,6 +13076,11 @@ class Session:
             # failure behind session 835fbcafdc27). Re-bound every turn for
             # the same reason the rest of this context is rebuilt.
             journal_credential=self.journal_credential_change,
+            # The send tool's own notice hook, wired for the same reason and
+            # with the same shape: the tool cannot write a transcript row
+            # itself, and the gate (``send.journal_unconfirmed``, default off) is
+            # read inside the session method so there is one reader of the key.
+            journal_send_notice=self.journal_send_notice,
             job_id=self._job_id,
             agent_registry=self.agent_registry,
             # The proactive-class surface (R29–R38), resolved FRESH each turn:
@@ -13999,6 +14021,77 @@ class Session:
             # reminder window is measured from, and a failed append must not
             # push the next attempt's eligibility out.
             self._mcp_notice_guard.note_emitted(server, fingerprint)
+
+    async def journal_send_notice(
+        self,
+        *,
+        text: str,
+        message_id: str,
+        state: str,
+        target: str,
+        force: bool = False,
+    ) -> None:
+        """Leave ONE durable notice that a send was not acknowledged.
+
+        The configurable half of the operator's notification requirement (design
+        note B): the tool RESULT is already a durable, model-visible,
+        error-flagged row carrying the cause, the message id and the retry
+        advice, so this exists only for an operator who wants the fact recorded
+        in the transcript as well. ``send.journal_unconfirmed`` (default OFF)
+        gates it, and the gate is read HERE rather than at the call site so
+        there is exactly one reader of the key. ``force`` bypasses that gate for
+        the one case the setting must not silence: a call the operator ABORTED
+        while a write may have landed, whose result the loop may never deliver to
+        the model at all.
+
+        Written ONCE per send, by construction:
+
+        * the row id is ``send-notice-<message_id>``, and both this method and
+          its caller no-op when that id is already in the transcript, so a
+          retried tool call cannot double-file it;
+        * it is emitted post-final only -- the caller passes the settled outcome
+          of the last attempt, never a per-attempt report;
+        * it is written by the SENDER's own session, never through
+          ``peer_message`` or the inbox, so it cannot re-enter the delivery rail
+          or wake anything.
+
+        Parked rather than spliced: ``_append_or_park_journal`` is what keeps a
+        mid-turn sender from writing an ``assistant(tool_use) -> user`` splice
+        the next provider round-trip would reject (the same reason
+        ``journal_mcp_unavailable`` parks).
+        """
+        from local_operator.mobile.peer_send import journal_unconfirmed_enabled
+
+        if self._disposed or not message_id:
+            return
+        if not force and not journal_unconfirmed_enabled():
+            return
+        entry_id = f"{_SEND_NOTICE_ENTRY_PREFIX}{message_id}"
+        # The idempotence check runs BEFORE the message is built: a second call
+        # for the same send must cost a dict lookup, not a write attempt.
+        if self._transcript.has_entry(entry_id):
+            return
+        message = CustomMessage(
+            id=entry_id,
+            custom_type=SESSION_SEND_NOTICE_MESSAGE_TYPE,
+            attribution="system",
+            details={
+                "text": text,
+                "message_id": message_id,
+                "state": state,
+                "target": target,
+            },
+        )
+        try:
+            async with self._journal_lock:
+                # Re-checked under the lock: two concurrent calls for one send
+                # would otherwise both pass the check above and append twice.
+                if self._transcript.has_entry(entry_id):
+                    return
+                await self._transcript.append_message(message, preserve_mtime=True)
+                self._append_or_park_journal(message)
+        except OSError:
+            logger.warning("could not journal a send notice", exc_info=True)
 
     async def journal_mcp_recovery(self, server: str, tool_count: int) -> None:
         """Tell the MODEL an MCP server it was told was unavailable is usable again.

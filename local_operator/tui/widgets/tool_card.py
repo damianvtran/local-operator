@@ -781,6 +781,51 @@ SWITCH_OUTCOME_WORDS: dict[str, str] = {
     "partial": "switched (error)",
 }
 
+#: The collapsed-row word for a settled send whose delivery is honest but not
+#: whole (design note A.4's ``details.delivery.state``).
+#:
+#: ``delivered`` and ``failed`` are deliberately absent. A delivered send keeps
+#: the mode marker that says HOW it was asked for (``wake`` vs ``quiet``) --
+#: replacing it with ``delivered`` would trade the sender's own instruction for a
+#: word the row already implies -- and ``failed`` rides the existing error arm,
+#: whose reason line is the failure itself.
+#:
+#: Both words LEAD, replacing the mode marker, for the reason ``_send_summary``
+#: documents at length: the row builder truncates from the right, so the
+#: discriminator has to be the first thing painted or a 37-cell conversation name
+#: buries it. ``wake unconfirmed`` rather than a bare ``unconfirmed`` on the
+#: mailbox arm because that is the fact that failed: the message is in the
+#: mailbox and the WAKE is what did not answer.
+DELIVERY_OUTCOME_WORDS: dict[str, str] = {
+    "mailbox": "wake unconfirmed",
+    "unconfirmed": "unconfirmed",
+}
+
+
+def _delivery_outcome_summary(summary: str, args: dict[str, object], details: object) -> str:
+    """Replace the send row's mode marker with its delivery word, when it has one.
+
+    Read from ``details.delivery.state``, never sniffed from the result text: the
+    renderers' one rule is that state comes from structured details, and the
+    prose is model-facing copy the card must not parse. An absent or unknown
+    state keeps the argument summary unchanged, which is what a card rebuilt from
+    an older payload gets.
+    """
+    from local_operator.tools.builtin import peer_send_mode_label
+
+    if not isinstance(details, Mapping):
+        return summary
+    delivery = details.get("delivery")
+    state = delivery.get("state") if isinstance(delivery, Mapping) else None
+    word = DELIVERY_OUTCOME_WORDS.get(state) if isinstance(state, str) else None
+    if not word:
+        return summary
+    marker = _scalar_text(peer_send_mode_label(args))
+    prefix = f"{marker} · "
+    if not marker or not summary.startswith(prefix):
+        return summary
+    return f"{word} · {summary[len(prefix):]}"
+
 
 def _switch_outcome_summary(summary: str, details: object) -> str:
     """The settled switch row: the outcome word replaces the ``model`` marker.
@@ -2456,9 +2501,16 @@ class ToolCard(ExpandableActionBlock):
         self._added, self._removed = _diff_counts(details)
         if self.tool_name.lower() == "send":
             # Re-derived from the arguments every time, so a card that settles
-            # twice (a replay over a live row) never stacks outcome words.
-            self._summary = _switch_outcome_summary(
-                _strip_control_sequences(_summary_from_args("send", self._args)), details
+            # twice (a replay over a live row) never stacks outcome words. The
+            # delivery word wins over the model-switch one: one result cannot be
+            # both, and reading the nested delivery state first is what keeps a
+            # future switch arm from claiming a send row.
+            self._summary = _delivery_outcome_summary(
+                _switch_outcome_summary(
+                    _strip_control_sequences(_summary_from_args("send", self._args)), details
+                ),
+                self._args,
+                details,
             )
         # Reset per result, with the fetch flags below and for the same reason: a
         # card is written once, but a rebuilt card must never inherit the previous
@@ -3046,11 +3098,18 @@ class ToolCard(ExpandableActionBlock):
         return head
 
     def _switch_row_names_its_outcome(self) -> bool:
-        """Whether this is a settled model-switch row whose summary leads with
-        its own outcome word (``_switch_outcome_summary``)."""
-        return self.tool_name.lower() == "send" and self._summary.startswith(
-            tuple(f"{word} · " for word in SWITCH_OUTCOME_WORDS.values())
-        )
+        """Whether this is a settled send row whose summary leads with its own
+        outcome word -- a model switch (``_switch_outcome_summary``) or a send
+        whose delivery is amber (``_delivery_outcome_summary``).
+
+        The no-double-word rule: the partial arm would otherwise append
+        ``Partial``/the promoted disclosure under a row that already states the
+        outcome, painting the same fact twice (design note D).
+        """
+        if self.tool_name.lower() != "send":
+            return False
+        words = (*SWITCH_OUTCOME_WORDS.values(), *DELIVERY_OUTCOME_WORDS.values())
+        return self._summary.startswith(tuple(f"{word} · " for word in words))
 
     def _partial_reason(self) -> str:
         """The body's LEADING line when the collapsed row must carry it too.

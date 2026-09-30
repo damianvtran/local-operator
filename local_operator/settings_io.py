@@ -3308,6 +3308,30 @@ SETTINGS: tuple[Setting, ...] = (
         help=_BASH_SHELL_HELP,
         empty_unsets=True,
     ),
+    # Cross-session SENDS. A `send` row rather than a `tools.send.*` one because
+    # that is the key the design named and what an operator will look for in
+    # ``config.yml``; it lives in this SECTION because "how a tool behaves" is
+    # what the section already means and its Scope is uniform (LIVE) — the gate
+    # is read per send, so an edit lands on the next one.
+    #
+    # OFF is the shipped behaviour and the designed default: the tool result
+    # already carries the cause, the message id and the retry advice, so this is
+    # the operator's opt-in SECOND copy of a fact the model has already been
+    # told (design note B). The default constant the reader uses is
+    # ``peer_send.JOURNAL_UNCONFIRMED_DEFAULT``, pinned to this row by
+    # ``tests/unit/test_settings_io.py``.
+    Setting(
+        key="send.journal_unconfirmed",
+        path=("send", "journal_unconfirmed"),
+        section="tools",
+        label="Journal unconfirmed sends",
+        kind=Kind.BOOL,
+        default=False,
+        help=(
+            "Write a transcript notice when a `send` is not acknowledged. "
+            "The tool result always reports it; this keeps a durable row too."
+        ),
+    ),
     # -- search_interception ------------------------------------------------
     # ``path`` mirrors ``tools.builtin.SEARCH_INTERCEPTION_*_PATH`` (pinned
     # together by ``test_search_interception_rows_share_the_consumer_paths``,

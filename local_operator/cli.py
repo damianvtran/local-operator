@@ -3483,6 +3483,17 @@ def _peer_red(message: str) -> None:
     print(f"\n\033[1;31m{message}\033[0m", file=sys.stderr)
 
 
+def _peer_note(message: str) -> None:
+    """Print one plain advisory line, below the receipt it qualifies.
+
+    Distinct from :func:`_peer_red` because the mailbox state is NOT an error:
+    the message landed. The advisory ("do not send it again") is the part a
+    script must not have to parse out of stdout's receipt, which is why the
+    mailbox arm alone writes here.
+    """
+    print(f"\n{message}", file=sys.stderr)
+
+
 def _hold_sigint() -> None:
     """Ignore further Ctrl-C while an interrupt notice is being printed.
 
@@ -3715,8 +3726,11 @@ def send_command(args: argparse.Namespace) -> int:
     import asyncio
 
     from local_operator.mobile.peer_send import (
+        DELIVERY_FAILED,
+        DELIVERY_MAILBOX,
+        DELIVERY_UNCONFIRMED,
         candidate_lines,
-        deliver_peer_message,
+        deliver_peer_message_outcome,
         interrupted_send_detail,
         skipped_clause,
         validate_peer_body,
@@ -3913,8 +3927,8 @@ def send_command(args: argparse.Namespace) -> int:
 
     mode = "steer" if args.steer else "mailbox"
     try:
-        detail = asyncio.run(
-            deliver_peer_message(
+        outcome = asyncio.run(
+            deliver_peer_message_outcome(
                 record,
                 session_id=(record.session_id if record is not None else cold_session_id),
                 text=text,
@@ -3930,26 +3944,41 @@ def send_command(args: argparse.Namespace) -> int:
         _hold_sigint()
         _peer_red(interrupted_send_detail())
         return _die_of_sigint()
-    except TimeoutError as exc:
-        # NOT "could not deliver": a read deadline expiring means no
-        # ACKNOWLEDGED result, not an undelivered message — the mutation op is
-        # already in the owner's socket buffer, and the receiver commits before
-        # it acks (``peer_send._unanswered_dial_detail``). Saying it failed
-        # invites a duplicate steer or wake. Same split, and the same words, as
-        # the send TOOL's arm below it.
-        _peer_red(f"no delivery confirmation: {exc}")
-        return 1
-    except (RuntimeError, ConnectionError, OSError, ValueError) as exc:
-        # ValueError covers a read fault the frame reader could still surface
-        # (e.g. an oversized non-welcome line): it must become the same soft,
-        # non-zero "could not deliver" line, never an uncaught traceback (U1).
+    except RuntimeError as exc:
+        # A pre-delivery refusal (unengaged target, live or cold): nothing was
+        # minted and nothing was written, so the confident line is honest here.
         _peer_red(f"could not deliver: {exc}")
         return 1
+    except (ConnectionError, OSError, ValueError) as exc:
+        # Defensive: the outcome builder classifies transport faults itself, so
+        # this arm is a fault it could not. ValueError covers a read fault the
+        # frame reader could still surface (e.g. an oversized non-welcome line):
+        # it must become the same soft, non-zero line, never a traceback (U1).
+        _peer_red(f"could not deliver: {exc}")
+        return 1
+
+    # THE EXIT CODE FOLLOWS THE STATE, not the sentence (design note D): the two
+    # amber states are not failures for a script either. ``mailbox`` is a
+    # DELIVERY whose receipt the sender could not confirm, so it exits 0 and says
+    # so on stderr; ``unconfirmed`` is the honest residual -- the message may
+    # still land -- and exits non-zero because a script that retries on it is
+    # making the only choice this side cannot make for it.
     if record is not None:
         name = record.conversation_name or record.session_id
-        print(f"→ {name} (pid {record.pid}): {detail}{skipped_clause(skipped)}")
+        target = f"{name} (pid {record.pid})"
     else:
-        print(f"→ {cold_session_id} (not running): {detail}{skipped_clause(skipped)}")
+        target = f"{cold_session_id} (not running)"
+    if outcome.state == DELIVERY_MAILBOX:
+        print(f"→ {target}: delivered to its mailbox")
+        _peer_note(outcome.text)
+        return 0
+    if outcome.state == DELIVERY_UNCONFIRMED:
+        _peer_red(outcome.text)
+        return 1
+    if outcome.state == DELIVERY_FAILED:
+        _peer_red(outcome.text)
+        return 1
+    print(f"→ {target}: {outcome.detail}{skipped_clause(skipped)}")
     return 0
 
 

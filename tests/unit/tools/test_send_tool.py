@@ -367,7 +367,13 @@ async def test_a_lost_ack_is_not_reported_as_a_failed_delivery(monkeypatch) -> N
     """The receive side commits BEFORE it acks, so a dropped socket or an ack
     timeout can mean "delivered, receipt lost". Claiming "could not deliver"
     there asserts a non-delivery this side cannot know, and a model that
-    believes it retries and duplicates the message (review round 1, MINOR-3)."""
+    believes it retries and duplicates the message (review round 1, MINOR-3).
+
+    Since the delivery states landed, a transport failure has ONE honest answer
+    and it is a state, not a sentence: ``unconfirmed``, ``is_error=False``, the
+    amber ``partial_result`` flag, and the ``delivery`` payload a renderer reads
+    instead of sniffing the prose.
+    """
     registrant, _alias, _handle = await _start_peer()
     try:
         import local_operator.mobile.peer_client as peer_client_mod
@@ -383,11 +389,19 @@ async def test_a_lost_ack_is_not_reported_as_a_failed_delivery(monkeypatch) -> N
             None,
             _context(),
         )
-        assert result.is_error is True
-        assert "no delivery confirmation" in result.text
-        assert "may or may not have arrived" in result.text
-        # The confident claim must NOT appear on this arm.
+        assert result.is_error is False
+        assert result.details is not None
+        assert result.details["delivery"]["state"] == "unconfirmed"
+        assert result.details["delivery"]["cause"] == "no_answer"
+        assert result.details["delivery"]["route"] == "live"
+        assert result.details["partial_result"] is True
+        assert "delivery UNCONFIRMED" in result.text
+        assert "may still arrive" in result.text
+        # The confident claim must NOT appear on this arm, and the text has to
+        # carry the id a human would quote plus the retry advice.
         assert "could not deliver" not in result.text
+        assert result.details["delivery"]["message_id"] in result.text
+        assert "retry" in result.text or "resending" in result.text
     finally:
         registrant.close()
 
@@ -396,17 +410,16 @@ async def test_a_lost_ack_is_not_reported_as_a_failed_delivery(monkeypatch) -> N
 async def test_a_timed_out_dial_is_an_unconfirmed_delivery(monkeypatch) -> None:
     """A read deadline expiring is not a failed delivery, on the timeout arm.
 
-    ``peer_send._dial_or_explain`` attaches a sentence to the message-less
-    ``TimeoutError`` and re-raises the SAME class, so this lands on the
-    "no delivery confirmation" arm rather than the confident one — which is the
-    whole point of the class split. The reproduced case is a real child server
-    whose loop was blocked for 0.7 s: the sender's 0.2 s deadline expired, and
-    the receiver recorded the delivered steer the moment its loop came back.
-    Wrapping the timeout into a ``RuntimeError`` (an earlier draft did) moves
-    that case onto the arm that says nothing was delivered. R4's other half is
-    asserted below: the dial is attempted ONCE. A message that may already be
-    queued in the owner's buffer must not be re-submitted automatically, and a
-    tool result is the last place that could happen unnoticed.
+    The reproduced case is a real child server whose loop was blocked for 0.7 s:
+    the sender's 0.2 s deadline expired, and the receiver recorded the delivered
+    steer the moment its loop came back. Reporting that as a failure is the
+    defect the delivery states exist to remove, so the tool answers with
+    ``unconfirmed`` — not an error — and the text forbids exactly the retry that
+    would duplicate a message which may already be queued in the owner's buffer.
+
+    R4's other half is asserted below: against a receiver that does NOT advertise
+    ``peer-message-id-v1`` the dial is attempted ONCE. A retry is only safe when
+    the receiver can dedupe the id (see ``peer_send``'s capability gate).
     """
     registrant, _alias, _handle = await _start_peer()
     dials: list[dict[str, Any]] = []
@@ -425,9 +438,11 @@ async def test_a_timed_out_dial_is_an_unconfirmed_delivery(monkeypatch) -> None:
             None,
             _context(),
         )
-        assert result.is_error is True
-        assert "no delivery confirmation" in result.text
-        assert "delivery is UNCONFIRMED" in result.text
+        assert result.is_error is False
+        assert result.details is not None
+        assert result.details["delivery"]["state"] == "unconfirmed"
+        assert result.details["partial_result"] is True
+        assert "delivery UNCONFIRMED" in result.text
         assert "may still arrive" in result.text
         # Neither confident claim: not "could not deliver", and nothing that
         # invites an automatic retry of a steer that may already have landed.

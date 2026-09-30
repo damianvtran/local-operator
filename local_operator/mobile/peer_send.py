@@ -68,6 +68,36 @@ MODEL_SWITCH_CAPABILITY = "cannot be switched remotely"
 #: spelling, and ``types.py`` is where the wire vocabulary lives (see its note on
 #: why the string exists and what gates it).
 
+#: Default for ``send.journal_unconfirmed``: OFF. The configurable notice the
+#: operator asked for, defaulting to silence because the tool result already
+#: carries the same facts and a second row per send is a second writer for one
+#: event (design note B).
+#:
+#: The registry (``settings_io``) states the same default and
+#: ``tests/unit/test_settings_io.py`` pins the two constants together, so a drift
+#: is a red test rather than a `/settings` page that lies.
+JOURNAL_UNCONFIRMED_DEFAULT = False
+
+
+def journal_unconfirmed_enabled() -> bool:
+    """Whether a settled amber send should also leave a transcript notice.
+
+    Never raises: a malformed config must not fail a send that has already
+    happened, and the conservative direction is the SHIPPED default (silence),
+    not an exception out of a notice path.
+    """
+    try:
+        from local_operator.config import ConfigManager
+
+        raw = ConfigManager(config_dir()).get_config_value("send", None)
+    except Exception:  # noqa: BLE001 — a notice must not break a delivery
+        return JOURNAL_UNCONFIRMED_DEFAULT
+    if not isinstance(raw, dict):
+        return JOURNAL_UNCONFIRMED_DEFAULT
+    value = raw.get("journal_unconfirmed")
+    return bool(value) if isinstance(value, bool) else JOURNAL_UNCONFIRMED_DEFAULT
+
+
 #: The sender-minted message id's shape. Validated by the RECEIVER before it is
 #: allowed to become a transcript entry id (see
 #: ``Session.receive_peer_message``): an id from a build that spells it
