@@ -308,8 +308,16 @@ NET_OPS: tuple[str, ...] = (
 #: deliberate: a pair-phase link has no member row yet, so there is nothing to
 #: authorise against — its authorisation IS the invite validation plus the two
 #: human confirmations. Dispatch refuses them outside phase ``pair``, and a test
-#: asserts the two directions of that rule.
-NET_PAIR_OPS: tuple[str, ...] = ("net_pair_ready", "net_pair_abort", "net_pair_result")
+#: asserts the two directions of that rule. ``net_pair_offer`` (the both-ends
+#: join screen's share list) is the newest member and the same rule is its whole
+#: version gate: a member link refuses it, and a peer that never advertised
+#: ``wire.PAIR_OFFER_V1`` is never sent it.
+NET_PAIR_OPS: tuple[str, ...] = (
+    "net_pair_ready",
+    "net_pair_abort",
+    "net_pair_result",
+    "net_pair_offer",
+)
 
 #: The relay's LOCAL control-socket ops (viewer → relay, authorised by the
 #: control key of the peers record). These never reach a peer link: a name from

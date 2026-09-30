@@ -1006,3 +1006,123 @@ def test_empty_and_skipped_offers_render_their_lines() -> None:
     assert "Credentials this device will serve to laptop:" in rows
     assert "openai (OAuth, d***@example.com)   will be served" in rows
     assert "legacy-key (API key)   not offered" in rows
+
+
+# ---------------------------------------------------------------------------
+# Mixed builds (memo §4: G1's other direction, and the mixed-daemon echo)
+# ---------------------------------------------------------------------------
+
+
+def test_a_new_owner_sends_nothing_to_an_old_joiner(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],  # noqa: F811
+) -> None:
+    """G1(a): the gate is the JOINER'S OWN hello, so an old build's wire is
+    untouched — its first sealed record is the RESULT, never an unknown op.
+
+    Played by the real protocol code: a handshake whose advertised capabilities
+    simply lack ``pair-offer-v1`` (the frame never existed for that build). The
+    owner must skip the send AND say why on its own side §4.2's line).
+    """
+    import socket as socket_mod
+
+    from local_operator.network.identity import mint_instance_id
+
+    server_a, server_b, host, port = devices
+    _seed(server_a.root, "openai", {"refresh": "r", "access": "a", "email": "d@e"})
+    _record, minted = _minted(server_a)
+    answered: dict[str, Any] = {}
+    failures: list[BaseException] = []
+
+    def _answer_and_record() -> None:
+        try:
+            answered.update(_answer_confirmation(server_a) or {})
+        except BaseException as exc:  # noqa: BLE001 — reported below
+            failures.append(exc)
+
+    thread = threading.Thread(target=_answer_and_record, daemon=True)
+    thread.start()
+    sock = socket_mod.create_connection((host, port), timeout=30)
+    try:
+        handshake = Handshake.new(
+            role="dialer",
+            identity=server_b.identity,
+            network_id=minted.envelope.network_id,
+            epoch=minted.envelope.epoch,
+            instance_id=mint_instance_id(),
+            session_protocol=net_cli._session_protocol(),  # noqa: SLF001 — the dialer's own
+            mode="join",
+            # AN OLD BUILD'S HELLO, spelled as absence: one string less than this
+            # build advertises, which is exactly what the gate reads.
+            capabilities=[n for n in wire.LINK_CAPABILITIES if n != wire.PAIR_OFFER_V1],
+            build={},
+            endpoints=[],
+        )
+        handshake.join_block = {
+            "invite_id": minted.envelope.invite_id,
+            "joiner_public_key": server_b.identity.public_key,
+            "joiner_name": server_b.identity.name,
+        }
+        handshake.send_hello(sock)
+        reader = wire.FrameReader(sock)
+        handshake.read_challenge(reader, wire.deadline_in(30))
+        # The dialer's own steps, exactly as `_join_one` runs them: the invite-derived
+        # credential, the MAC-ed auth frame, then the plaintext welcome.
+        credential = Credential(
+            "invite",
+            minted.envelope.epoch,
+            wire.invite_key(
+                minted.envelope.material, minted.envelope.network_id, minted.envelope.invite_id
+            ),
+        )
+        handshake.send_auth(sock, credential)
+        handshake.read_welcome(reader, wire.deadline_in(30))
+        result = handshake.establish()
+        codec = handshake.codec()
+        sock.sendall(codec.seal(pair_ready_frame(req=1, typed_sas=result.sas)))
+        frame = codec.open(reader.read_record_payload(wire.deadline_in(30)))
+        assert (
+            frame.get("op") == "net_pair_result"
+        ), "an old joiner's first sealed record was not the result — the offer gate leaked"
+        assert frame.get("admit") is True
+        assert frame.get("shares") == [], "a mixed pair has nothing to report"
+    finally:
+        sock.close()
+        thread.join(20)
+    assert not failures, failures[0]
+    assert answered, "the inviter's person was never asked"
+    # §4.2 on the owner's own record: the silence is SKIPPED, not EMPTY — the
+    # distinction the confirm screen and the audit both read.
+    assert answered.get("offer_state") == "skipped_peer_unsupported"
+    assert answered.get("offer") == []
+    assert "older build" in str(answered.get("prompt") or "")
+
+
+def test_a_stale_relay_response_is_named_not_hidden(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """§4.5's skew: a relay that does not echo ``shares`` is older than this CLI.
+
+    The old daemon's reply is simulated at the CLI's call seam (its own shape,
+    minus the echo: that is the only difference the check can see). The warning
+    goes to stderr and the command still succeeds — the admission lands; what the
+    operator learns is why the share choices did not.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    _pending_with_offer(root)
+    monkeypatch.setattr(net_cli, "_has_terminal", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+    monkeypatch.setattr(
+        net_cli,
+        "_relay_call",
+        lambda op, **fields: {
+            "invite_id": "i_offer1",
+            "decision": "admit",
+            "matched": True,
+            "joiner_device_id": "d_" + "b" * 32,
+            # NO "shares" key: an older relay, whose state machine predates them.
+        },
+    )
+    assert net_cli._cmd_confirm(_confirm_args()) == 0  # noqa: SLF001
+    err = capsys.readouterr().err
+    assert "older build" in err
+    assert "restart" in err
