@@ -2430,6 +2430,134 @@ async def test_a_refused_card_reply_reaches_the_pane(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_parked_card_refused_twice_tells_the_pane_once(tmp_path: Path) -> None:
+    """Beat-2 F-B: one notice per refusal STATE, not per refused attempt.
+
+    The owner refuses EVERY answer this pane posts to a gate it cannot allow —
+    deliberately — and the pane's re-arm puts the card back after each refusal
+    (the test above pins that half). So one parked gate can be refused many
+    times: the operator presses ALLOW twice, or a delta re-runs the ladder.
+    Each attempt used to surface its own identical ``not applied —`` sentence,
+    measured in the beat as 15+ verbatim copies beside a single parked card —
+    a stream of new problems where there is one standing fact.
+
+    Two halves, both over real sockets and the real runtime: the SAME gate
+    refused twice speaks once, and a DIFFERENT gate refused after it speaks
+    AGAIN — which is what keeps this a dedupe of a state rather than a mute
+    switch.
+    """
+    from local_operator.harness.approval import (
+        mint_operator_cap,
+        reset_operator_caps_for_tests,
+    )
+    from local_operator.mobile.types import PendingRequest
+
+    reset_operator_caps_for_tests()  # nobody here spawned this runtime
+    live = await _serve(tmp_path, operator_cap=mint_operator_cap())
+    remote = None
+    try:
+        remote = await _follower(tmp_path, live.record)
+        surfaced: list[BaseException] = []
+        first_seen = 0
+        second_seen = 0
+        hold_started = asyncio.Event()
+        release_deny = asyncio.Event()
+        deny_done = asyncio.Event()
+
+        async def staged_card(tool_name: str, description: str, job_id: str | None = None) -> bool:
+            """The operator's keystrokes, staged: ALLOW, ALLOW, DENY, ALLOW.
+
+            Gate 1: ALLOW, ALLOW — the second press is the repeat under test —
+            then HOLD, because a card does not answer itself. Gate 2: ALLOW
+            once, then hold for the same reason.
+            """
+            nonlocal first_seen, second_seen
+            if not deny_done.is_set():
+                if first_seen < 2:
+                    first_seen += 1
+                    return True
+                hold_started.set()
+                await release_deny.wait()
+                deny_done.set()
+                return False
+            if second_seen == 0:
+                second_seen += 1
+                return True
+            await asyncio.Event().wait()
+            return True
+
+        remote.set_approval_handler(staged_card)
+        remote.set_gate_refusal_handler(surfaced.append)
+
+        card = await _park_a_card(live.handle)
+        parked = live.handle._fold.projection.pending
+        assert parked is not None and parked.kind == "approval"
+        pending = PendingRequest(
+            request_id=parked.request_id,
+            kind="approval",
+            title=parked.title,
+            detail=parked.detail,
+        )
+        remote._gate_key = remote._gate_identity(pending)
+        remote._gate_task = asyncio.current_task()
+        await asyncio.wait_for(remote._run_approval(pending), 10)
+
+        # The re-armed card's second ALLOW is refused too — and its refusal must
+        # NOT surface a second copy of the sentence already on screen. The
+        # hold_started event is the third handler call (the card between
+        # keystrokes), which cannot start before the second refusal's arm ran.
+        for _ in range(200):
+            if hold_started.is_set():
+                break
+            await asyncio.sleep(0.02)
+        assert hold_started.is_set(), "the re-armed gate never reached its third call"
+        assert len(surfaced) == 1, (
+            f"the same parked gate refused twice surfaced {len(surfaced)} notices; "
+            "the verbatim repeat is the noise beat-2 F-B measured"
+        )
+
+        # The held card's DENY is ordinary and lands, settling gate 1.
+        release_deny.set()
+        for _ in range(200):
+            if live.handle._fold.projection.pending is None:
+                break
+            await asyncio.sleep(0.02)
+        assert live.handle._fold.projection.pending is None, "the deny never reached the owner"
+        assert card.done()
+
+        # A SECOND card is a NEW state: its refusal speaks again.
+        second = await _park_a_card(live.handle)
+        parked_second = live.handle._fold.projection.pending
+        assert parked_second is not None
+        pending_second = PendingRequest(
+            request_id=parked_second.request_id,
+            kind="approval",
+            title=parked_second.title,
+            detail=parked_second.detail,
+        )
+        remote._gate_key = remote._gate_identity(pending_second)
+        remote._gate_task = asyncio.current_task()
+        await asyncio.wait_for(remote._run_approval(pending_second), 10)
+        for _ in range(200):
+            if len(surfaced) == 2:
+                break
+            await asyncio.sleep(0.02)
+        assert len(surfaced) == 2, surfaced
+        assert second_seen == 1, "the second gate's handler was never reached — the pin is vacuous"
+        second.cancel()
+        gate_task = remote._gate_task
+        if gate_task is not None:
+            gate_task.cancel()
+        await asyncio.gather(
+            second, *([gate_task] if gate_task is not None else []), return_exceptions=True
+        )
+    finally:
+        if remote is not None:
+            await remote.dispose()
+        await live.close(tmp_path)
+
+
+@pytest.mark.asyncio
 async def test_the_routed_report_speaks_for_the_connection_that_asks(tmp_path: Path) -> None:
     """Who the report is FOR, driven through the runtime (agent R3-1 = U10 = Q6).
 
