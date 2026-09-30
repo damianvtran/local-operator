@@ -84,7 +84,12 @@ async def test_no_login_means_no_org_fetch_and_no_failure_noise(rig) -> None:
     report = await runner.tick(reason="startup")
     assert report.applied == 0 and report.failed == 0
     item = st.StatusStore(root).load()["items"][f"agent:{row.id}"]
-    assert item["error_class"] is None and item["state"] != "failed"
+    # The class IS recorded - it is the only way the UI can tell this user they
+    # need to sign in (UX round 2, U11) - but it is not failure NOISE: no attempt
+    # is counted, no retry is scheduled and nothing is described as broken.
+    assert item["error_class"] == "no-credential" and item["last_error"] is None
+    assert item["state"] != "failed" and item["attempts"] == 0
+    assert item["next_retry_at"] is None and item["auto_retry"] is True
 
 
 async def test_no_linked_items_costs_nothing(rig) -> None:
