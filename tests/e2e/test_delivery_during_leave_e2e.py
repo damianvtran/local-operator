@@ -438,8 +438,11 @@ class _ParkedDeliveryTurn(_ParkedWorkTurn):
 
     #: Every batch row's text — the LAST row is what ``last_user_text`` returns,
     #: so matching only the first one never fired (the batch carries both
-    #: children, and the review row is the tail).
-    delivery_markers = ("the QA round finished", "the review round finished")
+    #: children, and the review row is the tail). Annotated because cells
+    #: override it per-case with shorter tuples (the peer and mid-work cells
+    #: park on a single marker); the inferred ``tuple[str, str]`` would refuse
+    #: those assignments.
+    delivery_markers: tuple[str, ...] = ("the QA round finished", "the review round finished")
 
     def __init__(self, turns: Sequence[Sequence[StreamEvent]], *, hold_delivery: bool) -> None:
         super().__init__(turns)
@@ -673,21 +676,31 @@ async def test_a_noted_serving_cause_still_settles_a_zero_evidence_run(
 
 
 @pytest.mark.asyncio
-async def test_a_run_cut_after_its_first_request_still_errors(
+async def test_a_post_completion_delivery_cut_mid_request_settles_without_a_verdict(
     headless_tui_env: Path,
 ) -> None:
-    """NEGATIVE CONTROL: evidence = a dispatched round-trip. Still an error.
+    """THE CASE-3 CELL (v3, 2026-09-30): cut AFTER dispatch — still no verdict.
 
-    The same disposal, the same delivery origin — but this run's request
-    reached the provider (parked INSIDE the call). The disposal's verdict is
-    the honest one: ``error | cause=disposed``, and the successor narrates the
-    cut. Without this cell the settle arm could suppress a genuinely
-    involuntary death.
+    This replaced the v2 control ``…_still_errors`` for the delivery shape,
+    because that shape IS the case-3 misclassification: a delivery run admitted
+    6-14 ms after the completed turn's output was delivered, parked INSIDE its
+    provider call (its request WAS dispatched — the fact v2's split keyed on),
+    and cut by the one-shot host's own disposal. v2 could only publish
+    ``error|disposed`` for it, which masked the completion on nine exec
+    sessions (da0d927a7986, cc42557b5571, e4e0dfa96358, ...). The disposal
+    now reads the run's POST-COMPLETION provenance (admitted after a settled
+    ``complete``) and its PRODUCTION (nothing persisted — the empty tail
+    cannot arm it) and settles the run with no verdict at all: ``eligible:
+    False``, the completion stands, the successor narrates nothing. The
+    honest dispatched-run pin moved to
+    ``test_a_mid_work_cut_after_its_first_request_still_errors`` (no settled
+    success before it) and to the unit matrix, so this reversal removes no
+    guard.
     """
     config = headless_tui_env
     directory = config / "delivery-cut-after-dispatch"
 
-    with bounded(120, "a delivery run cut after its first provider request"):
+    with bounded(120, "a post-completion delivery run cut mid-request"):
         stream = _ParkedDeliveryTurn(
             [text_turn("working"), text_turn("delivery")], hold_delivery=True
         )
@@ -697,15 +710,92 @@ async def test_a_run_cut_after_its_first_request_still_errors(
         assert gate is None, "this cell must let the flushed run reach the provider"
         await asyncio.wait_for(stream.delivery_entered.wait(), _STEP_TIMEOUT_S)
         assert session.is_streaming, "the delivery turn never reached the provider"
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not session._attention_run_request_dispatched:
+            await asyncio.sleep(0.005)
+        inputs = (
+            getattr(session, "_attention_run_request_dispatched", False),
+            getattr(session, "_attention_run_after_settled_success", None),
+            getattr(session, "_attention_run_produced", None),
+        )
 
+        delivery_token = session._attention_run_token
         await session.dispose()
 
+    assert delivery_token is not None
     rows = _completion_rows(directory)
-    assert [row.get("kind") for row in rows] == ["complete", "error"], rows
+    # THE CLASS EVIDENCE IS CHECKED FIRST, so an unfixed tree fails HERE —
+    # with the false row — rather than on a probe attribute.
+    assert [row.get("kind") for row in rows] == ["complete"], rows
+    # …and the decision inputs the disposal read (``None`` on an unfixed tree).
+    assert inputs == (True, True, False), inputs
+    markers = [
+        row
+        for row in _rows(directory, "completion_attention")
+        if row.get("token") == delivery_token
+    ]
+    assert len(markers) == 1, f"one settle marker for the delivery run: {markers!r}"
+    assert markers[0].get("eligible") is False, markers[0]
+    assert not markers[0].get("kind"), "the settlement asserts no verdict"
+    from local_operator.session.attention import AttentionStore, conversation_identity
+
+    state = AttentionStore().state(conversation_identity(directory))
+    assert state.get("kind") == "complete", f"the store stays on the completed turn: {state!r}"
+    assert _incident_rows(directory) == []
+
+    successor_stream = ScriptedStream([text_turn("carrying on")])
+    successor = build_session(directory, successor_stream)
+    await successor.async_init()
+    try:
+        await successor.prompt("continue")
+        sent = "\n".join(
+            text for request in successor_stream.requests for text in _user_row_texts(request)
+        )
+        assert "[session incident]" not in sent, sent[-2000:]
+    finally:
+        await successor.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_mid_work_cut_after_its_first_request_still_errors(
+    headless_tui_env: Path,
+) -> None:
+    """HONESTY (v3): dispatched work with NO settled success before it errors.
+
+    The v3 arm is scoped by TWO facts the disposal reads (a settled
+    ``complete`` behind the run, and nothing produced). This cell removes the
+    first — a fresh conversation, its only run already INSIDE its provider
+    call — so the arm must not fire and the honest ``error | cause=disposed``
+    stands, with the successor narration intact. Without this pin the new arm
+    could be widened into "any dispatched disposal settles silently", which
+    would hide a genuine mid-work death.
+    """
+    config = headless_tui_env
+    directory = config / "mid-work-cut-after-dispatch"
+    directory.mkdir(parents=True, exist_ok=True)
+    stream = _ParkedDeliveryTurn([text_turn("working")], hold_delivery=True)
+    # The only call is this run's, and it must hold INSIDE the provider: the
+    # "dispatched" fact is exactly what the arm must NOT override here.
+    stream.delivery_markers = ("do the thing",)
+    session = build_session(directory, stream)
+
+    with bounded(120, "a mid-work run cut after its first request"):
+        task = asyncio.ensure_future(session.prompt("do the thing"))
+        await asyncio.wait_for(stream.delivery_entered.wait(), _STEP_TIMEOUT_S)
+        assert session.is_streaming, "the run never reached the provider"
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not session._attention_run_request_dispatched:
+            await asyncio.sleep(0.005)
+        assert session._attention_run_request_dispatched, "precondition: dispatched"
+        assert getattr(session, "_attention_run_after_settled_success", None) in (False, None)
+
+        await session.dispose()
+        await asyncio.wait_for(asyncio.shield(task), timeout=_STEP_TIMEOUT_S)
+
+    rows = _completion_rows(directory)
+    assert [row.get("kind") for row in rows] == ["error"], rows
     assert rows[-1].get("cause") == "disposed", rows[-1]
 
-    # HONESTY: the cut IS narrated to the next turn — the settle arm was not
-    # allowed to hide a real death.
     successor_stream = ScriptedStream([text_turn("carrying on")])
     successor = build_session(directory, successor_stream)
     await successor.async_init()
@@ -717,6 +807,118 @@ async def test_a_run_cut_after_its_first_request_still_errors(
         assert "[session incident]" in sent, sent[-2000:]
     finally:
         await successor.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_peer_arrival_cut_after_dispatch_closes_neutrally(
+    headless_tui_env: Path,
+) -> None:
+    """THE PEER DOOR (v3): a carried post-completion run gets ``closed``.
+
+    Session 23fc556c3799's shape at the dispatch boundary: the work turn's
+    output was delivered, a peer ask was admitted right after, and the one-shot
+    disposal cut it while its request was in flight. Carried provenance makes
+    the neutral record a ``closed`` receipt rather than silence (someone is
+    waiting on it); the settle intent suppresses the abort tail, so exactly one
+    outcome row exists for the run.
+    """
+    config = headless_tui_env
+    directory = config / "peer-dispatched-closure"
+    directory.mkdir(parents=True, exist_ok=True)
+    stream = _ParkedWorkTurn([text_turn("warm up answer"), text_turn("peer answer")])
+    stream.park_marker = "peer asks a question"
+    session = build_session(directory, stream)
+
+    with bounded(120, "a peer arrival cut after dispatch"):
+        await session.prompt("warm up")
+        message = session._peer_custom_message(
+            "peer asks a question",
+            {"pid": 999999, "conversation_name": "peer", "model_label": "m"},
+        )
+        task = asyncio.ensure_future(session._prompt_messages([message], carried_prompt=True))
+        await asyncio.wait_for(stream.entered.wait(), _STEP_TIMEOUT_S)
+        assert session.is_streaming, "the peer run never reached the provider"
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not session._attention_run_request_dispatched:
+            await asyncio.sleep(0.005)
+        inputs = (
+            getattr(session, "_attention_run_request_dispatched", False),
+            getattr(session, "_attention_run_after_settled_success", None),
+            getattr(session, "_attention_run_carried_prompt", None),
+        )
+
+        await session.dispose()
+        await asyncio.wait_for(asyncio.shield(task), timeout=_STEP_TIMEOUT_S)
+
+    rows = _completion_rows(directory)
+    # CLASS EVIDENCE FIRST (see the sibling cell): the carried peer run must
+    # close, not error, once it followed a settled completion.
+    assert [row.get("kind") for row in rows] == ["complete", "closed"], rows
+    assert rows[-1].get("cause") == "disposed", rows[-1]
+    assert inputs == (True, True, True), inputs
+
+
+@pytest.mark.asyncio
+async def test_a_declared_one_shot_turn_holds_its_final_batch_inside_the_lock(
+    headless_tui_env: Path,
+) -> None:
+    """THE v3 PREVENTION CELL (B): the hold lives in the TURN, not the host.
+
+    The case-3 admission happens at ``_turn_lock``'s release — the very next
+    loop turns after ``session.prompt()`` returns — and the host's own arming
+    (``run_print_mode``'s, and its predecessor here: anything after the prompt
+    returns) lands ~100-160 ms too late for it. This cell is the 664a script
+    with the ONE-SHOT DECLARATION: the session arms its departure pair in the
+    turn pipeline's ``finally``, before the deferred batch is delivered and
+    before the lock frees — so the flush HOLDS the batch inline and no
+    delivery task ever spawns. Asserted both ways: no task reaches the
+    provider within a bounded beat, the latch is armed by the turn itself, and
+    the batch stays durable for the successor. Before the fix the spawn
+    happens in the same ``finally`` (nothing armed) and the run it opens
+    reaches the provider — this cell's negative is cell
+    ``test_a_post_completion_delivery_cut_mid_request_settles_without_a_verdict``,
+    which drives that admitted run through the disposal.
+    """
+    config = headless_tui_env
+    directory = config / "one-shot-declared-batch-hold"
+    directory.mkdir(parents=True, exist_ok=True)
+    stream = _ParkedDeliveryTurn([text_turn("working"), text_turn("delivery")], hold_delivery=True)
+    session = build_session(directory, stream)
+    declare = getattr(session, "declare_one_shot_exit", None)
+    if callable(declare):
+        declare()
+
+    with bounded(120, "a declared one-shot turn holds its final batch"):
+        task = asyncio.ensure_future(session.prompt("delegate two children"))
+        await asyncio.wait_for(stream.entered.wait(), _STEP_TIMEOUT_S)
+        assert session.is_streaming, "the work turn never reached the provider"
+        assert (
+            not session._leaving_deliveries
+        ), "precondition: the latch arms in the turn's OWN tail, not at entry"
+        await session._on_job_completed("qa-r2", "the QA round finished", _settled("qa-r2"))
+        await session._on_job_completed("rev-r6", "the review round finished", _settled("rev-r6"))
+        assert session._deferred_job_results, "precondition: the batch is deferred"
+
+        stream.release.set()
+        await asyncio.wait_for(asyncio.shield(task), timeout=_STEP_TIMEOUT_S)
+        # THE DISCRIMINATOR: with the declaration, the flush held the batch
+        # inside the lock and NO delivery task exists to be admitted at the
+        # release. Give the loop a bounded beat to prove one did not appear.
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                asyncio.shield(asyncio.ensure_future(stream.delivery_entered.wait())),
+                timeout=3.0,
+            )
+        assert session._leaving_deliveries, "the turn itself armed the departure pair"
+        await session.dispose()
+
+    assert (
+        len(stream.requests) == 1
+    ), f"the held batch must not buy a provider call: {len(stream.requests)}"
+    assert len(_run_rows(directory)) == 1, "only the work turn may have opened a run"
+    assert [row.get("kind") for row in _completion_rows(directory)] == ["complete"]
+    assert _incident_rows(directory) == []
+    assert [row.get("job_id") for row in _job_result_rows(directory)] == ["qa-r2", "rev-r6"]
 
 
 @pytest.mark.asyncio
@@ -913,14 +1115,25 @@ async def test_run_print_mode_holds_a_deferred_batch_on_its_way_out(
     session = build_session(directory, stream)
 
     async def hook() -> None:
-        # The window exec's own close() gives the spawned task between the
+        # The window exec's own close() gives a spawned task between the
         # commit and the disposal: wait for it to reach its decision — either
-        # the delivery run dispatched (pre-fix shape; the park fires) or the
-        # held task finished without opening a turn (the fixed shape).
+        # the delivery run dispatched (the pre-v3 shape; the park fires) or
+        # the held task finished without opening a turn (the v1 shape).
+        # With the v3 session-side arming (2026-09-30) there is a THIRD shape
+        # and it is the shipped one: the batch was held INSIDE the last turn's
+        # lock, so no delivery task exists at all and there is nothing to wait
+        # for. The one-beat wait below is kept anyway, so a regression that
+        # spawns again surfaces HERE rather than racing the assertions below.
         pending = [t for t in session._background_tasks if not t.done()]
         waiter = asyncio.ensure_future(stream.delivery_entered.wait())
         try:
-            await asyncio.wait([*pending, waiter], return_when=asyncio.FIRST_COMPLETED)
+            if pending:
+                await asyncio.wait([*pending, waiter], return_when=asyncio.FIRST_COMPLETED)
+            else:
+                try:
+                    await asyncio.wait_for(asyncio.shield(waiter), timeout=1.0)
+                except asyncio.TimeoutError:
+                    pass
         finally:
             if not waiter.done():
                 waiter.cancel()
