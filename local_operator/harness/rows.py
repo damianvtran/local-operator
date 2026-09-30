@@ -1329,7 +1329,20 @@ def _sessions_peek_window(args: Mapping[str, object]) -> str:
 
     Empty when the call names no window: the tool's default applies, and the
     row must not claim a value nobody read.
+
+    ``query`` is tested FIRST because it is the discriminator that survives
+    beside ``steps``: the tool's own validation keeps ``steps`` as the SIZE of
+    the match window (``query`` + ``steps=6`` reads six steps around the match,
+    not the tail), so asking for ``steps`` first painted ``last 6`` — a read
+    this call never makes — and dropped the search term (round-1 review, R1).
+    The search rides out first and a call-sized window rides after it.
     """
+    query = _sessions_scalar(args.get("query"))
+    if query:
+        steps = args.get("steps")
+        if isinstance(steps, int) and not isinstance(steps, bool):
+            return f"search {query} · {steps} around"
+        return f"search {query}"
     steps = args.get("steps")
     if isinstance(steps, int) and not isinstance(steps, bool):
         return f"last {steps}"
@@ -1338,9 +1351,6 @@ def _sessions_peek_window(args: Mapping[str, object]) -> str:
         return f"first {head}"
     if args.get("digest") is True:
         return "digest"
-    query = _sessions_scalar(args.get("query"))
-    if query:
-        return f"search {query}"
     before = _sessions_scalar(args.get("before_id"))
     if before:
         return f"before {before}"

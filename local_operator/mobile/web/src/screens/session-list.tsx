@@ -397,7 +397,17 @@ function SessionCard({
 				    TUI's own gutter falls back to exactly it when the role cannot
 				    be read (`session/preview.py`). */}
 				{s.opened_by != null ? (
-					<span className="shrink-0 text-meta text-ink-dim">agent</span>
+					<span className="shrink-0 text-meta text-ink-dim">
+						{/* D1 (round 1): a bare `agent` is a noun, and a screen reader
+						    heard "Anonymous workstream agent" as the session's identity
+						    rather than its origin. The sr-only prefix makes the
+						    accessible name read "… opened by agent" — the TUI's own
+						    words for the same fact — at zero geometry cost: sr-only is
+						    clipped out of the layout, the same idiom as the `working`
+						    status span above, so the measured 40 px chip budget stands. */}
+						<span className="sr-only">opened by </span>
+						agent
+					</span>
 				) : null}
 				{/* A PINNED ROW CARRIES ITS ★, and it rides the RIGHT cluster rather than
 				    the state slot. The TUI made exactly this call (`session_sidebar.py`

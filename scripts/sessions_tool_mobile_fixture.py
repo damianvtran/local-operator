@@ -3,7 +3,7 @@
 Run:  PYTHONPATH=. .venv/bin/python scripts/sessions_tool_mobile_fixture.py PORT PASSWORD
 The CAPTURE script passes the password, so this file holds no literal.
 
-FOUR ROWS, and each answers one question the two changes are about:
+FIVE ROWS, and each answers one question the two changes are about:
 
 * ``Release cutter`` — a WORKSTREAM opened by a named agent (``manager``), the
   row the phone-agent-opened chip exists for. The marker is written through the
@@ -15,6 +15,13 @@ FOUR ROWS, and each answers one question the two changes are about:
   is drawn from, so this row must carry the mark all the same.
 * ``Operator session`` — an ordinary conversation with no marker at all: the
   control that must NOT carry the mark.
+* ``Release crew reshuffle`` — THE STACKED WORST CASE (design round 1, mobile
+  D2): agent-opened AND pinned AND unread AND delegating with todos, so the
+  chip sits directly beside ``★``, ``new``, ``N subagents`` and ``N todo`` in
+  one row. Every cluster member is seeded through the product's own writer
+  (pin store, attention receipt, origin marker, projection todos), so the
+  frame proves the words parse side by side, not merely that they can exist
+  in isolation.
 * ``Sessions tool run`` — a live entry whose projection carries ``sessions``
   tool rows. Summaries come from ``mobile.projection._summarize_args`` — the
   SAME function the fold uses — computed here at seed time, so this fixture run
@@ -25,7 +32,9 @@ FOUR ROWS, and each answers one question the two changes are about:
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
+import uuid
 
 import uvicorn
 
@@ -159,15 +168,88 @@ FIXTURE_PASSWORD_ENV = "LOP_MOBILE_FIXTURE_PASSWORD"
 
 
 def required_password(argv_rest: list[str]) -> str:
-    """The per-run password, or a refusal that names how to supply one."""
-    value = argv_rest[0] if argv_rest else ""
+    """The per-run password, or a refusal that names how to supply one.
+
+    The env spelling mirrors both sibling fixtures (``mobile_glance_fixture``,
+    ``mobile_delegating_fixture``): a caller may pass it as the second argument
+    OR export it under ``FIXTURE_PASSWORD_ENV`` — the constant above documents a
+    path this function has to actually implement, or the documented path is a
+    refusal (round-1 review, R3).
+    """
+    value = argv_rest[0] if argv_rest else os.environ.get(FIXTURE_PASSWORD_ENV, "")
     if not value:
         raise SystemExit(
-            "this fixture needs a per-run password: pass it as the second argument. "
-            "Generate one with python -c 'import secrets;print(secrets.token_urlsafe(16))'. "
+            "this fixture needs a per-run password: pass it as the second argument, or "
+            f"set {FIXTURE_PASSWORD_ENV}. Generate one with "
+            "python -c 'import secrets;print(secrets.token_urlsafe(16))' and export it. "
             "It is never defaulted and never printed by this script."
         )
     return value
+
+
+def _seed_stacked_neighbour(daemon: MobileDaemon) -> None:
+    """The one row carrying the WHOLE right cluster (design round 1, D2).
+
+    Every member comes from the product's own path: the origin marker +
+    listing via ``_seed_durable``, the pin through ``SessionTable.set_pins``
+    (the same mutation the pin route performs), the unread completion through
+    ``AttentionStore.publish`` (what a runtime's receipt goes through), and
+    the subagent counts / todos as fields an ordinary live record and
+    projection carry. The frame's question is whether ``agent`` parses beside
+    ``★`` / ``new`` / ``2 subagents`` / ``2 todo`` at 360 — a hand-built row
+    would not prove it of a row the product can produce.
+    """
+    from local_operator.mobile.types import TodoItem, TodoPhase
+    from local_operator.session.attention import AttentionStore
+
+    session_id = "aaaa00000005"
+    _seed_durable(
+        session_id,
+        "Release crew reshuffle",
+        {"agent": "manager", "label": "sessions-tool-0b39", "session": "e84228882245"},
+    )
+    daemon.table.set_pins(session_id, True)
+    AttentionStore().publish(
+        f"session/{session_id}", str(uuid.uuid4()), "reruns finished", "complete"
+    )
+    pid = 910002
+    record = SessionRecord(
+        pid=pid,
+        kind="tui",
+        session_id=session_id,
+        conversation_name="Release crew reshuffle",
+        cwd="/synthetic/worktree",
+        model_label="fixture/model",
+        control_port=1,
+        control_key="fixture",
+        detached=True,
+        busy=False,
+        # Two children of its own: the `N subagents` chip's half of the stack.
+        subagents_running=2,
+    )
+    entry = SessionEntry(record)
+    entry.projection = SessionProjection(
+        session_id=session_id,
+        pid=pid,
+        kind="tui",
+        conversation_name="Release crew reshuffle",
+        cwd="/synthetic/worktree",
+        model_label="fixture/model",
+        # Two open (pending + blocked) of three: the `N todo` chip's half.
+        todos=[
+            TodoPhase(
+                name="Release",
+                items=[
+                    TodoItem(text="rerun the flaky shard", status="pending"),
+                    TodoItem(
+                        text="fold the docs pass", status="blocked", reason="waiting on review"
+                    ),
+                    TodoItem(text="push the bump", status="completed"),
+                ],
+            )
+        ],
+    )
+    daemon.table.entries[pid] = entry
 
 
 async def main() -> None:
@@ -177,6 +259,7 @@ async def main() -> None:
     for session_id, title, opener in ROWS:
         _seed_durable(session_id, title, opener)
     _seed_tools_session(daemon)
+    _seed_stacked_neighbour(daemon)
     app = build_app(daemon)
     print(f"Fixture phone list on http://127.0.0.1:{port}", flush=True)
     await uvicorn.Server(
