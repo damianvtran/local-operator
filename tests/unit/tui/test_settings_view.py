@@ -5649,4 +5649,4 @@ async def test_settings_team_rows_paint_label_first_with_the_key(tmp_path: Path)
         await pilot.pause()
         rows = app._settings_team_rows()
 
-    assert rows == [("Data Quality (data-quality)", "0 members", "Data Quality · Finds issues")]
+    assert rows == [("Data Quality", "0 members", "Finds issues")]
