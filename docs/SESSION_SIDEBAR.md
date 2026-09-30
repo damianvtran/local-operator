@@ -4,8 +4,9 @@ The sidebar is an opt-in terminal view over existing session runtimes, not anoth
 runtime or a new scheduler. `Ctrl+B` and `/sidebar` toggle visibility without moving
 the editor caret. `F9` and `/sidebar focus` enter the list; F9 returns focus while
 leaving it open, and Escape dismisses it and returns to the last usable surface.
-A pointer press on the list enters it too; typed text lands in the composer
-while no hard claimant holds the keyboard — see "Click-to-focus and
+A pointer press on the panel enters the list too (the `⌥` chip's own cells
+are the one exception — they run the chip's action); typed text lands in the
+composer while no hard claimant holds the keyboard — see "Click-to-focus and
 typing-home" below.
 `Ctrl+Shift+↑`/`Ctrl+Shift+↓` attach the previous/next conversation directly — the
 one-press form of F9-then-arrow-then-Enter — in the list's own ranking, wrapping
@@ -22,9 +23,11 @@ the keyboard to it and wears the panel's focus ground (issue #1357 principles
 The row press still does what it always did — attach/open, with the cursor moving
 to the pressed row — and the pin cell still pins without opening. A press on the
 header, the `+N more pinned` line, the dead space below the rows or the footer
-takes the keyboard without acting on any row. Pinning keeps its cell and `F10`;
-there is no plain-key mnemonic for it, so `Space` types like every other
-printable key.
+takes the keyboard without acting on any row — with ONE exception: the `⌥`
+chip's own cells, a control with its own action, run the layer flip and leave
+the keyboard where it is (see "The ⌥ subagent layer"). Pinning keeps its cell
+and `F10`; there is no plain-key mnemonic for it, so `Space` types like every
+other printable key.
 
 The list never keeps the keyboard *for text*: any printable character, or a
 bracketed paste, delivered to it is handed to the composer and the composer takes
@@ -38,7 +41,7 @@ fresh key/paste is posted to it after focus moves, the same forwarding the
 transcript uses), so the draft, caret, shell mode and paste machinery see
 exactly what a focused composer would.
 
-Two guards bound the press:
+Three rules bound the press:
 
 * **A hard claimant keeps its keys.** A live approval, an ask picker, the aside,
   a full-page mode (subagent view, org chart, settings, login prompt) or a pushed
@@ -46,6 +49,11 @@ Two guards bound the press:
   press may still act on the row, but focus moves nowhere. This is the same
   predicate the composer's own focus routes consult (`_focus_is_claimed()`), held
   from `Screen._forward_event`'s click-to-focus walk before any handler runs.
+* **The `⌥` chip's cells are a control, not a panel press.** A press on them runs
+  the chip's action (the layer flip) and the keyboard stays where it was; one
+  cell off the chip is a normal press on the panel and takes the keyboard. The
+  chip's cells are read from the footer as painted when the press lands, because
+  the focus move itself repaints the ladder.
 * **A closed panel never holds the keyboard.** In the narrow drawer placement a
   valid selection closes the drawer and the keyboard returns to the composer. A
   press on a row the app cannot open (a stale row, a refused peer) is not a
@@ -166,6 +174,12 @@ shape changes — a flip that pages the list can shift it a few cells, and a pre
 aimed where it used to sit is inert; the underline returns on the next hover,
 wherever the chip now sits. The chord and the pointer are two ways to one flip,
 never two flips.
+
+The chip is also the one footer press that leaves the keyboard alone. The
+click-to-focus rule hands the keyboard to the list on a press anywhere on the
+panel; the chip is a control with its own action, so its own cells are exempt —
+a press on them flips the layer and focus does not move, while one cell off the
+chip is a normal press on the panel.
 
 Turning the layer on costs screen space before it shows a single row. Each
 section spends a heading plus the blank line beneath it, and every heading after
