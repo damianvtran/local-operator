@@ -323,6 +323,10 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/providers/qwencloud_console.py": (1, "a SECRET's name"),
     "local_operator/mobile/auth.py": (1, "the mobile session COOKIE's name"),
     "local_operator/mobile/seen.py": (1, "the mobile seen-store under the store root"),
+    "local_operator/mobile/push_devices.py": (
+        1,
+        "the mobile push-device registry under the store root",
+    ),
     "local_operator/secrets/keys.py": (
         2,
         "``secrets/`` and its registration ticket: the credential store at the config root",

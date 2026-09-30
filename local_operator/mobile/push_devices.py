@@ -23,12 +23,27 @@ Two decisions look odd until the reasons are on the table:
   ``app_version``, and the optional ``name`` label (an omitted ``name`` clears
   a stored one, so the app owns its label's whole lifecycle) — and keeps the
   ``device_id``, so a device that rotates its push token nightly cannot
-  accumulate rows.
+  accumulate rows. ``install_id`` is validated as a UUID (ADR §3.1) and stored
+  in canonical form, and an unknown body key refuses the request — the same
+  strictness the stored records get.
 
 The store is one JSON object under the config root, beside the daemon's other
 owner-private state (``mobile-seen.json``), written 0600 and atomically: temp
 file in the same directory, chmod before the replace, the same discipline as
 ``SeenStore._persist_locked``.
+
+The registry is BOUNDED (``MAX_DEVICE_ENTRIES``, the same discipline as
+``SeenStore._bound_locked``): overflow drops the least-recently-seen records,
+so a caller-side bug that mints a fresh ``install_id`` per launch cannot grow
+the store or the Settings payload without limit.
+
+``device_id`` is machine-minted and **provisional**. ADR §3.1/§4 assign the id
+to the cloud's registry ("the relay keeps the cloud's ``device_id``"), but the
+S7 forward that would create that registry does not exist yet, so this build
+mints a local ``uuid4``. DELETE acts on whatever id the registry currently
+holds; when S7 lands, the cloud's id becomes authoritative and supersedes the
+local one inside this module, and an app still holding a pre-S7 id keeps
+getting the documented idempotent ``{"ok": true}``.
 
 A store that cannot be parsed or fails validation is REFUSED, not repaired:
 every operation raises :class:`PushRegistryCorrupt` and the file is left
@@ -64,6 +79,15 @@ ENVIRONMENTS = ("sandbox", "production")
 #: grow the store without limit.
 MAX_FIELD_CHARS = 1024
 
+#: Bound on registered devices (the ``SeenStore._bound_locked`` discipline). A
+#: computer's devices are physical — a handful for any real user — so 256 is an
+#: order of magnitude past anything a healthy app produces, while still bounding
+#: both the file and the Settings payload. Overflow drops the least-recently-seen
+#: records: firing at all means a caller is minting identities it should not
+#: (the bug review round 1's M1 names), and the bound is a backstop, not a limit
+#: a healthy fleet approaches.
+MAX_DEVICE_ENTRIES = 256
+
 #: One lock over the store's read-modify-write cycle. The routes run their
 #: store calls on worker threads (``asyncio.to_thread``), so two concurrent
 #: registrations could otherwise interleave load/save and lose one. In-process
@@ -88,6 +112,11 @@ _REQUIRED_RECORD_FIELDS = frozenset(
 _OPTIONAL_RECORD_FIELDS = frozenset({"name"})
 _RECORD_FIELDS = _REQUIRED_RECORD_FIELDS | _OPTIONAL_RECORD_FIELDS
 
+#: The register body's canonical keys; an unknown key refuses (below).
+_REGISTER_FIELDS = frozenset(
+    {"platform", "token", "environment", "app_version", "install_id", "name"}
+)
+
 
 class PushDeviceRefusal(Exception):
     """One register payload this build cannot accept, written for the reader.
@@ -109,6 +138,15 @@ class PushRegistryCorrupt(RuntimeError):
     is left untouched by the raiser; the daemon answers it as an internal fault
     (500) whose message names the problem.
     """
+
+
+def store_path(config_dir: Path) -> Path:
+    """The registry file's path under one config root.
+
+    Public because the daemon's refusal log names it (``_push_call``): "which
+    file" is the first question a reader of that log line asks.
+    """
+    return config_dir / PUSH_DEVICES_STORE_NAME
 
 
 def register(config_dir: Path, body: object, *, now: float | None = None) -> dict[str, Any]:
@@ -133,6 +171,8 @@ def register(config_dir: Path, body: object, *, now: float | None = None) -> dic
         record = _find(records, fields["install_id"], fields["platform"])
         if record is None:
             record = {
+                # Machine-minted and provisional: the cloud's id supersedes it
+                # once the S7 forward exists (module docstring).
                 "device_id": uuid.uuid4().hex,
                 "platform": fields["platform"],
                 "environment": fields["environment"],
@@ -150,6 +190,7 @@ def register(config_dir: Path, body: object, *, now: float | None = None) -> dic
             record["name"] = fields["name"]
         else:
             record.pop("name", None)
+        records = _prune_locked(records)
         _save(config_dir, records)
         return {
             "ok": True,
@@ -217,18 +258,28 @@ def _checked_registration(body: object) -> dict[str, Any]:
     """One register body, field by field, strictly — or a refusal sentence."""
     if not isinstance(body, dict):
         raise PushDeviceRefusal("a JSON object body is required")
+    # Unknown keys refuse in BOTH directions — the register body like a stored
+    # record, matching the projects routes' ``_selected`` (whose models are
+    # ``extra="forbid"``): a typing slip in an identity field ("installID")
+    # must read as a refusal, not as "admitted".
+    unknown = sorted(set(body) - _REGISTER_FIELDS)
+    if unknown:
+        raise PushDeviceRefusal(f"unknown field(s): {', '.join(unknown)}")
     platform = body.get("platform")
     if platform not in PLATFORMS:
         raise PushDeviceRefusal('platform must be "ios" or "android"')
     environment = body.get("environment")
     if environment not in ENVIRONMENTS:
         raise PushDeviceRefusal('environment must be "sandbox" or "production"')
-    # Validated, then dropped — never persisted (module docstring, ADR §4).
+    # Validated, then dropped — never persisted (module docstring, ADR §4). The
+    # two failure modes stay distinct: an over-long token is not a missing one.
     token = body.get("token")
-    if not _is_text(token):
+    if not isinstance(token, str) or not token.strip():
         raise PushDeviceRefusal("token is required")
+    if len(token) > MAX_FIELD_CHARS:
+        raise PushDeviceRefusal("token is too long")
     app_version = _checked_text(body.get("app_version"), "app_version")
-    install_id = _checked_text(body.get("install_id"), "install_id")
+    install_id = _install_id(body.get("install_id"))
     # ``name`` is device-local metadata only (a user-editable label): never used
     # for routing or matching, and it must never drift into carrying
     # conversation/machine session content. Blank means "no label given", which
@@ -249,8 +300,23 @@ def _checked_registration(body: object) -> dict[str, Any]:
     }
 
 
-def _is_text(value: object) -> bool:
-    return isinstance(value, str) and bool(value.strip()) and len(value) <= MAX_FIELD_CHARS
+def _install_id(value: object) -> str:
+    """The register body's ``install_id``: a UUID, canonicalised.
+
+    ADR §3.1 spells the field "<uuid, minted once and kept in the keystore>".
+    Parsed rather than pattern-matched, and re-spelled canonically (lowercase,
+    hyphenated) so a case variant of the same UUID — iOS spells them uppercase
+    by default — cannot fork one device into two ``(install_id, platform)``
+    identities; such a fork would defeat the idempotency this slice rests on.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise PushDeviceRefusal("install_id is required")
+    if len(value.strip()) > MAX_FIELD_CHARS:
+        raise PushDeviceRefusal("install_id is too long")
+    try:
+        return str(uuid.UUID(value.strip()))
+    except ValueError as exc:
+        raise PushDeviceRefusal("install_id must be a UUID") from exc
 
 
 def _checked_text(value: object, field: str) -> str:
@@ -273,6 +339,27 @@ def _find(records: list[dict[str, Any]], install_id: str, platform: str) -> dict
     return None
 
 
+def _prune_locked(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop the least-recently-seen records past ``MAX_DEVICE_ENTRIES``.
+
+    ``SeenStore._bound_locked``'s discipline: prune on the write path, so a
+    caller-side bug that mints a fresh ``install_id`` per launch cannot grow
+    the store or the Settings payload without limit. The ranking is
+    ``last_seen_at`` (``registered_at`` breaks ties): every healthy
+    re-register refreshes its record, so a recently-active device is the LAST
+    thing this can touch, and ghosts from a broken caller age out as newer
+    registrations push in. Firing at all already means something upstream is
+    wrong — no bound can drop rows otherwise — so least-harm is the most this
+    can do, and it beats growth. The caller holds ``_LOCK``.
+    """
+    excess = len(records) - MAX_DEVICE_ENTRIES
+    if excess <= 0:
+        return records
+    ranked = sorted(records, key=lambda record: (record["last_seen_at"], record["registered_at"]))
+    doomed = {record["device_id"] for record in ranked[:excess]}
+    return [record for record in records if record["device_id"] not in doomed]
+
+
 # -- the file -------------------------------------------------------------------
 
 
@@ -285,7 +372,7 @@ def _load(config_dir: Path) -> list[dict[str, Any]]:
     an empty answer for a file that exists and cannot be read is the one answer
     that silently loses devices.
     """
-    path = config_dir / PUSH_DEVICES_STORE_NAME
+    path = store_path(config_dir)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -338,6 +425,16 @@ def _validated_record(entry: object, index: int) -> dict[str, Any]:
                 f"push device registry record {index} has an invalid {field};"
                 " refusing to rewrite it"
             )
+    # The identity is a UUID by contract (ADR §3.1). Any stored spelling is
+    # accepted — normalising on read would be a rewrite, which this store never
+    # does — but a non-UUID install_id is not a record this build can produce.
+    try:
+        uuid.UUID(entry["install_id"])
+    except ValueError as exc:
+        raise PushRegistryCorrupt(
+            f"push device registry record {index} has an invalid install_id;"
+            " refusing to rewrite it"
+        ) from exc
     for field in ("registered_at", "last_seen_at"):
         value = entry[field]
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
@@ -357,7 +454,7 @@ def _save(config_dir: Path, records: list[dict[str, Any]]) -> None:
     whose verdicts stay correct in memory, a register/deregister verdict must
     not be reported as accepted when the disk never got it.
     """
-    path = config_dir / PUSH_DEVICES_STORE_NAME
+    path = store_path(config_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, tmp_name = tempfile.mkstemp(
         dir=str(path.parent), prefix=f".{PUSH_DEVICES_STORE_NAME}.", suffix=".tmp"

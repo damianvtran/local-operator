@@ -17,8 +17,10 @@ untouchedness is the assertion.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import stat
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -147,6 +149,34 @@ def test_re_register_bumps_last_seen_at_but_not_registered_at(tmp_path: Path) ->
     assert record["last_seen_at"] == 1_700_000_999
 
 
+def test_the_registry_is_bounded_and_keeps_the_most_recent(tmp_path: Path) -> None:
+    """A caller minting a fresh install_id per launch cannot grow the store (M1).
+
+    The reviewer's probe registered 200 distinct install ids and found 202 rows;
+    here the same shape runs past the bound and must stay capped, dropping the
+    least-recently-seen records first.
+    """
+    root = tmp_path
+    for index in range(1, push_devices.MAX_DEVICE_ENTRIES + 1):
+        push_devices.register(
+            root,
+            {**PAYLOAD, "install_id": str(uuid.UUID(int=index))},
+            now=1_700_000_000.0 + index,
+        )
+    store = root / PUSH_DEVICES_STORE_NAME
+    assert len(json.loads(store.read_text(encoding="utf-8"))["devices"]) == (
+        push_devices.MAX_DEVICE_ENTRIES
+    )
+
+    newest = str(uuid.UUID(int=push_devices.MAX_DEVICE_ENTRIES + 1))
+    push_devices.register(root, {**PAYLOAD, "install_id": newest}, now=1_700_000_999.0)
+    records = json.loads(store.read_text(encoding="utf-8"))["devices"]
+    assert len(records) == push_devices.MAX_DEVICE_ENTRIES, "the store stays bounded"
+    kept = {record["install_id"] for record in records}
+    assert newest in kept, "the newest registration is never the one dropped"
+    assert str(uuid.UUID(int=1)) not in kept, "the least-recently-seen goes first"
+
+
 def test_a_different_install_id_or_platform_is_a_new_device() -> None:
     client = _client()
     original = client.post("/api/push/register", json=PAYLOAD)
@@ -159,6 +189,24 @@ def test_a_different_install_id_or_platform_is_a_new_device() -> None:
     ids.add(other_install.json()["device_id"])
     assert len(ids) == 3, "(install_id, platform) is the identity; neither half alone is"
     assert len(_stored_records()) == 3
+
+
+def test_install_id_is_stored_as_a_canonical_uuid() -> None:
+    """A case variant of one UUID must not fork the device identity (review M1).
+
+    iOS mints and keeps uppercase UUIDs; storing the caller's spelling verbatim
+    would let the same phone register as two devices depending on how the app
+    spelled its keystore value that day.
+    """
+    client = _client()
+    upper = client.post(
+        "/api/push/register", json={**PAYLOAD, "install_id": PAYLOAD["install_id"].upper()}
+    )
+    assert upper.status_code == 200, upper.text
+    assert _stored_records()[0]["install_id"] == PAYLOAD["install_id"].lower()
+    again = client.post("/api/push/register", json=PAYLOAD)
+    assert again.json()["device_id"] == upper.json()["device_id"], "one UUID, one device"
+    assert len(_stored_records()) == 1
 
 
 def test_deregister_removes_and_repeating_it_stays_ok() -> None:
@@ -281,6 +329,9 @@ _INVALID_BODIES = [
     ("blank-token", {**PAYLOAD, "token": "   "}),
     ("non-string-token", {**PAYLOAD, "token": 123}),
     ("non-string-name", {**PAYLOAD, "name": 7}),
+    ("install-id-not-a-uuid", {**PAYLOAD, "install_id": "not-a-uuid"}),
+    ("unknown-key", {**PAYLOAD, "installID": PAYLOAD["install_id"]}),
+    ("token-too-long", {**PAYLOAD, "token": "x" * 1025}),
     ("list-body", []),
     ("string-body", "text"),
     ("number-body", 12),
@@ -318,6 +369,24 @@ def test_invalid_input_leaves_an_existing_store_alone() -> None:
     assert _store_path().read_bytes() == before
 
 
+def test_refusals_name_their_actual_problem() -> None:
+    """N1/N2: an over-long token is not a missing one, and a typo'd identity
+    key is refused by name — the caller can fix what the sentence names."""
+    client = _client()
+    too_long = client.post("/api/push/register", json={**PAYLOAD, "token": "x" * 1025})
+    assert too_long.status_code == 422
+    assert too_long.json() == {"error": "token is too long"}
+
+    typo = client.post("/api/push/register", json={**PAYLOAD, "installID": PAYLOAD["install_id"]})
+    assert typo.status_code == 422
+    assert typo.json() == {"error": "unknown field(s): installID"}
+
+    not_uuid = client.post("/api/push/register", json={**PAYLOAD, "install_id": "not-a-uuid"})
+    assert not_uuid.status_code == 422
+    assert not_uuid.json() == {"error": "install_id must be a UUID"}
+    assert not _store_path().exists(), "no refusal may create the store"
+
+
 _VALID_RECORD = {
     "device_id": "a" * 32,
     "platform": "ios",
@@ -353,6 +422,12 @@ _CORRUPT_STORES = [
         "record-unknown-field",
         json.dumps({"devices": [{**_VALID_RECORD, "token": "leak"}]}).encode(),
     ),
+    # The identity is a UUID by contract; a stored non-UUID refuses like any
+    # other shape this build cannot have produced.
+    (
+        "record-install-id-not-a-uuid",
+        json.dumps({"devices": [{**_VALID_RECORD, "install_id": "legacy-caller-id"}]}).encode(),
+    ),
 ]
 
 
@@ -378,6 +453,23 @@ def test_a_corrupt_store_is_refused_and_left_byte_identical(label: str, stored: 
     assert _store_path().read_bytes() == before_bytes, f"{label}: the store must not be repaired"
     assert os.stat(_store_path()).st_mode == before_mode
     assert not list(config_dir().glob(f".{PUSH_DEVICES_STORE_NAME}.*")), "no temp litter"
+
+
+def test_a_corrupt_store_leaves_its_refusal_in_the_log(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """M3: uvicorn runs at warning level; an unlogged 500 left no trace."""
+    client = _client()
+    _store_path().parent.mkdir(parents=True, exist_ok=True)
+    _store_path().write_bytes(b"{not json")
+    with caplog.at_level(logging.WARNING, logger="local_operator.mobile.daemon"):
+        response = client.post("/api/push/register", json=PAYLOAD)
+    assert response.status_code == 500
+    refusals = [
+        record for record in caplog.records if "push device registry" in record.getMessage()
+    ]
+    assert len(refusals) == 1, "one refusal, one line"
+    assert str(_store_path()) in refusals[0].getMessage(), "the line names the store"
 
 
 def test_registry_operations_leave_attention_db_untouched() -> None:
