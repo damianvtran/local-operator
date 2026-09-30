@@ -205,6 +205,75 @@ async def test_a_retired_outcome_restates_the_live_cut_row_instead_of_doubling_i
 
 
 @pytest.mark.asyncio
+async def test_a_closed_outcome_restates_an_aborted_live_row_into_the_info_tier(
+    tmp_path, monkeypatch
+) -> None:
+    """THE CARRIED CUT'S ONE ROW (design D1 on #1829, 2026-09-30).
+
+    A carried run cancelled in the one-shot handoff paints the live ABORT row
+    (``! interrupted``, the aborted branch — the end arrives ``aborted=True``,
+    which is the pairing v2's captures missed by checking ``aborted=False``)
+    and the session publishes ``closed``. Pre-change the poller REFUSED the
+    kind, so the live ``! interrupted`` and the poller's dim closure row stood
+    together: two rows for one cut, one of them reading as an interruption that
+    had been superseded.
+
+    The adoption restates in place — the closure's own words
+    (``CLOSED_NOTICE_TEXT``) in the info tier — so the frame carries ONE row
+    for the cut, and it is the receipt the outcome (and both other surfaces)
+    call neutral. The retired cell above stays the warning-tier control.
+    """
+    session = OutcomeSession(tmp_path / "attention.db")
+    monkeypatch.setattr("local_operator.tui.attention.terminal_is_foreground", lambda: True)
+    app = OperatorApp(lambda: _factory(session))
+    from local_operator.harness.rows import CLOSED_NOTICE_TEXT
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _start_and_end_turn(app, pilot, aborted=True, error=None)
+        # The live row the handoff paints, held for adoption.
+        assert _notice_texts(app) == ["interrupted"]
+
+        session.publish("closed", cause="disposed")
+        anchor = session.store.state(session.identity)["anchor_id"]
+        assert app._adopt_own_interrupt_notice("closed", anchor) is True
+        await app._poll_completion_attention()
+        await pilot.pause()
+
+        texts = _notice_texts(app)
+        assert texts == [CLOSED_NOTICE_TEXT], texts
+        # The info tier, POSITIVELY: `info` is the `dim` token — the same ink
+        # the poller's own closure row uses — where the adopted row was warning
+        # `interrupted` before the restate.
+        assert [block._token for block in _notice_blocks(app)] == ["dim"]
+        assert not any("interrupted" in text for text in texts), texts
+
+
+@pytest.mark.asyncio
+async def test_the_closed_adoption_declines_a_mismatched_live_row(tmp_path, monkeypatch) -> None:
+    """The correspondence stays a guard, not a blanket (design D1).
+
+    `closed` supersedes the ABORT row; a live row for a DIFFERENT fact must
+    still refuse, so a held ``error`` row keeps its own wording and the
+    poller's closure row is not suppressed in its favour.
+    """
+    session = OutcomeSession(tmp_path / "attention.db")
+    monkeypatch.setattr("local_operator.tui.attention.terminal_is_foreground", lambda: True)
+    app = OperatorApp(lambda: _factory(session))
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        endpoint = "api refused the request: 502 Bad Gateway"
+        await _start_and_end_turn(app, pilot, aborted=False, error=endpoint)
+        assert _notice_texts(app) == [endpoint]
+
+        session.publish("closed", cause="disposed")
+        anchor = session.store.state(session.identity)["anchor_id"]
+        assert app._adopt_own_interrupt_notice("closed", anchor) is False
+        hold = app._own_interrupt_notice
+        assert hold is not None
+        assert hold._text == endpoint
+
+
+@pytest.mark.asyncio
 async def test_the_poller_names_the_cause_for_a_cut_off_it_never_painted(
     tmp_path, monkeypatch
 ) -> None:
