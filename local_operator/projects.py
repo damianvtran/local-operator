@@ -1246,6 +1246,12 @@ def history_lines(
     :func:`display_name` follows). Newest entries LAST (the log's own order),
     with the total in the header whenever older entries are elided; attachment
     lines carry the stored path, the resolvable handle to the copied-in file.
+
+    Rows pass through :func:`collapse_adjacent_updates` first (ruling §4.4): a
+    legacy or hand-edited run of identical-normalized entries prints as its
+    newest row with a ``(re-sent N×)`` note. The header keeps counting STORED
+    entries while 'latest N shown' counts printed rows, so a fully collapsed
+    tail can read ``history (5, latest 1 shown)`` with the row saying why.
     """
     raw_entries = project.get("updates") if isinstance(project, Mapping) else project.updates
     entries = list(raw_entries) if isinstance(raw_entries, list) else []
@@ -1257,19 +1263,22 @@ def history_lines(
     total = len(entries)
     if total == 0:
         return ["history: none recorded"]
-    shown = entries[-tail:]
+    # Collapse BEFORE the tail slice so a run's count is the run's WHOLE
+    # count, not just the entries the window happens to hold.
+    shown = collapse_adjacent_updates(entries)[-tail:]
     if len(shown) == total:
         lines = [f"history ({total}):"]
     else:
         lines = [f"history ({total}, latest {len(shown)} shown):"]
-    for entry in shown:
+    for entry, repeats in shown:
         stamp = str(_history_field(entry, "at") or "").strip() or "(no timestamp)"
         by = str(_history_field(entry, "by") or "").strip()
         # One line per entry: whitespace-collapsed so a multi-paragraph
         # markdown report cannot wrap the block; the row keeps the raw text.
         text = " ".join(str(_history_field(entry, "text") or "").split()) or "(empty)"
         by_text = f" by {by}" if by else ""
-        lines.append(f"  - {stamp}{by_text}: {text}")
+        note = f" (re-sent {repeats}×)" if repeats > 1 else ""
+        lines.append(f"  - {stamp}{by_text}: {text}{note}")
         raw_attachments = _history_field(entry, "attachments")
         for attachment in raw_attachments if isinstance(raw_attachments, list) else []:
             name = str(_history_field(attachment, "name") or "").strip()
@@ -1282,6 +1291,32 @@ def history_lines(
             path = str(_history_field(attachment, "path") or "").strip()
             lines.append(f"      attachment: {name} [{kind}, {file_size_text(size)}] {path}")
     return lines
+
+
+def collapse_adjacent_updates(entries: Sequence[Any]) -> list[tuple[Any, int]]:
+    """Display-only: adjacent identical-NORMALIZED history entries → newest + count.
+
+    Ruling §4.4's dedupe, renderer-side and nothing more: the stored log is
+    append-only and is never rewritten, and the write path cannot produce
+    adjacent duplicates any more (an exact-normalized re-send records a refresh
+    and appends nothing), so a collapse only ever reads a run an OLDER build or
+    a hand-edit left behind — the corpus holds zero such pairs today. The
+    NEWEST entry of a run is the one kept, so the surviving row is the one a
+    reader would verify against reality; attachment sub-lines follow it.
+
+    Normalization is the refresh classifier's (:func:`_normalize_progress`:
+    strip + collapse whitespace runs, case-sensitive, punctuation
+    significant), and near-identical variants are deliberately NOT collapsed —
+    the same false-positive argument the refresh rule carries.
+    """
+    collapsed: list[tuple[Any, int, str]] = []
+    for entry in entries:
+        key = _normalize_progress(str(_history_field(entry, "text") or ""))
+        if collapsed and collapsed[-1][2] == key:
+            collapsed[-1] = (entry, collapsed[-1][1] + 1, key)
+        else:
+            collapsed.append((entry, 1, key))
+    return [(entry, count) for entry, count, _key in collapsed]
 
 
 def truncate_row(row: str, *, cap: int = PROJECT_ROW_CAP) -> str:
@@ -2100,9 +2135,7 @@ class ProjectRegistry:
                     candidate.progress_refreshed_at = None
                     candidate.progress_refreshed_by = ""
                     changed = True
-                elif progress_is_stale(
-                    candidate, now=now, window=stale_after_s(self.config_dir)
-                ):
+                elif progress_is_stale(candidate, now=now, window=stale_after_s(self.config_dir)):
                     # REFRESH: identical-normalized text on a stale record. No
                     # append and the content clock is NEVER moved — the stale
                     # badge keeps reading the truth about content age — while

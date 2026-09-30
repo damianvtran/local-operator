@@ -845,7 +845,51 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: tiers-configured box renders the 762-char-larger surface above (219 over
 #: the ceiling), which is that config dependence, not an unfixable platform
 #: offset. The tighten band below (1,200) is not in play.
-BUDGET_BILLED_TOKENS = 37_378
+#:
+#: RAISED 37,378 -> 37,491 for the PROJECTS-SEMANTICS backend slice (PR #1831:
+#: coordination links, content-age staleness, refresh ≠ update), stated with
+#: the arithmetic because the guard exists to make copy growth an explicit
+#: decision. The slice's own delta is +187 chars = +67 billed, entirely in
+#: ``tool_schemas`` (67,903 -> 68,090 on the clean arm: a main-only tree at
+#: this fold's base vs the folded head) and NOTHING else — the ``project``
+#: tool's description and its ``progress`` field description teach the link
+#: roles and the refresh-vs-update split, and ``refresh`` joins the verb
+#: enum — while the other counters are byte-identical. A first pass cost
+#: +347 chars (+125 billed: CI run
+#: 36714584926 failed the gate by 82), and the review round's remediation
+#: trimmed the genuinely redundant halves — the "re-sending the identical
+#: line refreshes too" clause and "rather than a working link" — before this
+#: raise was written.
+#:
+#: This entry has survived TWO folds, and it now records both arithmetic
+#: lessons in its own numbers. The first push measured 103,419 = ~37,201
+#: against a 103,385/~37,189 branch-tree prediction: the +34 was MAIN's
+#: growth entering through the CI merge ref (the agent tool's schema, +36 on
+#: the tool itself), present because CI tests the merge with current main
+#: while any branch-tree prediction misses it. So this entry states the
+#: MERGE-REF numbers, BOTH arms, re-measured at the folded head with this
+#: script on this machine — the clean arm in ``env -i`` is the arm CI
+#: renders (same comparison as the tool:// entry above):
+#:
+#:   clean arm (CI), folded head      104,073 chars = ~37,436 billed
+#:   tiers-configured arm, same head  104,835 chars = ~37,710 billed
+#:                                    (104,835 - 104,073 = 762, the exact
+#:                                    config delta the tool:// entry
+#:                                    explains)
+#:
+#: A local run under that config therefore reads above this ceiling by the
+#: same 762 chars; the clean arm is what CI renders and the binding reading.
+#:
+#: Of the +314 clean-arm growth since the tool:// entry (103,759 -> 104,073,
+#: main kept moving between that merge and this fold), +187 is this slice's
+#: project-tool copy and the remaining ~127 is main-side merges, none of them
+#: here. The ceiling is the measured clean head + 55 (the band this file
+#: keeps): 37,491. That is ~152 further chars of main-side growth before this
+#: branch's CI run would eat the band, and CI's own reading then prints the
+#: number that replaces this one. The peel-off a future reduction can act
+#: on: moving the role wording into ``guide://projects`` (read on demand)
+#: takes this back toward the base.
+BUDGET_BILLED_TOKENS = 37_491
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

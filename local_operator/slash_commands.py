@@ -485,8 +485,8 @@ def project_overview_receipt(
     with no project of their own still gets the overview.
     """
     from local_operator.projects import (
-        stale_after_s,
         scan_runtime_states,
+        stale_after_s,
         store_error_text,
     )
 
@@ -515,9 +515,7 @@ def project_overview_receipt(
     if not projects:
         return (project_empty_text(), "info")
     states = scan_runtime_states(config_dir)
-    rows = project_listing_rows(
-        projects, states=states, now=now, window=stale_after_s(config_dir)
-    )
+    rows = project_listing_rows(projects, states=states, now=now, window=stale_after_s(config_dir))
     return ("\n".join([*rows, project_listing_hint_text()]), "info")
 
 
@@ -725,9 +723,9 @@ def run_project_slash_op(
         ProjectNameConflictError,
         ProjectSchemaGuardError,
         build_project_view,
-        stale_after_s,
         readable_error,
         scan_runtime_states,
+        stale_after_s,
         store_error_text,
     )
 
@@ -865,9 +863,19 @@ def run_project_slash_op(
         # The pre-state decides which receipt is true: a filed id that links
         # MOVES lists, and the receipt must say its liveness role changed.
         was_filed = linkable in project.coordination_sessions
+        # SELF-FILING: `/project link` is always a self-link, so a chief of
+        # staff session FILES rather than joins — the tool op's role decision,
+        # one copy each — and an existing work link is never demoted.
+        self_filing = False
+        if word == "link" and linkable not in project.sessions:
+            from local_operator.aida.state import is_aida_session
+
+            self_filing = is_aida_session(config_dir, linkable)
         try:
             if word == "link":
-                project, changed = registry.link_session(project.id, linkable)
+                project, changed = registry.link_session(
+                    project.id, linkable, role="coordination" if self_filing else "work"
+                )
             else:
                 project, changed = registry.unlink_session(project.id, linkable)
         except (ValueError, ValidationError) as exc:
@@ -878,6 +886,18 @@ def run_project_slash_op(
         if project.coordination_sessions:
             working += f" + {len(project.coordination_sessions)} filed"
         if word == "link":
+            if self_filing:
+                if changed:
+                    return (
+                        f"filed session {linkable} on {project.name!r} — a coordination "
+                        f"link, not a working session.",
+                        "info",
+                    )
+                return (
+                    f"session {linkable} is already filed on {project.name!r} — a "
+                    f"coordination link, not a working session.",
+                    "info",
+                )
             if not changed:
                 return (
                     f"session {linkable} was already linked to {project.name!r} as a "

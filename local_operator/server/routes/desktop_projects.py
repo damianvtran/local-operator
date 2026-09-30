@@ -56,9 +56,9 @@ from local_operator.projects import (
     ProjectRegistryLockTimeout,
     ProjectSchemaGuardError,
     build_project_view,
-    stale_after_s,
     readable_error,
     scan_runtime_states,
+    stale_after_s,
 )
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.desktop_projects import (
