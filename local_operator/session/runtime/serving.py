@@ -4667,19 +4667,32 @@ class ServingSessionHandle(SessionHandle):
         if record is None:
             raise ValueError("that question was already answered")
         if not value:
+            # An EMPTY value is today's Esc and settles the WHOLE ask: a decline
+            # is not a step of the multi-step flow.
             outcome = self._session.decline_ask(ask_id, by="mirror")
-        else:
-            questions = list(record.get("questions") or [])
-            key = (
-                str(questions[question_index].get("id") or "")
-                if 0 <= question_index < len(questions)
-                else ""
-            )
-            if not key:
-                raise ValueError("that question was already answered")
-            outcome = self._session.respond_ask(ask_id, {key: [value]}, by="mirror")
+            if not outcome.get("ok"):
+                raise ValueError(str(outcome.get("error") or "the decline was refused"))
+            return "declined"
+        questions = list(record.get("questions") or ())
+        if not 0 <= question_index < len(questions):
+            raise ValueError("that question was already answered")
+        key = str(questions[question_index].get("id") or "")
+        # THE LEGACY PATH IS INCREMENTAL (design §4, A2 addendum) and that is the
+        # difference from the ops below: the old card answers ONE question per
+        # tap, so this merges into the queue's draft and lets the LAST question
+        # settle the ask in one atomic write. ``ask_respond`` stays atomic and
+        # still refuses a partial map — a whole-ask client has no reason to send
+        # one, and accepting it there would be a second, weaker contract.
+        outcome = self._session.answer_ask_question(ask_id, key, [value], by="mirror")
         if not outcome.get("ok"):
             raise ValueError(str(outcome.get("error") or "the answer was refused"))
+        if not outcome.get("settled"):
+            total = len(questions)
+            waiting = len(outcome.get("waiting") or ())
+            # The card advances to the next unanswered question (the draft rides
+            # the published rows), so the detail says where the tap landed rather
+            # than claiming the ask is done.
+            return f"answered {total - waiting} of {total}; the next question is on the card"
         # Await the delivery for the same reason the queued-ask op does: the
         # caller's "answered" must be a claim about a row that EXISTS.
         await self._session.reconcile_asks()

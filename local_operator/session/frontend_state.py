@@ -2963,6 +2963,12 @@ class FrontendSessionState(BaseModel):
     #: way.
     asks: list[PendingAskState] | None = None
     asks_open: int | None = None
+    #: True when ``asks`` is a PREFIX of this session's ask list rather than all
+    #: of it — the wire bound dropped rows that did not fit the frame (see
+    #: ``bound_ask_rows``). Absent, not False, when nothing was dropped, so a
+    #: client reads absence as "complete" and never has to compare a count
+    #: against the rows it drew. ``model_catalogue_truncated``'s shape.
+    asks_truncated: bool | None = None
     slash_capabilities: list[SlashCapability] = Field(default_factory=list)
     # The runtime's provider-catalogue rows, so an attached terminal's bare
     # ``/model`` picker lists the models the SESSION can actually switch to
@@ -3002,6 +3008,8 @@ class FrontendSessionState(BaseModel):
             payload.pop("asks", None)
         if mutable.asks_open is None:
             payload.pop("asks_open", None)
+        if mutable.asks_truncated is None:
+            payload.pop("asks_truncated", None)
         return payload
 
     @field_validator("selected_model", "effective_model", mode="before")
@@ -3500,20 +3508,30 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
         # else will shrink. See MODEL_CATALOGUE_FLOOR_ROWS for why the
         # catalogue takes a residual budget where jobs take a fixed one.
         _bound_model_catalogue_in_place(payload, snapshot)
-        _yield_asks_when_the_frame_has_no_room(snapshot)
+        _yield_asks_when_the_frame_has_no_room(snapshot, payload)
     return payload
 
 
-def _yield_asks_when_the_frame_has_no_room(snapshot: dict[str, Any]) -> None:
+def _yield_asks_when_the_frame_has_no_room(
+    snapshot: dict[str, Any], payload: dict[str, Any]
+) -> None:
     """Drop the ask list entirely when the frame it rides is already full.
 
     THE LAST-RESORT YIELD, and the reason it is needed rather than a smaller
-    constant: the attach frame has essentially no slack at the all-maximum
-    shape the class guard measures (1,048,576-byte line; the fixture sat ~100 B
-    under it before this field existed), so there is NO ask budget, however
-    small, that both carries a question and fits that frame. A field that
-    overflowed the socket while carrying a question would be worse than one that
-    says nothing.
+    constant: the attach frame has essentially no slack at the all-maximum shape
+    the class guard measures (1,048,576-byte line; the fixture sat ~100 B under
+    it before this field existed), so there is NO ask budget, however small, that
+    both carries a question and fits that frame. A field that overflowed the
+    socket while carrying a question would be worse than one that says nothing.
+
+    It measures the REAL payload — the dict the socket actually writes, which is
+    the same shape ``_frame_line_bytes`` charges for — and that is a fix rather
+    than a style note: the first revision rebuilt a ``{"op": "frontend_sync",
+    …}`` envelope from the snapshot, omitting ``epoch``/``sequence``/
+    ``live_cursor`` and using the PUSH shape where the cap uses the RPC reply
+    shape, under-counting by ~220 B against ~110 B of slack. The branch could
+    therefore fail to fire and the WHOLE frame would degrade to fit instead of
+    this one field yielding.
 
     It runs AFTER ``_bound_model_catalogue_in_place`` deliberately: the
     catalogue's budget is the frame's residual, so it has already taken
@@ -3525,27 +3543,18 @@ def _yield_asks_when_the_frame_has_no_room(snapshot: dict[str, Any]) -> None:
     ``_bound_asks_in_place``). It is NOT a claim about the FEATURE: ``N2``'s gate
     is the publisher's (the flag and a host that can show an ask), so a
     dark runtime is distinguishable from a full frame by whether the flag was
-    ever on, and the cross-session aggregate route carries the view that a
-    frame this full cannot.
+    ever on, and the cross-session aggregate route carries the view that a frame
+    this full cannot.
     """
     if not snapshot.get("asks"):
         return
-    if _frame_line_bytes(_snapshot_frame(snapshot)) <= _MODEL_CATALOGUE_LINE_LIMIT:
+    if _frame_line_bytes(payload) <= _MODEL_CATALOGUE_LINE_LIMIT:
         return
     snapshot.pop("asks", None)
     snapshot.pop("asks_open", None)
-
-
-def _snapshot_frame(snapshot: dict[str, Any]) -> dict[str, Any]:
-    """The snapshot as the measurement functions expect it.
-
-    ``_bound_model_catalogue_in_place`` measures the whole ``payload`` (the sync
-    envelope), while the fields below it are edited on the ``snapshot``. The
-    yield above has only the snapshot in hand, so it rebuilds the envelope the
-    line is actually measured against rather than measuring a shape that never
-    ships — a lower bound would let a frame through that the socket then drops.
-    """
-    return {"op": "frontend_sync", "data": {"snapshot": snapshot}}
+    # The flag goes with the rows it describes: a frame carrying neither list nor
+    # tally must not claim one was clipped.
+    snapshot.pop("asks_truncated", None)
 
 
 def _bound_model_catalogue_in_place(payload: dict[str, Any], snapshot: dict[str, Any]) -> None:
@@ -3702,71 +3711,121 @@ def _bound_goal_record_in_place(payload: dict[str, Any], snapshot: dict[str, Any
 ASK_QUESTION_WIRE_CHARS = 200
 ASK_OPTION_LABEL_WIRE_CHARS = 60
 ASK_OPTION_DESC_WIRE_CHARS = 80
-ASK_WIRE_TEXT_BUDGET_CHARS = 8_000
+#: Counts are bounded as well as text, and that is a review finding rather than
+#: symmetry: with only a byte budget the FIRST row was exempt from it, so one ask
+#: carrying a hundred questions could spend the whole frame by itself. An ask is
+#: put to a human one screen at a time, so the wire carries a screenful.
+ASK_WIRE_QUESTIONS_MAX = 12
+ASK_WIRE_OPTIONS_MAX = 10
+#: The field's text budget, spent in the fold's own order (open first) so the
+#: rows that survive are the ones a user must answer. The FIRST row is clipped to
+#: fit this budget rather than exempt from it: the guarantee is that one row rides
+#: the frame, not that one row may be any size.
+ASK_WIRE_TEXT_BUDGET_CHARS = 6_000
 
 
-def _bound_asks_in_place(snapshot: dict[str, Any]) -> None:
-    """Clip the queued-ask list to its wire bound (see the constants above).
+def _clip_for_wire(text: str, cap: int) -> str:
+    """``text`` cut to ``cap`` characters, marked the way the neighbours mark it."""
+    return text if len(text) <= cap else text[:cap] + "…"
 
-    Operates on the serialized payload for the same reason every other ``_bound_*``
-    here does: this runs at the wire boundary, where the rows are plain JSON and
-    the pydantic model is behind us.
+
+def bound_ask_rows(
+    rows: Any, *, budget: int = ASK_WIRE_TEXT_BUDGET_CHARS
+) -> tuple[list[dict[str, Any]], bool]:
+    """``(rows, dropped)``: the ask list clipped to what this field may carry.
+
+    ONE implementation for BOTH routes that serialize asks — the attach snapshot
+    in :func:`sync_wire_payload` and the delta in ``FrontendStateStore.mutate`` —
+    because a bound applied on one route only is the leak this file records twice
+    for jobs ("a bound placed only at the snapshot boundary holds for the first
+    frame and leaks on every one after it").
+
+    The FIRST row always survives and is then clipped until it fits: a surface
+    must have the head ask to answer, and the reviewer's reproduction (one row
+    carrying a hundred long questions) showed that "exempt" and "bounded" cannot
+    both be true of it. Every field that can grow is cut — question text, option
+    labels, option descriptions, the number of questions, the number of options
+    per question — and ``dropped`` says whether any row was left out, so a client
+    can be told the list is a prefix instead of inferring it from a count.
     """
-    asks = snapshot.get("asks")
-    if not isinstance(asks, list):
-        return
+    if not isinstance(rows, list):
+        return [], False
     kept: list[dict[str, Any]] = []
     spent = 0
-    for row in asks:
+    dropped = False
+    for position, row in enumerate(rows):
         if not isinstance(row, dict):
             continue
+        raw_questions = [q for q in (row.get("questions") or []) if isinstance(q, dict)]
+        if len(raw_questions) > ASK_WIRE_QUESTIONS_MAX:
+            dropped = True
         questions: list[dict[str, Any]] = []
         charge = 0
-        for question in row.get("questions") or []:
-            if not isinstance(question, dict):
-                continue
-            clipped = dict(question)
-            text = str(clipped.get("question") or "")
-            if len(text) > ASK_QUESTION_WIRE_CHARS:
-                text = text[:ASK_QUESTION_WIRE_CHARS] + "…"
-            clipped["question"] = text
+        for question in raw_questions[:ASK_WIRE_QUESTIONS_MAX]:
+            text = _clip_for_wire(str(question.get("question") or ""), ASK_QUESTION_WIRE_CHARS)
+            raw_options = [o for o in (question.get("options") or []) if isinstance(o, dict)]
+            if len(raw_options) > ASK_WIRE_OPTIONS_MAX:
+                dropped = True
             options: list[dict[str, Any]] = []
-            for option in clipped.get("options") or []:
-                if not isinstance(option, dict):
-                    continue
-                label = str(option.get("label") or "")
-                if len(label) > ASK_OPTION_LABEL_WIRE_CHARS:
-                    label = label[:ASK_OPTION_LABEL_WIRE_CHARS] + "…"
-                description = str(option.get("description") or "")
-                if len(description) > ASK_OPTION_DESC_WIRE_CHARS:
-                    description = description[:ASK_OPTION_DESC_WIRE_CHARS] + "…"
+            for option in raw_options[:ASK_WIRE_OPTIONS_MAX]:
+                label = _clip_for_wire(str(option.get("label") or ""), ASK_OPTION_LABEL_WIRE_CHARS)
+                description = _clip_for_wire(
+                    str(option.get("description") or ""), ASK_OPTION_DESC_WIRE_CHARS
+                )
                 options.append({**option, "label": label, "description": description})
                 charge += len(label) + len(description)
-            clipped["options"] = options
-            questions.append(clipped)
+            questions.append({**question, "question": text, "options": options})
             charge += len(text)
-        if kept and spent + charge > ASK_WIRE_TEXT_BUDGET_CHARS:
+        if position == 0 and charge > budget and questions:
+            # ONE row, still over budget: its TEXT gives way, so the frame
+            # carries a legible head rather than an oversized one. The clip is
+            # applied to the widest cells first (the questions), which is what
+            # the budget arithmetic here is for.
+            over = charge - budget
+            for index, question in enumerate(questions):
+                if over <= 0:
+                    break
+                text = str(question.get("question") or "")
+                room = max(0, len(text) - over)
+                cut = _clip_for_wire(text, room)
+                over -= len(text) - len(cut)
+                questions[index] = {**question, "question": cut}
+            charge = min(charge, budget + sum(len(q["question"]) for q in questions))
+        if kept and spent + charge > budget:
+            dropped = True
             break
         kept.append({**row, "questions": questions})
         spent += charge
+    return kept, dropped
+
+
+def _bound_asks_in_place(snapshot: dict[str, Any]) -> None:
+    """Clip the queued-ask list to its wire bound on the SNAPSHOT route.
+
+    The rows themselves are bounded by :func:`bound_ask_rows`; this function is
+    the wire boundary's policy: ship the prefix, and say so when rows were left
+    out. A list that will not fit at all ships ABSENCE rather than an empty array
+    (see the constants above for the measured reason), which is the same state a
+    runtime with nothing queued publishes.
+    """
+    rows = snapshot.get("asks")
+    if not isinstance(rows, list):
+        return
+    kept, dropped = bound_ask_rows(rows)
     if not kept:
-        # NOTHING TO SHOW IS THE SAME WIRE STATE AS "NOTHING TO SAY": the frame
-        # this list would ride is the one the socket refuses, and an empty array
-        # still pays for its keys on a payload with ~100 B of slack at this head
-        # (measured on the class guard's all-maximum fixture: 1,048,408 B without
-        # the field, 1,048,698 B with it empty, against the 1,048,576-byte line).
-        # So a yield that keeps ``"asks": []`` would be a field that overflows
-        # every frame while carrying nothing.
-        #
-        # The capability proxy survives because the gate it protects is the
-        # PUBLISHER's, not this one: a runtime with the feature DARK publishes no
-        # asks at all (N2), so a client can never mistake "the flag is off" for
-        # "nothing queued" — the risky direction the rule exists for. The other
-        # direction only costs a surface some UI in the empty case.
         snapshot.pop("asks", None)
         snapshot.pop("asks_open", None)
+        snapshot.pop("asks_truncated", None)
         return
     snapshot["asks"] = kept
+    if dropped:
+        # ``asks_open`` keeps its meaning (the session's open asks); this says the
+        # frame could not carry every row. Present only when true, so absence
+        # reads as "nothing was dropped" — the additive-defaulted shape the rest
+        # of this payload uses. The catalogue's ``model_catalogue_truncated`` is
+        # the precedent, and QA's reproduction (20 long asks shipped as 9 rows
+        # beside ``asks_open: 20``) is why it exists.
+        snapshot["asks_truncated"] = True
 
 
 def _bound_live_events_in_place(snapshot: dict[str, Any]) -> None:
@@ -6020,6 +6079,25 @@ class FrontendStateStore:
             for summary in summaries:
                 _elide_row_facts_in_place(summary)
             wire_changes["jobs"] = summaries
+        if "asks" in wire_changes:
+            # THE DELTA ROUTE IS BOUNDED TOO. ``_bound_asks_in_place`` runs on the
+            # attach SNAPSHOT, and the queue's own change path drives the DELTA
+            # (``Session.publish_ask_state`` -> ``mutate``) — so a bound placed
+            # only at the snapshot boundary would hold for the first frame and
+            # leak on every one after it, which is exactly what this file records
+            # for the job fields. Same function, both routes.
+            kept, dropped = bound_ask_rows(wire_changes["asks"])
+            # ``None`` rather than ``[]`` when nothing survives: absence is what a
+            # frame that cannot carry the list says, and the client's model reads
+            # both as "no ask list on this frame" (see ``FrontendSessionState.asks``).
+            wire_changes["asks"] = kept or None
+            wire_changes["asks_truncated"] = True if dropped else None
+            # ``normalized`` keeps the VALIDATED candidate (the whole fold) and
+            # only the WIRE copy is clipped — the jobs rule, and the reason is
+            # concrete: storing the clipped dicts here would put plain dicts in a
+            # ``list[PendingAskState]`` field (pydantic warns on every serialize)
+            # and would make the next identical mutation look like a change
+            # against the fuller list it would then re-emit.
         if not normalized:
             return None
         # Unchanged fields are immutable snapshot components and can be shared.
@@ -7162,6 +7240,7 @@ class FrontendStateStore:
                 # checkpoint round trip (the capability proxy, N2).
                 "asks": None,
                 "asks_open": None,
+                "asks_truncated": None,
                 "jobs": [
                     job.model_copy(
                         update={
@@ -7777,7 +7856,17 @@ def ask_wire(session: Any) -> tuple[list[dict[str, Any]] | None, int | None]:
     try:
         # ``folder`` is a getattr result, so its return type is not statically
         # known to be iterable; the codebase's spelling for that is a cast.
-        rows = [dict(row) for row in cast("Any", folder())]
+        #
+        # ``drafts=True``: the WIRE view carries the legacy path's in-flight
+        # partial answers (design §4, A2 addendum) so the mirrored card advances
+        # between an old client's taps. The derived INDEX deliberately does not
+        # (``asks/queue._refresh``) — a durable cross-session view must not show
+        # an answer that a runtime death would erase. A queue that predates the
+        # parameter answers the plain call, which is the log-only view.
+        try:
+            rows = [dict(row) for row in cast("Any", folder(drafts=True))]
+        except TypeError:
+            rows = [dict(row) for row in cast("Any", folder())]
     except Exception:  # noqa: BLE001 — the same rule: absence, never a false zero
         logger.debug("ask: could not fold the queue for the wire", exc_info=True)
         return None, None

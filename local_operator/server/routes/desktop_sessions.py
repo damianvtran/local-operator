@@ -1192,7 +1192,10 @@ class Answer(Input):
         if self.ask_id is not None:
             if not self.ask_id:
                 raise ValueError("ask_id must be a non-empty string")
-            if self.decline is None and self.answers is None:
+            # ``decline: false`` is NOT a way to say "answer with nothing": the
+            # shape that carries no answers and no decline is malformed, and the
+            # refusal must happen HERE (422) rather than at the queue (409).
+            if self.decline is not True and not self.answers:
                 raise ValueError("A queued-ask answer needs answers or decline")
             if self.decline is True and self.answers is not None:
                 # Contradictory rather than merely redundant: "here are the
@@ -3469,8 +3472,20 @@ async def answer(session_id: str, body: Answer, request: Request):
                 detail = await bridge.remote.ask_respond(
                     body.ask_id, body.answers, decline=bool(body.decline)
                 )
-            except ValueError as error:
-                raise HTTPException(409, str(error)) from None
+            except (ValueError, RuntimeError) as error:
+                # BOTH classes, and the second is not defensive padding: a refusal
+                # that crossed the WIRE arrives as a ``RuntimeError``
+                # (``attach_client._request`` raises it for an error frame with no
+                # known code), which the shared ``errors()`` ladder would map to
+                # 503 ``runtime_unreachable`` — a reconnect remedy that cannot
+                # work while the owner is answering perfectly well and the ask is
+                # simply settled. QA round 1 measured exactly that: a second
+                # answer, an answer after a decline and an unknown ask id all came
+                # back 503 with a reconcile instruction instead of the ask's own
+                # sentence. The gate branch below keeps its own mapping, so the
+                # two shapes stay distinguishable.
+                message = str(error) or "the answer was refused"
+                raise HTTPException(409, message) from None
             return reply({"detail": detail})
         if body.epoch != bridge.remote.frontend_state.epoch:
             raise HTTPException(409, "This answer belongs to an earlier session owner")
