@@ -29,7 +29,7 @@ STORAGE
 
 ``<config_dir>/teams/<id>/``:
 
-- ``team.yml`` — id, name, description, manager, members
+- ``team.yml`` — id, name, description, manager, members, label, aliases
 - ``instructions.md`` — collaboration brief
 - ``project.md`` — project / product brief
 
@@ -53,6 +53,7 @@ import shutil
 import stat
 import tempfile
 import time
+import unicodedata
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -97,6 +98,17 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 #: Keep the historical safe-segment shape (fixtures use short IDs) while
 #: excluding every separator, absolute path, and dot segment.
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+#: Cap on a team's display LABEL (see ``_validate_label``). The label is free
+#: text shown in every listing, so the bound keeps one runaway paste from
+#: silencing the rows it rides in; the derived default is at most the 64-char
+#: name, so both shapes fit the same surfaces.
+_TEAM_LABEL_MAX_CHARS = 80
+
+#: Cap on a team's alias list (see ``_validate_aliases``). Aliases are EXTRA
+#: addressing keys; eight is far past what any real roster of names needs and
+#: keeps a hand-edited list from turning key resolution into a scan.
+_TEAM_ALIASES_MAX = 8
 
 #: Windows has no descriptor-pinned row reads. Immediate bounded retries cover
 #: the directory-swap gap without combining files from different revisions.
@@ -219,6 +231,12 @@ class TeamEditFields(BaseModel):
     description: str | None = None
     manager: str | None = None
     members: list[TeamMember] | None = None
+    # ``label``/``aliases`` follow the None-means-leave rule above, with one
+    # documented exception: for ``label`` an explicit "" is a RESET to the
+    # derived default, not "no label" -- a row cannot represent "no display
+    # name" once the derived default exists. ``aliases`` replaces wholesale.
+    label: str | None = None
+    aliases: list[str] | None = None
     instructions: str | None = None
     project: str | None = None
     # The hub's model suggestion (§3.2), following this model's None rule: a
@@ -255,6 +273,21 @@ class Team(BaseModel):
     description: str = ""
     manager: str = "manager"
     members: list[TeamMember] = Field(default_factory=list)
+    #: The display LABEL: free text (spaces allowed), shown label-first by
+    #: every listing while ``name`` stays the addressable key. LOCAL display
+    #: metadata by design: it never rides the hub publish wire (agent-server
+    #: refuses unknown fields) and is not part of hub-sync three-way merges --
+    #: a sync apply must leave it alone, which ``TeamEditFields``' None rule
+    #: gives for free. Empty = "no custom label": :meth:`display_label` derives
+    #: a Title-Case default, and the next write persists it
+    #: (``_save_team_locked``). Optional with a default so every old
+    #: ``team.yml`` loads unchanged; additive so a new one still loads on
+    #: older code.
+    label: str = ""
+    #: Extra ADDRESSING keys this team also answers to (each validated like a
+    #: name; see ``_validate_aliases``). Local metadata, same rules as
+    #: ``label``.
+    aliases: list[str] = Field(default_factory=list)
     # Both briefs default to "" and never carry a marker: see the class
     # docstring and ``save_team`` for why the loaded state lives in the
     # registry instead of the value. ``save_team``'s dump excludes both
@@ -351,6 +384,28 @@ class Team(BaseModel):
             if name not in names:
                 names.append(name)
         return names
+
+    def display_label(self) -> str:
+        """The label every surface SHOWS: the stored value, else the derived default.
+
+        The derived half is what makes a legacy row (written before labels
+        existed) render like a labelled one; the value is persisted on the
+        next write, so "no custom label" describes only rows not yet written.
+        """
+        return self.label or _default_label(self.name)
+
+    def display_with_key(self) -> str:
+        """The label with its addressable KEY when they differ, else the key alone.
+
+        A listing must keep the key visible beside a custom label: the key is
+        the only string that ADDRESSES the team (``/team <key> <request>``,
+        ``--team``, ``/team chart <key>``), so a row painting ``Data Quality``
+        alone would hide what the reader has to type. The parenthesised form
+        is skipped when the two are identical, so a row whose label IS its
+        name keeps its plain form.
+        """
+        label = self.display_label()
+        return f"{label} ({self.name})" if label != self.name else self.name
 
     def manager_preamble(self) -> str:
         """Standing brief stamped into a manager session's instructions.
@@ -452,6 +507,88 @@ def validate_team_name(name: str) -> str:
             "manager": "manager",
         }
     ).name
+
+
+def _default_label(name: str) -> str:
+    """The display label a team with no stored one derives from its name.
+
+    Names are keys (``data-quality``), so the derived default is the
+    human-readable form of the same tokens: split on the separators the name
+    rule allows, uppercase each token's first character and keep the rest
+    (``data-quality`` -> ``Data Quality``; ``radient-net`` -> ``Radient Net``;
+    a token that starts with a digit or symbol passes through). The value is
+    persisted on the next write, so a legacy row's rendering is stable once it
+    has been written.
+    """
+    tokens = [token for token in re.split(r"[._-]+", name) if token]
+    return " ".join(token[0].upper() + token[1:] for token in tokens)
+
+
+def _normalize_label(value: str) -> str:
+    """The stored shape of a label: ends trimmed, runs of whitespace to one space.
+
+    The same normalization agent-server is moving published names to
+    (``dev-name-spaces``), so a pulled name round-trips as a label unchanged.
+    """
+    return " ".join((value or "").split())
+
+
+def _validate_label(value: str) -> str:
+    """Normalize a label and enforce the storage rules, or raise ``ValueError``.
+
+    Whitespace is collapsed FIRST: a control character that is also whitespace
+    (a tab, a form feed) folds into the spacing, while the ones that would
+    paint invisibly or not at all (a NUL, a bidi override, a zero-width
+    joiner) survive normalization and are refused. The check is the whole
+    ``C*`` family -- every category whose characters render as nothing or as a
+    control -- not just Cc, because a label is a display string and a Cf
+    character is exactly the invisible difference the listings must not
+    carry. Empty is legal and means "no custom label".
+    """
+    label = _normalize_label(value)
+    if len(label) > _TEAM_LABEL_MAX_CHARS:
+        raise ValueError(
+            f"a team label must be at most {_TEAM_LABEL_MAX_CHARS} characters; "
+            f"this one is {len(label)} after whitespace was collapsed"
+        )
+    for character in label:
+        if unicodedata.category(character).startswith("C"):
+            raise ValueError(
+                "a team label cannot contain control characters "
+                f"({character!r} is Unicode category {unicodedata.category(character)})"
+            )
+    return label
+
+
+def _validate_aliases(raw: Iterable[str]) -> list[str]:
+    """Normalize a team's alias list and enforce its rules, or raise ``ValueError``.
+
+    Aliases are ADDRESSING keys, so each one obeys the name rule exactly
+    (``_NAME_RE``) and the list itself refuses casefold duplicates: lookups
+    casefold, so ``Ops`` and ``ops`` would be one key with two spellings.
+    Uniqueness against OTHER teams' keys lives in the registry
+    (``TeamRegistry._assert_keys_available``), which can see the snapshot;
+    this half is snapshot-free.
+    """
+    aliases = [alias.strip() for alias in raw]
+    if len(aliases) > _TEAM_ALIASES_MAX:
+        raise ValueError(
+            f"a team may carry at most {_TEAM_ALIASES_MAX} aliases; this list has {len(aliases)}"
+        )
+    seen: set[str] = set()
+    for alias in aliases:
+        if not _NAME_RE.match(alias):
+            raise ValueError(
+                f"alias {alias!r} must be 1-64 characters of letters, digits, "
+                "dot, underscore or hyphen, and cannot start with a hyphen"
+            )
+        key = alias.casefold()
+        if key in seen:
+            raise ValueError(
+                f"alias {alias!r} is listed more than once (aliases are case-insensitive)"
+            )
+        seen.add(key)
+    return aliases
 
 
 #: The name length ceiling ``_NAME_RE`` encodes (1 leading character + 63).
@@ -1412,10 +1549,107 @@ class TeamRegistry:
             return None
         return next((team for team in self._teams.values() if team.name.casefold() == key), None)
 
+    def _find_cached_team_by_alias(self, name: str) -> Team | None:
+        """Find metadata in the current snapshot by ALIAS, without refresh or hydration.
+
+        The alias half of :meth:`_find_cached_team_by_name`, kept a separate
+        probe because :meth:`get_team_by_name` gives names PRIORITY: a name
+        match anywhere in the snapshot wins over any alias match, so the
+        lookup asks for names first and only then asks here.
+        """
+        key = (name or "").strip().casefold()
+        if not key:
+            return None
+        return next(
+            (
+                team
+                for team in self._teams.values()
+                if any(alias.casefold() == key for alias in team.aliases)
+            ),
+            None,
+        )
+
+    def _find_cached_team_by_key(self, name: str) -> Team | None:
+        """Find metadata whose NAME or ALIAS resolves ``name``, name first.
+
+        Used where the question is "is this key FREE", not "which row do I
+        load": the hub import's collision loop must suffix past a candidate
+        that collides with either kind, because :meth:`create_team` refuses a
+        name that casefold-equals any team's alias exactly as it refuses a
+        taken name.
+        """
+        return self._find_cached_team_by_name(name) or self._find_cached_team_by_alias(name)
+
     def get_team_by_name(self, name: str, *, recovery_wait: float | None = None) -> Team | None:
+        """Resolve a team by its KEY: casefold name first, alias fallback.
+
+        Writers keep the two namespaces disjoint casefolded --
+        :meth:`_assert_keys_available` refuses a name that equals any other
+        team's name or alias, and an alias that equals any team's name or
+        another team's alias -- so whichever kind matches, the answer is
+        unambiguous. The name-first order makes resolution deterministic even
+        for a hand-edited row the writers' rule predates.
+        """
         self._refresh_if_needed(wait=recovery_wait)
         team = self._find_cached_team_by_name(name)
+        if team is None:
+            team = self._find_cached_team_by_alias(name)
         return self._load_briefs(team) if team is not None else None
+
+    def _assert_keys_available(
+        self,
+        *,
+        name: str,
+        aliases: list[str],
+        skip_id: str | None,
+    ) -> None:
+        """Refuse a (name, aliases) key set that collides with stored teams.
+
+        Runs under the writer lock against the just-refreshed snapshot, so
+        "available" here means exactly "no lookup can resolve one of these
+        keys to the wrong row" at the moment of publication. Keys compare
+        CASEFOLDED -- the rule the lookup resolves by. Per key:
+
+        * the candidate NAME must not equal any other team's name or alias;
+        * each candidate ALIAS must not equal any team's name (the candidate
+          team's own included -- an alias that repeats its own name is a
+          no-op key at best), any other team's alias, nor another alias in
+          the same list.
+
+        ``skip_id`` exempts the row being edited: its previous keys are
+        replaced by this very write, so it cannot collide with itself.
+
+        Raises:
+            ValueError: naming the SPECIFIC collision, because a generic
+                "already exists" against a key the operator cannot see (a
+                name that is another team's alias) sends them looking for a
+                team by that name and finding none.
+        """
+        name_key = name.casefold()
+        alias_keys: dict[str, str] = {}
+        for alias in aliases:
+            key = alias.casefold()
+            if key == name_key:
+                raise ValueError(f"alias {alias!r} duplicates the team's own name {name!r}")
+            if key in alias_keys:
+                raise ValueError(
+                    f"alias {alias!r} is listed more than once (aliases are case-insensitive)"
+                )
+            alias_keys[key] = alias
+        for stored in self._teams.values():
+            if stored.id == skip_id:
+                continue
+            stored_name_key = stored.name.casefold()
+            stored_alias_keys = {alias.casefold() for alias in stored.aliases}
+            if stored_name_key == name_key:
+                raise ValueError(f"Team with name {name} already exists")
+            if name_key in stored_alias_keys:
+                raise ValueError(f"Team name {name!r} is already an alias of team {stored.name!r}")
+            for key, alias in alias_keys.items():
+                if key == stored_name_key:
+                    raise ValueError(f"alias {alias!r} is the name of team {stored.name!r}")
+                if key in stored_alias_keys:
+                    raise ValueError(f"alias {alias!r} is already an alias of team {stored.name!r}")
 
     @contextmanager
     def _persistence_lock(self, *, wait: float | None = None) -> Iterator[None]:
@@ -1470,11 +1704,16 @@ class TeamRegistry:
 
     def create_team(self, fields: TeamEditFields) -> Team:
         name = validate_team_name(fields.name or "")
+        # Shape validation is snapshot-free, so it runs before the lock; the
+        # uniqueness half needs the fresh snapshot and runs inside it.
+        label = _validate_label(fields.label or "")
+        aliases = _validate_aliases(fields.aliases or [])
         with self._persistence_lock():
             # The refresh is unconditional and occurs inside the same lock as
             # validation and publication. Interval-gated snapshots cannot prove
             # uniqueness when another process has written since our last read.
             self._load()
+            self._assert_keys_available(name=name, aliases=aliases, skip_id=None)
             team = Team(
                 id=str(uuid.uuid4()),
                 name=name,
@@ -1482,6 +1721,8 @@ class TeamRegistry:
                 description=(fields.description or "").strip(),
                 manager=(fields.manager or "manager").strip() or "manager",
                 members=list(fields.members or []),
+                label=label,
+                aliases=aliases,
                 instructions=(
                     _bounded(fields.instructions, label="team instructions")
                     if fields.instructions is not None
@@ -1530,11 +1771,25 @@ class TeamRegistry:
 
             updates = fields.model_dump(exclude_unset=True)
             if "name" in updates and updates["name"] is not None:
-                new_name = validate_team_name(updates["name"])
-                occupant = self._find_cached_team_by_name(new_name)
-                if occupant is not None and occupant.id != team_id:
-                    raise ValueError(f"Team with name {new_name} already exists")
-                candidate.name = new_name
+                candidate.name = validate_team_name(updates["name"])
+            if "label" in updates and updates["label"] is not None:
+                # An explicit "" (or whitespace-only) is a RESET to the derived
+                # default, which ``_save_team_locked`` fills in: label is
+                # reset-to-derived, not "no label".
+                candidate.label = _validate_label(updates["label"])
+            if "aliases" in updates and updates["aliases"] is not None:
+                candidate.aliases = _validate_aliases(updates["aliases"])
+            # One combined uniqueness check for whichever keys this write
+            # touches -- run ONLY then: re-validating unchanged keys on an
+            # unrelated edit (a description tweak) would fail closed on a
+            # hand-edited collision the writers' rule predates, bricking every
+            # later edit of a row that loads fine.
+            if ("name" in updates and updates["name"] is not None) or (
+                "aliases" in updates and updates["aliases"] is not None
+            ):
+                self._assert_keys_available(
+                    name=candidate.name, aliases=candidate.aliases, skip_id=team_id
+                )
             if "description" in updates and updates["description"] is not None:
                 candidate.description = updates["description"].strip()
             if "manager" in updates and updates["manager"] is not None:
@@ -1627,6 +1882,14 @@ class TeamRegistry:
         )
         if occupant is not None:
             raise ValueError(f"Team with name {team.name} already exists")
+
+        # Persist the DISPLAY default at the single save choke point: every
+        # write path (create, update, save, the hub import) passes here, so a
+        # legacy row's label becomes durable on its next write. A label that
+        # IS present is only normalized (whitespace collapsed), never refused
+        # -- an over-long hand-edited value must not brick unrelated saves of
+        # an otherwise loadable row. An empty label derives from the name.
+        team.label = _normalize_label(team.label) or _default_label(team.name)
 
         # Hydrate BEFORE creating the final directory. An untrusted transported
         # row carries empty brief strings that mean "not loaded", while create
@@ -1818,9 +2081,17 @@ class TeamRegistry:
         - a name a local row already holds takes the existing
           rename-with-suffix convention (``name-2``, ``-3``, ... --
           ``agents.py::resolve_import_name``). Collisions are found with the
-          registry's own rule (casefold name equality), so a local ``Feature``
-          blocks an incoming ``feature`` exactly as the registry's own writer
-          would refuse it.
+          registry's own KEY rule (casefold equality across names AND
+          aliases, because ``create_team`` refuses a name that collides with
+          either), so a local ``Feature`` blocks an incoming ``feature``
+          exactly as the registry's own writer would refuse it.
+
+        The published spelling also rides along as the row's LABEL whenever
+        the local name had to change (a slug mapping or a collision suffix):
+        the hub name is the display form the author chose, and the local slug
+        is only the key. An UNCHANGED name leaves the label empty, so the
+        derived default applies. Labels are local metadata -- the push side
+        (``hub_team_document``) never sends them back.
 
         Roster slots: ``kind == "team"`` is the one nested-team marker the
         local model recognises; every other value (the hub deliberately stores
@@ -1870,22 +2141,32 @@ class TeamRegistry:
                 )
             members.append(TeamMember(role=role, count=count, kind=kind))
 
-        # Snapshot-only probe for the common case (`_find_cached_team_by_name`):
+        # Snapshot-only probe for the common case (`_find_cached_team_by_key`):
         # mutation paths must not refresh or hydrate through the public getter
         # (that getter's own documented rule), and a stale snapshot is safe
         # here because `create_team` re-checks uniqueness under the writer lock
         # -- the retry below is what converges a race (review round 1, R1-3).
+        # The probe is ALIAS-aware: `create_team` refuses a name that collides
+        # with any local team's alias exactly as it refuses a taken name, so a
+        # names-only loop would re-raise where a suffix can fix it.
+        published_display = published.strip()
         candidate = local_name
         suffix = 2
-        while self._find_cached_team_by_name(candidate) is not None:
+        while self._find_cached_team_by_key(candidate) is not None:
             candidate = _suffixed_team_name(local_name, suffix)
             suffix += 1
 
         while True:
+            # The published spelling rides along as the row's LABEL whenever
+            # the final local name differs from it; an unchanged name leaves
+            # the label empty for the derived default. Computed per attempt
+            # because the retry below can take a new candidate.
+            label = published_display if published_display != candidate else ""
             try:
                 team = self.create_team(
                     TeamEditFields(
                         name=candidate,
+                        label=label,
                         description=str(document.get("description") or ""),
                         manager=str(document.get("manager") or "").strip() or "manager",
                         members=members,
@@ -1902,7 +2183,7 @@ class TeamRegistry:
                 # when that is what it refused -- take the next suffix. Any
                 # other ValueError (an oversized brief, say) is re-raised,
                 # because a retry cannot fix it.
-                if self._find_cached_team_by_name(candidate) is None:
+                if self._find_cached_team_by_key(candidate) is None:
                     raise
                 candidate = _suffixed_team_name(local_name, suffix)
                 suffix += 1

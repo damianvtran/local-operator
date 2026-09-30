@@ -11562,7 +11562,7 @@ class OperatorApp(App[None]):
             # attached profile/team restores it here, so the band names it
             # immediately instead of only after the next attach.
             agent_profile=str(getattr(session, "active_agent", "") or ""),
-            team=str(getattr(session, "active_team_name", "") or ""),
+            team=self._team_band_text(str(getattr(session, "active_team_name", "") or "")),
             context_window=_context_window(session),
             conversation_name=session.conversation_name,
             # A fork that has not named itself yet wears the PARENT's identity
@@ -11872,7 +11872,7 @@ class OperatorApp(App[None]):
             effort=_effort_label(state),
             fast=_fast_label(state),
             agent_profile=str(getattr(state, "active_agent", "") or ""),
-            team=str(getattr(state, "active_team", "") or ""),
+            team=self._team_band_text(str(getattr(state, "active_team", "") or "")),
             cwd=str(getattr(state, "cwd", "") or ""),
             context_tokens=getattr(state, "context_tokens", None),
             context_is_estimate=getattr(state, "context_is_estimate", None),
@@ -12150,7 +12150,7 @@ class OperatorApp(App[None]):
             # `_adopt_session` does, so a reduced facade without the accessors
             # cannot raise here.
             agent_profile=str(getattr(session, "active_agent", "") or ""),
-            team=str(getattr(session, "active_team_name", "") or ""),
+            team=self._team_band_text(str(getattr(session, "active_team_name", "") or "")),
             context_window=_context_window(session),
             conversation_name=session.conversation_name,
             # As in `_adopt_session`: the replacement session may itself be an
@@ -18520,6 +18520,74 @@ class OperatorApp(App[None]):
         session = self._session
         return getattr(session, "team_registry", None) if session is not None else None
 
+    @staticmethod
+    def _team_display_label(team: Any) -> str:
+        """The display label a picker or band row shows for ``team``, best-effort.
+
+        Defensive like the rest of the picker builder: a reduced double
+        without ``display_label`` degrades to its stored ``label``, and one
+        with neither to "" -- which every caller renders as "no custom
+        label" rather than as an empty string.
+        """
+        display = getattr(team, "display_label", None)
+        if callable(display):
+            try:
+                return str(display() or "")
+            except Exception:  # noqa: BLE001 — a row must never break the picker
+                return ""
+        return str(getattr(team, "label", "") or "")
+
+    @classmethod
+    def _team_display_with_key(cls, team: Any) -> str:
+        """``label (name)`` when the two differ, else the plain name.
+
+        ONE reader for the display form the listings and wire rows paint, so
+        two surfaces cannot disagree about how a labelled team reads. The key
+        stays visible beside a custom label because it is the only string that
+        ADDRESSES the team (``/team <key> <request>``); a reduced double falls
+        back to its stored label, then to the name.
+        """
+        name = str(getattr(team, "name", "") or "")
+        display = getattr(team, "display_with_key", None)
+        if callable(display):
+            try:
+                return str(display() or name)
+            except Exception:  # noqa: BLE001 — a row must never break a listing
+                pass
+        label = cls._team_display_label(team)
+        return f"{label} ({name})" if label and label != name else name
+
+    def _team_band_text(self, name: str) -> str:
+        """The band's active-team text: the team's display label, name fallback.
+
+        The segment's value is whatever the SESSION carries -- a key -- while
+        the band is a display, so the label it resolves to is what the user
+        should read (``Data Quality``, or the derived default of a legacy
+        row). Resolution is best-effort and cheap: the session's own attached
+        Team first (no I/O), then the same metadata snapshot the picker reads,
+        then the raw key -- exactly what the band showed before labels
+        existed. Never raises: a broken registry must not take the band down.
+        """
+        if not name:
+            return ""
+        attached = getattr(self._session, "active_team", None)
+        if attached is not None and str(getattr(attached, "name", "") or "") == name:
+            label = self._team_display_label(attached)
+            if label:
+                return label
+        registry = self._team_registry()
+        if registry is not None and hasattr(registry, "list_teams"):
+            try:
+                for row in registry.list_teams():
+                    if str(getattr(row, "name", "") or "").casefold() == name.casefold():
+                        label = self._team_display_label(row)
+                        if label:
+                            return label
+                        break
+            except Exception:  # noqa: BLE001 — a broken registry must not break the band
+                logger.debug("team band: registry lookup failed", exc_info=True)
+        return name
+
     def _team_choices(self) -> list[ArgumentChoice]:
         """Teams the ``/team`` argument list offers, one row per name."""
         registry = self._team_registry()
@@ -18549,6 +18617,15 @@ class OperatorApp(App[None]):
             counter = getattr(team, "member_count", None)
             slots = counter() if callable(counter) else len(getattr(team, "members", ()) or ())
             description = (getattr(team, "description", "") or "").strip() or "no description"
+            # The label leads the DESCRIPTION, not the name column: ``name`` is
+            # what Tab completes, so it stays byte for byte, and the label
+            # rides the slot answering "which team is this". NOT the detail
+            # column -- detail is reserved and the description is what gets
+            # dropped first, and widening detail is what silenced descriptions
+            # between 76 and 123 columns (see the D1 note below).
+            label = self._team_display_label(team)
+            if label and label != team.name:
+                description = f"{label} · {description}"
             choices.append(
                 ArgumentChoice(
                     team.name,
@@ -18967,7 +19044,10 @@ class OperatorApp(App[None]):
             # and a multi-count slot was collapsed to one. The listing, the
             # picker and the org chart must agree.
             slots = team.member_count()
-            rows.append(Padding(Text(team.name, style=heading), (0, 0, 0, 2)))
+            # Label first with the KEY visible: `/team <name>` and the footer
+            # both address by the key, so the row must show what to type.
+            display = self._team_display_with_key(team)
+            rows.append(Padding(Text(display, style=heading), (0, 0, 0, 2)))
             # "members", matching the number (R6) — see the picker's note. This
             # row names the manager separately ("Led by <manager> · N
             # members"), so calling the roster count "roles" also double-counted
@@ -19732,11 +19812,15 @@ class OperatorApp(App[None]):
 
         Mirror of :meth:`_sync_agent_band` for the roster: read straight off
         ``active_team_name`` so an attach (and, when one exists, a detach) both
-        flow through the same one-line sync.
+        flow through the same one-line sync. The name is resolved through
+        :meth:`_team_band_text` -- the segment is a display, so a team
+        attached by its slug reads as its label.
         """
         if self._status is None or self._session is None:
             return
-        self._status.update(team=str(getattr(self._session, "active_team_name", "") or ""))
+        self._status.update(
+            team=self._team_band_text(str(getattr(self._session, "active_team_name", "") or ""))
+        )
 
     def _cmd_agent_class(self, rest: str, notice: NoticeFn) -> None:
         """``/agent class <name> [proactive|reactive]`` — the class switch (R36).
@@ -32477,11 +32561,34 @@ class OperatorApp(App[None]):
         second layout for a second registry. Never raises: an unreadable
         registry renders as an empty pane, and a settings page that crashed on
         a broken team file would be unreachable exactly when it is needed.
+
+        The first line is the label-first DISPLAY form (``label (name)``, or
+        the plain name when they agree): the pane is the roster a reader may
+        act on next, so it must show both what the team is called and what
+        addresses it. The choices carry no label field, so the display comes
+        from the same registry snapshot the choices come from -- metadata
+        only, the read the picker already makes -- and an unreadable registry
+        degrades to the choices' own names rather than dropping rows.
         """
         rows: list[tuple[str, str, str]] = []
         try:
+            displays: dict[str, str] = {}
+            registry = self._team_registry()
+            if registry is not None and hasattr(registry, "list_teams"):
+                try:
+                    for row in registry.list_teams():
+                        name = str(getattr(row, "name", "") or "")
+                        displays[name.casefold()] = self._team_display_with_key(row)
+                except Exception:  # noqa: BLE001 — labels are optional, rows are not
+                    logger.debug("settings: team labels unavailable", exc_info=True)
             for team in self._team_choices():
-                rows.append((team.name, team.detail or "team", team.description or ""))
+                rows.append(
+                    (
+                        displays.get(team.name.casefold(), team.name),
+                        team.detail or "team",
+                        team.description or "",
+                    )
+                )
         except Exception:  # noqa: BLE001 — a bad registry must not break the page
             logger.debug("settings: team rows unavailable", exc_info=True)
         return rows
@@ -46868,9 +46975,14 @@ class OperatorApp(App[None]):
             # terminal disagree with another about the same team. The plural
             # is keyed to the number actually shown, which `len(members) == 0`
             # was not.
+            # The first slot is painted VERBATIM by ``_team_listing_block`` on
+            # the viewer, so it carries the same display form the local
+            # listing paints -- label first with the key beside it -- or the
+            # two terminals would disagree about how one team reads (the D2
+            # rule, applied to names).
             items = [
                 (
-                    team.name,
+                    self._team_display_with_key(team),
                     f"Led by {team.manager} · {team.member_count()} "
                     f"{'member' if team.member_count() == 1 else 'members'}",
                     (team.description or "").strip(),

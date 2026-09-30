@@ -514,6 +514,21 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Roster slot as role or role:count (repeatable)",
     )
     teams_create.add_argument("--description", type=str, default="", help="One-line description")
+    teams_create.add_argument(
+        "--label",
+        type=str,
+        default=None,
+        help="Display label shown in listings, the chart and the status band "
+        "(free text; addressing still uses the name)",
+    )
+    teams_create.add_argument(
+        "--alias",
+        action="append",
+        default=[],
+        dest="aliases",
+        help="Extra addressing key for this team (repeatable; letters, digits, "
+        "dot, underscore, hyphen)",
+    )
     teams_show = teams_subparsers.add_parser(
         "show", help="Show a team's roster and briefs", parents=[parent_parser]
     )
@@ -8305,7 +8320,10 @@ def teams_list_command(team_registry: Any) -> int:
         is_last = i == len(teams) - 1
         branch = "└──" if is_last else "├──"
         left = "│  " if is_last else "│ │"
-        print(f"\033[1;32m│ {branch} {team.name}\033[0m")
+        # Label first with the KEY visible when they differ: `teams delete`
+        # and `/team <name>` address by the key, so a row painting only a
+        # custom label would hide what addresses it.
+        print(f"\033[1;32m│ {branch} {team.display_with_key()}\033[0m")
         print(f"\033[1;32m{left}   • Manager: {team.manager}\033[0m")
         print(f"\033[1;32m{left}   • Members: {team.member_count()}\033[0m")
         if team.description:
@@ -8328,6 +8346,8 @@ def teams_create_command(args: argparse.Namespace, team_registry: Any) -> int:
                 description=getattr(args, "description", "") or "",
                 manager=getattr(args, "manager", None) or "manager",
                 members=members,
+                label=getattr(args, "label", None),
+                aliases=list(getattr(args, "aliases", None) or []),
             )
         )
     except ValueError as exc:
@@ -8350,7 +8370,7 @@ def teams_show_command(name: str, team_registry: Any) -> int:
     if team is None:
         print(f"\n\033[1;31mError: No team found with name: {name}\033[0m")
         return 1
-    print(f"\n\033[1;32m╭─ Team {team.name} ───────────────────────────\033[0m")
+    print(f"\n\033[1;32m╭─ Team {team.display_with_key()} ───────────────────────────\033[0m")
     print(f"\033[1;32m│ Manager: {team.manager}\033[0m")
     if team.description:
         print(f"\033[1;32m│ Description: {team.description}\033[0m")
