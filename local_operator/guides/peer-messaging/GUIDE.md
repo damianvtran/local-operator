@@ -1,6 +1,6 @@
 ---
 name: peer-messaging
-description: "Message another local lop session: agents use the `send` tool for messages and the `sessions` tool to list, inspect, spawn; humans use `lop send` / `lop sessions`. No cmux needed."
+description: "Message another local lop session: agents use the `send` tool for messages and `sessions` to list, inspect, spawn; humans use `lop send` / `lop sessions`. No cmux needed."
 ---
 
 # Peer messaging between lop sessions
