@@ -94,6 +94,7 @@ from local_operator.harness.message_types import (
     HUB_MESSAGE_TYPE,
     PEER_MESSAGE_MESSAGE_TYPE,
     PROJECT_REMINDER_MESSAGE_TYPE,
+    SESSION_BINDING_NOTICE_MESSAGE_TYPE,
     SESSION_CREDENTIAL_MESSAGE_TYPE,
     SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
     SESSION_INCIDENT_MESSAGE_TYPE,
@@ -220,7 +221,10 @@ from local_operator.prompts_api import (
 )
 from local_operator.redaction_shapes import ShapeReport
 from local_operator.references import expand_references
-from local_operator.session.credential_binding import SESSION_BINDING_CUSTOM_TYPE
+from local_operator.session.credential_binding import (
+    SESSION_BINDING_CUSTOM_TYPE,
+    CredentialBinding,
+)
 from local_operator.session.goal import GoalHistoryEntry, GoalJudgeState, GoalState
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.model_selection import SELECTED_MODEL_CUSTOM_TYPE
@@ -1095,6 +1099,16 @@ _PERSISTABLE_CUSTOM_TYPES: frozenset[str] = frozenset(
         # cannot silently drop the row. The MODEL is kept out of it by the
         # renderer's allow-list, not by this one.
         SESSION_BINDING_CUSTOM_TYPE,
+        # SESSION_BINDING_NOTICE_MESSAGE_TYPE is the account-change notice that
+        # rides the same seam (slice B, D1). Journaled by
+        # ``journal_credential_binding_change`` through ``append_message``
+        # directly, so membership is again not what persists it today; the line
+        # is kept for the same future-proofing reason as its row's — a durable
+        # record of a switch must not be droppable by a predicate that has not
+        # been written yet. The MODEL is kept out of it by the renderer's
+        # allow-list, not by this one: the notice is deliberately
+        # operator-facing (see its note in ``harness/message_types.py``).
+        SESSION_BINDING_NOTICE_MESSAGE_TYPE,
         # SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE IS persisted, and it is the
         # member whose persistence is easiest to mistake for an oversight: the
         # record is operator-facing and enters no model context (see its own
@@ -13314,6 +13328,84 @@ class Session:
         teardown neither raises nor warns about an un-awaited coroutine.
         """
         self._spawn_background(self.journal_mcp_recovery(server, tool_count))
+
+    def _on_credential_binding_change(
+        self,
+        binding: CredentialBinding,
+        previous: CredentialBinding | None,
+        *,
+        device_id: str,
+    ) -> None:
+        """Recorder hook (``set_change_handler``): announce an account change.
+
+        Fire-and-forget on the session's background machinery, matching
+        :meth:`_on_mcp_incident`: the recorder calls this from its own write
+        task, where a raise must never fail the bookkeeping write that is
+        already on disk. ``previous is None`` marks the FIRST serve — nothing
+        to compare, so nothing to announce (memo M1) — and journals nothing.
+        ``device_id`` is the recording device's id, keyword-bound by
+        ``attach_credential_binding`` because the recorder's own handler
+        contract is ``(new, previous)`` and neither row can carry "this
+        device".
+        """
+        if previous is None:
+            return
+        self._spawn_background(
+            self.journal_credential_binding_change(binding, previous, device_id=device_id)
+        )
+
+    async def journal_credential_binding_change(
+        self,
+        binding: CredentialBinding,
+        previous: CredentialBinding,
+        *,
+        device_id: str,
+    ) -> None:
+        """Persist and surface ONE notice that the serving account changed (D1).
+
+        THE NON-SILENCE HALF OF THE BINDING (design §2.4; memo D1). The row
+        records the change; this is the operator-visible announcement of it,
+        written once per appended change row by the recorder's ``on_change``
+        seam, and it is deliberately NOT model-visible (see
+        ``SESSION_BINDING_NOTICE_MESSAGE_TYPE`` for why that exclusion is a
+        feature). The sentence comes from ``network/credentials/messages.py`` —
+        the one home for credential copy — and an empty render (nothing the
+        operator must be told) journals nothing.
+
+        Persisted like the MCP-unavailable warning and for the same reason: the
+        row is a historical fact a resume must still be able to answer "was
+        this session switched, and when?" from, and ``preserve_mtime`` keeps
+        the notice from restamping the activity clock (the type is bookkeeping
+        in ``transcript.BOOKKEEPING_CUSTOM_TYPES``). Parked, never spliced
+        (``_append_or_park_journal``); ``_journal_lock`` so two changes landing
+        together cannot invert against the row write they narrate.
+        """
+        from local_operator.network.credentials.messages import (
+            render_binding_change_notice,
+        )
+
+        if self._disposed:
+            return
+        text = render_binding_change_notice(binding, previous, self_device=device_id)
+        if not text:
+            return
+        message = CustomMessage(
+            custom_type=SESSION_BINDING_NOTICE_MESSAGE_TYPE,
+            attribution="system",
+            details={
+                "text": text,
+                "provider": binding.provider,
+                "owner_device": binding.owner_device,
+                "owner_device_name": binding.owner_device_name,
+                "credential_id": binding.credential_id,
+            },
+        )
+        try:
+            async with self._journal_lock:
+                await self._transcript.append_message(message, preserve_mtime=True)
+                self._append_or_park_journal(message)
+        except OSError:
+            logger.warning("could not journal credential binding change", exc_info=True)
 
     async def _on_job_completed(self, job_id: str, text: str, job: Any) -> None:
         """Auto-deliver one settled model-owned job back into the conversation.
