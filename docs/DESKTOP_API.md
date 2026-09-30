@@ -1143,6 +1143,12 @@ that takes a session — every mutation, every receipt, `/warm`, `/interrupt`,
 `/move` — keeps the control envelope, because none of those can be served
 without the owner that admitted them.
 
+`GET /v1/desktop/skills` splits by form the same way: its `cwd` arm (home when
+omitted) answers for a folder with NO session — no bridge is taken — while the
+`session_id` form in the list above keeps the read envelope, so that entry stays
+true for it. A composer reaches the sessionless form behind
+`features.skill_catalogue`.
+
 `GET /v1/desktop/mcp` is outside that list because it is outside the session: it
 answers the MCP catalog from the config files and the grant store for a folder, so
 there is no owner to wait for at all. Its optional `session_id` is an ENRICHMENT, not
@@ -2047,6 +2053,7 @@ absent.
 | `desktop_feed` | 1 | `GET /v1/desktop/events`, `POST /v1/desktop/presence` and their frame/lease shapes | the app opens no feed, beats no presence, and keeps its 5 s catalogue poll and its per-session notification path verbatim |
 | `desktop_presence` | 1 | the backend reads the per-publisher records under `run/desktop/delivery/` (plus the legacy `run/desktop/delivery.json` while an older sibling writes it) and defers its own completion banner to a notify-capable desktop | nothing is suppressed on the strength of a lease nobody publishes |
 | `mcp_catalog` | 1 | `GET|POST /v1/desktop/mcp` and `POST /v1/desktop/mcp/credentials`: MCP list, add, remove, test, sign-in and credentials with NO session and NO configured model, in the catalog vocabulary (`connected`/`needs_sign_in`/`not_started`/`connecting`/`error`, per-row `actions`, bounded refusal codes) — see [DESKTOP_CONTROLS.md](DESKTOP_CONTROLS.md) | the app keeps the session-scoped `/v1/desktop/sessions/{id}/mcp` path verbatim; it must NOT show "update the backend", because that path still works |
+| `skill_catalogue` | 1 | `GET /v1/desktop/skills` with `cwd` (home when omitted) — the folder's discoverable skills with NO session, for a composer that needs them before a conversation exists — and `version`, the skill tree's identity, on every answer (sessionless and session form alike) | the composer fires no sessionless skill query and says "update the backend" instead: an older backend REQUIRES `session_id` on that route, so a sessionless call is a 422 the client cannot classify. Nothing else is gated on this key — the session arm and the session-scoped `/skills` panel keep working |
 | `radient_org` | 1 | the four organization reads on `POST /v1/desktop/radient` — `memberships.list`, `org_agents.list`, `org_teams.list`, `org_team.get` — and the frozen membership refusals they carry through under their own codes (`not_a_member`, `insufficient_role`, `team_plan_required`) | the org selector is not offered: a backend without these operations answers them with a masked 422 ("The request has invalid fields."), indistinguishable from a malformed call, so the app must not attempt them |
 | `tunnel` | 1 | `GET /v1/desktop/tunnel`, and `radient_login`/`tunnel_remedy` on `GET /v1/auth/status` | the app shows no tunnel state and no sign-in callout, and the account section keeps its current wording — it must not read the absent key as "the tunnel is fine" |
 | `subagent_trajectory` | 1 | `POST`/`DELETE /v1/desktop/sessions/{id}/children/{job}/trajectory` and the per-job `job_trajectory_appends`/`job_trajectory_replacements` fields they turn on | the child reader keeps its durable pager, opens no watch, and its session's frames carry the empty pair they always have (the opt-in is per session, so an app that opens no reader for ANY child gets exactly today's frames) |
