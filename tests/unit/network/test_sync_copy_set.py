@@ -289,6 +289,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``GRACE_FILE``: the first-run marker under ``<config>/hub/`` — the hub update "
         "runner's own install-level state, beside ``sessions/``, never inside a session",
     ),
+    "local_operator/skills/discovery.py": (
+        1,
+        "``_SKILL_FILE`` (``SKILL.md``): the marker FILENAME looked for inside skill "
+        "directories under a skills root — a discovery convention of the skills tree, "
+        "never an entry a session directory holds (the config.yml / action-tool "
+        "identifier-not-a-path case)",
+    ),
     # Aida's own store lives at the CONFIG root (``<config>/aida/``), beside
     # ``sessions/`` rather than inside one: her state, onboarding stamp,
     # escalation tray and ensure lock are this INSTALL's records, and a session

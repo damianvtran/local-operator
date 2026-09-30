@@ -252,6 +252,15 @@ _AMBIENT_VARS = (
     # override names absolute paths and would survive that — a developer who
     # exports it gets a different prompt than CI from the same tree.
     "LOCAL_OPERATOR_ECOSYSTEM_INSTRUCTIONS",
+    # The skill scanner's depth cap (``skills.discovery.SKILL_MAX_DEPTH_ENV``,
+    # default 3), read at CALL time by both the walk and the fingerprint. It is
+    # scrubbed rather than harmless-listed because the cells that assert the
+    # DEFAULT walk (a flat root staying flat, a grouped skill at depth 2-3 being
+    # found) measure that default: a developer who exports ``=1`` would make
+    # every one of those cells discover only the flat skill while still looking
+    # like it tested the grouped library. Tests that want a specific depth set
+    # it through ``monkeypatch`` explicitly.
+    "LOCAL_OPERATOR_SKILL_MAX_DEPTH",
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
     # The provider registry's ONLY callable ``env_keys`` resolver prefers this
