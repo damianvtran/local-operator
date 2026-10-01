@@ -36,6 +36,7 @@ from local_operator.teams import (
     TeamRegistry,
     TeamRegistryLockTimeout,
     TeamRegistryRecoveryError,
+    display_form,
     parse_members,
 )
 from local_operator.tools.builtin import (
@@ -97,6 +98,24 @@ class TeamParams(BaseModel):
             "another product."
         ),
     )
+    label: str | None = Field(
+        default=None,
+        description=(
+            "create/update: the display name for listings, the chart, the "
+            "picker and the status band (free text, spaces allowed). The team "
+            "is still ADDRESSED by 'name'. On update, an empty string resets "
+            "the label to its derived default."
+        ),
+    )
+    aliases: list[str] | None = Field(
+        default=None,
+        description=(
+            "create/update: EXTRA addressing keys this team also answers to "
+            "(letters, digits, dot, underscore or hyphen; up to 8). The whole "
+            "list replaces any stored one; each key must not collide with a "
+            "team name or another team's alias."
+        ),
+    )
 
 
 def _registry(context: ToolContext | None) -> TeamRegistry | None:
@@ -116,7 +135,14 @@ def _row(team: Any) -> str:
     # manager, whom this row names separately, so "roles" implied he was
     # counted and put the model one ahead of the roster it can actually staff.
     member_word = "member" if slots == 1 else "members"
-    row = f"- {team.name} [{slots} {member_word}, led by {team.manager}]: {summary}"
+    # The shared display rule (D2): this row is what the MODEL reads when it
+    # lists teams, and the model may need to address one, so a chosen label
+    # keeps the typeable key beside it (``Platform Reliability (ops)``) while
+    # a derived default paints whatever the human surfaces paint.
+    row = (
+        f"- {display_form(team.name, team.label)} "
+        f"[{slots} {member_word}, led by {team.manager}]: {summary}"
+    )
     return row if len(row) <= _ROW_CAP else row[: _ROW_CAP - 1].rstrip() + "…"
 
 
@@ -152,11 +178,15 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
     if team is None:
         return _error(tool_call_id, "team", f"no team named {name!r} (try op='list')")
     header = [
-        f"{team.name}. Led by {team.manager}",
+        f"{display_form(team.name, team.label)}. Led by {team.manager}",
         f"description: {team.description or '(unstated)'}",
-        "roster:",
-        *team.roster_lines(),
     ]
+    if team.aliases:
+        # D5: an alias resolves to this team, and the model has no other way
+        # to learn one exists.
+        header.append(f"aliases: {', '.join(team.aliases)}")
+    header.append("roster:")
+    header.extend(team.roster_lines())
     body = "\n".join(header)
     if team.instructions.strip():
         body += "\n\ncollaboration:\n" + team.instructions.strip()
@@ -200,6 +230,17 @@ async def _op_write(
     except (TeamRegistryLockTimeout, TeamRegistryRecoveryError) as exc:
         return _error(tool_call_id, "team", str(exc))
     if creating and existing is not None:
+        # Q1: a create whose name collides with an ALIAS must say so in the
+        # registry's own words -- "already exists" sends the model looking
+        # for a team by that name that it will never find. The registry makes
+        # the same distinction under the writer lock; this pre-check just
+        # says it earlier, with the same wording.
+        if existing.name.casefold() != name.casefold():
+            return _error(
+                tool_call_id,
+                "team",
+                f"Team name {name!r} is already an alias of team {existing.name!r}",
+            )
         return _error(
             tool_call_id,
             "team",
@@ -219,6 +260,8 @@ async def _op_write(
         description=params.description,
         manager=params.manager,
         members=members,
+        label=params.label,
+        aliases=params.aliases,
         instructions=instructions,
         project=project,
     )

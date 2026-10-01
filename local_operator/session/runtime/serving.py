@@ -7209,14 +7209,16 @@ class ServingSessionHandle(SessionHandle):
                 kind="notice", text="no teams yet. Ask the agent to create one.", style="info"
             )
         # ``member_count()``, matching the TUI's own producer (D2). The old
-        # `len(members) + 1` assumed the manager is not on the roster — false
-        # for real teams — and collapsed multi-count slots; the plural was also
+        # `len(members) + 1` assumed the manager is not on the roster -- false
+        # for real teams -- and collapsed multi-count slots; the plural was also
         # keyed to a different number than the one displayed. A detached
         # runtime and an in-process one must answer the same question with the
-        # same number.
+        # same number. The first slot carries the shared bounded display form:
+        # the viewer paints that slot verbatim, so both producers must agree
+        # byte for byte.
         items = [
             (
-                team.name,
+                self._team_row_display(team),
                 f"Led by {team.manager} · {team.member_count()} "
                 f"{'member' if team.member_count() == 1 else 'members'}",
                 (team.description or "").strip(),
@@ -7224,6 +7226,23 @@ class ServingSessionHandle(SessionHandle):
             for team in teams
         ]
         return SlashResult(kind="block", data={"type": "team_list", "items": items})
+
+    @staticmethod
+    def _team_row_display(team: Any) -> str:
+        """The ``team_list`` row's first slot: the shared, BOUNDED display form.
+
+        The same rule and cap the local listing paints (D2/N1), so a follower
+        and an owner read one team the same way; a reduced double degrades to
+        its plain name rather than failing the listing.
+        """
+        from local_operator.teams import bounded_display_form
+
+        try:
+            return bounded_display_form(
+                str(getattr(team, "name", "") or ""), str(getattr(team, "label", "") or "")
+            )
+        except Exception:  # noqa: BLE001 — a listing is never worth an error
+            return str(getattr(team, "name", "") or "")
 
     def _team_attach_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
         """``/team <name> [<request>]`` on the owner: resolve, then attach.
@@ -7283,14 +7302,19 @@ class ServingSessionHandle(SessionHandle):
             )
         # The band and the discovery record both name the attached team, so the
         # projection has to refresh before the viewer paints its receipt.
+        from local_operator.teams import display_form
+
         self._notify()
+        shown = display_form(team.name, team.label)
         return SlashResult(
             kind="notice",
             text=(
-                f"team {team.name} is ready. {team.manager} leads it. "
+                # The prose uses the shared display form (D4); the addressing
+                # instruction and the receipt `data` keep the raw NAME.
+                f"team {shown} is ready. {team.manager} leads it. "
                 f"Send a request with /team {team.name} <message>."
                 if not request
-                else f"sending to {team.name}. {team.manager} is coordinating."
+                else f"sending to {shown}. {team.manager} is coordinating."
             ),
             style="info",
             data={
