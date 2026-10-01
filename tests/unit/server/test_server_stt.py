@@ -33,6 +33,11 @@ def _empty_radient(monkeypatch):
 
     monkeypatch.setattr(cascade, "resolve_radient_credential", empty)
 
+    async def no_probe(_config_dir, _base_url, *, store):
+        return False
+
+    monkeypatch.setattr(cascade, "has_persisted_radient_credential", no_probe)
+
 
 #: A body whose header sniffs as wav, so the executor's mime derivation is
 #: exercised through the real ``media.sniff_audio`` on every POST test.
@@ -45,6 +50,9 @@ class FakeStore:
 
     async def get_api_key(self, provider, session_id=None, *, read_only=False, **kwargs):
         return self.keys.get(provider)
+
+    async def has_persisted_credential(self, provider, session_id=None):
+        return bool(self.keys.get(provider))
 
 
 @pytest.fixture
@@ -186,6 +194,11 @@ async def test_paths_reports_radient_first_when_it_is_available(
         return SecretStr("r-key")
 
     monkeypatch.setattr(cascade, "resolve_radient_credential", present)
+
+    async def probe(_config_dir, _base_url, *, store):
+        return True
+
+    monkeypatch.setattr(cascade, "has_persisted_radient_credential", probe)
     store_override(FakeStore())
     response = await test_app_client.get("/v1/stt/paths")
     assert response.status_code == 200

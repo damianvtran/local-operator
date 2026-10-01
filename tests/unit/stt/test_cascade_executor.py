@@ -21,9 +21,18 @@ _WAV_BYTES = b"RIFF\x00\x00\x00\x00WAVEfmt " + b"\x00" * 32
 class FakeStore:
     def __init__(self, keys: Optional[dict[str, str]] = None):
         self.keys = dict(keys or {})
+        self.raises = False
+        self.probe_calls: list[tuple[str, Optional[str]]] = []
 
     async def get_api_key(self, provider, session_id=None, *, read_only=False, **kwargs):
         return self.keys.get(provider)
+
+    async def has_persisted_credential(self, provider, session_id=None):
+        """The probe seam: a fake's keys ARE its persisted rows."""
+        self.probe_calls.append((provider, session_id))
+        if self.raises:
+            raise RuntimeError("store unavailable")
+        return bool(self.keys.get(provider))
 
 
 class FakeRadientClient:
@@ -102,6 +111,11 @@ class Rig:
             return self.radient_credential["value"]
 
         monkeypatch.setattr(cascade, "resolve_radient_credential", fake_resolver)
+
+        async def fake_probe(_config_dir, _base_url, *, store):
+            return bool(self.radient_credential["value"].get_secret_value())
+
+        monkeypatch.setattr(cascade, "has_persisted_radient_credential", fake_probe)
 
         rig = self
 

@@ -20,6 +20,9 @@ class FakeStore:
         self.keys = dict(keys or {})
         self.raises = raises
         self.calls: list[tuple[str, Optional[str], bool]] = []
+        #: The AVAILABILITY probe's calls. The resolver must ask this and never
+        #: ``get_api_key`` (the call-time cascade), so ``calls`` stays empty.
+        self.probe_calls: list[tuple[str, Optional[str]]] = []
 
     async def get_api_key(self, provider, session_id=None, *, read_only=False, **kwargs):
         self.calls.append((provider, session_id, read_only))
@@ -27,12 +30,24 @@ class FakeStore:
             raise RuntimeError("store unavailable")
         return self.keys.get(provider)
 
+    async def has_persisted_credential(self, provider, session_id=None):
+        """The probe seam: a fake's keys ARE its persisted rows."""
+        self.probe_calls.append((provider, session_id))
+        if self.raises:
+            raise RuntimeError("store unavailable")
+        return bool(self.keys.get(provider))
+
 
 def _no_radient(monkeypatch, *, present: bool = False):
     async def fake(_config_dir, _base_url, *, store=None):
         return SecretStr("radient-key" if present else "")
 
     monkeypatch.setattr(cascade, "resolve_radient_credential", fake)
+
+    async def probe(_config_dir, _base_url, *, store):
+        return present
+
+    monkeypatch.setattr(cascade, "has_persisted_radient_credential", probe)
 
 
 def _model(capable: bool | None):
@@ -173,10 +188,11 @@ async def test_probes_are_read_only_and_carry_the_session(monkeypatch) -> None:
     _no_radient(monkeypatch)
     store = FakeStore()
     await _resolve(store, session_id="sess-1")
-    assert store.calls == [
-        ("elevenlabs", "sess-1", True),
-        ("openai", "sess-1", True),
-    ]
+    # The probe (``has_persisted_credential``) fixes ``read_only`` itself, so the
+    # resolver's contract is "ask the probe, carry the session, never call the
+    # call-time cascade": ``calls`` is empty.
+    assert store.probe_calls == [("elevenlabs", "sess-1"), ("openai", "sess-1")]
+    assert store.calls == []
 
 
 @pytest.mark.asyncio
