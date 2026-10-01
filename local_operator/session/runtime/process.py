@@ -2637,13 +2637,15 @@ class _SignalDrainBound:
     * A turn that keeps reporting either is NEVER cut by the bound, however
       long it runs; it leaves at its turn boundary. THE RESIDUAL IS A BLIND
       SPOT, stated rather than implied: the parent's own provider request is
-      INVISIBLE to both probes — ``_step_in_flight``'s stream counter is
-      CHILD-only (see its docstring), and a request that has yielded nothing
-      commits no row — so a turn parked on a silent parent request reports
-      neither movement nor an executing step, is indistinguishable from a
-      stall for the whole bound, and is reaped. ``_work_motion`` documents the
-      same blind spot; it is named here so the next reader can widen the
-      probes rather than discover it.
+      INVISIBLE to both probes, streamed or not — ``_step_in_flight``'s stream
+      counter is CHILD-only (see its docstring), and none of ``_work_motion``'s
+      four components move while a parent call is the only activity (transcript
+      rows land at step boundaries) — so a signalled turn whose only activity
+      is the parent's own provider call reports neither movement nor an
+      executing step, is indistinguishable from a stall for the whole bound,
+      and is reaped. That is the same blind spot ``_work_motion`` documents;
+      it is named here so the next reader can widen the probes rather than
+      discover it.
     * ONLY SILENCE AND IDLENESS TOGETHER REAP: no movement AND no step for
       ``SIGNAL_DRAIN_S`` disposes, byte for byte the old exit.
     * WHAT STILL KILLS A WEDGED-BUT-BEATING RUNTIME IS SIGKILL — the
