@@ -256,28 +256,58 @@ async def _start_targets(*, delay: float = 0.01) -> _Targets:
         raise
 
 
-async def _dropping_socket() -> "tuple[asyncio.Server, int]":
-    """A raw loopback socket that reads a request then closes without acking.
+class _Dropper:
+    """A raw loopback listener that reads a request then closes WITHOUT acking.
 
     This is the UNCONFIRMED case produced honestly: the transport fails after
     the message has been handed to the kernel, so nothing can say whether it
-    landed — the class the route must report as ``unconfirmed``, not ``failed``.
+    landed — the class the route must report as ``unconfirmed``, never
+    ``delivered``.
+
+    ``connections`` counts the dials this socket actually handled, and it is
+    load-bearing for the test: ``delivered`` can only come from a peer that
+    ACKED, so if resolution ever picked a different record (another listener at
+    some other port) the count stays 0 and the assertion fails on the real
+    fact — the dial never arrived here — instead of a mis-classification being
+    silently accepted. ``read_bytes`` records how much of the request arrived
+    before the close, so a future failure shows whether the dial got as far as
+    writing its frames.
     """
 
-    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        try:
-            await reader.read(4096)
-        except Exception:  # noqa: BLE001 — a torn-down reader is the point
-            pass
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except Exception:  # noqa: BLE001
-            pass
+    def __init__(self, server: asyncio.Server, port: int) -> None:
+        self.server = server
+        self.port = port
+        self.connections = 0
+        self.read_bytes = 0
 
-    server = await asyncio.start_server(handler, "127.0.0.1", 0)
-    port = server.sockets[0].getsockname()[1]
-    return server, port
+    @classmethod
+    async def start(cls) -> "_Dropper":
+        holder: dict[str, "_Dropper"] = {}
+
+        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            self = holder["self"]
+            self.connections += 1
+            try:
+                chunk = await asyncio.wait_for(reader.read(4096), timeout=10)
+                self.read_bytes += len(chunk or b"")
+            except Exception:  # noqa: BLE001 — a torn-down reader is the point
+                pass
+            # Close WITHOUT writing a byte: an unacked dial, by construction.
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:  # noqa: BLE001
+                pass
+
+        server = await asyncio.start_server(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        dropper = cls(server, port)
+        holder["self"] = dropper
+        return dropper
+
+    async def close(self) -> None:
+        self.server.close()
+        await self.server.wait_closed()
 
 
 def _last_delivery(handle: _RecordingHandle) -> dict[str, Any]:
@@ -463,7 +493,7 @@ async def test_a_call_during_an_in_flight_request_waits_then_re_evaluates(api) -
 async def test_an_unconfirmed_delivery_is_its_own_outcome(api) -> None:
     client, _root = api
     project_id = await _project_with(client, SESSION_A)
-    server, port = await _dropping_socket()
+    dropper = await _Dropper.start()
     (sleeper,) = _sleeper_procs(1)
     try:
         # A live record whose socket accepts then closes without acking: the
@@ -477,15 +507,30 @@ async def test_an_unconfirmed_delivery_is_its_own_outcome(api) -> None:
                 conversation_name=SESSION_A,
                 cwd="/tmp",
                 model_label="test/model",
-                control_port=port,
+                control_port=dropper.port,
                 control_key="0" * 64,
                 started=True,
             )
         )
         await _wait_live(SESSION_A)
+        # The resolution must land on the DROPPER's record, not some other live
+        # listener: this is what makes a `delivered` outcome impossible here,
+        # because the dropper never writes an ack.
+        record, state = next(
+            (rec, st) for rec, st in registry.scan() if rec.session_id == SESSION_A
+        )
+        assert state == "live" and record.control_port == dropper.port
+
         response = await client.post(f"/v1/desktop/projects/{project_id}/request-update", json={})
         result = response.json()["result"]
         (row,) = result["sessions"]
+        # The dial MUST have reached the dropper: an unacked peer is never
+        # `delivered`, and a misresolution would leave this at 0 rather than
+        # quietly passing a `delivered`.
+        assert dropper.connections == 1, (
+            f"the dial never reached the dropper (connections={dropper.connections}); "
+            f"outcome was {row['outcome']!r}"
+        )
         assert row["outcome"] == "unconfirmed"
         assert row["detail"] == "delivery could not be confirmed"
         assert result["counts"] == {"total": 1, "delivered": 0, "unconfirmed": 1, "failed": 0}
@@ -495,8 +540,77 @@ async def test_an_unconfirmed_delivery_is_its_own_outcome(api) -> None:
             "Could not confirm delivery on payments — the requests may still reach its sessions."
         )
     finally:
-        server.close()
-        await server.wait_closed()
+        await dropper.close()
+        sleeper.terminate()
+        try:
+            sleeper.wait(timeout=5)
+        except Exception:  # noqa: BLE001
+            sleeper.kill()
+
+
+async def test_the_unacked_dial_taxonomy_is_pinned_without_a_socket(api, monkeypatch) -> None:
+    """The outcome mapping, deterministically: an unacked dial is never `delivered`.
+
+    The E2E above is the smoke; this pins the taxonomy itself, because the one
+    decision that turns a dial result into an outcome is ``_deliver``'s except
+    ladder, and a socket whose timing a loaded runner can vary is the wrong
+    place to pin it. ``deliver_peer_message`` is swapped at its own module (the
+    route imports it per call), so each arm is exercised exactly.
+    """
+    import local_operator.mobile.peer_send as peer_send
+
+    client, _root = api
+    project_id = await _project_with(client, SESSION_A)
+    (sleeper,) = _sleeper_procs(1)
+    try:
+        # A LIVE record so resolution dials rather than refusing; the port is
+        # never opened because every arm replaces the delivery call.
+        registry.publish(
+            registry.SessionRecord(
+                pid=sleeper.pid,
+                kind="tui",
+                session_id=SESSION_A,
+                conversation_name=SESSION_A,
+                cwd="/tmp",
+                model_label="test/model",
+                control_port=9,
+                control_key="0" * 64,
+                started=True,
+            )
+        )
+        await _wait_live(SESSION_A)
+        url = f"/v1/desktop/projects/{project_id}/request-update"
+
+        def _raiser(exc: type[BaseException]):
+            async def _impl(*_args: Any, **_kwargs: Any) -> str:
+                raise exc("dial failed")
+
+            return _impl
+
+        # Every OSError-family fault means the ack never arrived: unconfirmed.
+        for exc in (ConnectionError, TimeoutError, OSError):
+            reset_cooldowns()
+            monkeypatch.setattr(peer_send, "deliver_peer_message", _raiser(exc))
+            row = (await client.post(url, json={})).json()["result"]["sessions"][0]
+            assert row["outcome"] == "unconfirmed", (exc.__name__, row)
+            assert row["detail"] == "delivery could not be confirmed"
+
+        # A peer that ANSWERED no is a refusal: nothing was delivered.
+        reset_cooldowns()
+        monkeypatch.setattr(peer_send, "deliver_peer_message", _raiser(RuntimeError))
+        row = (await client.post(url, json={})).json()["result"]["sessions"][0]
+        assert row["outcome"] == "failed", row
+
+        # Only a real receipt may be called delivered.
+        reset_cooldowns()
+
+        async def _ok(*_args: Any, **_kwargs: Any) -> str:
+            return "delivered to the mailbox (will be read on the next turn)"
+
+        monkeypatch.setattr(peer_send, "deliver_peer_message", _ok)
+        row = (await client.post(url, json={})).json()["result"]["sessions"][0]
+        assert row["outcome"] == "delivered", row
+    finally:
         sleeper.terminate()
         try:
             sleeper.wait(timeout=5)
