@@ -58,7 +58,13 @@ function element(overrides = {}) {
     id: overrides.id ?? "",
     parentElement: overrides.parentElement ?? null,
     getAttribute: (name) =>
-      name === "class" ? overrides.className ?? "" : name === "role" ? overrides.role ?? "" : null,
+      name === "class"
+        ? overrides.className ?? ""
+        : name === "role"
+          ? overrides.role ?? ""
+          : name === "id"
+            ? overrides.id ?? ""
+            : null,
     getBoundingClientRect: () => rect,
     style: styleMap(overrides.inline ?? []),
   };
@@ -225,6 +231,55 @@ test("ancestors: chain to html inclusive, depth bound, default 12", async () => 
 
     dom.document.querySelector = () => null;
     assert.equal(await withFakeDom(dom, () => module.loaded.ancestors(".none", 4)), null);
+  } finally {
+    await module.close();
+  }
+});
+
+test("oversized id and role are clipped like className in every reader", async () => {
+  // Inline review finding (geometry-read.ts): `id` and `role` shipped verbatim
+  // in all three readers while `className` and the style values were capped. A
+  // page can put megabytes in either attribute, and the value would cross
+  // isolated world -> worker -> daemon and land in `ToolResult.details`, where
+  // BROWSER_TEXT_LIMIT_CHARS cannot bound it — the cap has to exist here.
+  const LONG_ID = "i".repeat(5000);
+  const LONG_ROLE = "r".repeat(5000);
+  const html = element({ tagName: "HTML" });
+  const card = element({
+    tagName: "SECTION",
+    id: LONG_ID,
+    role: LONG_ROLE,
+    parentElement: html,
+  });
+  const dom = {
+    document: {
+      documentElement: html,
+      querySelector: () => card,
+      querySelectorAll: () => [card],
+      elementsFromPoint: () => [card, html],
+    },
+    getComputedStyle: () => COMPUTED,
+  };
+  const module = await load("src/driver/geometry-read.ts");
+  try {
+    const styles = await withFakeDom(dom, () => module.loaded.readStyles(".card", []));
+    const hit = await withFakeDom(dom, () => module.loaded.hitTest(5, 6));
+    const ancestors = await withFakeDom(dom, () => module.loaded.ancestors("#card", 12));
+
+    const shapes = [
+      ["styles.matches[0]", styles.matches[0]],
+      ["hit_test.elements[0]", hit.elements[0]],
+      ["ancestors.chain[0]", ancestors.chain[0]],
+    ];
+    for (const [shape, entry] of shapes) {
+      for (const field of ["id", "role", "className"]) {
+        assert.ok(entry[field].length <= 120, `${shape}.${field} is bounded`);
+      }
+      assert.equal(entry.id.length, 120, `${shape}.id clipped to the identity cap`);
+      assert.equal(entry.role.length, 120, `${shape}.role clipped to the identity cap`);
+      assert.ok(entry.id.endsWith("\u2026"), `${shape}.id cut is visible`);
+      assert.ok(entry.role.endsWith("\u2026"), `${shape}.role cut is visible`);
+    }
   } finally {
     await module.close();
   }
