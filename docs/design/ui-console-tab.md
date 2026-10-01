@@ -2560,7 +2560,10 @@ not.
 - **Storybook**: the pane's four states plus the secure and ended states, and the
   header control with and without a blip (`chat-header-cluster.stories.tsx` is the
   precedent), captured through `scripts/capture-evidence.mjs` with
-  `docs/evidence/manifest.json` re-stamped.
+  `docs/evidence/manifest.json` re-stamped (`pnpm evidence:fold` in the UI repo: it
+  re-derives the stamps and counts from the tree the commit names, runs the guards and
+  stages the result; a FOLD needs no hand work, and with `pnpm evidence:fold:install`
+  once per clone `git merge origin/main` does not stop on the manifest at all).
 - **What none of this can prove**: that the terminal *looks right* in twelve
   themes (that is the design round's frames), that a TUI behaves (that is P5/P6
   and §19.4), or that the packaging works (P11).
