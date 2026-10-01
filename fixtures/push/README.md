@@ -103,13 +103,15 @@ a drifted digest fails CI rather than being quietly refreshed.
   heartbeat) — proposals, owned by the cloud lane's `docs/push-cloud-ops.md`. The
   one shape they share is the `devices` report block, which rides the emit body
   here and is spelled the same way on all three carriers (§3.2 #1–#3).
-- **The report block's builders.** Its rows are S4c's (`PR #1881`, open at this
-  head, whose `REPORT_DEVICE_FIELDS` names the same four fields); this tree freezes
-  the block's literal, not its producer.
+- **The report block's builders.** Its rows are S4c's
+  (`local_operator/mobile/push_credentials.py`, merged as PR #1881) — this tree
+  freezes the block's literal, not its producer, and **names the block's key by
+  importing that module's `REPORT_DEVICES_FIELD`** rather than spelling a second
+  string beside it.
 - **The tunnel-gateway allowlist guard (QA row Q31).** The cells asserting that
   `X-Lop-Operator-Key` is absent at the relay and that the allowlist entries stay
-  lowercase are S4c's, added by `PR #1881`'s branch — this slice cross-references
-  the rule and deliberately does not write a second, differently-worded copy of it.
+  lowercase are S4c's, landed with PR #1881 — this slice cross-references the rule
+  and deliberately does not write a second, differently-worded copy of it.
 
 ## Versioning
 
