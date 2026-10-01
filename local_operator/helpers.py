@@ -904,7 +904,10 @@ def get_windows_registry_path() -> str | None:
 def get_posix_shell_path() -> str | None:
     """
     Retrieves the user's PATH environment variable from their default login shell on macOS/Linux.
-    On Linux, also explicitly checks for and adds ~/.local/bin if it exists and is not in PATH.
+    Prefers an interactive login shell (so rc-file-only PATH additions such as those in
+    ~/.zshrc are included) and retries with the non-interactive login shell if that fails. On
+    macOS and Linux, also explicitly checks for and adds ~/.local/bin if it exists and is not
+    in PATH.
 
     Returns:
         str | None: The PATH string from the login shell, or None if an error occurs.
@@ -925,16 +928,24 @@ def get_posix_shell_path() -> str | None:
 
         logger.debug(f"Using shell: {shell_path}")
 
-        # Construct the command to echo PATH from a login shell
-        # Use list format for subprocess.run when shell=False is preferred,
-        # but here shell=True is needed for the login shell behavior (-l).
-        # Ensure shell_path is quoted if it contains spaces (though unlikely for standard shells)
-        command = (
-            f"'{shell_path}' -l -c 'echo \"$PATH\"'"  # Use double quotes inside for robustness
-        )
-
-        # Run the command. shell=True is necessary here for the '-l' flag to work correctly
-        # by invoking the shell itself to interpret the command string.
+        # Capture PATH from an INTERACTIVE login shell, with the previous
+        # non-interactive invocation as the fallback.
+        #
+        # Interactive is the correct capture because zsh sources ~/.zshrc ONLY
+        # when interactive: a plain `-l -c` login shell reads ~/.zshenv and
+        # ~/.zprofile but never ~/.zshrc, and per-user PATH additions commonly
+        # live there. On the fleet that lost `lop` (2026-10), the entries the
+        # non-interactive capture was silently dropping — ~/.local/bin,
+        # ~/.bun/bin, ~/.kimi-code/bin — were each added only in ~/.zshrc. The
+        # gap is load-bearing for launchd-spawned processes: their plists carry
+        # no PATH, so they start from launchd's bare default and this capture
+        # is the only chance to recover the user's real PATH before it
+        # propagates into every tool shell the runtime spawns.
+        #
+        # The fallback exists because interactive shells run strictly more user
+        # code: an rc file that prompts, hangs or errors can defeat the
+        # interactive attempt where the non-interactive one survives. Retrying
+        # the old shape is strictly better than failing outright.
         #
         # The timeout is load-bearing rather than defensive. A login shell runs
         # the user's rc files, and an rc that blocks — a slow network mount, an
@@ -945,17 +956,71 @@ def get_posix_shell_path() -> str | None:
         # BEFORE `serve()`, so it is alive, fires no wakes, and launchd never
         # restarts it because nothing exited. Ten seconds is far above a
         # healthy shell's cost and far below a user noticing a missed wake.
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            check=True,
-            shell=True,
-            executable=shell_path,
-            timeout=10,
-        )
+        # Each attempt gets its own ten-second bound, so the pair stays bounded
+        # even when the interactive attempt is the wedged one.
+        #
+        # stdin is DEVNULL for the same reason: in interactive mode a prompt,
+        # or an rc file that reads, must see EOF rather than block on (or
+        # steal from) a terminal that is not attached.
+        full_path = None
+        for interactive in (True, False):
+            flags = "-l -i -c" if interactive else "-l -c"
+            retry_note = (
+                "retrying with a non-interactive login shell."
+                if interactive
+                else "falling back to the inherited PATH."
+            )
+            # The command is a shell command line: shell=True interprets it
+            # with the user's own shell (executable=shell_path). The shell
+            # path is quoted, and `echo "$PATH"` stays double-quoted so the
+            # variable expands in that shell rather than in the parent.
+            command = f"'{shell_path}' {flags} 'echo \"$PATH\"'"
+            try:
+                result = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    shell=True,
+                    executable=shell_path,
+                    timeout=10,
+                    stdin=subprocess.DEVNULL,
+                )
+            except FileNotFoundError:
+                # The shell binary itself does not exist; the fallback
+                # invocation runs the same binary and cannot help.
+                logger.error(
+                    "Shell executable not found at '%s'. Cannot get PATH from login shell.",
+                    shell_path if shell_path is not None else "<unknown>",
+                )
+                return None
+            except subprocess.TimeoutExpired:
+                logger.error(
+                    f"Timed out getting PATH from login shell. Command '{command}' "
+                    f"did not finish within 10s; {retry_note}"
+                )
+                continue
+            except subprocess.CalledProcessError as e:
+                logger.error(
+                    f"Failed to get PATH from login shell. Command '{command}' "
+                    f"failed with error code {e.returncode}; {retry_note}"
+                )
+                logger.error(f"Stderr: {e.stderr.strip()}")
+                continue
 
-        full_path = result.stdout.strip()
+            full_path = result.stdout.strip()
+            if full_path:
+                break
+            # Exited 0 but printed nothing usable; try the next attempt before
+            # settling for the inherited PATH below.
+
+        if full_path is None:
+            # Every attempt failed (each raised — a timeout or a non-zero
+            # exit). Degrade to None exactly as the previous single-attempt
+            # code did; `setup_cross_platform_environment` then keeps the
+            # inherited PATH.
+            return None
+
         if full_path:
             logger.debug(f"Successfully retrieved PATH from login shell: {full_path}")
         else:
@@ -967,8 +1032,14 @@ def get_posix_shell_path() -> str | None:
             )
             full_path = os.environ.get("PATH", "")
 
-        # On Linux, explicitly add ~/.local/bin if it exists and is not already in PATH
-        if platform.system() == "Linux":
+        # On macOS and Linux, explicitly add ~/.local/bin if it exists and is
+        # not already in PATH. Belt-and-braces on top of the interactive
+        # capture above: ~/.local/bin is where `lop` itself lives, and the
+        # capture depends on user-editable rc files — so the single most
+        # load-bearing directory gets a deterministic guard. (Darwin was the
+        # gap: launchd-spawned processes lost `lop` whenever the capture
+        # missed it.)
+        if platform.system() in ["Linux", "Darwin"]:
             local_bin = os.path.expanduser("~/.local/bin")
             if os.path.isdir(local_bin):
                 # Check if local_bin is already effectively in the path
@@ -980,34 +1051,6 @@ def get_posix_shell_path() -> str | None:
 
         return full_path
 
-    except FileNotFoundError:
-        # This occurs if the specified shell_path does not exist
-        logger.error(
-            "Shell executable not found at '%s'. Cannot get PATH from login shell.",
-            shell_path if shell_path is not None else "<unknown>",
-        )
-        return None
-    except subprocess.TimeoutExpired:
-        # A wedged rc file. Degrading to `None` costs nothing that was not
-        # already lost — `setup_cross_platform_environment` falls back to the
-        # inherited `os.environ` PATH — and it is strictly better than the
-        # alternative, which is a supervised process that never reaches its
-        # own main loop.
-        logger.error(
-            "Timed out getting PATH from login shell. Command "
-            f"'{command if command is not None else '<unknown>'}' "
-            "did not finish within 10s; falling back to the inherited PATH."
-        )
-        return None
-    except subprocess.CalledProcessError as e:
-        # This occurs if the shell command returns a non-zero exit code
-        logger.error(
-            "Failed to get PATH from login shell. Command "
-            f"'{command if command is not None else '<unknown>'}' "
-            f"failed with error code {e.returncode}."
-        )
-        logger.error(f"Stderr: {e.stderr.strip()}")
-        return None  # Indicate failure
     except Exception as e:
         # Catch any other unexpected errors
         logger.error(f"An unexpected error occurred while getting POSIX shell PATH: {e}")

@@ -1047,15 +1047,26 @@ def test_get_windows_registry_path_not_windows(mock_system):
 @patch("local_operator.helpers.platform.system", return_value="Darwin")
 @patch("local_operator.helpers.os.environ", new_callable=dict)
 @patch("local_operator.helpers.subprocess.run")
-def test_get_posix_shell_path_macos_success(mock_run, mock_environ, mock_system):
-    """Test successful PATH retrieval on macOS."""
+@patch("local_operator.helpers.os.path.expanduser", return_value="/Users/user/.local/bin")
+@patch("local_operator.helpers.os.path.isdir", return_value=False)
+def test_get_posix_shell_path_macos_success(
+    mock_isdir, mock_expanduser, mock_run, mock_environ, mock_system
+):
+    """Test successful PATH retrieval on macOS.
+
+    The capture must run the INTERACTIVE login shell: a non-interactive login
+    zsh never sources ~/.zshrc, where per-user PATH additions live — the gap
+    that dropped ~/.local/bin (and ~/.bun/bin, ~/.kimi-code/bin) on
+    launchd-spawned runtimes.
+    """
     mock_environ["SHELL"] = "/bin/zsh"
     mock_run.return_value = MagicMock(stdout="/usr/bin:/bin:/opt/homebrew/bin\n")
     expected_path = "/usr/bin:/bin:/opt/homebrew/bin"
     assert get_posix_shell_path() == expected_path
     mock_run.assert_called_once()
     call_args = mock_run.call_args[0][0]
-    assert call_args == "'/bin/zsh' -l -c 'echo \"$PATH\"'"
+    assert call_args == "'/bin/zsh' -l -i -c 'echo \"$PATH\"'"
+    assert mock_run.call_args.kwargs["stdin"] == subprocess.DEVNULL
 
 
 @patch("local_operator.helpers.platform.system", return_value="Linux")
@@ -1093,6 +1104,87 @@ def test_get_posix_shell_path_linux_local_bin_exists(
     mock_run.assert_called_once()
     mock_expanduser.assert_called_once_with("~/.local/bin")
     mock_isdir.assert_called_once_with("/home/user/.local/bin")
+
+
+@patch("local_operator.helpers.platform.system", return_value="Darwin")
+@patch("local_operator.helpers.os.environ", new_callable=dict)
+@patch("local_operator.helpers.subprocess.run")
+@patch("local_operator.helpers.os.path.expanduser", return_value="/Users/user/.local/bin")
+@patch("local_operator.helpers.os.path.isdir", return_value=True)
+def test_get_posix_shell_path_macos_adds_local_bin(
+    mock_isdir, mock_expanduser, mock_run, mock_environ, mock_system
+):
+    """~/.local/bin is re-added on Darwin if the capture missed it.
+
+    Mirrors the Linux guarantee: `lop` itself is installed there, so the
+    launchd lineage must not lose it even if a future capture regresses.
+    """
+    mock_environ["SHELL"] = "/bin/zsh"
+    mock_run.return_value = MagicMock(stdout="/usr/bin:/bin\n")
+    expected_path = f"/Users/user/.local/bin{os.pathsep}/usr/bin:/bin"
+    assert get_posix_shell_path() == expected_path
+    mock_expanduser.assert_called_once_with("~/.local/bin")
+    mock_isdir.assert_called_once_with("/Users/user/.local/bin")
+
+
+@patch("local_operator.helpers.platform.system", return_value="Darwin")
+@patch("local_operator.helpers.os.environ", new_callable=dict)
+@patch("local_operator.helpers.subprocess.run")
+@patch("local_operator.helpers.os.path.expanduser", return_value="/Users/user/.local/bin")
+@patch("local_operator.helpers.os.path.isdir", return_value=False)
+def test_get_posix_shell_path_macos_falls_back_to_non_interactive_on_timeout(
+    mock_isdir, mock_expanduser, mock_run, mock_environ, mock_system
+):
+    """A wedged interactive login shell must degrade to the non-interactive capture."""
+    mock_environ["SHELL"] = "/bin/zsh"
+    mock_run.side_effect = [
+        subprocess.TimeoutExpired(cmd="zsh -l -i -c", timeout=10),
+        MagicMock(stdout="/usr/bin:/bin\n"),
+    ]
+    assert get_posix_shell_path() == "/usr/bin:/bin"
+    assert mock_run.call_count == 2
+    first_command = mock_run.call_args_list[0][0][0]
+    second_command = mock_run.call_args_list[1][0][0]
+    assert first_command == "'/bin/zsh' -l -i -c 'echo \"$PATH\"'"
+    assert second_command == "'/bin/zsh' -l -c 'echo \"$PATH\"'"
+
+
+@patch("local_operator.helpers.platform.system", return_value="Darwin")
+@patch("local_operator.helpers.os.environ", new_callable=dict)
+@patch("local_operator.helpers.subprocess.run")
+@patch("local_operator.helpers.os.path.expanduser", return_value="/Users/user/.local/bin")
+@patch("local_operator.helpers.os.path.isdir", return_value=False)
+def test_get_posix_shell_path_macos_falls_back_to_non_interactive_on_failure(
+    mock_isdir, mock_expanduser, mock_run, mock_environ, mock_system
+):
+    """A failing interactive login shell must degrade to the non-interactive capture."""
+    mock_environ["SHELL"] = "/bin/zsh"
+    mock_run.side_effect = [
+        subprocess.CalledProcessError(1, "cmd", stderr="boom"),
+        MagicMock(stdout="/usr/bin:/bin\n"),
+    ]
+    assert get_posix_shell_path() == "/usr/bin:/bin"
+    assert mock_run.call_count == 2
+    second_command = mock_run.call_args_list[1][0][0]
+    assert second_command == "'/bin/zsh' -l -c 'echo \"$PATH\"'"
+
+
+@patch("local_operator.helpers.platform.system", return_value="Darwin")
+@patch("local_operator.helpers.os.environ", new_callable=dict)
+@patch("local_operator.helpers.subprocess.run")
+@patch("local_operator.helpers.os.path.expanduser", return_value="/Users/user/.local/bin")
+@patch("local_operator.helpers.os.path.isdir", return_value=False)
+def test_get_posix_shell_path_macos_retries_after_empty_capture(
+    mock_isdir, mock_expanduser, mock_run, mock_environ, mock_system
+):
+    """An exit-0 capture that printed nothing is unusable; the next attempt must run."""
+    mock_environ["SHELL"] = "/bin/zsh"
+    mock_run.side_effect = [
+        MagicMock(stdout="\n"),
+        MagicMock(stdout="/usr/bin:/bin\n"),
+    ]
+    assert get_posix_shell_path() == "/usr/bin:/bin"
+    assert mock_run.call_count == 2
 
 
 @patch("local_operator.helpers.platform.system", return_value="Darwin")
