@@ -172,19 +172,24 @@ RUNTIME_UNREACHABLE_MESSAGE = (
 #: TWO ARMS RAISE IT (``RuntimeUnresponsiveError``, a sync expiry, and a
 #: ``ConnectionError`` carrying ``owner_alive`` — an ``OwnerAckTimeout``), so the
 #: body is built in exactly one place; see :func:`_runtime_busy_refusal`.
-RUNTIME_BUSY = "runtime_busy"
-
-#: The vetted sentence that accompanies :data:`RUNTIME_BUSY`.
 #:
-#: THIS ONE SPEAKS FOR ITSELF rather than borrowing
-#: :data:`RUNTIME_UNREACHABLE_MESSAGE`, and the split is deliberate (QA round 1,
-#: Q3): the old text told the operator to "Reconnect and reconcile before
-#: retrying" under a ``retryable: true`` body, so the sentence and the disposition
-#: said opposite things about a request the app is now expected to resend itself.
-#: "Busy" also names the code, which is what a renderer should key on (D8); the
-#: shipped app's prefix match on the unreachable sentence is a UI-side change and
-#: rides the UI repo, whose MCP row falls back to its own copy until it lands.
-RUNTIME_BUSY_MESSAGE = "Session owner is busy and did not confirm this request. Retrying is safe."
+#: THE MESSAGE IS DELIBERATELY THE UNCHANGED :data:`RUNTIME_UNREACHABLE_MESSAGE`,
+#: and this is now a settled decision rather than an oversight. A revision of this
+#: branch drafted its own sentence for the busy arm ("Session owner is busy and
+#: did not confirm this request. Retrying is safe.") and the design round ruled
+#: it out on three counts, all of them about the SCREEN rather than the wire: the
+#: renderer prepends its own not-sent lead to an echoed `detail` on this arm, and
+#: a busy refusal on `/answers` is raised for a write-then-wait ack timeout, so
+#: the answer may have been taken and "was not sent" is false; "retrying is safe"
+#: is a promise about delivery the app cannot establish and the app has already
+#: retried by the time the band paints; and "Session owner"/"Reconnect and
+#: reconcile" are outside the app's vocabulary, whose noun is "the agent".
+#: The shipped renderer also prefix-matches this unreachable sentence for its MCP
+#: row, so a backend rewording is a regression on every un-updated machine
+#: (``docs/design-ownerless-session-attach.md`` §5 risk 5). The user-facing words
+#: therefore belong to the UI, keyed on this code plus ``retryable``; see the
+#: design-round remediation on the PR for the agreed copy set.
+RUNTIME_BUSY = "runtime_busy"
 
 #: How soon a client may usefully resend a ``runtime_busy`` request. Short
 #: because the refusal is produced in ``DESKTOP_CONTROL_ATTACH_S`` rather than
@@ -1569,7 +1574,7 @@ def _runtime_busy_refusal() -> "HTTPException":
         503,
         {
             "code": RUNTIME_BUSY,
-            "message": RUNTIME_BUSY_MESSAGE,
+            "message": RUNTIME_UNREACHABLE_MESSAGE,
             "retryable": True,
             "retry_after_ms": RUNTIME_BUSY_RETRY_AFTER_MS,
         },

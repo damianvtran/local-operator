@@ -34,10 +34,7 @@ from typing import Any
 import pytest
 
 from local_operator.mobile.attach_client import OwnerAckTimeout
-from local_operator.server.routes.desktop_sessions import (
-    DESKTOP_ANSWER_BUDGET_S,
-    RUNTIME_BUSY_MESSAGE,
-)
+from local_operator.server.routes.desktop_sessions import DESKTOP_ANSWER_BUDGET_S
 from tests.unit.server.test_desktop_read_without_owner import (
     DEADLOCK_GUARD_S,
     TOKEN,
@@ -120,10 +117,10 @@ async def test_an_owner_that_never_acks_the_answer_refuses_retryable(
         assert detail["retryable"] is True, detail
         assert detail["retry_after_ms"] == 2000
         assert response.headers["retry-after"] == "2"
-        # The sentence speaks for the disposition (QA round 1, Q3): telling the
-        # operator to "reconnect and reconcile" under a `retryable: true` body says
-        # the opposite of what the field does.
-        assert detail["message"] == RUNTIME_BUSY_MESSAGE
+        # The sentence is DELIBERATELY the shipped unreachable one (design round 1,
+        # D1/D3): the app prefix-matches it for its MCP row, and the user-facing
+        # words for this arm belong to the UI, keyed on the code plus `retryable`.
+        assert detail["message"].startswith("Session owner is unavailable.")
         await owner.stop()
 
 
