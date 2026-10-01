@@ -717,6 +717,13 @@ class AskQueue:
                 "waited_s": waited_s,
                 "urgent": bool(record.get("urgent")),
                 "lapsed_while_stopped": lapsed_while_stopped,
+                # The questions ride the row so a transcript CARD can expand onto
+                # what went unanswered (design §5.1: "collapsed one-liner,
+                # expandable Q&A"). They are the same dicts the response row and
+                # the wire carry, so a card cannot disagree with the picker about
+                # what was asked; additive, and a reader that ignores it (the
+                # phone's notice fold does) is unaffected.
+                "questions": [dict(q) for q in (record.get("questions") or ())],
                 "text": text,
             },
         )

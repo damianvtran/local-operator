@@ -21,6 +21,7 @@ from local_operator.harness.types import ImageContent
 from local_operator.tui.session_interaction import SessionDraft
 from local_operator.tui.widgets.image_block import ImageBlock
 from local_operator.tui.widgets.transcript import (
+    AskResponseBlock,
     NoticeBlock,
     NoticeKind,
     TranscriptBlock,
@@ -1012,8 +1013,6 @@ def project_settled_rows(
     # found was a decision one surface made and the other missed
     # (docs/design/history-fold-convergence.md §3).
     from local_operator.harness.rows import (
-        ask_response_notice,
-        ask_timeout_notice,
         assistant_row_text,
         assistant_stop_notice,
         compaction_refused_notice,
@@ -1250,18 +1249,32 @@ def project_settled_rows(
                 ASK_RESPONSE_CUSTOM_TYPE,
             ):
                 # A queued ask settling (design docs/design/ask-nonblocking.md
-                # §2.3/§2.5). Both rows render, for the reason the gate row below
-                # exists: a custom message with no branch falls through every
-                # branch and past the role handling, so the row renders NOWHERE.
-                # The ANSWER is `notice` ink — it is a receipt — while the
-                # DEADLINE is `warning`: the user must know the agent stopped
-                # waiting, and that their silence cost a decision.
+                # §2.3/§2.5, §5.1). Both rows render, for the reason the gate
+                # row below exists: a custom message with no branch falls
+                # through every branch and past the role handling, so the row
+                # renders NOWHERE.
+                #
+                # Rendered as a TOOL-LEDGER CARD rather than the notice line
+                # this branch used to append, because the two rows answer a
+                # question the notice could not: "what did I tell it, and
+                # when?". The collapsed line is still the shared copy
+                # (`harness/rows`), so the one-liner is unchanged for a reader
+                # scanning the transcript; what is new is that the row opens
+                # onto the questions and the answers behind it.
+                #
+                # The `warning`/`notice` ink the notice used to carry is
+                # unchanged and now comes from the block's own summary copy —
+                # the DEADLINE still reads as a warning (the user must know the
+                # agent stopped waiting) while an ANSWER stays a receipt.
                 details = getattr(message, "details", None) or {}
-                if getattr(message, "custom_type", None) == ASK_TIMEOUT_CUSTOM_TYPE:
-                    text, kind = ask_timeout_notice(details)
-                else:
-                    text, kind = ask_response_notice(details)
-                self._append_block(NoticeBlock(text, kind=kind, fold_width=fold_width))
+                is_timeout = getattr(message, "custom_type", None) == ASK_TIMEOUT_CUSTOM_TYPE
+                self._append_block(
+                    AskResponseBlock(
+                        details,
+                        kind="timeout" if is_timeout else "response",
+                        fold_width=fold_width,
+                    )
+                )
                 appended = True
                 continue
             if getattr(message, "custom_type", None) == GATE_TIMEOUT_CUSTOM_TYPE:
