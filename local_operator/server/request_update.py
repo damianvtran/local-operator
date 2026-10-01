@@ -250,7 +250,11 @@ async def _deliver(session_id: str, text: str, sender: dict[str, Any]) -> tuple[
     # the engine-adjacent path, and neither belongs at this module's import
     # surface (the server-shape guard reads it; see `server/features.py`).
     from local_operator.mobile.peer_send import (
-        deliver_peer_message,
+        DELIVERY_DELIVERED,
+        DELIVERY_FAILED,
+        DELIVERY_MAILBOX,
+        DELIVERY_UNCONFIRMED,
+        deliver_peer_message_outcome,
         resolve_cold_session,
         resolve_peer_target,
         session_id_unowned,
@@ -269,7 +273,12 @@ async def _deliver(session_id: str, text: str, sender: dict[str, Any]) -> tuple[
         return "failed", _resolver_detail(error)
 
     try:
-        await deliver_peer_message(
+        # The OUTCOME face, NOT the receipt-string face: a receipt is not a data
+        # channel, and under the delivery-state model an amber result
+        # (``mailbox``/``unconfirmed``) RETURNS its sentence rather than raising
+        # — so classifying on "did it raise?" calls an unacknowledged dial a
+        # delivery. ``.state`` is the peer layer's own settled word; map it.
+        outcome = await deliver_peer_message_outcome(
             record,
             session_id=record.session_id if record is not None else cold_id,
             text=text,
@@ -278,20 +287,36 @@ async def _deliver(session_id: str, text: str, sender: dict[str, Any]) -> tuple[
             sender=sender,
         )
     except RuntimeError as exc:
-        # A protocol-level refusal (nothing was delivered): the unengaged gate,
-        # an engage that could not start, a spool write that failed. The
-        # message is the peer layer's own reason, except the unengaged case,
-        # which carries the project-facing sentence.
+        # A pre-delivery REFUSAL (the unengaged gate, an engage that could not
+        # start): no message id was minted, so there is no state to report. The
+        # sentence is the peer layer's own, except the unengaged case, which
+        # carries the project-facing sentence.
         return "failed", _refusal_detail(str(exc))
     except (ConnectionError, OSError, ValueError):
-        # The same taxonomy the `send` tool applies: the socket or the ack
-        # failed, which is NOT the same as "not delivered" — the receive side
-        # commits before it acks, so this side cannot know. An
-        # `asyncio.TimeoutError` is an `OSError` subclass.
+        # A transport fault raised OUTSIDE the outcome builder's own
+        # classification: the socket or the ack failed, which is NOT the same as
+        # "not delivered" — the receive side commits before it acks, so this
+        # side cannot know. An `asyncio.TimeoutError` is an `OSError` subclass.
         return "unconfirmed", UNCONFIRMED_DETAIL
     except Exception as exc:  # noqa: BLE001 — one target must not sink the batch
         return "failed", str(exc) or type(exc).__name__
-    return "delivered", None
+
+    if outcome.state == DELIVERY_DELIVERED:
+        return "delivered", None
+    if outcome.state == DELIVERY_MAILBOX:
+        # The row is DURABLE in the target's mailbox and it reads the message on
+        # its next turn; only the immediate WAKE went unacknowledged. The peer
+        # layer's own word for that is "wake unconfirmed" — the DELIVERY is
+        # confirmed — so this is a delivery, not the unconfirmed class, whose
+        # sentence says the reverse (that delivery could not be confirmed).
+        return "delivered", None
+    if outcome.state == DELIVERY_UNCONFIRMED:
+        return "unconfirmed", UNCONFIRMED_DETAIL
+    if outcome.state == DELIVERY_FAILED:
+        return "failed", _refusal_detail(outcome.detail)
+    # A state a future build added: report it as failed rather than claiming a
+    # delivery this build cannot vouch for.
+    return "failed", outcome.detail or "the message was not delivered"
 
 
 def _resolver_detail(error: str) -> str:

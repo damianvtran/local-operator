@@ -501,18 +501,18 @@ async def test_an_unconfirmed_delivery_is_its_own_outcome(api, monkeypatch) -> N
     import local_operator.mobile.peer_send as peer_send
 
     calls: list[tuple[Any, ...]] = []
-    real_deliver = peer_send.deliver_peer_message
+    real_deliver = peer_send.deliver_peer_message_outcome
 
-    async def _spy(record: Any, **kwargs: Any) -> str:
+    async def _spy(record: Any, **kwargs: Any) -> Any:
         try:
-            receipt = await real_deliver(record, **kwargs)
+            outcome = await real_deliver(record, **kwargs)
         except BaseException as exc:  # noqa: BLE001 — recorded, then re-raised
             calls.append(("raised", record is None, type(exc).__name__, str(exc)[:120]))
             raise
-        calls.append(("returned", record is None, str(receipt)[:120]))
-        return receipt
+        calls.append(("returned", record is None, outcome.state, str(outcome.detail)[:80]))
+        return outcome
 
-    monkeypatch.setattr(peer_send, "deliver_peer_message", _spy)
+    monkeypatch.setattr(peer_send, "deliver_peer_message_outcome", _spy)
 
     # A second spy, on the WIRE call: it records the port each dial used and
     # whether it returned or raised. That is what separates the two candidate
@@ -651,12 +651,21 @@ async def test_the_unacked_dial_taxonomy_is_pinned_without_a_socket(api, monkeyp
     """The outcome mapping, deterministically: an unacked dial is never `delivered`.
 
     The E2E above is the smoke; this pins the taxonomy itself, because the one
-    decision that turns a dial result into an outcome is ``_deliver``'s except
-    ladder, and a socket whose timing a loaded runner can vary is the wrong
-    place to pin it. ``deliver_peer_message`` is swapped at its own module (the
-    route imports it per call), so each arm is exercised exactly.
+    decision that turns a dial result into an outcome is ``_deliver``'s mapping,
+    and a socket whose timing a loaded runner can vary is the wrong place to pin
+    it. ``deliver_peer_message_outcome`` is swapped at its own module (the route
+    imports it per call), so each peer-layer STATE is exercised exactly —
+    including the amber states, which RETURN a sentence rather than raising and
+    are the whole reason this table exists.
     """
     import local_operator.mobile.peer_send as peer_send
+    from local_operator.mobile.peer_send import (
+        DELIVERY_DELIVERED,
+        DELIVERY_FAILED,
+        DELIVERY_MAILBOX,
+        DELIVERY_UNCONFIRMED,
+        DeliveryOutcome,
+    )
 
     client, _root = api
     project_id = await _project_with(client, SESSION_A)
@@ -680,35 +689,49 @@ async def test_the_unacked_dial_taxonomy_is_pinned_without_a_socket(api, monkeyp
         await _wait_live(SESSION_A)
         url = f"/v1/desktop/projects/{project_id}/request-update"
 
+        def _returns(state: str, detail: str = "a receipt"):
+            async def _impl(*_args: Any, **_kwargs: Any) -> Any:
+                return DeliveryOutcome(state, detail, "peer-test", "requested", 1, "", "live", "x")
+
+            return _impl
+
         def _raiser(exc: type[BaseException]):
-            async def _impl(*_args: Any, **_kwargs: Any) -> str:
+            async def _impl(*_args: Any, **_kwargs: Any) -> Any:
                 raise exc("dial failed")
 
             return _impl
 
-        # Every OSError-family fault means the ack never arrived: unconfirmed.
+        # Each peer-layer STATE -> the route's three-way vocabulary. The amber
+        # states RETURN a sentence, so this table is what catches a mapping that
+        # infers the outcome from "did it raise?" (the defect this pins).
+        for state, expected in (
+            (DELIVERY_DELIVERED, "delivered"),
+            # A durable mailbox row whose wake went unacknowledged: the DELIVERY
+            # is confirmed, so it is a delivery — never the unconfirmed class.
+            (DELIVERY_MAILBOX, "delivered"),
+            (DELIVERY_UNCONFIRMED, "unconfirmed"),
+            (DELIVERY_FAILED, "failed"),
+        ):
+            reset_cooldowns()
+            monkeypatch.setattr(peer_send, "deliver_peer_message_outcome", _returns(state))
+            row = (await client.post(url, json={})).json()["result"]["sessions"][0]
+            assert row["outcome"] == expected, (state, row)
+
+        # Every OSError-family fault raised outside the classifier means the ack
+        # never arrived: unconfirmed (an `asyncio.TimeoutError` is an OSError).
         for exc in (ConnectionError, TimeoutError, OSError):
             reset_cooldowns()
-            monkeypatch.setattr(peer_send, "deliver_peer_message", _raiser(exc))
+            monkeypatch.setattr(peer_send, "deliver_peer_message_outcome", _raiser(exc))
             row = (await client.post(url, json={})).json()["result"]["sessions"][0]
             assert row["outcome"] == "unconfirmed", (exc.__name__, row)
             assert row["detail"] == "delivery could not be confirmed"
 
-        # A peer that ANSWERED no is a refusal: nothing was delivered.
+        # A pre-delivery refusal (the unengaged gate, an engage that could not
+        # start) mints no id: nothing was delivered.
         reset_cooldowns()
-        monkeypatch.setattr(peer_send, "deliver_peer_message", _raiser(RuntimeError))
+        monkeypatch.setattr(peer_send, "deliver_peer_message_outcome", _raiser(RuntimeError))
         row = (await client.post(url, json={})).json()["result"]["sessions"][0]
         assert row["outcome"] == "failed", row
-
-        # Only a real receipt may be called delivered.
-        reset_cooldowns()
-
-        async def _ok(*_args: Any, **_kwargs: Any) -> str:
-            return "delivered to the mailbox (will be read on the next turn)"
-
-        monkeypatch.setattr(peer_send, "deliver_peer_message", _ok)
-        row = (await client.post(url, json={})).json()["result"]["sessions"][0]
-        assert row["outcome"] == "delivered", row
     finally:
         sleeper.terminate()
         try:
