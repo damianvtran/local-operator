@@ -825,7 +825,9 @@ async def test_mock_client_hang_branch_never_ends_the_stream() -> None:
     assert isinstance(first, StreamStartEvent)
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(anext(stream), timeout=0.25)
-    await stream.aclose()
+    # No close call: ``wait_for`` delivers its cancellation into the suspended
+    # generator before it re-raises, so the stream above is already closed —
+    # and the declared return type (``AsyncIterator``) carries no ``aclose``.
 
 
 # ---------------------------------------------------------------------------

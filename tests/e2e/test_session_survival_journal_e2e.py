@@ -265,6 +265,18 @@ async def test_a_sigterm_the_drain_bound_cuts_records_the_readers_own_token(
     turn hangs on the mock's ``[hang]`` request instead: busy with the model in
     flight, no step any probe can read, no movement — the one shape the bound
     disposes.
+
+    TEETH, AND WHAT THEY ARE NOT (round 2, measured). This cell cannot be a
+    fix-discriminator and is not one: a silent parent request is disposed by
+    BOTH semantics — the old code cut everything at the deadline, the gated
+    code reaps one bound of silence — so the cell passes against the pre-fix
+    ``process.py`` too, and an "expected fail unpatched" check is
+    unsatisfiable for it. Its teeth are mutation-checked instead: disarm the
+    gate's ``REAP`` and the sentinel is never released, so this cell fails at
+    the 180 s wait (the exact failure shape CI produced when the parked shape
+    stopped being disposed); perturb the exit writer's token and it fails at
+    the assertion below. The cells that flip on an unfixed tree are the
+    signal suite's unit wave.
     """
     config = headless_tui_env
     session_id = "journalsigterm01"
