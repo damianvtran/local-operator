@@ -2175,7 +2175,17 @@ Screen.settings #input-dock #prompt-chevron {
  * detail's section headings do, so nothing here declares a margin of its own
  * and the minimalism guard's count stays at one. Horizontal padding is the
  * only spacing this block adds. */
-.projects-form {
+/* The page's OWN class, which Textual derives from the widget's class name —
+ * `.projects-form` matched nothing, so every rule here was dead: the scrollbar
+ * measured 2 cells and painted Textual's stock blue-on-black track (design
+ * review round 1, D2). The fields scroll; the page does not, so the confirm row
+ * can be pinned below them. */
+.projects-form-page {
+    height: 1fr;
+    padding: 0;
+}
+
+.projects-form-fields {
     height: 1fr;
     padding: 0;
     overflow: auto;
@@ -2184,6 +2194,41 @@ Screen.settings #input-dock #prompt-chevron {
     scrollbar-color: $lo-edge;
     scrollbar-color-hover: $lo-dim;
     scrollbar-color-active: $lo-muted;
+}
+
+/* One form-scoped rule for the inputs, for the reason every other surface here
+ * has one: stock `Input` is a 3-row box with a tall blue border — near-black
+ * slabs on light, stub ticks on dark, and the form measured 58 rows with 9
+ * visible at 80x24 (design review round 1, D3). Height 1, no border, the panel
+ * fill, and the app's "this is the one you are on" fill under the cursor. */
+.projects-form-fields Input {
+    border: none;
+    height: 1;
+    padding: 0 1;
+    background: $lo-sunken;
+    color: $lo-fg;
+}
+
+.projects-form-fields Input:focus {
+    background: $lo-tint-select;
+}
+
+/* The description editor keeps its own height (it is the one multi-line
+ * field), but shares the box treatment so the form has ONE control look. */
+.projects-form-fields TextArea {
+    border: none;
+    height: 6;
+    padding: 0 1;
+    background: $lo-sunken;
+    /* The INK is not optional: stock `TextArea` carries its own light-theme
+     * colour (`(224,224,224)` measured against this panel's `(229,224,213)`,
+     * i.e. the scaffold was invisible on light) — the same class of stock
+     * default the Input rule above exists for, caught in the light frame of
+     * this round. */
+    color: $lo-fg;
+    scrollbar-size-vertical: 1;
+    scrollbar-background: $lo-bg;
+    scrollbar-color: $lo-edge;
 }
 
 .projects-form-field {
@@ -2203,7 +2248,10 @@ Screen.settings #input-dock #prompt-chevron {
 .projects-form-error {
     width: 1fr;
     height: auto;
-    padding-left: 2;
+    /* One left edge: the label, the control's text and these lines all start at
+     * the same column, so a hint or a refusal reads as part of the field rather
+     * than as the next one (design review round 1, D6). */
+    padding-left: 1;
 }
 
 /* The `‹ value ›` rows (status, estimate unit): one line, focusable, and lit
