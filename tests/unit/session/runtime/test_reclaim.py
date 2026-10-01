@@ -35,7 +35,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from local_operator.session.runtime import reclaim
+from local_operator.session.runtime import reclaim, registry
 from local_operator.session.runtime.reclaim import (
     BUSY_CPU_FLOOR_S,
     CONFIRM_S,
@@ -66,7 +66,7 @@ from local_operator.session.runtime.reclaim import (
     socket_evidence,
     verdict,
 )
-from local_operator.session.runtime.types import RUN_DIRNAME, SessionRecord
+from local_operator.session.runtime.types import RUN_DIRNAME, SessionRecord, session_dir
 
 NOW = 1_800_000_000.0
 
@@ -1511,3 +1511,186 @@ def test_a_rejected_probe_withholds_the_signal_instead_of_signalling(
     assert report is not None
     assert report.refusals() == {REFUSAL_CHANGED: 1}
     assert len(caplog.records) == 1, [record.getMessage() for record in caplog.records]
+
+
+# ---------------------------------------------------------------------------
+# Attestation: every signal this module sends leaves a marker first
+# ---------------------------------------------------------------------------
+
+
+def _session_env(tmp_path: Path, session: str = "s1"):
+    """A ``env_of`` for a recordless runtime that names the session it hosts.
+
+    ``_recordless_env`` above deliberately names NO session (its candidates are
+    the anonymous class). An attestable candidate is the one whose spawn contract
+    names the conversation — which is where the marker has to land.
+    """
+
+    def env_of(pid: int) -> str:
+        return env_text(str(tmp_path), session=session)
+
+    return env_of
+
+
+def test_a_signal_is_attested_before_it_is_sent(tmp_path: Path) -> None:
+    """ORDERING IS THE CONTRACT: the marker is visible BEFORE the SIGTERM.
+
+    The kill hook reads the marker AT SIGNAL TIME, which pins the ordering rather
+    than the presence alone — the file must already be on disk when the signal
+    lands, because from that moment the target cannot record anything and the
+    acting process is the only party that can. The payload is then asserted on
+    the facts a reader (``attention``'s classifier) keys on: the run key, the
+    empty rung, ``deliberate`` False, and the mechanism/actor pair that makes the
+    act attributable.
+    """
+    conversation = session_dir(tmp_path, "s1")
+    conversation.mkdir(parents=True, exist_ok=True)
+    sightings = Sightings()
+    seen_at_signal: list[dict[str, object] | None] = []
+
+    def kill(pid: int, sig: int) -> None:
+        seen_at_signal.append(registry.read_stop_marker(conversation))
+
+    for now in (NOW, NOW + CONFIRM_S):
+        reclaim_runtimes(
+            tmp_path,
+            apply=True,
+            sightings=sightings,
+            processes=[proc()],
+            env_of=_session_env(tmp_path),
+            row_of=lambda pid: reread(pid, root=tmp_path),
+            fleet=fleet(tmp_path),
+            kill=kill,
+            now=now,
+        )
+    assert len(seen_at_signal) == 1
+    marker = seen_at_signal[0]
+    assert marker is not None, "the marker must be visible BEFORE the signal lands"
+    assert marker["session_id"] == "s1"
+    assert marker["pid"] == 4242
+    assert marker["rung"] == ""
+    assert marker["deliberate"] is False
+    assert marker["mechanism"] == reclaim.RECLAIM_MECHANISM
+    assert marker["actor"] == reclaim.RECLAIM_ATTEST_ACTOR
+
+
+def test_a_candidate_without_a_session_still_signals_and_stages_nothing(
+    tmp_path: Path,
+) -> None:
+    """No conversation to attest into: the sweep still acts, and invents no path.
+
+    A recordless runtime whose spawn contract names no session is the one
+    candidate class with nowhere to file the fact — and the sweep's own warning
+    already says ``<unknown>`` there. The decision must not change because the
+    paperwork has nowhere to go, and no directory may be created for a session
+    that never existed (``write_stop_marker`` deliberately does not create one).
+    """
+    sightings = Sightings()
+    kill: list[tuple[int, int]] = []
+    for now in (NOW, NOW + CONFIRM_S):
+        reclaim_runtimes(
+            tmp_path,
+            apply=True,
+            sightings=sightings,
+            processes=[proc()],
+            env_of=_recordless_env(tmp_path),
+            row_of=lambda pid: reread(pid, root=tmp_path),
+            fleet=fleet(tmp_path),
+            kill=lambda pid, sig: kill.append((pid, sig)),
+            now=now,
+        )
+    assert kill == [(4242, signal.SIGTERM)]
+    assert list(tmp_path.glob("sessions/*/runtime-stop.json")) == []
+
+
+def test_an_unattestable_signal_is_logged_and_still_sent(tmp_path: Path, caplog) -> None:
+    """A gap in the artifact is SAID, never swallowed — and never blocks the act.
+
+    The conversation directory does not exist here (no mkdir), which is the one
+    realistic way the write fails. The candidate was already proven unreachable;
+    refusing to end it over a sidecar would leave up a runtime the sweep exists
+    to end. So: signalled, and the failure named in the log — "could not attest"
+    is a gap in the artifact and the acting process is the only one who can say
+    so.
+    """
+    sightings = Sightings()
+    kill: list[tuple[int, int]] = []
+    caplog.set_level(logging.WARNING, logger=reclaim.__name__)
+    for now in (NOW, NOW + CONFIRM_S):
+        reclaim_runtimes(
+            tmp_path,
+            apply=True,
+            sightings=sightings,
+            processes=[proc()],
+            env_of=_session_env(tmp_path),
+            row_of=lambda pid: reread(pid, root=tmp_path),
+            fleet=fleet(tmp_path),
+            kill=lambda pid, sig: kill.append((pid, sig)),
+            now=now,
+        )
+    assert kill == [(4242, signal.SIGTERM)]
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("could not attest" in message for message in messages), messages
+
+
+def test_a_signal_that_never_lands_withdraws_its_marker(tmp_path: Path) -> None:
+    """The act did not complete: the attestation goes back, like the ladder's.
+
+    A candidate can die between the decision and the signal (``os.kill`` raising
+    ``ProcessLookupError``), or refuse the signal (``PermissionError``) — in both
+    the sweep's act is NOT taken, and a marker left behind would narrate a death
+    this sweep did not cause as this sweep (the misreading
+    ``update.withdraw_involuntary_stops`` exists to prevent). The withdrawal
+    re-reads the file and compares the whole run key, which is why the record is
+    built once per candidate in production — a second ``time.time()`` would
+    refuse its own marker.
+    """
+    conversation = session_dir(tmp_path, "s1")
+    conversation.mkdir(parents=True, exist_ok=True)
+    sightings = Sightings()
+
+    def refuse(pid: int, sig: int) -> None:
+        raise ProcessLookupError(pid)
+
+    report = None
+    for now in (NOW, NOW + CONFIRM_S):
+        report = reclaim_runtimes(
+            tmp_path,
+            apply=True,
+            sightings=sightings,
+            processes=[proc()],
+            env_of=_session_env(tmp_path),
+            row_of=lambda pid: reread(pid, root=tmp_path),
+            fleet=fleet(tmp_path),
+            kill=refuse,
+            now=now,
+        )
+    assert report is not None
+    assert report.signalled == []
+    assert registry.read_stop_marker(conversation) is None
+
+
+def test_a_dry_run_stages_nothing_even_when_it_would_signal(tmp_path: Path) -> None:
+    """THE NEGATIVE ORDERING: no act, no marker.
+
+    The marker exists to attest a signal. A dry run decides without acting, so
+    the one file a reader keys on must not appear — and a candidate whose row
+    changed between the passes never reaches the attestation either (the
+    ``target_changed`` refusal returns one branch above; that path is pinned in
+    ``test_a_signal_is_withheld_when_the_target_is_no_longer_the_one_measured``).
+    """
+    conversation = session_dir(tmp_path, "s1")
+    conversation.mkdir(parents=True, exist_ok=True)
+    sightings = Sightings()
+    for now in (NOW, NOW + CONFIRM_S):
+        reclaim_runtimes(
+            tmp_path,
+            apply=False,
+            sightings=sightings,
+            processes=[proc()],
+            env_of=_session_env(tmp_path),
+            row_of=lambda pid: reread(pid, root=tmp_path),
+            fleet=fleet(tmp_path),
+            now=now,
+        )
+    assert registry.read_stop_marker(conversation) is None
