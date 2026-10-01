@@ -210,13 +210,21 @@ export function AsksSheet({
 										{named?.name ?? sessionId}
 									</span>
 									{onOpenConversation ? (
+										/* THE PARENT OWNS THE WHOLE TRANSITION (agent review round 2,
+										   M1). This control used to navigate and THEN close itself, and
+										   closing gives the sheet's history entry back with
+										   `history.back()` — which, on an entry the navigation had
+										   just pushed, popped the target and left the hash back at
+										   `#/s/asks`. `onOpenConversation` now clears the sheet AND
+										   replaces its entry, in that order, in one place. */
 										<button
 											type="button"
-											onClick={() => {
-												onOpenConversation(sessionId);
-												onClose();
-											}}
-											className="shrink-0 underline"
+											onClick={() => onOpenConversation(sessionId)}
+											/* 44 px, like every other control on this sheet (design
+											   D7 = UX U9): it was a bare `underline` link at 28x17 css
+											   — the smallest target here and the only route from the
+											   sheet to a foreign ask's conversation. */
+											className="flex min-h-11 shrink-0 items-center rounded-sm border border-control px-3 text-body-sm text-ink-muted active:bg-elevated"
 										>
 											open
 										</button>

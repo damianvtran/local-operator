@@ -49,9 +49,11 @@ LOCAL_OPERATOR_CONFIG_DIR are re-homed by ``scripts.probe_isolation`` on import.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 import uvicorn
@@ -1010,6 +1012,40 @@ def _asks_stacked_projection() -> SessionProjection:
     return projection
 
 
+#: Sessions the fixture presents as ENDED — a conversation whose runtime is gone,
+#: which is the state the ask sheet warns about before a tap ("this conversation
+#: has ended — answering may need it reopened", design round 1's D6/D8).
+#:
+#: WHY IT TAKES BOTH A TRANSCRIPT AND AN ENTRY FLAG. The daemon derives a row's
+#: ``ended`` from a row with NO live entry plus an entry carrying that session id
+#: marked ended (``mobile/daemon.py``), and a row with no live entry reaches the
+#: list only through the DURABLE scan — which sees a session directory only when
+#: it carries ``transcript.jsonl``. Marking the entry ended WITHOUT the transcript
+#: removes the row altogether (measured: 13 rows -> 12), so the sentence D8 asked
+#: for cannot be framed with the flag alone.
+ENDED_SESSIONS = {"asks-foreign"}
+
+
+def _write_opening_turn(session_dir: Path, text: str) -> None:
+    """One user turn in ``transcript.jsonl``, in the store's own line shape.
+
+    The durable row's NAME is read from this file (``resume.session_name``), so an
+    ended receipt needs an opening turn as much as it needs the flag — an empty
+    transcript lists the row with a blank label. The payload comes from the real
+    ``Message`` type rather than a hand-written dict, so the fixture cannot drift
+    from what the writer emits.
+    """
+    from local_operator.harness.types import Message
+
+    entry = {
+        "id": f"fixture-{session_dir.name}",
+        "ts": time.time(),
+        "type": "message",
+        "payload": Message.user(text).model_dump(exclude_defaults=True),
+    }
+    (session_dir / "transcript.jsonl").write_text(json.dumps(entry) + "\n", encoding="utf-8")
+
+
 def seed_ask_index(projections: list[SessionProjection]) -> None:
     """Publish the asks into the daemon's INDEX, the way a live runtime does.
 
@@ -1030,7 +1066,10 @@ def seed_ask_index(projections: list[SessionProjection]) -> None:
     root = config_dir()
     sessions = root / "sessions"
     for projection in projections:
-        (sessions / projection.session_id).mkdir(parents=True, exist_ok=True)
+        directory = sessions / projection.session_id
+        directory.mkdir(parents=True, exist_ok=True)
+        if projection.session_id in ENDED_SESSIONS:
+            _write_opening_turn(directory, "Ask me the second one too.")
         rows = [row.to_json() for row in (projection.asks or [])]
         write_entry(root, projection.session_id, cwd="/synthetic", asks=rows)
 
@@ -1075,6 +1114,10 @@ async def main() -> None:
         )
         entry = SessionEntry(record)
         entry.projection = projection
+        # The ended RECEIPT for the durable row above: an entry with the same
+        # session id and ``ended=True`` is exactly what the daemon reads to set the
+        # summary's field.
+        entry.ended = projection.session_id in ENDED_SESSIONS
         daemon.session_projections[projection.session_id] = projection
         daemon.table.entries[record.pid] = entry
     # The aggregate route reads the derived INDEX, not the projections (an ask

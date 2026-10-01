@@ -102,23 +102,26 @@ export function durationLabel(ms: number): string {
 	return `${Math.floor(hours / 24)} d`;
 }
 
-/** The rows in the order every ask surface should show them: the HEAD ask
- *  first, then newest-first — the wire's own order with the head lifted to the
- *  front.
+/** The rows in the order every ask surface should show them: the ask the CHIP
+ *  NAMES first, then the wire's own order.
  *
- *  WHY THE ORDER IS THE CLIENT'S TO DECIDE (UX round 1, U8). The bar names the
- *  head ask (the OLDEST open one, `headAsk`), and the published list leads with
- *  the NEWEST — so tapping a bar that says "Which sequencing…" opened a sheet
- *  whose first card was a different question, with the named one below the fold.
- *  A thumb arrives expecting what it just read. The design's A2 addendum already
- *  names this divergence and its fix ("a later PR may make the list lead with
- *  the oldest too"); this is that fix, applied where the reader stands, with no
- *  wire change. */
+ *  WHY THE ORDER IS THE CLIENT'S TO DECIDE (UX round 1, U8). The chip names the
+ *  head ask, and the published list leads with the NEWEST — so tapping a chip
+ *  that says "Which sequencing…" opened a sheet whose first card was a different
+ *  question, with the named one below the fold. A thumb arrives expecting what
+ *  it just read. The design's A2 addendum already names this divergence and its
+ *  fix ("a later PR may make the list lead with the oldest too"); this is that
+ *  fix, applied where the reader stands, with no wire change.
+ *
+ *  THE LIFTED ROW IS `dockAsk`, NOT `headAsk` (agent review round 2, N2): with
+ *  nothing open, the chip names the first still-answerable TIMEOUT (U7's fix),
+ *  so lifting only the open-ask head left the two surfaces naming different rows
+ *  in exactly the state U7 exists for. One rule, both callers. */
 export function orderedForDisplay(rows: PendingAsk[] | undefined | null): PendingAsk[] {
 	const list = Array.isArray(rows) ? rows : [];
-	const head = headAsk(list);
-	if (head === null) return [...list];
-	return [head, ...list.filter((row) => row.ask_id !== head.ask_id)];
+	const first = dockAsk(list);
+	if (first === null) return [...list];
+	return [first, ...list.filter((row) => row.ask_id !== first.ask_id)];
 }
 
 /** The one line a queued ask's own state is stated in (§5's shared copy).

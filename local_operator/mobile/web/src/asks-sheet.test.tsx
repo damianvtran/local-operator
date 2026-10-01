@@ -84,18 +84,23 @@ describe("AsksSheet", () => {
 	it("lists a foreign conversation's ask under its own name, with a way in", async () => {
 		rows = [summary()];
 		const navigate = vi.fn();
+		const close = vi.fn();
 		render(
-			<AsksSheet
-				open
-				onClose={() => {}}
-				currentSessionId="mine"
-				onOpenConversation={navigate}
-			/>,
+			<AsksSheet open onClose={close} currentSessionId="mine" onOpenConversation={navigate} />,
 		);
 		await waitFor(() => expect(screen.getByTestId("ask-card")).toBeTruthy());
 		expect(screen.getByText("woken-by-monitor")).toBeTruthy();
-		fireEvent.click(screen.getByRole("button", { name: "open" }));
+		const link = screen.getByRole("button", { name: "open" });
+		fireEvent.click(link);
 		expect(navigate).toHaveBeenCalledWith("other");
+		/* THE SHEET DOES NOT CLOSE ITSELF HERE (agent review round 2, M1 = design
+		   D7's neighbour): a close after the route change popped the entry the
+		   navigation had just pushed. The parent owns the whole transition. */
+		expect(close).not.toHaveBeenCalled();
+		/* And it is a 44 px control like every other on this sheet (D7 = U9),
+		   not the 28x17 bare link it was. */
+		expect(link.className).toMatch(/min-h-11/);
+		expect(link.className).not.toMatch(/underline/);
 	});
 
 	it("answers against the row's OWN session route, not the screen's", async () => {
