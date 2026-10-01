@@ -24,6 +24,7 @@ from local_operator.projects import ProjectRegistry
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.projects_form import (
+    DESCRIPTION_HINT,
     DESCRIPTION_SCAFFOLD,
     DISCARD_PROMPT,
     ProjectsFormPage,
@@ -340,29 +341,6 @@ async def test_a_long_refused_create_keeps_the_sentence_in_the_form(
         assert len(_store(tmp_path).list_projects()) == 1
 
 
-async def test_a_store_refusal_focuses_the_field_its_line_sits_under(
-    tmp_path: Path,
-) -> None:
-    """The receipt and the cursor agree (design review round 1, D5)."""
-    session = _ProjectSession()
-    session.project_registry = _registry(tmp_path, "alpha", "taken")
-    app = OperatorApp(lambda: _factory(session))
-    async with app.run_test(size=(100, 30)) as pilot:
-        await _boot(pilot, app)
-        view = await _open(pilot, app)
-        page = await _open_form(pilot, view)
-
-        await pilot.press(*"taken")
-        await pilot.pause()
-        page._team_input.focus()
-        await pilot.press("ctrl+s")
-        await pilot.pause()
-
-        assert view._mode == "form"
-        assert any("already exists" in row for row in view.rendered_rows())
-        assert app.focused is page._title_input, "focus must land where the line is"
-
-
 async def test_a_bracket_carrying_refusal_is_data_not_markup(tmp_path: Path) -> None:
     """The sentence is a store message, and store messages carry brackets.
 
@@ -619,6 +597,161 @@ async def test_the_hints_are_the_labels_voice(tmp_path: Path) -> None:
         assert not any("comma or space separated · at most" in row for row in rows), rows
 
 
+async def test_the_caret_takes_the_composers_treatment(tmp_path: Path) -> None:
+    """D13: the caret was the theme's near-white on the light field's own fill.
+
+    About 1:1 — the one mark a reader needs while typing was invisible. Same
+    treatment as the composer's caret, pinned to its resolved component style.
+    """
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        app._run_slash_command("/theme light")
+        await pilot.pause()
+        await pilot.pause()
+        view = await _open(pilot, app)
+        page = await _open_form(pilot, view)
+
+        composer = app.query_one(Editor).get_component_rich_style("text-area--cursor")
+        field = page._title_input.get_component_rich_style("input--cursor")
+        area = page._description.get_component_rich_style("text-area--cursor")
+        assert field.color == composer.color, (field.color, composer.color)
+        assert field.bgcolor == composer.bgcolor, (field.bgcolor, composer.bgcolor)
+        assert area.color == composer.color, (area.color, composer.color)
+
+
+async def test_the_canvas_advertises_the_create_key(tmp_path: Path) -> None:
+    """U1: `c` was a binding with no hint — nothing said how to make a project.
+
+    The ladder is the honest home for it (the empty-store SENTENCE is shared
+    with the transcript's `/project` reply, where `c` means nothing), and the
+    two widest sizes a reader actually works at must carry it.
+    """
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha", "beta")
+    for size in ((100, 30), (150, 40)):
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=size) as pilot:
+            await _boot(pilot, app)
+            view = await _open(pilot, app)
+            assert view._create_hint.display is True, size
+            assert "create" in str(view._create_hint.rendered()), (
+                size,
+                view._create_hint.rendered(),
+            )
+
+
+async def test_the_description_caret_starts_under_the_first_heading(tmp_path: Path) -> None:
+    """U2: it opened ON `## Goals`, so the first keystroke glued onto it."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        page = await _open_form(pilot, view)
+
+        assert page._description.text == DESCRIPTION_SCAFFOLD
+        assert page._description.cursor_location == (1, 0), page._description.cursor_location
+        page._description.focus()
+        await pilot.press(*"hello")
+        await pilot.pause()
+        assert page._description.text.startswith("## Summary\nhello"), page._description.text
+
+
+async def test_a_store_refusal_lands_on_the_field_it_names(tmp_path: Path) -> None:
+    """U3: it painted under the TITLE and stayed while the title was corrected."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        page = await _open_form(pilot, view)
+
+        await pilot.press(*"alpha")
+        await pilot.pause()
+        page._team_input.focus()
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+
+        rows = view.rendered_rows()
+        assert any(row.startswith("key error:") for row in rows), rows
+        assert not any(row.startswith("title error:") for row in rows), rows
+        assert app.focused is page._key_input
+
+        # Correcting the offending value clears the line: the reader's fix IS
+        # the answer to the sentence under the field.
+        page._title_input.focus()
+        await pilot.press("x")
+        await pilot.pause()
+        assert not any(row.startswith("key error:") for row in view.rendered_rows())
+
+
+async def test_an_empty_submit_points_at_the_title(tmp_path: Path) -> None:
+    """U4: the form is title-first, so the empty case belongs on the title."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        page = await _open_form(pilot, view)
+
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+
+        rows = view.rendered_rows()
+        assert any(row.startswith("title error:") for row in rows), rows
+        assert not any(row.startswith("key error:") for row in rows), rows
+        assert app.focused is page._title_input
+
+
+async def test_n_and_enter_answer_the_question_keep_editing(tmp_path: Path) -> None:
+    """U5: both were swallowed in silence; `esc` stays the advertised answer."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    for key in ("n", "enter"):
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _boot(pilot, app)
+            view = await _open(pilot, app)
+            page = await _open_form(pilot, view)
+            await pilot.press(*"half")
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            await pilot.pause()
+            assert page.confirming is True
+            await pilot.press(key)
+            await pilot.pause()
+            await pilot.pause()
+            assert page.confirming is False, key
+            assert view._mode == "form", key
+            assert page._title_input.value == "half", key
+
+
+async def test_the_scaffold_hint_goes_away_once_the_writer_types(tmp_path: Path) -> None:
+    """U6: it described a state that no longer existed."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        page = await _open_form(pilot, view)
+
+        assert page._description_block.hint == DESCRIPTION_HINT
+        assert any("nothing is saved" in row for row in view.rendered_rows())
+        page._description.focus()
+        await pilot.press("h")
+        await pilot.pause()
+        assert page._description_block.hint == ""
+        assert not any("nothing is saved" in row for row in view.rendered_rows())
+
+
 # ---------------------------------------------------------------------------
 # Cancelling
 # ---------------------------------------------------------------------------
@@ -659,12 +792,20 @@ async def test_esc_on_a_clean_form_closes_and_a_dirty_one_confirms(
         await pilot.pause()
         assert page.confirming is True, "a focus key must not end the question"
         assert app.focused is page, app.focused
-        # … and no OTHER printable letter is interpreted either.
+        # `n` answers the question too — keep editing (UX round 1, U5) — so the
+        # confirm is re-armed below before the advertised `y` discards.
         await pilot.press("n")
         await pilot.pause()
+        await pilot.pause()
+        assert page.confirming is False
         assert view._mode == "form" and page._title_input.value == "Half typed"
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.pause()
+        assert page.confirming is True
         # The advertised `y` is what discards.
         await pilot.press("y")
+        await pilot.pause()
         await pilot.pause()
         assert view._mode == "canvas"
         assert _store(tmp_path).get_project_by_name("half-typed") is None

@@ -2213,6 +2213,17 @@ Screen.settings #input-dock #prompt-chevron {
     background: $lo-tint-select;
 }
 
+/* The caret, in the form's own controls. Stock Textual draws it in the theme's
+ * near-white, which on this light ramp measured about 1:1 against the field's
+ * own fill — the one mark a reader needs while typing was the one mark they
+ * could not see (design review round 1 r3, D13). Same treatment as the
+ * composer's caret above: the surface colour on the foreground step. */
+.projects-form-fields .input--cursor,
+.projects-form-fields .text-area--cursor {
+    color: $lo-surface;
+    background: $lo-fg;
+}
+
 /* The selection band, in the form's own controls. Stock Textual paints `Input`
  * selection with the theme's default blue and leaves the glyphs at the
  * widget's colour — measured 1.41:1 on the light ramp, i.e. the text a reader
