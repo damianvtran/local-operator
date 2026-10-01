@@ -1663,3 +1663,47 @@ def test_branded_image_and_import_isolation_hold_on_the_same_spawn(branded, tmp_
     name, module = result.stdout.strip().splitlines()[:2]
     assert name == procname.BRAND
     assert Path(module).resolve() != decoy_module
+
+
+# --- the CLI's own gate: WHO re-execs ---------------------------------------
+
+
+def test_the_cli_brand_gate_skips_the_short_lived_exec_paths(monkeypatch) -> None:
+    """The gate's contract, pinned at the seam the re-exec is called from.
+
+    ``lop exec --background`` exits in seconds once its detached worker is up,
+    and ``lop exec --status`` exits on the first ledger read — neither lives
+    long enough for the branded Activity Monitor row to be the point, and the
+    WORKER (born branded via ``spawn_identity``) is the process whose row
+    matters. Foreground ``exec`` and every interactive/long-lived subcommand
+    keep the re-exec. Measured when the skip was added (2026-10-01): the
+    re-exec costs +0.2-0.4 s per invocation, paid once per child in a bulk
+    resume.
+    """
+    import argparse
+
+    from local_operator import cli as cli_module
+
+    recorded: list[object] = []
+
+    def record(label=None):
+        recorded.append(label)
+
+    monkeypatch.setattr(cli_module.procname, "reexec_branded", record)
+
+    def run(**args):
+        del recorded[:]
+        cli_module._maybe_brand_process(argparse.Namespace(**args))
+        return list(recorded)
+
+    # The two short-lived exec shapes: no re-exec.
+    assert run(subcommand="exec", background=True) == []
+    assert run(subcommand="exec", background=True, status=None) == []
+    assert run(subcommand="exec", status="abc123") == []
+    # Foreground exec (the run lives in THIS process): re-exec, bare brand.
+    assert run(subcommand="exec", background=False) == [None]
+    # Long-lived subcommands and the interactive TUI keep branding.
+    assert len(run(subcommand="serve", port=1)) == 1
+    assert len(run(subcommand=None)) == 1
+    # Subcommands outside the brand set are untouched, background or not.
+    assert run(subcommand="sessions", background=False) == []
