@@ -120,6 +120,10 @@ Do not batch several packages into one approval to save a round trip, and do not
 sneak an install into a longer command the user already approved. Approval is per
 change.
 
+**If that call comes back with a receipt ("queued") rather than the answer** —
+the host queues asks — the approval is still owed, and the receipt is neither it
+nor a refusal. Install once the answer arrives, as a turn of its own.
+
 ### 5. Run it in the Console
 
 The Console is where an install belongs. It drives a real pty, so a package
@@ -269,6 +273,8 @@ never as `text`. Keystrokes into a pty are never recorded, and at an echo-off
 prompt (as `sudo` uses) the value does not enter the surface's output or your
 record; a relayed value is also registered for redaction. A user who would
 rather type it into the prompt themselves can simply be handed the surface.
+A host that queues asks returns a receipt here rather than the value, so the
+relay waits for the answer to arrive — a receipt is not the credential.
 
 **When the user will not or cannot grant root.** A static build into the user's
 own `~/.local/bin` needs no privileges at all and is the honest alternative:
