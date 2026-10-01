@@ -33,6 +33,7 @@ from local_operator.server.routes import (
     desktop_lifecycle,
     desktop_sessions,
 )
+from local_operator.server.routes.desktop_sessions import RUNTIME_BUSY_MESSAGE
 from local_operator.server.utils.desktop_sessions import (
     DesktopSessionBridge,
     DesktopSessions,
@@ -435,7 +436,10 @@ async def test_a_control_route_answers_a_silent_owner_busy_and_fast(
         assert detail["retryable"] is True
         assert detail["retry_after_ms"] == 2000
         assert response.headers["retry-after"] == "2"
-        assert detail["message"].startswith("Session owner is unavailable.")
+        # The busy sentence is its OWN text, not the unreachable one (QA round 1,
+        # Q3): "Reconnect and reconcile before retrying" contradicts a
+        # ``retryable: true`` body, which is what a renderer acts on.
+        assert detail["message"] == RUNTIME_BUSY_MESSAGE
         await owner.stop()
 
 

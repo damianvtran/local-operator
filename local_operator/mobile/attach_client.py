@@ -217,19 +217,26 @@ class OwnerAckTimeout(ConnectionError, TimeoutError):
     that wants to tell a slow owner from a dead one ask, rather than parse the
     message. See docs/design-aside-deadline.md §2.
 
-    ``runtime_alive`` is the DISPOSITION, and it is a class attribute rather than
-    a sentence for the same reason ``RuntimeUnresponsiveError`` carries it
-    (``session/attached.py``): the control ladder classifies a bare
-    ``ConnectionError`` as unreachable (dial refused, socket died) and must not
-    do that for an owner that ACCEPTED the socket and is merely slow — that case
-    is retryable, and a duck check on a class attribute is what lets the ladder
-    say so without importing this module (``mobile.projects`` reaches the server
-    package, so a module-scope import there would close an import cycle).
+    ``owner_alive`` is the DISPOSITION, and it is a class attribute rather than a
+    sentence for the same reason ``RuntimeUnresponsiveError`` carries
+    ``runtime_alive`` (``session/attached.py``): the control ladder classifies a
+    bare ``ConnectionError`` as unreachable (dial refused, socket died) and must
+    not do that for an owner that ACCEPTED the socket and is merely slow — that
+    case is retryable, and a duck check on a class attribute is what lets the
+    ladder say so without importing this module (``mobile.projects`` reaches the
+    server package, so a module-scope import there would close an import cycle).
+
+    DELIBERATELY NOT ``runtime_alive``, which is the name the TUI duck-checks
+    (``tui/app.py``) and whose comments state it "is set only by
+    ``RuntimeUnresponsiveError``" — a sync expiry. Borrowing the name made two
+    TUI notices change register silently for a failure they cannot even see (a
+    lost ACK needs a socket client; the TUI is the owner), so this class owns its
+    own marker and the ladder reads both (agent review round 1, MINOR-2).
     """
 
-    #: The owner holds a live connection; the request is worth resending.
-    #: Read through ``getattr`` by ``server/routes/desktop_sessions.py``'s ladder.
-    runtime_alive = True
+    #: The owner holds a live connection; an unacknowledged request is worth
+    #: resending. Read through ``getattr`` by ``server/routes/desktop_sessions.py``.
+    owner_alive = True
 
 
 class _RefitReport(NamedTuple):
@@ -2274,20 +2281,41 @@ class AttachClient:
     async def set_effort(self, effort: str) -> str:
         return await self._request("set_effort", effort=effort)
 
-    async def approval_answer(self, request_id: str, approved: bool) -> str:
+    async def approval_answer(
+        self, request_id: str, approved: bool, *, deadline_s: float = ACK_TIMEOUT_S
+    ) -> str:
+        """``deadline_s`` is the caller's own budget for this acknowledgement.
+
+        The default is this client's full envelope, and it is what every
+        pre-existing caller gets. The desktop answer path passes something
+        SHORTER when its remaining control budget is smaller: an answer that is
+        retried must fit inside the renderer's per-op deadline, so the two
+        attempts have to share one window rather than spend one each (agent
+        review round 1, MAJOR-1).
+        """
         return await self._request(
-            "approval_answer", request_id=request_id, approved=approved, remember=False
+            "approval_answer",
+            request_id=request_id,
+            approved=approved,
+            remember=False,
+            deadline_s=deadline_s,
         )
 
     async def ask_answer(
-        self, request_id: str, value: str, *, question_index: int | None = None
+        self,
+        request_id: str,
+        value: str,
+        *,
+        question_index: int | None = None,
+        deadline_s: float = ACK_TIMEOUT_S,
     ) -> str:
+        """See :meth:`approval_answer` for what ``deadline_s`` is for."""
         fields: dict[str, Any] = {"request_id": request_id, "value": value}
         if question_index is not None:
             # The stale-answer guard (U8): name the question that was on
             # screen when the user answered, so an advanced picker refuses it.
             fields["question_index"] = question_index
-        return await self._request("ask_answer", **fields)
+        return await self._request("ask_answer", deadline_s=deadline_s, **fields)
 
     async def ask_respond(self, ask_id: str, answers: dict[str, list[str]], *, by: str = "") -> str:
         """Answer a QUEUED ask, ATOMIC per ask (design §2.4).

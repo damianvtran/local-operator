@@ -34,6 +34,10 @@ from typing import Any
 import pytest
 
 from local_operator.mobile.attach_client import OwnerAckTimeout
+from local_operator.server.routes.desktop_sessions import (
+    DESKTOP_ANSWER_BUDGET_S,
+    RUNTIME_BUSY_MESSAGE,
+)
 from tests.unit.server.test_desktop_read_without_owner import (
     DEADLOCK_GUARD_S,
     TOKEN,
@@ -116,7 +120,55 @@ async def test_an_owner_that_never_acks_the_answer_refuses_retryable(
         assert detail["retryable"] is True, detail
         assert detail["retry_after_ms"] == 2000
         assert response.headers["retry-after"] == "2"
-        assert detail["message"].startswith("Session owner is unavailable.")
+        # The sentence speaks for the disposition (QA round 1, Q3): telling the
+        # operator to "reconnect and reconcile" under a `retryable: true` body says
+        # the opposite of what the field does.
+        assert detail["message"] == RUNTIME_BUSY_MESSAGE
+        await owner.stop()
+
+
+@pytest.mark.asyncio
+async def test_the_route_hands_the_gate_its_remaining_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The route's half of MAJOR-1: the deadline has to be WIRED, not just honoured.
+
+    Without it ``answer_gate`` falls back to one full acknowledgement envelope per
+    attempt (~33 s with the control attach) against the renderer's 20 s per-op
+    deadline, so the refusal it produces is one the client has already abandoned.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    async with _Harness(tmp_path) as harness:
+        assert harness.client is not None
+        owner = _FakeOwner(harness.session_id, tmp_path, sync_on_connect=True)
+        await owner.start()
+        _publish_live(tmp_path, owner, session_id=harness.session_id)
+        base = f"/v1/desktop/sessions/{harness.session_id}"
+
+        seen: dict[str, Any] = {}
+
+        async with harness.pool.session(harness.session_id, read=True) as bridge:
+            remote = await _wait_for_owner_state(bridge)
+
+            async def _capture(request_id: str, **kwargs: Any) -> str:
+                seen["request_id"] = request_id
+                seen.update(kwargs)
+                raise OwnerAckTimeout("owner did not answer within 8s")
+
+            monkeypatch.setattr(remote, "answer_gate", _capture)
+            response = await harness.client.post(
+                f"{base}/answers",
+                json={
+                    "epoch": remote.frontend_state.epoch,
+                    "request_id": "gate-1",
+                    "approved": True,
+                },
+            )
+
+        assert response.status_code == 503, response.text
+        remaining = seen["deadline"] - time.monotonic()
+        assert 0 < remaining <= DESKTOP_ANSWER_BUDGET_S, seen
+        assert DESKTOP_ANSWER_BUDGET_S < 20.0, "the backend must lose the race deliberately"
         await owner.stop()
 
 
