@@ -17,6 +17,9 @@ fire would be the second one). The cells:
 * ON A REAL MOVE over two relays: the destination's indexes exist after the
   promote while the source's are pruned — and the prune is observed with the
   session directory already gone, which is the F5 order itself.
+* a REFUSED ENGAGE does not consume the row (OQ14): the sweep reaches
+  ``engage_runtime``, the handoff guard refuses it, and
+  ``next_due_at``/``fired_count`` are untouched, so the row still fires.
 """
 
 from __future__ import annotations
@@ -308,3 +311,95 @@ class TestOrderingOnARealMove:
         assert kept.get("ok"), kept
         assert observed == [], "a keep copy pruned its source's derived state"
         assert wake_store.read_entry(server_a.root, "aabbccddeeff") is not None
+
+
+class TestRefusedEngageDoesNotConsume:
+    """OQ14 (accepted default, note §8): a refused engage must not eat the row.
+
+    The guard predicate itself is covered in ``test_mobility``; what THIS cell
+    adds is the supervisor's own path over it — ``fire_due_wakes`` →
+    ``_engage_one`` → ``engage_runtime`` → ``handoff_guard_refusal`` — and the
+    F5 property the design names: the refused attempt leaves
+    ``next_due_at``/``fired_count`` untouched, so the destination still fires
+    the row exactly once.
+
+    The refused attempt drives the REAL ``engage_runtime`` (the refusal comes
+    before any spawn), with only the stale-entry recovery stubbed: recovering a
+    genuinely stale entry is its own covered behaviour, and this cell is about
+    the refusal's arithmetic.
+    """
+
+    def test_a_refused_engage_leaves_the_row_untouched_and_the_wake_fireable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import asyncio
+
+        from local_operator.session import placement
+        from local_operator.session.runtime import launch as launch_mod
+        from local_operator.wakes import store as wake_store
+        from local_operator.wakes.supervisor import fire_due_wakes
+
+        root = tmp_path / "device"
+        directory = root / "sessions" / SESSION
+        directory.mkdir(parents=True)
+        due = int(time.time() * 1000) - 60_000
+        rows = [dict(WAKE_ROW, next_due_at=due)]
+        (directory / "transcript.jsonl").write_text(
+            _custom_entry("wake_schedules", {"schedules": rows}) + "\n", encoding="utf-8"
+        )
+        carry.rebuild_indexes(root, SESSION)
+        assert wake_store.read_entry(root, SESSION) is not None
+
+        # A HANDOFF IN FLIGHT: the journal entry the guard reads.
+        placement.write_handoff_entry(
+            root,
+            SESSION,
+            {
+                "role": "source",
+                "phase": placement.HANDOFF_PHASE_PREPARED,
+                "to_device": "d_other",
+            },
+        )
+        monkeypatch.setattr(launch_mod, "recover_stale_handoff", lambda *_a, **_k: None)
+        attempted: list[str] = []
+        real_engage = launch_mod.engage_runtime
+
+        async def counting_engage(*args: Any, **kwargs: Any) -> Any:
+            attempted.append(str(args[0]))
+            return await real_engage(*args, **kwargs)
+
+        monkeypatch.setattr(launch_mod, "engage_runtime", counting_engage)
+
+        fired = asyncio.run(fire_due_wakes(root, now_ms=due + 1000))
+        # THE ENGAGE WAS REACHED (not skipped as live/ghost/wedged — any of
+        # which would pass a weaker assertion without ever consulting the
+        # guard), and the guard refused it: nothing started.
+        assert attempted == [SESSION], "the sweep never reached the engage"
+        assert fired == 0, "a move in flight must refuse the engage"
+        after = wake_store.read_entry(root, SESSION)
+        assert after is not None
+        assert after["schedules"][0]["next_due_at"] == due
+        assert after["schedules"][0]["fired_count"] == rows[0]["fired_count"]
+        # AND THE STORED TRANSCRIPT IS UNTOUCHED, which is the truth the index
+        # is derived from (a consume would show here even if the index were
+        # rewritten back).
+        stored = carry.latest_custom_details(directory, "wake_schedules") or {}
+        assert stored["schedules"][0]["next_due_at"] == due
+        assert stored["schedules"][0]["fired_count"] == rows[0]["fired_count"]
+
+        # AND THE FIRE IS STILL OWED, NOT EATEN: clear the handoff and the same
+        # row engages. ``later`` is past any owed-failure backoff (bounded by
+        # ``deliveries.RETRY_CAP_S`` <= 1 h), because the refusal durably owes
+        # the attempt — that record is the retry's bookkeeping, deliberately
+        # NOT the schedule's numbers. A recorder stands in for the spawn here:
+        # what this half asserts is the sweep's arithmetic, not a runtime.
+        assert placement.clear_handoff_entry(root, SESSION) is True
+        engaged: list[str] = []
+
+        async def fake_engage(session_id: str, cwd: str, work: Any, **kwargs: Any) -> None:
+            engaged.append(session_id)
+
+        monkeypatch.setattr(launch_mod, "engage_runtime", fake_engage)
+        later = due + 2 * 3600 * 1000
+        assert asyncio.run(fire_due_wakes(root, now_ms=later)) == 1
+        assert engaged == [SESSION]
