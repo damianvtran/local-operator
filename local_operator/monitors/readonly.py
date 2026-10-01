@@ -250,6 +250,31 @@ def monitor_call_verdict(
     return _shape_reason(tool, args)
 
 
+def monitor_call_arguments(tool: AgentTool, args: Mapping[str, Any]) -> dict[str, Any]:
+    """The arguments a monitor tick should RUN: the harness intent lifted off.
+
+    LOOP PARITY, and the reason this exists. Every tool schema advertises the
+    injected ``i`` property (``registry.apply_intent_schema``), so a model
+    arming a monitor naturally includes one — and every builtin params model is
+    ``extra="forbid"``, so leaving it in makes the tick fail deterministically
+    with ``invalid arguments:\n- i: Extra inputs are not permitted``. Measured
+    live: two monitors (`4eabc50d61bd` m1/m2) failing every tick on exactly
+    that. Refusing ``i`` at arm instead would leave them dead; lifting it heals
+    them with no re-arm, and it is what the loop already does
+    (``harness/loop.py``, "Lift the intent off BEFORE validation").
+
+    The lift is conditional exactly as the loop's is: only when the schema
+    carries OUR intent property. A tool that declares its own ``i`` never had
+    ours injected, so its value is a real argument and is kept.
+    """
+    from local_operator.harness.intent import INTENT_FIELD, intent_is_injected
+
+    view = dict(args)
+    if INTENT_FIELD in view and intent_is_injected(tool.parameters):
+        view.pop(INTENT_FIELD)
+    return view
+
+
 def _shape_reason(tool: AgentTool, args: Mapping[str, Any]) -> str | None:
     """Refuse a call the tool itself would reject on every execution.
 
@@ -264,29 +289,32 @@ def _shape_reason(tool: AgentTool, args: Mapping[str, Any]) -> str | None:
       manager's ``prepare_outbound_args`` drops extras before the call, so a
       tick tolerates them and refusing at arm would be stricter than the run.
 
-    The harness's injected ``i`` (intent) property is declared in the schema
-    the model sees but is stripped by the loop BEFORE ``execute``; the monitor
-    path calls ``execute`` directly, so a nested ``i`` would pass a naive
-    schema check and then fail at tick. It counts as undeclared unless the
-    tool owns a real ``i`` of its own.
+    Validation runs on the STRIPPED view (:func:`monitor_call_arguments`), so
+    an injected ``i`` — which the tick lifts before ``execute`` — is judged the
+    way the run will judge it: arm refuses exactly what a tick refuses, and the
+    intent the harness injected into every real session's schemas is never a
+    refusal. (A COLD arm resolves a tool through its raw builder, which has not
+    been through ``apply_intent_schema``; there an ``i`` is an undeclared key
+    like any other, and the tick still lifts it.)
     """
     from local_operator.harness.intent import INTENT_FIELD, intent_is_injected
     from local_operator.harness.loop import validate_tool_arguments
 
     name = tool.name
-    errors = validate_tool_arguments(tool, dict(args))
+    view = monitor_call_arguments(tool, args)
+    errors = validate_tool_arguments(tool, view)
     if errors:
         return f'monitor can\'t watch "{name}": ' + "; ".join(errors) + "."
 
     schema = tool.parameters or {}
     if name.startswith("mcp__") or schema.get("additionalProperties") is not False:
         return None
-    declared = {
-        key
-        for key in (schema.get("properties") or {})
-        if not (key == INTENT_FIELD and intent_is_injected(schema))
-    }
-    unknown = sorted(str(key) for key in args if key not in declared)
+    # The ACCEPTS list omits our injected intent property: it is not an
+    # argument the caller may pass (the tick lifts it either way), and naming it
+    # would tell the model to keep sending the key this fix exists to absorb.
+    injected_intent = INTENT_FIELD if intent_is_injected(schema) else None
+    declared = {str(key) for key in (schema.get("properties") or {}) if str(key) != injected_intent}
+    unknown = sorted(key for key in view if key not in declared)
     if not unknown:
         return None
     unknown_terms = ", ".join(f'"{key}"' for key in unknown)

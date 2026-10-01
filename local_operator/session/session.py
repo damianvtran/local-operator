@@ -205,7 +205,10 @@ from local_operator.monitors.delivery import (
     format_monitor_delivery_text,
     format_monitor_notice_text,
 )
-from local_operator.monitors.readonly import monitor_call_verdict
+from local_operator.monitors.readonly import (
+    monitor_call_arguments,
+    monitor_call_verdict,
+)
 from local_operator.monitors.scheduler import CheckOutcome, MonitorScheduler
 from local_operator.monitors.settings import read_monitor_settings
 from local_operator.monitors.spec import (
@@ -19957,6 +19960,15 @@ class Session:
         tool = self._resolve_monitor_tool(spec.tool)
         if tool is None:  # pragma: no cover — validate() above covers this
             return {"error": "call is no longer read-only"}
+        # The intent the harness injects into every tool schema is LIFTED here,
+        # exactly as the loop lifts it before ``execute`` (see
+        # ``readonly.monitor_call_arguments``): the model naturally includes
+        # ``i`` when it arms a monitor, every builtin params model forbids the
+        # extra key, and leaving it in made the tick fail deterministically
+        # with ``- i: Extra inputs are not permitted`` — measured live on two
+        # monitors, every tick, until this lift. A tool that declares its own
+        # ``i`` keeps it: the helper decides, not this call site.
+        call_arguments = monitor_call_arguments(tool, spec.arguments)
         signal = AbortSignal()
         context = self._build_tool_context()
         if spec.cwd:
@@ -19964,7 +19976,7 @@ class Session:
         timeout_s = self._monitors.settings.run_timeout_ms / 1000.0
         try:
             result = await asyncio.wait_for(
-                tool.execute(f"monitor-{spec.id}", dict(spec.arguments), signal, None, context),
+                tool.execute(f"monitor-{spec.id}", call_arguments, signal, None, context),
                 timeout=timeout_s,
             )
         except asyncio.TimeoutError:

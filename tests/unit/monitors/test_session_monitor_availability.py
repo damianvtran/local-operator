@@ -23,6 +23,7 @@ from local_operator.harness.types import (
     AgentTool,
     StreamEndEvent,
     TextContent,
+    ToolContext,
     ToolResult,
 )
 from local_operator.monitors.spec import MonitorSpec
@@ -325,6 +326,76 @@ async def test_a_manager_without_the_status_apis_behaves_as_before(tmp_path: Any
     session = _session(tmp_path, manager)
     try:
         assert session._monitor_availability(mcp_name()) == ("gone", "")
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_regression_pin_a_stored_intent_no_longer_fails_the_tick(tmp_path: Any) -> None:
+    """FAIL-BEFORE/AFTER PIN for the live `i` class.
+
+    Two live monitors (`4eabc50d61bd` m1 swap-step, m2 monitor-control) failed
+    EVERY tick with ``invalid arguments:\n- i: Extra inputs are not permitted``:
+    the model includes ``i`` because every tool schema advertises it, and every
+    builtin params model is ``extra="forbid"``. The pre-fix failure is
+    REPRODUCED here against the raw tool, and then the same stored arguments are
+    shown to tick cleanly — and to observe a change — with no re-arm.
+    """
+    from local_operator.tools.registry import create_tools
+
+    workdir = tmp_path / "watch"
+    workdir.mkdir()
+    (workdir / "a.py").write_text("a = 1\n", encoding="utf-8")
+
+    tools = create_tools(ToolContext(cwd=str(workdir)))
+    glob_tool = next(tool for tool in tools if tool.name == "glob")
+    original = glob_tool.execute
+    seen: list[dict[str, Any]] = []
+
+    async def record(tool_call_id: str, args: dict[str, Any], *rest: Any) -> ToolResult:
+        seen.append(dict(args))
+        return await original(tool_call_id, args, *rest)
+
+    glob_tool.execute = record  # type: ignore[method-assign]
+
+    # The monitor as it was armed: the model's intent rode along in the args.
+    stored = {"pattern": "*.py", "i": "Listing the python files in the workspace"}
+
+    session = _session(tmp_path, FakeManager([]), tools=[glob_tool])
+    try:
+        # BEFORE (the pre-fix behaviour, reproduced): the raw call fails.
+        raw = await glob_tool.execute(
+            "probe", dict(stored), None, None, ToolContext(cwd=str(workdir))
+        )
+        assert raw.is_error is True
+        assert "Extra inputs are not permitted" in (raw.text or "")
+        seen.clear()
+
+        spec = MonitorSpec(
+            id="m1",
+            name="py-files",
+            tool="glob",
+            arguments=stored,
+            # The check runs in the armed cwd, as a real monitor's does.
+            cwd=str(workdir),
+            every_ms=60_000,
+            created_at=1_756_000_000_000,
+        )
+        first = await session._run_monitor_check(spec)
+        assert first.get("error") is None, first
+        assert first.get("kind") is None
+        # The tool got its real arguments — the intent was lifted, not forwarded.
+        assert seen and "i" not in seen[-1] and seen[-1].get("pattern") == "*.py"
+        baseline = first.get("text") or ""
+        assert "a.py" in baseline
+
+        # AFTER, second tick: the call still runs and now observes the change
+        # (this is the text the scheduler diffs).
+        (workdir / "b.py").write_text("b = 2\n", encoding="utf-8")
+        second = await session._run_monitor_check(spec)
+        assert second.get("error") is None, second
+        assert second.get("text") != baseline
+        assert "b.py" in (second.get("text") or "")
     finally:
         await session.dispose()
 

@@ -521,15 +521,62 @@ def test_glob_with_path_is_refused_at_arm() -> None:
     assert "glob accepts: pattern." in reason, reason
 
 
-def test_injected_intent_key_is_refused() -> None:
-    """``i`` is declared in the schema the MODEL sees but is stripped by the
-    loop before ``execute``; the monitor path calls ``execute`` directly, so a
-    nested ``i`` would pass a naive schema check and fail at tick.
+def intent_tool(name: str) -> AgentTool:
+    """A tool as a SESSION builds it — the schema carries the injected ``i``.
+
+    The distinction matters and is the whole point of the intent rows below:
+    ``TOOL_BUILDERS`` returns the raw schema, and ``create_tools`` is what
+    applies ``apply_intent_schema`` (registry.py). Real sessions use the
+    latter, which is why a model arming a monitor naturally includes ``i``.
     """
-    glob_tool = real_tool("glob")
-    reason = readonly.monitor_call_verdict(glob_tool, {"pattern": "x", "i": "narrate"})
-    assert reason is not None
-    assert 'unknown argument(s) "i"' in reason, reason
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools.registry import create_tools
+
+    tool = next(tool for tool in create_tools(ToolContext()) if tool.name == name)
+    return tool
+
+
+def test_injected_intent_key_is_stripped_at_tick_and_accepted_at_arm() -> None:
+    """LOOP PARITY (plan amendment, live evidence).
+
+    Every tool schema advertises the injected ``i``, so a model arming a
+    monitor includes it — and every builtin params model is ``extra="forbid"``,
+    so leaving it in fails the tick deterministically with
+    ``- i: Extra inputs are not permitted``. Two live monitors were failing
+    every tick on exactly that. The fix lifts it before validation and before
+    ``execute``, as the loop does, rather than refusing it at arm.
+    """
+    glob_tool = intent_tool("glob")
+    from local_operator.harness.intent import intent_is_injected
+
+    assert intent_is_injected(glob_tool.parameters), "create_tools injects the intent property"
+
+    # Accepted at arm...
+    assert readonly.monitor_call_verdict(glob_tool, {"pattern": "x", "i": "narrate"}) is None
+    # ...and the arguments the tool actually runs with do not carry it.
+    assert readonly.monitor_call_arguments(glob_tool, {"pattern": "x", "i": "narrate"}) == {
+        "pattern": "x"
+    }
+    # The refusal a real typo earns is unchanged, and the accepts list does not
+    # advertise the harness's own field.
+    reason = readonly.monitor_call_verdict(glob_tool, {"pattern": "x", "path": "/tmp"})
+    assert reason is not None and "glob accepts: pattern." in reason, reason
+
+
+def test_a_tool_that_declares_its_own_i_keeps_it() -> None:
+    """Loop parity runs both ways: a tool owning the name ``i`` never had ours
+    injected, so its value is a real argument and is forwarded.
+    """
+    own_i = fake_tool(
+        "grep",
+        parameters={
+            "type": "object",
+            "properties": {"i": {"type": "string", "description": "their own"}},
+            "additionalProperties": False,
+        },
+    )
+    assert readonly.monitor_call_arguments(own_i, {"i": "x"}) == {"i": "x"}
+    assert readonly.monitor_call_verdict(own_i, {"i": "x"}) is None
 
 
 def test_mcp_extras_are_not_refused() -> None:
@@ -577,6 +624,10 @@ def test_required_and_type_errors_refused() -> None:
         ("glob", {"pattern": "*.py", "path": "/tmp"}),
         ("read", {"path": "/x"}),
         ("read", {"range": "1-5"}),
+        # A stray intent key: BOTH paths build their tool the same way, so both
+        # answer alike (the session path in a real session lifts it — see
+        # ``test_injected_intent_key_is_stripped_at_tick_and_accepted_at_arm``).
+        ("glob", {"pattern": "x", "i": "narrate"}),
     ],
 )
 def test_in_session_and_external_verdicts_agree(tool_name: str, args: dict[str, Any]) -> None:
