@@ -889,7 +889,27 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: number that replaces this one. The peel-off a future reduction can act
 #: on: moving the role wording into ``guide://projects`` (read on demand)
 #: takes this back toward the base.
-BUDGET_BILLED_TOKENS = 37_491
+#:
+#: RAISED 37,491 -> 37,515 for the ``sessions`` tool's per-op advertisement and
+#: the eval bridge's failure notice (``fix/sessions-resume-0930-9d2e``), on top
+#: of the projects entry above, stated with the arithmetic because the guard
+#: exists to make copy growth an explicit decision. THIS branch was cut at
+#: ``0dada4792`` and folded three times — onto ``fff390360``, then ``85ed0f7fd``
+#: (+ the tool:// reader), then ``ebb5fd496`` — so the ceiling is re-derived on
+#: the MERGED tree with THIS file's own method: the clean arm (the one CI
+#: renders) reads 104,139 chars = ~37,460 billed, the tiers-configured arm
+#: reads 104,901 = ~37,734 (the same 762-char config delta the entries above
+#: explain), and the ceiling is the clean reading plus the 55-token band =
+#: 37,515. The change's own component is +66 chars = +24 billed over the
+#: projects entry's clean folded head (104,073 -> 104,139), which is exactly
+#: the three platform-free strings measured during the first fold: sessions
+#: description 738 -> 746 = +8; sessions schema 3,241 -> 3,238 = -3 (the
+#: op-field description trimmed against the added ``help`` enum value); eval
+#: description 693 -> 754 = +61 (the eval result now reports failed ``tool()``
+#: calls in its own text). A local tiers-configured run reads 219 over
+#: (37,734 vs 37,515) — the recorded gap minus the band — and CI remains the
+#: binding reading; if any reading disagrees, the script wins.
+BUDGET_BILLED_TOKENS = 37_515
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

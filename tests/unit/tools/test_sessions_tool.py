@@ -30,6 +30,7 @@ import re
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +38,7 @@ import pytest
 
 from local_operator import session_lease
 from local_operator.agent_shell import AGENT_SHELL_ENV, MAY_DELEGATE_ENV
-from local_operator.harness.types import ToolContext
+from local_operator.harness.types import FAULT_INVALID_ARGUMENTS, FAULT_KEY, ToolContext
 from local_operator.resume import (
     ORIGIN_AGENT_SHELL,
     ORIGIN_AGENT_WORKSTREAM,
@@ -51,6 +52,8 @@ from local_operator.session.archived import set_archived
 from local_operator.session.runtime import control, registry
 from local_operator.session.runtime.types import SessionRecord
 from local_operator.tools.builtin import (
+    _SESSIONS_OP_FIELDS,
+    _SESSIONS_TOOL_DESCRIPTION,
     SessionsParams,
     _describe_sessions_approval,
     _sessions_marker_extras,
@@ -62,6 +65,7 @@ from local_operator.tools.builtin import (
     _sessions_validation_error,
     build_sessions_tool,
     execute_sessions,
+    render_sessions_reference,
 )
 from local_operator.tools.registry import create_tools
 
@@ -298,6 +302,36 @@ def test_child_env_signs_the_marker_the_guard_reads(root: Path, monkeypatch: Any
     assert env[AGENT_SHELL_ENV] == "1"
     assert env[MAY_DELEGATE_ENV] == "1"
     assert env[SCRATCHPAD_PATH_ENV] == str(root / "sessions" / REQUESTER_ID / "scratchpad")
+
+
+def test_child_env_strips_inherited_caller_prefixes_but_keeps_injections(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The caller's session markers must never steer the spawned CLI.
+
+    A live desktop-engaged runtime carries ``LOP_RUNTIME_ADOPT_SESSION``,
+    ``LOP_RUNTIME_DEFER_MATERIALISE`` and ``LOP_MOBILE_CHILD_RESUME=<its own
+    id>`` (measured on this host); inherited, they relax the child's resume
+    rules and make it claim the CALLER's session to anything reading a
+    process's environment. ``sdk._scoped_process_env`` strips the same two
+    prefixes for its children and ``standby.CONTRACT_KEYS`` pins the warm-pool
+    half of the rule — this test pins the third child-spawn path to it.
+    """
+    monkeypatch.setenv("LOP_RUNTIME_ADOPT_SESSION", "1")
+    monkeypatch.setenv("LOP_RUNTIME_DEFER_MATERIALISE", "1")
+    monkeypatch.setenv("LOP_MOBILE_CHILD_RESUME", REQUESTER_ID)
+    monkeypatch.setenv("LOP_MOBILE_CHILD_PROVIDER", "deepseek")
+    monkeypatch.setenv("CMUX_WORKSPACE_ID", "ws-caller")
+
+    env = _sessions_open_env(_context(root))
+
+    assert [name for name in env if name.startswith(("CMUX_", "LOP_"))] == []
+    # The deliberate grants are untouched — including the names the child
+    # contract is built from (LOCAL_OPERATOR_* is a different prefix).
+    assert env[AGENT_SHELL_ENV] == "1"
+    assert env[MAY_DELEGATE_ENV] == "1"
+    assert env[SCRATCHPAD_PATH_ENV] == str(root / "sessions" / REQUESTER_ID / "scratchpad")
+    assert "PATH" in env
 
 
 def test_the_allowance_is_three_armed(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -617,6 +651,8 @@ def test_tier_table_is_per_op() -> None:
     assert _sessions_tier({"op": "list"}) == "read"
     assert _sessions_tier({"op": "info"}) == "read"
     assert _sessions_tier({"op": "peek"}) == "read"
+    # ``help`` renders a fixed string and touches nothing; it must not prompt.
+    assert _sessions_tier({"op": "help"}) == "read"
     assert _sessions_tier({"op": "spawn"}) == "write"
     assert _sessions_tier({"op": "resume"}) == "write"
     assert _sessions_tier({"op": "stop"}) == "exec"
@@ -901,9 +937,14 @@ def test_validation_refusals_are_legible_and_per_op() -> None:
     )
     assert refusal is not None and "never re-stamped" in refusal
     refusal = _sessions_validation_error(SessionsParams(op="stop", prompt="p"))
-    assert refusal == "`prompt` applies to spawn/resume only."
+    assert refusal is not None
+    assert refusal.startswith("`prompt` applies to spawn/resume only. ")
+    assert "`stop` takes: session|target|pid." in refusal
+    assert refusal.endswith("Call op='help' for the full per-op reference.")
     refusal = _sessions_validation_error(SessionsParams(op="list", session="a"))
-    assert refusal == "`session` does not apply to op='list' — it takes no address."
+    assert refusal is not None
+    assert refusal.startswith("`session` does not apply to op='list' — it takes no address. ")
+    assert "`list` takes: include_stored, limit, query." in refusal
     refusal = _sessions_validation_error(SessionsParams(op="spawn", prompt="go", target="x"))
     assert refusal is not None and "creates a new session" in refusal
     refusal = _sessions_validation_error(SessionsParams(op="info"))
@@ -1468,4 +1509,352 @@ def test_peek_validation_refusals_are_legible() -> None:
     # The window fields are peek-only, and the refusal says so rather than
     # misdirecting the caller at another op.
     refusal = _sessions_validation_error(SessionsParams(op="info", target="x", steps=4))
-    assert refusal == "`steps` applies to op='peek' only."
+    assert refusal is not None
+    assert refusal.startswith("`steps` applies to op='peek' only. ")
+    assert "`info` takes: session|target|pid." in refusal
+
+
+# ---------------------------------------------------------------------------
+# The incident's contracts: the advertisement, the refusals, the receipt
+# ---------------------------------------------------------------------------
+
+
+def test_the_description_advertises_every_ops_accepted_set() -> None:
+    """Text-vs-table drift guard, in BOTH directions.
+
+    The per-op summary is DERIVED from ``_SESSIONS_OP_FIELDS``; this test
+    re-derives the advertised set from the rendered text and demands it EQUAL
+    the table's — a field added to one without the other, a name in the text
+    no op takes, or an op missing from either, fails here instead of in a
+    caller's retry loop (the incident was thirteen of those).
+    """
+    from typing import get_args
+
+    literal_ops = tuple(get_args(SessionsParams.model_fields["op"].annotation))
+    assert set(literal_ops) == set(_SESSIONS_OP_FIELDS)
+    for op, fields in _SESSIONS_OP_FIELDS.items():
+        match = re.search(
+            rf"(?:^|; |— ){re.escape(op)}: ([^;.]+?)(?:;|\.)", _SESSIONS_TOOL_DESCRIPTION
+        )
+        assert match is not None, f"{op} is missing from the description's per-op summary"
+        listed = {part for part in re.split(r"[|, ]+", match.group(1)) if part}
+        expected = fields - {"op"}
+        assert listed == expected or (not expected and listed == {"none"})
+
+
+def test_the_reference_is_deterministic_bounded_and_never_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The renderer contract the audit lane's ``read tool://sessions`` serves:
+    same bytes on every call, bounded, and a fallback instead of a raise."""
+
+    first = render_sessions_reference()
+    assert first == render_sessions_reference()
+    assert len(first) <= 8 * 1024, "the shared reference must stay under its 8 KiB cap"
+    for op in _SESSIONS_OP_FIELDS:
+        assert f"`{op}` —" in first
+
+    import local_operator.tools.builtin as builtin
+
+    def boom() -> str:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(builtin, "_sessions_reference_body", boom)
+    fallback = render_sessions_reference()
+    assert "reference unavailable" in fallback
+    assert "sessions" in fallback
+
+
+def test_the_reference_derives_the_peek_bound_from_the_constant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M3 (agent review round 1): the one enumerable bound is generated.
+
+    The renderer reads ``comms.PEEK_MAX_STEPS`` at call time, so a changed
+    constant changes the help text — the drift this replaces was a hand copy
+    that would have kept saying 50.
+    """
+    import local_operator.harness.comms as comms
+
+    assert f"max {comms.PEEK_MAX_STEPS} steps" in render_sessions_reference()
+    monkeypatch.setattr(comms, "PEEK_MAX_STEPS", 41)
+    assert "max 41 steps" in render_sessions_reference()
+
+
+@pytest.mark.asyncio
+async def test_help_returns_the_reference_and_refuses_an_address() -> None:
+    """``help``: read-tier, no address, and the same bytes as the renderer."""
+    result = await execute_sessions("t", {"op": "help"}, None, None, None)
+    assert not result.is_error, result.text
+    assert result.text == render_sessions_reference()
+
+    refusal = await execute_sessions("t", {"op": "help", "session": "a1"}, None, None, None)
+    assert refusal.is_error
+    assert refusal.text.startswith("`session` does not apply to op='help' — it takes no address. ")
+    assert "`help` takes no extra params." in refusal.text
+    assert refusal.text.endswith("Call op='help' for the full per-op reference.")
+
+
+@pytest.mark.asyncio
+async def test_a_stray_parameter_refusal_names_the_ops_accepted_set() -> None:
+    """The incident's exact call: ``timeout_ms`` on ``resume``.
+
+    The refusal must name the op's accepted set and the help route, in the
+    message the model reads — not only the field that was wrong.
+    """
+    result = await execute_sessions(
+        "t",
+        {"op": "resume", "session": "x", "prompt": "y", "timeout_ms": 1},
+        None,
+        None,
+        None,
+    )
+    assert result.is_error
+    assert result.text == (
+        "`timeout_ms` is not a sessions parameter. `resume` takes: "
+        "session|target|pid, prompt, background. Call op='help' for the full per-op reference."
+    )
+    assert (result.details or {}).get(FAULT_KEY) == FAULT_INVALID_ARGUMENTS
+
+    # When the op itself is unusable the clause degrades to the op list rather
+    # than guessing one op's set, and the other errors keep the generic lines.
+    mixed = await execute_sessions("t", {"op": "bogus", "timeout_ms": 1}, None, None, None)
+    assert mixed.is_error
+    assert mixed.text.startswith("invalid arguments:")
+    assert "The ops are list, info, spawn, resume, stop, peek, help." in mixed.text
+
+
+@pytest.mark.asyncio
+async def test_resume_receipt_claims_live_only_when_the_job_went_live(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A running ledger means the reopen receipt; the id alone does not."""
+    _requester(root)
+    _session(root, "aaaa11112222", "stopped once")
+
+    async def fake_launch(argv: list[str], env: dict[str, str], cwd: str | None):
+        return 0, "Background job cafebabe0001: running (execution receipt)\n"
+
+    def fake_status(job_id: str, *, reconcile: bool = True) -> dict[str, Any]:
+        return {
+            "id": job_id,
+            "status": "running",
+            "session_id": "aaaa11112222",
+            "log": str(root / "logs" / "exec-live.log"),
+        }
+
+    monkeypatch.setattr("local_operator.tools.builtin._sessions_launch", fake_launch)
+    monkeypatch.setattr("local_operator.exec_mode.job_status", fake_status)
+    monkeypatch.setattr("local_operator.tools.builtin.SESSIONS_READY_GRACE_S", 0.05)
+
+    result = await execute_sessions(
+        "t",
+        {"op": "resume", "session": "aaaa11112222", "prompt": "continue"},
+        None,
+        None,
+        _context(root),
+    )
+
+    assert not result.is_error, result.text
+    assert result.text.startswith("reopened")
+    assert (result.details or {}).get("readiness") == "live"
+
+
+@pytest.mark.asyncio
+async def test_a_resume_job_that_died_before_going_live_is_a_loud_error(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The silent no-op class, refused loudly: job dead, session never live.
+
+    The answer must carry the worker's own last log line, the log path, and
+    the CLI fallback for the exact session — not a "reopened" receipt.
+    """
+    _requester(root)
+    _session(root, "aaaa11112222", "stopped once")
+    log = root / "logs" / "exec-dead.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(
+        "# local-operator exec background job\nRuntimeError: provider exploded\n",
+        encoding="utf-8",
+    )
+
+    async def fake_launch(argv: list[str], env: dict[str, str], cwd: str | None):
+        return 0, "Background job deadbeef0001: failed (execution receipt)\n"
+
+    def fake_status(job_id: str, *, reconcile: bool = True) -> dict[str, Any]:
+        return {"id": job_id, "status": "failed", "log": str(log)}
+
+    monkeypatch.setattr("local_operator.tools.builtin._sessions_launch", fake_launch)
+    monkeypatch.setattr("local_operator.exec_mode.job_status", fake_status)
+    monkeypatch.setattr("local_operator.tools.builtin.SESSIONS_READY_GRACE_S", 0.05)
+
+    result = await execute_sessions(
+        "t",
+        {"op": "resume", "session": "aaaa11112222", "prompt": "continue"},
+        None,
+        None,
+        _context(root),
+    )
+
+    assert result.is_error
+    assert "did not become a live session (failed)" in result.text
+    assert "RuntimeError: provider exploded" in result.text
+    assert str(log) in result.text
+    assert "`lop exec --resume aaaa11112222 --background`" in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_still_starting_resume_reports_starting_not_reopened(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No published session within the grace: the honest starting receipt."""
+    _requester(root)
+    _session(root, "aaaa11112222", "stopped once")
+
+    async def fake_launch(argv: list[str], env: dict[str, str], cwd: str | None):
+        return 0, "Background job feedface0001: starting (execution receipt)\n"
+
+    def fake_status(job_id: str, *, reconcile: bool = True) -> dict[str, Any]:
+        return {"id": job_id, "status": "starting"}
+
+    monkeypatch.setattr("local_operator.tools.builtin._sessions_launch", fake_launch)
+    monkeypatch.setattr("local_operator.exec_mode.job_status", fake_status)
+    monkeypatch.setattr("local_operator.tools.builtin.SESSIONS_READY_GRACE_S", 0.05)
+
+    result = await execute_sessions(
+        "t",
+        {"op": "resume", "session": "aaaa11112222", "prompt": "continue"},
+        None,
+        None,
+        _context(root),
+    )
+
+    assert not result.is_error, result.text
+    assert result.text.startswith("reopen requested")
+    assert "still starting" in result.text
+    assert "`lop exec --status feedface0001`" in result.text
+    assert (result.details or {}).get("readiness") == "starting"
+
+
+@pytest.mark.parametrize(
+    ("status", "op", "expected_route"),
+    [
+        ("cancelled", "resume", "Retry with `lop exec --resume aaaa11112222 --background`"),
+        ("interrupted", "resume", "Retry with `lop exec --resume aaaa11112222 --background`"),
+        ("", "resume", "Retry with `lop exec --resume aaaa11112222 --background`"),
+        ("failed", "spawn", "Follow up with `lop exec --status feedface0001`"),
+        ("cancelled", "spawn", "Follow up with `lop exec --status feedface0001`"),
+        ("", "spawn", "Follow up with `lop exec --status feedface0001`"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_every_dead_or_missing_ledger_arm_is_loud_with_its_own_route(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    op: str,
+    expected_route: str,
+) -> None:
+    """M2 (agent review round 1): every terminal/missing arm, both ops, pinned.
+
+    ``failed``, live and starting have their own tests above; this table covers
+    what they did NOT pin: ``cancelled``/``interrupted`` and the
+    no-ledger-record wording, plus the spawn path's route — a status read is
+    not a retry, so its verb differs (N1).
+    """
+    _requester(root)
+    if op == "resume":
+        _session(root, "aaaa11112222", "stopped once")
+    log = root / "logs" / "exec-dead.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("ValueError: worker exploded\n", encoding="utf-8")
+
+    async def fake_launch(argv: list[str], env: dict[str, str], cwd: str | None):
+        return 0, "Background job feedface0001: starting (execution receipt)\n"
+
+    def fake_status(job_id: str, *, reconcile: bool = True) -> dict[str, Any]:
+        return {"id": job_id, "status": status, "log": str(log)}
+
+    monkeypatch.setattr("local_operator.tools.builtin._sessions_launch", fake_launch)
+    monkeypatch.setattr("local_operator.exec_mode.job_status", fake_status)
+    monkeypatch.setattr("local_operator.tools.builtin.SESSIONS_READY_GRACE_S", 0.05)
+
+    params: dict[str, Any] = {"op": op, "prompt": "continue"}
+    if op == "resume":
+        params["session"] = "aaaa11112222"
+    result = await execute_sessions("t", params, None, None, _context(root))
+
+    expected_outcome = status or "no ledger record"
+    assert result.is_error
+    assert f"did not become a live session ({expected_outcome})" in result.text
+    assert "ValueError: worker exploded" in result.text
+    assert expected_route in result.text
+    assert "`lop sessions`" in result.text
+
+
+@pytest.mark.asyncio
+async def test_resume_of_a_stopped_session_really_relaunches(root: Path) -> None:
+    """The before/after proof against the REAL CLI and ledger, in-process.
+
+    "Stopped" maps onto this codebase's own vocabulary (no runtime record; the
+    stored row's ``state: "stored"``): the run must go live on the ledger and
+    the transcript must GROW — a receipt alone is not a relaunch.
+    """
+    from local_operator.exec_mode import job_status
+
+    _write_config(root)
+    _requester(root)
+    directory = _session(root, "resumed00001", "stopped once")
+    before = (directory / "transcript.jsonl").read_text(encoding="utf-8").count("\n")
+    try:
+        result = await execute_sessions(
+            "t",
+            {"op": "resume", "session": "resumed00001", "prompt": "continue"},
+            None,
+            None,
+            _context(root),
+        )
+        assert not result.is_error, result.text
+        job = str((result.details or {})["job_id"])
+
+        deadline = time.monotonic() + 120.0
+        grew = False
+        state: dict[str, Any] = {}
+        while time.monotonic() < deadline:
+            state = job_status(job)
+            after = (directory / "transcript.jsonl").read_text(encoding="utf-8").count("\n")
+            grew = grew or after > before
+            status = str(state.get("status") or "")
+            if status in ("failed", "cancelled", "interrupted"):
+                break
+            if grew and status in ("running", "succeeded", "completed"):
+                break
+            await asyncio.sleep(0.5)
+
+        assert grew, "the resumed run wrote nothing to the transcript; ledger: " + repr(state)
+        assert str(state.get("status")) in ("running", "succeeded", "completed"), state
+    finally:
+        await _reap_worker(root, "resumed00001")
+
+
+@pytest.mark.asyncio
+async def test_resume_resolves_an_archived_session_by_exact_id(root: Path) -> None:
+    """Archive is the nearest real state to the operator's "disposed": hidden
+    from LISTINGS, and the archive contract keeps exact-id resolution — resume
+    through the tool must honor that, and the receipt must not claim more."""
+    _write_config(root)
+    _requester(root)
+    _session(root, "archived0009", "filed away")
+    assert set_archived(root, "archived0009", True)
+    try:
+        result = await execute_sessions(
+            "t",
+            {"op": "resume", "session": "archived0009", "prompt": "continue"},
+            None,
+            None,
+            _context(root),
+        )
+        assert not result.is_error, result.text
+        assert "reopen" in result.text
+    finally:
+        await _reap_worker(root, "archived0009")

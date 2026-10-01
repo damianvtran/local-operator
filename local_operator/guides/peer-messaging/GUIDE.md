@@ -1,6 +1,6 @@
 ---
 name: peer-messaging
-description: "Message another local lop session: agents use the `send` tool for messages and `sessions` to list, inspect, spawn; humans use `lop send` / `lop sessions`. No cmux needed."
+description: "Message, restart or monitor another local lop session: agents use `send` for messages and `sessions` for list/spawn/resume/stop; humans use `lop send` / `lop sessions`."
 ---
 
 # Peer messaging between lop sessions
@@ -238,6 +238,35 @@ provider fallback is serving, it names the fallback, `(on fallback <fallback>
 until it applies)`, and reads `switch back to <new>` when `<new>` is the model
 that fallback displaced. The card is record-only; it does
 not start a turn.
+
+## Restarts, monitoring and other session work — tool first
+
+"Restart a peer session", "check whether it is still running", "stop it before
+it touches the release" — reach for the tools before shelling out to `lop`
+from `bash`. A shelled `lop send` or `lop exec` is a command an approval gate
+has to read as an opaque string, where the tool call is its own card; the three
+tools that cover this surface are:
+
+- **`sessions`** — the session-management surface. `list`/`info` show what is
+  running and its state; `resume` restarts a stored or stopped conversation
+  headlessly (`stop` + `resume` is the auditable restart pair — there is no
+  force option, and no `restart` shorthand); `peek` reads a bounded transcript
+  window when you need more than the state line; `help` prints the full per-op
+  reference, and a refused parameter names the op's accepted set. Read
+  `guide://sessions` for the canonical resume flow — tool first, CLI only
+  where the tool is absent. Watching progress is `info`/`peek`, not a loop
+  over `ps`.
+- **`send`** — messages, wake modes and model switches; this guide is its
+  reference. A restart is a `stop` + `resume` through `sessions`, not a
+  specially-crafted message.
+- **`hub`** — the subagent side: answering a parent agent or reporting to one.
+  Subagents are never published sessions, so they never appear in `sessions`
+  and can never be messaged with `send`.
+
+One rule of thumb across all three: if the human at a terminal would type a
+`lop` command, check whether the matching tool exists first — the tools carry
+the approval tier, the receipts and the resolution rules the shell versions
+re-derive.
 
 ## `lop sessions` — what is running and what it costs
 

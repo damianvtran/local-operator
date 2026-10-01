@@ -26,6 +26,7 @@ the message protocol.
 | `resume` | reopen a stored or stopped session headlessly | write |
 | `stop` | end a running session gracefully (no force in this version) | exec |
 | `peek` | a bounded transcript read — a window, a search, or a digest | read |
+| `help` | the full per-op reference — accepted inputs with types and defaults, one example and the refusals per op | read |
 
 Address a session with exactly one of `session` (exact id), `target`
 (name/cwd substring), or `pid` — the same resolver `send` uses, so an
@@ -50,6 +51,37 @@ is a new workstream, not an edit.
 
 `stop` runs the graceful ladder and releases the session lease. Restart is two
 auditable calls (`stop` + `resume`); this version has no force option.
+
+## Resume — the canonical flow
+
+`sessions(op='resume', session='<id>', prompt='<what to do next>')` reopens a
+stored or stopped conversation headlessly. The receipt says what was opened —
+session, job and pid once published — and never claims more than the ledger
+knows: a job that died before the session went live returns an error naming
+the worker log and the CLI fallback below, and a job still booting says
+"starting" and points at `lop exec --status <job>` rather than claiming a
+reopen.
+
+```
+sessions(op='resume', session='a1b2c3d4e5f6', prompt='continue the audit')
+→ reopened "audit" (session a1b2c3d4e5f6, job d83d63e37b63, pid 50601) — …
+
+sessions(op='help')     # the full per-op reference, on demand
+```
+
+Validation is per op, and a refusal names the set the op DOES take — read it
+instead of retrying blind:
+
+```
+sessions(op='resume', session='a1b2c3d4e5f6', prompt='go', timeout_ms=1)
+→ `timeout_ms` is not a sessions parameter. `resume` takes:
+  session|target|pid, prompt, background. Call op='help' for the full per-op
+  reference.
+```
+
+The always-loaded description carries each op's accepted inputs; `op='help'`
+prints the fuller reference (targets, defaults, refusals) any time, and
+`read tool://sessions` serves the same text where that reader exists.
 
 ## Bounded peek
 
@@ -94,6 +126,8 @@ the CLI remains:
 lop sessions                                  # the live-session table
 lop sessions --all --json                     # stored sessions too, machine-readable
 lop exec --workstream --name <name> "<task>"  # the CLI fallback for a spawn
+lop exec --resume <session-id> --background   # the CLI fallback for a resume
+lop exec --status <job-id>                    # follow a background run
 ```
 
 `--workstream` is what makes a CLI-spawned run listed; without it an
