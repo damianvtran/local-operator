@@ -4136,8 +4136,20 @@ def build_app(daemon: MobileDaemon):
         worker = daemon.push_worker
         if worker is not None and device_id is not None:
             known = await asyncio.to_thread(known_device_id, device_id)
-            if known is not None:
-                worker.note_ack(device_id=known, conversation=f"session/{session_id}")
+            # ``revision[1]`` is the acknowledged watermark this receipt just moved
+            # the conversation to — the same value ``acknowledgement_map``
+            # returns — and it rides the nudge so the pass can tell THIS change
+            # from a later one on the same conversation (review round 2, m2).
+            # Guarded rather than indexed: the receipt above is already written,
+            # and a store shape this route does not recognise must not fail a read
+            # that has succeeded.
+            revision = state.get("revision") if isinstance(state, dict) else None
+            if known is not None and isinstance(revision, list) and len(revision) == 2:
+                worker.note_ack(
+                    device_id=known,
+                    conversation=f"session/{session_id}",
+                    acknowledged=revision[1],
+                )
         return JSONResponse({"ok": True, "attention": state})
 
     async def api_session_pin(request: Request) -> Response:
