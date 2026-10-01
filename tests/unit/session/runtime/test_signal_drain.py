@@ -769,3 +769,52 @@ def test_the_ways_out_are_armed_before_the_record_makes_this_process_addressable
     )
     assert hoisted["construct"] > hoisted["install"]
     assert hoisted["construct"] > hoisted["socket_hook"]
+
+
+# -- wave B: the idle branch of ``_on_signal`` names the signal when it cuts a live turn --
+
+
+def test_the_idle_branch_names_an_unsanctioned_signal_that_cuts_a_live_turn() -> None:
+    """``_work_in_flight`` says idle while the session still has a turn the dispose will abort."""
+    from local_operator.session.runtime import signal_receipt
+
+    noted: list[tuple[str, str]] = []
+
+    class _Session:
+        def disposal_cuts_a_turn(self) -> bool:
+            return True
+
+        def note_cut_off(self, cause: str, detail: str = "") -> None:
+            noted.append((cause, detail))
+
+    class _Handle:
+        _session = _Session()
+
+    unsanctioned = {
+        "signals": [{"name": "SIGTERM", "number": 15, "at": 1.0, "sanction": "none"}],
+    }
+    process._note_signal_cut_off(_Handle(), unsanctioned)
+    assert noted and noted[0][0] == "runtime-shutdown"
+    assert "no stop was staged" in noted[0][1]
+
+    # A covering DELIBERATE marker reads exactly as before: nothing is noted.
+    noted.clear()
+    deliberate = {
+        "signals": [
+            {
+                "name": "SIGTERM",
+                "number": 15,
+                "at": 1.0,
+                "sanction": "marker",
+                "stop_marker": {"deliberate": True},
+            }
+        ],
+    }
+    process._note_signal_cut_off(_Handle(), deliberate)
+    assert noted == []
+    assert signal_receipt.cut_off_verdict(deliberate["signals"][0]) is None
+
+    # And nothing is armed when this disposal would cut no turn (an idle session).
+    _Handle._session.disposal_cuts_a_turn = lambda: False  # type: ignore[method-assign]
+    process._note_signal_cut_off(_Handle(), unsanctioned)
+    assert noted == []
