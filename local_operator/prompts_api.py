@@ -250,11 +250,24 @@ def _resolve_system_md_flags(data: dict[str, Any]) -> dict[str, Any]:
     The console pair has the same three states and its own copy; it is completed
     here so ONE call site cannot ship one pair and forget the other, which is
     exactly the failure the browser pair's history records.
+
+    The ask pair is completed here for the same reason and is the one pair whose
+    state is NOT the caller's to state: whether ``ask`` queues is a PROCESS fact
+    (``asks.policy``, read once at import), and the blocking arm is what the
+    deployed default renders. It is therefore seeded from the mode — rather than
+    left to ``_complete_flag_pair``'s absent-pair default, which happens to agree
+    while the queue is dark — so a process with the flip on cannot render the
+    paragraph that says the tool parks on a human. A caller may still pass the
+    pair explicitly (a test rendering the other arm); passing both members is
+    still refused.
     """
+    seed = dict(data)
+    if "ask_queued" not in seed and "ask_inline" not in seed:
+        seed["ask_queued"] = _ask_queue_queued()
     resolved = {
-        **data,
+        **seed,
         **_complete_flag_pair(
-            data,
+            seed,
             has_key="has_browser",
             no_key="no_browser",
             both_message=(
@@ -265,7 +278,7 @@ def _resolve_system_md_flags(data: dict[str, Any]) -> dict[str, Any]:
             ),
         ),
         **_complete_flag_pair(
-            data,
+            seed,
             has_key="has_console",
             no_key="no_console",
             both_message=(
@@ -274,6 +287,17 @@ def _resolve_system_md_flags(data: dict[str, Any]) -> dict[str, Any]:
                 "together, so the prompt would describe a tool it has just said "
                 "does not exist. Pass the pair from build_system_blocks, or pass "
                 "just one and let it derive."
+            ),
+        ),
+        **_complete_flag_pair(
+            seed,
+            has_key="ask_queued",
+            no_key="ask_inline",
+            both_message=(
+                "system.md: ask_queued and ask_inline cannot both be true — that "
+                "ships the queued-ask paragraphs and the blocking-ask paragraph "
+                "together, so the prompt would describe the same call two "
+                "contradictory ways. Pass at most one; the other derives."
             ),
         ),
     }
@@ -621,6 +645,32 @@ answer, parked for hours if necessary.
   you will do with it.
 </interactivity>"""
 
+#: Attached, this session owns an ``ask`` hook, and ``ask`` QUEUES (design §6
+#: D6). Same two measured facts as the body above, and the ONLY difference is
+#: what the ask does to the turn — so the pair is kept side by side rather than
+#: derived, because the two must not drift into describing the same call.
+#:
+#: Three consequences a reader cannot infer from the blocking body, and each is
+#: one line, in the order it matters: the call is not the answer; a receipt is
+#: not consent (design risk 1 — this is the body read by the sessions most
+#: likely to be mid-task); and the turn must not be spent idling for it.
+_INTERACTIVITY_ATTACHED_ASK_QUEUED = """<interactivity>
+An interface is attached to this session, so a question you ask WILL be
+presented to the operator: `ask` queues it and returns at once, and the answer
+arrives later as a turn of its own.
+
+- Ask when the answer is genuinely the operator's to give, and not otherwise.
+- A receipt is not consent: until the answer arrives, do not run anything the
+  ask was meant to authorise.
+- Do not idle on it. Continue with work that does not depend on the answer; if
+  nothing else remains, end the turn saying what is queued.
+- The question is presented even if nobody is looking at this exact moment. It
+  waits; it is not lost. A slow answer is not a refusal, and it is not a reason
+  to decide on the operator's behalf.
+- Write for a reader who may answer minutes later: say what you need and what
+  you will do with it.
+</interactivity>"""
+
 #: Attached, no ``ask`` hook, but a parent channel (a SUBAGENT). The attachment is
 #: a fact about the PARENT's session — the surface the operator is attached to —
 #: and the child's route to it is ``hub``. Saying "attached to this session" here
@@ -675,6 +725,33 @@ may block for hours.
 - Do not take an irreversible or destructive action to avoid asking; when the
   choice genuinely needs a person, stop and say so — that is cheaper than a
   wrong guess.
+- The operator will read this conversation when they return, so write for
+  someone catching up, not for someone watching live.
+</interactivity>"""
+
+#: Detached, with an ``ask`` hook, and ``ask`` QUEUES. The blocking body's
+#: "the turn may block for hours" is exactly the false claim this variant
+#: exists to remove: the queue is durable precisely so a session with nobody
+#: attached is not held, and the ask is shown when a surface attaches.
+#:
+#: The PROCEED-first bullet survives unchanged, and that is deliberate: an
+#: unattended session still should not spend an ask it cannot wait on, and the
+#: ask is still the right move for the one case below it (something genuinely
+#: the operator's to decide) — now because the ask will be waiting for them
+#: rather than because the turn parks.
+_INTERACTIVITY_DETACHED_ASK_QUEUED = """<interactivity>
+No interface is attached to this session right now, so a question you ask is
+queued: it is kept durably, it is shown when a surface attaches, and it never
+blocks this turn.
+
+- Prefer to PROCEED with what you have, or finish the turn with a clear
+  statement of what you would have asked, over calling `ask`.
+- That statement is a decision you already took and the fact that would change
+  it, not a question left hanging.
+- Do not take an irreversible or destructive action to avoid asking; when the
+  choice genuinely needs a person, `ask` — a queued ask is durable and waits for
+  them — or stop and say so.
+- A receipt is not consent: the answer arrives later, as a turn.
 - The operator will read this conversation when they return, so write for
   someone catching up, not for someone watching live.
 </interactivity>"""
@@ -734,24 +811,49 @@ def _interactivity_channel(tools: Sequence[AgentTool], channel: str | None) -> s
     return CHANNEL_NONE
 
 
-def _interactivity_block(attached: bool, channel: str) -> str:
+def _interactivity_block(attached: bool, channel: str, *, queued_ask: bool) -> str:
     """The ``<interactivity>`` body for one measured (attachment, channel) pair.
 
-    SIX constants, keyed on two stable facts, and no interpolation of any kind:
-    the same pair always renders the same bytes, which is what lets the block ride
-    a persisted prompt prefix without ever moving it.
+    EIGHT constants, keyed on two stable facts plus one process-level mode, and
+    no interpolation of any kind: the same triple always renders the same bytes,
+    which is what lets the block ride a persisted prompt prefix without moving
+    it. ``queued_ask`` is a process constant (``asks.policy`` is read once at
+    import), so it cannot churn a block inside one session's prefix — the reason
+    it is a parameter here rather than a live lookup per render.
+
+    It selects only the ASK channel's bodies: ``hub`` describes where a
+    delegated child's question goes, which the queue does not change, and the
+    no-channel bodies name no tool at all.
     """
     if attached:
         return {
-            CHANNEL_ASK: _INTERACTIVITY_ATTACHED_ASK,
+            CHANNEL_ASK: (
+                _INTERACTIVITY_ATTACHED_ASK_QUEUED if queued_ask else _INTERACTIVITY_ATTACHED_ASK
+            ),
             CHANNEL_HUB: _INTERACTIVITY_ATTACHED_HUB,
             CHANNEL_NONE: _INTERACTIVITY_ATTACHED_NONE,
         }[channel]
     return {
-        CHANNEL_ASK: _INTERACTIVITY_DETACHED_ASK,
+        CHANNEL_ASK: (
+            _INTERACTIVITY_DETACHED_ASK_QUEUED if queued_ask else _INTERACTIVITY_DETACHED_ASK
+        ),
         CHANNEL_HUB: _INTERACTIVITY_DETACHED_HUB,
         CHANNEL_NONE: _INTERACTIVITY_DETACHED_NONE,
     }[channel]
+
+
+def _ask_queue_queued() -> bool:
+    """Whether ``ask`` QUEUES in this process (design §6, D6).
+
+    ONE read, in one function, because two surfaces of the same prompt describe
+    the same mode — the paragraph in ``system.md`` and the ``<interactivity>``
+    body — and two reads are how they would start disagreeing. Lazy for the same
+    reason as the tool-side copy: ``prompts_api`` is on every session's build
+    path and the queued-ask policy is not worth a module-scope import.
+    """
+    from local_operator.asks import policy
+
+    return policy.enabled()
 
 
 def build_system_blocks(
@@ -1023,9 +1125,10 @@ def build_system_blocks(
         # refuses without a hook) and a channel that does not exist — the failure
         # this whole change removes, reintroduced for the population most
         # sessions' turns are made of.
-        tail = (
-            f"{tail}\n\n{_interactivity_block(interactive, _interactivity_channel(tools, channel))}"
+        body = _interactivity_block(
+            interactive, _interactivity_channel(tools, channel), queued_ask=_ask_queue_queued()
         )
+        tail = f"{tail}\n\n{body}"
     names = [name for name in (credentials or ()) if name]
     if names:
         # Names only. The values live in process memory and are injected into
