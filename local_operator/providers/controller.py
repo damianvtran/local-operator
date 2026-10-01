@@ -277,8 +277,8 @@ def _chat_providers() -> list[ProviderDefinition]:
     """The registry rows that may contribute CHAT models to a catalogue.
 
     Decision-only providers (``registry.is_decision_only`` — TypeSafe's Jev) and
-    speech-only ones (``registry.is_speech_only`` — ElevenLabs, whose wire serves
-    speech-to-text and no chat route at all) are dropped HERE, at the one place
+    speech-only ones (``registry.is_speech_only`` — ElevenLabs and ``openai-key``,
+    whose wires serve speech and no chat route at all) are dropped HERE, at the one place
     every catalogue is assembled, rather than inside the three builders below or
     in each consumer of them. A provider whose wire rejects ``chat/completions``
     on every host must not appear as a model the user can pick: selecting one

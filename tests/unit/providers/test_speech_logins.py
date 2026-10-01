@@ -103,3 +103,53 @@ async def test_the_standard_login_flow_stores_a_pasted_key_under_openai_key(
     assert rows[0].data["source"] == "login"
     assert rows[0].data["key"] == "sk-test-speech-key", "trimmed, like every paste-a-key login"
     assert store.list_credentials("openai") == [], "never beside the ChatGPT rows"
+
+
+# ---------------------------------------------------------------------------
+# Review round 1: one noun for every refusal door, and the key route's agreement
+# with the census
+# ---------------------------------------------------------------------------
+
+
+def test_speech_wire_noun_is_read_off_capabilities_by_membership() -> None:
+    import dataclasses
+
+    from local_operator.providers import registry
+
+    assert registry.speech_wire_noun("elevenlabs") == "speech-to-text"
+    assert registry.speech_wire_noun("openai-key") == "text-to-speech"
+    # Not set-equality: a set that is neither exactly one of the two says the
+    # honest generic word instead of a wrong specific one.
+    assert registry.speech_wire_noun("not-a-provider") == "speech"
+    definition = get_provider_definition("openai-key")
+    assert definition is not None
+    both = dataclasses.replace(definition, capabilities=frozenset({"tts", "stt"}))
+    registry._BY_ID["openai-key"] = both
+    try:
+        assert registry.speech_wire_noun("openai-key") == "speech-to-text"
+    finally:
+        registry._BY_ID["openai-key"] = definition
+
+
+def test_the_selection_refusal_uses_the_same_sentence_as_the_registry() -> None:
+    """QA Q1: ``model/configure.py`` carried its own hardcoded copy."""
+    from local_operator.model.configure import (
+        ModelSelectionRefused,
+        validate_model_selection,
+    )
+
+    with pytest.raises(ModelSelectionRefused) as refused:
+        validate_model_selection("openai-key", "tts-1")
+    assert "text-to-speech" in str(refused.value)
+    assert "speech-to-text" not in str(refused.value)
+
+
+def test_openai_key_accepts_an_api_key_so_the_advert_and_the_route_agree() -> None:
+    """S-2: the census said ``api_key`` method + ``accepts_api_key=false``."""
+    definition = get_provider_definition("openai-key")
+    assert definition is not None
+    assert definition.accepts_api_key is True
+    # Every row that accepted a key before still does, and a keyless local
+    # provider still does not.
+    assert get_provider_definition("deepseek").accepts_api_key is True  # type: ignore[union-attr]
+    assert get_provider_definition("ollama").accepts_api_key is False  # type: ignore[union-attr]

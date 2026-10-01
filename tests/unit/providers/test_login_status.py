@@ -54,3 +54,11 @@ def test_format_logins_names_env_vars_not_values(
     assert "ELEVENLABS_API_KEY=<set>" in text
     assert "ambient-secret" not in text
     assert "No stored credentials." in text
+
+
+def test_the_status_word_is_case_insensitive_like_the_tui(
+    store: AuthStore, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """QA Q2: ``/login STATUS`` worked in the TUI, ``lop login STATUS`` did not."""
+    assert auth_cli.run_login(" Status ", None, store) == 0
+    assert "No stored credentials." in capsys.readouterr().out
