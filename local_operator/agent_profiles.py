@@ -1066,9 +1066,25 @@ def backfill_seed_action_class(
     call is a read-only no-op. Best-effort per row (a locked or unreadable
     registry answers ``()``), and it returns the names it flipped, which the
     startup seam logs and the tests assert on.
+
+    IT REFUSES BEFORE CONSTRUCTING A WRITER, and that ordering is the whole of
+    the guard. ``AgentRegistry.__init__`` mkdirs the config dir *and* ``agents/``
+    (``agents.py``), and this runs from the ``lop`` entry point for EVERY
+    subcommand — including the ones whose documented contract is that a
+    storeless machine stays storeless (a bare ``config list``, ``login``,
+    ``--version``, the org-sharing push, the interactive shell's pre-session
+    guard). Constructing the registry to ask "is there anything to repair?"
+    created the store it was asking about (agent review round 2, R5: three guard
+    suites caught it, on paths that had never written a byte). A machine with no
+    ``agents/`` directory has no rows by definition, so the directory test IS the
+    first term of the predicate — nothing scanned, nothing created — and the
+    repair still runs on every machine that has ever installed a role.
     """
 
     from local_operator.action_class import PROACTIVE, set_registered_action_class
+
+    if registry is None and not (Path(config_dir) / "agents").is_dir():
+        return ()
 
     try:
         from local_operator.agents import AgentRegistry
