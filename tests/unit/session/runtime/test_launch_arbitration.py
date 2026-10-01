@@ -771,6 +771,71 @@ async def test_a_retried_prompt_is_delivered_under_the_same_identity(
 
 
 @pytest.mark.asyncio
+async def test_a_peer_errand_puts_its_identity_on_the_wire(
+    fleet: FakeRuntimeFleet, tmp_path: Path
+) -> None:
+    """The ENGAGED route's carriage (agent review round 1, MAJOR).
+
+    The errand already carried ``command_id`` -- the peer sender mints its
+    message identity into it -- and this arm used to drop it before dialling.
+    Three consequences are closed by the keyword below: the sender's disk probe
+    could never hit (the receiver names its row with its own id, so the sender's
+    id is never in the transcript), its verdict claimed "not in its transcript"
+    from a probe that could not have found anything, and a re-run of this same
+    errand -- ``_deliver`` is re-entered after a ``ConnectionError`` -- had no id
+    for the receiver to dedupe on, which appended the message a second time.
+    """
+    fleet.loop = asyncio.get_running_loop()
+    message_id = "peer-" + "a" * 32
+    await engage_runtime(
+        SESSION_ID,
+        str(tmp_path),
+        PeerMessageErrand(text="fyi", mode="mailbox", wake=True, command_id=message_id),
+        config_dir=tmp_path,
+    )
+    frames = [f for f in fleet.delivered if f.get("op") == "peer_message"]
+    assert len(frames) == 1
+    assert frames[0]["message_id"] == message_id
+
+    # And the re-run sends the SAME id, which is what makes the receiver's
+    # dedupe the answer to the double-append risk rather than a hope.
+    await engage_runtime(
+        SESSION_ID,
+        str(tmp_path),
+        PeerMessageErrand(text="fyi", mode="mailbox", wake=True, command_id=message_id),
+        config_dir=tmp_path,
+    )
+    replayed = [f for f in fleet.delivered if f.get("op") == "peer_message"]
+    assert [f["message_id"] for f in replayed] == [message_id, message_id]
+
+
+@pytest.mark.asyncio
+async def test_the_carried_identity_is_the_errand_s_own(
+    fleet: FakeRuntimeFleet, tmp_path: Path
+) -> None:
+    """An errand with no identity of its own still travels WITH one.
+
+    ``engage_runtime`` mints a ``command_id`` for any errand whose caller omitted
+    one (its own test above pins that), so this arm cannot produce a frame whose
+    identity is blank -- which is the property worth stating here: ``_deliver``
+    passes whatever identity the errand ended up with, and the receiver always
+    has a string to validate (a minted uuid fails that validation and the
+    receiver names its own row, exactly as it does for a sender that predates the
+    carriage).
+    """
+    fleet.loop = asyncio.get_running_loop()
+    await engage_runtime(
+        SESSION_ID,
+        str(tmp_path),
+        PeerMessageErrand(text="fyi", mode="mailbox", wake=True),
+        config_dir=tmp_path,
+    )
+    frames = [f for f in fleet.delivered if f.get("op") == "peer_message"]
+    assert len(frames) == 1
+    assert frames[0]["message_id"], "engage mints an identity when the caller has none"
+
+
+@pytest.mark.asyncio
 async def test_engage_times_out_rather_than_spinning_forever(tmp_path: Path, monkeypatch) -> None:
     """A runtime that never appears must fail the caller, not hang it."""
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))

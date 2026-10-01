@@ -225,6 +225,19 @@ class DeliveryOutcome:
         return f"→ {self.target}: {self.detail}"
 
     @property
+    def advisory(self) -> str:
+        """What follows the receipt's ``—`` separator: the part to ACT on.
+
+        The CLI prints the receipt on stdout (the channel a script reads) and
+        this half on stderr (the channel the person reads), so one sentence is
+        not printed twice in a terminal that shows both streams — the id-bearing
+        receipt used to appear as a prefix of the stderr sentence (UX round 1,
+        N1 / QA round 1, observation 1). Empty when the detail has no separator.
+        """
+        _, separator, rest = self.detail.partition(" — ")
+        return rest if separator else ""
+
+    @property
     def is_error(self) -> bool:
         """True ONLY for ``failed`` (design note A.1).
 
@@ -281,13 +294,80 @@ def _ack_lost_detail(message_id: str, attempts: int) -> str:
     )
 
 
-def _unconfirmed_detail(message_id: str, attempts: int) -> str:
-    """Copy for the honest residual: no ack AND no evidence on disk (A.5)."""
+#: What a probe run can honestly establish about the target's transcript, and
+#: the only three things the residual's sentence may claim (round 1, MAJOR):
+#:
+#: ``ABSENT`` -- the target names its rows with the SENDER's id (it advertised
+#: the carriage), so a miss means the row is genuinely not there yet.
+#: ``UNKNOWN`` -- a probe ran, but a miss proves nothing: a receiver that
+#: predates the carriage names the row with its OWN id, so the sender's id is
+#: absent from a transcript that may well hold the message. This is the engaged
+#: route's shape, where nothing advertises a capability to read.
+#: ``UNPROBED`` -- no probe ran at all (a receiver that did not advertise the
+#: carriage gets one attempt and no probe), and the copy must not imply one did.
+PROBE_ABSENT = "absent"
+PROBE_UNKNOWN = "unknown"
+PROBE_UNPROBED = "unprobed"
+
+
+def _unconfirmed_detail(message_id: str, attempts: int, *, observed: str = PROBE_UNKNOWN) -> str:
+    """Copy for the honest residual: no ack, and no proof either way (A.5).
+
+    ``observed`` is one of the :data:`PROBE_ABSENT` / ``PROBE_UNKNOWN`` /
+    ``PROBE_UNPROBED`` tokens above, and the sentence makes only the claim that
+    token supports -- the earlier version asserted "not yet in its transcript"
+    on every route, which on the engaged route was a claim the code could not
+    make at all (round 1, MAJOR). Sentence case for the state word, and a
+    reader-neutral next step: this one string is printed by the tool result, the
+    journal notice and `lop send` stderr alike, and `sessions(op="peek", …)` is
+    not a thing a person at a terminal can run (design N1, UX U4).
+    """
+    if observed == PROBE_ABSENT:
+        clause = " and the message is not yet in its transcript"
+    elif observed == PROBE_UNKNOWN:
+        clause = " and it could not be confirmed in its transcript"
+    else:
+        clause = ""
     return (
-        f"delivery UNCONFIRMED (id {message_id}) — no answer within 5s after "
-        f"{_attempts_phrase(attempts)} and the message is not yet in its "
-        "transcript. It may still arrive once its loop turns. Check with "
-        'sessions(op="peek", …) before resending; sending again may deliver it twice.'
+        f"delivery unconfirmed (id {message_id}) — no answer within 5s after "
+        f"{_attempts_phrase(attempts)}{clause}. It may still arrive once its loop "
+        "turns. Check the target's transcript before resending; sending again may "
+        "deliver it twice."
+    )
+
+
+def _queued_detail(message_id: str, receipt: str, attempts: int) -> str:
+    """Copy for the hop-timeout ack, keeping the receiver's own WHY (round 1, MINOR-1).
+
+    The queued branch has a receipt and it is the accurate one -- "the terminal
+    is busy; it lands when its turn settles" -- so it is kept rather than
+    replaced by this module's generic no-answer sentence, which also discarded
+    the reason. The state is still unconfirmed (nothing durable exists yet, and
+    the wake did not run), which is why the sentence says so first.
+    """
+    return (
+        f"delivery unconfirmed (id {message_id}) — {receipt.rstrip('.')}, after "
+        f"{_attempts_phrase(attempts)}. Check the target's transcript before "
+        "resending; sending again may deliver it twice."
+    )
+
+
+def _in_flight_detail(message_id: str, attempts: int) -> str:
+    """Copy for a duplicate whose row is NOT durable yet (round 1, MINOR-4).
+
+    The receiver answers ``duplicate`` from two different places: its transcript
+    index (the row is durable -- the "already delivered" sentence is true) and
+    its IN-FLIGHT set (an earlier attempt of this same send is still mid-hop
+    inside it, so nothing is on disk). Reporting the durable sentence for the
+    second case claims a fact the in-flight window has not established, so this
+    says what is actually true: it is being delivered right now.
+    """
+    return (
+        f"delivery unconfirmed (id {message_id}) — an earlier attempt of this "
+        f"same send is still being delivered after {_attempts_phrase(attempts)}, "
+        "so nothing is on disk yet. It may still arrive once its loop turns. "
+        "Check the target's transcript before resending; sending again may deliver "
+        "it twice."
     )
 
 
@@ -1075,6 +1155,26 @@ def _classify_ack(
     duplicate = bool(delivery.get("duplicate"))
     committed = bool(delivery.get("committed"))
     queued = bool(delivery.get("queued"))
+    if duplicate and not committed:
+        # AN EARLIER ATTEMPT IS STILL MID-HOP, which is a different fact from a
+        # lost ack (round 1, MINOR-4): the receiver owns the id from its
+        # IN-FLIGHT set, not from its transcript index, so nothing is durable
+        # yet and the "already delivered" sentence would over-claim. Same
+        # residual as the queued arm, with the reason said out loud.
+        if probe_transcript_for(message_id, session_id):
+            return _probe_found_outcome(
+                message_id, target=target, wake=wake, attempts=attempts, route=route
+            )
+        return DeliveryOutcome(
+            DELIVERY_UNCONFIRMED,
+            _in_flight_detail(message_id, attempts),
+            message_id,
+            WAKE_UNCONFIRMED if wake else WAKE_NOT_REQUESTED,
+            attempts,
+            "in_flight",
+            route,
+            target,
+        )
     if duplicate:
         # A PRIOR ATTEMPT'S ACK WAS THE LOST ONE, and the receiver proved it by
         # answering the re-send with the id it already owns. The row is durable;
@@ -1107,16 +1207,18 @@ def _classify_ack(
         )
     # QUEUED IN MEMORY ONLY (a busy steer the receiver has not persisted yet).
     # The ack is honest -- the receiver WILL deliver it -- but nothing durable
-    # exists, so the state is unconfirmed and cause names why.
+    # exists, so the state is unconfirmed, the wake did NOT answer (round 1,
+    # MINOR-1: this arm used to report ``acked``), and the receiver's OWN
+    # sentence is the receipt rather than this module's generic no-answer copy.
     if probe_transcript_for(message_id, session_id):
         return _probe_found_outcome(
             message_id, target=target, wake=wake, attempts=attempts, route=route
         )
     return DeliveryOutcome(
         DELIVERY_UNCONFIRMED,
-        _unconfirmed_detail(message_id, attempts),
+        _queued_detail(message_id, detail, attempts),
         message_id,
-        wake_state if wake else WAKE_NOT_REQUESTED,
+        WAKE_UNCONFIRMED if wake else WAKE_NOT_REQUESTED,
         attempts,
         "queued_busy",
         route,
@@ -1348,10 +1450,15 @@ async def _live_outcome(
         )
     # Ambiguous: at least one attempt reached the wire and nothing came back, and
     # the probe (re-run after the last attempt) found no row. Not failed -- the
-    # op may still sit in a stalled socket buffer -- and not delivered.
+    # op may still sit in a stalled socket buffer -- and not delivered. The
+    # sentence claims "not in its transcript" only when a miss means absence:
+    # a capable receiver names the row with THIS id, while a receiver that never
+    # advertised the carriage was not probed at all (round 1, MAJOR).
     return DeliveryOutcome(
         DELIVERY_UNCONFIRMED,
-        _unconfirmed_detail(message_id, attempts),
+        _unconfirmed_detail(
+            message_id, attempts, observed=PROBE_ABSENT if capable else PROBE_UNPROBED
+        ),
         message_id,
         WAKE_UNCONFIRMED if wake else WAKE_NOT_REQUESTED,
         attempts,
@@ -1419,7 +1526,11 @@ async def _engaged_outcome(
             )
         return DeliveryOutcome(
             DELIVERY_UNCONFIRMED,
-            _unconfirmed_detail(message_id, 1),
+            # THE ENGAGED ROUTE CANNOT READ A CAPABILITY, so a probe miss here is
+            # genuinely unknown rather than absence: a receiver that predates the
+            # carriage names its own row, and the id's absence says nothing
+            # (round 1, MAJOR).
+            _unconfirmed_detail(message_id, 1, observed=PROBE_UNKNOWN),
             message_id,
             WAKE_UNCONFIRMED if wake else WAKE_NOT_REQUESTED,
             1,

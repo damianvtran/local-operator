@@ -395,7 +395,7 @@ async def test_a_lost_ack_is_not_reported_as_a_failed_delivery(monkeypatch) -> N
         assert result.details["delivery"]["cause"] == "no_answer"
         assert result.details["delivery"]["route"] == "live"
         assert result.details["partial_result"] is True
-        assert "delivery UNCONFIRMED" in result.text
+        assert "delivery unconfirmed" in result.text
         assert "may still arrive" in result.text
         # The confident claim must NOT appear on this arm, and the text has to
         # carry the id a human would quote plus the retry advice.
@@ -442,7 +442,7 @@ async def test_a_timed_out_dial_is_an_unconfirmed_delivery(monkeypatch) -> None:
         assert result.details is not None
         assert result.details["delivery"]["state"] == "unconfirmed"
         assert result.details["partial_result"] is True
-        assert "delivery UNCONFIRMED" in result.text
+        assert "delivery unconfirmed" in result.text
         assert "may still arrive" in result.text
         # Neither confident claim: not "could not deliver", and nothing that
         # invites an automatic retry of a steer that may already have landed.

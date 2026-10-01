@@ -1436,10 +1436,90 @@ async def test_a_silent_receiver_is_unconfirmed_never_failed(
     assert outcome.partial is True
     assert outcome.attempts == peer_send.PEER_SEND_ATTEMPTS
     assert outcome.cause == "no_answer"
-    assert "delivery UNCONFIRMED" in outcome.text
+    # Sentence case (design N1) and a reader-neutral next step (UX U4): this one
+    # string is printed by the tool result, the journal notice and `lop send`
+    # stderr alike, and `sessions(op="peek", …)` is not a thing a person at a
+    # terminal can run.
+    assert "delivery unconfirmed" in outcome.text
+    assert "sessions(op=" not in outcome.text
+    assert "Check the target's transcript before resending" in outcome.text
     assert "may still arrive" in outcome.text
+    # The clause claims only what this route's probe can establish: the receiver
+    # advertised the carriage, so its row would be named with THIS id and a miss
+    # means the row is genuinely absent (round 1, MAJOR).
+    assert "and the message is not yet in its transcript" in outcome.text
     # The copy is pluralised for the number of tries that really happened.
     assert f"after {peer_send.PEER_SEND_ATTEMPTS} attempts" in outcome.text
+
+
+@pytest.mark.asyncio
+async def test_an_old_receiver_is_told_it_was_not_probed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A receiver from before the carriage gets one attempt and no probe, and the
+    sentence must not imply a transcript was read (round 1, MAJOR). Its miss
+    would prove nothing there: an old receiver names its row with its own id."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _fast_retry(monkeypatch)
+
+    async def on_op(frame: dict[str, Any], writer: Any) -> None:
+        await asyncio.sleep(5.0)
+        return None
+
+    async with _FakeControlPeer(on_op) as peer:
+        record = peer.record
+        record.capabilities = [c for c in (record.capabilities or []) if "message-id" not in c]
+        outcome = await peer_send.deliver_peer_message_outcome(
+            record,
+            session_id="probe-target",
+            text="anyone home?",
+            mode="mailbox",
+            wake=True,
+            sender={"pid": 1},
+        )
+        assert peer.connections == 1, "an old receiver gets exactly one attempt"
+
+    assert outcome.state == peer_send.DELIVERY_UNCONFIRMED, outcome
+    assert outcome.is_error is False, "a timeout still never reads as failed"
+    assert "refus" not in outcome.text.lower()
+    assert (
+        "could not be confirmed in its transcript" not in outcome.text
+    ), "no probe ran at all, so the copy must not imply one did"
+    assert "not yet in its transcript" not in outcome.text
+
+
+@pytest.mark.asyncio
+async def test_the_engaged_route_never_claims_the_transcript_is_clear(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The cold-target route cannot read a capability, so a probe miss there is
+    UNKNOWN, not absence (round 1, MAJOR): the engaged arm must say so rather
+    than asserting the message is not in a transcript it cannot interpret."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    from local_operator.mobile import peer_send as ps
+
+    async def _boom(*args: Any, **kwargs: Any) -> Any:
+        raise TimeoutError("the spawned runtime never answered")
+
+    # The arm itself, not the resolver above it: the cold-target path is entered
+    # through ``engage_runtime``, whose import is function-local, so the double
+    # is installed on the launch module (and the gate that refuses a
+    # never-engaged target is above this unit and not what is under test).
+    monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", _boom)
+    outcome = await ps._engaged_outcome(
+        "cold-target",
+        target="cold-target (not running)",
+        message_id="peer-" + "a" * 32,
+        text="anyone home?",
+        mode="mailbox",
+        wake=True,
+        sender={"pid": 1},
+        cwd=str(tmp_path),
+    )
+    assert outcome.route == "engaged", outcome
+    assert outcome.state == ps.DELIVERY_UNCONFIRMED, outcome
+    assert "could not be confirmed in its transcript" in outcome.text
+    assert "not yet in its transcript" not in outcome.text
 
 
 @pytest.mark.asyncio
@@ -1607,6 +1687,101 @@ async def test_a_duplicate_ack_makes_a_wake_send_a_mailbox(
     assert outcome.wake == peer_send.WAKE_UNCONFIRMED
     assert outcome.cause == "ack_lost"
     assert outcome.is_error is False
+
+
+@pytest.mark.asyncio
+async def test_an_in_flight_duplicate_is_not_reported_as_delivered(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The receiver answers ``duplicate`` from TWO places (round 1, MINOR-4).
+
+    ``committed=True`` means its transcript index owns the id -- the durable
+    "already delivered" sentence is then true. ``committed=False`` means its
+    IN-FLIGHT set does: an earlier attempt of this same send is still mid-hop, so
+    nothing is on disk and claiming delivery would state a fact the in-flight
+    window has not established. The two are reachable in the incident shape
+    (attempt 2 lands while attempt 1 is still inside the receiver), so they must
+    not classify alike.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _fast_retry(monkeypatch)
+    seen = {"n": 0}
+
+    async def on_op(frame: dict[str, Any], writer: Any) -> dict[str, Any] | None:
+        seen["n"] += 1
+        if seen["n"] == 1:
+            await asyncio.sleep(5.0)  # the first ack never arrives
+            return None
+        return {
+            "op": "ack",
+            "req": frame["req"],
+            "detail": "duplicate — this message is already delivered",
+            "delivery": {
+                "message_id": frame["message_id"],
+                "committed": False,  # in flight, NOT on disk
+                "queued": False,
+                "duplicate": True,
+            },
+        }
+
+    async with _FakeControlPeer(on_op) as peer:
+        outcome = await peer_send.deliver_peer_message_outcome(
+            _capable(peer.record),
+            session_id="probe-target",
+            text="gates are green",
+            mode="mailbox",
+            wake=True,
+            sender={"pid": 1},
+        )
+
+    assert outcome.state == peer_send.DELIVERY_UNCONFIRMED, outcome
+    assert outcome.cause == "in_flight"
+    assert outcome.wake == peer_send.WAKE_UNCONFIRMED
+    assert outcome.is_error is False
+    assert "still being delivered" in outcome.text
+    assert "do not send it again" not in outcome.text
+
+
+@pytest.mark.asyncio
+async def test_a_queued_ack_keeps_the_receivers_own_sentence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The hop-timeout ack answered -- with "queued, the terminal is busy" -- so
+    the sender must report the wake as UNANSWERED (not ``acked``) and keep the
+    receiver's accurate reason instead of replacing it with its own no-answer
+    copy (round 1, MINOR-1)."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _fast_retry(monkeypatch)
+
+    async def on_op(frame: dict[str, Any], writer: Any) -> dict[str, Any]:
+        return {
+            "op": "ack",
+            "req": frame["req"],
+            "detail": "queued — the terminal is busy; it lands when its turn settles",
+            "delivery": {
+                "message_id": frame["message_id"],
+                "committed": False,
+                "queued": True,
+                "duplicate": False,
+            },
+        }
+
+    async with _FakeControlPeer(on_op) as peer:
+        outcome = await peer_send.deliver_peer_message_outcome(
+            _capable(peer.record),
+            session_id="probe-target",
+            text="gates are green",
+            mode="mailbox",
+            wake=True,
+            sender={"pid": 1},
+        )
+
+    assert outcome.state == peer_send.DELIVERY_UNCONFIRMED, outcome
+    assert outcome.cause == "queued_busy"
+    assert outcome.wake == peer_send.WAKE_UNCONFIRMED, "a queued wake did NOT answer"
+    assert outcome.is_error is False
+    assert "the terminal is busy" in outcome.text
+    assert "no answer within 5s" not in outcome.text
 
 
 @pytest.mark.asyncio

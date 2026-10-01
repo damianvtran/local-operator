@@ -3448,8 +3448,11 @@ class Session:
         #: before either row is persisted -- the busy-steer path queues the row in
         #: memory and the idle-wake path hands it to a spawned task, so a re-send
         #: arriving in that window would pass the ``has_entry`` test and write the
-        #: message TWICE. Membership here is held from entry to the end of the
-        #: first ``await``-free stretch, and released in a ``finally``.
+        #: message TWICE. Membership is held for the WHOLE delivery -- added
+        #: before the first ``await`` of ``receive_peer_message`` and released in
+        #: its ``finally``, however many awaits and branches the delivery takes
+        #: (agent review round 1, N3: the comment used to name only an
+        #: ``await``-free stretch, which sized the window far too small).
         #:
         #: Peer-row ids only. The user-row admission rail
         #: (``CommandReservations``/``_admitted_command_ids``) is deliberately
@@ -8364,7 +8367,11 @@ class Session:
             return PeerReceiveDetail(
                 detail,
                 {
-                    "message_id": incoming or "",
+                    # THE ROW'S OWN ID, which is the sender's mint when it
+                    # supplied one and the receiver's own uuid when it did not (a
+                    # legacy sender, agent review round 1 N2): reporting "" there
+                    # described nothing about the row this receipt is about.
+                    "message_id": message.id,
                     "committed": not queued,
                     "queued": queued,
                     "duplicate": False,
@@ -14047,9 +14054,13 @@ class Session:
         in the transcript as well. ``send.journal_unconfirmed`` (default OFF)
         gates it, and the gate is read HERE rather than at the call site so
         there is exactly one reader of the key. ``force`` bypasses that gate for
-        the one case the setting must not silence: a call the operator ABORTED
-        while a write may have landed, whose result the loop may never deliver to
-        the model at all.
+        the one case the setting must not silence: a call the operator ABORTED.
+        The premise is narrow and verified (agent review round 1, MINOR-3): a
+        COMPLETED call's result is durable regardless — the loop appends the
+        batch and only then consults the abort signal — but a call the abort
+        CANCELS is paired with a synthetic ``aborted`` result that carries
+        neither the message id nor the cause, so the row is the only durable
+        record of a message that may already have landed.
 
         Written ONCE per send, by construction:
 

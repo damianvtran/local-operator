@@ -13238,9 +13238,15 @@ async def execute_send(
         # result above already carries the cause, the id and the retry advice,
         # so this writes nothing unless ``send.journal_unconfirmed`` is on — the
         # gate is read inside the session method, so there is one reader of the
-        # key. ``force`` is the config-independent case: an ABORTED call, whose
-        # result the loop may discard before the model ever reads it, leaving the
-        # row as the only durable record that a message may have landed.
+        # key. ``force`` is the config-independent case, and its premise is
+        # narrower than the first version of this comment claimed (agent review
+        # round 1, MINOR-3): a COMPLETED call's result row is durable either way
+        # — ``harness/loop.py`` appends every call of the batch, and it does so
+        # BEFORE it consults the abort signal — but a call the abort CANCELS is
+        # paired with a synthetic ``aborted`` result instead, which carries
+        # neither the message id nor the cause. For an aborted call this row is
+        # therefore the only durable record that a message may already have
+        # landed.
         journal = getattr(context, "journal_send_notice", None) if context is not None else None
         if callable(journal):
             # ``Any``: the hook is a host seam (a session method, or a test's

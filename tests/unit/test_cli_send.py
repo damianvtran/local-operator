@@ -32,7 +32,12 @@ from unittest.mock import patch
 
 import pytest
 
-from local_operator.cli import _bind_send_positionals, build_cli_parser, send_command
+from local_operator.cli import (
+    SEND_EXIT_UNCONFIRMED,
+    _bind_send_positionals,
+    build_cli_parser,
+    send_command,
+)
 
 
 def _engaged(root: Path, session_id: str) -> None:
@@ -748,7 +753,11 @@ def test_send_to_a_different_pid_is_not_a_self_send(capsys) -> None:
     # unconfirmed. The discriminator is the SELF-SEND refusal's own sentence:
     # the receipt legitimately names the target, so a bare "this session" match
     # would now be satisfied by the delivery line itself.
-    assert rc == 1
+    #
+    # The code is the residual's OWN (UX round 1, U5), not 1: a script that
+    # retries on any non-zero would otherwise do exactly the duplicate the
+    # sentence forbids.
+    assert rc == SEND_EXIT_UNCONFIRMED
     assert red.called
     assert "use the composer to message yourself" not in red.call_args[0][0]
 
@@ -881,11 +890,17 @@ def test_a_timed_out_dial_is_not_reported_as_a_failed_delivery() -> None:
         rc = send_command(_send_args(steer=True))
 
     assert dial.call_count == 1, dial.call_args_list
-    assert rc == 1
+    assert rc == SEND_EXIT_UNCONFIRMED, "the ambiguous state is not the retry-me 1"
     assert red.called
     line = red.call_args[0][0]
-    assert "delivery UNCONFIRMED" in line, line
+    assert "delivery unconfirmed" in line, line
     assert "could not deliver" not in line, line
+    # This receiver advertised no carriage, so nothing was probed and the
+    # sentence may not imply otherwise (agent review round 1, MAJOR).
+    assert "not yet in its transcript" not in line, line
+    # And the next step is written for a person at a terminal (UX round 1, U4).
+    assert "sessions(op=" not in line, line
+    assert "Check the target's transcript before resending" in line, line
     assert "peer-" in line, line
     assert "before resending" in line, line
 

@@ -790,6 +790,18 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "send",
         help="Send a message to another local lop session (no cmux needed)",
         parents=[parent_parser],
+        # The exit codes ARE the contract now that one call settles four honest
+        # ways (send/wake delivery design A.1, A.4), so they are stated where a
+        # user actually reads them. 3 rather than 1 for the ambiguous state is
+        # what lets a script separate "unknown -- check before resending" from
+        # "nothing was delivered" without parsing prose (UX round 1, U5).
+        epilog=(
+            "exit codes: 0 delivered, or delivered-to-mailbox with the wake "
+            "unconfirmed (the advisory goes to stderr); "
+            f"{SEND_EXIT_UNCONFIRMED} unconfirmed -- the message may or may not "
+            "have landed, so do not resend it without checking the target's "
+            "transcript first; 1 not delivered. Every state names the message id."
+        ),
     )
     send_parser.add_argument(
         "target",
@@ -3478,6 +3490,14 @@ def browser_command(args: argparse.Namespace) -> int:
     return 1
 
 
+#: ``lop send``'s exit code for the AMBIGUOUS state (design note D, UX round 1
+#: U5): the message may still land, so this is neither success nor the "retry
+#: me" 1 that a script reads as "nothing was delivered" -- the pair the copy
+#: deliberately forbids retrying. 3 rather than 2, which argparse already uses
+#: for a usage error. Documented in the subcommand's own ``--help``.
+SEND_EXIT_UNCONFIRMED = 3
+
+
 def _peer_red(message: str) -> None:
     """Print one red error line, matching the rest of the CLI's error style."""
     print(f"\n\033[1;31m{message}\033[0m", file=sys.stderr)
@@ -3968,17 +3988,22 @@ def send_command(args: argparse.Namespace) -> int:
         target = f"{name} (pid {record.pid})"
     else:
         target = f"{cold_session_id} (not running)"
+    clause = skipped_clause(skipped)
     if outcome.state == DELIVERY_MAILBOX:
-        print(f"→ {target}: delivered to its mailbox")
-        _peer_note(outcome.text)
+        # THE RECEIPT ONCE, the advisory once (UX round 1, N1): stdout carries
+        # the full receipt -- id included, so it is not a prefix of the stderr
+        # sentence -- and stderr carries only what to do about the wake.
+        print(f"→ {target}: {outcome.detail}{clause}")
+        if outcome.advisory:
+            _peer_note(outcome.advisory)
         return 0
     if outcome.state == DELIVERY_UNCONFIRMED:
-        _peer_red(outcome.text)
-        return 1
+        _peer_red(f"{outcome.text}{clause}")
+        return SEND_EXIT_UNCONFIRMED
     if outcome.state == DELIVERY_FAILED:
-        _peer_red(outcome.text)
+        _peer_red(f"{outcome.text}{clause}")
         return 1
-    print(f"→ {target}: {outcome.detail}{skipped_clause(skipped)}")
+    print(f"→ {target}: {outcome.detail}{clause}")
     return 0
 
 
