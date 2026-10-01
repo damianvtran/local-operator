@@ -22,7 +22,7 @@
  * pinned height as a custom property gives those caps the same unit as the
  * box they are bounded by, so they tighten exactly when the space does.
  */
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { resumeSession, setSessionPin } from "../api";
 import { AskDock } from "../components/ask-dock";
 import { AsksSheet } from "../components/asks-sheet";
@@ -83,6 +83,7 @@ function Header({
 	projection,
 	sessionId,
 	onOpenAsks,
+	askQuestionCount,
 }: {
 	projection: SessionProjection;
 	sessionId: string;
@@ -90,6 +91,10 @@ function Header({
 	    EXPANDED state (§5.0's "explicit /asks / header action"); the minimized
 	    bar above the composer is the first. */
 	onOpenAsks: () => void;
+	/** The session's outstanding questions, derived ONCE by the screen and handed
+	    to both doors (the header entry and the minimized bar), so the two cannot
+	    state one queue two ways. */
+	askQuestionCount: number;
 }) {
 	const [gateOpen, setGateOpen] = useState(false);
 	/* THE LOOSENING RECEIPT, held HERE rather than in the sheet (design round 6,
@@ -217,15 +222,23 @@ function Header({
 			    something waiting, so the header never grows chrome for a state the
 			    session is not in — and absent at zero, exactly like the minimized
 			    bar. The COUNT is here rather than on the gate control because the
-			    two are different promises: a gate holds the turn, an ask does not. */}
-			{outstandingAsks(projection.asks).length > 0 ? (
+			    two are different promises: a gate holds the turn, an ask does not.
+
+			    THE NUMBER IS VISIBLE, and it is the bar's own number (design round
+			    1, N3; agent review round 1, R3): it used to live only in the
+			    aria-label, so the eye saw "? asks" while the bar beside it said
+			    "4 questions waiting" — one screen stating one queue two ways. Both
+			    now read the outstanding set in questions. */}
+			{askQuestionCount > 0 ? (
 				<button
 					type="button"
 					onClick={onOpenAsks}
-					aria-label={`queued asks in this session (${outstandingAsks(projection.asks).length})`}
+					aria-label={`queued asks in this session (${askQuestionCount} question${
+						askQuestionCount === 1 ? "" : "s"
+					} waiting)`}
 					className={cn(HEADER_CONTROL, "!min-w-0 px-2 text-meta text-accent")}
 				>
-					? asks
+					? {askQuestionCount}
 				</button>
 			) : null}
 			{/* THE GATE CONTROL (stage D). On the phone this is the LOOSEN surface:
@@ -436,11 +449,44 @@ export function SessionScreen({
 	   header say "needs you", and must not be rendered as a second copy of a row
 	   the queued surface already shows. */
 	const blocking = blockingPending(projection?.pending, projection?.asks);
+	/* ONE NUMBER FOR THE WHOLE SCREEN: the header entry and the minimized bar are
+	   two doors to one sheet, so they state the same population in the same unit
+	   (the outstanding set — open plus still-answerable timeouts — counted in
+	   QUESTIONS, which is what §5.0's own bar copy counts). */
+	const askQuestionCount = outstandingAsks(projection?.asks).reduce(
+		(total, row) => total + (Array.isArray(row.questions) ? row.questions.length : 0),
+		0,
+	);
 	const [modelsOpen, setModelsOpen] = useState(false);
 	const [effortOpen, setEffortOpen] = useState(false);
 	/* The asks sheet — the EXPANDED half of R7 (§5.0). Client-local interaction
 	   state with no wire meaning, exactly as the design's §5.0 states. */
 	const [asksOpen, setAsksOpen] = useState(false);
+	/* BACK CLOSES THE SHEET, it does not leave the conversation (UX round 1, U2).
+	   On a phone the system back gesture is the primary escape from a modal, and
+	   on this surface it popped the ROUTE — `#/s/asks` → `#/` — taking the answer
+	   draft with it. The sheet therefore claims one history entry while it is
+	   open, and any back that lands on it collapses the sheet first; a second
+	   back leaves the conversation as it always did.
+
+	   The entry carries no URL change (the hash router owns the address), so a
+	   pop re-renders the SAME route and the sheet's own listener is what reacts. */
+	const openAsks = useCallback(() => {
+		window.history.pushState({ ...window.history.state, askSheet: true }, "");
+		setAsksOpen(true);
+	}, []);
+	const closeAsks = useCallback(() => {
+		setAsksOpen(false);
+		/* Give the entry back when the user closes by hand (✕, scrim, Escape), so
+		   the next Back is not eaten by a sheet that is already closed. */
+		if (window.history.state?.askSheet) window.history.back();
+	}, []);
+	useEffect(() => {
+		if (!asksOpen) return;
+		const onPop = () => setAsksOpen(false);
+		window.addEventListener("popstate", onPop);
+		return () => window.removeEventListener("popstate", onPop);
+	}, [asksOpen]);
 	const rootRef = useRef<HTMLDivElement>(null);
 	/* THE RUNG'S HEIGHT, MEASURED BECAUSE IT IS THE OVERLAY'S (round 2,
 	   U23 = D7). The ladder is an overlay (round 1, U19/D4) so the column's
@@ -592,7 +638,8 @@ export function SessionScreen({
 				<Header
 					projection={projection}
 					sessionId={sessionId}
-					onOpenAsks={() => setAsksOpen(true)}
+					onOpenAsks={openAsks}
+					askQuestionCount={askQuestionCount}
 				/>
 				{/* The spend + context glance (phase 1), read-only and self-hiding:
 				    it renders nothing until either reading has something to state. */}
@@ -739,7 +786,7 @@ export function SessionScreen({
 			    half ("while EXPANDED the composer sends the answer") is enforced by the
 			    sheet being modal over this column: while it is open, the sheet's own
 			    answer fields are the only inputs that can receive a keystroke. */}
-			<AskDock rows={projection.asks} onOpen={() => setAsksOpen(true)} />
+			<AskDock rows={projection.asks} onOpen={openAsks} />
 
 			<Composer
 				pid={sessionId}
@@ -759,7 +806,7 @@ export function SessionScreen({
 
 			<AsksSheet
 				open={asksOpen}
-				onClose={() => setAsksOpen(false)}
+				onClose={closeAsks}
 				currentSessionId={sessionId}
 				onOpenConversation={(target) => navigate(`/s/${target}`)}
 			/>

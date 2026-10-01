@@ -60,8 +60,23 @@ describe("AskDock", () => {
 		expect(open).toHaveBeenCalledTimes(1);
 	});
 
-	it("counts a timed-out ask too — it is still answerable", () => {
+	it("counts a timed-out ask too, and still NAMES it", () => {
+		/* U7 (UX round 1): with only a timed-out ask left the chip counted it but
+		   previewed nothing — the count and the preview disagreed about which
+		   question was waiting, in the one state R7 keeps answerable. */
 		render(<AskDock rows={[ask({ status: "timed_out" })]} onOpen={() => {}} />);
 		expect(screen.getByText("1 question waiting")).toBeTruthy();
+		expect(screen.getByText(/ship the fix\?/)).toBeTruthy();
+	});
+
+	it("is a chip, not a full-bleed strip", () => {
+		/* D1 (design round 1): the approved shape is inset + rounded + accent
+		   bordered, matching `pending-card.tsx`; a wash spanning the whole width
+		   read as a banner, which §5.0 names as the thing it must not be. */
+		render(<AskDock rows={[ask()]} onOpen={() => {}} />);
+		const dock = screen.getByTestId("ask-dock");
+		expect(dock.className).toMatch(/mx-2/);
+		expect(dock.className).toMatch(/rounded-md/);
+		expect(dock.className).toMatch(/border-accent/);
 	});
 });

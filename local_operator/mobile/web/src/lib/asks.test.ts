@@ -77,6 +77,12 @@ describe("durationLabel", () => {
 		expect(durationLabel(3 * 3600 * 1000)).toBe("3 h");
 		expect(durationLabel(50 * 3600 * 1000)).toBe("2 d");
 		expect(durationLabel(0)).toBe("");
+		/* SUB-SECOND IS A BOUND, NOT A BLANK (agent review round 1, N1): the open
+		   line used to read "expires in" with no value at all for a deadline
+		   inside the next second. */
+		expect(durationLabel(400)).toBe("<1 m");
+		expect(durationLabel(30_000)).toBe("<1 m");
+		expect(durationLabel(60_000)).toBe("1 m");
 	});
 });
 

@@ -139,6 +139,33 @@ describe("AsksSheet", () => {
 		);
 	});
 
+	it("leads with the head ask — the order the minimized chip names", async () => {
+		/* U8 (UX round 1): the chip named the oldest open ask while the sheet led
+		   with the newest, so a tap landed on a question the reader had not just
+		   read. The sheet now shares `orderedForDisplay` with the chip. */
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({
+			asks: [ask({ ask_id: "a-new", created_at: 900 }), ask({ ask_id: "a-old", created_at: 1 })],
+		});
+		render(<AsksSheet open onClose={() => {}} />);
+		await waitFor(() => expect(screen.getAllByTestId("ask-card").length).toBe(2));
+		const cards = screen.getAllByTestId("ask-card");
+		expect(cards[0].getAttribute("data-ask-id")).toBe("a-old");
+	});
+
+	it("offers a retry when the read fails, instead of closing being the only move", async () => {
+		/* U6 (UX round 1): a hung or failed aggregate read left the sheet with no
+		   way forward but closing it. The hung case is bounded in the component
+		   (`AbortSignal.timeout`); the failed case gets this control. */
+		(getAsks as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+			new Error("could not reach the daemon"),
+		);
+		render(<AsksSheet open onClose={() => {}} />);
+		await waitFor(() => expect(screen.getByText("could not reach the daemon")).toBeTruthy());
+		(getAsks as ReturnType<typeof vi.fn>).mockResolvedValue({ asks: [ask()] });
+		fireEvent.click(screen.getByRole("button", { name: /try again/ }));
+		await waitFor(() => expect(screen.getByTestId("ask-card")).toBeTruthy());
+	});
+
 	it("warns before the tap when the owning conversation has ended", async () => {
 		rows = [summary({ ended: true })];
 		render(<AsksSheet open onClose={() => {}} currentSessionId="mine" />);

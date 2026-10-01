@@ -49,13 +49,15 @@ describe("session row outstanding asks", () => {
 	it("states the count when asks are waiting", () => {
 		sessionList = [summary({ asks_open: 2 })];
 		render(<SessionListScreen />);
-		expect(screen.getByText("2 questions")).toBeTruthy();
+		/* The chip states ASKS, the field's own unit (agent review round 1, R3):
+		   `asks_open` counts open asks and it was labelled with the bar's unit. */
+		expect(screen.getByText("2 asks")).toBeTruthy();
 	});
 
 	it("says it in the singular for one, and is absent at zero", () => {
 		sessionList = [summary({ session_id: "a", conversation_name: "One", asks_open: 1 })];
 		render(<SessionListScreen />);
-		expect(screen.getByText("1 question")).toBeTruthy();
+		expect(screen.getByText("1 ask")).toBeTruthy();
 		cleanup();
 		sessionList = [summary({ session_id: "b", conversation_name: "None", asks_open: 0 })];
 		render(<SessionListScreen />);

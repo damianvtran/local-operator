@@ -5,7 +5,7 @@
 // empty list, which is the contract's own spelling for "no answer"), the
 // answerable-after-deadline state, and the rule that a refusal is rendered in
 // the DAEMON's own words rather than humanised here.
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AskCard } from "./components/ask-card";
 import type { AskQuestion, PendingAsk } from "./types";
@@ -149,11 +149,83 @@ describe("AskCard", () => {
 		);
 		unmount();
 		vi.clearAllMocks();
-		renderCard(ask());
+		/* DISMISS IS A `timed_out` ACTION (agent review round 1, R1): the queue
+		   accepts no other status, so the control is offered only where it can
+		   land. The open-ask assertion below is the regression guard — the button
+		   used to be rendered on an open ask, where every tap collected a
+		   refusal sentence that was false about the row under it. */
+		renderCard(ask({ status: "timed_out" }));
 		fireEvent.click(screen.getByRole("button", { name: /dismiss — send no reply/ }));
 		await waitFor(() =>
 			expect(sendCommand).toHaveBeenCalledWith("s1", { op: "ask_dismiss", ask_id: "ask-1" }),
 		);
+	});
+
+	it("offers dismiss only on a timed-out ask", () => {
+		const { unmount } = renderCard(ask());
+		expect(screen.queryByRole("button", { name: /dismiss/ })).toBeNull();
+		unmount();
+		renderCard(ask({ status: "timed_out" }));
+		expect(screen.getByRole("button", { name: /dismiss — send no reply/ })).toBeTruthy();
+	});
+
+	it("keeps the answer draft across an unmount — collapse and return keeps it", async () => {
+		/* Q-1 (QA) = U1 (UX): §5.0-R7 requires BOTH drafts to survive a collapse.
+		   The draft used to be component state and the sheet unmounts when it
+		   closes, so collapsing to read the transcript and coming back re-answered
+		   every question from scratch. This asserts the survival at the level the
+		   failure happened — same ask id, a fresh mount. */
+		const first = renderCard(ask());
+		fireEvent.click(screen.getByRole("button", { name: /yes/ }));
+		expect(screen.getByRole("button", { name: /yes/ }).getAttribute("aria-pressed")).toBe("true");
+		first.unmount();
+
+		renderCard(ask());
+		expect(screen.getByRole("button", { name: /yes/ }).getAttribute("aria-pressed")).toBe("true");
+		expect(
+			(screen.getByRole("button", { name: /send answer/ }) as HTMLButtonElement).disabled,
+		).toBe(false);
+	});
+
+	it("composes two picks made in the same tick, instead of losing the first", async () => {
+		/* Found by the capture rig, not by a unit test: the rig clicks both of the
+		   head ask's options inside ONE evaluate, so both handlers closed over the
+		   same pre-tick draft and the second overwrote the first — the form stayed
+		   incomplete and the send control stayed disabled while the frame showed an
+		   option pressed. One `act` is what reproduces that batching. */
+		const two = question({ id: "q1", question: "first?" });
+		const other = question({ id: "q2", question: "second?" });
+		renderCard(ask({ questions: [two, other] }));
+		const picks = screen.getAllByRole("button", { name: /^yes$/ });
+		await act(async () => {
+			fireEvent.click(picks[0]);
+			fireEvent.click(picks[1]);
+		});
+		expect(
+			(screen.getByRole("button", { name: /send answers/ }) as HTMLButtonElement).disabled,
+		).toBe(false);
+	});
+
+	it("marks the recommended option from the wire's own index", () => {
+		renderCard(ask({ questions: [question({ recommended: 0 })] }));
+		expect(screen.getByText(/· recommended/)).toBeTruthy();
+	});
+
+	it("says why an ask with nothing left to answer cannot be sent", () => {
+		/* R6 (agent review round 1): `draft_question_ids` had every question, so
+		   the card rendered no fields and a disabled send with no explanation. */
+		renderCard(ask({ draft_question_ids: ["q1"] }));
+		expect(screen.getByText(/nothing left to answer here/)).toBeTruthy();
+		expect(
+			(screen.getByRole("button", { name: /send answer/ }) as HTMLButtonElement).disabled,
+		).toBe(true);
+	});
+
+	it("degrades a settled row with no questions to a plain line instead of throwing", () => {
+		/* R5 (agent review round 1): `row.questions[0]` on a row that arrived
+		   without the list threw during render, which unmounts the sheet. */
+		renderCard({ ...ask({ status: "answered" }), questions: undefined } as unknown as PendingAsk);
+		expect(screen.getByTestId("ask-card")).toBeTruthy();
 	});
 
 	it("shows the queue's own refusal sentence verbatim, and restores the controls", async () => {

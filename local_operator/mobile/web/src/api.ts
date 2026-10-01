@@ -114,8 +114,8 @@ export function getCommands(): Promise<{ commands: SlashCommand[] }> {
     conversation's route. An ask outlives the runtime that queued it, so this
     answer never needs one — but answering one sent to a session with no live
     runtime is a refusal naming the reason, not a silent failure. */
-export function getAsks(): Promise<{ asks: PendingAsk[] }> {
-	return request("/api/asks");
+export function getAsks(signal?: AbortSignal): Promise<{ asks: PendingAsk[] }> {
+	return request("/api/asks", { signal });
 }
 
 export function getModels(): Promise<{ models: ModelEntry[] }> {
