@@ -26013,7 +26013,8 @@ class OperatorApp(App[None]):
             return ""
         return (
             "; but operator authority is not installed on this machine yet: neither can run "
-            "until `lop operator install` has run there (one privileged step)"
+            "until it is set up here — ask Local Operator to set up operator authority for "
+            "you (one approval and one admin password prompt)"
         )
 
     def _configured_approvals_mode(self) -> str | None:

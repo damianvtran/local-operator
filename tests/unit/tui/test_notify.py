@@ -962,10 +962,10 @@ def test_the_remote_park_copy_is_pinned() -> None:
     assert remote_park_card("demo-laptop", "approval") == (
         "Waiting for approval on demo-laptop\n"
         "Open the session here to deny it. Allowing it happens on demo-laptop (Touch ID) or "
-        "on a phone paired with it. If nothing there can check a signature: run "
-        "`lop operator install` on demo-laptop (one privileged step) — `lop network ready "
-        "--peer demo-laptop` shows the operator_authority row (a peer too old to report "
-        "that row answers `peer_too_old`, and needs `lop-update` first)."
+        "on a phone paired with it. If nothing there can check a signature: ask Local "
+        "Operator to set up operator authority there (one approval and one admin password "
+        "prompt) — if "
+        "that device is running an older build, updating it is what fixes that."
     )
     # The attached reader (the F-A shape): the lead swaps so the card does not
     # send this reader to open the session it is looking at (design round 1,
@@ -974,10 +974,10 @@ def test_the_remote_park_copy_is_pinned() -> None:
         "Waiting for approval on demo-laptop\n"
         "Its gate card has not reached this view — deny it here once it does. "
         "Allowing it happens on demo-laptop (Touch ID) or on a phone paired with it. "
-        "If nothing there can check a signature: run `lop operator install` on "
-        "demo-laptop (one privileged step) — `lop network ready --peer demo-laptop` "
-        "shows the operator_authority row (a peer too old to report that row answers "
-        "`peer_too_old`, and needs `lop-update` first)."
+        "If nothing there can check a signature: ask Local Operator to set up operator "
+        "authority there "
+        "(one approval and one admin password prompt) — if that device is running an "
+        "older build, updating it is what fixes that."
     )
     assert remote_park_card("demo-laptop", "approval", name="Backfill the audit log") == (
         "Backfill the audit log\n" + remote_park_card("demo-laptop", "approval")

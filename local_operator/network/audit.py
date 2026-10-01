@@ -183,6 +183,19 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # A membership-class event: who may borrow what changed here. "How could that
         # device spend my OpenAI account" is answered by exactly this record.
         "credential.placement",
+        # THE REMOTE ONBOARDING APPROVAL (remote-onboarding §2.4). Six lifecycle
+        # events for ONE durable record: the operator's single gesture that lets an
+        # agent install this product and the operator anchor on a remote device (or
+        # bootstrap the operator's own anchor locally — the same events, `kind`
+        # tells them apart). Membership-CLASS: `onboard_connected` is the moment a
+        # device could start appearing in the mesh, and `onboard_approved` is the
+        # authority decision that led there.
+        "onboard_requested",
+        "onboard_approved",
+        "onboard_denied",
+        "onboard_expired",
+        "onboard_connected",
+        "onboard_failed",
     }
 )
 
@@ -342,6 +355,20 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "credential.placement": frozenset(
         {"credential_key", "act", "sub", "owner_device", "holders", "skipped"}
     ),
+    # -- the remote onboarding approval -------------------------------------------
+    #
+    # `kind` is the record's own enum (device_onboard / local_authority);
+    # `key_id`/`spki_fp` are PUBLIC fingerprints of the anchor key the decision
+    # authorised (the anchor itself is public data) — never material, and neither
+    # spelling collides with FORBIDDEN_DETAIL_KEYS. `step`/`run_id` describe the
+    # receipt a runner transition carried, so an incident reader can tie the
+    # audit line to the record's own fold.
+    "onboard_requested": frozenset({"kind", "request_id", "surface", "device_id", "host"}),
+    "onboard_approved": frozenset({"kind", "key_id", "spki_fp"}),
+    "onboard_denied": frozenset({"kind"}),
+    "onboard_expired": frozenset({"kind"}),
+    "onboard_connected": frozenset({"kind", "run_id"}),
+    "onboard_failed": frozenset({"kind", "step", "run_id"}),
 }
 
 #: Detail keys that are dropped on sight, whatever the whitelist says. The second
@@ -416,6 +443,14 @@ DURABLE_EVENTS: frozenset[str] = frozenset(
         "device_rotated",
         "audit_rotated",
         "audit_pruned",
+        # The onboarding approval's DECISIONS and its arrival: an authority
+        # decision lost to a power cut would leave an installation with no record
+        # of who allowed it (the `member_capabilities_changed` argument).
+        # `onboard_requested`/`onboard_expired`/`onboard_failed` stay batched —
+        # routine lifecycle that a crash's last second need not preserve.
+        "onboard_approved",
+        "onboard_denied",
+        "onboard_connected",
     }
 )
 

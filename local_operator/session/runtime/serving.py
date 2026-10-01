@@ -811,6 +811,14 @@ class ServingSessionHandle(SessionHandle):
         self._background_tasks: set[asyncio.Future[Any]] = set()
         # request_id -> Future the gate/ask call is parked on.
         self._pending_futures: dict[str, asyncio.Future[Any]] = {}
+        # request_id -> (monotonic instant, settled value) for gates that LANDED
+        # recently. The desktop answer path retries ONCE under the same id when an
+        # acknowledgement is lost, so a repeat that finds no parked future is a
+        # repeat of an answer that already succeeded — not a refusal. Bounded by
+        # both an age and a count so it can never become a second store of gate
+        # state: the queue stays the single owner of settled state and this map
+        # only answers "did MY OWN id already settle, just now".
+        self._settled_futures: dict[str, tuple[float, Any]] = {}
         # request_id -> the AskQuestion.id the harness is waiting on (the
         # answer map's key — see ask_gate).
         self._pending_question_ids: dict[str, str] = {}
@@ -2588,6 +2596,27 @@ class ServingSessionHandle(SessionHandle):
         self._pending_futures.clear()
         return denied
 
+    #: How long a settled gate id is remembered, and how many at most. The retry
+    #: window is one control request (`DESKTOP_CONTROL_ATTACH_S` plus one ack
+    #: envelope), so a few minutes is far longer than any repeat can arrive; the
+    #: cap is what keeps the map bounded on a long session with many prompts.
+    _SETTLED_FUTURE_TTL_S = 300.0
+    _SETTLED_FUTURE_MAX = 64
+
+    def _record_settled_future(self, request_id: str, value: Any) -> None:
+        """Remember that ``request_id`` settled, with the value it settled to.
+
+        Called only from the loop-thread ``settle`` closure below, so it needs no
+        lock of its own (the same ordering ``_pending_futures`` relies on).
+        """
+        now = time.monotonic()
+        settled = self._settled_futures
+        settled[request_id] = (now, value)
+        for key in [k for k, (at, _) in settled.items() if now - at > self._SETTLED_FUTURE_TTL_S]:
+            settled.pop(key, None)
+        while len(settled) > self._SETTLED_FUTURE_MAX:
+            settled.pop(min(settled, key=lambda k: settled[k][0]), None)
+
     async def _resolve_pending(self, request_id: str, value: Any) -> None:
         """Atomically reserve and settle one gate on its owning event loop."""
         # THE GATE PATH NEEDS THE REFUSAL TOO (review round 2, UX U8). This is the
@@ -2604,6 +2633,22 @@ class ServingSessionHandle(SessionHandle):
         def settle() -> None:
             future = self._pending_futures.pop(request_id, None)
             if future is None or future.done():
+                settled = self._settled_futures.get(request_id)
+                if settled is not None and settled[1] == value:
+                    # A REPEAT OF AN ANSWER THAT LANDED, WITH THE SAME VALUE. The
+                    # desktop answer path re-issues once under the same id after a
+                    # lost acknowledgement (`session/attached.py::answer_gate`);
+                    # without this the owner answered "no longer waiting" to the
+                    # press it had already honoured. Success is the truthful report.
+                    #
+                    # THE VALUE MUST MATCH, and that is what keeps the
+                    # single-winner rule intact: a second front end answering the
+                    # SAME id with a DIFFERENT decision is still refused
+                    # (`test_concurrent_gate_answers_have_one_authoritative_winner`),
+                    # because reporting a choice the owner did not make would be a
+                    # worse lie than the refusal this change exists to fix.
+                    receipt.set_result(None)
+                    return
                 receipt.set_exception(ValueError("that prompt is no longer waiting"))
                 return
             try:
@@ -2611,6 +2656,7 @@ class ServingSessionHandle(SessionHandle):
             except (InvalidStateError, TypeError):
                 receipt.set_exception(ValueError("that prompt is no longer waiting"))
                 return
+            self._record_settled_future(request_id, value)
             receipt.set_result(None)
 
         self._loop.call_soon_threadsafe(settle)
@@ -7812,8 +7858,9 @@ class ServingSessionHandle(SessionHandle):
         it replaces it with the one thing that clause was standing in for: a
         sentence naming the route that actually works from where the reader is.
         On a host with no usable anchor the two levers the report names cannot run
-        yet, so the report has to say so and name the command that fixes it
-        (UX round 6, U1/U2 — the same gap the refusal copy had).
+        yet, so the report has to say so and name the SETUP ACTION that ends the
+        state (UX round 6, U1/U2 — the same gap the refusal copy had; the copy
+        rule §2.9: a remedy names a product action, never a terminal command).
         """
         from local_operator.operator import operator_authority_unusable
 
@@ -7821,7 +7868,8 @@ class ServingSessionHandle(SessionHandle):
             return ""
         return (
             "; but operator authority is not installed on this machine yet: neither can run "
-            "until `lop operator install` has run there (one privileged step)"
+            "until it is set up here — ask Local Operator to set up operator authority for "
+            "you (one approval and one admin password prompt)"
         )
 
     def _approvals_slash(
@@ -8604,6 +8652,48 @@ def _ladder(session: Any) -> list[str]:
         return []
 
 
+def _carried_auto_authority(root: Path, session_id: str) -> bool:
+    """Whether THIS device may honour a session's carried full-auto authority.
+
+    Two halves, both required, both read at ENGAGE:
+
+    * the STAMP says the session was created or moved here with full-auto
+      accepted at the door (``placement.MeshStamp.unattended``);
+    * THIS DEVICE's member row for the session's originating device says the
+      operator actually granted that device ``unattended`` here.
+
+    The stamp alone would be a session-writable file granting itself authority —
+    exactly the substitution the approval-authority design rejects — and the
+    grant alone says nothing about this session. Reading at engage is also what
+    makes a REVOCATION effective at the next engage: this function is called
+    from :func:`spawn_owned_session`, the one funnel every owned runtime goes
+    through (the phone child, a desktop spawn, and a relay-engaged runtime on a
+    peer all construct here), so the create, move and engage paths cannot drift.
+
+    FAILS CLOSED on every unreadable input: no stamp, no record, no row, a
+    removed member — each withholds auto and nothing else.
+    """
+    from local_operator.session.placement import read_stamp
+
+    try:
+        stamp = read_stamp(root, session_id)
+    except Exception:  # noqa: BLE001 — unreadable means no carry, never a crash
+        return False
+    if stamp is None or not stamp.unattended:
+        return False
+    origin = str(stamp.origin.get("source_device") or "") or stamp.home_device
+    if not origin or not stamp.network_id:
+        return False
+    try:
+        from local_operator.network import store as network_store
+
+        record = network_store.load(stamp.network_id, root=root)
+    except Exception:  # noqa: BLE001 — an absent/odd record withholds auto
+        return False
+    member = record.member(origin)
+    return bool(member is not None and member.active and member.has("unattended"))
+
+
 async def spawn_owned_session(
     loop: asyncio.AbstractEventLoop,
     *,
@@ -8684,6 +8774,15 @@ async def spawn_owned_session(
         logger.debug("could not read tool_approval_mode; defaulting to ask", exc_info=True)
         approval_mode = "ask"
     auto_approve = approval_mode == "auto"
+    # CARRIED AUTO AUTHORITY (remote-onboarding §6 defect 2). A session created
+    # or moved here under an accepted ``unattended`` request carries that fact on
+    # its ``mesh.json``; applying it is RE-CHECKED here, at engage, against this
+    # device's member row — so the carry cannot outrun a revocation and the
+    # stamp alone cannot loosen anything (see ``_carried_auto_authority``).
+    # ``resume`` is the session this construction adopts; a brand-new session
+    # has no stamp yet and stays on the boot value.
+    if not auto_approve and resume:
+        auto_approve = _carried_auto_authority(config_directory, resume)
 
     args = argparse.Namespace(
         hosting=provider,

@@ -1,0 +1,65 @@
+{
+  "provenance": {
+    "kind": "synthetic",
+    "adr_ref": "damianvtran/local-operator-mobile@b03aeb15fcbff64c5bbd0c4117713a0285c28554 docs/adr/0006-push-and-ack-sync.md",
+    "core_ref": "damianvtran/local-operator@b77fec9d4",
+    "sections": [
+      "§3.4",
+      "§3.3"
+    ],
+    "how": "constructed from the ADR's literals at the pinned ref and cross-checked against the core's own builders (tests/unit/mobile/test_push_wire_contract.py); not captured from a running relay, because no relay route emits the machine-side shapes yet"
+  },
+  "shape": "idempotency-keys",
+  "header": "Idempotency-Key",
+  "recipes": {
+    "completion": "sha256(completion_token ‖ anchor_id ‖ kind), lowercase hex. The three parts are concatenated in that order with NO separator and no salt; the ‖ in the ADR's recipe is the concatenation operator, not a literal character, and this file is where that reading is pinned so both sides derive byte-identical keys.",
+    "attention": "attention-<sequence>, the machine's monotone emit sequence persisted with the cursor that produced it. The prefix makes the two key spaces disjoint BY SHAPE (a completion key is 64 lowercase hex characters), so an attention emit can never collide with a completion emit."
+  },
+  "completion_vectors": [
+    {
+      "completion_token": "9f5d1d6e-6b1a-4c6e-9b3a-7a1c2f3d4e5f",
+      "anchor_id": "entry-1043",
+      "kind": "complete",
+      "key": "caba7885497b62be164808b9901bce0b9a3ceeebbe85b3563ec2913d48e1e86b"
+    },
+    {
+      "completion_token": "9f5d1d6e-6b1a-4c6e-9b3a-7a1c2f3d4e5f",
+      "anchor_id": "entry-1043",
+      "kind": "interrupted",
+      "key": "077e675f822be163c1851ce3b2f43c8dc37cad9b0ed97b340b392ffa414b66d3",
+      "why": "A HEAL, same turn: a different kind is a different key, so the correction is a new delivery and idempotency cannot swallow it."
+    },
+    {
+      "completion_token": "9f5d1d6e-6b1a-4c6e-9b3a-7a1c2f3d4e5f",
+      "anchor_id": "completion-9f5d1d6e",
+      "kind": "interrupted",
+      "key": "e4bd54af6c8f778a7b9d26f474ef03a6e7def7de1fa13a6ec8556b8b12ddbe8e",
+      "why": "The same token and kind under a DIFFERENT anchor is also a new key — the anchor is what makes a provisional record's supersede detectable."
+    },
+    {
+      "completion_token": "0b0a0908-0706-0504-0302-0100ffeeddcc",
+      "anchor_id": "entry-1044",
+      "kind": "closed",
+      "key": "ce9e8badd1ae9053d97beb291a17d111664aee42c170e82fdfc9f1009980f11c",
+      "why": "kind=closed is in the STORE's vocabulary and must be keyable: the composer's set does not carry it."
+    }
+  ],
+  "attention_vectors": [
+    {
+      "sequence": 1,
+      "key": "attention-1"
+    },
+    {
+      "sequence": 2,
+      "key": "attention-2"
+    },
+    {
+      "sequence": 41,
+      "key": "attention-41"
+    }
+  ],
+  "notes": [
+    "A duplicate or replayed completion key is a no-op cloud-side; a heal is not, because its key differs.",
+    "The badge is NOT a wire field and is not keyed here: it is the machine's count at read time, so a missed or reordered push cannot drift it."
+  ]
+}

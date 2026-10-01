@@ -176,11 +176,13 @@ def peer_session_row(session_id: str, root: Path | None = None) -> SessionRow | 
 class RemotePark(NamedTuple):
     """One LIVE parked request on a peer device, as the origin sees it.
 
-    The origin cannot answer a remote ALLOW (``operator_challenge`` is
-    deliberately absent from the mesh transport's capability set), so what a
-    park is worth at the origin is the FACT that a person is needed on
-    ``device``: this is the tuple every origin surface composes from — the
-    toast, the OS banner, and the card hint's device name.
+    The origin cannot answer a remote ALLOW — the OWNER takes one only as a
+    signature from a device the operator has paired with it (a challenge minted
+    there, answered with its key), so the requesting device's own gesture is
+    refused by the owner's runtime by design. What a park is worth at the origin
+    is the FACT that a person is needed on ``device``: this is the tuple every
+    origin surface composes from — the toast, the OS banner, and the card hint's
+    device name.
 
     ``device_name`` can be empty (a peer that never reported a name), so a
     reader falls back to ``device_id`` exactly as the lifecycle router does

@@ -135,6 +135,17 @@ class MeshStamp:
     #: mistake it for one (INV-1) — so this is a notification list, not a
     #: placement claim, and it is the one field here that is about OTHER devices.
     replicas: list[str] = field(default_factory=list)
+    #: CARRIED AUTO AUTHORITY (remote-onboarding §6 defect 2). True when this
+    #: session was created or moved here with full-auto accepted at the door:
+    #: the granted-``unattended`` create path stamps it, and a move preserves
+    #: it. HONORING IT IS RE-CHECKED, at every engage, against THIS device's
+    #: member row for the device the session came from
+    #: (``serving._carried_auto_authority``) — so this field is a CARRY, never
+    #: the authority itself: a stamp alone cannot loosen a gate (it is a
+    #: session-writable file), and a revoked grant takes effect at the next
+    #: engage. Absent (a stamp an older build wrote) reads as False, the
+    #: conservative direction: it can only ever withhold auto, never grant it.
+    unattended: bool = False
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -146,6 +157,7 @@ class MeshStamp:
             "origin": dict(self.origin),
             "created_at": self.created_at,
             "replicas": list(self.replicas),
+            "unattended": bool(self.unattended),
         }
 
     @staticmethod
@@ -196,6 +208,7 @@ class MeshStamp:
             created_at=float(data.get("created_at") or 0.0),
             version=_as_int(data.get("version")) or MESH_STAMP_VERSION,
             replicas=replicas,
+            unattended=bool(data.get("unattended")),
         )
 
 

@@ -43,6 +43,7 @@ from local_operator.server.routes import (
     config,
     credentials,
     desktop_aida,
+    desktop_approvals,
     desktop_catalogues,
     desktop_claim,
     desktop_hub,
@@ -785,6 +786,14 @@ app.include_router(desktop_runtimes.router)
 # the sessions router has no single-segment `/v1/desktop/{...}` path and no `/transfer`
 # child, and no block above declares `/peers` or `/networks`.
 app.include_router(desktop_mesh.router)
+# The APPROVALS surface (`features.approvals`): the onboarding card's read and its
+# two answers. DEVICE-LOCAL — these routes open no socket, so there is nothing to
+# collide with and nothing to dial — but registered here anyway, with the mesh block
+# above it, so the mesh family's routes read as one neighbourhood; its templates
+# (`/v1/desktop/approvals`, `/v1/desktop/approvals/{id}/approve|deny`) match no
+# template declared earlier (`{id}/approve`/`{id}/deny` are two-segment children of a
+# path nothing else declares).
+app.include_router(desktop_approvals.router)
 
 # Add CORS middleware
 app.add_middleware(
