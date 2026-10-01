@@ -592,7 +592,7 @@ export function SessionScreen({
 		return (
 			<div
 				ref={rootRef}
-				className="relative mx-auto flex h-dvh w-full max-w-md flex-col overflow-hidden"
+				className="relative mx-auto flex h-dvh w-full max-w-[var(--lo-column-max,28rem)] flex-col overflow-hidden"
 			>
 				<header className="flex items-center gap-2 border-b border-hairline px-1 py-1 pt-[max(env(safe-area-inset-top),0.25rem)]">
 					<button
@@ -625,7 +625,7 @@ export function SessionScreen({
 	return (
 		<div
 			ref={rootRef}
-			className="relative mx-auto flex h-dvh w-full max-w-md flex-col overflow-hidden"
+			className="relative mx-auto flex h-dvh w-full max-w-[var(--lo-column-max,28rem)] flex-col overflow-hidden"
 		>
 			{jobId ? (
 				<AgentScreen
