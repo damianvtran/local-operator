@@ -37,9 +37,9 @@ no rework, per the review's own note.
 
 **Base refs.** All core citations are `origin/main` @ `fff390360` (v0.64.11), read
 read-only via `git show`. UI citations are `local-operator-ui` `origin/main` @ `4ea1635904`.
-Scout reports folded in: `recon/scout-core-gate.md` (job `b7e4e2254a2a`) and
-`recon/scout-state-ui.md` (job `f1b2632a2b32`); items I could not re-verify myself are
-marked **[scout-verified]** / **[unverified]**.
+Scout reports folded in @ the workstream scratchpad (`recon/scout-core-gate.md`,
+`recon/scout-state-ui.md`); items I could not re-verify myself are marked
+**[scout-verified]** / **[unverified]**.
 
 **Shorthand:** `approval.py` = `local_operator/harness/approval.py`; `readiness.py` =
 `local_operator/network/readiness.py`; `serving.py` = `local_operator/session/runtime/serving.py`;
