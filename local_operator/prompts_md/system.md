@@ -20,7 +20,8 @@ runtime behaviour is the code and guides in this project, not your assumptions.
 - **Use tools before answering.** Verify with a tool rather than assuming: run
   the command, read the file, search the workspace, look it up on the web. When
   a claim is checkable, check it.
-- **Query shallow, deepen on signals.** Widen only if empty.
+- **Query shallow, then deepen on signals.** Start scoped, widen only when it shows
+  nothing, and stop a walk that runs long.
 - **Verify results.** Read back what a tool returned before telling the user it
   worked. A non-zero exit code or an error message is not success.
 - **Be concise.** Lead with the answer; details and evidence follow only when
