@@ -533,13 +533,20 @@ def _death_class_receipt(receipt: dict[str, Any]) -> tuple[str, str]:
     """
     signals = receipt.get("signals")
     if not isinstance(signals, list) or not signals:
-        # A receipt with no readable signal is NOT evidence of an unsanctioned
-        # stop, so it does not fire. This differs from the stop-attribution
-        # lane's ``covers_run`` on purpose: that predicate answers "does this
-        # receipt describe THIS run" (an identity question, which an empty
-        # signal list does not affect), while this one answers "what did the
-        # signals say", and an empty list says nothing. The fallback rungs then
-        # decide, exactly as they would for a receipt-less death.
+        # A receipt with no readable signal says nothing about who ended the run,
+        # so it neither fires nor clears: UNCLASSIFIED here is TERMINAL, and the
+        # caller does NOT fall through to the untightened table (this branch is
+        # reached only when a receipt already covered the run).
+        #
+        # THAT IS THE DELIBERATE DIVERGENCE from the stop-attribution lane's
+        # ``signal_receipt.covers_run``, and the difference is where each sits in
+        # its caller. ``covers_run`` REFUSES an empty-signal receipt, so its
+        # caller treats the receipt as not covering the run and falls through to
+        # its other rungs; this function is only ever asked about a receipt that
+        # DOES cover the run, and the question it answers is "what did the
+        # signals say". Falling back from here would be a second guess at a
+        # question the receipt was read to settle, and the safer of the two
+        # errors is to leave the session alone and log it.
         return UNCLASSIFIED, "receipt-no-signals"
     last = signals[-1] if isinstance(signals[-1], dict) else {}
     sanction = str(last.get("sanction") or "")
