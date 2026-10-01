@@ -914,7 +914,38 @@ def build_cli_parser() -> argparse.ArgumentParser:
         type=_positive_int,
         default=None,
         metavar="N",
-        help="with --all, cap the stored rows listed; positive (default: 50)",
+        help="with --all (or a set filter), cap the stored rows listed; positive (default: 50)",
+    )
+    # THE TWO SET FILTERS (bulk resume, 2026-10-01). They are plain booleans
+    # with NO argument-shaped requirement, because the sets are named by the
+    # words the operator already uses and the mapping to the attention store's
+    # kinds is a product decision that lives in ONE place (``info.collect``'s
+    # FAILED_OUTCOME_KINDS / PAUSED_OUTCOME_KINDS, with the full "why" on the
+    # constants). Both flags together select the UNION of the sets — the
+    # natural reading of "show me everything stopped or broken".
+    #
+    # A SET FILTER IMPLIES THE STORE: it answers a question about STORED
+    # sessions (``--sessions-plus-store``), and with one active the listing is
+    # EXACTLY the matched stored set — the live fleet is not mixed in, because
+    # a running session is not a member of either set and a mixed answer would
+    # imply the resume path would touch it. See ``session_rows``.
+    sessions_parser.add_argument(
+        "--paused",
+        action="store_true",
+        help=(
+            "list only stored sessions whose last turn was STOPPED rather than "
+            "completed or lost — a deliberate stop or a build retirement "
+            "(the set the bulk-resume path selects; implies --all)"
+        ),
+    )
+    sessions_parser.add_argument(
+        "--failed",
+        action="store_true",
+        help=(
+            "list only stored sessions whose last recorded outcome was a failure "
+            "(an involuntary death with no deliberate-stop evidence; implies --all). "
+            "A death whose outcome was never imported is in neither set"
+        ),
     )
     # THE MESH'S TWO LISTING FLAGS (mesh-session-mobility.md §9.3). Both default
     # off, so a client that does not ask gets exactly today's answer — which is
@@ -4935,12 +4966,34 @@ def sessions_command(args: argparse.Namespace) -> int:
     # of the CLI's published contract, so ``session_rows`` pins it explicitly
     # rather than deriving it from the dataclass — which would also have leaked
     # ``is_self``, a field this command never had.
-    from local_operator.info.collect import session_rows
+    from local_operator.info.collect import (
+        FAILED_OUTCOME_KINDS,
+        PAUSED_OUTCOME_KINDS,
+        session_rows,
+    )
 
     # ``--limit`` bounds the STORED rows only — the live fleet is always listed
     # in full, and a stored cap means nothing without ``--all`` asking for them.
     # ``None`` lets ``collect`` apply its own stored cap.
-    rows = session_rows(config_dir(), include_stored=args.all, stored_limit=args.limit)
+    #
+    # THE SET FILTERS (``--paused`` / ``--failed``): each flag adds its set's
+    # kinds to one union, so both together select either set's members; a filter
+    # on selects the store half (see the parser's note) and ``session_rows``
+    # answers EXACTLY the matched stored rows. ``getattr`` because the flag
+    # attributes are newer than the Namespace builders some callers (and old
+    # tests) hand in — the same tolerance the two mesh flags already take.
+    selected_kinds: frozenset[str] = frozenset()
+    if getattr(args, "paused", False):
+        selected_kinds |= PAUSED_OUTCOME_KINDS
+    if getattr(args, "failed", False):
+        selected_kinds |= FAILED_OUTCOME_KINDS
+
+    rows = session_rows(
+        config_dir(),
+        include_stored=args.all or bool(selected_kinds),
+        stored_limit=args.limit,
+        stored_kinds=selected_kinds or None,
+    )
 
     # THE FEDERATED LISTING (§9.1/§9.3). Both flags default off, so nothing below
     # runs and the local listing is byte-identical to what it was before the mesh
