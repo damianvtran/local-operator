@@ -75,9 +75,9 @@ Two things this build mints, and they are deliberately different:
 - **``device_key``** — one secret per device, minted and returned by every
   ``register`` call and stored machine-side. It is what a later request moves its
   own device's state with (ADR §4 rule 2's ``m3``: ``X-Lop-Device`` alone is a
-  claim, the key is the proof); :func:`device_key_matches` is the comparison, and
-  it drops out of this file and into the routes when S4c lands. It is returned
-  ONCE per call, is never rendered by ``list``, and never reaches a log.
+  claim, the key is the proof); :func:`device_key_matches` is the comparison and
+  :func:`note_credential` is its one caller. It is returned ONCE per call, is
+  never rendered by ``list``, and never reaches a log.
 - **``operator_key``** — one per machine, stored in this file beside the records
   and never given to any device. It is how the daemon's operators-only route
   (``.../unrevoke``) knows a caller is the machine's own surface rather than a
@@ -97,6 +97,38 @@ build wrote neither, and an upgrade must not refuse a store the previous version
 produced. Absence is the truth for those rows — ``list`` omits a credential
 field it does not have rather than inventing a value for it (the repo's absence
 rule) — and the next ``register`` fills them in.
+
+**The credential fields, and who may write them** (push/ack-sync S4c; ADR §4
+rule 2). Three of the record's optional fields exist for one question — *may the
+cloud deliver to this device?* — and the answer is the relay's to compute,
+because the relay is the only component that sees the ``lop_mobile`` cookie:
+
+- ``credential_expires_at`` — the instant the cookie the device last PRESENTED
+dies (``auth.cookie_expiry``). Written at ``register`` time, because the
+registering row is the device that presented it and the relay's ``/login`` route
+knows no device (round 7 Q-F15 / R8-m1). This is the field the lapse is DERIVED
+from; on the Radient route the gateway mints a fresh cookie per request, so no
+cookie there is ever old and that route's lock is the cloud's grant, not this
+clock.
+- ``credential_live`` and ``last_authenticated_at`` — the flag and the stamp.
+Written ONLY by :func:`note_credential`, on an authenticated request that names
+its device with the key minted for it, which is what makes the write
+attributable (a register on its own cannot attribute the computer's cookie to one
+device: review round 1 R4).
+- :func:`credential_live_at` is the ONE derivation — the stored flag, the
+Settings list and the credential report all answer "live?" through it, so no two
+readers can disagree about what the word means.
+
+**Who writes a MARKER, and the direction that matters.** The relay's routes write
+markers: ``register`` clears ``expired_at`` (the restore path), :func:`rotate_credentials`
+sets ``expired_at`` on every row when the relay password rotates, and
+:func:`note_credential` sets it when a request arrives carrying a stale cookie.
+The EMIT side writes nothing at all: :func:`credential_facts` is its only input
+and is read-only, which is what makes "the emit worker writes no marker" a
+structural fact rather than a promise. And the asymmetry the whole design rests
+on is that a device's own report can only PAUSE its delivery, never restore it —
+:func:`note_credential` never clears a marker, so accepting a self-reported
+lapse is safe (§4 rule 2).
 """
 
 from __future__ import annotations
@@ -193,6 +225,20 @@ MACHINE_ONLY_MESSAGE = "a device cannot restore itself — use the computer or y
 OPERATOR_KEY_HEADER = "X-Lop-Operator-Key"
 OPERATOR_KEY_FIELD = "operator_key"
 
+#: The two headers a relay request presents to move ITS OWN device's credential
+#: state (ADR §4 rule 2's ``m3``; the names are S3's settled ones). ``X-Lop-Device``
+#: names the ``install_id`` — attribution only, a CLAIM — and ``X-Lop-Device-Key``
+#: carries the per-device key minted at registration, which is what makes the
+#: claim a proof. A request without the key moves NO device's state: the key is
+#: IDENTITY, never permission, which is why a valid key for a tombstoned row is
+#: still refused by the state rules (:func:`note_credential`).
+#:
+#: Both are HEADERS and never query parameters, and both are spelled here rather
+#: than in the daemon for the same reason the refusal sentences are: the header
+#: the phone sends and the header the relay reads must be one string each.
+DEVICE_HEADER = "X-Lop-Device"
+DEVICE_KEY_HEADER = "X-Lop-Device-Key"
+
 #: The CLOUD's idle-drop threshold, in days (ADR §2.2): a device with no
 #: authenticated request for this long has its row deleted cloud-side, with no
 #: marker. It is defined here, once, because the CLI renders a sentence that
@@ -250,6 +296,7 @@ _OPTIONAL_RECORD_FIELDS = frozenset(
         "name",
         "device_key",
         "credential_live",
+        "credential_expires_at",
         "last_authenticated_at",
         "expired_at",
         "unpaired_at",
@@ -356,6 +403,46 @@ def device_state(record: Mapping[str, Any]) -> str:
     return STATE_LIVE
 
 
+def credential_live_at(record: Mapping[str, Any], now: float) -> bool:
+    """THE lapse rule for one device at one instant (ADR §4 rule 2).
+
+    A device's credential is live while the cookie it last presented has not
+    died: ``credential_expires_at > now``. The instant is the COOKIE'S OWN and
+    not a timer and not a last-request stamp (round 7 Q-F15: the cookie is signed
+    once at login and never renewed, so ``last_authenticated_at`` + TTL would
+    over-report — a phone silent since day 29 would look alive until day 59 while
+    its cookie really died on day 30).
+
+    Two inputs, in this order, and the order is the design:
+
+    1. an ``expired_at`` marker answers NOT live, outright. It is the one fact a
+       rotation writes that no clock can infer (a rotation kills every cookie
+       while each `credential_expires_at` is still days in the future), so the
+       marker has to outrank the arithmetic or a rotated device would report
+       live until its dead cookie's nominal expiry.
+    2. ``credential_expires_at`` when the row carries one — the derivation, read
+       fresh. This is what makes a lapse observable with NO request at all (the
+       heartbeat case an app that was shut all week produces), which is why the
+       report recomputes through here rather than reading the stored flag.
+    3. the stored ``credential_live`` otherwise, for a row an earlier build wrote
+       before the expiry was recorded. Absent on all three is NOT live: a device
+       no request has ever named has no credential fact, and inventing one would
+       tell the cloud it may deliver on evidence the machine does not hold.
+
+    It is one function and not a rule restated per caller so that every reader —
+    the Settings list, the credential report, the recompute itself — answers
+    "live?" the same way, and the only thing that can differ between them is the
+    instant they ask about. The stored flag is an INPUT to it (point 3), never a
+    second answer beside it (review round 1, AR-1).
+    """
+    if "expired_at" in record:
+        return False
+    expires = record.get("credential_expires_at")
+    if isinstance(expires, int) and not isinstance(expires, bool):
+        return expires > now
+    return bool(record.get("credential_live"))
+
+
 def device_key_matches(record: Mapping[str, Any], presented: object) -> bool:
     """Whether ``presented`` is this device's key (ADR §4 rule 2's ``m3``).
 
@@ -363,9 +450,9 @@ def device_key_matches(record: Mapping[str, Any], presented: object) -> bool:
     is not a string, an empty presentation. This is the check that makes
     ``X-Lop-Device: <install_id>`` a proof rather than a claim — a request that
     moves a device's state must present the key minted for that device at
-    registration, so a stolen cookie cannot vouch for a sibling device. Nothing
-    consumes it yet: the routes that move credential state are S4c, and landing
-    the helper here is what lets them reuse one comparison.
+    registration, so a stolen cookie cannot vouch for a sibling device. Its one
+    caller is :func:`note_credential`, which is why the comparison lives here
+    rather than on that route.
     """
     stored = record.get("device_key")
     if not isinstance(stored, str) or not stored:
@@ -423,7 +510,13 @@ def verify_operator_key(config_dir: Path, presented: object) -> bool:
     return hmac.compare_digest(stored.encode(), presented.encode())
 
 
-def register(config_dir: Path, body: object, *, now: float | None = None) -> dict[str, Any]:
+def register(
+    config_dir: Path,
+    body: object,
+    *,
+    credential_expires_at: int | None = None,
+    now: float | None = None,
+) -> dict[str, Any]:
     """``POST /api/push/register`` — record one device, idempotent on identity.
 
     The upsert IS the idempotency (module docstring): a re-register with a
@@ -460,9 +553,23 @@ def register(config_dir: Path, body: object, *, now: float | None = None) -> dic
     so "cannot tell device A from device B". A successful register therefore
     proves an authenticated connection, not this device's live credential — and
     the relay's per-device reading is where §4 rule 2 puts it: a request that
-    NAMES its device (``X-Lop-Device`` + the key minted here) is S4c's route, and
-    that is where those two fields are written. Until then ``list`` omits them
-    rather than over-claiming a flag the ADR has the cloud enforce against.
+    NAMES its device (``X-Lop-Device`` + the key minted here) is
+    :func:`note_credential`'s route, and that is where those two fields are
+    written. Until then ``list`` omits them rather than over-claiming a flag the
+    ADR has the cloud enforce against.
+
+    ``credential_expires_at`` IS written here, and the difference from the two
+    fields above is the whole of ADR §4 rule 2's round 7 Q-F15 / R8-m1: the
+    expiry is not a claim about this device, it is the instant the cookie the
+    request PRESENTED dies, and the registering row is the device that presented
+    it — so the caller reads it off the cookie (``auth.cookie_expiry``) and hands
+    it in. The relay's ``/login`` route cannot write it: it knows no device, and
+    on a first install there is no row to write it to. The value is the DIRECT
+    route's lapse rule (``credential_live_at`` compares it against now); on the
+    RADIENT route the gateway mints a fresh cookie on every request
+    (``tunnels/gateway.py``'s ``sign_cookie`` call), so no cookie there is ever
+    old and a device's liveness on that route is the CLOUD's grant, not this
+    clock (ADR §4 rule 2).
     """
     fields = _checked_registration(body)
     with _LOCK:
@@ -507,6 +614,13 @@ def register(config_dir: Path, body: object, *, now: float | None = None) -> dic
         # The two refusal markers are untouched — a row that reaches here has
         # neither, and clearing one would undo a decision no request made.
         record.pop("expired_at", None)
+        # The presented cookie's own expiry (the parameter's docstring above):
+        # refreshed on every register, so the direct route's lapse rule tracks
+        # the cookie the app is actually holding. A caller that presents no
+        # cookie fact (a non-browser client, a probe) leaves whatever the row
+        # already carries alone rather than clearing a real one.
+        if credential_expires_at is not None:
+            record["credential_expires_at"] = int(credential_expires_at)
         record["device_key"] = device_key
         # The machine's operator key is minted WITH the first device, inside this
         # daemon-side write rather than lazily by the CLI: exactly one process
@@ -527,7 +641,213 @@ def register(config_dir: Path, body: object, *, now: float | None = None) -> dic
         }
 
 
-def list_devices(config_dir: Path) -> dict[str, Any]:
+def note_credential(
+    config_dir: Path,
+    *,
+    install_id: object,
+    device_key: object,
+    credential_expires_at: object,
+    now: float | None = None,
+) -> dict[str, Any] | None:
+    """Apply ONE authenticated request's credential evidence to ITS device.
+
+    This is ADR §4 rule 2's evaluation, and it is the relay's because the relay
+    is the only component that sees the ``lop_mobile`` cookie. It runs on an
+    authenticated request that NAMES a device — ``X-Lop-Device: <install_id>``
+    plus ``X-Lop-Device-Key: <device_key>`` — and recomputes that device's
+    ``credential_live`` and ``last_authenticated_at`` from the expiry the request
+    presented (``auth.cookie_expiry`` on the cookie, which is what makes the
+    instant the COOKIE'S and not ``now``).
+
+    The three refusals that make it safe, each of which is a test:
+
+    * **no key, or a wrong one, moves NO device's state.** Attribution is bound,
+      not asserted (``m3``): ``X-Lop-Device`` is a claim anyone holding the
+      computer's cookie can make, so without the per-device key there is no
+      proof and this function returns ``None`` without so much as reading the
+      store's answer into a write. A request naming a device that is not in the
+      registry is the same case — there is nothing to attribute to.
+    * **a valid key for a TOMBSTONED row moves nothing.** The key proves
+      IDENTITY, never PERMISSION (``push_devices``' header constants say so):
+      the state rules still win, so a revoked or unpaired device cannot write a
+      credential fact that would restore it. Checked BEFORE the recompute, so
+      there is no intermediate state to observe.
+    * **it can only PAUSE, never restore.** A lapsed cookie writes ``expired_at``;
+      nothing here ever CLEARS a marker. That asymmetry is the whole reason a
+      device's own report is safe to accept (ADR §4 rule 2: "every self-reported
+      action here can only *pause* its own delivery, never restore it"). The way
+      back is the register that follows an authenticated login, which clears
+      ``expired_at`` because the credential that earned it was live.
+
+    **What it writes, exactly — and a claim this docstring used to get wrong**
+    (review round 1, AR-5). It rewrites the row once per ATTRIBUTABLE request,
+    and that is the semantics rather than an accident: ``last_authenticated_at``
+    IS the fact such a request updates, so the row changes whenever the request
+    crosses an integer second. The ``before == after`` guard below therefore
+    suppresses a rewrite only inside the same second (a retry, a burst); an
+    earlier draft claimed it left a phone polling every 2 s as a non-writer,
+    which was false of the code. The fix is the claim, not the write — "when did
+    this device last authenticate" is a question whose whole point is that it
+    moves, and the ADR's list shape renders it. What the guard does buy is that a
+    same-second burst does not touch the file, so the store's mtime stays a signal
+    a reader can use rather than noise.
+
+    The return value is ``None`` for "no state moved" and otherwise the moved
+    facts, which is what lets a caller (or a test) tell an evaluation apart from
+    a no-op without reading the store behind it.
+    """
+    stamp = int(time.time() if now is None else now)
+    if not isinstance(credential_expires_at, int) or isinstance(credential_expires_at, bool):
+        return None
+    if not isinstance(install_id, str) or not install_id:
+        return None
+    with _LOCK:
+        store = _load_store(config_dir)
+        record = next(
+            (
+                candidate
+                for candidate in store["devices"]
+                if candidate.get("install_id") == install_id
+                and device_key_matches(candidate, device_key)
+            ),
+            None,
+        )
+        if record is None:
+            return None
+        if device_state(record) in (STATE_REVOKED, STATE_UNPAIRED):
+            # Refused rather than written-and-ignored: the marker is the machine's
+            # answer, and a credential fact written underneath it would be a
+            # second one.
+            return None
+        # The recompute. ``credential_live_at`` is asked about the row with the
+        # presented expiry in place, so a marker a rotation wrote still outranks
+        # the arithmetic — this request may not be the first evidence since it.
+        presented_live = credential_expires_at > stamp
+        live = credential_live_at({**record, "credential_expires_at": credential_expires_at}, stamp)
+        before = {
+            "credential_live": record.get("credential_live"),
+            "credential_expires_at": record.get("credential_expires_at"),
+            "last_authenticated_at": record.get("last_authenticated_at"),
+            "expired_at": record.get("expired_at"),
+        }
+        record["credential_expires_at"] = credential_expires_at
+        record["credential_live"] = live
+        record["last_authenticated_at"] = stamp
+        if not presented_live:
+            # Written from the COOKIE's own death, not this request's clock: the
+            # phone may arrive up to the cookie skew late, and the marker is meant
+            # to say when the credential lapsed. Guarded on the presented cookie
+            # rather than on the derived flag because a live cookie must never
+            # stamp a FUTURE instant into a marker — a row a rotation expired, and
+            # whose device has since logged in again, keeps the rotation's
+            # instant until the register that clears it (this function may not
+            # restore delivery; ADR §4 rule 2's "one writer" says the register is
+            # where ``expired_at`` goes).
+            record["expired_at"] = credential_expires_at
+        after = {
+            "credential_live": record.get("credential_live"),
+            "credential_expires_at": record.get("credential_expires_at"),
+            "last_authenticated_at": record.get("last_authenticated_at"),
+            "expired_at": record.get("expired_at"),
+        }
+        if after == before:
+            return None
+        _save(config_dir, store)
+        return {
+            "device_id": record["device_id"],
+            "state": device_state(record),
+            **after,
+        }
+
+
+def credential_facts(config_dir: Path, *, now: float | None = None) -> list[dict[str, Any]]:
+    """READ-ONLY per-device credential facts — the emit path's only input.
+
+    The counterweight to :func:`note_credential` and the reason the "one writer"
+    rule is structural rather than a convention: this function cannot write,
+    because the only mutation in this module runs under ``_LOCK`` inside the
+    functions that spell ``_save``, and an emitter that went through here
+    physically has no call to make (ADR §4 rule 2: "the emit worker writes no
+    marker at all: it reads the flag and the markers, skips a device, and emits
+    the event"). A test asserts the read leaves the store's bytes and mtime
+    untouched, so the invariant fails loudly if a future edit reaches for a write.
+
+    ``credential_live`` is the derived value at ``now`` (:func:`credential_live_at`)
+    rather than the stored flag — that is what lets an app that has been shut for
+    a week be reported not-live at the next heartbeat with no request involved.
+    ``expired_at``/``unpaired_at``/``revoked_at`` ride along because the emitting
+    side must skip a device the machine has marked; the wire block built from
+    this keeps only the four fields the ADR names.
+    """
+    stamp = float(time.time() if now is None else now)
+    facts: list[dict[str, Any]] = []
+    with _LOCK:
+        records = _load(config_dir)
+    for record in records:
+        fact: dict[str, Any] = {
+            "device_id": record["device_id"],
+            "state": device_state(record),
+            "credential_live": credential_live_at(record, stamp),
+        }
+        for field in ("credential_expires_at", "last_authenticated_at", "expired_at"):
+            if field in record:
+                fact[field] = record[field]
+        facts.append(fact)
+    return facts
+
+
+def rotate_credentials(config_dir: Path, *, now: float | None = None) -> list[str]:
+    """A relay-password rotation: every device's cookie dies at once.
+
+    The machine-side half of ADR §4 path 3, and it is ONE action for the whole
+    registry because the cookie key is derived from the password — rotating it
+    invalidates every device's ``lop_mobile`` cookie simultaneously
+    (``auth``'s module docstring). It writes ``expired_at`` and NEVER
+    ``revoked_at``, which is the distinction §4 turns on: a rotation is not a
+    decision about any device, the tokens are kept, and every device is welcome
+    back the moment it authenticates (the register that follows a fresh login
+    clears the marker).
+
+    Every row gets the marker, including one already carrying a stronger one: the
+    truth it records — this cookie died here — is true of all of them, and
+    precedence (``revoked`` > ``unpaired`` > ``expired``) is what keeps each row's
+    ANSWER stable. The returned ids are what the caller hands to the credential
+    report, which is where §4 rule 2's "one credential-change event per rotation"
+    is enforced — one event naming every device, never one per device.
+
+    On the RADIENT route this is an outage rather than a lever (§4 path 3): the
+    gateway signs with the password it read at construction, so until the
+    connector restarts it signs with a STALE one and every device of that
+    computer stops, a restart healing all of them. The account side is the lever
+    there; this marker is still the honest machine-side record of what happened.
+    """
+    stamp = int(time.time() if now is None else now)
+    with _LOCK:
+        store = _load_store(config_dir)
+        rotated: list[str] = []
+        changed = False
+        for record in store["devices"]:
+            rotated.append(record["device_id"])
+            if record.get("expired_at") == stamp:
+                # Idempotent: a second rotation at the same instant writes nothing.
+                continue
+            # The marker ALONE, and no ``credential_live`` beside it. An earlier
+            # revision also wrote the flag here, to stop the Settings list
+            # rendering "live" beside an ``expired`` state — which was treating a
+            # derived answer as a second stored fact, the exact drift review
+            # round 1's AR-1 found between two renderers. ``credential_live_at``
+            # answers False for a row carrying this marker (it outranks the
+            # arithmetic), so the marker is the whole write and the stored flag
+            # keeps meaning one thing: what the relay computed when it last saw
+            # this device's cookie.
+            record["expired_at"] = stamp
+            changed = True
+        if changed:
+            _save(config_dir, store)
+    return rotated
+
+
+def list_devices(config_dir: Path, *, now: float | None = None) -> dict[str, Any]:
     """``GET /api/push/devices`` — the Settings list.
 
     Exactly the fields the ADR's shape names, ``environment`` and
@@ -537,6 +857,24 @@ def list_devices(config_dir: Path) -> dict[str, Any]:
     special-case; absence is the truth), and so are ``credential_live`` and
     ``last_authenticated_at`` on a row an earlier build wrote: this store will
     not invent a credential fact it does not hold.
+
+    ``credential_live`` is the DERIVED answer (:func:`credential_live_at`), not
+    the flag the record happens to hold (review round 1, AR-1 / QA Q-F1). The
+    stored flag is what the relay computed when it last SAW the cookie, and the
+    two part company exactly when it matters — a cookie that died with no keyed
+    request since leaves ``credential_live: true`` on the row while the machine
+    has stopped delivering, which is the case the ADR's heartbeat exists for. One
+    reader rendering the stored value while the credential report derived would be
+    one row read two ways, so both go through the one rule. The presence guard is
+    widened to either credential field rather than to the flag alone: a row with an
+    expiry and no stored flag still has a fact to report, and a row with NEITHER is
+    an earlier build's and keeps omitting the key.
+
+    That makes this function's answer a function of the CLOCK, which is the
+    intent rather than a side effect: a lapse is derived from the cookie's own
+    death, so the same store can render differently across a cookie's lifetime
+    without anything having written to it. ``now`` is injectable for the same
+    reason every other function here takes one.
 
     ``state`` and the response's ``precedence`` are ADR §4's one vocabulary: the
     state is :func:`device_state`'s answer on this row, and the precedence string
@@ -549,6 +887,7 @@ def list_devices(config_dir: Path) -> dict[str, Any]:
     position does not move under a token rotation. READ-ONLY: nothing is
     written, so opening Settings cannot bump anything.
     """
+    stamp = float(time.time() if now is None else now)
     with _LOCK:
         records = _load(config_dir)
     devices: list[dict[str, Any]] = []
@@ -563,8 +902,8 @@ def list_devices(config_dir: Path) -> dict[str, Any]:
         }
         if "name" in record:
             entry["name"] = record["name"]
-        if "credential_live" in record:
-            entry["credential_live"] = record["credential_live"]
+        if "credential_live" in record or "credential_expires_at" in record:
+            entry["credential_live"] = credential_live_at(record, stamp)
         if "last_authenticated_at" in record:
             entry["last_authenticated_at"] = record["last_authenticated_at"]
         devices.append(entry)
@@ -920,7 +1259,13 @@ def _validated_record(entry: object, index: int) -> dict[str, Any]:
     # THIS build, so they are optional (an earlier build's record has none) and
     # validated only when present. A bool is refused alongside a non-int: it is
     # an ``int`` to Python and it is not a timestamp anybody wrote.
-    for field in ("expired_at", "unpaired_at", "revoked_at", "last_authenticated_at"):
+    for field in (
+        "expired_at",
+        "unpaired_at",
+        "revoked_at",
+        "last_authenticated_at",
+        "credential_expires_at",
+    ):
         if field not in entry:
             continue
         value = entry[field]
