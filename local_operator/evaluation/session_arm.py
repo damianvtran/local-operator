@@ -44,9 +44,9 @@ terminalled paths carry ``finish`` / ``max-steps`` / ``bridge-wedged``; an
 ``agent_stop`` carries the end-of-turn fact that ended the turn
 (``no-tool-call``, ``completion-claim``, ``empty-message``, ``provider-error``
 -- with the classified category in ``diagnostic`` -- ``no-progress``,
-``gate-stop``, ``wall-bound``, ``aborted``, or a cut-off cause token such as
-``continuation-limit``); a ``failed`` / ``failed_pre_bundle`` carries the
-phase it died in (``environment-setup``, ``environment-allocation``,
+``gate-stop``, ``wall-bound``, ``aborted``, ``stopped``, or a cut-off cause
+token such as ``continuation-limit``); a ``failed`` / ``failed_pre_bundle``
+carries the phase it died in (``environment-setup``, ``environment-allocation``,
 ``record-sink``, ``session-arm``, else its exception class kebabed). The
 tokens are read from the shared end-of-turn vocabulary -- the final
 ``agent_end`` frame, the terminal assistant message, the driver's own wall
@@ -1588,6 +1588,29 @@ def _bounded_text(text: str, limit: int) -> str:
     return collapsed[: limit - 1].rstrip() + "…"
 
 
+def _bounded_text_keeping_tail(text: str, limit: int, *, tail: int) -> str:
+    """One bounded excerpt that keeps both ends of ``text``.
+
+    ``_bounded_text`` truncates from the END, which is right when the signal
+    leads. The repeated-error sentence inverts that: it OPENS with the
+    (roster-sized) tool-name list and ends with the reason the turn stopped
+    ("returned the same errors for N unchanged tool batches"), so a head-only
+    excerpt would drop the reason exactly when the roster grows. Same budget,
+    both ends kept; the full text stays in ``events.jsonl``.
+    """
+
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= limit:
+        return collapsed
+    head = collapsed[: limit - tail - 3].rstrip()
+    # Start the kept tail at a word boundary so the excerpt never opens
+    # mid-token; advancing only ever shortens it, so the budget holds.
+    start = len(collapsed) - tail
+    boundary = collapsed.find(" ", start)
+    kept = collapsed[boundary + 1 :] if boundary != -1 else collapsed[start:]
+    return f"{head} … {kept}"
+
+
 def _agent_stop_terminal_reason(
     *,
     wall_fired: bool,
@@ -1614,32 +1637,51 @@ def _agent_stop_terminal_reason(
     ends the same way, and the label only names which way that was.
 
     Order is precedence: the wall bound is the driver's own act and outranks
-    whatever the provider was doing when it fired; an error names the provider
-    (classified through the shared incident rules) or a host gate; an abort
-    carries its cut-off cause when one was stamped; a clean stop is read from
-    the terminal message, the only account of it.
+    whatever the provider was doing when it fired; a stamped cut-off cause
+    outranks the error text, because the session REWRITES an involuntary
+    cut-off into ``aborted=False, error=<cut-off notice>`` before any sink
+    sees it while the cause rides the same frame -- reading the error branch
+    first filed every cut-off as the provider's error (review round 1, R1-1);
+    else an error names the provider (classified through the shared incident
+    rules) or a host gate; an abort with no cause is named an abort; a clean
+    stop is read from the terminal message, the only account of it.
     """
 
     if wall_fired:
         return "wall-bound", "the episode wall budget aborted the turn"
     if end is None:
         return "stopped", "the turn ended with no end-of-turn event recorded"
+    if end.cut_off_cause:
+        # BEFORE the error branch: the frame a sink sees for an involuntary
+        # cut-off is the session's rewrite (``aborted=False``, an error whose
+        # text reads like a provider failure) with the cause preserved beside
+        # it, so reading ``error`` first filed every cut-off as the
+        # provider's (review round 1, R1-1). The rewrite runs in
+        # ``Session._classify_cut_off`` before any handler is called, and
+        # "consumption on the end event is the established rule for this
+        # field" (session.py).
+        return end.cut_off_cause, _bounded_text(render_cut_off_reason(end.cut_off_cause), 400)
     if end.error:
         if end.error == "stopped by gate":
             return "gate-stop", end.error
         if end.error.startswith("No progress: "):
-            return "no-progress", end.error
+            # The sentence names EVERY tool in the failing batch, so it grows
+            # with the model's roster (QA measured 4376 chars at 120 names);
+            # bound it like the siblings -- keeping the sentence's reason,
+            # which sits at its tail.
+            return "no-progress", _bounded_text_keeping_tail(end.error, 400, tail=140)
         incident = classify_incident(end.error)
         return "provider-error", _bounded_text(f"{incident.category}: {end.error}", 400)
     if end.aborted:
-        if end.cut_off_cause:
-            return end.cut_off_cause, _bounded_text(render_cut_off_reason(end.cut_off_cause), 400)
         return "aborted", "the turn was aborted and no cut-off cause was named"
     if message is None:
         return "empty-message", "the turn ended with no terminal assistant message"
     text = (message.text or "").strip()
     if not text:
-        return "empty-message", "the terminal assistant message carried no content"
+        # "no text content", not "no content" (QA round 1, Q-2): an image-only
+        # terminal message carried content; it just carried no text for this
+        # reader.
+        return "empty-message", "the terminal assistant message carried no text content"
     note = f" (the completion gate challenged it {challenges} time(s))" if challenges else ""
     if prose_claims_completion(text):
         return "completion-claim", (

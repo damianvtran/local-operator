@@ -86,14 +86,22 @@ from local_operator.harness.types import (
     ImageContent,
     Message,
     MessageEndEvent,
+    ModelSpec,
     TextContent,
     ToolCall,
     ToolContext,
     TurnEndEvent,
 )
-from local_operator.incidents import classify_incident, render_cut_off_reason
+from local_operator.incidents import (
+    CONTINUATION_LIMIT_CAUSE,
+    classify_incident,
+    format_cut_off_notice,
+    render_cut_off_reason,
+)
 from local_operator.mcp.manager import McpManager
+from local_operator.session.session import Session
 from local_operator.session.spec import ApprovalPolicy, SessionRoots, SessionSpec
+from local_operator.session.transcript import Transcript
 from tests.unit.evaluation.runner.conftest import (
     FakeAdapter,
     build_config,
@@ -1919,7 +1927,37 @@ class TestAgentStopTerminalReason:
             challenges=0,
         ) == ("no-progress", no_progress)
 
+    def test_a_no_progress_limit_is_bounded_at_a_large_roster(self) -> None:
+        """The repeated-error sentence scales with the model's tool roster.
+
+        QA round 1, Q-1: the loop embeds EVERY name in the failing batch, so
+        the diagnostic must stay inside the sibling 400-char budget at roster
+        sizes the arm can reach -- a three-tool case never trips the bound --
+        and must keep the sentence's reason, which sits at its tail.
+        """
+        names = ", ".join(f"mcp__server_{i:02d}__some_tool_name_{i:02d}" for i in range(120))
+        no_progress = (
+            f"No progress: {names} returned the same errors for 3 unchanged "
+            "tool batches. Change the arguments or resolve the reported blocker "
+            "before retrying."
+        )
+        assert len(no_progress) > 4000  # 4376 at this roster, the length QA measured
+        reason, detail = _agent_stop_terminal_reason(
+            wall_fired=False,
+            end=AgentEndEvent(error=no_progress),
+            message=None,
+            challenges=0,
+        )
+        assert reason == "no-progress"
+        assert detail is not None
+        assert len(detail) <= 400
+        assert "returned the same errors for 3 unchanged tool batches" in detail
+        assert detail.endswith("before retrying.")
+
     def test_a_cut_off_carries_its_cause_token_and_sentence(self) -> None:
+        # The raw, pre-rewrite shape, for callers that hand one in directly;
+        # the shape the real sink RECEIVES (rewritten by ``Session._emit``
+        # before any handler runs) is pinned by the emitted-frame case below.
         reason, detail = _agent_stop_terminal_reason(
             wall_fired=False,
             end=AgentEndEvent(aborted=True, cut_off_cause="continuation-limit"),
@@ -1928,6 +1966,54 @@ class TestAgentStopTerminalReason:
         )
         assert reason == "continuation-limit"
         assert detail == render_cut_off_reason("continuation-limit")
+
+    @pytest.mark.asyncio
+    async def test_a_cut_off_is_classified_from_the_emitted_frame(self, tmp_path: Path) -> None:
+        """The real seam: the session rewrites the end before the sink sees it.
+
+        ``Session._emit`` runs ``_classify_cut_off`` BEFORE its handler fan-out,
+        so an involuntary cut-off reaches the sink as ``aborted=False`` plus an
+        error whose text reads like a provider failure, with the cause
+        preserved beside it. Classifying the error first filed every real
+        cut-off as ``provider-error`` (review round 1, R1-1) -- and only a
+        frame emitted by the real session can pin this, because a hand-built
+        pre-rewrite frame skips the rewrite and a hand-built rewritten frame
+        would pin this test's own guess of it.
+        """
+
+        async def _no_stream(*_args: Any, **_kwargs: Any) -> Any:
+            return
+            yield  # pragma: no cover - the yield is what makes this a generator
+
+        session = Session(
+            model=ModelSpec(provider="test", model_id="mock"),
+            stream_fn=_no_stream,
+            tools=[],
+            transcript=Transcript(tmp_path / "sess"),
+            system_blocks_provider=lambda *_args: [],
+        )
+        frames: list[AgentEndEvent] = []
+
+        def _capture(event: Any) -> None:
+            if isinstance(event, AgentEndEvent):
+                frames.append(event)
+
+        session.subscribe(_capture)
+        await session._emit(
+            AgentEndEvent(messages=[], aborted=True, cut_off_cause=CONTINUATION_LIMIT_CAUSE)
+        )
+
+        assert frames, "the sink the arm subscribes received no end frame"
+        emitted = frames[-1]
+        # The rewrite really ran before the sink: the emitted shape is the
+        # one that reads like a provider failure...
+        assert emitted.aborted is False
+        assert emitted.error == format_cut_off_notice(CONTINUATION_LIMIT_CAUSE)
+        assert emitted.cut_off_cause == CONTINUATION_LIMIT_CAUSE
+        # ...and the classifier names the cause that rides it, not the provider.
+        assert _agent_stop_terminal_reason(
+            wall_fired=False, end=emitted, message=None, challenges=0
+        ) == (CONTINUATION_LIMIT_CAUSE, render_cut_off_reason(CONTINUATION_LIMIT_CAUSE))
 
     def test_an_abort_without_a_cause_is_named_an_abort(self) -> None:
         reason, detail = _agent_stop_terminal_reason(
