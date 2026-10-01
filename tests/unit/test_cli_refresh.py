@@ -195,11 +195,11 @@ def test_a_draining_target_is_settled_and_says_the_bound(capsys) -> None:
     """A target already leaving a signal is NOT a failure, and it says why.
 
     Nothing is owed by the caller — the exit is already scheduled — so the exit
-    code stays 0. What the receipt must carry is the fact itself and the
-    EXISTENCE of a bound: a signalled runtime works on, looking ordinary, for up
-    to ``SIGNAL_DRAIN_S``, and two minutes of unexplained waiting reads as a
-    hang (U2, PR #1141). ``draining`` is in ``REFRESH_SETTLED_METHODS``, and
-    this cell is what pins that it stayed there.
+    code stays 0. What the receipt must carry is the fact itself and the bound's
+    own words: a signalled runtime works on, looking ordinary, and is cut only if
+    it goes silent for ``SIGNAL_DRAIN_S``; an unexplained wait reads as a hang
+    (U2, PR #1141). ``draining`` is in ``REFRESH_SETTLED_METHODS``, and this cell
+    is what pins that it stayed there.
     """
     from local_operator.session.runtime.types import SIGNAL_DRAIN_S
 
@@ -224,7 +224,7 @@ def test_a_draining_target_is_settled_and_says_the_bound(capsys) -> None:
     # a build-replaced one, and the record is where the trigger wrote which it
     # was (PR #1108 reconciliation).
     assert LEAVING_ON_SIGNAL in line
-    assert f"up to {SIGNAL_DRAIN_S / 60:.0f} min" in line
+    assert f"cut if silent {SIGNAL_DRAIN_S / 60:.0f} min" in line
     # A peer whose build predates the field answers ``kept: already leaving``
     # with nothing published, and still gets a true sentence.
     bare = control._refresh_line(_session_record(), "0.54.48", "draining", "")

@@ -206,13 +206,13 @@ class NetworkParams(BaseModel):
     )
     expires: str = Field(
         default="",
-        description="For invite: how long the token stays open, e.g. 30m or 2h (default 10m).",
+        description="For invite: how long the token stays open (default 10m).",
     )
     peer: str = Field(
         default="",
         description=(
-            "For sessions: the device to ask (a name from `peers`). For ready: the "
-            "device to report on. Required by create/engage/stop/delete."
+            "For sessions: the device to ask (a name from `peers`); for ready, the "
+            "device to report on."
         ),
     )
     all_peers: bool = Field(default=False, description="For sessions: list every device.")
@@ -241,8 +241,8 @@ class NetworkParams(BaseModel):
     device: str = Field(
         default="",
         description=(
-            "For member_rm: the device id to revoke. For invite: a device id to bind "
-            "the token to, so only it may redeem it (others are refused and the "
+            "For member_rm: the device id to revoke; for invite, a device id to "
+            "bind the token to (only it may redeem it; others are refused and the "
             "invite burns)."
         ),
     )
@@ -699,7 +699,7 @@ def _render(action: str, payload: dict[str, Any]) -> list[str]:
             relay_line = "not running"
         lines = [
             f"installed: {'yes' if payload.get('installed') else 'no'}"
-            + ("" if payload.get("supported") else "  (no launchd on this platform)"),
+            + ("" if payload.get("supported") else "  (no user service supervisor here)"),
             f"identity:  {'present' if payload.get('identity_present') else 'missing'}",
             f"relay:     {relay_line}",
         ]

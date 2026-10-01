@@ -410,14 +410,17 @@ def validate_milestones(milestones: list[Any] | None) -> list["ProjectMilestone"
 
 
 class ProjectMilestone(BaseModel):
-    """One milestone: a name, a target date, and the completion date.
+    """One milestone: a name, a target date, and the completion date."""
 
-    Milestone *status* (``completed`` / ``overdue`` / ``upcoming``) is
-    deliberately NOT stored: it is derived at render from ``completed_at`` and
-    ``target_date`` (:func:`milestone_status`), so a stored status can never
-    drift from the dates that contradict it — the same "derived, not stored"
-    rule the view composer applies to session liveness.
-    """
+    # The rationale that used to sit in the docstring above — milestone status
+    # (completed / overdue / upcoming) is deliberately NOT stored but derived
+    # at render from ``completed_at`` and ``target_date`` (derived, not
+    # stored), so a stored status can never drift from the dates that
+    # contradict it — moved to ``read tool://project`` in the slimming wave
+    # (audit item 2). Pydantic copies this docstring into the emitted schema's
+    # ``description``, so anything here rides EVERY request (the context-budget
+    # ratchet measures it); the tool:// doc is the reader that needs the rule,
+    # and the schema keeps only what the field list must say.
 
     model_config = ConfigDict(extra="ignore")
 

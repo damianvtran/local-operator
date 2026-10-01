@@ -330,7 +330,15 @@ def test_init_in_an_isolated_home_explains_the_missing_launchagent(
 ) -> None:
     """The reported symptom: `lop network init` printed a launchd refusal that read
     like a failure. It must instead say what a redirected HOME means and what to run
-    instead — and `--no-start` must remain silent about it entirely."""
+    instead — and `--no-start` must remain silent about it entirely.
+
+    PLATFORM-TOLERANT SINCE ROUND 2: the supervisors rework (remote onboarding
+    slice (b)) sends Linux down the systemd arm, whose note names `systemd` and the
+    foreground fallback instead of `launchd`/`serve`. QA round 2 reproduced this
+    cell failing on Linux at head while passing on main; the intent asserted below
+    is unchanged — name the missing supervisor, name the fallback, say what an
+    isolated HOME means.
+    """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
     args = Namespace(
         name="home-net",
@@ -343,8 +351,8 @@ def test_init_in_an_isolated_home_explains_the_missing_launchagent(
     assert net_cli._cmd_init(args) == 0  # noqa: SLF001
     payload = json.loads(capsys.readouterr().out)
     note = str(payload["relay"])
-    assert "launchd" in note
-    assert "serve" in note
+    assert "launchd" in note or "systemd" in note
+    assert "foreground" in note
     assert "isolated" in note or "redirected" in note
     assert "did not start" not in note
 

@@ -2224,7 +2224,8 @@ class ServingSessionHandle(SessionHandle):
         runtime with the turn parked: a non-streaming prompt (``prompt_and_wait``
         — the shape a loop, a second viewer, a supervisor or a CLI caller uses)
         is refused within milliseconds of the signal, while the same runtime's
-        record and ``/info`` row say "signalled; leaving when its turn ends". The
+        record and ``/info`` row say "signalled; finishing its turn (cut if
+        silent 2 min)". The
         interactive composer does not reach it mid-turn, because its text rides
         the running turn as a steer; a peer wake or steer is spooled for the
         successor for as long as the drain runs and reaches this refusal only

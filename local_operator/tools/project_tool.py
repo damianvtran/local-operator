@@ -40,7 +40,6 @@ from local_operator.projects import (
     HISTORY_DEFAULT_TAIL,
     MILESTONES_MAX,
     PROGRESS_MAX,
-    PROJECT_STATUSES,
     SESSIONS_MAX,
     UPDATES_MAX,
     MilestoneEdit,
@@ -76,12 +75,6 @@ from local_operator.tools.builtin import (
 logger = logging.getLogger(__name__)
 
 
-#: The status vocabulary — ONE copy, imported from the store, so the tool's
-#: validation, its field description and the model literal can never drift
-#: apart.
-_STATUS_WORDS = PROJECT_STATUSES
-
-
 class ProjectParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -91,6 +84,14 @@ class ProjectParams(BaseModel):
     name: str | None = Field(default=None, description="Project name (all ops but list).")
     description: str | None = Field(
         default=None,
+        # Resolution note (fold onto #1837): upstream's text WINS here. Issue
+        # #1815 deliberately ties the schema text, the guide and the refusal
+        # together (test_the_schema_text_names_the_cap_the_refusal_enforces),
+        # and its contract is the generous markdown promise built from
+        # DESCRIPTION_MAX — so this field keeps "multiple paragraphs, headings,
+        # lists and code" and the dynamic cap, and the slimming wave's pin for
+        # this tool rests on the milestone-rationale phrase instead (the
+        # MOVED_WIRE_DETAIL entry in tests/unit/tools/test_tool_docs.py).
         description=(
             "create/update: markdown prose describing the workstream — multiple "
             "paragraphs, headings, lists and code; rendered, not dumped "
@@ -106,25 +107,23 @@ class ProjectParams(BaseModel):
     title: str | None = Field(
         default=None,
         description=(
-            "create/update: short human-readable name shown first on lists and "
-            "headers; ``name`` stays the addressing key; '' clears it."
+            "create/update: short display name (``name`` stays the addressing "
+            "key); '' clears it."
         ),
     )
     status: ProjectStatus | None = Field(
         default=None,
         description=(
-            f"create/update: {'|'.join(_STATUS_WORDS)}. 'done' needs every "
-            "milestone complete (or force_done=true) and stamps completed_at "
-            "unless given."
+            "create/update: 'done' needs every milestone complete (or "
+            "force_done=true) and stamps completed_at unless given."
         ),
     )
     progress: str | None = Field(
         default=None,
         description=(
-            "update: one dated line (markdown text), not a transcript; a NEW "
-            "line appends and moves the freshness clock. An identical re-send "
-            "records a refresh that keeps the clock (prefer op='refresh'); a "
-            "near-identical line is NEW — it appends."
+            "update: one dated line (markdown), not a transcript; a NEW line "
+            "appends and moves the freshness clock (an identical re-send is a "
+            "refresh — prefer op='refresh')."
         ),
     )
     tags: list[str] | None = Field(
@@ -155,16 +154,16 @@ class ProjectParams(BaseModel):
         default=None,
         description=(
             "create: the list to store (<= 20, names unique). update: replaces "
-            "the WHOLE list, and is refused unless replace_milestones=true; use "
-            "op='milestone' to change ONE milestone by name."
+            "the WHOLE list unless replace_milestones=true; use op='milestone' "
+            "for one."
         ),
     )
     replace_milestones: bool = Field(
         default=False,
         description=(
             "update: pass true to DELIBERATELY replace the whole milestones "
-            "list; without it, supplying 'milestones' to update is refused "
-            "(use op='milestone' for one milestone)."
+            "list; supplying 'milestones' without it is refused (use "
+            "op='milestone' for one)."
         ),
     )
     force_done: bool = Field(

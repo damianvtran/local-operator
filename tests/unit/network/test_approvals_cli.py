@@ -233,9 +233,16 @@ def test_approve_headless_refuses_with_the_setup_sentence(
 
 
 def test_run_refuses_truthfully_and_leaves_the_record_approved(
-    root: Path, capsys: pytest.CaptureFixture[str]
+    root: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The pinned sentence, and the property that makes it honest: no state change."""
+    """The pinned sentence, and the property that makes it honest: no state change.
+
+    THE SEAM IS STUBBED ABSENT (slice (b), the rebase fold): ``onboard.
+    step_runner`` now exists in this tree, and this cell's home is a build
+    WITHOUT the runner — the constant's own note asks for a cell that keeps
+    the sentence from rotting. The filled seam has its own cell next door.
+    """
+    monkeypatch.setattr(net_cli, "_approval_step_runner", lambda record: None)
     _make_key(root)
     filed = _request(root, capsys)
     net_cli.main(
@@ -274,6 +281,56 @@ def test_run_refuses_truthfully_and_leaves_the_record_approved(
     record = json.loads(capsys.readouterr().out)["approval"]
     assert record["state"] == "approved", "a refused run must not leave the record mid-flight"
     assert record["receipts"] == []
+
+
+def test_the_run_verb_finds_the_step_runner_and_hands_it_the_record(
+    root: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Slice (b) filled the seam; the verb hands the runner the record's id.
+
+    The runner itself is stubbed here — the machine it drives has its own
+    fake-transport cells in ``test_onboard.py`` — so this cell pins the WIRING
+    (the lookup, the call shape, the emitted payload), which is exactly what a
+    rebase can silently drop.
+    """
+    _make_key(root)
+    filed = _request(root, capsys)
+    net_cli.main(
+        Namespace(
+            network_command="approvals",
+            approvals_command="approve",
+            approval=filed["approval_id"],
+            json=True,
+        )
+    )
+    capsys.readouterr()
+
+    seen: list[dict[str, Any]] = []
+
+    def fake_execute(approval_id: str, **kwargs: Any) -> dict[str, Any]:
+        seen.append({"approval_id": approval_id, **kwargs})
+        return {
+            "ok": True,
+            "approval_id": approval_id,
+            "state": "connected",
+            "steps": [],
+            "next": "done",
+        }
+
+    monkeypatch.setattr("local_operator.network.onboard.execute_approval", fake_execute)
+
+    rc = net_cli.main(
+        Namespace(
+            network_command="approvals",
+            approvals_command="run",
+            approval=filed["approval_id"],
+            json=True,
+        )
+    )
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert seen and seen[0]["approval_id"] == filed["approval_id"]
+    assert json.loads(out)["state"] == "connected"
 
 
 def test_run_refuses_an_unapproved_record_with_its_own_sentence(
