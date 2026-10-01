@@ -101,7 +101,7 @@ def _confirm(row: dict[str, object]) -> bool:
         # both should not have to reconcile two sentences about one host.
         sys.stdout.write(
             "  ...once this machine's operator authority is set up: one approval\n"
-            "  and one admin prompt.\n"
+            "  and one admin password prompt.\n"
         )
     sys.stdout.flush()
     try:
@@ -167,9 +167,10 @@ def _pair(args: argparse.Namespace) -> int:
         print(f"could not load the operator key: {exc}", file=sys.stderr)
         return 1
     if signer is None:
+        # R1-4: the remedy names the setup action (§4), not the terminal verb.
         print(
-            "no operator key on this machine — run `lop operator init` (and "
-            "`lop operator install`) first",
+            "no operator key on this machine — set up operator authority first "
+            "(one approval and one admin password prompt)",
             file=sys.stderr,
         )
         return 1
@@ -231,7 +232,7 @@ def _pair(args: argparse.Namespace) -> int:
     if operator_authority_unusable():
         promise = (
             "It can act once this machine's operator authority is set up here: one\n"
-            "  approval and one admin prompt. Until then the runtime has\n"
+            "  approval and one admin password prompt. Until then the runtime has\n"
             "  no key to verify this device's signatures against, and refuses every one of\n"
             "  them. Revoke it with `lop operator devices --revoke <device id>`.\n"
         )

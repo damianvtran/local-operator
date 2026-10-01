@@ -317,7 +317,7 @@ async def test_a_model_authored_subprocess_cannot_loosen_the_gate(
         # THE UNCONFIGURED PAIR, because `no_anchor` pins this host as one with no
         # anchor at all: each refusal names the reader's situation, and on this host
         # that situation is that neither named surface can act until operator
-        # authority is set up here (one approval and one admin prompt; UX round 6,
+        # authority is set up here (one approval and one admin password prompt; UX round 6,
         # U1/U2 — and §2.9's repave: the remedy is a product action, not a command).
         # The ordinary pair is pinned by the injected-anchor cells, where a usable
         # anchor exists and the levers are real.
@@ -325,7 +325,7 @@ async def test_a_model_authored_subprocess_cannot_loosen_the_gate(
         assert out.count(OPERATOR_AUTHORITY_REQUIRED_UNCONFIGURED_NOTICE) == 1, out
         assert out.count("this approval is still waiting") == 1, out
         assert out.count(CARD_APPROVAL_REFUSED_UNCONFIGURED_NOTICE) == 1, out
-        assert "one approval and one admin prompt" in out, out
+        assert "one approval and one admin password prompt" in out, out
         assert "slash_result error" in out, out
         assert "approval_answer error" in out, out
 
@@ -1322,7 +1322,7 @@ async def test_the_desktop_route_cannot_loosen_a_runtime_this_backend_did_not_st
         # THE UNCONFIGURED VARIANT, because this runtime has no anchor at all
         # (`no_anchor` pins that): on such a host neither "this machine (Touch ID)"
         # nor "your paired phone" can work, so the refusal names the setup action
-        # that makes them able to (one approval and one admin prompt; UX round 6,
+        # that makes them able to (one approval and one admin password prompt; UX round 6,
         # U1/U2). The class is a SUBCLASS of the ordinary one, which is what keeps
         # every route that keys on `operator_authority_required` working unchanged.
         from local_operator.session.errors import (
@@ -1335,7 +1335,7 @@ async def test_the_desktop_route_cannot_loosen_a_runtime_this_backend_did_not_st
         assert isinstance(refused.value, OperatorAuthorityUnconfigured), refused.value
         assert refused.value.code == "operator_authority_unconfigured"
         assert OPERATOR_AUTHORITY_REQUIRED_UNCONFIGURED_NOTICE in str(refused.value)
-        assert "one approval and one admin prompt" in str(refused.value)
+        assert "one approval and one admin password prompt" in str(refused.value)
         # ...and it does NOT offer the two remedies that cannot run here, which is
         # the whole of U1: the reader is ON the paired phone.
         assert "authorise it from this machine (Touch ID) or from your paired" not in str(
@@ -3185,7 +3185,7 @@ async def test_a_connection_to_a_runtime_with_no_anchor_is_refused_with_the_type
         # re-reading English that has already been rewritten twice
         # (UX round 6, U1 + U6).
         assert reply.get("error_code") == "operator_authority_unconfigured", reply
-        assert "one approval and one admin prompt" in reply.get("message", ""), reply
+        assert "one approval and one admin password prompt" in reply.get("message", ""), reply
         assert live.handle._auto_approve is False
         conn.close()
     finally:

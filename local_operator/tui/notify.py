@@ -329,18 +329,16 @@ REMOTE_PARK_APPROVAL_LEAD = "Open the session here to deny it."
 REMOTE_PARK_APPROVAL_ATTACHED_LEAD = (
     "Its gate card has not reached this view — deny it here once it does."
 )
-#: The clause names the row's OWN old-peer answer (beat-2 F-D, disambiguated
-#: per design round 1, D4): a peer that predates readiness reporting answers
-#: ``peer_too_old`` on the row the card points at, where the reader's next
-#: step is ``lop-update``. Without it a reader following the card met a
-#: different vocabulary at the exact step the card sent them to.
+#: The clause carries the DIAGNOSIS in product words (design round 1, D3): the
+#: sentence used to print two backtick commands (which the terminal rendered
+#: literally) and turned the remedy into a terminal instruction right after the
+#: first half had just left that register. What stays is the fact — an older build
+#: on the other device is what to fix — and the action a person can take.
 REMOTE_PARK_APPROVAL_REMAINDER = (
     "Allowing it happens on {device} (Touch ID) or on a phone paired with it. "
-    "If nothing there can check a signature: approve setup for {device} in the "
-    "Mesh tab (one approval and one admin prompt) — "
-    "`lop network ready --peer {device}` shows the "
-    "operator_authority row (a peer too old to report that row answers "
-    "`peer_too_old`, and needs `lop-update` first)."
+    "If nothing there can check a signature: ask Local Operator to set it up there "
+    "(one approval and one admin password prompt) — if that device is running an "
+    "older build, updating it is what fixes that."
 )
 REMOTE_PARK_APPROVAL_BODY = REMOTE_PARK_APPROVAL_LEAD + " " + REMOTE_PARK_APPROVAL_REMAINDER
 #: The same card for the reader the F-A fix exists for: attached, with the

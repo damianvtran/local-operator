@@ -118,7 +118,7 @@ def test_operator_levels_map_to_codes(fact: dict[str, Any], ok: bool, code: str)
     assert row.get("code", "") == code, row
     assert row["capability"] == readiness.CAPABILITY_OPERATOR_AUTHORITY
     if not ok:
-        assert any("approve setup for" in remedy for remedy in row["remedies"]), row
+        assert any("ask Local Operator to set up" in remedy for remedy in row["remedies"]), row
         assert "parks" in row["detail"], row
     if ok:
         assert row["remedies"] == []
@@ -673,7 +673,9 @@ def test_build_row_compares_versions_and_degrades() -> None:
     )
     assert behind["ok"] is False and behind["code"] == readiness.CODE_BEHIND
     assert "runs 0.63.2" in behind["detail"] and "0.64.1" in behind["detail"]
-    assert any("lop-update" in remedy and "cloud-node-1" in remedy for remedy in behind["remedies"])
+    assert any(
+        "updating it there" in remedy and "cloud-node-1" in remedy for remedy in behind["remedies"]
+    )
 
     ahead = readiness.build_row(
         _member(),
@@ -731,7 +733,7 @@ def test_build_suffix_speaks_only_when_a_version_is_known() -> None:
         == "  build 0.66.0"
     )
     assert readiness.build_suffix(readiness.BuildComparison("behind", "0.63.2", "0.64.1")) == (
-        "  build 0.63.2 — behind this device (0.64.1); run `lop-update` there"
+        "  build 0.63.2 — behind this device (0.64.1); updating it there is what fixes that"
     )
 
 
@@ -1148,7 +1150,7 @@ def test_not_asked_and_too_old_rows_cover_the_checklist() -> None:
     too_old = readiness._peer_too_old_rows(member)
     assert [row["capability"] for row in too_old] == list(readiness.PEER_SIDE_CHECKS)
     assert all(row["code"] == readiness.CODE_PEER_TOO_OLD for row in too_old)
-    assert all(any("lop-update" in remedy for remedy in row["remedies"]) for row in too_old)
+    assert all(any("updating it first" in remedy for remedy in row["remedies"]) for row in too_old)
 
 
 def test_safe_text_drops_credential_shaped_text() -> None:

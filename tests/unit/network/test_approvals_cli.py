@@ -309,6 +309,38 @@ def test_unknown_id_is_a_not_found_class_refusal_with_its_own_code(
     assert json.loads(out)["code"] == "unknown_approval"
 
 
+def test_a_request_id_retry_is_idempotent_from_the_cli(
+    root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """QA round 1, Q1: the flag's own promise, made reachable through the CLI.
+
+    ``--request-id`` says "resend the SAME id with the same payload to retry
+    without duplicating", and this verb re-derives ``created_at``/``expires_at``
+    on every invocation — so before the window fallback the second call came back
+    ``approval_request_conflict`` and the only recovery (drop the id) could file a
+    second card. The second call here is the SAME command run again: it must
+    return the FIRST record, by id. The intent half still bites, so the cell
+    carries it too — a retry that changed a field is a new request.
+    """
+    _make_key(root)
+    request_id = "req_9f3ac1e0b7d2ab"
+    first = _request(root, capsys, request_id=request_id)
+    second = _request(root, capsys, request_id=request_id)
+    assert second["approval_id"] == first["approval_id"], (first, second)
+    assert second["state"] == first["state"], second
+
+    rc = net_cli.main(
+        Namespace(
+            network_command="approvals",
+            approvals_command="request",
+            **{**REQUEST_ARGS, "request_id": request_id, "host": "other.example"},
+        )
+    )
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert json.loads(out)["code"] == "approval_request_conflict"
+
+
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------

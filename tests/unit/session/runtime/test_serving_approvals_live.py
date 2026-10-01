@@ -475,7 +475,7 @@ async def test_a_bare_approvals_reports_a_divergence_against_the_file(
     # being offered as if they worked (copy rule §2.9: a remedy names a product
     # action, never a terminal command).
     both = approvals_default_notice(may_loosen=False, anchor_unusable=True)
-    assert "one approval and one admin prompt" in both, both
+    assert "one approval and one admin password prompt" in both, both
     assert "authority is not installed here" in both, both
     assert len(both) <= 400, len(both)
     await handle.dispose()

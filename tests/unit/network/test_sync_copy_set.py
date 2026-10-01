@@ -379,6 +379,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``_ROTATION_MARKER`` (``.gz``): the suffix a rotated audit file carries under "
         "``network/audit`` — a store file, never a session entry",
     ),
+    "local_operator/network/approvals.py": (
+        2,
+        "the approval store under ``<config>/network/approvals`` (``APPROVALS_DIRNAME``, "
+        "``INDEX_FILENAME``): a DEVICE-LOCAL record store beside ``sessions/``, never an "
+        "entry of one and never carried in one — a card records THIS device's consent, "
+        "so a move must not transport it",
+    ),
     "local_operator/network/types.py": (
         1,
         "``PEERS_RUN_DIRNAME`` (``run/peers``): the mesh's run directory under the store root",

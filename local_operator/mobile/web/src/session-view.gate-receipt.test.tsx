@@ -165,18 +165,18 @@ describe("the phone's gate sheet", () => {
 		expect(mocks.sendCommandWithProof).not.toHaveBeenCalled();
 	});
 
-	it("shows the runtime's own unconfigured copy, setup step and all (U1)", async () => {
+	it("shows the runtime's own unconfigured copy, setup action and all (U1)", async () => {
 		mocks.sendCommandWithProof.mockRejectedValueOnce(
 			new HttpError(
 				422,
-				"this session's gate is still at ask: /approvals auto removes it and needs the operator's own consent — but operator authority is not installed on this machine, so the remedies below cannot work yet. Set it up for this machine first (one approval and one admin prompt), then authorise from this machine or from your paired phone. /approvals ask still tightens it here.",
+				"this session's gate is still at ask: /approvals auto removes it and needs the operator's own consent — but operator authority is not installed on this machine, so the remedies below cannot work yet. Ask Local Operator to set it up for you first (one approval and one admin password prompt), then authorise from this machine or from your paired phone. /approvals ask still tightens it here.",
 				"operator_authority_unconfigured",
 			),
 		);
 		await openSheet();
 		fireEvent.click(screen.getByText("run without asking (auto)"));
 		const shown = await screen.findByText(/remedies below cannot work yet/);
-		expect(shown.textContent).toContain("one approval and one admin prompt");
+		expect(shown.textContent).toContain("one approval and one admin password prompt");
 		expect(screen.getByRole("dialog")).toBeTruthy();
 	});
 });

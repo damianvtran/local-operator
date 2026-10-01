@@ -408,9 +408,8 @@ _SECURE_ENCLAVE_DIAGNOSES: dict[tuple[str, int], tuple[str, ...]] = {
         "and the operator key is unchanged",
     ),
     (KEY_LOOKUP_REFUSED, _ERR_SEC_ITEM_NOT_FOUND): (
-        "there is no operator key under this tag on this host: run `lop operator init` "
-        "(this is the KEY AGENT's answer, which is the only process that can see the "
-        "item)",
+        "there is no operator key under this tag on this host: set up operator authority " "first",
+        "(this is the KEY AGENT's answer, which is the only process that can see the " "item)",
     ),
     (KEY_GENERATION_REFUSED, _ERR_SEC_PARAM): (
         "key generation was refused (errSecParam): the parameters are inconsistent for a "
@@ -648,7 +647,7 @@ _KEYAGENT_STATES: dict[str, tuple[str, str]] = {
         "the key agent refused its keychain call",
     ),
     "no-key": (
-        "no operator key on this host: run `lop operator init`",
+        "no operator key on this host: set up operator authority first",
         "no key on this host",
     ),
     "cancelled": (

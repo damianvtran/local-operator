@@ -743,7 +743,12 @@ def _label(member: Any) -> str:
 def _peer_too_old_rows(member: Any) -> list[dict[str, Any]]:
     """One row per peer-side check for a peer that predates this report."""
     detail = "the peer predates readiness reporting, so its answer is not available"
-    remedy = f"`lop-update` on {_label(member)}, then `lop network restart` there and re-check"
+    # §2.9 (QA round 1, Q3): a remedy names a product action, and the action here
+    # is an update ON THE PEER — the old sentence printed two ``lop-`` commands.
+    remedy = (
+        f"if {_label(member)} is running an older build, updating it first is what "
+        "fixes that, then re-check"
+    )
     return [
         _capability_row(
             device_id=member.device_id,
@@ -864,9 +869,13 @@ def operator_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> d
         code=code,
         detail=sentence,
         remedies=[
-            # §2.9: a remedy names a PRODUCT action, never a terminal command.
-            f"approve setup for {peer_label} in the Mesh tab, then approvals for "
-            "offloaded work can be answered from your devices"
+            # §2.9: a remedy names a PRODUCT action, never a terminal command — and
+            # never a surface the reader may not have (design round 1, D1/D2: no
+            # ship of a Mesh tab exists until the setup card does, so the interim
+            # action is the agent path).
+            f"ask Local Operator to set up {peer_label} (one approval and one admin "
+            "password prompt), then approvals for offloaded work can be answered from "
+            "your devices"
         ],
         source=SOURCE_PEER,
     )
@@ -928,9 +937,12 @@ def build_suffix(comparison: BuildComparison) -> str:
     if comparison.state == "unknown":
         return ""
     if comparison.state == "behind":
+        # §2.9 (QA round 1, Q3's disposition): the suffix names the ACTION, not
+        # the command — "run `lop-update` there" was the last command-shaped
+        # remedy in this report.
         return (
             f"  build {comparison.peer_version} — behind this device "
-            f"({comparison.own_version}); run `lop-update` there"
+            f"({comparison.own_version}); updating it there is what fixes that"
         )
     return f"  build {comparison.peer_version}"
 
@@ -965,7 +977,8 @@ def build_row(
                 "reporting, or sent none), so build parity is not known"
             ),
             remedies=[
-                f"`lop-update` on {peer_label}, then `lop network restart` there and re-check"
+                f"updating the build on {peer_label} is what makes the comparison possible, "
+                "then re-check"
             ],
             source=SOURCE_PEER,
             observed=observed,
@@ -981,7 +994,9 @@ def build_row(
                 f"the build versions are not comparable (this device {own_version or 'unknown'}, "
                 f"{peer_label} {peer_version}), so build parity is not known"
             ),
-            remedies=["`lop-update` on both devices, then re-check"],
+            remedies=[
+                "updating both devices to a comparable build is what makes it known, then re-check"
+            ],
             source=SOURCE_PEER,
             observed=observed,
         )
@@ -1007,7 +1022,8 @@ def build_row(
                 f"runs {own_version} — work offloaded there runs its older build"
             ),
             remedies=[
-                f"`lop-update` on {peer_label}, then `lop network restart` there and re-check"
+                f"updating it there is what fixes that ({peer_label} runs an older build), "
+                "then re-check"
             ],
             source=SOURCE_PEER,
             observed=observed,
@@ -1022,7 +1038,7 @@ def build_row(
             f"{peer_label} is ahead ({peer_version} > {own_version}) — this side may lack "
             "capabilities the peer expects"
         ),
-        remedies=["`lop-update` on this device, then re-check"],
+        remedies=["updating this device is what closes the gap, then re-check"],
         source=SOURCE_PEER,
         observed=observed,
     )

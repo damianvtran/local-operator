@@ -118,10 +118,15 @@ _ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     # deny allowed while NO receipt exists (nothing ran yet); the runner opens
     # ``connecting`` on its first credentialed step.
     STATE_APPROVED: frozenset({STATE_CONNECTING, STATE_DENIED, STATE_EXPIRED}),
-    STATE_CONNECTING: frozenset({STATE_CONNECTED, STATE_FAILED, STATE_EXPIRED}),
+    # MID-RUN DENY (frozen revision, slice (a) remediation): the operator may deny
+    # while ``connecting``. The deny WRITE lands (write-once, first decision wins)
+    # and the RUNNER observes it at its next step check and stops, the receipts
+    # recording where — the one write that cannot take an executed step back.
+    STATE_CONNECTING: frozenset({STATE_CONNECTED, STATE_FAILED, STATE_DENIED, STATE_EXPIRED}),
     # RETRY re-enters execution on the SAME record with a new run_id; a window
-    # that passes with no retry expires.
-    STATE_FAILED: frozenset({STATE_CONNECTING, STATE_EXPIRED}),
+    # that passes with no retry expires; a failed-but-retryable request the
+    # operator no longer wants is ABANDONED (denied, write-once, never reset).
+    STATE_FAILED: frozenset({STATE_CONNECTING, STATE_DENIED, STATE_EXPIRED}),
 }
 
 #: One use, one window: 60 minutes by default (§2.1). The invite's own TTL is
@@ -313,6 +318,31 @@ def request_digest(record: Mapping[str, Any]) -> str:
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
+def _digest_adopting_window(
+    candidate: Mapping[str, Any],
+    existing: Mapping[str, Any],
+) -> str:
+    """The candidate's digest rebuilt on the RECORD's own window — the retry rule.
+
+    QA round 1, Q1: the mint surfaces re-derive their window
+    (``created_at = now``, ``expires_at = created_at + window``) on every
+    invocation — the CLI passes its own computed pair, so a byte-identical
+    retry is impossible — and the F1 promise, "a surface that retries its own
+    command gets its first record back", was unreachable through it. Resolution
+    (the reviewer's second option, chosen for its simplicity): the WINDOW IS NOT
+    PART OF THE IDEMPOTENCY INTENT. On a request-id hit the comparison adopts the
+    STORED window (rebuilding the digest on it) after every other immutable has
+    been compared; a matching intent returns the first record, and the window
+    stays moored to the first acceptance of the id — a caller that needs a
+    different window files a NEW request id, which is the same rule a changed
+    host follows.
+    """
+    rebuilt = dict(candidate)
+    rebuilt["created_at"] = existing.get("created_at", rebuilt.get("created_at"))
+    rebuilt["expires_at"] = existing.get("expires_at", rebuilt.get("expires_at"))
+    return request_digest(rebuilt)
+
+
 def is_terminal(state: str) -> bool:
     return state in TERMINAL_STATES
 
@@ -348,10 +378,13 @@ def _load_raw(approval_id: str, root: Path | None = None) -> dict[str, Any]:
     """
     data = _read_json(record_path(approval_id, root))
     if not isinstance(data, dict) or data.get("approval_id") != approval_id:
+        # Design round 1, D5: a pointer, not a command — this sentence travels
+        # verbatim to the desktop route's ``{code, message}``, where "type this
+        # verb" is not an action the reader can take.
         raise MeshRefusal(
             "unknown_approval",
-            f"no approval {approval_id!r} on this device; "
-            "`lop network approvals list` shows what is pending here",
+            f"no approval {approval_id!r} on this device — it may already have been "
+            "answered, denied or expired; the pending list shows what is here",
         )
     return data
 
@@ -521,18 +554,22 @@ def create_request(
 ) -> dict[str, Any]:
     """Create the record, or answer the one this request id already made.
 
-    THE IDEMPOTENCY RULES, exactly as frozen (§2.2): the lookup is by
-    ``request_id``; a hit with the SAME digest returns the existing record
-    verbatim (no merge, no state change — including a terminal state, so a
-    re-request never resets a deny or an expiry); a hit with a different digest
-    refuses ``approval_request_conflict`` and writes nothing; a tombstoned id
-    refuses the same way for 180 days. This function is NOT authority-
-    increasing: it creates a REQUEST, and approve still needs the operator's
-    signature (deny stays ordinary — §2.4).
+    THE IDEMPOTENCY RULES, exactly as frozen (§2.2), with the retry rule QA
+    round 1 (Q1) pinned down: the lookup is by ``request_id``; a hit with the
+    SAME digest returns the existing record verbatim (no merge, no state change
+    — including a terminal state, so a re-request never resets a deny or an
+    expiry); a hit whose immutables match apart from the WINDOW returns the
+    first record too — the window is moored to the first acceptance of the id,
+    so a retry cannot shift it (see ``_digest_adopting_window``); any OTHER
+    difference refuses ``approval_request_conflict`` and writes nothing; a
+    tombstoned id refuses the same way for 180 days. This function is NOT authority-increasing: it
+    creates a REQUEST, and approve still needs the operator's signature (deny
+    stays ordinary — §2.4).
 
     The digest is computed BEFORE the approval id is minted (the id is not part
-    of the immutable request), so a surface that retries its own command
-    produces byte-identical immutables and gets its first record back.
+    of the immutable request), so a surface that retries its own command gets
+    its first record back — including a surface that re-derives its window per
+    call, which is every shipped mint's shape.
     """
     _require(kind in KINDS, f"unknown approval kind {kind!r}; known: {', '.join(KINDS)}")
     _require(
@@ -584,6 +621,8 @@ def create_request(
         existing = _find_by_request_id(request_id, root)
         if existing is not None:
             if existing.get("request_digest") == record["request_digest"]:
+                return presented(existing, moment)
+            if existing.get("request_digest") == _digest_adopting_window(record, existing):
                 return presented(existing, moment)
             raise MeshRefusal(
                 "approval_request_conflict",
@@ -692,8 +731,8 @@ def signed_payload(
 #: §3.7) and no terminal command (§2.9).
 NO_SIGNING_SURFACE_SENTENCE = (
     "approving needs the operator key's consent, and operator authority is not set "
-    "up on this machine yet — set it up for this machine (one approval and one "
-    "admin prompt), then approve again"
+    "up on this machine yet — ask Local Operator to set it up for this machine (one "
+    "approval and one admin password prompt), then approve again"
 )
 
 
@@ -913,17 +952,26 @@ def _record_decision(
                 f"this approval was already decided ({state}); the first decision wins, "
                 "and a retry is a new request",
             )
-        if decision == "deny" and state in (STATE_CONNECTING, STATE_FAILED):
-            raise MeshRefusal(
-                "approval_running",
-                "this approval has started running and can no longer be denied; "
-                "let it finish or fail, and revoke on the node if the outcome is unwanted",
-            )
-        if decision == "deny" and record.get("receipts"):
-            raise MeshRefusal(
-                "approval_running",
-                "this approval has already taken its first step, so a deny can no longer "
-                "stop it cleanly",
+        if decision == "deny" and state == STATE_CONNECTING:
+            # MID-RUN DENY: the write lands (write-once) and the RUNNER stops at
+            # its next step check (``verify_for_run`` refuses a denied record). A
+            # receipt lands with the decision so the record itself shows where the
+            # deny arrived — the steps already executed stay, above it.
+            run_id = ""
+            for prior in reversed(record.get("receipts") or []):
+                if isinstance(prior, Mapping) and prior.get("run_id"):
+                    run_id = str(prior["run_id"])
+                    break
+            record.setdefault("receipts", []).append(
+                {
+                    "run_id": run_id,
+                    "step": "deny",
+                    "at": float(decided_at if decided_at is not None else moment),
+                    "ok": True,
+                    "detail": "the operator denied this while it was running; the runner "
+                    "stops at its next step check",
+                    "digest": "",
+                }
             )
         _require_transition(record, target)
 
@@ -939,17 +987,28 @@ def _record_decision(
                 )
             anchor = record.get("what")
             anchor = anchor.get("anchor") if isinstance(anchor, Mapping) else None
-            if isinstance(anchor, Mapping):
-                if (
-                    str(anchor.get("key_id") or "") != str(trio["key_id"])
-                    or str(anchor.get("spki_fp") or "") != str(trio["spki_fp"])
-                    or str(anchor.get("statement_digest") or "") != str(trio["statement_digest"])
-                ):
-                    raise MeshRefusal(
-                        "approval_anchor_mismatch",
-                        "the operator key on this machine no longer matches the one this "
-                        "request was filed for; nothing was written",
-                    )
+            if not isinstance(anchor, Mapping):
+                # FAIL CLOSED (R1-5 / QA Q2): every shipped mint records the trio
+                # and the card's "matches your operator key" presumes it, so a
+                # record WITHOUT provenance has nothing to compare — there is no
+                # way to say the decision matches the request it claims to answer.
+                # Refusing here points the same direction as a mismatch; approving
+                # anyway was the one branch that skipped the comparison entirely.
+                raise MeshRefusal(
+                    "approval_anchor_missing",
+                    "this request carries no operator-key provenance, so a decision cannot "
+                    "be checked against it; nothing was written",
+                )
+            if (
+                str(anchor.get("key_id") or "") != str(trio["key_id"])
+                or str(anchor.get("spki_fp") or "") != str(trio["spki_fp"])
+                or str(anchor.get("statement_digest") or "") != str(trio["statement_digest"])
+            ):
+                raise MeshRefusal(
+                    "approval_anchor_mismatch",
+                    "the operator key on this machine no longer matches the one this "
+                    "request was filed for; nothing was written",
+                )
             if not signature_hex:
                 raise MeshRefusal(
                     "approval_signature_invalid",
@@ -1055,13 +1114,14 @@ def deny(
     signature_hex: str | None = None,
     root: Path | None = None,
 ) -> dict[str, Any]:
-    """``requested|approved → denied``: ordinary, write-once, safe direction.
+    """``requested|approved|connecting|failed → denied``: ordinary, write-once, safe direction.
 
-    Allowed from ``requested`` and from ``approved`` while NO receipt exists;
-    refused once the run has started (``approval_running``), after
-    ``connected`` (``approval_already_connected``), and on any already-decided
-    record (``approval_decision_conflict``). Does not roll back steps already
-    executed — deny only ever lands before the first one.
+    Allowed from ``requested`` and from ``approved`` any time before the runner's
+    next step check; from ``connecting`` (the deny write lands and the RUNNER
+    observes it and stops at its next step check, the receipts showing where);
+    and from ``failed`` (an operator abandoning a failed-but-retryable request).
+    Refused after ``connected`` (``approval_already_connected``) and on any
+    already-decided record (``approval_decision_conflict``).
     """
     return _record_decision(
         approval_id,
@@ -1237,7 +1297,7 @@ def mark_connected(
 
 
 def verify_for_run(approval_id: str, *, root: Path | None = None) -> dict[str, Any]:
-    """Re-check a record before a step: digest, then signature.
+    """Re-check a record before a step: the decision, then digest, then signature.
 
     THE ENFORCEMENT TOKEN CLAIM (§2.5) against a same-uid file: a launderer who
     edits the immutable fields changes the re-derived digest and is refused
@@ -1245,8 +1305,23 @@ def verify_for_run(approval_id: str, *, root: Path | None = None) -> dict[str, A
     signature, so the re-verification fails. Returns the folded record when it
     holds; raises the typed refusal otherwise — the caller records a failed
     receipt naming the check and refuses to run.
+
+    FIRST, the operator's DECISION: a deny that landed while the run was in
+    flight refuses ``approval_denied`` here, which is the runner's stop signal
+    between steps.
     """
     record = _load_raw(approval_id, root)
+    # THE RUNNER'S DECISION CHECK (frozen revision, slice (a) remediation): a
+    # deny may land mid-run, and the runner must observe it BEFORE every step.
+    # ``denied`` is reachable from ``connecting`` now, so a step loop that calls
+    # this between steps stops here rather than executing past the operator's
+    # decision; the receipts on the record show where it stopped.
+    if str(record.get("state")) == STATE_DENIED:
+        raise MeshRefusal(
+            "approval_denied",
+            "this approval was denied while it was running; the runner stops here — "
+            "no further step is executed",
+        )
     derived = request_digest(record)
     if derived != str(record.get("request_digest") or ""):
         raise MeshRefusal(

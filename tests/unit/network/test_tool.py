@@ -1084,7 +1084,7 @@ def test_the_peers_digest_carries_the_build_suffix(
     assert "reachable   fresh  build 0.64.1" in lines, lines
     assert (
         "reachable   stale  build 0.63.2 — behind this device (0.64.1); "
-        "run `lop-update` there" in lines
+        "updating it there is what fixes that" in lines
     ), lines
     assert "reachable   quiet" in lines, lines
 

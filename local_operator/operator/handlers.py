@@ -108,7 +108,13 @@ def install_anchor(root: Path, *, print_only: bool = False) -> int:
     staged = staging_path(root)
     target = anchor_path()
     if not staged.exists():
-        print(f"nothing staged at {staged}; run `lop operator init` first", file=sys.stderr)
+        # R1-4 (§4's rule applied to the init-shaped refusals): the remedy names the
+        # product action, not the terminal verb that performs it.
+        print(
+            f"nothing staged at {staged}; set up operator authority first "
+            "(the setup stages the key)",
+            file=sys.stderr,
+        )
         return 1
     command = install_commands(staged, target)
     if print_only:
@@ -284,8 +290,8 @@ def _init(args: argparse.Namespace) -> int:
     print()
     print("The runtime trusts ONLY the root-owned anchor, and landing it is one privileged")
     print("step: set up operator authority for this machine (one approval and one admin")
-    print("prompt). If you are working from this terminal, the install verb below is the")
-    print("same step and keeps its own sudo prompt:")
+    print("password prompt). If you are working from this terminal, the install verb below")
+    print("is the same step and keeps its own sudo prompt:")
     print("  lop operator install")
     if handle.backend == "file-only":
         print()

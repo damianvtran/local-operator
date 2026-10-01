@@ -161,12 +161,15 @@ def test_a_re_request_after_a_terminal_state_returns_it_unchanged(root: Path) ->
 
 
 def test_the_digest_binds_every_immutable_field(root: Path) -> None:
-    """One field at a time: any changed immutable field is a conflict, never a merge."""
+    """One field at a time: any changed immutable field is a conflict, never a merge.
+
+    The WINDOW fields are the deliberate exception (QA round 1, Q1): a retry
+    re-derives them per call, so they are not part of the idempotency intent —
+    the retry cell below pins the moored behaviour they have instead.
+    """
     request_id = A.new_request_id()
     A.create_request(**_device_request(request_id), root=root)
     for overrides in (
-        {"expires_at": EXPIRES_AT + 1.0},
-        {"created_at": CREATED_AT + 1.0},
         {"what": {"install": False}},
         {"credential_ref": None},
         {"requested_by": {"session_id": "s2", "device_id": "d_self", "surface": "cli"}},
@@ -192,18 +195,53 @@ def test_deny_is_write_once_and_approve_after_deny_conflicts(root: Path) -> None
     assert approve_after.value.code == "approval_decision_conflict"
 
 
-def test_deny_lands_before_the_first_step_and_refuses_once_running(root: Path) -> None:
+def test_deny_lands_before_the_first_step_and_mid_run_the_runner_stops(root: Path) -> None:
+    """The frozen deny matrix: approved→denied, connecting→denied, failed→denied.
+
+    A deny is accepted any time before the runner's NEXT step check: from
+    ``approved`` (ordinary), from ``connecting`` (the write lands and the runner
+    observes it and stops — receipts show where), and from ``failed``
+    (abandoning a failed-but-retryable request). It is refused only AFTER
+    ``connected``.
+    """
     _make_key(root)
     record = _approved_device_record(root)
     # `approved` with no receipts: a deny is still the safe direction.
     A.deny(record["approval_id"], decided_at=CREATED_AT + 10.0, root=root)
     assert A.load_record(record["approval_id"], root=root)["state"] == "denied"
 
+    # connecting → denied: the write lands, a receipt records the stop, and the
+    # runner's per-step check refuses to execute past it.
     other = _approved_device_record(root)
     A.begin_run(other["approval_id"], run_id="run_1", root=root)
-    with pytest.raises(MeshRefusal) as raised:
-        A.deny(other["approval_id"], root=root)
-    assert raised.value.code == "approval_running"
+    A.append_receipt(other["approval_id"], run_id="run_1", step="connect", ok=True, root=root)
+    denied = A.deny(other["approval_id"], decided_at=CREATED_AT + 20.0, root=root)
+    assert denied["state"] == "denied"
+    assert [r["step"] for r in denied["receipts"]] == ["connect", "deny"], denied["receipts"]
+    with pytest.raises(MeshRefusal) as stopped:
+        A.verify_for_run(other["approval_id"], root=root)
+    assert stopped.value.code == "approval_denied"
+
+    # failed → denied: an operator abandoning a failed-but-retryable request.
+    failed_rec = _approved_device_record(root)
+    A.begin_run(failed_rec["approval_id"], run_id="run_1", root=root)
+    A.mark_failed(
+        failed_rec["approval_id"], run_id="run_1", step="install", detail="boom", root=root
+    )
+    abandoned = A.deny(failed_rec["approval_id"], decided_at=CREATED_AT + 30.0, root=root)
+    assert abandoned["state"] == "denied"
+    # Write-once, never reset: a second deny (or an approve) still conflicts.
+    with pytest.raises(MeshRefusal) as again:
+        A.deny(failed_rec["approval_id"], root=root)
+    assert again.value.code == "approval_decision_conflict"
+
+    # AFTER connected: the one refusal that stays.
+    done = _approved_device_record(root)
+    A.begin_run(done["approval_id"], run_id="run_1", root=root)
+    A.mark_connected(done["approval_id"], run_id="run_1", step="verify", root=root)
+    with pytest.raises(MeshRefusal) as late:
+        A.deny(done["approval_id"], root=root)
+    assert late.value.code == "approval_already_connected"
 
 
 def test_run_re_entry_from_failed_uses_a_new_run_id(root: Path) -> None:
@@ -355,6 +393,63 @@ def test_approve_refuses_a_record_whose_anchor_is_not_the_local_key(root: Path) 
     with pytest.raises(MeshRefusal) as raised:
         A.approve(record["approval_id"], signature_hex=signature, decided_at=decided_at, root=root)
     assert raised.value.code == "approval_anchor_mismatch"
+
+
+def test_approve_refuses_a_record_with_no_anchor_provenance(root: Path) -> None:
+    """R1-5 / QA Q2: the ABSENCE branch must fail CLOSED, not skip the check.
+
+    No shipped mint omits the trio (the CLI derives it), but the comparison used
+    to run only ``if`` it was present — so a record stripped of provenance
+    approved with NO comparison at all. It refuses now, with the provenance-
+    shaped code, and the file is untouched.
+    """
+    _make_key(root)
+    record = A.create_request(**_device_request(A.new_request_id()), root=root)
+    assert "anchor" not in record["what"]
+    decided_at = CREATED_AT + 30.0
+    signature = _sign_decision(root, record, "approve", decided_at)
+    with pytest.raises(MeshRefusal) as raised:
+        A.approve(record["approval_id"], signature_hex=signature, decided_at=decided_at, root=root)
+    assert raised.value.code == "approval_anchor_missing"
+    assert "nothing was written" in str(raised.value)
+    again = json.loads(A.record_path(record["approval_id"], root).read_text())
+    assert again["state"] == A.STATE_REQUESTED, "a refused decision wrote anyway"
+
+
+def test_a_windowness_retry_with_the_same_request_id_is_idempotent(root: Path) -> None:
+    """QA round 1, Q1, at the store: the window is NOT part of the intent.
+
+    Retries re-derive their window per call (the CLI passes its own computed
+    pair), so the comparison adopts the STORED window: a retry returns the first
+    record, and the window stays moored to the first acceptance of the id — a
+    retry cannot extend a card. A changed INTENT still conflicts.
+    """
+    first = A.create_request(
+        **_device_request(A.new_request_id(), created_at=None, expires_at=None), root=root
+    )
+    second = A.create_request(
+        **_device_request(first["request_id"], created_at=None, expires_at=None), root=root
+    )
+    assert second["approval_id"] == first["approval_id"], (first, second)
+
+    # Same id, a DIFFERENT window: moored, so this is the same request — not a
+    # conflict, and not a new record.
+    third = A.create_request(
+        **_device_request(first["request_id"], created_at=1001.0, expires_at=2001.0), root=root
+    )
+    assert third["approval_id"] == first["approval_id"]
+    assert third["expires_at"] == first["expires_at"], "the window must stay moored"
+
+    # ...but a changed intent still refuses.
+    with pytest.raises(MeshRefusal) as raised:
+        A.create_request(
+            **_device_request(
+                first["request_id"],
+                what={"install": False, "connect": True, "unattended": True, "grant": ["approve"]},
+            ),
+            root=root,
+        )
+    assert raised.value.code == "approval_request_conflict"
 
 
 def test_verify_for_run_refuses_a_tampered_record(root: Path) -> None:

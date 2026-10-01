@@ -5899,11 +5899,15 @@ def _guard_credential_subcommand(args: argparse.Namespace) -> int:
 
 #: The ``approvals run`` refusal while this build ships no install runner. PINNED
 #: as a constant because it is user-visible copy: it says exactly what was and was
-#: not done and names no terminal command (§2.9); unit tests assert the sentence
-#: so a later slice that fills the runner cannot leave it stranded on a live path.
+#: not done, names no terminal command (§2.9), and names the next REAL action — an
+#: update is what brings the runner, so the sentence says so rather than pointing at
+#: "a build that ships the runner" (design round 1, D4: that phrasing told a person
+#: to go find another build, which is not an action a product may ask for). Unit
+#: tests assert the sentence so a later slice that fills the runner cannot leave it
+#: stranded on a live path.
 APPROVAL_RUNNER_MISSING_SENTENCE = (
     "the install runner is not part of this build yet, so nothing was executed: this "
-    "approval stays approved and can be run from a build that ships the runner"
+    "approval stays approved, and updating Local Operator is what lets it run"
 )
 
 #: The step-runner seam's module (slice (b) fills it). Named here so the refusal
@@ -6007,8 +6011,8 @@ def _cmd_approvals_request(args: argparse.Namespace) -> int:
         raise MeshRefusal(
             "approval_anchor_unavailable",
             "operator authority is not set up on this machine yet, and the card has to "
-            "name the key it will install: set it up for this machine (one approval "
-            "and one admin prompt), then file the request",
+            "name the key it will install: ask Local Operator to set it up for this "
+            "machine (one approval and one admin password prompt), then file the request",
         )
     network_id = ""
     if args.network:
