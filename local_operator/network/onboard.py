@@ -844,6 +844,7 @@ class OnboardRun:
         run_local: Callable[..., CommandResult] = _run_local,
         clock: Callable[[], float] = _now,
         refile: bool = True,
+        root: Any = None,
     ) -> None:
         self.approval_id = approval_id
         self.view = view
@@ -853,6 +854,7 @@ class OnboardRun:
         self.run_local = run_local
         self.clock = clock
         self.refile = refile
+        self.root = root
         self.facts: dict[str, str] = {}
         self.invite_id = ""
         self.invite_path: Path | None = None
@@ -864,7 +866,7 @@ class OnboardRun:
     def _gate(self) -> None:
         """Re-check state, expiry and signature before one credentialed step."""
         self.view = approvals_adapter.require_step_allowed(
-            self.approval_id, run_id=self.view.run_id
+            self.approval_id, run_id=self.view.run_id, root=self.root
         )
 
     def _step_timeout(self, step: str) -> float:
@@ -982,11 +984,16 @@ class OnboardRun:
             if refusal.code == "host_key_changed":
                 # A CHANGED KEY IS A HALT, not a retry: the facts moved after the
                 # operator approved them, exactly the class step zero exists for.
+                # The probe the refusal came from IS the observed value (the real
+                # transport records it before the fingerprint check), so the fresh
+                # card can name the key that actually answered.
+                probe = getattr(self.transport, "last_probe", None)
+                observed = str(getattr(probe, "host_key_fp", "") or "")
                 raise self._contradiction(
                     {
                         "check": "host_key_fp",
                         "approved": expected_fp,
-                        "observed": "",
+                        "observed": observed,
                         "why": "the host key changed between the handshake and the run",
                     },
                     refusal.sentence,
@@ -1135,7 +1142,9 @@ class OnboardRun:
         refiled: str | None = None
         if self.refile:
             try:
-                refiled = approvals_adapter.refile_after_contradiction(self.approval_id, finding)
+                refiled = approvals_adapter.refile_after_contradiction(
+                    self.approval_id, finding, root=self.root
+                )
             except MeshRefusal:
                 refiled = None
         suffix = (
@@ -1677,6 +1686,7 @@ def execute_approval(
     local_cli: Sequence[str] | None = None,
     run_local: Callable[..., CommandResult] = _run_local,
     clock: Callable[[], float] = _now,
+    root: Any = None,
 ) -> dict[str, Any]:
     """Execute an approved onboarding record. THE runner entry point.
 
@@ -1690,7 +1700,7 @@ def execute_approval(
     unit cells drive the whole machine against a scripted fake with no SSH
     anywhere in CI.
     """
-    view = approvals_adapter.begin_run(approval_id)
+    view = approvals_adapter.begin_run(approval_id, root=root)
     if transport is None:
         if transport_factory is None:
             device = view.device
@@ -1713,6 +1723,7 @@ def execute_approval(
         local_cli=local_cli,
         run_local=run_local,
         clock=clock,
+        root=root,
     )
     steps: list[dict[str, Any]] = []
     state = "connecting"
@@ -1733,38 +1744,72 @@ def execute_approval(
                     step,
                     _StepOutcome(False, contradiction.sentence, contradiction.finding),
                 )
-                approvals_adapter.append_receipt(approval_id, run.view.run_id, receipt)
                 steps.append(receipt)
-                approvals_adapter.finish(approval_id, "failed", run.view.run_id)
+                # The FAILING receipt is written by the store's own terminal
+                # write in the same locked mutation (mark_failed); appending it
+                # separately would leave the step on the record twice.
+                approvals_adapter.finish(
+                    approval_id,
+                    "failed",
+                    run.view.run_id,
+                    step=step,
+                    detail=contradiction.sentence,
+                    root=root,
+                )
                 state = "failed"
                 next_step = step
                 error = {"code": contradiction.code, "message": contradiction.sentence}
                 break
             receipt = _receipt(run.view.run_id, step, outcome)
-            approvals_adapter.append_receipt(approval_id, run.view.run_id, receipt)
             steps.append(receipt)
             if not outcome.ok:
-                approvals_adapter.finish(approval_id, "failed", run.view.run_id)
+                approvals_adapter.finish(
+                    approval_id,
+                    "failed",
+                    run.view.run_id,
+                    step=step,
+                    detail=outcome.detail,
+                    root=root,
+                )
                 state = "failed"
                 next_step = step
                 error = {"code": f"{step}_failed", "message": outcome.detail}
                 break
-        else:
-            approvals_adapter.finish(approval_id, "connected", run.view.run_id)
-            state = "connected"
+            if step == STEP_NAMES[-1]:
+                # The LAST step's receipt is the terminal write's own
+                # (mark_connected lands it in the same mutation); every earlier
+                # ok step appends here.
+                approvals_adapter.finish(
+                    approval_id,
+                    "connected",
+                    run.view.run_id,
+                    step=step,
+                    detail=outcome.detail,
+                    root=root,
+                )
+                state = "connected"
+                break
+            approvals_adapter.append_receipt(approval_id, run.view.run_id, receipt, root=root)
     except MeshRefusal as refusal:
         # A gate refusal (denied / expired / not approved / already connected)
         # lands as its own failing receipt, then the record's state. Expiry is
         # the ONE case that folds to `expired` rather than `failed` (§2.4).
         receipt = _receipt(run.view.run_id, "gate", _StepOutcome(False, refusal.sentence))
-        try:
-            approvals_adapter.append_receipt(approval_id, run.view.run_id, receipt)
-        except MeshRefusal:
-            pass
         steps.append(receipt)
         terminal = "expired" if refusal.code == "approval_expired" else "failed"
         try:
-            approvals_adapter.finish(approval_id, terminal, run.view.run_id)
+            # ``failed`` writes its own receipt (mark_failed); an expiry is an
+            # observation the store's fold already reflects, so finish() is a
+            # no-op there. A deny is already on the record — its write is
+            # refused, and that is the honest outcome for this run.
+            approvals_adapter.finish(
+                approval_id,
+                terminal,
+                run.view.run_id,
+                step="gate",
+                detail=refusal.sentence,
+                root=root,
+            )
         except MeshRefusal:
             pass
         state = terminal
@@ -1778,7 +1823,7 @@ def execute_approval(
             pass
         if state != "connected":
             _release_invite_decision(run)
-    latest = approvals_adapter.load(approval_id)
+    latest = approvals_adapter.load(approval_id, root=root)
     return {
         "ok": state == "connected",
         "approval_id": approval_id,
@@ -1813,6 +1858,28 @@ def _release_invite_decision(run: OnboardRun) -> None:
         network_store.clear_pair_decision(run.invite_id)
     except MeshRefusal:
         pass
+
+
+def step_runner(record: dict[str, Any]) -> Callable[..., dict[str, Any]]:
+    """The seam ``lop network approvals run`` looks up (``APPROVAL_RUNNER_MODULE``).
+
+    Slice (a) documents the contract, verbatim: this module exposes
+    ``step_runner`` → a callable ``runner(record, *, root) -> dict`` that drives
+    the record-side phase machine and answers the frozen run shape
+    ``{approval_id, state, steps, next}``. The binding is one call: the runner
+    is :func:`execute_approval`, which already drives the store through the
+    ``onboard_approvals`` adapter; ``root`` is threaded to every store call so
+    a caller that relocated the store reaches the same one.
+    """
+    approval_id = str(record.get("approval_id") or "")
+
+    def runner(record: dict[str, Any], *, root: Any = None) -> dict[str, Any]:
+        # ``record`` is the already-loaded dict the seam hands back; the id it
+        # carries is what the adapter re-reads (and re-verifies) per step — one
+        # source of truth, not a second copy of the record state.
+        return execute_approval(approval_id, root=root)
+
+    return runner
 
 
 def _port_from(host: str) -> int:

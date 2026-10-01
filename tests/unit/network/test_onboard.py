@@ -39,7 +39,14 @@ from local_operator.operator.verify import key_id_for, spki_fp
 
 
 class FakeApprovals:
-    """Slice (a)'s store, minimally: one record, receipts, transitions."""
+    """Slice (a)'s store, minimally: one record, receipts, transitions.
+
+    Method names and keyword shapes mirror ``local_operator.network.approvals``
+    as MERGED (the rebase bound the adapter to this surface): ``load_record``,
+    ``verify_for_run``, ``begin_run``, ``append_receipt``, ``mark_connected``,
+    ``mark_failed``, and the refile mint (``create_request`` +
+    ``new_request_id``).
+    """
 
     def __init__(self, record: dict[str, Any]) -> None:
         self.record = record
@@ -48,29 +55,91 @@ class FakeApprovals:
         self.refiled: list[dict[str, Any]] = []
         self.verify_refusal: MeshRefusal | None = None
 
-    def load(self, approval_id: str) -> Any:
+    def load_record(self, approval_id: str, **_kwargs: Any) -> Any:
         return self.record if approval_id == self.record["approval_id"] else None
 
-    def verify_signature(self, record: Any) -> None:
+    def verify_for_run(self, approval_id: str, **_kwargs: Any) -> Any:
         if self.verify_refusal is not None:
             raise self.verify_refusal
-        return None
+        return self.record
 
-    def begin_run(self, approval_id: str, run_id: str) -> Any:
+    def begin_run(self, approval_id: str, *, run_id: str = "", **_kwargs: Any) -> Any:
         self.record["state"] = "connecting"
         return self.record
 
-    def append_receipt(self, approval_id: str, run_id: str, receipt: dict[str, Any]) -> None:
-        self.appended.append((approval_id, run_id, receipt))
-        self.record.setdefault("receipts", []).append(receipt)
+    def append_receipt(
+        self,
+        approval_id: str,
+        *,
+        run_id: str,
+        step: str,
+        ok: bool,
+        detail: str = "",
+        digest: str = "",
+        at: Any = None,
+        **_kwargs: Any,
+    ) -> None:
+        row = {
+            "run_id": run_id,
+            "step": step,
+            "ok": ok,
+            "detail": detail,
+            "digest": digest,
+            "at": at if at is not None else 0.0,
+        }
+        self.appended.append((approval_id, run_id, row))
+        self.record.setdefault("receipts", []).append(row)
 
-    def finish(self, approval_id: str, state: str, run_id: str) -> None:
-        self.finished.append((approval_id, state, run_id))
-        self.record["state"] = state
+    def mark_failed(
+        self,
+        approval_id: str,
+        *,
+        run_id: str,
+        step: str = "",
+        detail: str = "",
+        **_kwargs: Any,
+    ) -> None:
+        self.finished.append((approval_id, "failed", run_id))
+        self.record["state"] = "failed"
+        self.record.setdefault("receipts", []).append(
+            {
+                "run_id": run_id,
+                "step": step,
+                "ok": False,
+                "detail": detail,
+                "digest": "",
+                "at": 0.0,
+            }
+        )
 
-    def refile(self, approval_id: str, finding: dict[str, Any]) -> str:
-        self.refiled.append(finding)
-        return "ap_fresh000"
+    def mark_connected(
+        self,
+        approval_id: str,
+        *,
+        run_id: str,
+        step: str = "verify",
+        detail: str = "",
+        **_kwargs: Any,
+    ) -> None:
+        self.finished.append((approval_id, "connected", run_id))
+        self.record["state"] = "connected"
+        self.record.setdefault("receipts", []).append(
+            {
+                "run_id": run_id,
+                "step": step,
+                "ok": True,
+                "detail": detail,
+                "digest": "",
+                "at": 0.0,
+            }
+        )
+
+    def create_request(self, **fields: Any) -> dict[str, Any]:
+        self.refiled.append(dict(fields))
+        return {"approval_id": "ap_fresh000"}
+
+    def new_request_id(self) -> str:
+        return "req_fresh000"
 
 
 def _result(argv: tuple[str, ...], **fields: Any) -> onboard.CommandResult:
@@ -97,6 +166,10 @@ class FakeTransport:
         self.connect_refusal = connect_refusal
         self.calls: list[tuple[str, tuple[str, ...]]] = []
         self.connected: onboard.ResolvedCredential | None = None
+        # Mirrors ``SshTransport``'s early record: the halt's refile reads the
+        # probe the refusal came from (the real transport sets it before the
+        # fingerprint check), so the fake carries the same surface.
+        self.last_probe: onboard.Probe | None = None
 
     def probe(self) -> onboard.Probe:
         return onboard.Probe(
@@ -443,8 +516,10 @@ def test_a_contradicted_pre_read_halts_files_a_fresh_request_and_runs_nothing_mo
     failing = payload["steps"][-1]
     assert failing["step"] == "pre_read" and failing["ok"] is False
     assert "OS" in failing["detail"] or "os" in failing["detail"]
-    # The fresh-request refile went through the adapter with the finding.
-    assert fake.refiled and fake.refiled[0]["check"] == "os"
+    # The fresh-request refile went through the adapter against the store's
+    # mint: the created request CARRIES THE CORRECTED FACT (os: Linux, observed)
+    # while the old record's failed state stays where it was.
+    assert fake.refiled and fake.refiled[0]["what"]["os"] == "Linux"
     assert "A new request ap_fresh000" in failing["detail"]
     # NOTHING state-changing ran: the only transport calls are the connect and
     # the pre-read itself.
@@ -469,6 +544,18 @@ def test_a_changed_host_key_halts_as_a_contradiction(
             "approved against",
         )
     )
+    # The probe the refusal came from: the real transport records it before the
+    # fingerprint check, so the refile can name the key that actually answered.
+    transport.last_probe = onboard.Probe(
+        ok=True,
+        host="node",
+        port=22,
+        user="ec2-user",
+        banner="SSH-2.0-OpenSSH",
+        host_key_fp="SHA256:v2-shifted",
+        host_keys=("node ssh-ed25519 AAAA",),
+        at=0.0,
+    )
 
     payload = onboard.execute_approval(
         "ap_aaaa1111",
@@ -480,7 +567,10 @@ def test_a_changed_host_key_halts_as_a_contradiction(
 
     assert payload["state"] == "failed"
     assert payload["error"]["code"] == "pre_read_contradiction"
-    assert fake.refiled and fake.refiled[0]["check"] == "host_key_fp"
+    # The refile carries the CORRECTED host key (the observed value, from the
+    # probe the halt came from) on the fresh request, against the store's
+    # merged mint surface.
+    assert fake.refiled and fake.refiled[0]["device"]["host_key_fp"] == "SHA256:v2-shifted"
     assert not [c for c in transport.calls if c[0] == "run"]
 
 

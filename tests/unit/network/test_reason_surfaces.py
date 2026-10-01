@@ -72,6 +72,14 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "the install receipt's machine reason, assigned to the payload's key",
     ),
+    # The onboarding adapter COPIES the runner's own receipt row into the store's
+    # six fields: ``detail`` here was composed by the runner a moment earlier
+    # (never a peer's wire value), and this read is the field re-shape itself —
+    # no sentence of it is printed from this site.
+    ("local_operator/network/onboard_approvals.py", "append_receipt", "detail"): (
+        1,
+        "the runner's own receipt field, copied into the store row — not a wire read",
+    ),
     # The relay's OWN sentence for a session op (``runtime joining``), printed verbatim
     # on purpose: the wire facts (``outcome``/``engaged``/``admitted``) are the booleans
     # beside it, and UX round 3 removed the second copy of those from these lines.
