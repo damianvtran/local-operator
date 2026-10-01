@@ -1146,3 +1146,77 @@ async def test_the_urgency_word_counts_the_same_set_on_both_surfaces(enabled):
         assert "1 urgent" in bar, bar
         assert "1 urgent" in header, header
         assert "2 urgent" not in header, header
+
+
+# -- round 4: the VIEWER holder ---------------------------------------------
+
+
+class _ViewerAskSession(_AskSession):
+    """The viewer's shape: the same three ops, but ``async`` (they cross the wire).
+
+    This is the double whose absence let QA round 4's blocker through: the dock
+    looked the owner's names up on whichever session held the ask, and a viewer
+    that lacked them made every answer silently do nothing.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.wire: list[tuple[str, str, dict[str, Any], str]] = []
+
+    async def respond_ask(self, ask_id, answers=None, *, by="unknown"):
+        self.wire.append(("respond", ask_id, dict(answers or {}), by))
+        return {"ok": True, "detail": "delivered"}
+
+    async def decline_ask(self, ask_id, *, by="unknown"):
+        self.wire.append(("decline", ask_id, {}, by))
+        return {"ok": False, "error": "already answered by phone."}
+
+    async def dismiss_ask(self, ask_id, *, by="unknown"):
+        self.wire.append(("dismiss", ask_id, {}, by))
+        return {"ok": True}
+
+
+async def _drain(pilot, turns: int = 6) -> None:
+    """Let the op's worker run and report: it rides a task, not the key path."""
+    await _settle(pilot, turns)
+
+
+async def test_a_viewer_answers_a_queued_ask_through_its_async_op(enabled):
+    """QA round 4, Q1: on a viewer every answer used to be silently dropped.
+
+    ``AttachedSession`` now carries the same three names as the owner, in the
+    same verdict-dict contract but ``async`` — so the dock's one lookup works on
+    both kinds of holder and the copy is the same.
+    """
+    session = _ViewerAskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?"), _row("a2", "Which region?")]))
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        app.on_ask_queue_list_picked(AskQueueList.Picked("a1"))
+        await _settle(pilot)
+        app._submit_ask_answer("eu-west-1")
+        await _drain(pilot)
+        assert session.wire == [("respond", "a1", {"q1": ["eu-west-1"]}, "terminal")], session.wire
+        assert app._ask_mode is False
+
+
+async def test_a_viewer_refusal_reaches_the_screen_in_the_owners_words(enabled):
+    """The refusal arrives on the worker, so it has to be reported from there."""
+    from local_operator.tui.widgets.toast import Toast
+
+    session = _ViewerAskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?"), _row("a2", "Which region?")]))
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        app._decline_ask("a1")
+        await _drain(pilot)
+        assert session.wire == [("decline", "a1", {}, "terminal")], session.wire
+        assert "already answered by phone." in str(app.query_one(Toast)._message)
