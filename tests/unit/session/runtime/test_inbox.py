@@ -25,9 +25,11 @@ from local_operator.session.runtime.inbox import (
     SOURCE_USER,
     InboxLine,
     append_inbox,
+    coalesce_wake_rows,
     drain_inbox,
     inbox_path,
     peek_inbox,
+    remove_wake_rows,
     withdraw_inbox,
 )
 from local_operator.session.transcript import TRANSCRIPT_FILENAME
@@ -40,6 +42,8 @@ def _line(
     command_id: str = "",
     wake: bool = False,
     harness_injected: bool = False,
+    wake_id: str = "",
+    wake_fires: int = 1,
 ) -> InboxLine:
     return InboxLine(
         text=text,
@@ -48,7 +52,14 @@ def _line(
         command_id=command_id,
         wake=wake,
         harness_injected=harness_injected,
+        wake_id=wake_id,
+        wake_fires=wake_fires,
     )
+
+
+def _fire(text: str, wake_id: str = "w1", fires: int = 1) -> InboxLine:
+    """One spooled wake fire, as ``Session._spool_wake_to_inbox`` writes it."""
+    return _line(text, wake=True, wake_id=wake_id, wake_fires=fires)
 
 
 def test_append_then_drain_preserves_write_order(tmp_path: Path) -> None:
@@ -706,3 +717,253 @@ def test_a_recall_that_loses_the_race_answers_so(
     monkeypatch.setattr(inbox_mod, "_read_all", read_all)
 
     assert withdraw_inbox(tmp_path, "w" * 8) is False
+
+
+# ---------------------------------------------------------------------------
+# Repeated fires of ONE wake: coalesce at drain, purge at cancel
+#
+# The operator's report (2026-10-01): an ``every: 20m`` wake whose runtime kept
+# draining spooled one row per fire — ~52 rows over ~17 h — and the successor
+# delivered each as its own turn. Cancelling the schedule stopped the store entry
+# and the supervisor's errand but not the rows already in the spool.
+# ---------------------------------------------------------------------------
+
+
+def test_wake_carriage_round_trips_and_legacy_rows_read_absent(tmp_path: Path) -> None:
+    """``wake_id``/``wake_fires`` are additive: absent must read as the old row.
+
+    The rows already sitting in the fleet's spools were written by a build with
+    no such keys, and they must keep delivering exactly as they did — individually
+    and without a count — rather than failing to parse or being folded together.
+    """
+    path = inbox_path(tmp_path)
+    path.write_text(
+        json.dumps({"text": "older build's fire", "sender": {}, "wake": True}) + "\n",
+        encoding="utf-8",
+    )
+    (legacy,) = drain_inbox(tmp_path)
+    assert legacy.wake is True
+    assert legacy.wake_id == ""
+    assert legacy.wake_fires == 1, "an absent count is one fire, not zero"
+
+    row = _fire("newer build's fire", wake_id="w1", fires=4)
+    assert append_inbox(tmp_path, row)
+    (restored,) = drain_inbox(tmp_path)
+    assert (restored.wake_id, restored.wake_fires) == ("w1", 4)
+    assert restored.to_json()["wake_id"] == "w1"
+    assert restored.to_json()["wake_fires"] == 4
+
+
+def test_a_junk_fire_count_reads_as_one_and_does_not_take_the_batch_with_it(
+    tmp_path: Path,
+) -> None:
+    """The spool is untrusted input: a hand-edited row must not fail the drain.
+
+    ``int(raw)`` raises on ``"soon"``, and ``_parse`` catches only the JSON
+    decode — so a raising coercion would lose the whole batch, not just the row.
+    """
+    path = inbox_path(tmp_path)
+    path.write_text(
+        "\n".join(
+            json.dumps(row)
+            for row in (
+                {"text": "a", "sender": {}, "wake": True, "wake_id": "w1", "wake_fires": "soon"},
+                {"text": "b", "sender": {}, "wake": True, "wake_id": "w1", "wake_fires": 0},
+                {"text": "c", "sender": {}, "wake": True, "wake_id": "w1", "wake_fires": None},
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    lines = drain_inbox(tmp_path)
+    assert [line.wake_fires for line in lines] == [1, 1, 1]
+
+
+def test_three_fires_of_one_wake_coalesce_to_one_row(tmp_path: Path) -> None:
+    """The core of the flood fix: N spooled fires deliver as ONE row."""
+    lines = [_fire("standup", wake_id="w1") for _ in range(3)]
+    merged = coalesce_wake_rows(lines)
+    assert len(merged) == 1
+    assert merged[0].wake is True
+    assert merged[0].wake_id == "w1"
+    assert merged[0].wake_fires == 3
+    assert "x3 fires of this wake were coalesced" in merged[0].text
+    assert merged[0].text.endswith("standup"), "the latest envelope is the payload"
+
+
+def test_a_coalesced_row_keeps_the_last_occurrence_position(tmp_path: Path) -> None:
+    """Position is part of the guarantee: the row stands where the LAST fire did.
+
+    Merging to the first position would deliver the reminder ahead of a peer note
+    that arrived before the last fire — an ordering the drain's own docstring
+    promises to preserve.
+    """
+    a, b = _line("peer one"), _line("peer two")
+    lines = [_fire("first fire", wake_id="w1"), a, _fire("last fire", wake_id="w1"), b]
+    merged = coalesce_wake_rows(lines)
+    assert [line.text for line in merged] == ["peer one", merged[1].text, "peer two"]
+    assert "last fire" in merged[1].text
+    assert merged[1].wake_fires == 2
+
+
+def test_rows_without_a_wake_id_are_untouched(tmp_path: Path) -> None:
+    """A peer note, an owner prompt, or a row an older build wrote has no id to
+    group on, and must survive byte-for-byte (identity, not equality)."""
+    legacy = _line("older build's fire", wake=True)
+    note = _line("a quiet note")
+    another = _fire("other wake", wake_id="w2")
+    lines = [legacy, note, another]
+    merged = coalesce_wake_rows(lines)
+    assert merged == lines
+    assert merged[0] is legacy and merged[1] is note and merged[2] is another
+
+
+def test_a_single_fire_is_not_rewritten(tmp_path: Path) -> None:
+    """One fire is not a flood: no note, no count, the same object back."""
+    only = _fire("standup", wake_id="w1")
+    assert coalesce_wake_rows([only]) == [only]
+    assert "coalesced" not in only.text
+
+
+def test_a_non_wake_row_with_a_wake_id_is_not_a_fire(tmp_path: Path) -> None:
+    """``wake`` decides: the id alone must not fold a quiet row into an alarm."""
+    quiet = _line("read when you next turn", wake=False, wake_id="w1")
+    fires = [_fire("standup", wake_id="w1") for _ in range(2)]
+    merged = coalesce_wake_rows([quiet, *fires])
+    assert merged[0] == quiet
+    assert len(merged) == 2
+    assert merged[1].wake_fires == 2
+
+
+def test_a_re_coalesce_replaces_the_note_instead_of_nesting_it() -> None:
+    """The deferral path re-spools kept rows and they are merged AGAIN.
+
+    The count must be the sum of what each row already stood for (5 then 1 is 6,
+    not 2), and the note must be REPLACED rather than stacked — otherwise the
+    user reads "x2 fires" for six alarms, and every handover adds another line.
+    """
+    once = coalesce_wake_rows([_fire("standup", wake_id="w1") for _ in range(5)])
+    assert once[0].wake_fires == 5
+
+    # The row is re-spooled (carrying its count and note) and one more fire lands.
+    again = coalesce_wake_rows([once[0], _fire("standup", wake_id="w1")])
+    assert len(again) == 1
+    assert again[0].wake_fires == 6
+    assert again[0].text.count("fires of this wake were coalesced") == 1
+    assert "x6 fires" in again[0].text
+
+
+def test_coalescing_is_pure(tmp_path: Path) -> None:
+    """The drains pass the live batch: mutating it in place would merge rows the
+    deferral path still has to re-spool."""
+    lines = [_fire("standup", wake_id="w1") for _ in range(3)]
+    before = [line.text for line in lines]
+    coalesce_wake_rows(lines)
+    assert [line.text for line in lines] == before
+
+
+def test_remove_wake_rows_drops_only_that_wakes_pending_rows(tmp_path: Path) -> None:
+    """The cancel path: matching fires go, everything else keeps its place."""
+    assert append_inbox(tmp_path, _fire("w1 fire one", wake_id="w1"))
+    assert append_inbox(tmp_path, _line("a quiet note"))
+    assert append_inbox(tmp_path, _fire("w2 fire", wake_id="w2"))
+    assert append_inbox(tmp_path, _fire("w1 fire two", wake_id="w1"))
+    assert append_inbox(tmp_path, _line("owner prompt", source=SOURCE_USER))
+
+    assert remove_wake_rows(tmp_path, "w1") == 2
+    left = [line.text for line in peek_inbox(tmp_path)]
+    assert left == ["a quiet note", "w2 fire", "owner prompt"]
+
+    # An id nobody spooled is not a write.
+    assert remove_wake_rows(tmp_path, "w3") == 0
+    assert [line.text for line in peek_inbox(tmp_path)] == left
+
+
+def test_remove_wake_rows_keeps_unknown_fields_and_torn_rows_verbatim(
+    tmp_path: Path,
+) -> None:
+    """Rows nobody asked to remove must come back byte-identical.
+
+    A re-serialisation through ``InboxLine`` would drop any key a NEWER build
+    wrote beside the known ones — the very additivity ``from_json`` reads — and
+    would silently repair a torn final line into a deliverable row.
+    """
+    path = inbox_path(tmp_path)
+    future_row = json.dumps(
+        {"text": "peer note", "sender": {}, "wake": False, "field_from_2027": {"a": 1}}
+    )
+    torn = '{"text": "half a line", "sender": {}, '
+    path.write_text(
+        f"{json.dumps(_fire('gone', wake_id='w1').to_json())}\n{future_row}\n{torn}",
+        encoding="utf-8",
+    )
+    assert remove_wake_rows(tmp_path, "w1") == 1
+    assert path.read_text(encoding="utf-8") == f"{future_row}\n{torn}"
+
+
+def test_remove_wake_rows_on_a_missing_or_id_less_spool_is_a_no_op(tmp_path: Path) -> None:
+    assert remove_wake_rows(tmp_path, "w1") == 0
+    assert remove_wake_rows(tmp_path, "") == 0
+
+
+def test_the_spool_owes_no_turn_once_the_cancelled_rows_are_gone(tmp_path: Path) -> None:
+    """The obligation the supervisor reads must go with the rows, or a purged
+    cancel still raises a runtime that wakes to nothing."""
+    from local_operator.wakes.spooled import spool_owes_turn
+
+    assert append_inbox(tmp_path, _fire("standup", wake_id="w1"))
+    assert spool_owes_turn(tmp_path) is True
+    assert remove_wake_rows(tmp_path, "w1") == 1
+    assert spool_owes_turn(tmp_path) is False
+
+
+def test_the_boot_drain_delivers_three_spooled_fires_as_one_turn(tmp_path: Path) -> None:
+    """END TO END over the real spool and the real drain: the flood, fixed.
+
+    Three fires of one wake reach ``_drain_inbox_into`` as three rows and must
+    leave as ONE wake delivery carrying the count — the operator's reading was
+    three turns for one reminder.
+    """
+    import asyncio
+
+    from local_operator.session.runtime.process import _drain_inbox_into
+
+    session_dir = tmp_path / "sessions" / "s1"
+    session_dir.mkdir(parents=True)
+    (session_dir / TRANSCRIPT_FILENAME).write_text(
+        json.dumps(
+            {
+                "id": "h1",
+                "ts": 1,
+                "type": "message",
+                "payload": {"kind": "message", "role": "user", "content": []},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    for _ in range(3):
+        assert append_inbox(session_dir, _fire("standup", wake_id="w1"))
+
+    class _Transcript:
+        directory = session_dir
+
+    class _Session:
+        transcript = _Transcript()
+
+    class _Handle:
+        def __init__(self) -> None:
+            self._session = _Session()
+            self.received: list[tuple[str, bool]] = []
+
+        async def receive_peer_message(self, text, *, mode, wake, sender=None):
+            self.received.append((text, wake))
+            return "ok"
+
+    handle = _Handle()
+    assert asyncio.run(_drain_inbox_into(handle)) == 1
+    assert len(handle.received) == 1, "one reminder is one turn"
+    text, wake = handle.received[0]
+    assert wake is True, "it still RUNS the occurrence rather than filing a note"
+    assert "x3 fires of this wake were coalesced" in text
+    assert peek_inbox(session_dir) == [], "and the spool is consumed"

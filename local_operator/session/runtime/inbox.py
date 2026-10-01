@@ -36,10 +36,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import secrets
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -151,6 +152,23 @@ _LOCK_RETRY_S = 0.005
 #: handful of notes between sessions) and far below "this file is a problem".
 MAX_INBOX_ROWS = 500
 
+#: The one-line note a COALESCED wake row carries above the envelope it kept,
+#: and the pattern that recovers its count. Both come from this ONE definition,
+#: because a coalesced row can be re-spooled by the deferral path
+#: (``process._drain_inbox_into``) and merged AGAIN on the next drain: the
+#: second merge must REPLACE this note with a note carrying the summed count,
+#: never nest a second one or double-count the fires already folded in. The
+#: count is also carried structurally (``InboxLine.wake_fires``), so the total
+#: survives a re-spool even when the note is not the thing being read.
+_COALESCED_NOTE = (
+    "(x{count} fires of this wake were coalesced while the runtime was handing over; "
+    "latest below)"
+)
+_COALESCED_NOTE_RE = re.compile(
+    r"^\(x(\d+) fires of this wake were coalesced while the runtime was handing over; "
+    r"latest below\)\n\n"
+)
+
 
 @dataclass(frozen=True, slots=True)
 class InboxLine:
@@ -204,6 +222,23 @@ class InboxLine:
     #: the drain then delivers it exactly as it always did. It only ever rides a
     #: peer row — the owner-prompt paths own no message id.
     message_id: str = ""
+    #: WHICH wake schedule a spooled fire belongs to (``WakeSchedule.id``). A
+    #: draining runtime spools one row PER occurrence, and a schedule that
+    #: repeats fast — ``every: 20m`` across a long handover — used to spool one
+    #: row per fire, which the successor then delivered as one turn per row: the
+    #: reported flood of dozens of identical alarms. This id is what lets
+    #: :func:`coalesce_wake_rows` recognise the rows as the SAME wake without
+    #: parsing their text, and what lets :func:`remove_wake_rows` purge the rows
+    #: of a schedule the user has since cancelled. Additive and defaulted for the
+    #: same reason ``message_id`` is: a row an older build wrote has no key,
+    #: reads as ``""``, and delivers individually, exactly as it always did.
+    wake_id: str = ""
+    #: How many FIRINGS this one row stands for. Additive and defaulted to 1 (the
+    #: ordinary, un-coalesced row). Carried STRUCTURALLY rather than re-derived
+    #: from the note text so a coalesced row that the deferral path re-spools
+    #: merges on the next drain without double-counting: the total is the sum of
+    #: what each member already stood for. See :func:`coalesce_wake_rows`.
+    wake_fires: int = 1
 
     @classmethod
     def from_json(cls, payload: dict[str, Any]) -> "InboxLine":
@@ -229,6 +264,8 @@ class InboxLine:
             command_id=str(payload.get("command_id", "") or ""),
             harness_injected=bool(payload.get("harness_injected", False)),
             message_id=str(payload.get("message_id", "") or ""),
+            wake_id=str(payload.get("wake_id", "") or ""),
+            wake_fires=_fire_count(payload.get("wake_fires", 1)),
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -242,6 +279,8 @@ class InboxLine:
             "command_id": self.command_id,
             "harness_injected": self.harness_injected,
             "message_id": self.message_id,
+            "wake_id": self.wake_id,
+            "wake_fires": self.wake_fires,
         }
 
 
@@ -253,6 +292,21 @@ _KNOWN_SOURCES = frozenset({SOURCE_PEER, SOURCE_USER, SOURCE_RECALL})
 def _known_source(raw: Any) -> str:
     """The row's own source when this build knows it, else the peer default."""
     return raw if isinstance(raw, str) and raw in _KNOWN_SOURCES else SOURCE_PEER
+
+
+def _fire_count(raw: Any) -> int:
+    """``wake_fires`` off a persisted row, coerced rather than trusted.
+
+    The spool is untrusted input — a truncated or hand-edited line reaches
+    ``from_json`` — so this must not raise the way ``int(raw)`` can: a row that
+    fails to parse takes the whole batch with it (``_parse`` catches only the
+    JSON decode). Anything unusable reads as the default, one fire.
+    """
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 1
+    return value if value >= 1 else 1
 
 
 def inbox_path(session_dir: Path) -> Path:
@@ -499,6 +553,80 @@ def _deliverable(lines: list[InboxLine]) -> list[InboxLine]:
     ]
 
 
+def coalesce_wake_rows(lines: list[InboxLine]) -> list[InboxLine]:
+    """Fold repeated firings of ONE wake into a single row (the flood fix).
+
+    **The defect this closes.** A draining runtime spools one row per FIRED
+    occurrence (``Session._spool_wake_to_inbox``). A recurring wake whose runtime
+    is draining for a long time — an ``every: 20m`` schedule across a multi-hour
+    build handover — therefore spooled a row per occurrence: 52 identical rows
+    over ~17 h, each of which the successor then delivered as its OWN wake and
+    its own turn. The user comes back to dozens of alarms for one reminder.
+
+    **What is merged.** Among the batch a drain just took, every group of rows
+    that share a non-empty ``wake_id`` AND carry ``wake=True`` — i.e. repeated
+    fires of the same schedule — becomes ONE row, placed where the group's LAST
+    occurrence was, carrying the latest text and the summed ``wake_fires``. Rows
+    without a ``wake_id`` (a peer note, an owner prompt, a row an older build
+    wrote) are untouched and keep their order relative to everything else, so a
+    batch that interleaves peer notes with wake fires keeps both its ordering and
+    its meaning. A group of ONE is returned unchanged: a single fire is not a
+    flood, and rewriting its text would be a change with no cause.
+
+    **Why the count is structural AND in the text.** The predecessor is already
+    in a batch that can be RE-SPOOLED: ``process._drain_inbox_into`` puts back the
+    rows it will not deliver yet (no durable history), and those rows are merged
+    again on the next drain. Carrying ``wake_fires`` on each row makes the second
+    merge sum what each member already stood for — 5 then 1 is 6, never "two
+    notes" — and :data:`_COALESCED_NOTE_RE` lets the earlier note be REPLACED
+    instead of nested, so the text says what the count says. Both halves are
+    tested (``test_a_re_coalesce_replaces_the_note_instead_of_nesting_it``).
+
+    Pure and total: it never raises, never writes, and never reorders what it
+    does not merge.
+    """
+    groups: dict[str, list[int]] = {}
+    for index, line in enumerate(lines):
+        if line.wake and line.wake_id:
+            groups.setdefault(line.wake_id, []).append(index)
+    merged: dict[int, InboxLine] = {}
+    folded: set[int] = set()
+    for indices in groups.values():
+        if len(indices) < 2:
+            continue
+        last = indices[-1]
+        latest = lines[last]
+        fires = sum(lines[index].wake_fires for index in indices)
+        merged[last] = replace(
+            latest,
+            text=f"{_flagged_note(fires)}\n\n{_strip_coalesced_note(latest.text)}",
+            wake_fires=fires,
+        )
+        folded.update(indices[:-1])
+    if not merged:
+        return list(lines)
+    out: list[InboxLine] = []
+    for index, line in enumerate(lines):
+        if index in folded:
+            continue
+        out.append(merged.get(index, line))
+    return out
+
+
+def _flagged_note(fires: int) -> str:
+    """The ONE line a coalesced row carries above the envelope it kept."""
+    return _COALESCED_NOTE.format(count=fires)
+
+
+def _strip_coalesced_note(text: str) -> str:
+    """Drop a previous coalesce note so a re-coalesce can replace, not nest.
+
+    Anchored at the start and matched whole (note + the blank line that separates
+    it from the envelope), so text that merely mentions the phrase is untouched.
+    """
+    return _COALESCED_NOTE_RE.sub("", text, count=1)
+
+
 def _holds_owner_row(raw: bytes, command_id: str) -> bool:
     """Does this batch still hold the owner row carrying ``command_id``?
 
@@ -606,12 +734,118 @@ def withdraw_inbox(session_dir: Path, command_id: str) -> bool:
         os.close(fd)
 
 
+def remove_wake_rows(session_dir: Path, wake_id: str) -> int:
+    """Drop every pending spooled fire of ONE wake. Returns how many went.
+
+    **The defect half this closes.** Spooled rows outlive the schedule that wrote
+    them: cancelling a wake stops the store entry and the supervisor's errand
+    (``WakeScheduler.update``), but the rows a draining runtime already spooled
+    stay in the file, so the successor still delivers the alarms the user just
+    cancelled. This is what the cancel path calls to take them out.
+
+    **Why it rewrites IN PLACE rather than through** ``os.replace``. The module's
+    two other writers are asymmetric on purpose: :func:`_replace_remainder` uses
+    a staged replace and can lose a row an appender wrote in the window
+    (``withdraw_inbox``'s docstring records the measurement — 10/27, 10/45,
+    14/42 acked rows lost, because an unlocked appender's already-open
+    ``O_APPEND`` descriptor points at the inode the replace orphans). That loss is
+    acceptable for a drain, which is delivering the rows it read; it is NOT
+    acceptable here, where the rows we keep are exactly the ones nobody has seen.
+    Truncating and rewriting through the SAME descriptor keeps that appender's
+    descriptor pointing at the live file, so a row it writes lands after our
+    payload as a clean line instead of vanishing.
+
+    **Best-effort by contract, and it never corrupts to make a deadline.** If the
+    non-blocking lock cannot be taken, another reader is mid-consume and splicing
+    bytes under it would be worse than leaving the rows: it returns 0 and says so.
+    The caller's fallback is the unchanged row, which part 1 of this fix
+    (:func:`coalesce_wake_rows`) still folds to ONE delivery rather than N.
+    Every failure path leaves the file byte-identical to what it read.
+    """
+    if not wake_id:
+        return 0
+    path = inbox_path(session_dir)
+    try:
+        fd = os.open(path, os.O_RDWR | O_BINARY)
+    except FileNotFoundError:
+        return 0
+    except OSError:
+        logger.warning("could not open inbox for %s", session_dir.name, exc_info=True)
+        return 0
+    try:
+        with _NonBlockingLock(fd) as lock:
+            if not lock.acquired:
+                # Another reader owns the window (a drain consuming the file, or a
+                # sibling cancel). Leaving its rows is the safe direction: they
+                # are coalesced to one delivery, never lost.
+                logger.info("inbox purge for wake %s skipped: a reader owns the spool", wake_id)
+                return 0
+            raw = _read_all(fd)
+            kept, dropped = _without_wake_rows(raw, wake_id)
+            if not dropped:
+                return 0
+            _rewrite_in_place(fd, b"".join(kept))
+            return dropped
+    except OSError:
+        logger.warning("inbox purge failed for %s", session_dir.name, exc_info=True)
+        return 0
+    finally:
+        os.close(fd)
+
+
+def _without_wake_rows(raw: bytes, wake_id: str) -> tuple[list[bytes], int]:
+    """``(kept line bytes, rows dropped)`` for the asked-for wake.
+
+    Byte-faithful on purpose: the chunks that survive are the bytes that were
+    there, never a re-serialisation of the parsed row. ``InboxLine.from_json``
+    keeps only the fields this build knows, so a rewrite through it would strip
+    whatever a newer build wrote beside them — the additivity this module relies
+    on is exactly the set of keys an older reader must NOT launder. A chunk that
+    does not parse (a torn final line, a hand-edited file) is kept untouched for
+    the same reason.
+    """
+    kept: list[bytes] = []
+    dropped = 0
+    for chunk in raw.splitlines(keepends=True):
+        if not chunk.strip():
+            kept.append(chunk)
+            continue
+        try:
+            payload = json.loads(chunk)
+            line = InboxLine.from_json(payload) if isinstance(payload, dict) else None
+        except (ValueError, TypeError, KeyError):
+            line = None
+        if line is not None and line.wake and line.wake_id == wake_id:
+            dropped += 1
+            continue
+        kept.append(chunk)
+    return kept, dropped
+
+
+def _rewrite_in_place(fd: int, payload: bytes) -> None:
+    """Truncate the open spool and write ``payload`` through the SAME handle.
+
+    The ``O_APPEND`` appender discipline is a constraint, not a detail: its
+    descriptor is the live file's, so it must stay the live file. Any short write
+    is looped, and the caller holds the non-blocking lock, which is the same
+    window :func:`drain_inbox` truncates in.
+    """
+    os.ftruncate(fd, 0)
+    os.lseek(fd, 0, os.SEEK_SET)
+    view = memoryview(payload)
+    while view:
+        written = os.write(fd, view)
+        view = view[written:]
+
+
 def _replace_remainder(path: Path, consumed: bytes) -> None:
     """Rewrite the spool with only the bytes written after ``consumed``.
 
     Staged through ``os.replace`` so a reader never sees a truncated file, and it
-    is the ONLY place this module replaces the file: the recall does not rewrite
-    the spool at all (see :func:`withdraw_inbox`).
+    is the ONLY place this module replaces the file: the recall appends a marker
+    rather than rewriting (see :func:`withdraw_inbox`), and
+    :func:`remove_wake_rows` rewrites through the live descriptor without a
+    replace — for the appender-orphan reason its docstring gives.
     """
     staged = path.with_name(f"{path.name}.{secrets.token_hex(6)}.tmp")
     try:
