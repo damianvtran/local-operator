@@ -24,15 +24,21 @@ pin the properties that make it trustworthy:
   ledger is current: a diff here is a deliberate, visible cost change to the
   reference surface, not an accident to wave through.
 
-Plus one integration test against a real ``Session``, because the wiring — not
+Plus integration tests against a real ``Session``, because the wiring — not
 the renderer — is what a subagent inherits: ``Session.__init__`` chains the
 ``tool://`` resolver ahead of the knowledge resolver over the session's LIVE
 inventory, and ``read`` reaches it through the turn's own ``ToolContext``.
+One of them is the sessions pilot's byte parity — ``read tool://sessions``
+serves exactly the ``help`` op's payload, and NOT the generic schema render —
+which is the drift pin on the registration that lifts it (PR #1862/#1863's
+missing seam).
 """
 
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -703,6 +709,104 @@ async def test_session_wrapper_serves_read_tool_urls_over_live_inventory(tmp_pat
         assert resolver("skill://anything") is None
     finally:
         await session.dispose()
+
+
+# ---------------------------------------------------------------------------
+# The sessions pilot's byte parity (the #1862/#1863 seam)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_read_tool_url_sessions_serves_the_help_op_and_renderer_bytes(tmp_path) -> None:
+    """One surface, two entry points: ``read tool://sessions`` == the ``help`` op.
+
+    The sessions pilot promises byte parity between its ``help`` payload and
+    the audit lane's reader, and this drives the REAL path for both — Session
+    -> ``_build_tool_context`` -> the actual ``read`` tool over
+    ``tool://sessions``, and the sessions tool's own executor — against one
+    renderer. The generic-render inequality is the falsifier: without the
+    registration (the tool-side half of the seam) the read serves
+    :func:`render_tool_doc`'s schema render instead, so (1) and (3) both go
+    red — mutation-checked by reverting the registration locally.
+    """
+    session = make_session(tmp_path, ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
+    try:
+        context = session._build_tool_context()
+        tools = {tool.name: tool for tool in create_tools(context)}
+        sessions_tool = tools["sessions"]
+        # The resolver reads the session's LIVE inventory (the lambda chained
+        # in ``Session.__init__``), so the tool must be in it to be served.
+        session.refresh_tools([sessions_tool])
+
+        result = await tools["read"].execute(
+            "call-read", {"path": "tool://sessions"}, None, None, context
+        )
+        assert result.is_error is False
+        text = _text_of(result)
+
+        reference = builtin.render_sessions_reference()
+        # (1) The read serves the registered renderer's bytes, exactly.
+        assert text == reference
+        # (2) ...which are the ``help`` op's payload, exactly.
+        help_result = await sessions_tool.execute("call-help", {"op": "help"}, None, None, context)
+        assert help_result.is_error is False
+        assert _text_of(help_result) == reference
+        # (3) The registration is what makes it so: the generic render for the
+        # same tool is DIFFERENT bytes, so an unregistered read cannot pass
+        # (1). Determinism rides along — a second read is byte-equal.
+        assert text != render_tool_doc(sessions_tool)
+        again = await tools["read"].execute(
+            "call-read-2", {"path": "tool://sessions"}, None, None, context
+        )
+        assert _text_of(again) == text
+    finally:
+        await session.dispose()
+
+
+def test_sessions_special_renderer_is_registered_to_the_one_renderer() -> None:
+    """The registration itself: keyed to ``sessions`` and pointing at the one
+    renderer both entry points render with — a second renderer, or a copy,
+    is the drift this pins shut."""
+    assert SPECIAL_RENDERERS.get("sessions") is builtin.render_sessions_reference
+
+
+#: Fresh-interpreter arms for the registration's import behaviour. Each boots
+#: ``sys.executable`` (the interpreter the suite runs under) and asserts the
+#: registration landed through imports a REAL startup performs — not because
+#: pytest's collection order imported a side module first, and with no import
+#: cycle that only some orders survive. ``tool_docs_first`` also pins WHO
+#: registers: the leaf module must stay importable alone and register nothing
+#: by itself.
+_FRESH_IMPORT_ARMS: dict[str, str] = {
+    "builtin_alone": (
+        "import local_operator.tools.builtin as builtin\n"
+        "from local_operator.tools.tool_docs import SPECIAL_RENDERERS\n"
+        "assert SPECIAL_RENDERERS['sessions'] is builtin.render_sessions_reference\n"
+    ),
+    "tool_docs_first": (
+        "import local_operator.tools.tool_docs as tool_docs\n"
+        "assert 'sessions' not in tool_docs.SPECIAL_RENDERERS\n"
+        "import local_operator.tools.builtin as builtin\n"
+        "assert tool_docs.SPECIAL_RENDERERS['sessions'] is builtin.render_sessions_reference\n"
+    ),
+    "session_startup": (
+        "import local_operator.session.session\n"
+        "from local_operator.tools.tool_docs import SPECIAL_RENDERERS\n"
+        "from local_operator.tools.builtin import render_sessions_reference\n"
+        "assert SPECIAL_RENDERERS['sessions'] is render_sessions_reference\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("arm", sorted(_FRESH_IMPORT_ARMS))
+def test_the_registration_is_live_for_normal_startup_import_orders(arm: str) -> None:
+    proc = subprocess.run(
+        [sys.executable, "-c", _FRESH_IMPORT_ARMS[arm]],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert proc.returncode == 0, f"{arm}: rc={proc.returncode}\n{proc.stderr}"
 
 
 def test_read_description_advertises_the_tool_scheme() -> None:
