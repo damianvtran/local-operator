@@ -25,9 +25,18 @@ from typing import Any
 
 import pytest
 
+from local_operator.mobile import daemon as daemon_module
 from local_operator.mobile import push_worker as worker_module
 from local_operator.mobile.daemon import MobileDaemon
-from local_operator.mobile.push_payload import attention_emit_key, completion_emit_key
+from local_operator.mobile.push_payload import (
+    ALERT_BODY_FIELD,
+    ALERT_FIELD,
+    ALERT_TITLE_FIELD,
+    TYPE_DIGEST,
+    attention_emit_key,
+    completion_emit_key,
+    digest_emit_key,
+)
 from local_operator.mobile.push_worker import (
     DEFERRAL_WINDOW_S,
     EMIT_RETRY_ATTEMPTS,
@@ -40,8 +49,14 @@ from local_operator.mobile.push_worker import (
     state_path,
 )
 from local_operator.session.attention import AttentionStore, provisional_anchor
+from local_operator.tui.notify import APP_NAME, BODIES
 
 COMPUTER = "computer-handle"
+
+#: The daemon's scan cadence, for the passes a test counts rather than waits for
+#: (``daemon.SCAN_INTERVAL_S``, spelled here so this file's arithmetic does not
+#: import the loop's own constant).
+TICK_S = 2.0
 
 
 class Clock:
@@ -114,11 +129,12 @@ class Harness:
         attended: bool = False,
         live: bool = True,
         arm: bool = True,
+        verdicts: Sequence[EmitAccepted | EmitRefused] | None = None,
     ) -> None:
         self.root = root
         (root / "sessions").mkdir(parents=True, exist_ok=True)
         self.store = AttentionStore(root / "attention.db")
-        self.plane = ControlPlane()
+        self.plane = ControlPlane(verdicts=verdicts)
         self.clock = Clock()
         self.presence = Presence(attended)
         self.devices = Devices(live)
@@ -371,7 +387,9 @@ def test_a_restart_neither_repushes_nor_drops_what_landed_while_down(harness: Ha
 
 
 def test_a_catch_up_above_the_burst_limit_is_one_digest(harness: Harness) -> None:
-    """> BURST_LIMIT eligible rows in one pass is ONE emit naming the count."""
+    """> BURST_LIMIT eligible rows in one pass is ONE emit naming the count —
+    and, since the lane's ruling, a VISIBLE one: its own type, not the attention
+    form's silent wake."""
     for index in range(worker_module.BURST_LIMIT + 1):
         harness.publish(f"burst-{index}")
 
@@ -379,11 +397,113 @@ def test_a_catch_up_above_the_burst_limit_is_one_digest(harness: Harness) -> Non
 
     assert len(records) == 1, "the whole catch-up is exactly one emit"
     key, body = harness.plane.calls[0]
-    assert body["type"] == "attention"
+    assert body["type"] == worker_module.EVENT_DIGEST == TYPE_DIGEST
     assert body["count"] == worker_module.BURST_LIMIT + 1
-    assert key.startswith("attention-")
-    assert "exclude" not in body
+    assert key == digest_emit_key(body["emit_id"], COMPUTER)
+    assert "exclude" not in body, "a tick-detected batch excludes nobody"
     assert harness.cursor()["publication_cursor"] == worker_module.BURST_LIMIT + 1
+    assert (
+        harness.cursor()["attention_sequence"] == 0
+    ), "a digest is not sequence-keyed and must not burn the attention counter"
+    assert body[ALERT_FIELD] == {
+        ALERT_TITLE_FIELD: APP_NAME,
+        ALERT_BODY_FIELD: "Complete · 4 conversations need you",
+    }, "a uniform batch says its real state, and the count is the batch's"
+    for name in ("conversation", "completion_token", "kind"):
+        assert name not in body, f"a digest spans conversations and names none: {name}"
+
+
+def test_the_alert_rides_the_visible_types_and_never_the_silent_one(harness: Harness) -> None:
+    """The lane's ruling: the machine writes the text for completion and digest,
+    and an attention push carries none at all — it is a silent badge correction.
+    """
+    token = harness.publish("alert-me")
+    assert [record.kind for record in harness.worker.tick()] == ["completion"]
+    alert = harness.plane.calls[0][1][ALERT_FIELD]
+    assert alert[ALERT_TITLE_FIELD] == APP_NAME
+    assert alert[ALERT_BODY_FIELD].endswith("1 conversation needs you")
+    assert alert[ALERT_BODY_FIELD].startswith(BODIES["complete"])
+
+    harness.store.acknowledge("session/alert-me", token)
+    assert [record.kind for record in harness.worker.tick()] == ["attention"]
+    assert ALERT_FIELD not in harness.plane.calls[1][1], "the silent form has no text"
+
+
+def test_a_refused_digest_retries_its_own_key_then_drops_at_the_bound(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """B1's first arm: the digest is a first-class retryable item.
+
+    Before the fix the item stranded in the queue (no later pass could see it),
+    so it was never retried, never dropped, and the cursor pinned for good.
+    """
+    harness = Harness(tmp_path, verdicts=[EmitRefused(status=503)])
+    for index in range(worker_module.BURST_LIMIT + 2):
+        harness.publish(f"refused-{index}")
+
+    with caplog.at_level(logging.WARNING, logger=worker_module.__name__):
+        first = harness.worker.tick()
+        assert [record.status for record in first] == [503]
+        assert harness.worker.pending() == 1, "one digest, and nothing else queued"
+        assert harness.cursor()["publication_cursor"] == 0, "the cursor has not moved"
+
+        # Too soon to retry: the wire interval is the ADR's, not the tick's.
+        harness.clock.advance(worker_module.EMIT_RETRY_INTERVAL_S - 1)
+        assert harness.worker.tick() == []
+
+        for _ in range(worker_module.EMIT_RETRY_ATTEMPTS - 1):
+            harness.clock.advance(1)
+            assert len(harness.worker.tick()) == 1
+            harness.clock.advance(worker_module.EMIT_RETRY_INTERVAL_S)
+
+    assert len(harness.plane.calls) == worker_module.EMIT_RETRY_ATTEMPTS
+    assert set(harness.plane.keys) == {
+        harness.plane.keys[0]
+    }, "every attempt wears the SAME key: a re-minted key cannot be deduped"
+    drops = [record for record in caplog.records if "dropped" in record.message]
+    assert len(drops) == 1, f"ONE drop line, not {len(drops)}"
+    assert harness.worker.pending() == 0, "the queue is empty after the drop"
+    assert (
+        harness.cursor()["publication_cursor"] == worker_module.BURST_LIMIT + 2
+    ), "the cursor advances once the batch is dropped"
+
+
+def test_a_sustained_refusal_neither_grows_the_queue_nor_remints(tmp_path: Path) -> None:
+    """B1's second arm, at the repro's scale: 60 passes under a permanent 503.
+
+    The measured defect was the queue and the minted key space each growing by
+    one per pass while the cursor pinned. Both must be flat now.
+    """
+    harness = Harness(tmp_path, verdicts=[EmitRefused(status=503)])
+    for index in range(worker_module.BURST_LIMIT + 2):
+        harness.publish(f"leak-{index}")
+
+    for _ in range(75):
+        harness.worker.tick()
+        harness.clock.advance(TICK_S)
+
+    assert (
+        len(set(harness.plane.keys)) == 1
+    ), f"one batch, one key: {sorted(set(harness.plane.keys))}"
+    assert len(harness.plane.calls) == worker_module.EMIT_RETRY_ATTEMPTS
+    assert harness.worker.pending() == 0
+    assert harness.cursor()["publication_cursor"] == worker_module.BURST_LIMIT + 2
+
+
+def test_a_pending_digest_keeps_its_rows_out_of_the_next_pass(tmp_path: Path) -> None:
+    """The other half of B1: a pending digest COVERS its rows, so a later pass
+    cannot re-derive the same batch as fresh completions — which would put one
+    event on the wire under two identities while the first is still queued."""
+    harness = Harness(tmp_path, verdicts=[EmitRefused(status=503)])
+    for index in range(worker_module.BURST_LIMIT + 3):
+        harness.publish(f"mixed-{index}")
+
+    for _ in range(6):
+        harness.worker.tick()
+        harness.clock.advance(TICK_S)
+
+    assert harness.worker.pending() == 1, "the digest is the only item in the queue"
+    assert len(set(harness.plane.keys)) == 1
 
 
 def test_a_catch_up_at_the_limit_is_not_coalesced(harness: Harness) -> None:
@@ -635,6 +755,94 @@ def test_the_worker_never_writes_the_registry_or_the_handle_key_unasked(harness:
 
 
 # -- the daemon owns the loop -------------------------------------------------
+
+
+def test_an_attention_emit_retries_on_the_wire_interval(tmp_path: Path) -> None:
+    """m1: the badge correction obeys the same 60 s cadence as everything else.
+
+    It used to be returned unconditionally, so a refused correction spent its
+    three attempts in ~6 s — twenty times the frozen budget, on the one emit
+    whose key cannot be re-derived from a record.
+    """
+    harness = Harness(tmp_path, verdicts=[EmitAccepted(emit_id="e", accepted_at=1)])
+    token = harness.publish("acked-elsewhere")
+    harness.worker.tick()  # the completion emit, accepted
+    harness.store.acknowledge("session/acked-elsewhere", token)
+
+    harness.plane._verdicts = [EmitRefused(status=500)]
+    first = harness.worker.tick()
+    assert [record.kind for record in first] == ["attention"]
+    assert len(harness.plane.calls) == 2
+
+    # Any number of ticks inside the interval must leave the wire alone.
+    for _ in range(10):
+        harness.clock.advance(TICK_S)
+        assert harness.worker.tick() == []
+    assert len(harness.plane.calls) == 2
+
+    harness.clock.advance(EMIT_RETRY_INTERVAL_S)
+    second = harness.worker.tick()
+    assert [record.kind for record in second] == ["attention"]
+    assert harness.plane.keys[1] == harness.plane.keys[2], "the same key again"
+
+
+def test_a_tick_cannot_re_enter_a_pass_in_flight(harness: Harness) -> None:
+    """The daemon cuts the scan loose on ``PUSH_TICK_TIMEOUT_S`` and cannot kill
+    the thread, so a second pass must be refused rather than interleaved: the
+    queue, the cursors and the key space are single-claimant state."""
+    inner: list[list[worker_module.EmitRecord]] = []
+    plane = harness.plane
+
+    def reentrant(body: Mapping[str, Any], *, idempotency_key: str):
+        inner.append(harness.worker.tick())  # a second pass, from inside the first
+        return plane(body, idempotency_key=idempotency_key)
+
+    harness.worker.transport = reentrant
+    harness.publish("reentrant")
+
+    records = harness.worker.tick()
+
+    assert len(records) == 1, "the outer pass still emits"
+    assert inner == [[]], "the inner pass did nothing at all"
+    assert harness.worker.pending() == 0
+    assert len(harness.plane.calls) == 1, "and it did not put a second emit on the wire"
+
+
+def test_the_cursor_file_is_not_rewritten_when_nothing_moved(harness: Harness) -> None:
+    """n1: a pass that changes no position must not rename an identical file.
+
+    Measured across a RESTART, which is where the optimisation is armed: a fresh
+    worker that reads the file back must know what is already on disk, or its
+    first tick rewrites an identical file.
+    """
+    harness.publish("moves-the-position")
+    harness.worker.tick()
+    path = state_path(harness.root)
+
+    restarted = harness.restart()
+    before = path.stat().st_ino
+    assert restarted.tick() == []
+    assert path.stat().st_ino == before, "the first pass after a restart rewrote the file"
+
+    harness.publish("moves-it-again")
+    assert len(restarted.tick()) == 1
+    assert path.stat().st_ino != before, "a real move still lands on disk"
+
+
+def test_the_daemon_builds_one_session_table(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Q-2: ``__init__`` carried the same three assignments twice (a rebase
+    artifact), so two ``SessionTable``s were built per daemon."""
+    built: list[object] = []
+    original = daemon_module.SessionTable
+
+    class Counting(original):  # type: ignore[misc,valid-type]
+        def __init__(self) -> None:
+            super().__init__()
+            built.append(self)
+
+    monkeypatch.setattr(daemon_module, "SessionTable", Counting)
+    daemon_module.MobileDaemon(port=0, password="pw")
+    assert len(built) == 1, f"one table per daemon, built {len(built)} times"
 
 
 def test_the_daemon_scan_loop_ticks_the_worker(harness: Harness, tmp_path: Path) -> None:

@@ -1,0 +1,100 @@
+{
+  "provenance": {
+    "kind": "synthetic",
+    "adr_ref": "damianvtran/local-operator-mobile@b03aeb15fcbff64c5bbd0c4117713a0285c28554 docs/adr/0006-push-and-ack-sync.md §2.1/§3.2, with the third type ruled by the lane on 2026-10-01",
+    "core_ref": "damianvtran/local-operator@ebb5fd496",
+    "sections": [
+      "§2.1",
+      "§3.2",
+      "§3.4"
+    ],
+    "how": "constructed from the ADR's burst rule and the lane's ruling (the digest is a VISIBLE alert, not the silent attention form), and cross-checked against the core's own builder and key recipe (tests/unit/mobile/test_push_payload.py); not captured from a running relay, because no relay route emits the machine-side shapes yet"
+  },
+  "shape": "emit-body/digest",
+  "route": "/v1/tunnels/{tunnel_id}/push/events",
+  "method": "POST",
+  "required_headers": {
+    "Idempotency-Key": "emit-idempotency-keys.json"
+  },
+  "payload_required": {
+    "v": "int",
+    "type": "str",
+    "computer": "str",
+    "count": "int",
+    "emit_id": "str",
+    "alert": "object"
+  },
+  "payload_optional": {
+    "exclude": "list[str]"
+  },
+  "payload_version": 1,
+  "alert_required": {
+    "title": "str",
+    "body": "str"
+  },
+  "report_block_required": {
+    "device_id": "str",
+    "credential_live": "bool"
+  },
+  "report_block_optional": {
+    "credential_expires_at": "int",
+    "last_authenticated_at": "int"
+  },
+  "payload": {
+    "v": 1,
+    "type": "digest",
+    "computer": "VZ8kQ1mT4pR7sW2xY6bN9c",
+    "count": 4,
+    "emit_id": "5c7e9a1b3d5f708192a3b4c5d6e7f809",
+    "alert": {
+      "title": "Local Operator",
+      "body": "Complete · 4 conversations need you"
+    },
+    "exclude": [
+      "3f1c9a7b2d4e506182a3b4c5d6e7f809"
+    ]
+  },
+  "exclude_absent_payload": {
+    "v": 1,
+    "type": "digest",
+    "computer": "VZ8kQ1mT4pR7sW2xY6bN9c",
+    "count": 4,
+    "emit_id": "5c7e9a1b3d5f708192a3b4c5d6e7f809",
+    "alert": {
+      "title": "Local Operator",
+      "body": "Complete · 4 conversations need you"
+    }
+  },
+  "body": {
+    "v": 1,
+    "type": "digest",
+    "computer": "VZ8kQ1mT4pR7sW2xY6bN9c",
+    "count": 4,
+    "emit_id": "5c7e9a1b3d5f708192a3b4c5d6e7f809",
+    "alert": {
+      "title": "Local Operator",
+      "body": "Complete · 4 conversations need you"
+    },
+    "exclude": [
+      "3f1c9a7b2d4e506182a3b4c5d6e7f809"
+    ],
+    "devices": [
+      {
+        "device_id": "3f1c9a7b2d4e506182a3b4c5d6e7f809",
+        "credential_live": true,
+        "credential_expires_at": 1791592000,
+        "last_authenticated_at": 1789099000
+      }
+    ]
+  },
+  "notes": [
+    "A DIGEST IS NOT THE ATTENTION FORM. §3.2 fixes the attention form's envelope as a silent, best-effort wake (aps.content-available), so a coalesced catch-up riding it would arrive with no banner, no body and no count the user can read. type: \"digest\" is the signal the cloud's fan-out composes an ALERT from: a house constant plus the count, never a conversation name, a snippet or an error line.",
+    "No conversation, no completion_token and no kind: a digest spans conversations, so it names none of them, and a tap on it resolves nowhere — it is a \"look at the app\" nudge, and the app reads the truth from the machine.",
+    "COLLAPSE PER COMPUTER, not per conversation: the cloud derives apns-collapse-id / notification.tag as digest:<computer handle> from this payload's type and computer. A phone that already has banners queued for several conversations must not get one banner per conversation for a burst that is one event.",
+    "The machine sends no aps envelope (payload-forbidden-fields.json): the alert above is the text the cloud wraps, and aps.badge is never sent at all (§1.5).",
+    "alert is COMPOSED BY THE MACHINE and delivered verbatim (the lane's ruling of 2026-10-01): the title is APP_NAME, and the body's leading phrase is digest_subtitle's answer for the SET — \"Complete\" here because the batch is uniformly complete, \"Mixed outcomes\" when it is not — followed by the count. A fixed \"Task complete\" would announce a set of failures as complete, which is the claim the TUI's own digest vocabulary exists to refuse.",
+    "exclude means what it means on the attention form, and is REQUIRED when the digest follows an ack nudge — the device that just acted must not be told about its own action. Absent means \"exclude nobody\", which is what the tick-detected path sends; exclude_absent_payload is a whole valid payload, not an empty list.",
+    "The key is sha256(\"digest\" ‖ emit_id ‖ computer) — see emit-idempotency-keys.json, which carries the worked vector. The emit_id is minted ONCE when the coalescing window closes, so a retry re-emits the same emit under the same key; re-minting per attempt would give one batch a new identity each time and defeat the cloud's dedupe (review round 1, B1).",
+    "count is §3.2's count: the machine's unread conversation count at composition time, the one aggregate the design discloses to the cloud on purpose."
+  ]
+}

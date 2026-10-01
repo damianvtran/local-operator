@@ -13,13 +13,14 @@
   "shape": "payload-allow-list/deny",
   "applies_to": [
     "emit-completion.json",
-    "emit-attention.json"
+    "emit-attention.json",
+    "emit-digest.json"
   ],
   "forbidden": {
     "name": "never a CONVERSATION name — not in the title, not in the body, not in any field (P2). The machine's own privacy flag gates LOCAL notifications only and is not a cloud-facing consent. (A device row's ``name`` in registry-list-response.json is the app's own label for a phone: a different field on a different shape, which is why this list is scoped to the payloads — see applies_to.)",
     "conversation_name": "same rule as name",
-    "title": "the banner's title is the cloud's house constant, not a machine field; sending one would carry a name by another spelling",
-    "body": "same rule: never composed from model output or a transcript snippet",
+    "title": "the banner's title is the product's own name (APP_NAME), composed by the machine inside the alert object — never a session name, and never a PAYLOAD field. This entry forbids the KEY as a payload field; alert.title is the one place it may appear, and its value is a house constant.",
+    "body": "same rule: inside the alert object the body is a house constant plus the count, composed by the machine; as a payload field it is forbidden outright, because that is where a transcript snippet or a provider's error line would go.",
     "snippet": "never sent; the desktop composer's body is a last-assistant-line snippet",
     "content": "never sent",
     "transcript": "never sent",
@@ -37,11 +38,12 @@
     "badge": "aps.badge is never sent, ever — the app owns the badge and corrects it by reading the machine's count",
     "aps": "the machine sends the data object and stops; the envelope is the cloud's fan-out and a proposal",
     "revision": "dropped: the badge comes from a read, not from a push, and revision counters leak activity volume",
-    "count_completion": "not a field name; listed so a reader does not read 'count' as a revision counter — count is the disclosed unread aggregate"
+    "count_completion": "not a field name; listed so a reader does not read 'count' as a revision counter — count is the disclosed unread aggregate on all three emit forms"
   },
   "notes": [
     "SCOPED TO THE PAYLOADS, not to every file in this tree: the list response is a relay response whose own forbidden array (registry-list-response.json) names its secrets, and it legitimately carries a device ``name`` — the label for a phone, never a conversation.",
     "One home for the payload deny list, referenced by each emit shape, so a field is either allowed by the shape block or forbidden here — never both.",
+    "THE ALERT OBJECT IS THE ONE EXCEPTION TO title/body, and it is an exception the scan is written to know about: since the lane's ruling of 2026-10-01 the MACHINE composes the user-visible text (APP_NAME, and a house constant plus the count), so alert.title and alert.body legitimately carry those two keys. What the exception does not relax is the CONTENT rule: the alert's text is asserted against the house constants, so no name, snippet or error line can take their place.",
     "The cloud's contract is extra=\"forbid\", so an unlisted field is refused rather than ignored; this file is the machine-side twin of that rule."
   ]
 }
