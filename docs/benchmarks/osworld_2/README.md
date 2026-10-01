@@ -1142,7 +1142,8 @@ $0.05–0.30, capped at $0.50. For scale on a full suite: prior uncapped
 model side of that is no longer an estimate: the campaign's sealed usage records
 now measure per-episode model spend directly. Arm 1830's ten r1 episodes — same
 arm, same route, same budgets — cost **$0.5597 to $14.3239 each, ≈$35.26 for the
-ten** (a floor, since the provider reported a price on only some calls: 49 of
+ten** ([arm 1830's record](records/TRANCHE-arm-1830.md); a floor, since the
+provider reported a price on only some calls: 49 of
 193 on `task_005`, 93 of 166 on `task_016`). That is roughly an order of
 magnitude above the $0.05–0.30 per episode the staging document predicted for
 the model, and the top of the range is the cache re-billing defect recorded
@@ -1231,7 +1232,7 @@ It produced #542 (the frame-id contract, plus the bytecode-proof digest) and
 ### Measured scoring-side defects
 
 Four defects on the *scoring* side were measured during the campaign — three of
-them run records under `~/worktrees/osworld/scripts/logs/` (the cache defect
+them run records, committed under [`records/`](records/) (the cache defect
 carries both a controlled probe and a cost-forensics analysis), and one a
 property of the evidence format itself. None is a hypothesis
 and none is repaired by this document. They matter to any reader deciding
@@ -1289,7 +1290,8 @@ registry — normalising `openrouter` to `openai_compatible` plus
 `https://openrouter.ai/api/v1`, and raising `JudgeUnavailable` **by name before
 allocation** for anything unrecognised — is in review as PR #1887 (which
 also discloses the spend surface, since an enabled judge now spends the call it
-was always configured for).
+was always configured for). The record is
+[`records/EVAL-JUDGE-FINDING-1830-task_003.md`](records/EVAL-JUDGE-FINDING-1830-task_003.md).
 
 **An evaluator can read the wrong browser tab and score the task 0.** task_009's
 evaluator selects a tab by `tab_prefix`, which for that task is the **bare
@@ -1315,10 +1317,11 @@ episode is "not evaluated as intended", not "verified wrong", and no claim in
 either direction can be made from it. No fix has landed at the time of writing;
 the repair shape is to pin the prefix to the page that holds the submitted data,
 or to prefer a prefix match whose page can answer (`typeof getJSON === 'function'`).
+The record is [`records/ZERO-CLASSIFICATION-1830-009-013.md`](records/ZERO-CLASSIFICATION-1830-009-013.md).
 
 **Appending to the context re-writes the provider's cached prefix.** A cost
 defect, measured with a controlled nine-case prefix probe on this apparatus —
-`probe_rule4.py`, whose per-case rows read `cached_tokens` and
+[`probe_rule4.py`](records/probe_rule4.py.txt), whose per-case rows read `cached_tokens` and
 `cache_write_tokens` back out of the provider's own response: an **identical**
 prefix re-sent reads back cached, while **appending** content re-bills it.
 
@@ -1342,7 +1345,9 @@ $17.1957). It is not cache TTL expiry (re-write gaps of 33–180 s sit far below
 `provider_turn_start` 87 against 86 calls). The probe ran against **Alibaba**,
 so whether the effect is provider-specific is not yet settled. A fix — appending
 the observation frame so the cached prefix survives an action turn — is a
-candidate, not a change.
+candidate, not a change. The records are
+[`records/COST-FORENSICS-1830-task_003.md`](records/COST-FORENSICS-1830-task_003.md)
+and [`records/PROBE-RULE4-README.md`](records/PROBE-RULE4-README.md).
 
 **What these records can and cannot settle.** The diagnostics block bounds what
 any post-hoc analysis of these bundles can conclude, and the boundary is worth
