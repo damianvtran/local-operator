@@ -533,6 +533,29 @@ _DEGRADED_RESYNC_RETRY_CAP_S = 8.0
 #: actually known.
 _SYNC_UNRESPONSIVE_REASON = "the runtime is not responding"
 
+#: The slack one answer ATTEMPT leaves for its response to travel and be painted
+#: before the caller's own deadline fires. Without it the backend and the client
+#: would race to the same instant and the client would win, which is the whole
+#: failure `answer_gate`'s deadline exists to avoid (agent review round 1, MAJOR-1).
+_ANSWER_DEADLINE_MARGIN_S = 0.5
+
+#: The acknowledgement envelope the FIRST attempt holds back for the retry. The
+#: two attempts share the caller's window, so the first is shortened by this — the
+#: alternative is that the retry exists only for callers with budget to spare, and
+#: the lost-ack case (the one it was written for) is the one that has least.
+_ANSWER_RETRY_RESERVE_S = 2.0
+
+#: Below this much remaining budget the retry is ABANDONED rather than shortened.
+#: The owner's settle path is a loop hop, so a retry that has any real room lands
+#: at once or is not going to; spending the last of the window on a second envoy
+#: only pushes the answer past the client's deadline, where the disposition this
+#: retry exists to deliver is exactly what gets lost.
+_ANSWER_RETRY_MIN_S = 1.0
+
+#: The floor under a single attempt's envelope, so a nearly-spent budget still
+#: gives the owner's instant path an honest chance rather than a zero-length wait.
+_ANSWER_ATTEMPT_FLOOR_S = 0.5
+
 
 class RuntimeUnresponsiveError(ConnectionError):
     """The socket was alive and the owner did not produce the canonical sync.
@@ -2881,25 +2904,19 @@ class AttachedSession:
                     # it. Passing None made that token unreachable from this arm
                     # (review round 2, NIT-2).
                     self._note_read_cold_reason(self._runtime_record, self._runtime_pid)
-                    # A READ IS SERVED FROM DISK, so a connected-but-unsynced owner
-                    # is simply a cold READ and nothing more.
-                    return False
-                # A CONTROL CALL IS NOT A READ, and this arm is where the two part
-                # company. ``owner_reachable`` answers a question about the
-                # SOCKET, so it is True for exactly the window a read's expired
-                # dial is deliberately kept open in (``_retain_unsynced_dial``)
-                # while canonical state has still not arrived. Returning from here
-                # as though the call was served left the route one line later at
-                # ``bridge.remote.frontend_state``, which raises
-                # ``RuntimeError("frontend state has not synchronized")`` — and the
-                # ladder turned that into a generic ``503 runtime_unreachable``,
-                # a reconcile remedy for an owner that was alive and about to
-                # answer. Await the retained dial's OWN sync instead (the same
-                # future the retained dial exists to adopt), bounded by the
-                # control envelope, and refuse TYPED if it still has not landed.
-                if self._frontend_store is None:
-                    await self._await_retained_sync(control_budget)
-                return True
+                # AND A CONTROL CALLER PROCEEDS DELIBERATELY. An earlier revision
+                # of this arm awaited the retained dial's sync for CONTROL callers
+                # too, on the theory that a connected-but-unsynced facade is not a
+                # served control call. It was removed because that theory does not
+                # survive contact with the callers: ``acquire(read=False)`` is the
+                # one door every control route uses, so making it wait (and then
+                # refuse) would have taken a ``/messages`` send that works fine
+                # over the live retained dial (`admit_prompt` needs the socket, not
+                # canonical state) and answered it a retryable 503 instead
+                # (agent review round 1 / QA round 1, Q1). Who needs canonical
+                # state — the answer route's epoch and gate reads — is a fact about
+                # the ROUTE, not about the socket, and belongs there.
+                return False
             # THE OWNER SEAM, NOT THE LOCAL REGISTRY (mesh slice DB2). This asked
             # ``find_runtime_record`` directly, which is a scan of THIS machine's
             # run directory — so for a session another device holds it answered
@@ -3001,45 +3018,6 @@ class AttachedSession:
             self._note_read_cold_reason(record, record.pid)
         else:
             self._read_cold_reason = None
-
-    async def _await_retained_sync(self, budget: float | None) -> None:
-        """Wait for a RETAINED dial's canonical sync, or refuse with the typed error.
-
-        The CONTROL half of the read's retention policy, and it exists because the
-        two callers ask different questions of the same socket. A read's expired
-        attach keeps its authenticated dial open so a late sync still installs state
-        (:meth:`_await_late_sync`); in that window ``owner_reachable`` is True while
-        ``_frontend_store`` is still None, so a control caller that took the socket
-        fact for a served call would reach ``frontend_state`` one line later and
-        raise a bare ``RuntimeError`` — which the route ladder answers as a generic
-        ``503 runtime_unreachable``, the reconcile remedy for an owner that is
-        alive and merely has not spoken yet.
-
-        So the wait is on the landing task the retained dial already owns, bounded
-        by the caller's control envelope. Both outcomes are honest and neither is a
-        guess: a sync that lands installs canonical state (the landing task does
-        that itself), and an envelope that expires is raised as the typed
-        :class:`RuntimeUnresponsiveError`, whose ``runtime_alive`` the ladder turns
-        into a RETRYABLE refusal. The task is SHIELDED, never cancelled and never
-        re-dialled: a control call giving up must not close the socket the read
-        path deliberately kept, and a second dial here would be exactly the
-        duplicate connection the retention policy was written to avoid (design
-        risk 2).
-        """
-        task = self._sync_landing_task
-        if task is not None and not task.done():
-            timeout = SYNC_LANDING_DEADLINE_S if budget is None else budget
-            try:
-                await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
-            except TimeoutError:
-                # AN EXPIRY IS NOT EVIDENCE THAT NOTHING LANDED — the distinction
-                # ``_await_late_sync`` draws for its own deadline, and the reason
-                # the verdict below is taken from the store rather than the clock.
-                pass
-            except Exception:  # noqa: BLE001 — a failed landing is no landing
-                logger.debug("retained sync did not land for %s", self._session_id, exc_info=True)
-        if self._frontend_store is None:
-            raise RuntimeUnresponsiveError(_SYNC_UNRESPONSIVE_REASON)
 
     def _note_read_cold_reason(self, record: SessionRecord | None, owner: int | None) -> None:
         """Classify why a read is cold, in the wire's three-token vocabulary.
@@ -3218,6 +3196,7 @@ class AttachedSession:
         value: str | None = None,
         approved: bool | None = None,
         question_index: int | None = None,
+        deadline: float | None = None,
     ) -> str:
         """Answer the current owner gate without a terminal-local prompt task.
 
@@ -3237,11 +3216,24 @@ class AttachedSession:
         refuses is read against the gate's OWN state: if the gate is gone, the
         first attempt settled it and the receipt is a success; if it is still
         parked, the refusal is real and travels unchanged.
+
+        ``deadline`` is the CALLER'S budget, a ``time.monotonic()`` instant by
+        which this call must have returned, and it is what keeps the retry from
+        spending a SECOND full acknowledgement envelope. The desktop answer route
+        passes it because its renderer abandons the request at its own per-op
+        deadline (20 s): two 15 s envelopes plus the control attach is ~33 s, so in
+        the double-timeout case the CLIENT gave up first and the ``retryable``
+        disposition the retry exists to deliver never reached the screen (agent
+        review round 1, MAJOR-1). Given a deadline the attempts SHARE it — the
+        first is shortened so the retry keeps its reserve — and the retry is
+        abandoned outright when too little is left to be worth issuing. ``None``
+        (a caller with no such window) keeps the previous shape: one full envelope
+        per attempt, at most two.
         """
         # Lazily imported, the constraint the two other ``mobile`` imports in this
         # file observe: ``mobile.projects`` reaches ``server.models``, so a
         # module-scope import here would make ``session`` depend on ``mobile``.
-        from local_operator.mobile.attach_client import OwnerAckTimeout
+        from local_operator.mobile.attach_client import ACK_TIMEOUT_S, OwnerAckTimeout
 
         pending = self.pending_gate
         client = self._client
@@ -3253,36 +3245,78 @@ class AttachedSession:
         ):
             raise ValueError("this question is no longer pending")
 
-        async def _issue() -> str:
+        def _remaining() -> float | None:
+            """Seconds this call may still spend, or ``None`` when it has no budget."""
+            if deadline is None:
+                return None
+            return deadline - time.monotonic() - _ANSWER_DEADLINE_MARGIN_S
+
+        def _ack_budget(reserve: float) -> float:
+            """The acknowledgement envelope for ONE attempt.
+
+            ``reserve`` is what the caller wants held back for a later attempt, so
+            the two share one window instead of each claiming a fresh one.
+            """
+            left = _remaining()
+            if left is None:
+                return ACK_TIMEOUT_S
+            return max(min(ACK_TIMEOUT_S, left - reserve), _ANSWER_ATTEMPT_FLOOR_S)
+
+        async def _issue(ack_budget: float) -> str:
             if pending.kind == "approval" and type(approved) is bool:
-                return await client.approval_answer(request_id, approved)
+                return await client.approval_answer(request_id, approved, deadline_s=ack_budget)
             if (
                 pending.kind == "ask"
                 and value is not None
                 and question_index == pending.question_index
             ):
-                return await client.ask_answer(request_id, value, question_index=question_index)
+                return await client.ask_answer(
+                    request_id, value, question_index=question_index, deadline_s=ack_budget
+                )
             raise ValueError("the answer does not match the current question")
 
         try:
-            return await _issue()
-        except (OwnerAckTimeout, RuntimeUnresponsiveError):
+            return await _issue(_ack_budget(_ANSWER_RETRY_RESERVE_S))
+        except OwnerAckTimeout:
             # The owner did not acknowledge inside the envelope. It may still have
             # settled the gate while the ack was in flight, so before spending the
             # retry ask the fact rather than the clock.
             if not self._gate_answer_still_pending(request_id, client):
                 return _settled_gate_receipt(pending, approved)
+            left = _remaining()
+            if left is not None and left < _ANSWER_RETRY_MIN_S:
+                # NO ROOM INSIDE THE CALLER'S WINDOW. Spending the last of the
+                # budget on a doomed second envelope would push the response past
+                # the client's own deadline, which is the very failure the budget
+                # exists to prevent — so the first attempt's timeout travels.
+                raise
         try:
-            return await _issue()
+            return await _issue(_ack_budget(0.0))
         except OperatorAuthorityRequired:
             # A REFUSAL rather than a settlement: the card is STILL parked and
             # this connection is not the console that may clear it (the route
             # answers this one 422 with ``still_pending``). Re-raised so the
             # retry can never turn it into a receipt.
             raise
-        except Exception:  # noqa: BLE001 — classified by the gate's own state below
+        except (OwnerAckTimeout, ValueError, RuntimeError) as error:
+            # NARROW ON PURPOSE (agent review round 1, MINOR-1). These are the
+            # classes a SETTLED gate arrives as — the runtime's own
+            # ``ValueError`` in process, the client's ``RuntimeError`` for an error
+            # frame that crossed the wire, and a second timeout. Anything else
+            # (``AttributeError``, ``TypeError``, a client defect) is not evidence
+            # about the gate and propagates as the bug it is.
+            #
+            # ``RuntimeUnresponsiveError`` is deliberately NOT in this list even
+            # though the retry's purpose is the same class of hazard: it is raised
+            # by THIS facade's bind, never by the client seam below (agent review
+            # round 1, NIT-2).
             if self._gate_answer_still_pending(request_id, client):
                 raise
+            logger.info(
+                "answer gate %s settled under this caller; reporting the receipt (%s)",
+                request_id,
+                error,
+            )
         return _settled_gate_receipt(pending, approved)
 
     def _gate_answer_still_pending(self, request_id: str, client: Any) -> bool:
@@ -9714,6 +9748,16 @@ def _settled_gate_receipt(pending: Any, approved: bool | None) -> str:
     (``session/runtime/serving.py::approval_answer``/``ask_answer``). Returning it
     is what lets the retry report the SETTLEMENT the operator caused instead of a
     transport error over a card that is already gone from their screen.
+
+    THE VALUE IS THIS CALLER'S, AND THAT IS EARNED RATHER THAN ASSUMED. A gate
+    that settled under a COMPETING front end would have refused this caller's
+    attempt outright — the owner's ``_resolve_pending`` finds no parked future and
+    the client raises. Reaching here means the attempt was SENT and then TIMED OUT,
+    i.e. the owner still held the gate when it arrived, so this caller's value is
+    the one that was applied. The folded state cannot name the winning value
+    (``pending_gate`` is gone by the time the retry returns), so if that reasoning
+    is ever weakened the receipt must be re-derived rather than trusted (agent
+    review round 1, MINOR-4).
     """
     if getattr(pending, "kind", "") == "approval":
         return "approved" if approved else "denied"
