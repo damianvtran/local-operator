@@ -454,7 +454,7 @@ def test_every_row_declares_capabilities_from_the_closed_vocabulary() -> None:
         assert definition.capabilities <= CAPABILITY_VOCABULARY, definition.id
 
 
-def test_elevenlabs_declares_stt_only_and_keeps_its_speech_only_flag() -> None:
+def test_elevenlabs_declares_stt_and_tts_and_keeps_its_speech_only_flag() -> None:
     """The wire fact and the enforcement flag are separate and both true.
 
     ``speech_only`` is what keeps the provider off every chat surface today;
@@ -464,7 +464,7 @@ def test_elevenlabs_declares_stt_only_and_keeps_its_speech_only_flag() -> None:
     """
     definition = get_provider_definition("elevenlabs")
     assert definition is not None
-    assert definition.capabilities == frozenset({"stt"})
+    assert definition.capabilities == frozenset({"stt", "tts"})
     assert definition.speech_only is True
 
 
@@ -549,6 +549,7 @@ def test_every_registry_brand_is_pinned() -> None:
         "openai-compatible": "OpenAI-compatible",
         "openrouter": "OpenRouter",
         "elevenlabs": "ElevenLabs",
+        "openai-key": "OpenAI",
         "radient": "Radient",
         "radient-key": "Radient",
         "alibaba": "Alibaba Cloud",

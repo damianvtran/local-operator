@@ -637,8 +637,52 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         # CHAT model (`speech_only` above documents the enforcement sites).
         speech_only=True,
         # The wire fact behind the flag above, declared where the wire is:
-        # ElevenLabs serves speech-to-text and nothing else.
-        capabilities=frozenset({"stt"}),
+        # ElevenLabs serves speech-to-text AND text-to-speech (the voicing
+        # settings' provider voice, ``tts``) and never chat. ``speech_only``
+        # above is deliberately untouched: it is the chat-enforcement flag with
+        # its own pinned call sites, and "never chat" is still true.
+        capabilities=frozenset({"stt", "tts"}),
+    ),
+    ProviderDefinition(
+        id="openai-key",
+        search_aliases=("openai-api-key", "openai-speech"),
+        name="OpenAI (API key)",
+        # NO ``env_keys``, on purpose, and that is the whole safety property of
+        # this row: this login exists for OpenAI SPEECH under the user's own API
+        # key, and the speech availability rule is "advertised only from a key
+        # the user stored here". With an env name declared, an ambient
+        # ``OPENAI_API_KEY`` would surface as ``has_credential`` on every view
+        # of this row (the registry view's env-OR-store hint) and invite a
+        # reader to treat it as a login. Declaring none makes that impossible
+        # by construction. The cost is accepted: this row's key is not
+        # resolvable from the environment, and the chat ``openai`` row keeps
+        # its own ``OPENAI_API_KEY`` for chat. Provider-key checks
+        # (``key_check``) and the desktop's "save a key" route are keyed on
+        # ``env_keys is not None`` for the SYNTHESIZED api-key method, but this
+        # row carries its own real ``create_api_key_login`` method, so the
+        # desktop still lists it as an API-key method.
+        login=create_api_key_login(
+            "OpenAI",
+            "https://platform.openai.com/api-keys",
+            "Paste an API key from the OpenAI platform. This is separate from a "
+            "ChatGPT sign-in, which cannot be used for speech.",
+        ),
+        # Its OWN credential namespace (``storage_id`` on the wire): the row is
+        # stored under ``openai-key``, never under ``openai``. That is the
+        # DEFAULT -- ``store_credentials_as`` is deliberately left unset, because
+        # setting it names a flavour ALIAS onto another provider (``openai-device``
+        # -> ``openai``) and every "is this a flavour" rule keys on that field being
+        # truthy (the catalogue drops such rows, the CLI marks them). Aliasing onto
+        # ``openai`` is exactly what this row must not do: it would put a platform
+        # API key beside the ChatGPT OAuth rows the chat provider's cascade walks,
+        # and the key would be routed to the ChatGPT backend as a chat credential.
+        base_url="https://api.openai.com/v1",
+        # SPEECH-ONLY, same reasoning as ElevenLabs: the row is a login the
+        # speech cascade reads, and must stay off every surface that offers or
+        # resolves a CHAT model (the chat provider is ``openai``). Declared in
+        # the enforcement flag and in the wire fact.
+        speech_only=True,
+        capabilities=frozenset({"tts"}),
     ),
     ProviderDefinition(
         id="radient",
@@ -931,8 +975,15 @@ def speech_only_message(provider_id: str) -> str:
     backend, this one is a voice provider — and collapsing them into one
     sentence would tell the reader something false about whichever it is not.
     """
+    # The sentence names what the wire ACTUALLY serves: a TTS-only row
+    # (``openai-key``) must not be described as speech-to-text. A provider that
+    # serves STT (ElevenLabs, which also serves TTS) keeps the sentence its
+    # pinned tests and users already know.
+    definition = get_provider_definition(provider_id)
+    capabilities = definition.capabilities if definition is not None else frozenset()
+    serves = "text-to-speech" if capabilities == frozenset({"tts"}) else "speech-to-text"
     return (
-        f"Hosting '{provider_id}' serves speech-to-text, not chat completions, "
+        f"Hosting '{provider_id}' serves {serves}, not chat completions, "
         "so no session can run on it."
     )
 
