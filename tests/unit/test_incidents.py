@@ -820,3 +820,17 @@ def test_a_fired_stall_bound_has_a_class_of_its_own() -> None:
     assert "no plane reported" in render_cut_off_reason(
         STALL_BOUND_CAUSE, detail="its own stall bound fired: no plane reported for the whole bound"
     )
+
+
+def test_signal_receipt_detail_states_the_gap_and_never_names_a_sender() -> None:
+    from local_operator.incidents import KILL_UNATTRIBUTED, render_signal_receipt_detail
+
+    unsanctioned = render_signal_receipt_detail(signal_name="SIGTERM", at=0, unsanctioned=True)
+    assert unsanctioned.startswith(" (") and unsanctioned.endswith(")")
+    assert KILL_UNATTRIBUTED in unsanctioned
+    assert "SIGTERM received from an unidentified sender; no stop was staged" in unsanctioned
+    assert unsanctioned.count("(") == 1, "one parenthetical, never nested"
+    assert "no stop was staged" not in render_signal_receipt_detail(
+        signal_name="SIGTERM", unsanctioned=False
+    )
+    assert "3 signals received" in render_signal_receipt_detail(signal_name="SIGTERM", count=3)

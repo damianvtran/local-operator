@@ -2249,3 +2249,84 @@ async def test_the_ladder_publishes_the_journals_latest_marker(
         assert rows == 0, "the superseded deferral's token must never be published"
     finally:
         await session.dispose()
+
+
+# -- the signal-receipt rung (``runtime-signal.json``): the runtime's own word about a SIGTERM --
+
+
+def _write_receipt(root: Path, session_id: str, pid: int, *, sanction: str = "none", **entry: Any):
+    from local_operator.session.runtime import registry
+
+    signal_entry: dict[str, Any] = {
+        "name": "SIGTERM",
+        "number": 15,
+        "at": time.time(),
+        "in_flight": True,
+        "action": "drain",
+        "sender": {"state": "unavailable", "reason": "no-siginfo", "could_be": "same-uid-or-root"},
+        "stop_marker": None,
+        "sanction": sanction,
+    }
+    signal_entry.update(entry)
+    registry.write_signal_receipt(
+        root / "sessions" / session_id,
+        {
+            "v": 1,
+            "kind": "runtime",
+            "session_id": session_id,
+            "pid": pid,
+            "started_at": None,
+            "signals": [signal_entry],
+            "count": 1,
+            "receiver": {},
+            "platform": "darwin",
+        },
+    )
+
+
+def test_an_unsanctioned_signal_receipt_tells_the_signal_story(tmp_path: Path) -> None:
+    from local_operator.session.attention import bootstrap_transcript
+
+    session_id = "sigrcpt1"
+    _seed_started(tmp_path, session_id)
+    pid = 2**22 + 51
+    _write_record(tmp_path, session_id, pid)
+    _write_receipt(tmp_path, session_id, pid)
+    result = bootstrap_transcript(
+        Transcript(tmp_path / "sessions" / session_id), AttentionStore(tmp_path / "a.db")
+    )
+    assert result is not None
+    assert (result[0], result[1]) == ("error", "runtime-shutdown"), result
+    assert "SIGTERM received" in result[2] and "no stop was staged" in result[2], result[2]
+    assert "unidentified sender" in result[2], result[2]
+
+
+def test_a_receipt_for_another_run_is_refused(tmp_path: Path) -> None:
+    from local_operator.session.attention import bootstrap_transcript
+
+    session_id = "sigrcpt2"
+    _seed_started(tmp_path, session_id)
+    _write_record(tmp_path, session_id, 2**22 + 61)
+    _write_receipt(tmp_path, session_id, 2**22 + 99)  # an EARLIER run's signal
+    result = bootstrap_transcript(
+        Transcript(tmp_path / "sessions" / session_id), AttentionStore(tmp_path / "b.db")
+    )
+    assert result is not None
+    assert (result[0], result[1]) == ("error", "runtime-killed"), result
+    assert "SIGTERM received" not in result[2]
+
+
+def test_a_covering_marker_outranks_the_receipt(tmp_path: Path) -> None:
+    from local_operator.session.attention import bootstrap_transcript
+
+    session_id = "sigrcpt3"
+    _seed_started(tmp_path, session_id)
+    pid = 2**22 + 71
+    _write_record(tmp_path, session_id, pid)
+    _write_stop_marker(tmp_path, session_id, pid=pid, started_at=None, rung="sigterm")
+    _write_receipt(tmp_path, session_id, pid, sanction="marker")
+    result = bootstrap_transcript(
+        Transcript(tmp_path / "sessions" / session_id), AttentionStore(tmp_path / "c.db")
+    )
+    assert result is not None
+    assert (result[0], result[1]) == ("interrupted", "user-stop"), result
