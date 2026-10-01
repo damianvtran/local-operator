@@ -37,11 +37,14 @@ a drifted digest fails CI rather than being quietly refreshed.
 
 **Two pins, on purpose.** Every shape is transcribed from the ADR at
 `b03aeb15` (S3's freeze). The DIGEST rules were amended after that freeze and are
-now merged in the same document at **`cc2569a4`** — the third emit type, the
-`alert` object, the `alert`-absent-on-attention rule, the `exclude` scope, and
-the persisted window's `emit_id` — so the digest file carries a
-`digest_rules_ref` naming that ref beside its `adr_ref`. Where the two disagree
-about the digest, `cc2569a4` is the one that governs.
+now merged in the same document at **`5da35710`** — the third emit type, the
+`alert` object, the `alert`-absent-on-attention rule, the `exclude` scope (permitted
+on a digest, **never required**), and the persisted window's `emit_id` — so the
+digest file carries a `digest_rules_ref` naming that ref beside its `adr_ref`.
+Where the two disagree about the digest, the later head is the one that governs.
+(The digest rules passed through two further heads before that one; the refs here
+name the final head rather than the revision each sentence first appeared in, so
+there is one digest pin to follow.)
 
 ## The files
 

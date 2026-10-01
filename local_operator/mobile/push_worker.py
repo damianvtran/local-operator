@@ -178,13 +178,15 @@ class WorkerCursors:
     enabled_at: float = 0.0
     #: The pending coalescing window: ``{emit_id, publications, supersedes}``.
     #:
-    #: DURABLE, and that is a contract requirement rather than tidiness (§3.4 as
-    #: merged at ``cc2569a4``): a digest is the one VISIBLE emit, so a restart
-    #: mid-window that re-minted its ``emit_id`` would put a second banner in
-    #: front of the user — the cloud dedupes on the key alone, and it may have
-    #: delivered the first one and lost the ``202``. The attention emit carries
-    #: no such field because the ADR accepts its caveat there: a duplicated
-    #: silent badge correction is harmless, a duplicated banner is not.
+    #: DURABLE, and that is a contract requirement rather than tidiness (§3.4 at
+    #: ``5da35710``): a digest is the one VISIBLE emit, so a restart mid-window
+    #: that re-minted its ``emit_id`` would put a second banner in front of the
+    #: user — the cloud dedupes on the key alone, and it may have delivered the
+    #: first one and lost the ``202``. THE CAVEAT THIS FIELD CLOSES IS THE
+    #: WINDOW'S, NOT THE ATTENTION EMIT'S (round 3, R13): the attention sequence
+    #: is persisted with the cursor, so a restart RESUMES it rather than
+    #: re-minting. What the cursor only DERIVES is this window, which is exactly
+    #: why the id has to be stored for the one visible type.
     digest_window: dict[str, Any] | None = None
 
     def as_json(self) -> dict[str, Any]:
@@ -773,7 +775,7 @@ class PushWorker:
 
         THE ID IS MINTED HERE, WHEN THE WINDOW CLOSES, and it is PERSISTED in the
         state file — a restart that re-folds this same window must wear the SAME
-        key (§3.4 as merged at ``cc2569a4``). That is what makes an attempt the
+        key (§3.4 at ``5da35710``). That is what makes an attempt the
         same emit: a key re-derived per attempt would hand one batch a new
         identity on every pass, so a cloud that delivered but lost its ``202``
         could not dedupe, and the cursor would pin behind a batch that keeps
@@ -992,8 +994,8 @@ class PushWorker:
     def _resolve(self, item: _PendingEmit) -> None:
         """Close an item: it is accepted, or it is decided not to be sent.
 
-        A digest takes its window's identity with it — §3.4 as merged at
-        ``cc2569a4`` clears it on the same three exits the completion path uses
+        A digest takes its window's identity with it — §3.4 at ``5da35710`` clears
+        it on the same three exits the completion path uses
         (the cloud's ``202``, the third failure, the drop-with-log), and this
         path adds its own: the gate that made the item moot. Leaving the id
         behind would let the NEXT burst wear a key the cloud has already seen,
