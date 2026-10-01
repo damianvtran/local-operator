@@ -848,6 +848,23 @@ async def test_an_amber_send_offers_the_notice_hook_and_a_clean_one_does_not(mon
         assert call["force"] is False
         assert "do not resend" in call["text"] and call["message_id"] in call["text"]
 
+        # THE ABORTED CALL IS FILED REGARDLESS OF THE SETTING (round 1, MINOR-3,
+        # now EXERCISED rather than described): the loop appends a COMPLETED
+        # call's result before it consults the abort signal, but a call the abort
+        # CANCELS is paired with a synthetic ``aborted`` result that carries
+        # neither the id nor the cause — so for that one call the notice row is
+        # the only durable record that a message may have landed.
+        from local_operator.harness.types import AbortSignal
+
+        calls.clear()
+        aborted = AbortSignal()
+        aborted.abort("operator stopped the turn")
+        await execute_send(
+            "aborted", {"target": "peer-target", "message": "did this land?"}, aborted, None, context
+        )
+        assert len(calls) == 1, calls
+        assert calls[0]["force"] is True, "an aborted send is filed even with the key off"
+
         # A delivered send offers nothing: the result IS the receipt.
         calls.clear()
 
