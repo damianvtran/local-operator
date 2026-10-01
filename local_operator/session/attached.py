@@ -71,6 +71,7 @@ from local_operator.harness.types import (
 )
 from local_operator.incidents import format_cut_off_notice
 from local_operator.mobile.attach_client import (
+    MOVED_REASON,
     RETIRING_REASON,
     STOPPED_REASON,
     AttachClient,
@@ -1142,6 +1143,12 @@ class AttachedSession:
         #: shows the cold state for a refresh the user did not ask for. See
         #: ``_go_cold(refresh=True)``.
         self._refresh_callback: Callable[[], Any] | None = None
+        #: The device a MOVE took this conversation to, learned from the
+        #: ``retiring`` frame's own reason (``MOVED_REASON``) — the disconnect
+        #: handler's one output about where the viewer's conversation now
+        #: lives. Empty until a move retires this viewer; a surface reads it
+        #: via :attr:`moved_to`.
+        self._moved_to: str = ""
         #: Told the moment the ``retiring`` frame ARRIVES (not at the close),
         #: and only when the runtime says it is DRAINING. The refresh callback
         #: above is the end of the handover and owns the re-engage; this one is
@@ -7008,6 +7015,21 @@ class AttachedSession:
         # the cases the local flag cannot: another TUI's /stop all, or a shell
         # `lop stop`, hitting a session THIS viewer merely watches — including
         # a session with no wakes, which leaves no on-disk marker to consult.
+        if reason == MOVED_REASON:
+            # THE QUEUED MOVE'S RETIREMENT, and it is deliberately NOT the
+            # refresh arm below. A refresh owes a successor HERE; a move means
+            # the conversation is leaving, so re-engaging from this viewer
+            # would spawn a local runtime for a session mid-handoff — the
+            # second-writer window INV-1 exists to close, and the race the
+            # queued move's attach window is designed around (design note
+            # §5.4: announce, window, then proceed; a client that could not
+            # follow is disconnected, not re-engaged). Go cold WITHOUT the
+            # refresh callback, and keep the destination the frame named so a
+            # surface can say where it went.
+            client = self._client
+            self._moved_to = str(getattr(client, "moved_to", "") or "")
+            self._go_cold(refresh=False)
+            return
         if reason == RETIRING_REASON:
             # A planned refresh, not owner death and not a stop: the runtime
             # left so the next engage runs the build now on disk. Nothing to
@@ -7480,8 +7502,26 @@ class AttachedSession:
         The viewer re-engages at once (``OperatorApp._on_runtime_refreshed``);
         the conversation is untouched and no notice is painted — the band's
         ``starting…`` state covers the ~1 s the re-engage takes.
+
+        NOT told for a MOVE's retirement: that departure arrives as
+        ``MOVED_REASON`` and goes cold through ``set_went_cold_callback``
+        instead, because a re-engage would spawn a runtime for a session that
+        is leaving (see ``_on_disconnected``).
         """
         self._refresh_callback = callback
+
+    @property
+    def moved_to(self) -> str:
+        """The device a move took this conversation to, or ``""``.
+
+        Set when a ``retiring`` frame carrying ``reason: "moved"`` reaches
+        this viewer (delivered during the move's attach window, before the
+        socket closes); persists on the cold viewer so a surface opened after
+        the move can name the destination. The UI slice renders it; the core
+        promises only that it is remembered in the same step that refuses to
+        re-engage locally.
+        """
+        return self._moved_to
 
     def set_drain_callback(self, callback: Callable[..., Any] | None) -> None:
         """Told when the runtime announces a departure that is REFUSING work.

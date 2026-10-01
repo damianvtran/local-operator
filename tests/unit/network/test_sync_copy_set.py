@@ -429,6 +429,12 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         2,
         "``network`` again and the handoff journal inside it: both outside ``sessions/``",
     ),
+    "local_operator/network/move_queue.py": (
+        1,
+        "``QUEUE_DIRNAME``: the queued move's directory under ``network/queue/`` — the "
+        "relay-owned record keyed by session id (design note §5.4), deliberately "
+        "outside ``sessions/`` and never copied",
+    ),
     "local_operator/session/runtime/presence.py": (
         3,
         "the delivery record and its directory under ``run/desktop``: per-device runtime "

@@ -556,6 +556,26 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "prefix lop-join-) once the join it was written for has run; a leaked copy is a "
         "live credential until it is redeemed",
     ),
+    (
+        "local_operator/network/move_queue.py::_write_record_raw",
+        "os.replace",
+        "Atomic write of the queued move's record FILE <config>/network/queue/"
+        "move-<session_id>.json (design note §5.4): a tmp FILE over its target, both "
+        "direct children of queue/, a sibling of sessions/ — the record is relay-owned "
+        "and never copied",
+    ),
+    (
+        "local_operator/network/move_queue.py::_write_record_raw",
+        "os.unlink",
+        "Removes only this call's own .move-<id>.<rand>.tmp sidecar in "
+        "<config>/network/queue/, and only on the failure path",
+    ),
+    (
+        "local_operator/network/move_queue.py::sweep_terminal",
+        "<path>.unlink",
+        "Sweeps terminal queue records past the TTL out of <config>/network/queue/ "
+        "(the glob's own move-*.json matches); the directory is a sibling of sessions/",
+    ),
     # -- the session STAMP: `sessions/<id>/mesh.json` ------------------------
     # THE ONE MESH FILE THAT REALLY IS INSIDE A SESSION DIRECTORY, so it is argued
     # here and not in the block above. `stamp_path` joins the literal

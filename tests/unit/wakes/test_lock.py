@@ -52,7 +52,7 @@ def test_a_second_holder_waits_and_then_times_out(tmp_path: Path) -> None:
     try:
         with pytest.raises(WakeLockBusy) as busy:
             WakeWriteLock(tmp_path, timeout_s=0.05).acquire()
-        assert "Retry in a moment" in str(busy.value)
+        assert "Try again in a moment" in str(busy.value)
     finally:
         held.release()
 

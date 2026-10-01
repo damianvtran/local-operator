@@ -1110,11 +1110,16 @@ def build_cli_parser() -> argparse.ArgumentParser:
         ),
         parents=[parent_parser],
     )
-    move_parser.add_argument("session", help="the conversation id to move")
+    move_parser.add_argument(
+        "session",
+        nargs="?",
+        default="",
+        help="the conversation id to move (with --cancel-queued, the id is that flag's value)",
+    )
     move_parser.add_argument(
         "--to",
-        required=True,
         metavar="DEVICE",
+        default="",
         help="a peer device (id or name), or `local` to bring the conversation here",
     )
     move_parser.add_argument(
@@ -1135,6 +1140,31 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default=0,
         metavar="SECONDS",
         help="re-check a busy conversation every 5s, up to SECONDS (bare: up to 30 min)",
+    )
+    # THE QUEUED MOVE (design note §5.4): today's answer to a busy source is a
+    # refusal plus `--wait`; this is the explicit alternative — accept now, run at
+    # the next safe point, and survive this command exiting. The two flags are
+    # deliberately separate: `--queue` is a REQUEST whose fate the source chooses
+    # (a keep copy ignores it), while `--cancel-queued` is a whole verb shape (see
+    # `sessions_move_command` for why a mixture is refused by name).
+    move_parser.add_argument(
+        "--queue",
+        action="store_true",
+        help=(
+            "wait for the next safe point instead of refusing a busy conversation: the "
+            "move is queued durably on the conversation's device and runs when its "
+            "turn ends (attached clients there are announced and given a window to "
+            "follow or detach). Ignored with --keep"
+        ),
+    )
+    move_parser.add_argument(
+        "--cancel-queued",
+        metavar="SESSION",
+        default="",
+        help=(
+            "cancel a queued move that has not started yet; takes the conversation id "
+            "and nothing else"
+        ),
     )
     move_parser.add_argument(
         "--from-replica",
@@ -4881,6 +4911,50 @@ def _sessions_move_words(
             )
         return lines
 
+    if isinstance(result.get("queue"), dict):
+        # THE QUEUED RECEIPT (design note §5.4) — neither a refusal nor a finished
+        # move: the intent is durable on the source and runs by itself. The human
+        # lines speak product words; the raw phase token stays on the record
+        # (`--json`) rather than in the sentence. The closing lines are
+        # PHASE-AWARE because the cancel hint is a lie once the move has started
+        # (`move_queue.cancel` answers ``too_late`` from ``paused`` on), so only
+        # the phases before the safe point carry it. An unknown phase gets no
+        # gloss rather than a guess, and keeps the cancel line (the
+        # pre-safe-point reading).
+        queue = result["queue"]
+        phase = str(result.get("phase") or queue.get("phase") or "queued")
+        to_block_q = result.get("to_device") or {}
+        # The caller's own `to` (what they typed) beats an opaque device id, and
+        # a product phrase beats both: a raw id means nothing to a person (D9).
+        target = str(to_block_q.get("name") or to or "another device")
+        notes = {
+            "queued": ("waiting for a safe point", "queued"),
+            "finishing": (
+                "waiting for the current step to finish (a pending approval holds this up)",
+                "queued",
+            ),
+            "paused": ("the move has started", "running"),
+            "copying": ("the move has started", "running"),
+            "resumed": (f"it has arrived on {target}", "arrived"),
+        }
+        note, shape = notes.get(phase, ("", "queued"))
+        head = f"Queued a move of {session_id} to {target}"
+        head += f" — {note}." if note else "."
+        if shape == "arrived":
+            return [head, "It is no longer running on this device."]
+        if shape == "running":
+            return [
+                head,
+                f"It can no longer be cancelled; the conversation continues on {target}.",
+            ]
+        return [
+            head,
+            "Windows open on it are told first and get a moment to follow; any that "
+            f"can't will be disconnected, and the conversation continues on {target}.",
+            f"Cancel the queued move before it starts with "
+            f"`lop sessions move --cancel-queued {session_id}`.",
+        ]
+
     to_block = result.get("to_device") or {}
     from_block = result.get("from_device") or {}
     target = str(to_block.get("name") or to_block.get("device_id") or to)
@@ -4938,16 +5012,57 @@ def sessions_move_command(args: argparse.Namespace) -> int:
     peer links and is the only process that speaks the mesh, so a CLI that dialled
     a peer itself would be a second implementation of the protocol. A device with
     no relay gets a refusal naming that, never a silent no-op.
+
+    TWO VERB SHAPES, one parser: ``move <id> --to DEVICE`` and
+    ``move --cancel-queued <id>`` (design note §5.4). A mixture is refused by name
+    rather than guessed at — a silently-picked reading is how a cancel would seem
+    to succeed against the wrong shape of request.
     """
     import json as _json
 
     from local_operator.network import mobility
 
-    session_id = str(args.session)
+    cancel_id = str(getattr(args, "cancel_queued", "") or "")
+    session_id = str(getattr(args, "session", "") or "")
+    to = str(getattr(args, "to", "") or "")
+    if cancel_id:
+        if (
+            session_id
+            or to
+            or bool(getattr(args, "keep", False))
+            or int(getattr(args, "wait", 0) or 0)
+            or bool(getattr(args, "from_replica", False))
+            or bool(getattr(args, "engage_on_arrival", False))
+            or bool(getattr(args, "queue", False))
+        ):
+            print(
+                "--cancel-queued takes only the conversation id; it cannot be combined "
+                "with --to/--keep/--wait/--from-replica/--engage-on-arrival/--queue",
+                file=sys.stderr,
+            )
+            return 2
+        cancelled = mobility.request_move_cancel(cancel_id)
+        if getattr(args, "json", False):
+            print(_json.dumps(cancelled, indent=2, sort_keys=True, default=str))
+            return 0 if cancelled.get("ok") else 1
+        if cancelled.get("ok"):
+            print(f"Cancelled the queued move of {cancel_id}; nothing was changed.")
+            return 0
+        print(
+            str(cancelled.get("message") or "the queued move could not be cancelled"),
+            file=sys.stderr,
+        )
+        return 1
+    if not session_id or not to:
+        print(
+            "sessions move needs a conversation id and --to DEVICE (or " "--cancel-queued SESSION)",
+            file=sys.stderr,
+        )
+        return 2
     wait_s = mobility.MOVE_MAX_WAIT_S if int(args.wait) < 0 else float(args.wait)
     result = mobility.request_move(
         session_id,
-        to=str(args.to),
+        to=to,
         keep=bool(args.keep),
         wait_s=wait_s,
         from_replica=bool(args.from_replica),
@@ -4956,6 +5071,10 @@ def sessions_move_command(args: argparse.Namespace) -> int:
         # does not pass it and therefore still moves a conversation cold, which is
         # today's behaviour and the behaviour every existing caller keeps.
         engage_on_arrival=bool(getattr(args, "engage_on_arrival", False)),
+        # ``--queue``: the explicit "move at the next safe point" request. Read
+        # with ``bool(...)`` so a hand-rolled Namespace without the attribute is
+        # off, the same contract the parser's default gives it.
+        queue=bool(getattr(args, "queue", False)),
     )
     if getattr(args, "json", False):
         print(_json.dumps(result, indent=2, sort_keys=True, default=str))
@@ -4963,7 +5082,7 @@ def sessions_move_command(args: argparse.Namespace) -> int:
     lines = _sessions_move_words(
         dict(result),
         session_id=session_id,
-        to=str(args.to),
+        to=to,
         engage_on_arrival=bool(getattr(args, "engage_on_arrival", False)),
     )
     if result.get("ok"):
