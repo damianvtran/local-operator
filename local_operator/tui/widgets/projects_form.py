@@ -378,7 +378,12 @@ class ProjectsFormPage(Vertical):
         # carry brackets — and Textual's ``Static`` parses markup by default,
         # so a bracketed sentence would raise inside the handler painting it
         # (QA round 1, Q-3).
-        self._confirm_row = Static(DISCARD_PROMPT, classes="projects-form-confirm", markup=False)
+        # `gap-above` is the sheet's ONE sanctioned blank row: the question
+        # must not read as the value of whichever field the viewport clipped
+        # (design review round 1 r2, D10).
+        self._confirm_row = Static(
+            DISCARD_PROMPT, classes="projects-form-confirm gap-above", markup=False
+        )
         self._confirm_row.display = False
 
     # -- composition --------------------------------------------------------
@@ -587,7 +592,9 @@ class ProjectsFormPage(Vertical):
 
     # -- hints --------------------------------------------------------------
     def _tags_hint(self) -> str:
-        return f"comma or space separated · at most {TAGS_MAX}"
+        # The separator is already the field's PLACEHOLDER; repeating it here
+        # said the same thing twice in one row (design review round 1 r2, D11).
+        return f"at most {TAGS_MAX} tags"
 
     def _teams_hint(self) -> str:
         if not self._known_teams:
