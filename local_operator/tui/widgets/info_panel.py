@@ -207,15 +207,16 @@ def _model(value: str, width: int) -> str:
 #: the panel (the 51-cell phrase ``lop sessions`` sizes its column to).
 #:
 #: Kept as a TABLE keyed by the trigger's own words rather than by cutting the
-#: phrase, because the shelf is ~15 cells and a cut phrase is a fragment:
-#: ``signalled; leav…`` is not a thing a person reads. The bound is not invented
+#: phrase, because the shelf has room for a few words, not a sentence, and a
+#: cut phrase is a fragment: ``signalled; fini…`` is not a thing a person reads.
+#: The bound is not invented
 #: here either — it is ``SIGNAL_DRAIN_S``, the same constant the phrase spells
 #: out in full, so the compact form and the long one cannot disagree. A phrase
 #: this build does not know (written by a newer runtime) falls back to
 #: :data:`_LEAVING_SHORT_OTHER`, which says the irreducible fact rather than
 #: another trigger's words.
 _LEAVING_SHORT: dict[str, str] = {
-    LEAVING_ON_SIGNAL: f"leaving (≤{bound_text(SIGNAL_DRAIN_S)})",
+    LEAVING_ON_SIGNAL: f"leaving (silent {bound_text(SIGNAL_DRAIN_S)})",
     LEAVING_FOR_BUILD: "leaving for build",
     # The bounded handover, and the SHELF IS `no movement {bound}` rather than a
     # cut of the long phrase: ``no movement`` is the runtime's own observation
