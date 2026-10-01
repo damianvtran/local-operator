@@ -8,6 +8,7 @@ import json
 import logging
 import pathlib
 import sqlite3
+import time
 from collections.abc import AsyncIterator
 from contextlib import aclosing, asynccontextmanager
 from typing import Annotated, Any, Callable, Literal, NamedTuple
@@ -168,11 +169,26 @@ RUNTIME_UNREACHABLE_MESSAGE = (
 #: the same request will very likely succeed shortly and is safe to resend (the
 #: receipt journal makes an admission at-most-once per request id).
 #:
-#: The MESSAGE is deliberately the unchanged :data:`RUNTIME_UNREACHABLE_MESSAGE`:
-#: a shipped app that predates this code matches that prefix for its copy, and a
-#: backend fix must not move user-visible text on machines whose app has not
-#: updated. ``retryable``/``retry_after_ms`` and a ``Retry-After`` header are
-#: additive fields a newer renderer keys on.
+#: TWO ARMS RAISE IT (``RuntimeUnresponsiveError``, a sync expiry, and a
+#: ``ConnectionError`` carrying ``owner_alive`` — an ``OwnerAckTimeout``), so the
+#: body is built in exactly one place; see :func:`_runtime_busy_refusal`.
+#:
+#: THE MESSAGE IS DELIBERATELY THE UNCHANGED :data:`RUNTIME_UNREACHABLE_MESSAGE`,
+#: and this is now a settled decision rather than an oversight. A revision of this
+#: branch drafted its own sentence for the busy arm ("Session owner is busy and
+#: did not confirm this request. Retrying is safe.") and the design round ruled
+#: it out on three counts, all of them about the SCREEN rather than the wire: the
+#: renderer prepends its own not-sent lead to an echoed `detail` on this arm, and
+#: a busy refusal on `/answers` is raised for a write-then-wait ack timeout, so
+#: the answer may have been taken and "was not sent" is false; "retrying is safe"
+#: is a promise about delivery the app cannot establish and the app has already
+#: retried by the time the band paints; and "Session owner"/"Reconnect and
+#: reconcile" are outside the app's vocabulary, whose noun is "the agent".
+#: The shipped renderer also prefix-matches this unreachable sentence for its MCP
+#: row, so a backend rewording is a regression on every un-updated machine
+#: (``docs/design-ownerless-session-attach.md`` §5 risk 5). The user-facing words
+#: therefore belong to the UI, keyed on this code plus ``retryable``; see the
+#: design-round remediation on the PR for the agreed copy set.
 RUNTIME_BUSY = "runtime_busy"
 
 #: How soon a client may usefully resend a ``runtime_busy`` request. Short
@@ -187,6 +203,21 @@ RUNTIME_BUSY = "runtime_busy"
 #: attempts inside the renderer's 20 s deadline. Aligning it to 3 s buys no extra
 #: chance of admission and costs the third attempt's headroom.
 RUNTIME_BUSY_RETRY_AFTER_MS = 2000
+
+#: The WHOLE answer route's backend envelope, measured from the handler's first
+#: statement, and it exists so the BACKEND gives up before the client does.
+#:
+#: The renderer abandons ``sessions.answer`` at its own per-op deadline
+#: (``DESKTOP_CONTROL_DEADLINE_MS = 20 s``; the op is not a long-read), and a
+#: response that arrives after that is not a refusal the operator can act on — the
+#: UI can only paint "outcome unknown". Two full acknowledgement envelopes (15 s
+#: each) plus the 3 s control attach is ~33 s, which is exactly how a fix whose
+#: whole point was to deliver a ``retryable`` disposition ended up delivering
+#: nothing (agent review round 1, MAJOR-1). 17 s = the control attach + a first
+#: attempt shortened to leave the retry its reserve, with ~3 s left for the
+#: response to travel and be painted; ``answer_gate`` spends it, this route only
+#: hands it over.
+DESKTOP_ANSWER_BUDGET_S = 17.0
 
 #: The receipt's three dispositions (``AdmissionDetail.status``). ``status`` is
 #: the ONE-WORD answer to "did the owner take this text", which is why a false
@@ -1529,6 +1560,28 @@ def _store_refusal(
     )
 
 
+def _runtime_busy_refusal() -> "HTTPException":
+    """The RETRYABLE control refusal, built in exactly one place.
+
+    TWO ARMS RAISE IT — ``RuntimeUnresponsiveError`` (a sync expiry, raised by the
+    facade) and a ``ConnectionError`` carrying ``owner_alive`` (an
+    ``OwnerAckTimeout``, raised when the owner accepted the socket and did not
+    acknowledge in time). They are the same fact to a client, so they must not
+    drift: the code and the disposition ARE the contract, and a second copy of the
+    body is a second place to forget a field (agent review round 1, NIT-1).
+    """
+    return HTTPException(
+        503,
+        {
+            "code": RUNTIME_BUSY,
+            "message": RUNTIME_UNREACHABLE_MESSAGE,
+            "retryable": True,
+            "retry_after_ms": RUNTIME_BUSY_RETRY_AFTER_MS,
+        },
+        headers={"Retry-After": str(max(1, RUNTIME_BUSY_RETRY_AFTER_MS // 1000))},
+    )
+
+
 @asynccontextmanager
 async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> AsyncIterator[None]:
     """The control plane's shared failure ladder.
@@ -1777,16 +1830,7 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         # is alive and this host reached it; it did not answer inside the desktop
         # control envelope. Answered fast and typed so the renderer can retry
         # instead of reporting a lost session at its 20 s deadline.
-        raise HTTPException(
-            503,
-            {
-                "code": RUNTIME_BUSY,
-                "message": RUNTIME_UNREACHABLE_MESSAGE,
-                "retryable": True,
-                "retry_after_ms": RUNTIME_BUSY_RETRY_AFTER_MS,
-            },
-            headers={"Retry-After": str(max(1, RUNTIME_BUSY_RETRY_AFTER_MS // 1000))},
-        ) from None
+        raise _runtime_busy_refusal() from None
     except ProjectionRefusal as error:
         # THE MESH'S OWN REFUSAL, which carries a machine ``code`` AND the sentence
         # the device that refused composed (``network.projection``). Unmapped it was
@@ -1807,6 +1851,24 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         # disagree about one machine's state.
         raise HTTPException(503, {"code": error.code, "message": error.sentence}) from None
     except ConnectionError as error:
+        if getattr(error, "owner_alive", False):
+            # THE OWNER IS ALIVE AND SIMPLY DID NOT ANSWER THIS REQUEST IN TIME.
+            # ``OwnerAckTimeout`` carries the ``owner_alive`` mark for exactly this
+            # check. The generic arm below would call that ``runtime_unreachable``
+            # and hand the renderer a reconnect-and-reconcile remedy for a socket
+            # that is up and a runtime that is mid-turn — the refusal the design
+            # says must carry its disposition
+            # (``docs/design-ownerless-session-attach.md`` D6/D8). Same refusal as
+            # the ``RuntimeUnresponsiveError`` arm above, because it is the same
+            # fact and calls for the same client behaviour: the request was not
+            # served, and resending the SAME request is safe — an admission is
+            # at-most-once per request id (the receipt journal), and an answer gate
+            # re-issues under its own idempotent settle.
+            #
+            # ``owner_alive`` rather than ``runtime_alive`` deliberately: the
+            # latter is the name the TUI duck-checks for a SYNC EXPIRY, and a lost
+            # ACK is not that (agent review round 1, MINOR-2).
+            raise _runtime_busy_refusal() from None
         # A cold session that cannot start a runtime reports WHY -- but only when
         # the reason arrives as an `ActionableConnectionError`, whose TYPE is
         # what certifies the message as one of the vetted configuration
@@ -3452,6 +3514,12 @@ async def answer(session_id: str, body: Answer, request: Request):
     handler's first statement: a stale-epoch answer on a latched daemon must not
     get a refusal that suggests retrying against this process.
     """
+    # TAKEN FIRST, before the pool hands the bridge over, because the control
+    # attach inside that hand-over is the first thing to spend it — and because a
+    # budget that starts after the attach is a budget the renderer can outlast.
+    # ``answer_gate`` is the only consumer; the queued-ask branch below answers
+    # from the ask log and is not subject to it.
+    deadline = time.monotonic() + DESKTOP_ANSWER_BUDGET_S
     async with errors(request), host(request).session(session_id) as bridge:
         assert bridge.remote is not None
         if body.ask_id is not None:
@@ -3495,6 +3563,7 @@ async def answer(session_id: str, body: Answer, request: Request):
                 value=body.value,
                 approved=body.approved,
                 question_index=body.question_index,
+                deadline=deadline,
             )
         except OperatorAuthorityRequired as error:
             # BEFORE the ``RuntimeError`` arm below, which would otherwise
