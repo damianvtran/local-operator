@@ -54,6 +54,9 @@ class FakeStore:
     async def has_persisted_credential(self, provider, session_id=None):
         return bool(self.keys.get(provider))
 
+    async def get_persisted_api_key(self, provider, session_id=None, *, kinds=None):
+        return self.keys.get(provider)
+
 
 @pytest.fixture
 def store_override():
