@@ -1322,8 +1322,8 @@ async def test_the_drain_reads_as_prose_in_every_receipt() -> None:
 
     The record's phrase is a CELL VALUE (lowercase, subject-less) because
     ``lop sessions`` and ``/info`` print it in a column, so concatenating it
-    into a sentence produced '"name" (pid 12, running …) signalled; leaving when
-    its turn ends' — a fragment with no verb. Both prose slots hang their own
+    into a sentence produced '"name" (pid 12, running …) signalled; finishing
+    its turn (cut if silent 2 min)' — a fragment with no verb. Both prose slots hang their own
     subject on one copula supplied by ``_drain_phrase``, so the same words are a
     cell in one place and a clause in the other.
     """

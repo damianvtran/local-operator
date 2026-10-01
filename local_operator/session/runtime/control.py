@@ -2119,8 +2119,8 @@ def _drain_phrase(record: SessionRecord) -> str:
     IT IS A CLAUSE, NOT THE CELL VALUE VERBATIM, and that is the difference
     design round 3 (D7) filed: the record's phrase is written as a CELL
     (lowercase, subject-less) because ``lop sessions`` and ``/info`` print it in
-    a column, so '"name" (pid 12, running …) signalled; leaving when its turn
-    ends' reads as a fragment — the receipt had no verb. One copula restores the
+    a column, so '"name" (pid 12, running …) signalled; finishing its turn (cut if
+    silent 2 min)' reads as a fragment — the receipt had no verb. One copula restores the
     grammar in every prose slot without a second vocabulary: the caller supplies
     the subject (``{where}``, ``it``) and this supplies ``is signalled; …``.
 

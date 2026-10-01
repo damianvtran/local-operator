@@ -271,8 +271,8 @@ async def test_stop_target_paints_a_declined_stop_at_warning_severity(
 
     target = _record(77778, "draining agent")
     line = (
-        'skipped "draining agent" (pid 77778) — signalled; leaving when its turn ends '
-        "(up to 2 min); stopping it now cuts the turn it is finishing — it leaves by "
+        'skipped "draining agent" (pid 77778) — signalled; finishing its turn '
+        "(cut if silent 2 min); stopping it now cuts the turn it is finishing — it leaves by "
         "itself, nothing to do (to force it, run lop stop --force 77778 in a shell)"
     )
 
@@ -668,7 +668,7 @@ async def test_a_target_left_alone_is_named_at_warning_severity(
 
     monkeypatch.setattr(control, "_stop_targets", lambda root, own_pid=None: [_record(9, "z")])
     busy_line = 'skipped "z" (pid 9) — a turn is in flight'
-    draining_line = 'skipped "y" (pid 7) — signalled; leaving when its turn ends'
+    draining_line = 'skipped "y" (pid 7) — signalled; finishing its turn (cut if silent 2 min)'
 
     async def fake_all(  # noqa: ANN001, ANN202
         *, own_pid, _root, only_pids=None, timeout_s=10.0, _command=None, on_wait=None
