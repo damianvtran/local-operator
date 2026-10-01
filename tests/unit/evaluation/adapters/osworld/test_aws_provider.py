@@ -1729,9 +1729,12 @@ _GETTER_CHROME = "/site-packages/desktop_env/evaluators/getters/chrome.py"
 _GETTER_LOGGER = "desktopenv.getters.chrome"
 
 # Upstream's own terminal lines for that getter, verbatim from the pinned
-# checkout. The first is the one an arm already paid for (task_009, r1 arm
-# 1830); the rest are the same getter's other "we selected a target and could
-# not read it" outcomes, which the guard covers for the same reason.
+# checkout, and split by WHOSE failure each one is. The first three are the same
+# "selected a target and could not read it" shape; the last is the getter
+# refusing to run at all on a config its own task failed to supply -- an
+# evaluator defect, and unscoreable for the same reason rather than because a
+# page could not be read. The first is the one an arm already paid for
+# (task_009, r1 arm 1830).
 _UNREADABLE_TARGET = "[ACTIVATE_TAB_JSON] getJSON is not defined in target page"
 _GETTER_FAILURES = (
     _UNREADABLE_TARGET,
@@ -1753,7 +1756,7 @@ async def test_a_getter_that_could_not_read_its_target_raises_scoring_unavailabl
     """The arm-1830 zero, at its source: the evaluator's getter selected a page
     it could not interrogate, logged that, and returned None -- which the task
     read as "no result" and the adapter sealed as a SCORED 0.0 the agent never
-    earned. It is now an unscored episode whose reason names the getter."""
+    earned. It is now an unscored episode whose reason quotes the getter."""
 
     class _UnreadableTargetEnv(_FakeEnv):
         def evaluate(self) -> Any:
@@ -1763,7 +1766,7 @@ async def test_a_getter_that_could_not_read_its_target_raises_scoring_unavailabl
     with _Stubs() as stubs:
         provider = AwsProvider(CREDS, region=REGION, lease_ref="lop-ttl-x", clients=stubs.clients)
         provider._env = _UnreadableTargetEnv()
-        with pytest.raises(scoring.ScoringUnavailable, match="getter could not read"):
+        with pytest.raises(scoring.ScoringUnavailable, match="produced no reading"):
             await provider.evaluate()
 
 
@@ -1855,6 +1858,33 @@ async def test_the_getter_capture_is_removed_when_it_raises() -> None:
             isinstance(h, aws_mod._UnreadGetterTargetCapture)
             for h in logging.getLogger(_GETTER_LOGGER).handlers
         )
+
+
+def test_the_getter_capture_target_matches_the_pinned_upstream() -> None:
+    """The capture matches on four things at once -- the module basename, the
+    logger, the tag and the one exempt message -- and all four are names a
+    rename upstream would change silently, disarming the guard into a no-catch.
+    Pin them against the pinned checkout, as the judge and screenshot captures
+    are pinned. Skipped where that checkout is absent (CI)."""
+
+    inputs_root = Path(
+        os.environ.get(
+            "OSWORLD_INPUTS_ROOT", Path(pwd.getpwuid(os.getuid()).pw_dir) / "worktrees" / "osworld"
+        )
+    )
+    getter = inputs_root / "prepared" / "desktop_env" / "evaluators" / "getters" / "chrome.py"
+    if not getter.exists():  # pragma: no cover - inputs root absent on CI
+        pytest.skip("pinned OSWorld checkout not present")
+    # The FILE half of the match is this module's own basename, and the tagged
+    # getter really is defined in it (a move would leave the tag intact and the
+    # file filter pointing at the wrong module).
+    assert getter.name == aws_mod._GETTER_SOURCE_FILE
+    source = getter.read_text()
+    assert "def get_activate_tab_json(" in source
+    # The LOGGER half, and the two texts the classification keys on.
+    assert f'getLogger("{aws_mod._GETTER_LOGGER}")' in source
+    assert aws_mod._GETTER_TAG in source, aws_mod._GETTER_TAG
+    assert aws_mod._GETTER_NO_TARGET in source, aws_mod._GETTER_NO_TARGET
 
 
 # ---------------------------------------------------------------------------

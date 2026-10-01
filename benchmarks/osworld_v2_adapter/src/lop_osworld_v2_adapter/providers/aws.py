@@ -388,9 +388,16 @@ _GETTER_TAG = "[ACTIVATE_TAB_JSON]"
 
 #: The tag's one terminal outcome that is the AGENT's to own: no page matched
 #: at all, so the artifact the evaluator asked for is absent from the guest and
-#: a 0.0 is the honest reading of an absent artifact. Every OTHER terminal
-#: failure of this getter means it selected a target it could not interrogate,
-#: so its ``None`` says nothing about the agent's work.
+#: a 0.0 is the honest reading of an absent artifact.
+#:
+#: Every OTHER terminal failure of this getter is the EVALUATOR's, in one of two
+#: shapes, and both must not be sealed as a miss: it selected a target it could
+#: not interrogate (the ``getJSON`` helper is missing, or invoking it failed), so
+#: its ``None`` says nothing about the agent's work; or it refused to run at all
+#: because its own configuration is missing (``Missing required config
+#: 'tab_prefix'``), which is evaluator misconfiguration and equally not the
+#: agent's. The captured line is upstream's own text, so it names which shape it
+#: was rather than leaving a reader to infer it.
 _GETTER_NO_TARGET = "No tab url starts with"
 
 
@@ -421,6 +428,13 @@ class _UnreadGetterTargetCapture(logging.Handler):
     helper, falling back to the current rule -- belongs upstream; this guard is
     the legibility boundary that holds on our side until it lands, and until
     then it covers EVERY task using this getter and every prefix, not one task.
+
+    A SECOND SHAPE REACHES THE SAME GUARD, and it is not a matcher failure: the
+    getter returns ``None`` without looking at any page when its own config
+    carries no ``tab_prefix``. That is an evaluator-authoring defect, not a
+    reading of the agent's work, so it is unscoreable for the same reason and is
+    captured by the same rule (see ``_GETTER_NO_TARGET`` for the rule and its
+    one exemption).
     """
 
     def __init__(self) -> None:
@@ -433,10 +447,12 @@ class _UnreadGetterTargetCapture(logging.Handler):
         try:
             message = record.getMessage()
         except Exception:  # pragma: no cover - a broken format must not mask the error
-            # Still an ERROR raised from inside this getter, so still a target
-            # this episode could not be scored against. Kept legible without
-            # copying a half-formatted record.
-            self.messages.append("tab getter failed without a readable message")
+            # A record whose message will not format cannot be checked against
+            # the tag, and ``chrome.py`` holds ~a dozen page getters logging
+            # ERRORs from this same file and logger. Capturing it would raise on
+            # a record this guard cannot attribute to the tagged getter at all,
+            # so it is dropped -- the same failure direction as an upstream
+            # rename: no catch rather than a wrong one.
             return
         if _GETTER_TAG not in message or _GETTER_NO_TARGET in message:
             return
@@ -1358,12 +1374,14 @@ class AwsProvider:
                     "judge/evaluator backend failed: " + "; ".join(capture.messages[:3])
                 )
             if getter_capture.messages:
-                # Same reasoning, different instrument: the getter read a page
-                # it could not interrogate, so the score it fed says nothing
-                # about the agent's work and must not be sealed as a miss.
+                # Same reasoning, different instrument: the getter produced no
+                # reading -- it selected a page it could not interrogate, or it
+                # refused to run at all on its own missing config -- so the score
+                # it fed says nothing about the agent's work and must not be
+                # sealed as a miss. The captured line is upstream's own, so it
+                # names which of the two shapes it was.
                 raise scoring.ScoringUnavailable(
-                    "page getter could not read the target it selected: "
-                    + "; ".join(getter_capture.messages[:3])
+                    "page getter produced no reading: " + "; ".join(getter_capture.messages[:3])
                 )
             return raw
 
