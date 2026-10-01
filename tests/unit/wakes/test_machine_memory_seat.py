@@ -63,36 +63,68 @@ def test_kick_runs_one_pass_per_interval(tmp_path: Path, monkeypatch: pytest.Mon
     asyncio.run(scenario())
 
 
-def test_the_cooldown_withholds_the_second_kill(
+def _fragment(pid: int, ppid: int, mb: int = 2048) -> machine_memory.memory_guard.Fragment:
+    return machine_memory.memory_guard.Fragment(pid=pid, mb=mb, pids=(pid,), ppid=ppid, pgid=pid)
+
+
+def _report_ending(
+    fragment: machine_memory.memory_guard.Fragment,
+) -> machine_memory.MemoryPassReport:
+    return machine_memory.MemoryPassReport(
+        state="act",
+        fleet_mb=900,
+        runtimes=1,
+        measured=1,
+        unmeasured=0,
+        killed=fragment,
+        reason="fleet 900 MB of 1000 MB physical",
+    )
+
+
+def test_the_cooldown_withholds_a_second_stop_of_the_same_lineage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    seen: list[bool] = []
+    """The regrowing respawn the cooldown exists for: same parent, new pid."""
+    held: list[bool] = []
+    ended = _fragment(9900010, ppid=9900001)
 
-    def spy(config_dir: Path, *, apply: bool = True, kill_allowed: bool = True) -> object:
-        seen.append(kill_allowed)
-        return _report(killed=kill_allowed)
+    def spy(
+        config_dir: Path, *, apply: bool = True, in_cooldown: object = None, **_: object
+    ) -> object:
+        assert callable(in_cooldown)
+        held.append(in_cooldown(_fragment(9900011, ppid=9900001)))
+        return _report_ending(ended)
 
     monkeypatch.setattr(machine_memory, "machine_memory_pass", spy)
     seat = sup._MachineMemorySweep(tmp_path)
     first = seat.sweep()
-    assert seen == [True]
-    assert first.killed is not None
+    assert held == [False] and first.killed is not None
     assert seat.last_kill_at is not None
-    # Immediately after: the kill rung is withheld, and the pass still runs (it
-    # warns; it just cannot end anything).
-    second = seat.sweep()
-    assert seen == [True, False]
-    assert second.killed is None
-    # The cooldown expires on the clock, not on the pass count.
-    seat.last_kill_at -= sup.MACHINE_MEMORY_KILL_COOLDOWN_S
     seat.sweep()
-    assert seen == [True, False, True]
+    assert held == [False, True]
+    # The cooldown expires on the clock, not on the pass count.
+    seat._ended = [(at - sup.MACHINE_MEMORY_KILL_COOLDOWN_S, r, p) for at, r, p in seat._ended]
+    assert seat.in_cooldown(_fragment(9900011, ppid=9900001)) is False
+
+
+def test_a_different_runaway_is_killable_on_the_next_pass(tmp_path: Path) -> None:
+    """2026-09-30 02:39-02:43: a 52 GB and a 350 GB runaway were withheld for 10
+    minutes by a cooldown earned by an UNRELATED kill. Different parent, different
+    pid: not held."""
+    seat = sup._MachineMemorySweep(tmp_path)
+    seat._ended = [(time.monotonic(), 9900010, 9900001)]
+    assert seat.in_cooldown(_fragment(9900010, ppid=9900001)) is True  # the same pid
+    assert seat.in_cooldown(_fragment(9900011, ppid=9900001)) is True  # same parent
+    assert seat.in_cooldown(_fragment(9900020, ppid=9900002)) is False  # a stranger
+    # init (pid 1) is everyone's parent, so it never makes two fragments kin.
+    seat._ended = [(time.monotonic(), 9900010, 1)]
+    assert seat.in_cooldown(_fragment(9900030, ppid=1)) is False
 
 
 def test_a_failed_pass_is_a_warning_not_a_crash(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def boom(config_dir: Path, *, apply: bool = True, kill_allowed: bool = True) -> object:
+    def boom(config_dir: Path, *, apply: bool = True, **_: object) -> object:
         raise RuntimeError("ps exploded")
 
     monkeypatch.setattr(machine_memory, "machine_memory_pass", boom)
