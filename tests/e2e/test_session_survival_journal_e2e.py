@@ -17,9 +17,11 @@ it left behind from ANOTHER process:
   evidence instead of inferring it from a missing record.
 
 A third cell covers the exit the runtime DOES get to announce: a real SIGTERM
-whose drain bound expires with the turn still open, read back from the row the
-runtime wrote (reviewer round 1, R3). It parks the turn on an armed approval
-gate so the escalated shape is reached by construction, and takes its shortened
+whose drain bound disposes it with the turn still open, read back from the row
+the runtime wrote (reviewer round 1, R3). The turn is parked on a HANGING
+parent request (the mock's ``[hang]``) — busy with nothing executing and
+nothing moving, the one shape the 2026-10-01 progress-gated bound still cuts —
+so the escalated shape is reached by construction, and it takes its shortened
 bound from the signal suite's own driver.
 
 Isolation: ``headless_tui_env`` redirects the config dir and the root conftest
@@ -37,7 +39,9 @@ from __future__ import annotations
 
 import asyncio
 import signal
+import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -58,24 +62,34 @@ from tests.e2e.watchdog import bounded
 pytestmark = pytest.mark.e2e
 
 
-def _seed_parked_gate(config_dir: Path, session_id: str) -> Path:
-    """``_seed``, with the approval gate ARMED so the turn cannot finish by itself.
+async def _park_a_hanging_turn(viewer: Any, directory: Path) -> None:
+    """Prompt a real turn whose PARENT provider request never returns.
 
-    ``_seed`` arms ``tool_approval_mode: auto`` because its cells want the bash
-    sleep to actually run. This cell wants a turn that cannot end inside the
-    drain bound, so the escalated shape — a signal whose bound expires with the
-    turn still open, the only shape in which a row ever carries an exit cause —
-    is reached by CONSTRUCTION. The earlier version of this cell parked the same
-    sleep and raced the bound instead: whether the row kept the signal came down
-    to the millisecond the signal landed in (it failed twice, then passed
-    fourteen times). A race is a flaky test, and a flaky test is not evidence.
+    Readiness is taken the way ``_park_a_turn`` takes it — from the viewer's
+    ``streaming`` flag rather than the transcript, because a previous turn's row
+    is not evidence this one started — and the turn is genuinely outstanding
+    when this returns: the mock has yielded only its stream-start boundary and
+    will yield nothing more (the ``[hang]`` marker), so the runtime is busy with
+    no readable step until it is signalled and the drain's bound disposes it.
+
+    A step in flight SPARES a signalled runtime under the 2026-10-01 progress
+    gate — the previous version of this cell parked the turn on an armed
+    approval gate, and a gate-parked tool call is exactly such a step, which is
+    why the cell's turn moved to the hang.
     """
-    directory = _seed(config_dir, session_id)
-    (config_dir / "config.yml").write_text(
-        "values:\n  hosting: test\n  model_name: mock\n  tool_approval_mode: manual\n",
-        encoding="utf-8",
+    await viewer.prompt("please [hang]")
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        state = getattr(viewer, "frontend_state", None)
+        if state is not None and getattr(state, "streaming", False):
+            # Past the point where the model's request reached the provider.
+            await asyncio.sleep(1.0)
+            return
+        await asyncio.sleep(0.2)
+    raise AssertionError(
+        f"the turn never started; transcript:\n"
+        f"{(directory / 'transcript.jsonl').read_text(encoding='utf-8')[-2000:]}"
     )
-    return directory
 
 
 @pytest.mark.asyncio
@@ -243,16 +257,36 @@ async def test_a_sigterm_the_drain_bound_cuts_records_the_readers_own_token(
     patches the constant before ``main()`` — the knob stays in the test rather
     than becoming a shipped env override; the code path is the production one
     and the shipped 120 s value is pinned by ``test_residency_guard.py``.
+
+    WHAT THE BOUND STILL CUTS (2026-10-01). Under the progress-gated drain the
+    escalated shape is reached by construction ONLY with a turn that has
+    nothing executing and nothing moving; a tool batch or gate in flight now
+    SPARES the runtime rather than cutting it, which is the fix itself. So the
+    turn hangs on the mock's ``[hang]`` request instead: busy with the model in
+    flight, no step any probe can read, no movement — the one shape the bound
+    disposes.
+
+    TEETH, AND WHAT THEY ARE NOT (round 2, measured). This cell cannot be a
+    fix-discriminator and is not one: a silent parent request is disposed by
+    BOTH semantics — the old code cut everything at the deadline, the gated
+    code reaps one bound of silence — so the cell passes against the pre-fix
+    ``process.py`` too, and an "expected fail unpatched" check is
+    unsatisfiable for it. Its teeth are mutation-checked instead: disarm the
+    gate's ``REAP`` and the sentinel is never released, so this cell fails at
+    the 180 s wait (the exact failure shape CI produced when the parked shape
+    stopped being disposed); perturb the exit writer's token and it fails at
+    the assertion below. The cells that flip on an unfixed tree are the
+    signal suite's unit wave.
     """
     config = headless_tui_env
     session_id = "journalsigterm01"
-    directory = _seed_parked_gate(config, session_id)
+    directory = _seed(config, session_id)
     child = _spawn_with_drain_bound(config, session_id, 3.0)
     viewer = None
     try:
         with bounded(240, "session survival: sigterm writer"):
             viewer = await _attach(config, session_id)
-            await _park_a_turn(viewer, directory, seconds=20)
+            await _park_a_hanging_turn(viewer, directory)
 
             before = journal.TurnJournalRow.from_json(registry.read_turn_journal(directory))
             assert before is not None and before.open is True and before.pid == child.pid
