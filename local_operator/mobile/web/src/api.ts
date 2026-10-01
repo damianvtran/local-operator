@@ -202,10 +202,22 @@ export function setSessionPin(
 	});
 }
 
-export function sendCommand(
-	sessionId: string,
-	op: CommandOp,
-): Promise<{ ok: boolean; detail: string }> {
+/** What a control command answers with.
+
+    ``tone`` and ``refused`` are ADDITIVE fields the daemon sends for a routed
+    slash outcome (design round 1, D1; UX round 1, U3): the runtime gives a
+    completed write and a plain report the same ``style``, so the container and
+    the draft-keeping rule are decided where the outcome is read. Both are absent
+    for every other op, and a caller that ignores them reads ``detail`` exactly as
+    it always did. */
+export type CommandReceipt = {
+	ok: boolean;
+	detail: string;
+	tone?: "success" | "neutral";
+	refused?: boolean;
+};
+
+export function sendCommand(sessionId: string, op: CommandOp): Promise<CommandReceipt> {
 	return request(`/api/sessions/${encodeURIComponent(sessionId)}/command`, {
 		method: "POST",
 		headers: { "content-type": "application/json" },
@@ -298,7 +310,7 @@ export type SignedCommand = CommandOp & {
 export function sendCommandWithProof(
 	sessionId: string,
 	op: SignedCommand,
-): Promise<{ ok: boolean; detail: string }> {
+): Promise<CommandReceipt> {
 	return request(`/api/sessions/${encodeURIComponent(sessionId)}/command`, {
 		method: "POST",
 		headers: { "content-type": "application/json" },

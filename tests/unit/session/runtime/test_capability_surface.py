@@ -238,6 +238,28 @@ def test_the_runtime_dispatches_every_slash_command_it_advertises() -> None:
     )
 
 
+def test_every_command_the_phone_sheet_offers_is_dispatched_by_the_runtime() -> None:
+    """Sheet to route, the end of the chain the phone's composer actually walks.
+
+    The composer sends every command it offers as ``slash_result``, which lands in
+    ``_slash_result``. ``test_the_runtime_dispatches_every_slash_command_it_advertises``
+    pins advertisement to dispatch; this pins the PHONE's catalogue to that same
+    dispatch, through the daemon's own ``slash_commands()`` — so a catalogue that
+    drifted back to "the whole registry" (issue #1869: 35 of 46 entries died with
+    "terminal-only here") fails here by name, whatever the capability table says.
+    """
+    from local_operator.mobile.daemon import MobileDaemon
+
+    offered = {entry["name"] for entry in MobileDaemon(port=0, password="x").slash_commands()}
+    dispatched = _commands_dispatched_by_the_runtime()
+    unrunnable = sorted(offered - dispatched)
+    assert not unrunnable, (
+        f"the phone's sheet offers commands the routed dispatcher has no branch for: "
+        f"{unrunnable}. Hide them (change their scope) or implement them in "
+        "ServingSessionHandle._slash_result."
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("spelling", ["title", "models", "recall"])
 async def test_a_routed_alias_reaches_the_same_handler_as_its_primary_name(
