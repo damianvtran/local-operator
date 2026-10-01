@@ -659,7 +659,10 @@ def test_an_old_peer_degrades_to_peer_too_old_and_is_never_asked(
     ]
     assert {row["code"] for row in too_old} == {readiness.CODE_PEER_TOO_OLD}
     assert {row["capability"] for row in too_old} == set(readiness.PEER_SIDE_CHECKS)
-    assert all(any("updating it first" in remedy for remedy in row["remedies"]) for row in too_old)
+    assert all(
+        any("ask Local Operator to update it" in remedy for remedy in row["remedies"])
+        for row in too_old
+    )
     build = _capability(payload, readiness.CAPABILITY_BUILD)
     assert build["ok"] is True, build
     server_b.stop()

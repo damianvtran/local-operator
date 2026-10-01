@@ -963,7 +963,8 @@ def test_the_remote_park_copy_is_pinned() -> None:
         "Waiting for approval on demo-laptop\n"
         "Open the session here to deny it. Allowing it happens on demo-laptop (Touch ID) or "
         "on a phone paired with it. If nothing there can check a signature: ask Local "
-        "Operator to set it up there (one approval and one admin password prompt) — if "
+        "Operator to set up operator authority there (one approval and one admin password "
+        "prompt) — if "
         "that device is running an older build, updating it is what fixes that."
     )
     # The attached reader (the F-A shape): the lead swaps so the card does not
@@ -973,7 +974,8 @@ def test_the_remote_park_copy_is_pinned() -> None:
         "Waiting for approval on demo-laptop\n"
         "Its gate card has not reached this view — deny it here once it does. "
         "Allowing it happens on demo-laptop (Touch ID) or on a phone paired with it. "
-        "If nothing there can check a signature: ask Local Operator to set it up there "
+        "If nothing there can check a signature: ask Local Operator to set up operator "
+        "authority there "
         "(one approval and one admin password prompt) — if that device is running an "
         "older build, updating it is what fixes that."
     )

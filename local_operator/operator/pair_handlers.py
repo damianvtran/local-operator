@@ -169,8 +169,8 @@ def _pair(args: argparse.Namespace) -> int:
     if signer is None:
         # R1-4: the remedy names the setup action (§4), not the terminal verb.
         print(
-            "no operator key on this machine — set up operator authority first "
-            "(one approval and one admin password prompt)",
+            "no operator key on this machine — ask Local Operator to set up operator "
+            "authority (one approval and one admin password prompt)",
             file=sys.stderr,
         )
         return 1
@@ -389,15 +389,15 @@ def describe_devices(args: argparse.Namespace) -> int:
                 print(
                     "no installed operator anchor to lift a revocation from, and the local "
                     "record could not be cleared either, so this device is STILL refused — "
-                    "set up operator authority on this machine and fix the permissions on "
-                    "the operator directory, then run this again",
+                    "ask Local Operator to set up operator authority on this machine and "
+                    "fix the permissions on the operator directory, then run this again",
                     file=sys.stderr,
                 )
             else:
                 print(
                     "no installed operator anchor to lift a revocation from, so only the "
-                    "local record was cleared — set up operator authority on this machine "
-                    "if you expected an anchor here",
+                    "local record was cleared — ask Local Operator to set up operator "
+                    "authority on this machine if you expected an anchor here",
                     file=sys.stderr,
                 )
 
@@ -457,8 +457,8 @@ def describe_devices(args: argparse.Namespace) -> int:
                 f"{authorise} could pair again — and do nothing else: there is no usable "
                 "installed operator anchor on this machine, so no anchor statement would "
                 f"be written and no privileged step would be needed. Run `{command}` "
-                "without --print-only to do exactly that, and set up operator authority "
-                "if you expected an anchor here."
+                "without --print-only to do exactly that, and ask Local Operator to set "
+                "up operator authority if you expected an anchor here."
             )
         else:
             halves = " and ".join(

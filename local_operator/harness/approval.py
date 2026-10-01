@@ -715,9 +715,9 @@ OPERATOR_AUTHORITY_REQUIRED_NOTICE = (
 OPERATOR_AUTHORITY_REQUIRED_UNCONFIGURED_NOTICE = (
     "this session's gate is still at ask: /approvals auto removes it and needs the "
     "operator's own consent — but operator authority is not installed on this machine, so "
-    "the remedies below cannot work yet. Ask Local Operator to set it up for you first "
-    "(one approval and one admin password prompt), then authorise from this machine or "
-    "from your paired phone. /approvals ask still tightens it here."
+    "the remedies below cannot work yet. Ask Local Operator to set up operator "
+    "authority first (one approval and one admin password prompt), then authorise from "
+    "this machine or your paired phone. /approvals ask still tightens it here."
 )
 
 #: The same refusal for the CARD, which is a different situation for the person
@@ -745,8 +745,8 @@ CARD_APPROVAL_REFUSED_NOTICE = (
 CARD_APPROVAL_REFUSED_UNCONFIGURED_NOTICE = (
     "this approval is still waiting: only the operator can allow it, but operator authority "
     "is not installed on the machine running the session yet, so nothing there can check a "
-    "signature — ask Local Operator to set that machine up (one approval and one admin "
-    "password prompt). Denying it works from here."
+    "signature — ask Local Operator to set up operator authority on that machine (one "
+    "approval and one admin password prompt). Denying it works from here."
 )
 
 
@@ -793,14 +793,14 @@ def approvals_default_notice(*, may_loosen: bool | None, anchor_unusable: bool =
         # pre-existing sentence rather than acquiring a claim it did not compute.
         switch = (
             "/approvals ask switches this session now; /approvals auto needs the operator's "
-            "own consent, but authority is not installed here yet: ask Local Operator to set "
-            "it up (one approval and one admin password prompt); a new session can start "
-            "loosened via --yolo"
+            "own consent, but authority is not installed here yet: ask Local Operator to "
+            "set up operator authority (one approval and one admin password prompt); a new "
+            "session can start loosened via --yolo"
         )
 
     return (
         "/approvals default writes the config file of the machine this session runs on — "
-        f"a file edit or the desktop app's settings, not a session command. {switch}"
+        f"a file edit or the app's settings. {switch}"
     )
 
 

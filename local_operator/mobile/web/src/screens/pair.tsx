@@ -193,40 +193,39 @@ export function PairScreen() {
 					{status.authorityReady ? (
 						<p className="text-meta text-ink-muted">
 							This phone can now approve parked tool calls and loosen a session&rsquo;s
-							approval gate ({DEVICE_SCOPES.join(", ")}). Revoke it on the machine with{" "}
-							<code>lop operator devices --revoke {status.deviceId}</code>.
+							approval gate ({DEVICE_SCOPES.join(", ")}). Ask Local Operator on the
+							machine to revoke this phone, if you no longer want it paired.
 						</p>
 					) : (
 						<p className="text-meta text-ink-muted">
-							This phone can sign already; that machine cannot check it yet. Its operator
-							authority is not installed, so there is no key there to verify this
-							phone&rsquo;s signatures against. Ask Local Operator on your Mac to set that
-							machine up (one approval and one admin password prompt) — then this
-							phone&rsquo;s approvals, and loosening a session&rsquo;s gate, will be
-							accepted. Revoke it with{" "}
-							<code>lop operator devices --revoke {status.deviceId}</code>.
+							This phone can sign already; the machine it is paired with cannot check
+							it yet. Its operator authority is not installed, so there is no key there
+							to verify this phone&rsquo;s signatures against. Ask Local Operator on
+							that machine to set up operator authority (one approval and one admin
+							password prompt) — then this phone&rsquo;s approvals, and loosening a
+							session&rsquo;s gate, will be accepted. Ask it to revoke this phone too,
+							if you no longer want it paired.
 						</p>
 					)}
 				</div>
 			) : null}
 
 			{status.kind === "revoked" ? (
-				/* D1 and D2 (design round 10): the command is marked up as the command it
-				   is — the paragraph above renders `lop pair` as <code>, and this one is
-				   the sentence a reader must ACT on — and the machine-side condition the
-				   old parenthetical asked a phone reader to evaluate is now its own
-				   sentence, gated on a check they can run (`lop operator status`). */
+				/* D1 and D2 (design round 10) kept the machine-side condition its own
+				   sentence instead of a parenthetical a phone reader had to evaluate.
+				   D9 (design round 2) then removed the terminal COMMAND from the remedy:
+				   a phone reader cannot run one, so the sentence names the agent route
+				   the rest of the product uses for the same step (§2.9). */
 				<div className="flex flex-col gap-1">
 					<p className="text-body-sm text-danger">
 						This device has been revoked on the machine, and a revocation is lifted
 						only there — pairing again will be refused.
 					</p>
 					<p className="text-body-sm text-danger">
-						On the machine, run <code>{AUTHORISE_COMMAND} {status.deviceId}</code> in a
-						terminal there, then pair this phone again. If{" "}
-						<code>lop operator status</code> there reports the anchor as not installed,
-						ask Local Operator on that machine to set operator authority up first
-						(one approval and one admin password prompt).
+						Ask Local Operator on that machine to allow this phone again (the device
+						id is {status.deviceId}), then pair this phone again. If operator
+						authority is not installed there yet, ask it to set that up first — one
+						approval and one admin password prompt.
 					</p>
 				</div>
 			) : null}
@@ -246,12 +245,6 @@ function defaultDeviceName(): string {
 	const label = platform.includes("iPhone") || platform.includes("iPad") ? "iPhone" : "phone";
 	return `${label} (${new Date().toISOString().slice(0, 10)})`;
 }
-
-/* The phone's spelling of the one command (design round 10, D4). TypeScript cannot
-   import the CLI's own constant (`operator/devices.py::AUTHORISE_COMMAND`), so this
-   is a second copy by necessity rather than by accident; `pair-screen.authority-state
-   .test.tsx` pins the shared words, which is the bound. */
-const AUTHORISE_COMMAND = "lop operator devices --authorise";
 
 /** Whether the machine refused this device as revoked, rather than failing another way. */
 function revokedRefusal(error: unknown): boolean {
@@ -273,9 +266,9 @@ function humanizePairingError(error: unknown): string {
 		   answer — `lop operator init` + `install` — leaving the phone refused). */
 		return (
 			"This device has been revoked on the machine, and a revocation is lifted only " +
-			"there — pairing again will be refused. On the machine, run `" +
-			AUTHORISE_COMMAND +
-			" <device id>` (the id is in `lop operator devices`), then pair this phone again."
+			"there — pairing again will be refused. Ask Local Operator on the machine to " +
+			"allow this phone again (its device id is in the operator device list), then " +
+			"pair this phone again."
 		);
 	}
 	if (message.toLowerCase().includes("subtle")) {

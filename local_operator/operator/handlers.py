@@ -111,8 +111,8 @@ def install_anchor(root: Path, *, print_only: bool = False) -> int:
         # R1-4 (§4's rule applied to the init-shaped refusals): the remedy names the
         # product action, not the terminal verb that performs it.
         print(
-            f"nothing staged at {staged}; set up operator authority first "
-            "(the setup stages the key)",
+            f"nothing staged at {staged}; ask Local Operator to set up operator "
+            "authority (the setup stages the key)",
             file=sys.stderr,
         )
         return 1

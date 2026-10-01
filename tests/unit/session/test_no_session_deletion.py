@@ -516,6 +516,20 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<config>/network/, oldest first, and logs each deletion in the surviving log",
     ),
     (
+        "local_operator/network/approvals.py::sweep",
+        "os.unlink",
+        # The retention sweep (remote-onboarding §2.4) prunes a terminal record's
+        # FILE and its .lock FILE, both minted by record_path()/lock_path() from
+        # the approval id under <config>/network/approvals/ — a device-local store
+        # beside sessions/, never inside one, and neither path takes a session id
+        # or any caller-supplied string (new_approval_id() is crockford-random).
+        # Two calls of this shape: the record and the lock. No cleanup-path move is
+        # possible or wanted — the store is this device's, not a session's.
+        "Prunes a terminal approval's record FILE and its lock FILE under "
+        "<config>/network/approvals/; both paths approval-id-derived, never session-derived",
+        2,
+    ),
+    (
         "local_operator/network/cli.py::_cmd_disconnect",
         "<path>.unlink",
         "`lop network disconnect`: deletes THIS network's <id>.secrets.json FILE under "
