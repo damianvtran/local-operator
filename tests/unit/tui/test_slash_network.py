@@ -338,6 +338,79 @@ async def test_read_verbs_run_the_cli_with_the_argv_the_design_names(
 
 
 @pytest.mark.asyncio
+async def test_approval_verbs_run_the_cli_with_the_argv_the_design_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The approval cards from the composer, one hop onto the CLI's own verbs.
+
+    Slice (e)'s TUI half (remote-onboarding §2.3): the badge reads (`list`,
+    `show`) and the two decisions (`approve`, `deny`) are the SAME verbs every
+    other surface runs — the store, the signature gate and the audit line are
+    the CLI's, and this surface decides only the argv (plus the gesture-shaped
+    budget `approve` gets).
+    """
+    run = _Recorder()
+    monkeypatch.setattr("local_operator.tui.app.run_network", run)
+    app = _app_fixture()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+
+        await _submit(pilot, app, "/network approvals")
+        await app.workers.wait_for_complete()
+        assert run.argv == ["approvals", "list"]
+
+        run.calls.clear()
+        await _submit(pilot, app, "/network approvals list")
+        await app.workers.wait_for_complete()
+        assert run.argv == ["approvals", "list"]
+
+        run.calls.clear()
+        await _submit(pilot, app, "/network approvals show a_123")
+        await app.workers.wait_for_complete()
+        assert run.argv == ["approvals", "show", "a_123"]
+
+        run.calls.clear()
+        await _submit(pilot, app, "/network approvals approve a_123")
+        await app.workers.wait_for_complete()
+        assert run.argv == ["approvals", "approve", "a_123"]
+
+        run.calls.clear()
+        await _submit(pilot, app, "/network approvals deny a_123")
+        await app.workers.wait_for_complete()
+        assert run.argv == ["approvals", "deny", "a_123"]
+
+
+@pytest.mark.asyncio
+async def test_approval_words_this_surface_does_not_carry_read_the_usage_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`request`/`run` stay the agent's path; a half-typed sub-verb reads the
+    surface's own usage line, not argparse's sentence from one hop down."""
+    run = _Recorder()
+    monkeypatch.setattr("local_operator.tui.app.run_network", run)
+    app = _app_fixture()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+
+        await _submit(pilot, app, "/network approvals request --host 10.0.0.9")
+        await pilot.pause()
+        assert run.calls == []
+        assert any("Use /network approvals list" in text for text in _notices(app))
+
+        await _submit(pilot, app, "/network approvals run")
+        await pilot.pause()
+        assert run.calls == []
+
+        await _submit(pilot, app, "/network approvals show")
+        await pilot.pause()
+        assert run.calls == []
+
+        await _submit(pilot, app, "/network approvals list extra")
+        await pilot.pause()
+        assert run.calls == []
+
+
+@pytest.mark.asyncio
 async def test_the_receipt_is_the_clis_own_line(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
