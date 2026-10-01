@@ -1337,6 +1337,258 @@ class _MachineMemorySweep:
         return report
 
 
+#: How often the rescue pass runs (see :class:`_RescueSweep`), and therefore how
+#: long the loop may sleep between passes.
+#:
+#: WHY 120 s AND NOT THE RESIDENCY CADENCE (300 s): a rescue's whole value is the
+#: gap between a death and the session being useful again, and the settle window
+#: (``rescue.RESCUE_SETTLE_S``, 30 s) already covers a wave's own retry passes. A
+#: settle window plus one pass is a target recovery latency of ~2.5 min. The pass
+#: forks nothing — file reads and a signal-0 per dead record — so it is cheaper
+#: than either of its neighbours at a shorter interval.
+RESCUE_INTERVAL_S = 120.0
+
+#: The most rescue engagements that may run at once. Deliberately the same two as
+#: :data:`_MAX_CONCURRENT_ENGAGES`: a rescue and a wake engage cost the same thing
+#: (a cold runtime construction), and the fleet's engage capacity is one resource.
+RESCUE_MAX_CONCURRENT_ENGAGES = 2
+
+#: The gap inserted between two rescues started in the same pass. The settle
+#: window already smears a wave over 30 s and the per-pass start budget
+#: (``rescue.RESCUE_MAX_STARTS_PER_PASS``) caps the burst, but the 2026-09-30
+#: manual resume storm took this host to load 273, so the four starts of one pass
+#: are spread rather than fired in the same instant.
+RESCUE_START_STAGGER_S = 1.5
+
+
+class _RescueSweep:
+    """The rescue pass's seat in this loop: the cadence, the engage, the verify.
+
+    **THE PASS ITSELF LIVES IN** :mod:`local_operator.session.runtime.rescue`;
+    this class is only its seat — when it runs, how it engages, and how it
+    verifies. It sits in this loop because the supervisor is the existing
+    always-on process that already owns "start a runtime for a session"
+    (:func:`_engage_one`), already reads the record plane
+    (:func:`_has_live_runtime`) and already runs a sliced loop to hang a pass on.
+    A second daemon would duplicate all of that, and would itself be an update
+    casualty.
+
+    **A SIBLING OF THE RESIDENCY PASS, NOT PART OF IT.** Reclaim ENDS processes
+    and rescue SPAWNS; one census cannot carry two opposite fail directions, so
+    the two seats share the loop and nothing else (see the rescue module's
+    docstring).
+
+    **IT REMEMBERS NOTHING ITSELF.** The episode state — attempts, backoff,
+    episode cooldown, the session breaker — lives in the durable ledger
+    ``rescue/`` writes, because a rescue that re-fired after a supervisor
+    restart would be noise, where a residency sighting lost to a restart costs
+    one window of delay and never a wrong decision. This seat holds only the
+    in-flight set that stops one pass re-engaging what the last one started.
+
+    **THE PASS NEVER BLOCKS THE LOOP.** The census (a ``registry.scan`` of the
+    two run namespaces, one ``attention.db`` read, the ledger reads) runs on a
+    worker thread; the engagements it decides on are started as background
+    tasks, so the loop keeps slicing while a cold runtime constructs.
+    """
+
+    def __init__(self, config_dir: Path) -> None:
+        self.config_dir = config_dir
+        #: ``None`` until the first pass, so the first pass is always due: a
+        #: supervisor START is the moment a fleet most needs looking at (the
+        #: residency seat's convention).
+        self.next_at: float | None = None
+        self.last_refusals: dict[str, int] | None = None
+        self._semaphore = asyncio.Semaphore(RESCUE_MAX_CONCURRENT_ENGAGES)
+        self._in_flight: dict[tuple[str, float], "asyncio.Task[None]"] = {}
+        self._task: "asyncio.Task[None] | None" = None
+
+    def seconds_until(self, now: float | None = None) -> float:
+        """How long the loop may sleep before this pass is due again."""
+        moment = time.monotonic() if now is None else now
+        if self.next_at is None:
+            return 0.0
+        return max(0.0, self.next_at - moment)
+
+    def due(self, now: float | None = None) -> bool:
+        return self.seconds_until(now) <= 0.0
+
+    def kick(self) -> None:
+        """Start a pass if one is due, WITHOUT holding this loop for it.
+
+        Detached for the residency pass's reason: the census is file reads and
+        process probes that do not belong inside the iteration that fires wakes,
+        and nothing here is urgent — it decides over a window of minutes. A pass
+        already in flight is left alone, and the next one is armed from here
+        rather than from its completion, so a slow pass cannot make the loop
+        wake every second waiting for it.
+        """
+        if self._task is not None and not self._task.done():
+            return
+        if not self.due():
+            return
+        self.next_at = time.monotonic() + RESCUE_INTERVAL_S
+        self._task = asyncio.ensure_future(self._pass())
+        self._task.add_done_callback(self._finished)
+
+    @property
+    def in_flight(self) -> int:
+        """How many rescue engagements are running.
+
+        The loop must not retire on 0 of these (see the retirement guard in
+        :func:`serve`): a rescue in flight is constructing a runtime for a
+        session that has none, and retiring under it would abandon exactly the
+        work this seat exists to do.
+        """
+        return len(self._in_flight)
+
+    async def _pass(self) -> None:
+        """Select candidates off the loop, then start their engagements."""
+        from local_operator.session.runtime import rescue
+
+        try:
+            report = await asyncio.to_thread(rescue.rescue_scan, self.config_dir, apply=True)
+        except Exception as exc:  # noqa: BLE001 — a failed pass must not crash the loop
+            logger.warning("the rescue pass failed; dead runtimes are unguarded", exc_info=exc)
+            return
+        refusals = dict(report.refusals)
+        changed = bool(report.to_engage or report.verified or report.abandoned) or (
+            refusals != self.last_refusals
+        )
+        self.last_refusals = refusals
+        (logger.info if changed else logger.debug)("%s", report.summary())
+        for decision in report.to_engage:
+            await self._start(decision)
+
+    async def _start(self, decision: Any) -> None:
+        """Start one rescue engagement in the background, staggered."""
+        key = (decision.session_id, decision.started_at)
+        if key in self._in_flight:
+            return
+        if self._in_flight:
+            # Stagger ONLY when something is already running, so the first
+            # rescue of a pass starts immediately and a lone death is never
+            # delayed by the burst machinery.
+            await asyncio.sleep(RESCUE_START_STAGGER_S)
+        self._in_flight[key] = asyncio.create_task(self._engage(decision))
+
+    async def _engage(self, decision: Any) -> None:
+        """Engage one candidate and record the outcome in the ledger.
+
+        THE ENGAGE PATH IS THE SUPERVISOR'S OWN (``engage_runtime`` with a
+        ``WakeErrand``, which delivers nothing) rather than a second spawn path:
+        lease arbitration, record reuse, the deadline and the throttled failure
+        handling all come free, and an attempt against a live runtime is a no-op
+        because the transcript lease admits at most one SERVING runtime.
+        """
+        from local_operator.mobile.attach_client import find_runtime_record
+        from local_operator.session.runtime import rescue
+        from local_operator.session.runtime.launch import WakeErrand, engage_runtime
+
+        session_id = decision.session_id
+        key = (session_id, decision.started_at)
+        entry = rescue.read_ledger(self.config_dir, session_id) or {}
+        attempt = int(entry.get("count") or 0) + 1
+        try:
+            async with self._semaphore:
+                logger.info(
+                    "rescue: engaging %s (dead run pid %d, class %s, attempt %d/%d)",
+                    session_id,
+                    decision.pid,
+                    decision.tag,
+                    attempt,
+                    rescue.RESCUE_MAX_ATTEMPTS,
+                )
+                try:
+                    await engage_runtime(
+                        session_id,
+                        decision.cwd,
+                        WakeErrand(
+                            schedule_id="",
+                            occurrence_ms=decision.death_at_ms or 0,
+                            command_id=f"rescue-{session_id}-{decision.pid}",
+                        ),
+                        config_dir=self.config_dir,
+                        deadline_s=WAKE_DEADLINE_S,
+                    )
+                except (TimeoutError, ConnectionError, OSError, RuntimeError) as exc:
+                    await asyncio.to_thread(
+                        rescue.note_rescue_attempt,
+                        self.config_dir,
+                        session_id,
+                        outcome="failed",
+                        detail=str(exc),
+                    )
+                    if _skip_log.should_log(session_id, "rescue-failed"):
+                        logger.warning("rescue: engaging %s failed: %s", session_id, exc)
+                    return
+                record, _owner = await asyncio.to_thread(
+                    find_runtime_record, self.config_dir, session_id
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — one rescue must not fail the seat
+            if _skip_log.should_log(session_id, "rescue-error"):
+                logger.warning(
+                    "rescue: engaging %s raised %s: %s",
+                    session_id,
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
+                )
+            await asyncio.to_thread(
+                rescue.note_rescue_attempt,
+                self.config_dir,
+                session_id,
+                outcome="raised",
+                detail=str(exc),
+            )
+            return
+        finally:
+            self._in_flight.pop(key, None)
+        if record is not None and record.pid != decision.pid:
+            await asyncio.to_thread(
+                rescue.note_rescue_attempt,
+                self.config_dir,
+                session_id,
+                outcome="verified",
+                detail=f"runtime {record.pid} up",
+                engaged_pid=record.pid,
+            )
+            logger.info("rescue: re-engaged %s — runtime %d is up", session_id, record.pid)
+        else:
+            await asyncio.to_thread(
+                rescue.note_rescue_attempt,
+                self.config_dir,
+                session_id,
+                outcome="started",
+                detail="no successor record yet",
+            )
+
+    def _finished(self, task: "asyncio.Task[None]") -> None:
+        """Never raises out of a done-callback (the other seats' contract)."""
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.warning("the rescue pass failed; dead runtimes are unguarded", exc_info=error)
+
+    async def shutdown(self) -> None:
+        """Drop the in-flight pass and engage tasks on the way out.
+
+        Cancelling an engagement abandons the WAITING, not the rescue: the
+        runtime an engage spawned is detached and keeps constructing, which is
+        the same trade :meth:`_Sweeper.shutdown` makes.
+        """
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+        tasks = list(self._in_flight.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._in_flight.clear()
+
+
 class _Sweeper:
     """Owns the in-flight engagements so the serve loop never waits on one.
 
@@ -1962,6 +2214,7 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
     triggers_seat = _TriggerSweep(config_dir)
     residency = _ResidencySweep(config_dir)
     memory_sweep = _MachineMemorySweep(config_dir)
+    rescue_seat = _RescueSweep(config_dir)
     try:
         while True:
             if once:
@@ -1992,7 +2245,7 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
                 # In-flight work outlives a momentarily-empty index: retiring
                 # under a running engagement would kill the runtime it is
                 # constructing. Slice instead and re-decide next pass.
-                if sweeper.in_flight:
+                if sweeper.in_flight or rescue_seat.in_flight:
                     await _sleep_in_slices(config_dir, SLICE_S, None)
                     continue
                 if await _should_retire(config_dir):
@@ -2086,6 +2339,14 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
             # operator — so it is rate-limited by its own cooldown and silent
             # while the machine is healthy.
             memory_sweep.kick()
+            # THE RESCUE PASS RIDES THE SAME POSITION, for a third reason: it
+            # SPAWNS a runtime for a session whose last one died involuntarily,
+            # and spawning is not wake work — nothing this iteration read is
+            # invalidated by it either. It runs off the loop (the census is a
+            # registry scan and an attention.db read) and its own interval bounds
+            # the sleep below, so a store whose only wake is hours out still gets
+            # a rescue pass every ``RESCUE_INTERVAL_S``.
+            rescue_seat.kick()
             # THE SWEEP BOUNDS THE SLEEP. Without this the loop's own cadence is set
             # purely by the next wake, which on a store holding one wake three hours
             # out means three hours between passes — and a residency pass that only
@@ -2094,7 +2355,12 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
             # into a spin.
             delay = max(
                 MIN_SLEEP_S,
-                min(delay, residency.seconds_until(), memory_sweep.seconds_until()),
+                min(
+                    delay,
+                    residency.seconds_until(),
+                    memory_sweep.seconds_until(),
+                    rescue_seat.seconds_until(),
+                ),
             )
             logger.debug("sleeping %.1fs until the next wake (in %.0fs slices)", delay, SLICE_S)
             await _sleep_in_slices(config_dir, delay, upcoming)
@@ -2106,6 +2372,7 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
         # background work and are dropped the same way.
         await residency.shutdown()
         await memory_sweep.shutdown()
+        await rescue_seat.shutdown()
         await triggers_seat.shutdown()
         await sweeper.shutdown()
 
