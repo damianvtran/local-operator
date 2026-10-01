@@ -1204,7 +1204,19 @@ It produced #542 (the frame-id contract, plus the bytecode-proof digest) and
   task_004 and task_017 moved 0 → 1,000,000, 0 → 700,000 and 143k → 571k ppm
   (`~/worktrees/osworld/scripts/logs/CONTROL-repeat-1796.md`). The same
   caveat rode on a documented −46% arm-to-arm delta that the control repeat
-  put inside within-build variance (`TRANCHE-arm-1796.md`).
+  put inside within-build variance (`TRANCHE-arm-1796.md`). Arm 1830 — the
+  campaign's own paired read, now in the repository — is the direct
+  measurement of this: of its ten tasks, eight were run twice (r1/r2) on
+  identical build, route and budgets, and two of those eight flipped their
+  binary outcome, in opposite directions (task_013 went 0 → a full solve;
+  task_001 went a full solve → 0/777,778). In the record's own words the
+  arm-level result is "indistinguishable given its own spread", any single-run
+  comparison against another arm or a published baseline "has no power", and a
+  ten-task arm "cannot carry a capability claim"
+  ([`records/TRANCHE-arm-1830.md`](records/TRANCHE-arm-1830.md)). The record
+  also bounds what the arm covers: input-refusal recovery, the bridge-wedge
+  re-bind and the provider 504/media recovery never fired in any episode, so
+  the ten-pair result says nothing about them.
 - **No live kill-and-rescue drill.** The drill — SIGKILL the parent mid-episode,
   confirm the audit is non-empty, sweep, confirm it returns to `[]` — was
   staged and still pending at the time of writing. #548's fix was verified
