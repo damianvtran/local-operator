@@ -464,6 +464,12 @@ class ProjectsFormPage(VerticalScroll):
         self._focus_step(-1)
 
     def _focus_step(self, delta: int) -> None:
+        if self._confirm:
+            # The confirm OWNS the keyboard (its docstring, and the spec's
+            # "inline confirm"): moving the focus into a field would hand the
+            # advertised `y` to that field as text — measured, the reader's
+            # next `y` typed itself into the title instead of discarding.
+            return
         fields = self.fields()
         focused = self.app.focused
         try:
@@ -490,6 +496,7 @@ class ProjectsFormPage(VerticalScroll):
                 self._write_key(slug_for_title(self._title_input.value))
             else:
                 self._key_follows = False
+                self._sync_key_hint()
         if event.input is self._tags_input:
             self._tags_block.set_hint(self._tags_hint())
         if self._on_state_change is not None:
@@ -498,6 +505,16 @@ class ProjectsFormPage(VerticalScroll):
     def _write_key(self, value: str) -> None:
         self._key_written = value
         self._key_input.value = value
+        self._sync_key_hint()
+
+    def _sync_key_hint(self) -> None:
+        """State whether the key is following the title.
+
+        ONE place decides the wording, and both edges call it: the write path
+        AND the detach edge — the hint stayed on "follows the title until you
+        edit it" after the reader had edited the key, because only the write
+        path set it (agent review round 1, R1-3).
+        """
         self._key_block.set_hint(
             "follows the title until you edit it" if self._key_follows else "set by hand"
         )
@@ -723,7 +740,8 @@ class ProjectsFormPage(VerticalScroll):
         ``y`` and ``esc`` are the two ways out and both are on this block: with
         the confirm up, a printable key must not reach the field underneath it
         — the reader is answering a question, not editing (the key prompt's
-        rule, same reason).
+        rule, same reason). Everything else printable is swallowed rather than
+        left to bubble, so no other letter is interpreted as a meaning either.
         """
         if not self._confirm:
             return
@@ -731,10 +749,15 @@ class ProjectsFormPage(VerticalScroll):
             event.stop()
             event.prevent_default()
             self.action_discard()
-        elif event.key == "escape":
+            return
+        if event.key == "escape":
             event.stop()
             event.prevent_default()
             self.disarm_confirm()
+            return
+        if event.is_printable:
+            event.stop()
+            event.prevent_default()
 
     # -- save ---------------------------------------------------------------
     def action_save(self) -> None:
@@ -748,7 +771,11 @@ class ProjectsFormPage(VerticalScroll):
     # -- readbacks (tests and geometry probes) ------------------------------
     def readback(self) -> list[str]:
         rows: list[str] = []
-        for block in self._blocks().values():
+        # ``_blocks`` maps TWO field names onto the key block (the store calls
+        # its handle ``name``; the form calls it ``key``), so the rows are built
+        # from the ordered UNIQUE blocks or that field was read back twice
+        # (agent review round 1, R1-4).
+        for block in dict.fromkeys(self._blocks().values()):
             rows.append(f"{block.field_label}: {self._control_text(block)}")
             # The hint is part of what the reader SEES, so it is part of what
             # the readback states: a surface a test cannot assert is a surface

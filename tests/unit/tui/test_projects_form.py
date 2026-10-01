@@ -158,6 +158,10 @@ async def test_the_title_drives_the_key_until_the_key_is_touched(tmp_path: Path)
         await pilot.press("x")
         await pilot.pause()
         assert page._key_input.value == "x"
+        # … the hint SAYS it detached (agent review round 1, R1-3: only the
+        # write path set it, so it went on claiming the key still followed).
+        assert any("key hint: set by hand" in row for row in view.rendered_rows())
+
         # … and the title no longer moves it. (Focusing a field selects what is
         # in it, so the title is extended deliberately here.)
         page._title_input.focus()
@@ -174,6 +178,9 @@ async def test_the_title_drives_the_key_until_the_key_is_touched(tmp_path: Path)
         await pilot.pause()
         await pilot.pause()
         assert page._key_input.value == "tui-parity", page._key_input.value
+        assert any(
+            "key hint: follows the title until you edit it" in row for row in view.rendered_rows()
+        )
 
 
 async def test_tab_and_shift_tab_walk_the_fields(tmp_path: Path) -> None:
@@ -360,7 +367,19 @@ async def test_esc_on_a_clean_form_closes_and_a_dirty_one_confirms(
         assert view._mode == "form", "a dirty cancel must not close the form"
         assert page.confirming is True
         assert any(DISCARD_PROMPT in row for row in view.rendered_rows())
-        # The confirm owns the keyboard: a printable key is an answer, not text.
+        # The confirm OWNS the keyboard (agent review round 1, R1-1): tab and
+        # shift+tab must not carry the cursor into a field, where the advertised
+        # `y` would be typed instead of answered.
+        await pilot.press("tab")
+        await pilot.press("shift+tab")
+        await pilot.pause()
+        assert page.confirming is True, "a focus key must not end the question"
+        assert app.focused is page, app.focused
+        # … and no OTHER printable letter is interpreted either.
+        await pilot.press("n")
+        await pilot.pause()
+        assert view._mode == "form" and page._title_input.value == "Half typed"
+        # The advertised `y` is what discards.
         await pilot.press("y")
         await pilot.pause()
         assert view._mode == "canvas"

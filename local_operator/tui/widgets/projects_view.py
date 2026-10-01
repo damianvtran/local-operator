@@ -69,10 +69,7 @@ from local_operator.tui.projects_render import (
     timeline_span,
 )
 from local_operator.tui.widgets.projects_detail import ProjectDetailPage
-from local_operator.tui.widgets.projects_form import (
-    FORM_FOOTER_HINT,
-    ProjectsFormPage,
-)
+from local_operator.tui.widgets.projects_form import FORM_FOOTER_HINT, ProjectsFormPage
 from local_operator.tui.widgets.subagent_view import READ_ONLY_NOTE, HintButton
 
 #: The view vocabulary, in the order ``1``/``2``/``3`` address it and ``v``
@@ -1963,7 +1960,8 @@ class ProjectsView(Vertical):
         disarming every hotkey the way key capture does (see
         :meth:`form_focus_previous`).
         """
-        return self._mode == "form"
+        #: True while the FORM owns the keyboard (see `wants_field_tab`).
+        return self._mode == "form" and not self._form_page.confirming
 
     def form_focus_previous(self) -> None:
         """``shift+tab`` — the app's priority binding delegates here.
