@@ -62,7 +62,7 @@ import json
 import os
 import plistlib
 import queue
-import shutil
+import shutil  # noqa: F401 — kept: tests and siblings patch `relay.shutil.which`
 import signal
 import socket
 import subprocess
@@ -76,6 +76,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
+from local_operator import supervisors
 from local_operator.network import addresses
 from local_operator.network import dial as session_dial
 from local_operator.network import projection, store, wire
@@ -136,7 +137,7 @@ from local_operator.network.types import (
     capabilities_for_role,
     trust_state,
 )
-from local_operator.paths import config_dir, log_dir
+from local_operator.paths import CONFIG_DIR_ENV, config_dir, log_dir
 from local_operator.session.runtime.types import HEARTBEAT_INTERVAL_S, PROTOCOL_VERSION
 
 # ---------------------------------------------------------------------------
@@ -10260,10 +10261,22 @@ class _ReplyWaiter:
 
 
 # ---------------------------------------------------------------------------
-# Supervision: the launchd shape `lop mobile serve` established
+# Supervision: the three-platform shape `lop mobile serve` established
 # ---------------------------------------------------------------------------
+#
+# THE NETWORK GROUP DROVE LAUNCHD ONLY until slice (b) of remote onboarding —
+# which is why B3 measured: on Linux the relay "degrades to a foreground
+# process" and an onboarded peer lost it at logout. The arm now goes through
+# :mod:`local_operator.supervisors`, the same discovery the mobile daemon, the
+# wake supervisor, the tunnel and the browser bridge use: launchd on macOS, a
+# ``systemd --user`` unit on Linux, and an honest refusal where neither exists.
 
 LABEL = "com.local-operator.network"
+
+#: Linux user unit name. Fixed, like the LaunchAgent label: the unit owns the
+#: relay's port, so a per-root name would let two units fight over one bind
+#: instead of one failing loudly (the mobile daemon's own reasoning).
+SYSTEMD_UNIT = "local-operator-network.service"
 
 #: The role template rendered into argv[0]. Defined HERE rather than in
 #: ``procname`` because this slice may not edit that module; it is the same shape
@@ -10280,8 +10293,19 @@ def plist_path() -> Path:
     return Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
 
 
+def systemd_path() -> Path:
+    """``~/.config/systemd/user/<unit>`` for the CURRENT home (redirectable)."""
+    return supervisors.systemd_unit_path(SYSTEMD_UNIT)
+
+
 def is_supported() -> bool:
-    return sys.platform == "darwin" and shutil.which("launchctl") is not None
+    """Whether THIS host has a user-level supervisor the relay can install into.
+
+    Guarded on the BINARY through :mod:`local_operator.supervisors`, not on
+    ``sys.platform``: a Linux box without systemd (Devuan, Alpine, most
+    containers) has no user supervisor, and saying so is the honest answer.
+    """
+    return supervisors.supervisor() in (supervisors.LAUNCHCTL, supervisors.SYSTEMCTL)
 
 
 def render_plist(port: int = DEFAULT_PORT) -> dict[str, object]:
@@ -10305,6 +10329,32 @@ def render_plist(port: int = DEFAULT_PORT) -> dict[str, object]:
         # A relay holds long-lived sockets and timers; App Nap would suspend them.
         "ProcessType": "Interactive",
     }
+
+
+def render_systemd(port: int = DEFAULT_PORT) -> str:
+    """The Linux user unit, in the shape every supervised daemon's unit shares.
+
+    ``procname.supervised_image`` when this machine has the generation layout,
+    else this interpreter — the mobile unit's own lesson: a unit is re-executed
+    on every restart, and a path inside a tree a flip or a prune replaced is a
+    daemon that dies at load. The config-dir Environment pin is the same shape
+    and the same reason as mobile's: no supervised process inherits the
+    installer's environment, so without it an install from a store override
+    would serve a different store than the one it was installed against.
+    """
+    from local_operator import procname
+
+    image = procname.supervised_image() or Path(sys.executable)
+    return supervisors.render_systemd_unit(
+        description="Local Operator network relay",
+        exec_start=(
+            f"{supervisors.quoted(str(image))} -m local_operator.network.relay " f"--port {port}"
+        ),
+        post_lines=[
+            f"Environment={supervisors.quoted(f'{CONFIG_DIR_ENV}={config_dir()}')}",
+            *supervisors.output_redirect_lines(log_path()),
+        ],
+    )
 
 
 def _launchctl(*args: str) -> subprocess.CompletedProcess[str]:
@@ -10361,25 +10411,33 @@ def refresh_plist_if_stale() -> Any:
 
 
 def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, Any]:
+    """Install-or-refresh this platform's user service and verify the relay answers.
+
+    Platform first, then the HOME question — the same order ``service_action``
+    documents, and now for two platforms instead of one (slice (b): the relay
+    was launchd-only, so a Linux peer's relay could only run in a foreground
+    terminal and was lost at logout).
+    """
+    if sys.platform == "darwin" and is_supported():
+        return _install_launchd(port, dry_run=dry_run)
+    if sys.platform.startswith("linux") and is_supported():
+        return _install_systemd(port, dry_run=dry_run)
+    return {
+        "ok": False,
+        "steps": [],
+        "reason": "no_supervisor",
+        "error": (
+            "no supported user service supervisor found (launchctl on macOS, "
+            "systemctl --user on Linux); the relay can run in the foreground instead"
+        ),
+    }
+
+
+def _install_launchd(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, Any]:
     """Install-or-refresh the LaunchAgent and verify the relay answers."""
     from local_operator import launchd
 
     steps: list[str] = []
-    if not is_supported():
-        return {
-            "ok": False,
-            "steps": steps,
-            # ``reason`` beside the sentence, like this verb's two siblings:
-            # ``service_action`` answers ``no_launchd`` for the same condition, and a
-            # refusal with only prose is what the CLI's own caller has to switch on
-            # by string. Additive — no caller reads this key today (the CLI refuses
-            # before it gets here), which is exactly why naming it now costs nothing.
-            "reason": "no_launchd",
-            "error": (
-                "install needs macOS launchd; run `lop network serve` in the foreground "
-                "elsewhere"
-            ),
-        }
     if not _plist_is_addressable():
         # R6: say why, in the operator's terms. The launchd guard's own wording
         # ("is not the LaunchAgent the real home owns") is correct and about
@@ -10424,6 +10482,72 @@ def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, Any
     }
 
 
+def _install_systemd(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, Any]:
+    """Write, enable and verify the Linux user unit (mobile's shape, one daemon over).
+
+    THE UNIT MUST BE THE THING THAT ANSWERS. A relay started by hand can hold the
+    port while the unit sits failed (bind conflict), so the readiness check reads
+    ``is-active`` and the control socket TOGETHER — an install that reported
+    "answers" for the old process would claim a supervision it does not have.
+    """
+    steps: list[str] = []
+    unit = systemd_path()
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        unit.write_text(render_systemd(port), encoding="utf-8")
+    steps.append(f"wrote {unit}")
+    if dry_run:
+        steps.append("dry run: skipped enable and verification")
+        return {"ok": True, "steps": steps}
+    if not supervisors.systemd_unit_is_addressable(SYSTEMD_UNIT):
+        return {
+            "ok": False,
+            "steps": steps,
+            "reason": "isolated_home",
+            "error": (
+                "no user unit is available here: this run's HOME is not the home "
+                "the systemd user manager supervises, so nothing was enabled. "
+                "That is what an isolated or redirected HOME looks like, and it "
+                "is expected."
+            ),
+        }
+    # Lingering BEFORE enable --now (mobile's ordering): without a user manager
+    # the enable itself fails with the bus error, and enabling linger is what
+    # spawns one. Best-effort — a refusal must not fail the install.
+    if supervisors.enable_linger():
+        steps.append("enabled lingering so the relay survives logout and reboot")
+    supervisors.systemctl_user("daemon-reload")
+    enabled = supervisors.systemctl_user("enable", "--now", SYSTEMD_UNIT)
+    if enabled.returncode:
+        return {
+            "ok": False,
+            "steps": steps,
+            "reason": "enable_failed",
+            "error": supervisors.translate_systemctl_error(enabled.stderr),
+        }
+    steps.append(f"enabled the systemd user service ({SYSTEMD_UNIT})")
+    deadline = time.time() + 20
+    last_state = "unknown"
+    while time.time() < deadline:
+        active = supervisors.systemctl_user("is-active", SYSTEMD_UNIT)
+        last_state = (active.stdout or active.stderr or "").strip() or "unknown"
+        if last_state == "active" and health(timeout=1.0) is not None:
+            steps.append("the relay answered its local control socket")
+            return {"ok": True, "steps": steps}
+        if last_state == "failed":
+            break
+        time.sleep(0.5)
+    return {
+        "ok": False,
+        "steps": steps,
+        "reason": "not_serving",
+        "error": (
+            f"the systemd user unit is {last_state}; if another relay already held "
+            f"the port, stop it and restart the service. See {log_path()}"
+        ),
+    }
+
+
 def uninstall(
     *,
     purge: bool = False,
@@ -10434,7 +10558,7 @@ def uninstall(
     assume_tty: bool | None = None,
     answer: Callable[[str], str] | None = None,
 ) -> dict[str, Any]:
-    """Remove the LaunchAgent; ``--purge`` forgets networks; ``--purge-identity``
+    """Remove this platform's service unit; ``--purge`` forgets networks; ``--purge-identity``
     destroys the device keypair, and only after a human confirms by name.
 
     ONE FLAG, ONE BLAST RADIUS (design §6 and §12, and the invariant
@@ -10490,18 +10614,14 @@ def uninstall(
         # BEFORE any of this verb's work — so `lop network uninstall` could not
         # clean anything up on the platform the peers actually run (QA round 1,
         # F-9). `install` has always consulted the platform guard; removal is the
-        # other half of the same surface and must consult it too.
-        addressable = _plist_is_addressable()
-        if addressable and is_supported():
-            _launchctl("bootout", _domain(), str(plist_path()))
-        if plist_path().exists():
-            plist_path().unlink()
-        if not is_supported():
-            steps.append(
-                "no launchd on this platform: nothing was loaded or unloaded. `lop "
-                "network serve` (or `--no-start`) is how the relay runs here."
-            )
-        else:
+        # other half of the same surface and must consult it too, and since slice
+        # (b) of remote onboarding there are TWO service arms to remove from.
+        if sys.platform == "darwin" and is_supported():
+            addressable = _plist_is_addressable()
+            if addressable:
+                _launchctl("bootout", _domain(), str(plist_path()))
+            if plist_path().exists():
+                plist_path().unlink()
             steps.append(
                 "removed the LaunchAgent and its plist"
                 if addressable
@@ -10510,6 +10630,23 @@ def uninstall(
                     "supervises, so nothing was loaded or unloaded. `--no-start` (or "
                     "`serve --no-launchd`) is how to run without launchd at all."
                 )
+            )
+        elif sys.platform.startswith("linux") and is_supported():
+            if supervisors.systemd_unit_is_addressable(SYSTEMD_UNIT):
+                supervisors.systemctl_user("disable", "--now", SYSTEMD_UNIT)
+                systemd_path().unlink(missing_ok=True)
+                supervisors.systemctl_user("daemon-reload")
+                steps.append(f"disabled and removed the systemd user service ({SYSTEMD_UNIT})")
+            else:
+                steps.append(
+                    "no user service to remove here: this run's HOME is not the one "
+                    "systemd supervises, so nothing was loaded or unloaded."
+                )
+        else:
+            steps.append(
+                "no user service supervisor on this platform: nothing was loaded or "
+                "unloaded. `lop network serve` (or `--no-start`) is how the relay runs "
+                "here."
             )
     receipt: dict[str, Any] = {
         "ok": True,
@@ -10627,24 +10764,33 @@ def _plist_is_addressable() -> bool:
 
 
 def service_action(action: str) -> dict[str, Any]:
-    """start|stop|restart via launchctl, bootstrapping a plist that was never loaded.
+    """start|stop|restart on THIS platform's user supervisor.
 
-    PLATFORM FIRST, HOME SECOND. ``_plist_is_addressable`` is a HOME question and
-    answers "no" on a Linux host only by accident (the real home has no plist
-    there), which would print the redirected-HOME explanation to an operator
-    whose actual problem is that there is no launchd at all. `install` and
-    `uninstall` both consult ``is_supported()`` first; this is the third half of
-    one surface and does the same.
+    PLATFORM FIRST, HOME SECOND, on both arms: the addressability guards are HOME
+    questions and answer "no" on the wrong platform only by accident, which
+    would print a redirected-HOME explanation to an operator whose actual problem
+    is that this host has no supervisor at all. launchd on macOS (unchanged
+    semantics: bootstrapping a plist that was never loaded); ``systemctl --user``
+    on Linux, where start/restart ALSO installs the unit when none is there —
+    ``join`` never installed one (only ``init``'s autostart did), so "start the
+    relay" on such a host can only mean "make it supervised and running".
     """
-    if not is_supported():
-        return {
-            "ok": False,
-            "reason": "no_launchd",
-            "error": (
-                f"`lop network {action}` drives launchd, and this platform has none. Run "
-                "the relay in the foreground with `lop network serve` instead."
-            ),
-        }
+    if sys.platform == "darwin" and is_supported():
+        return _service_action_launchd(action)
+    if sys.platform.startswith("linux") and is_supported():
+        return _service_action_systemd(action)
+    return {
+        "ok": False,
+        "reason": "no_supervisor",
+        "error": (
+            f"`lop network {action}` needs a user service supervisor (launchctl on "
+            "macOS, systemctl --user on Linux). Run the relay in the foreground "
+            "with `lop network serve` instead."
+        ),
+    }
+
+
+def _service_action_launchd(action: str) -> dict[str, Any]:
     if not _plist_is_addressable():
         return {
             "ok": False,
@@ -10670,6 +10816,39 @@ def service_action(action: str) -> dict[str, Any]:
         result = _launchctl("kickstart", "-k", f"{_domain()}/{LABEL}")
     ok = result.returncode == 0
     return {"ok": ok, "error": "" if ok else result.stderr.strip()[:300]}
+
+
+def _service_action_systemd(action: str) -> dict[str, Any]:
+    if not supervisors.systemd_unit_is_addressable(SYSTEMD_UNIT):
+        return {
+            "ok": False,
+            "reason": "isolated_home",
+            "error": (
+                f"`lop network {action}` drives systemd --user, and this run's HOME is "
+                "not the home the user manager supervises, so there is no unit to "
+                "drive. Run the relay in the foreground with `lop network serve`, or "
+                "run this from a normal login where the unit exists."
+            ),
+        }
+    if action in ("start", "restart") and not systemd_path().exists():
+        # THE MISSING-UNIT CASE INSTALLS (slice (b) of remote onboarding): a device
+        # that JOINED a network has no unit, and `join`'s path never installed one.
+        installed = _install_systemd(DEFAULT_PORT, dry_run=False)
+        if not installed.get("ok"):
+            return {
+                "ok": False,
+                "reason": str(installed.get("reason") or "install_failed"),
+                "error": str(installed.get("error") or "the relay service could not be installed"),
+            }
+        # ``enable --now`` already started the current build, so both start and
+        # restart are done here; a restart has no older process to replace.
+        return {"ok": True, "error": ""}
+    result = supervisors.systemctl_user(action, SYSTEMD_UNIT)
+    ok = result.returncode == 0
+    return {
+        "ok": ok,
+        "error": "" if ok else supervisors.translate_systemctl_error(result.stderr)[:300],
+    }
 
 
 def health(timeout: float = 3.0) -> dict[str, Any] | None:

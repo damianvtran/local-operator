@@ -193,12 +193,13 @@ def test_uninstall_reports_an_isolated_home_instead_of_a_launchd_error(
     reason, ``service_action``'s reason — see the two siblings below, which pin the
     OPPOSITE answer and are the other half of this surface). Unpinned, the test
     asserted the launchd wording on a host that has launchd and therefore failed on
-    CI's Linux runner, where the honest answers are "no launchd on this platform"
-    and reason ``no_launchd``: a test that only passes on the author's OS is not a
-    test. ``sys.platform`` and ``shutil.which`` are patched to the launchd answer
-    rather than stubbing the guard, so the real ``is_supported()`` expression is
-    what runs. In an isolated HOME nothing downstream reaches ``launchctl``:
-    ``_plist_is_addressable()`` is a passwd-home question and answers False here."""
+    CI's Linux runner, where the honest answers are "no user service supervisor on
+    this platform" and reason ``no_supervisor``: a test that only passes on the
+    author's OS is not a test. ``sys.platform`` and ``shutil.which`` are patched to
+    the launchd answer rather than stubbing the guard, so the real ``is_supported()``
+    expression is what runs. In an isolated HOME nothing downstream reaches
+    ``launchctl``: ``_plist_is_addressable()`` is a passwd-home question and answers
+    False here."""
     identity.mint(root)
     monkeypatch.setattr(relay.sys, "platform", "darwin")
     monkeypatch.setattr(relay.shutil, "which", lambda name: f"/usr/bin/{name}")
@@ -212,14 +213,15 @@ def test_uninstall_reports_an_isolated_home_instead_of_a_launchd_error(
     # Two sentences say the same thing here, and which one is correct depends on
     # the HOST, not on the HOME: a redirected HOME on a machine that HAS launchd
     # reports that launchd supervises a different home, while a host with no
-    # launchd at all reports that there is no launchd to unload. Both mean
-    # "nothing was loaded or unloaded, and here is how to run without launchd",
+    # supervisor at all reports that nothing was loaded or unloaded. Both mean
+    # "nothing was loaded or unloaded, and here is how to run without a service",
     # and asserting only the first made this test pass on the author's macOS and
     # fail on CI's Linux — a test that only holds on one OS is not a test of the
     # receipt. The teeth are unchanged: a receipt that reported success with no
     # step at all, or a step that did not explain itself, still fails.
     assert any(
-        "no LaunchAgent to remove here" in step or "no launchd on this platform" in step
+        "no LaunchAgent to remove here" in step
+        or "no user service supervisor on this platform" in step
         for step in result["steps"]
     ), result
 
@@ -266,7 +268,9 @@ def test_uninstall_never_reaches_for_launchctl_where_there_is_none(
     assert attempts == []
     # THE STORE REALLY WENT. This is the half QA could not reach on Linux.
     assert store.record_path(record.network_id, root).exists() is False
-    assert any("no launchd on this platform" in step for step in result["steps"]), result
+    assert any(
+        "no user service supervisor on this platform" in step for step in result["steps"]
+    ), result
     # The identity is still kept: that is what `--purge` alone promises.
     assert identity.identity_path(root).exists()
 
@@ -282,5 +286,5 @@ def test_service_action_names_the_missing_launchd_rather_than_the_home(
     monkeypatch.setattr(relay.shutil, "which", lambda _name: None)
     action = relay.service_action("start")
     assert action["ok"] is False
-    assert action.get("reason") == "no_launchd"
+    assert action.get("reason") == "no_supervisor"
     assert "serve" in str(action["error"])

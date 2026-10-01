@@ -213,6 +213,20 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
         action="store_true",
         help="Start the pairing and wait for `--confirm <code>` instead of prompting",
     )
+    # THE NO-HUMAN-AT-THIS-END SHAPE (design §2.6; transport doc §12.4). The node
+    # supplies its OWN derived code as the transcription, exactly the value a
+    # human would read off the inviter's screen and type — and the inviter still
+    # compares it against its own derivation, so a mismatch refuses exactly as it
+    # does for a typed digit. It is what lets the operator's confirm be the only
+    # human act of an onboarded join; it is NOT a bypass of the compare.
+    join.add_argument(
+        "--automated",
+        action="store_true",
+        help=(
+            "No human at this device: send this device's own derived code for the "
+            "inviter to compare (a person on the inviting device must still confirm)"
+        ),
+    )
     join.add_argument(
         "--confirm",
         metavar="CODE",
@@ -2179,13 +2193,49 @@ def _cmd_join(args: argparse.Namespace) -> int:
     had. A caller with no terminal gets the two-phase pair (design §1.4.3): ``--park``
     opens the ceremony and hands back the code, and ``--confirm <code>`` — a second
     invocation, wherever the person is — records the transcription the ceremony is
-    waiting for. Neither spelling can complete a pairing without a human reading a
-    code off another screen; see ``_park_join`` for why the confirmation has to reach
-    the process that derived the code rather than starting a second one.
+    waiting for. Neither of those spellings can complete a pairing without a human
+    reading a code off another screen; see ``_park_join`` for why the confirmation
+    has to reach the process that derived the code rather than starting a second one.
+
+    ``--automated`` is the third spelling (design §2.6, transport doc §12.4): no
+    human at THIS end at all. It sends this device's OWN derived code as the
+    transcription — exactly the value a person would have read off the other
+    screen — and the INVITER still compares it against its own derivation, so a
+    mismatch refuses and spends the attempt exactly as a wrong digit does. What
+    moves to the inviter is only the transcription; the compare never moves, and
+    the operator's confirm is the run's one human act.
     """
     confirm = str(getattr(args, "confirm", "") or "").strip()
     if confirm:
         return _answer_parked_join(args, confirm)
+    if bool(getattr(args, "automated", False)):
+        # Each pair below cannot mean one thing at once: automated supplies this
+        # device's own code, and the other flag asks a PERSON to do that same job.
+        if bool(getattr(args, "park", False)):
+            print(
+                "--automated sends the code itself; --park waits for a person to send it",
+                file=sys.stderr,
+            )
+            return 2
+        if getattr(args, "emit_sas", False):
+            print(
+                "--automated never stops to print a code; --emit-sas prints one and waits",
+                file=sys.stderr,
+            )
+            return 2
+        if getattr(args, "sas_stdin", False):
+            print(
+                "--sas-stdin is answered by a prompt; --automated has no prompt",
+                file=sys.stderr,
+            )
+            return 2
+        if getattr(args, "verify", False):
+            print(
+                "--verify asks a person to compare a fingerprint; --automated has no "
+                "person here",
+                file=sys.stderr,
+            )
+            return 2
     if bool(getattr(args, "park", False)):
         # USAGE errors, not refusals (the guide's rc 2): each names a flag pair that
         # cannot mean one thing at the same time, and silently dropping one of the two
@@ -2449,6 +2499,12 @@ def _join_one(
         if args.emit_sas:
             print(json.dumps({"sas": result.sas, "fingerprint": fingerprint}))
             sys.stdout.flush()
+            # ``--emit-sas`` PRINTS THIS DEVICE'S CODE, THEN WAITS (the parser's own
+            # help): the read is still the human's transcription, so this branch
+            # must fall through to it exactly as it did before ``--automated``
+            # existed — leaving ``typed`` unset here was a real UnboundLocalError
+            # on every emit-sas harness run (found by test_relay_e2e).
+            typed = _read_code(args, result.sas, fingerprint)
         elif getattr(args, "park", False):
             # PHASE ONE. Everything above this line is the ceremony a terminal runs;
             # below it, who answers is the only difference — and that difference is
@@ -2469,6 +2525,15 @@ def _join_one(
                 offer_view=offer_view,
                 helpers=helpers,
             )
+        elif getattr(args, "automated", False):
+            # NO HUMAN AT THIS END (design §2.6; M4). The value that crosses the
+            # wire is THIS device's own derivation — exactly what a person would
+            # have transcribed from the other screen — and the inviter's compare
+            # (relay.py's ``sas_matches``) is untouched: a mismatch refuses,
+            # spends the attempt and audits ``sas_mismatch`` exactly as a typed
+            # digit does. Nothing here may ever grow into a bless that skips the
+            # compare.
+            typed = result.sas
         else:
             print(
                 invite_mod.joiner_prompt(
@@ -2480,7 +2545,7 @@ def _join_one(
                 )
             )
             sys.stdout.flush()
-        typed = _read_code(args, result.sas, fingerprint)
+            typed = _read_code(args, result.sas, fingerprint)
         if typed is None:
             sock.sendall(codec.seal(helpers["pair_abort_frame"](req=1, reason="declined_local")))
             raise MeshRefusal("declined", "this device declined the pairing")
@@ -2748,6 +2813,15 @@ def _finish_pairing(
             "inviter": envelope.inviter_device_id,
             "role": record.self_role,
             "fingerprint": fingerprint,
+            # THE VALUE THE COMPARE ACTUALLY SAW FROM THIS SIDE (§2.6: "both SAS
+            # codes are recorded in receipts + audit rather than typed by a
+            # person"). On the human path it is the transcription; with
+            # ``--automated`` it is this device's own derivation. It is pointless
+            # to an attacker after the ceremony (the transcript is fixed and the
+            # value is not a credential), and it is what lets a receipt show
+            # what was compared instead of claiming it. The inviter's matching
+            # value lives in the relay's parked record and its audit.
+            "sas": typed,
             # The final granted set, exactly what the receipt line above names.
             "shares": shares,
             # The deliberate half of the offer-to-final delta, so the tool's
@@ -3408,7 +3482,7 @@ def _autostart() -> str:
         return "the relay is already running"
     if not relay_mod.is_supported():
         return (
-            "no launchd here: run `lop network serve` in the foreground "
+            "no user service supervisor here: run `lop network serve` in the foreground "
             f"(log {relay_mod.log_path()})"
         )
     result = relay_mod.install()
@@ -3432,8 +3506,8 @@ def _cmd_service(action: str) -> Callable[[argparse.Namespace], int]:
             # THE FAMILY'S SHAPE, even here: `code` + `message`, because a consumer
             # that reads `code` (which GUIDE.md tells it to) saw nothing at all on
             # this verb. The relay's own `reason` is the NAME when it has one —
-            # `no_launchd` and `isolated_home` are diagnoses with their own
-            # remedies, not launchctl failures — and `service_failed` covers the
+            # `no_supervisor` and `isolated_home` are diagnoses with their own
+            # remedies — not launchctl failures — and `service_failed` covers the
             # rest. `error` is kept beside them: it is what this verb has always
             # carried.
             message = str(result.get("error") or "")
@@ -4677,7 +4751,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
             )
     lines = [
         f"installed:  {'yes' if payload['installed'] else 'no'}"
-        + ("" if payload["supported"] else "  (no launchd on this platform)"),
+        + ("" if payload["supported"] else "  (no user service supervisor here)"),
         f"identity:   {'present' if payload['identity_present'] else 'missing'}",
         f"relay:      {relay_line}",
     ]
