@@ -1959,21 +1959,26 @@ class ProjectsView(Vertical):
 
     @property
     def wants_field_tab(self) -> bool:
-        """True while the FORM (and not its confirm) owns the keyboard.
+        """True while the FORM MODE is up — the app's `shift+tab` asks.
 
         `shift+tab` is an app-wide PRIORITY binding (`cycle_effort`), so the
         focused field can never see the chord; the app asks this page instead of
         disarming every hotkey the way key capture does (see
         :meth:`form_focus_previous`).
 
+        The claim is the WHOLE MESSAGE the mode is up, and that is the fix QA
+        round 2 (Q-4) measured: narrowing it to "not confirming" made the app
+        fall THROUGH the delegation for the chord, straight into
+        `action_cycle_effort` — every `shift+tab` at the discard question moved
+        a billable setting silently while a reader answered it. What must not
+        happen is the journey to the next field, and that is the belt inside
+        :meth:`form_focus_previous`, not the claim.
+
         ``@property`` is load-bearing rather than decorative: without it the app
-        received the bound METHOD — always truthy — so the delegation ran on
-        every `shift+tab` in every mode and the confirm guard here never
-        executed. The behaviour happened to stay correct because
-        :meth:`form_focus_previous` guards on the mode itself, which is exactly
-        the kind of accident the property removes (QA round 1, Q-2).
+        received the bound METHOD — always truthy — so the claim was never the
+        one asked about (QA round 1, Q-2).
         """
-        return self._mode == "form" and not self._form_page.confirming
+        return self._mode == "form"
 
     def form_focus_previous(self) -> None:
         """``shift+tab`` — the app's priority binding delegates here.

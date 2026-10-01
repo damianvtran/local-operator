@@ -15,12 +15,14 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
+from local_operator.model.configure import build_model_spec
 from local_operator.projects import ProjectRegistry
 from local_operator.tui.app import OperatorApp
+from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.projects_form import (
     DESCRIPTION_SCAFFOLD,
     DISCARD_PROMPT,
@@ -461,6 +463,160 @@ async def test_the_hints_state_the_rules_a_reader_cannot_guess(tmp_path: Path) -
         rows = view.rendered_rows()
         assert any("nothing is saved" in row for row in rows), rows
         assert any("← → change" in row for row in rows), rows
+
+
+class _EffortProjectSession(_ProjectSession):
+    """The projects rig with a REAL ``ModelSpec``, so the effort chord is live.
+
+    ``FakeSession.model`` is ``None`` and the app refuses the effort chord before
+    it can act, which would make the Q-4 pin below read zero cycles for a fix
+    that was never there. ``build_model_spec`` is the same offline derivation
+    the shipped controller lands on.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._spec = build_model_spec("anthropic", "claude-opus-5")
+
+    @property
+    def model(self) -> Any:
+        return self._spec
+
+    @property
+    def model_label(self) -> str:
+        return f"{self._spec.provider}/{self._spec.model_id}"
+
+    def set_model(self, model: Any, *, explicit: bool = False) -> None:
+        self._spec = model
+
+
+async def test_shift_tab_at_the_confirm_never_moves_a_billable_setting(
+    tmp_path: Path,
+) -> None:
+    """Q-4: the page claims the chord for the WHOLE form mode.
+
+    ``shift+tab`` is an app-wide priority binding (``cycle_effort``). Narrowing
+    the claim to "not confirming" let the app fall through the delegation, so
+    every press at the discard question moved the session's reasoning effort —
+    a billable setting changed silently while a reader answered a question. The
+    belt that must stop the journey to the next field is in
+    :meth:`ProjectsView.form_focus_previous`, not in the claim.
+    """
+    session = _EffortProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+
+        # The instrument is live: with no form up, the chord really cycles.
+        def level() -> str | None:
+            assert app._session is not None
+            return cast("str | None", app._session.model.reasoning_effort)
+
+        start = level()
+        await pilot.press("shift+tab")
+        await pilot.pause()
+        cycled = level()
+        assert cycled != start, "the rig must be able to cycle, or this proves nothing"
+
+        view = await _open(pilot, app)
+        page = await _open_form(pilot, view)
+
+        # In the form, the chord walks the fields and touches no setting.
+        await pilot.press("shift+tab")
+        await pilot.pause()
+        assert level() == cycled
+
+        # `shift+tab` walked back to the last field (a cycle row), so the title
+        # takes the focus again before anything is typed into it.
+        page._title_input.focus()
+        await pilot.pause()
+        await pilot.press(*"dirty")
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.pause()
+        assert page.confirming is True
+
+        for _ in range(3):
+            await pilot.press("shift+tab")
+            await pilot.pause()
+
+        assert level() == cycled, "the chord must not move a billable setting at the confirm"
+        assert page.confirming is True, "the question must survive the chord"
+
+
+async def test_the_selection_band_takes_the_composers_treatment(tmp_path: Path) -> None:
+    """D9: stock `Input` selection measured 1.41:1 on the light ramp.
+
+    The band is stock ``#9bc3e3`` with the widget's own light glyphs, so the
+    text a reader had just selected was the least readable text on the page.
+    The form takes the composer's treatment instead, and this pins the two to
+    the SAME resolved colours, so a future ramp change cannot separate them.
+    """
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        app._run_slash_command("/theme light")
+        await pilot.pause()
+        await pilot.pause()
+        view = await _open(pilot, app)
+        page = await _open_form(pilot, view)
+
+        composer = app.query_one(Editor).get_component_rich_style("text-area--selection")
+        field = page._title_input.get_component_rich_style("input--selection")
+        area = page._description.get_component_rich_style("text-area--selection")
+
+        assert field.bgcolor == composer.bgcolor, (field.bgcolor, composer.bgcolor)
+        assert field.color == composer.color, (field.color, composer.color)
+        assert area.bgcolor == composer.bgcolor, (area.bgcolor, composer.bgcolor)
+        assert area.color == composer.color, (area.color, composer.color)
+
+
+async def test_the_question_gets_its_own_row(tmp_path: Path) -> None:
+    """D10: the confirm must not read as the clipped field's value.
+
+    The blank row above it is the sheet's one sanctioned spacing class rather
+    than a margin of the form's own.
+    """
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        page = await _open_form(pilot, view)
+
+        await pilot.press(*"dirty")
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.pause()
+
+        assert page._confirm_row.has_class("gap-above")
+        body = page._fields_scroll.region
+        confirm = page._confirm_row.region
+        assert confirm.y == body.y + body.height + 1, (body, confirm)
+
+
+async def test_the_hints_are_the_labels_voice(tmp_path: Path) -> None:
+    """D11: a hint wears the label's quiet ink, and does not repeat a placeholder."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        page = await _open_form(pilot, view)
+
+        muted = str(app.get_css_variables()["lo-muted"]).lower()
+        hint = page._title_block._hint_widget.styles.color
+        assert hint is not None and hint.hex.lower() == muted, (hint, muted)
+        rows = view.rendered_rows()
+        assert any("at most 8 tags" in row for row in rows), rows
+        assert not any("comma or space separated · at most" in row for row in rows), rows
 
 
 # ---------------------------------------------------------------------------

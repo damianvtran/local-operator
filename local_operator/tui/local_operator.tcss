@@ -2213,6 +2213,18 @@ Screen.settings #input-dock #prompt-chevron {
     background: $lo-tint-select;
 }
 
+/* The selection band, in the form's own controls. Stock Textual paints `Input`
+ * selection with the theme's default blue and leaves the glyphs at the
+ * widget's colour — measured 1.41:1 on the light ramp, i.e. the text a reader
+ * had just selected became unreadable (design review round 1 r2, D9). The form
+ * takes the composer's treatment instead (`Editor .text-area--selection`):
+ * the ramp's selected-prose ground, with the ink NORMALISED to `fg`. */
+.projects-form-fields .input--selection,
+.projects-form-fields .text-area--selection {
+    background: $lo-edge;
+    color: $lo-fg;
+}
+
 /* The description editor keeps its own height (it is the one multi-line
  * field), but shares the box treatment so the form has ONE control look. */
 .projects-form-fields TextArea {
@@ -2248,6 +2260,10 @@ Screen.settings #input-dock #prompt-chevron {
 .projects-form-error {
     width: 1fr;
     height: auto;
+    /* The hint is the LABEL's voice, not the value's: at full foreground it
+     * competed with the value it was explaining (design review round 1 r2,
+     * D11). */
+    color: $lo-muted;
     /* One left edge: the label, the control's text and these lines all start at
      * the same column, so a hint or a refusal reads as part of the field rather
      * than as the next one (design review round 1, D6). */
