@@ -317,16 +317,19 @@ function EffortSheet({
 
 const MAX_TEXTAREA_PX = 6 * 22; /* six lines at body line-height */
 const CONTINUATION_ERROR = "Couldn’t continue this conversation. Try again.";
-/* U15's other half (UX round 1, U20): on an ENDED session the generic line's
-   `Try again.` is not true advice — the runtime is gone and no retry of this
-   control can land — and it sat directly under a strip naming the one path that
-   does work. The honest sentence names it instead. (The composer is NOT
-   disabled for an ended session by this batch: a disabled composer would
-   change the draft, attachment and retained-envelope flows for a state whose
-   refusal the daemon already words, and the gate above removes the affordance
-   that motivated the finding.) */
+/* U15's other half (UX round 1, U20; reworded for issue #1875): on an ENDED
+   session the generic line's `Try again.` is not the whole story — the runtime
+   is gone — and the old sentence ("tap resume to continue") was WRONG about the
+   mechanism: a send to an ended session is itself resume-then-send (the daemon
+   wakes a host for a prompt with no live entry and the continuation carries the
+   text into it), so resume is never a prerequisite. A send that FAILED here means
+   that wake failed, and the honest remedies are the two that exist: send again
+   (the retained draft goes under the same envelope), or resume, which is the one
+   thing a send cannot do — reopen the session without composing. (The composer
+   is NOT disabled for an ended session: a disabled composer would change the
+   draft, attachment and retained-envelope flows, and sending is a real way back.) */
 const ENDED_CONTINUATION_ERROR =
-	"This session has ended — tap resume to continue.";
+	"This session has ended and couldn’t be woken just now. Send again, or tap resume to reopen it.";
 const SLASH_ERROR = "Couldn’t run that command. Try again.";
 const STEER_ERROR = "Couldn’t send this instruction. Try again.";
 /* U5: one vocabulary for the retained instruction across the alert, the retry

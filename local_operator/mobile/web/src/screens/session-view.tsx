@@ -376,9 +376,13 @@ function EndedSessionStrip({ sessionId }: { sessionId: string }) {
 					    (measured at 390 fitting beside the button, and at 320 on its own
 					    line inside the row). Inside the row's text cell: at 390 it costs
 					    no height at all beside the 44px button, and the row's growth at
-					    320 is bounded by the sentence it belongs to. */}
+					    320 is bounded by the sentence it belongs to.
+
+					    AND THAT A SEND DOES IT TOO (issue #1875): the daemon wakes a host for
+					    a prompt to an ended session, so resume is the way to reopen WITHOUT
+					    composing, not a prerequisite for continuing. */}
 					<p className="mt-0.5 text-meta text-ink-dim">
-						resume reopens it in your home folder
+						a send or resume reopens it in your home folder
 					</p>
 				</div>
 				{/* A real 44px target inside a `pointer-events-none` overlay: the

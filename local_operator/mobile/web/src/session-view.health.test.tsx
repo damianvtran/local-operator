@@ -220,11 +220,11 @@ describe("an ended session (U7)", () => {
 		);
 	});
 
-	it("says where a resume reopens the conversation (U18)", () => {
+	it("says where an ended session reopens, and that a send does it too (U18, #1875)", () => {
 		slot = { projection: projection({ ended: true }), connected: true };
 		render(<SessionScreen sessionId="s1" />);
 		/* The words are spelled out, not a bare `~` (UX round 2, U25 = D8). */
-		expect(screen.getByText("resume reopens it in your home folder")).toBeTruthy();
+		expect(screen.getByText("a send or resume reopens it in your home folder")).toBeTruthy();
 	});
 
 	it("a resume that succeeds without a live frame says so (U24)", async () => {
