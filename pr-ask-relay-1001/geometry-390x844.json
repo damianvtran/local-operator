@@ -1,0 +1,605 @@
+{
+  "390x844-bar": {
+    "viewport": [
+      390,
+      844
+    ],
+    "dock": {
+      "top": 688,
+      "bottom": 732,
+      "h": 44
+    },
+    "dockText": "?4 questions waiting\u00b7 Which sequencing should the rollout use?\u25b8",
+    "mirroredCardDrawn": null,
+    "composer": {
+      "top": 753,
+      "bottom": 777,
+      "h": 24
+    },
+    "composerVisible": true,
+    "headerAskEntry": 1
+  },
+  "390x844-sheet": {
+    "open": true,
+    "loading": false,
+    "empty": false,
+    "cards": [
+      {
+        "askId": "qa-head",
+        "status": "open",
+        "controls": 10,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "qa-second",
+        "status": "open",
+        "controls": 4,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "fa-mine",
+        "status": "open",
+        "controls": 3,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "st-second",
+        "status": "open",
+        "controls": 3,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "st-first",
+        "status": "open",
+        "controls": 3,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "qa-deadline",
+        "status": "timed_out",
+        "controls": 5,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "qa-settled",
+        "status": "answered",
+        "controls": 0,
+        "refusal": null,
+        "sendDisabled": null
+      },
+      {
+        "askId": "qa-declined",
+        "status": "declined",
+        "controls": 0,
+        "refusal": null,
+        "sendDisabled": null
+      }
+    ],
+    "scroller": {
+      "scrollH": 2147,
+      "clientH": 660
+    }
+  },
+  "390x844-recommended": {
+    "drag": {
+      "dy": 4,
+      "x": 195,
+      "y": 224,
+      "scrollTop": 0,
+      "max": 1487,
+      "remaining": 4
+    },
+    "open": true,
+    "loading": false,
+    "empty": false,
+    "cards": [
+      {
+        "askId": "qa-head",
+        "status": "open",
+        "controls": 10,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "qa-second",
+        "status": "open",
+        "controls": 4,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "fa-mine",
+        "status": "open",
+        "controls": 3,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "st-second",
+        "status": "open",
+        "controls": 3,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "st-first",
+        "status": "open",
+        "controls": 3,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "qa-deadline",
+        "status": "timed_out",
+        "controls": 5,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "qa-settled",
+        "status": "answered",
+        "controls": 0,
+        "refusal": null,
+        "sendDisabled": null
+      },
+      {
+        "askId": "qa-declined",
+        "status": "declined",
+        "controls": 0,
+        "refusal": null,
+        "sendDisabled": null
+      }
+    ],
+    "scroller": {
+      "scrollH": 2147,
+      "clientH": 660
+    }
+  },
+  "390x844-foreign": {
+    "open": true,
+    "loading": false,
+    "empty": false,
+    "cards": [
+      {
+        "askId": "qa-head",
+        "status": "open",
+        "controls": 10,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "qa-second",
+        "status": "open",
+        "controls": 4,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "fa-mine",
+        "status": "open",
+        "controls": 3,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "st-second",
+        "status": "open",
+        "controls": 3,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "st-first",
+        "status": "open",
+        "controls": 3,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "qa-deadline",
+        "status": "timed_out",
+        "controls": 5,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "qa-settled",
+        "status": "answered",
+        "controls": 0,
+        "refusal": null,
+        "sendDisabled": null
+      },
+      {
+        "askId": "qa-declined",
+        "status": "declined",
+        "controls": 0,
+        "refusal": null,
+        "sendDisabled": null
+      }
+    ],
+    "scroller": {
+      "scrollH": 2232,
+      "clientH": 660
+    }
+  },
+  "390x844-stacked": {
+    "viewport": [
+      390,
+      844
+    ],
+    "dock": {
+      "top": 688,
+      "bottom": 732,
+      "h": 44
+    },
+    "dockText": "?2 questions waiting\u00b7 Ship behind the flag while this decision is pending?\u25b8",
+    "mirroredCardDrawn": "pending-card",
+    "composer": {
+      "top": 753,
+      "bottom": 777,
+      "h": 24
+    },
+    "composerVisible": true,
+    "headerAskEntry": 1
+  },
+  "390x844-filled": {
+    "fill": "picked 6 pickers",
+    "open": true,
+    "loading": false,
+    "empty": false,
+    "cards": [
+      {
+        "askId": "qa-head",
+        "status": "open",
+        "controls": 10,
+        "refusal": null,
+        "sendDisabled": false
+      },
+      {
+        "askId": "qa-second",
+        "status": "open",
+        "controls": 4,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "fa-mine",
+        "status": "open",
+        "controls": 3,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "st-second",
+        "status": "open",
+        "controls": 3,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "st-first",
+        "status": "open",
+        "controls": 3,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "qa-deadline",
+        "status": "timed_out",
+        "controls": 5,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "qa-settled",
+        "status": "answered",
+        "controls": 0,
+        "refusal": null,
+        "sendDisabled": null
+      },
+      {
+        "askId": "qa-declined",
+        "status": "declined",
+        "controls": 0,
+        "refusal": null,
+        "sendDisabled": null
+      }
+    ],
+    "scroller": {
+      "scrollH": 2147,
+      "clientH": 660
+    }
+  },
+  "390x844-answered": {
+    "submit": "sent",
+    "open": true,
+    "loading": false,
+    "empty": false,
+    "cards": [
+      {
+        "askId": "st-first",
+        "status": "open",
+        "controls": 3,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "qa-second",
+        "status": "open",
+        "controls": 4,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "fa-mine",
+        "status": "open",
+        "controls": 3,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "st-second",
+        "status": "open",
+        "controls": 3,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "qa-head",
+        "status": "answered",
+        "controls": 0,
+        "refusal": null,
+        "sendDisabled": null
+      },
+      {
+        "askId": "qa-deadline",
+        "status": "timed_out",
+        "controls": 5,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "qa-settled",
+        "status": "answered",
+        "controls": 0,
+        "refusal": null,
+        "sendDisabled": null
+      },
+      {
+        "askId": "qa-declined",
+        "status": "declined",
+        "controls": 0,
+        "refusal": null,
+        "sendDisabled": null
+      }
+    ],
+    "scroller": {
+      "scrollH": 1614,
+      "clientH": 660
+    }
+  },
+  "390x844-refusal": {
+    "drag": {
+      "dy": 115,
+      "x": 195,
+      "y": 224,
+      "scrollTop": 981,
+      "max": 981,
+      "remaining": 115
+    },
+    "open": true,
+    "loading": false,
+    "empty": false,
+    "cards": [
+      {
+        "askId": "st-first",
+        "status": "open",
+        "controls": 3,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "qa-second",
+        "status": "open",
+        "controls": 4,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "fa-mine",
+        "status": "open",
+        "controls": 3,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "st-second",
+        "status": "open",
+        "controls": 3,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "qa-head",
+        "status": "answered",
+        "controls": 0,
+        "refusal": null,
+        "sendDisabled": null
+      },
+      {
+        "askId": "qa-deadline",
+        "status": "timed_out",
+        "controls": 5,
+        "refusal": "already answered by desktop.",
+        "sendDisabled": false
+      },
+      {
+        "askId": "qa-settled",
+        "status": "answered",
+        "controls": 0,
+        "refusal": null,
+        "sendDisabled": null
+      },
+      {
+        "askId": "qa-declined",
+        "status": "declined",
+        "controls": 0,
+        "refusal": null,
+        "sendDisabled": null
+      }
+    ],
+    "scroller": {
+      "scrollH": 1641,
+      "clientH": 660
+    }
+  },
+  "390x844-loading": {
+    "open": true,
+    "loading": true,
+    "empty": false,
+    "cards": [],
+    "scroller": {
+      "scrollH": 44,
+      "clientH": 44
+    }
+  },
+  "390x844-settled": {
+    "viewport": [
+      390,
+      844
+    ],
+    "dock": null,
+    "dockText": null,
+    "mirroredCardDrawn": null,
+    "composer": {
+      "top": 753,
+      "bottom": 777,
+      "h": 24
+    },
+    "composerVisible": true,
+    "headerAskEntry": 0
+  },
+  "390x844-card": {
+    "expand": "expanded",
+    "rows": 2
+  },
+  "390x844-none": {
+    "viewport": [
+      390,
+      844
+    ],
+    "dock": null,
+    "dockText": null,
+    "mirroredCardDrawn": null,
+    "composer": {
+      "top": 753,
+      "bottom": 777,
+      "h": 24
+    },
+    "composerVisible": true,
+    "headerAskEntry": 0
+  },
+  "390x844-empty": {
+    "open": true,
+    "loading": false,
+    "empty": true,
+    "cards": [],
+    "scroller": {
+      "scrollH": 44,
+      "clientH": 44
+    }
+  },
+  "390x844-bar-light": {
+    "viewport": [
+      390,
+      844
+    ],
+    "dock": {
+      "top": 688,
+      "bottom": 732,
+      "h": 44
+    },
+    "dockText": "?2 questions waiting\u00b7 Answer the second ask first?\u25b8",
+    "mirroredCardDrawn": null,
+    "composer": {
+      "top": 753,
+      "bottom": 777,
+      "h": 24
+    },
+    "composerVisible": true,
+    "headerAskEntry": 1
+  },
+  "390x844-sheet-light": {
+    "open": true,
+    "loading": false,
+    "empty": false,
+    "cards": [
+      {
+        "askId": "st-first",
+        "status": "open",
+        "controls": 3,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "qa-second",
+        "status": "open",
+        "controls": 4,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "fa-mine",
+        "status": "open",
+        "controls": 3,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "st-second",
+        "status": "open",
+        "controls": 3,
+        "refusal": null,
+        "sendDisabled": true
+      },
+      {
+        "askId": "qa-head",
+        "status": "answered",
+        "controls": 0,
+        "refusal": null,
+        "sendDisabled": null
+      },
+      {
+        "askId": "qa-deadline",
+        "status": "timed_out",
+        "controls": 5,
+        "refusal": null,
+        "sendDisabled": false
+      },
+      {
+        "askId": "qa-settled",
+        "status": "answered",
+        "controls": 0,
+        "refusal": null,
+        "sendDisabled": null
+      },
+      {
+        "askId": "qa-declined",
+        "status": "declined",
+        "controls": 0,
+        "refusal": null,
+        "sendDisabled": null
+      }
+    ],
+    "scroller": {
+      "scrollH": 1614,
+      "clientH": 660
+    }
+  }
+}
