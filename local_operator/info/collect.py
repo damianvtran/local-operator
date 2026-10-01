@@ -498,12 +498,20 @@ def collect_sessions(
 def _outcome_states(root: Path | None, session_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
     """Latest stored outcome STATE per session id, on ONE batched store read.
 
-    The single read behind the listing's outcome columns AND its ``--paused`` /
-    ``--failed`` set membership, so the two can never disagree about a row.
+    THE ONE IMPLEMENTATION both the listing's outcome columns and its
+    ``--paused`` / ``--failed`` set membership read through, so the two cannot
+    RESOLVE a row's kind differently.
 
-    ONE READ FOR THE WHOLE CALL: ``state_many`` chunks its SQL parameters over
-    one connection, so a fleet of forty sessions costs what one costs. The read
-    is also why the fields come from the store and not from the record — see
+    Resolution, not snapshot: with a filter active the listing issues two reads
+    (the candidate-set read, then the enrichment read for the rows it kept),
+    each its own connection and its own ``state_many`` snapshot. A row could in
+    principle be selected under one state and enriched with another if an
+    outcome landed between them — benign and sub-millisecond, and stated here
+    rather than implied by "one read" (review round 1, R4).
+
+    ONE READ PER CALL: ``state_many`` chunks its SQL parameters over one
+    connection, so a fleet of forty sessions costs what one costs. The read is
+    also why the fields come from the store and not from the record — see
     :attr:`SessionLine.completion_kind` for why the OUTCOME is what answers
     "why did this die".
 
