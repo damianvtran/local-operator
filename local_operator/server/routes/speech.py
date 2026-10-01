@@ -69,12 +69,16 @@ def _upstream_failure_detail(exc: APIError) -> str:
 
 
 #: The sentence for the daemon-local no-credential refusal (the resolver found
-#: nothing). It mirrors the app's own disabled-button tooltip -- "Sign in to
-#: Radient in the settings page to enable text to speech" -- so the toast and
-#: the tooltip that precedes it agree. This is NOT the state a press usually
-#: meets: the app disables the speak button without a credential, so a press
-#: that fails answers with the upstream 401 below instead (design round 1, D2).
-SPEECH_NO_CREDENTIAL_SENTENCE = "Sign in to Radient in the settings page to enable text to speech."
+#: nothing). It mirrors the app's own disabled-button sentence -- the speech
+#: gate's speaking-aloud sign-in entry, "Sign in to Radient in Settings to
+#: enable speaking aloud" (speech-gate.ts) -- so the toast and the sentence the
+#: gate shows before a press agree. The app renamed the destination to
+#: `Settings` and the control to `speaking aloud` when the gate module landed
+#: (copy review C4 on the UI PR; the daemon side was deferred to this PR's
+#: live-acceptance turn). This is NOT the state a press usually meets: the app
+#: disables the speak button without a credential, so a press that fails
+#: answers with the upstream 401 below instead (design round 1, D2).
+SPEECH_NO_CREDENTIAL_SENTENCE = "Sign in to Radient in Settings to enable speaking aloud."
 
 #: The sentence for an agent id that no longer exists. The raw id is an internal
 #: identifier the user never chose, so it goes to the route's log line rather
@@ -86,7 +90,8 @@ SPEECH_UNKNOWN_AGENT_SENTENCE = "This conversation's agent is no longer availabl
 #:
 #: * 401 a credential the hub refused or that expired -- the signed-in-but-
 #:   broken state the app's button gate cannot catch -- so the sentence names
-#:   the fix rather than claiming the user never signed in (design round 1, D2);
+#:   the fix rather than claiming the user never signed in (design round 1,
+#:   D2), with the destination in the app's `Settings` naming (copy review C4);
 #: * 402 the hub's credit gate. Vendor 402s are absorbed into its 503 by
 #:   design, so a 402 reaching the daemon is genuinely the account's balance
 #:   (design round 1, D3), and it names where the top-up happens (D5);
@@ -99,7 +104,7 @@ SPEECH_UNKNOWN_AGENT_SENTENCE = "This conversation's agent is no longer availabl
 #: ("insufficient credits for this request"), not for the toast the user reads.
 #: Every sentence ends with a full stop so the set reads alike in one toast (N1).
 _SPEECH_REFUSAL_SENTENCES: Dict[int, str] = {
-    401: "Your Radient sign-in has stopped working. Sign in again in the settings page.",
+    401: "Your Radient sign-in has stopped working. Sign in again in Settings.",
     402: (
         "Your Radient credit balance is too low for speech. "
         "Add credits in the Radient Console to continue."
