@@ -591,6 +591,17 @@ def feature_flags() -> dict[str, Any]:
         # never hears of this word.
         "aida": 1,
         "projects": 1,
+        # THE ONBOARDING APPROVAL SURFACE: GET /v1/desktop/approvals plus the two
+        # decision posts (POST /v1/desktop/approvals/{id}/approve|deny). ONE key
+        # for the family because it is one contract revision and one flow: a
+        # renderer that can draw the card is the renderer that can answer it.
+        #
+        # WHY A KEY AT ALL: the routes are ADDITIVE (an old renderer never calls
+        # one), so this gates nothing on an old client — it is how a renderer
+        # learns the surface EXISTS before it builds a Mesh-tab affordance whose
+        # POST would 404 on a backend without it. Absent, the tab simply has no
+        # approval affordance, which is the pre-onboarding state.
+        "approvals": 1,
         # THE SILENT INPUT-METADATA CARRIAGE: `input_mode`/`input_path` on a
         # message body (`POST /v1/desktop/sessions/{id}/messages`) and onto the
         # durable user row. ONE key un-gates BOTH fields, because they landed

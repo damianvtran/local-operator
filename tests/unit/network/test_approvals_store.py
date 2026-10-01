@@ -1,0 +1,552 @@
+"""The approval store's lifecycle, pinned: F1 idempotency, F2 matrix, F3
+write-once decision, F4 signature contract, expiry fold, tombstones.
+
+These cells drive the REAL store functions against an isolated config root with
+a REAL (file-only) operator key — no doubles for the crypto half, because the
+point of F4 is that the product path cannot be loosened without a signature and
+a test that stubbed the verifier would pin the stub.
+
+Isolation notes: the installed anchor is pinned ABSENT (``trust.load_anchor``),
+so a developer's machine state cannot select a different branch; the staged
+statement is written exactly as ``lop operator init`` leaves it. Nothing here
+touches the operator's login keychain (``file-only`` writes a 0600 file under
+the isolated root).
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from local_operator.network import approvals as A
+from local_operator.network.types import MeshRefusal
+
+#: Timestamps RELATIVE to now: a record created "a minute ago" is inside every
+#: live window below, so nothing here is born expired on a machine whose clock
+#: says today. Cells that need a past window pass explicit values instead.
+_NOW = time.time()
+CREATED_AT = _NOW - 60.0
+EXPIRES_AT = _NOW + 3600.0
+
+
+@pytest.fixture
+def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """An isolated config root, with "this host has no installed anchor" pinned."""
+    from local_operator.operator import trust
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+
+    def absent(uid: int | str | None = None) -> Any:
+        return trust.AnchorLoad(
+            anchor=None,
+            path=trust.anchor_path(uid),
+            root_owned=False,
+            reason="pinned absent by the test",
+            exists=False,
+        )
+
+    monkeypatch.setattr(trust, "load_anchor", absent)
+    return config_dir
+
+
+def _device_request(request_id: str, **overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "kind": A.KIND_DEVICE_ONBOARD,
+        "request_id": request_id,
+        "requested_by": {"session_id": "s1", "device_id": "d_self", "surface": "cli"},
+        "device": {
+            "device_id": "d_node",
+            "name": "cloud-node-1",
+            "fingerprint": "ABCD-EF12-3456",
+            "host": "99.79.190.164",
+            "user": "ec2-user",
+            "transport": "ssh",
+            "host_key_fp": "SHA256:abc",
+        },
+        "what": {"install": True, "connect": True, "unattended": True, "grant": ["approve"]},
+        "credential_ref": {"kind": "ssh", "ref": "secret:node-key"},
+        "created_at": CREATED_AT,
+        "expires_at": EXPIRES_AT,
+    }
+    base.update(overrides)
+    return base
+
+
+def _make_key(config_root: Path) -> Any:
+    """A real file-only operator key, staged exactly as ``lop operator init``.
+
+    Idempotent per root: a second call in one test returns the staged anchor
+    rather than re-creating the key (the file backend refuses to overwrite).
+    """
+    from local_operator.operator.keychain import FILE_ONLY
+    from local_operator.operator.sign import anchor_for_handle, create_key
+    from local_operator.operator.trust import (
+        anchor_bytes,
+        load_staged_anchor,
+        staging_path,
+    )
+
+    staged = staging_path(config_root)
+    existing = load_staged_anchor(config_root)
+    if existing is not None and staged.exists():
+        return existing
+    handle = create_key(config_root=config_root, preference=FILE_ONLY)
+    anchor = anchor_for_handle(handle, label="approvals-test")
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    staged.write_bytes(anchor_bytes(anchor))
+    return anchor
+
+
+def _sign(config_root: Path, message: bytes) -> str:
+    from local_operator.operator.sign import load_signer, sign_message
+
+    signer = load_signer(config_root=config_root, backend_name="file-only")
+    assert signer is not None, "the rig's operator key did not load"
+    try:
+        return sign_message(signer, message).sig
+    finally:
+        signer.close()
+
+
+def _sign_decision(config_root: Path, record: dict[str, Any], decision: str, decided_at: float):
+    message = A.signed_payload(
+        kind=record["kind"],
+        request_id=record["request_id"],
+        request_digest=record["request_digest"],
+        decision=decision,
+        decided_at=decided_at,
+    )
+    return _sign(config_root, message)
+
+
+# ---------------------------------------------------------------------------
+# F1 — idempotency
+# ---------------------------------------------------------------------------
+
+
+def test_same_id_and_digest_returns_the_record_and_a_changed_payload_conflicts(
+    root: Path,
+) -> None:
+    request_id = A.new_request_id()
+    first = A.create_request(**_device_request(request_id), root=root)
+    again = A.create_request(**_device_request(request_id), root=root)
+    assert again["approval_id"] == first["approval_id"]
+    assert again["request_digest"] == first["request_digest"]
+
+    before = (root / "network" / "approvals" / f"{first['approval_id']}.json").read_text()
+    with pytest.raises(MeshRefusal) as raised:
+        A.create_request(
+            **_device_request(
+                request_id, device={**_device_request(request_id)["device"], "host": "5.5.5.5"}
+            ),
+            root=root,
+        )
+    assert raised.value.code == "approval_request_conflict"
+    after = (root / "network" / "approvals" / f"{first['approval_id']}.json").read_text()
+    assert before == after, "a conflicting re-request changed the file"
+
+
+def test_a_re_request_after_a_terminal_state_returns_it_unchanged(root: Path) -> None:
+    request_id = A.new_request_id()
+    record = A.create_request(**_device_request(request_id), root=root)
+    A.deny(record["approval_id"], decided_at=CREATED_AT + 5.0, root=root)
+    again = A.create_request(**_device_request(request_id), root=root)
+    assert again["state"] == "denied", "a deny must not be reset by a re-request"
+
+
+def test_the_digest_binds_every_immutable_field(root: Path) -> None:
+    """One field at a time: any changed immutable field is a conflict, never a merge."""
+    request_id = A.new_request_id()
+    A.create_request(**_device_request(request_id), root=root)
+    for overrides in (
+        {"expires_at": EXPIRES_AT + 1.0},
+        {"created_at": CREATED_AT + 1.0},
+        {"what": {"install": False}},
+        {"credential_ref": None},
+        {"requested_by": {"session_id": "s2", "device_id": "d_self", "surface": "cli"}},
+    ):
+        with pytest.raises(MeshRefusal) as raised:
+            A.create_request(**_device_request(request_id, **overrides), root=root)
+        assert raised.value.code == "approval_request_conflict", overrides
+
+
+# ---------------------------------------------------------------------------
+# F2 — the frozen matrix
+# ---------------------------------------------------------------------------
+
+
+def test_deny_is_write_once_and_approve_after_deny_conflicts(root: Path) -> None:
+    record = A.create_request(**_device_request(A.new_request_id()), root=root)
+    A.deny(record["approval_id"], decided_at=CREATED_AT + 1.0, root=root)
+    with pytest.raises(MeshRefusal) as second:
+        A.deny(record["approval_id"], root=root)
+    assert second.value.code == "approval_decision_conflict"
+    with pytest.raises(MeshRefusal) as approve_after:
+        A.approve(record["approval_id"], signature_hex="00", decided_at=1.0, root=root)
+    assert approve_after.value.code == "approval_decision_conflict"
+
+
+def test_deny_lands_before_the_first_step_and_refuses_once_running(root: Path) -> None:
+    _make_key(root)
+    record = _approved_device_record(root)
+    # `approved` with no receipts: a deny is still the safe direction.
+    A.deny(record["approval_id"], decided_at=CREATED_AT + 10.0, root=root)
+    assert A.load_record(record["approval_id"], root=root)["state"] == "denied"
+
+    other = _approved_device_record(root)
+    A.begin_run(other["approval_id"], run_id="run_1", root=root)
+    with pytest.raises(MeshRefusal) as raised:
+        A.deny(other["approval_id"], root=root)
+    assert raised.value.code == "approval_running"
+
+
+def test_run_re_entry_from_failed_uses_a_new_run_id(root: Path) -> None:
+    _make_key(root)
+    record = _approved_device_record(root)
+    A.begin_run(record["approval_id"], run_id="run_1", root=root)
+    A.append_receipt(record["approval_id"], run_id="run_1", step="connect", ok=True, root=root)
+    A.mark_failed(record["approval_id"], run_id="run_1", step="install", detail="boom", root=root)
+    failed = A.load_record(record["approval_id"], root=root)
+    assert failed["state"] == "failed"
+
+    A.begin_run(record["approval_id"], run_id="run_2", root=root)
+    A.append_receipt(record["approval_id"], run_id="run_2", step="connect", ok=True, root=root)
+    A.mark_connected(record["approval_id"], run_id="run_2", step="verify", root=root)
+    done = A.load_record(record["approval_id"], root=root)
+    assert done["state"] == "connected"
+    runs = {r["run_id"] for r in done["receipts"]}
+    assert runs == {"run_1", "run_2"}
+    with pytest.raises(MeshRefusal) as raised:
+        A.begin_run(record["approval_id"], run_id="run_3", root=root)
+    assert raised.value.code == "approval_not_runnable", "a connected record must never re-run"
+
+
+def test_receipts_never_touch_state_or_signature_and_stop_at_terminal(root: Path) -> None:
+    _make_key(root)
+    record = _approved_device_record(root)
+    before = A.load_record(record["approval_id"], root=root)
+    A.begin_run(record["approval_id"], run_id="run_1", root=root)
+    A.append_receipt(record["approval_id"], run_id="run_1", step="connect", ok=True, root=root)
+    after = A.load_record(record["approval_id"], root=root)
+    assert after["state"] == "connecting"
+    assert after["signature"] == before["signature"]
+    A.mark_connected(record["approval_id"], run_id="run_1", step="verify", root=root)
+    with pytest.raises(MeshRefusal) as raised:
+        A.append_receipt(record["approval_id"], run_id="run_1", step="later", ok=True, root=root)
+    assert raised.value.code == "approval_receipt_refused"
+
+
+# ---------------------------------------------------------------------------
+# Expiry: a fold for readers, a materialized transition for writers
+# ---------------------------------------------------------------------------
+
+
+def test_expiry_folds_on_read_and_materializes_on_the_first_write(root: Path) -> None:
+    request_id = A.new_request_id()
+    record = A.create_request(
+        **_device_request(request_id, created_at=1000.0, expires_at=1001.0), root=root
+    )
+    # The create-time retention sweep materializes it immediately (the window is
+    # long past); the view has folded either way.
+    assert record["state"] == "expired" or A.presented(record)["state"] == "expired"
+    raw = json.loads((root / "network" / "approvals" / f"{record['approval_id']}.json").read_text())
+    assert raw["state"] == "expired"
+    with pytest.raises(MeshRefusal) as raised:
+        A.approve(record["approval_id"], signature_hex="00", decided_at=1.0, root=root)
+    assert raised.value.code == "approval_expired"
+
+
+def test_a_read_folds_without_writing(root: Path) -> None:
+    record = A.create_request(
+        **_device_request(A.new_request_id(), created_at=CREATED_AT, expires_at=EXPIRES_AT),
+        root=root,
+    )
+    path = root / "network" / "approvals" / f"{record['approval_id']}.json"
+    raw = json.loads(path.read_text())
+    raw["expires_at"] = time.time() - 10.0
+    path.write_text(json.dumps(raw))
+    loaded = A.load_record(record["approval_id"], root=root)
+    assert loaded["state"] == "expired"
+    assert json.loads(path.read_text())["state"] == "requested", "a read materialized a write"
+
+
+# ---------------------------------------------------------------------------
+# F4 — the signature contract, on the real signer
+# ---------------------------------------------------------------------------
+
+
+def test_the_signed_payload_framing_round_trips_through_operator_verify(root: Path) -> None:
+    from local_operator.operator.verify import APPROVAL_DOMAIN, verify_signature
+
+    assert APPROVAL_DOMAIN == A.APPROVAL_DOMAIN_LITERAL, "the domain tag drifted from verify.py"
+    record = A.create_request(**_device_request(A.new_request_id()), root=root)
+    message = A.signed_payload(
+        kind=record["kind"],
+        request_id=record["request_id"],
+        request_digest=record["request_digest"],
+        decision="approve",
+        decided_at=1790734000.123456,
+    )
+    _make_key(root)
+    signature = bytes.fromhex(_sign(root, message))
+    trio = A.local_anchor_trio(root)
+    assert trio is not None
+    assert verify_signature(spki=trio["spki"], message=message, signature=signature)
+    assert not verify_signature(spki=trio["spki"], message=message + b"x", signature=signature)
+
+
+def test_approve_verifies_the_signature_before_the_file_is_touched(root: Path) -> None:
+    anchor = _make_key(root)
+    trio = A.local_anchor_trio(root)
+    assert trio is not None
+    request_id = A.new_request_id()
+    record = A.create_request(
+        **_device_request(
+            request_id,
+            what={
+                "install": True,
+                "connect": True,
+                "anchor": {k: trio[k] for k in ("key_id", "spki_fp", "statement_digest")},
+            },
+        ),
+        root=root,
+    )
+    path = root / "network" / "approvals" / f"{record['approval_id']}.json"
+
+    decided_at = CREATED_AT + 30.0
+    with pytest.raises(MeshRefusal) as bad:
+        A.approve(record["approval_id"], signature_hex="00" * 8, decided_at=decided_at, root=root)
+    assert bad.value.code == "approval_signature_invalid"
+    assert json.loads(path.read_text())["state"] == "requested", "a refused decision wrote anyway"
+
+    good = _sign_decision(root, record, "approve", decided_at)
+    approved = A.approve(
+        record["approval_id"], signature_hex=good, decided_at=decided_at, root=root
+    )
+    assert approved["state"] == "approved"
+    assert approved["signature"]["key_id"] == anchor.key_id
+    assert approved["decided_at"] == decided_at
+
+
+def test_approve_refuses_a_record_whose_anchor_is_not_the_local_key(root: Path) -> None:
+    _make_key(root)
+    record = A.create_request(
+        **_device_request(
+            A.new_request_id(),
+            what={
+                "install": True,
+                "anchor": {
+                    "key_id": "lop-op-other",
+                    "spki_fp": "AAAA-BBBB-CCCC",
+                    "statement_digest": "sha256:" + "0" * 64,
+                },
+            },
+        ),
+        root=root,
+    )
+    decided_at = CREATED_AT + 30.0
+    signature = _sign_decision(root, record, "approve", decided_at)
+    with pytest.raises(MeshRefusal) as raised:
+        A.approve(record["approval_id"], signature_hex=signature, decided_at=decided_at, root=root)
+    assert raised.value.code == "approval_anchor_mismatch"
+
+
+def test_verify_for_run_refuses_a_tampered_record(root: Path) -> None:
+    _make_key(root)
+    record = _approved_device_record(root)
+    assert A.verify_for_run(record["approval_id"], root=root)["state"] == "approved"
+    path = root / "network" / "approvals" / f"{record['approval_id']}.json"
+    raw = json.loads(path.read_text())
+    raw["what"] = {**raw["what"], "install": False}  # an immutable field, edited
+    path.write_text(json.dumps(raw))
+    with pytest.raises(MeshRefusal) as raised:
+        A.verify_for_run(record["approval_id"], root=root)
+    assert raised.value.code == "approval_record_tampered"
+
+
+# ---------------------------------------------------------------------------
+# Retention: tombstones guard a spent id
+# ---------------------------------------------------------------------------
+
+
+def test_a_tombstoned_id_is_refused_for_180_days(root: Path) -> None:
+    request_id = A.new_request_id()
+    record = A.create_request(**_device_request(request_id), root=root)
+    A.deny(record["approval_id"], decided_at=CREATED_AT + 1.0, root=root)
+    later = time.time() + A.TERMINAL_PRUNE_AGE_S + 10.0
+    counts = A.sweep(root=root, now=later)
+    assert counts["pruned"] == 1
+    assert not (root / "network" / "approvals" / f"{record['approval_id']}.json").exists()
+
+    with pytest.raises(MeshRefusal) as raised:
+        A.create_request(**_device_request(request_id), root=root)
+    assert raised.value.code == "approval_request_conflict"
+
+    # Past 180 days the tombstone itself ages out and the id is reuseable.
+    A.sweep(root=root, now=later + A.TOMBSTONE_PRUNE_AGE_S + 1.0)
+    again = A.create_request(**_device_request(request_id), root=root)
+    assert again["state"] in {"requested", "expired"}
+
+
+# ---------------------------------------------------------------------------
+# The sibling kind
+# ---------------------------------------------------------------------------
+
+
+def test_local_authority_rides_the_same_store(root: Path) -> None:
+    record = A.create_request(
+        kind=A.KIND_LOCAL_AUTHORITY,
+        request_id=A.new_request_id(),
+        requested_by={"session_id": "s1", "device_id": "d_self", "surface": "desktop"},
+        machine={
+            "hostname": "mac",
+            "platform": "darwin",
+            "uid": "501",
+            "backend": "file-only",
+            "level": "operator-file-only",
+        },
+        what={"install": True},
+        credential_ref=None,
+        created_at=CREATED_AT,
+        expires_at=EXPIRES_AT,
+        root=root,
+    )
+    assert "machine" in record and "device" not in record
+    assert record["credential_ref"] is None
+    assert "proposed" in A.LOCAL_AUTHORITY_STEPS
+    digest_again = A.request_digest(record)
+    assert digest_again == record["request_digest"]
+
+
+# ---------------------------------------------------------------------------
+# Reads
+# ---------------------------------------------------------------------------
+
+
+def test_an_unknown_id_refuses_and_listing_orders_by_creation(root: Path) -> None:
+    with pytest.raises(MeshRefusal) as raised:
+        A.load_record("ap_nothinghere", root=root)
+    assert raised.value.code == "unknown_approval"
+
+    older = A.create_request(
+        **_device_request(
+            A.new_request_id(), created_at=CREATED_AT - 100, expires_at=EXPIRES_AT + 100
+        ),
+        root=root,
+    )
+    newer = A.create_request(**_device_request(A.new_request_id()), root=root)
+    rows = A.list_records(root=root)
+    assert [row["approval_id"] for row in rows] == [older["approval_id"], newer["approval_id"]]
+
+
+# ---------------------------------------------------------------------------
+
+
+def _approved_device_record(root: Path) -> dict[str, Any]:
+    """A device_onboard record approved with a REAL signature over its payload."""
+    _make_key(root)
+    trio = A.local_anchor_trio(root)
+    assert trio is not None
+    record = A.create_request(
+        **_device_request(
+            A.new_request_id(),
+            what={
+                "install": True,
+                "connect": True,
+                "anchor": {k: trio[k] for k in ("key_id", "spki_fp", "statement_digest")},
+            },
+        ),
+        root=root,
+    )
+    decided_at = CREATED_AT + 5.0
+    signature = _sign_decision(root, record, "approve", decided_at)
+    return A.approve(
+        record["approval_id"], signature_hex=signature, decided_at=decided_at, root=root
+    )
+
+
+# ---------------------------------------------------------------------------
+# The audit trail
+# ---------------------------------------------------------------------------
+
+
+def test_every_transition_lands_a_mesh_audit_event(root: Path) -> None:
+    """The taxonomy is closed AND the store actually reaches it.
+
+    Read back from the real ``audit.jsonl``: the detail a transition carries
+    must survive the whitelist (a key the whitelist drops would make the event
+    useless exactly where an incident reader looks), and every emitted name
+    must be in the closed set the writer enforces.
+    """
+    from local_operator.network import audit as audit_mod
+
+    record = A.create_request(**_device_request(A.new_request_id()), root=root)
+    A.deny(record["approval_id"], decided_at=CREATED_AT + 1.0, root=root)
+
+    path = root / "network" / "audit.jsonl"
+    events = [
+        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
+    ]
+    names = [event["event"] for event in events]
+    assert "onboard_requested" in names, names
+    assert "onboard_denied" in names, names
+    requested = next(event for event in events if event["event"] == "onboard_requested")
+    assert requested["detail"].get("kind") == A.KIND_DEVICE_ONBOARD, requested
+    denied = next(event for event in events if event["event"] == "onboard_denied")
+    assert denied["subject"] == record["approval_id"], denied
+    assert all(event["event"] in audit_mod.EVENT_KINDS for event in events), names
+
+
+def test_records_tolerate_unknown_keys_and_forward_them(root: Path) -> None:
+    """Forward-compat (slice (b), PR #1876): unknown keys are ignored, never fatal.
+
+    The receipt vocabulary is additive — slice (b) landed a ``data`` key beside
+    the frozen six (step/at/ok/detail/digest) — and readers must not error on it
+    (or on any future addition). Equally load-bearing in the other direction: a
+    mutation WRITES BACK what it read, so an extra key must not be silently
+    dropped by this build either, or a reader-run that rewrites the record would
+    erase the very field it does not understand. Both directions are asserted,
+    because either one alone is a half-contract.
+    """
+    record = A.create_request(**_device_request(A.new_request_id()), root=root)
+    approval_id = record["approval_id"]
+
+    # A record as a LATER build writes it: one unknown top-level key and one
+    # receipt carrying slice (b)'s additive ``data``.
+    path = A.record_path(approval_id, root)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["future_field"] = {"nested": True}
+    raw["receipts"] = [
+        {
+            "run_id": "r1",
+            "step": "install",
+            "at": CREATED_AT + 1.0,
+            "ok": True,
+            "detail": "",
+            "digest": "",
+            "data": {"bytes": 1234},
+        }
+    ]
+    raw["state"] = A.STATE_CONNECTING
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    # READS: fold + presentation, no error, extras carried.
+    view = A.presented(A._load_raw(approval_id, root))
+    assert view["state"] == A.STATE_CONNECTING
+    assert view["future_field"] == {"nested": True}
+    assert view["receipts"][0]["data"] == {"bytes": 1234}
+
+    # WRITES: the next mutation preserves both extras (a run stays successful
+    # through this build), which is what keeps a mixed fleet from pruning a
+    # field its sibling wrote.
+    decided = A.mark_connected(approval_id, run_id="r1", root=root)
+    assert decided["state"] == A.STATE_CONNECTED
+    again = json.loads(path.read_text(encoding="utf-8"))
+    assert again["future_field"] == {"nested": True}
+    assert again["receipts"][0]["data"] == {"bytes": 1234}

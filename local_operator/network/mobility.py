@@ -1093,6 +1093,7 @@ def _destination_move(
     asked: bool = False,
     adopt_under_id: str = "",
     engage_on_arrival: bool = False,
+    unattended: bool = False,
 ) -> tuple[SessionMoveResult | None, SessionMoveRefusal | None, str]:
     """Pull ``session_id`` from its owner and adopt it here. THE destination path.
 
@@ -1303,6 +1304,13 @@ def _destination_move(
                 "source_session_id": session_id,
                 "moved_at": time.time(),
             },
+            # CARRIED AUTO AUTHORITY (§6 defect 2): the flag rode the invite from the
+            # device that held the session, and it is stamped HERE because the
+            # destination's runtime construction reads the STAMP, not the invite. It
+            # is a carry, never the authority: the construction re-checks this
+            # device's ``unattended`` grant for ``owner_device`` (the row the origin
+            # names), so a revoked grant takes effect at the next engage.
+            unattended=unattended,
         ),
     )
     # ORIGIN_FORK FOR BOTH MODES, and this is not cosmetic: ``resume`` decides
@@ -2501,6 +2509,12 @@ def _destination_invite(
     # so a peer older than this field — which sends no key at all — arrives cold,
     # exactly as it did before the flag existed.
     engage_on_arrival = bool(frame.get("engage_on_arrival") or False)
+    # THE CARRY OF THE SESSION'S AUTO AUTHORITY (§6 defect 2), read off the invite
+    # like every other optional field on it: absent reads off, which is what an
+    # older source sends and what every session that never asked for full-auto
+    # carries. The DESTINATION's runtime re-checks the grant at engage, so this
+    # bit only ever decides whether that check is asked at all.
+    unattended = bool(frame.get("unattended") or False)
     owner_device = link.device_id
     owner_name = server._member_name(owner_device)  # noqa: SLF001
     if not keep and _owned_here(server, session_id):
@@ -2542,6 +2556,7 @@ def _destination_invite(
                 # the inviter was told about rather than a second, unreachable one.
                 adopt_under_id=new_id,
                 engage_on_arrival=engage_on_arrival,
+                unattended=unattended,
             )
         except Exception:  # noqa: BLE001 — the inviter polls durable state, not this
             logger.debug("mobility: invited pull of %s failed", session_id, exc_info=True)
@@ -3529,6 +3544,16 @@ def _offload(
     if blocked is not None:
         return blocked
     transport = LinkTransport(server, link, session_id)
+    # THE CARRY IS READ FROM THIS DEVICE'S OWN STAMP, and it has to be: the source
+    # holds the session, so the source is the only device that can say whether it
+    # was created or re-stamped with accepted full-auto authority. It travels with
+    # the invite (below) because the step it configures — the destination's runtime
+    # construction — runs there. A MISSING key reads as off at the destination: an
+    # older source sends none and an older destination ignores it, both default-off.
+    from local_operator.session.placement import read_stamp
+
+    _stamp_here = read_stamp(server.root, session_id)
+    _unattended = bool(_stamp_here is not None and _stamp_here.unattended)
     try:
         accepted = transport.ask(
             {
@@ -3548,6 +3573,11 @@ def _offload(
                 # ``request_move`` sends the same field for on the way in.
                 "engage_on_arrival": engage_on_arrival,
                 "to_device": target_device,
+                # THE SESSION'S AUTO AUTHORITY TRAVELS WITH THE INVITE, for the same
+                # reason as the two fields above: the runtime it would be applied at
+                # is constructed on the device this frame is addressed to. Sent on
+                # every invite so the key's presence does not depend on a boolean.
+                "unattended": _unattended,
             }
         )
     except Moved as refusal:

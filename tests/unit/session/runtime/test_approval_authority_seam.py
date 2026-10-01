@@ -316,15 +316,16 @@ async def test_a_model_authored_subprocess_cannot_loosen_the_gate(
         # U8 — a phone user was handed advice they could not take).
         # THE UNCONFIGURED PAIR, because `no_anchor` pins this host as one with no
         # anchor at all: each refusal names the reader's situation, and on this host
-        # that situation is that neither named surface can act until
-        # `lop operator install` has run (UX round 6, U1/U2). The ordinary pair is
-        # pinned by the injected-anchor cells, where a usable anchor exists and the
-        # levers are real.
+        # that situation is that neither named surface can act until operator
+        # authority is set up here (one approval and one admin prompt; UX round 6,
+        # U1/U2 — and §2.9's repave: the remedy is a product action, not a command).
+        # The ordinary pair is pinned by the injected-anchor cells, where a usable
+        # anchor exists and the levers are real.
         assert out.count(_REFUSAL) == 1, out
         assert out.count(OPERATOR_AUTHORITY_REQUIRED_UNCONFIGURED_NOTICE) == 1, out
         assert out.count("this approval is still waiting") == 1, out
         assert out.count(CARD_APPROVAL_REFUSED_UNCONFIGURED_NOTICE) == 1, out
-        assert "lop operator install" in out, out
+        assert "one approval and one admin prompt" in out, out
         assert "slash_result error" in out, out
         assert "approval_answer error" in out, out
 
@@ -709,6 +710,30 @@ _SINK_CALLERS = frozenset(
 )
 
 
+def _dispatch_condition_names(node: ast.If) -> set[str]:
+    """The op names one ``if op == "x":`` / ``if op in ("x", "y"):`` branch tests.
+
+    Factored so the two derivations over ``server.py``'s dispatch — the
+    sink-reaching set and the full op-name set — read the source the same way; a
+    second copy of this branch shape is how one of them quietly stops matching.
+    """
+    test = node.test
+    names: set[str] = set()
+    if isinstance(test, ast.Compare) and isinstance(test.ops[0], (ast.Eq, ast.In)):
+        comparators = test.comparators
+        if comparators:
+            first = comparators[0]
+            if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                names.add(first.value)
+            elif isinstance(first, (ast.Tuple, ast.Set)):
+                names.update(
+                    element.value
+                    for element in first.elts
+                    if isinstance(element, ast.Constant) and isinstance(element.value, str)
+                )
+    return names
+
+
 def _dispatch_ops_reaching_the_sinks(source: str) -> set[str]:
     """Every op in ``server.py``'s dispatch whose body calls a sink-reaching method.
 
@@ -724,20 +749,7 @@ def _dispatch_ops_reaching_the_sinks(source: str) -> set[str]:
         # this module uses in both ``_dispatch`` and ``_dispatch_payload``.
         if not isinstance(node, ast.If):
             continue
-        test = node.test
-        names: set[str] = set()
-        if isinstance(test, ast.Compare) and isinstance(test.ops[0], (ast.Eq, ast.In)):
-            comparators = test.comparators
-            if comparators:
-                first = comparators[0]
-                if isinstance(first, ast.Constant) and isinstance(first.value, str):
-                    names.add(first.value)
-                elif isinstance(first, (ast.Tuple, ast.Set)):
-                    names.update(
-                        element.value
-                        for element in first.elts
-                        if isinstance(element, ast.Constant) and isinstance(element.value, str)
-                    )
+        names = _dispatch_condition_names(node)
         if not names:
             continue
         for inner in ast.walk(node):
@@ -781,6 +793,48 @@ def test_the_authority_op_set_matches_the_dispatch_source() -> None:
         "`_approvals_slash`/`_set_approve_all`/a card approval without being in the class "
         "is an unguarded way to loosen a running gate."
     )
+
+
+def _dispatch_op_names(source: str) -> set[str]:
+    """Every op name ``server.py``'s dispatch branches on, read from the source."""
+    tree = ast.parse(source)
+    ops: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If):
+            ops |= _dispatch_condition_names(node)
+    return ops
+
+
+def test_the_forwarded_approval_ops_are_real_dispatch_routes() -> None:
+    """The forwarded-op table, re-derived from ``server.py``'s dispatch source.
+
+    THE FORWARDED PAIR of the remote-onboarding slice is ``operator_challenge``
+    (the signing material, relay-checked on ``approve``) and the
+    ``approval_answer`` it answers (``prompt`` — the answer is admitted by WHAT
+    IT CARRIES, never by what the table grants a forwarder). Both must be ROUTES
+    the runtime really dispatches, and both rows must be the wire's own, read
+    from the source rather than a list beside it: the failure this pins is one
+    side of the wire moving — a runtime that renames an op, or a table row
+    naming something nothing dispatches — which ships a dead end only a user at
+    a node would find, with every local test green.
+    """
+    from local_operator.network import types as network_types
+
+    source = (_TESTS_ROOT / "local_operator/session/runtime/server.py").read_text(encoding="utf-8")
+    derived = _dispatch_op_names(source)
+    assert derived, "the dispatch shape changed; this pin no longer reads it"
+    forwarded = {"operator_challenge", "approval_answer"}
+    assert forwarded <= derived, (
+        f"the relay forwards {sorted(forwarded)} while server.py dispatches "
+        f"{sorted(derived)}: a forwarded op that is not a route is a dead end "
+        "discovered by a user at a node"
+    )
+    # The rows themselves, exactly: the challenge is SIGNING MATERIAL (``approve``,
+    # so a member that may prompt is not thereby handed it), and the answer stays
+    # ``prompt`` — the runtime admits it on the signature it carries, not on who
+    # forwarded it (the frozen "``approval_answer`` STAYS prompt" rule, §2.8).
+    assert network_types.INNER_OP_CAPABILITY["operator_challenge"] == "approve"
+    assert network_types.INNER_OP_CAPABILITY["approval_answer"] == "prompt"
 
 
 def test_only_the_guarded_hosts_call_the_authority_sinks() -> None:
@@ -1267,10 +1321,10 @@ async def test_the_desktop_route_cannot_loosen_a_runtime_this_backend_did_not_st
         # R1-2 = design D1 = UX U4 = QA Q1).
         # THE UNCONFIGURED VARIANT, because this runtime has no anchor at all
         # (`no_anchor` pins that): on such a host neither "this machine (Touch ID)"
-        # nor "your paired phone" can work, so the refusal names the command that
-        # makes them able to — `lop operator install` (UX round 6, U1/U2). The
-        # class is a SUBCLASS of the ordinary one, which is what keeps every route
-        # that keys on `operator_authority_required` working unchanged.
+        # nor "your paired phone" can work, so the refusal names the setup action
+        # that makes them able to (one approval and one admin prompt; UX round 6,
+        # U1/U2). The class is a SUBCLASS of the ordinary one, which is what keeps
+        # every route that keys on `operator_authority_required` working unchanged.
         from local_operator.session.errors import (
             OperatorAuthorityRequired,
             OperatorAuthorityUnconfigured,
@@ -1281,7 +1335,7 @@ async def test_the_desktop_route_cannot_loosen_a_runtime_this_backend_did_not_st
         assert isinstance(refused.value, OperatorAuthorityUnconfigured), refused.value
         assert refused.value.code == "operator_authority_unconfigured"
         assert OPERATOR_AUTHORITY_REQUIRED_UNCONFIGURED_NOTICE in str(refused.value)
-        assert "lop operator install" in str(refused.value)
+        assert "one approval and one admin prompt" in str(refused.value)
         # ...and it does NOT offer the two remedies that cannot run here, which is
         # the whole of U1: the reader is ON the paired phone.
         assert "authorise it from this machine (Touch ID) or from your paired" not in str(
@@ -2060,6 +2114,146 @@ async def test_a_replayed_phone_signature_is_refused(
         second = await rig.command(body)
         assert second.status_code != 200, second.text
         assert rig.live.handle._auto_approve is False, "the replay was accepted"
+    finally:
+        await rig.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_signature_less_allow_is_refused_while_the_signed_one_is_admitted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The forwarded allow, both halves in one cell (§2.8; matrix cell N9).
+
+    A surface that did not spawn the runtime asks the relay for an ``approve``
+    challenge (relay-checked on ``approve``), signs it, and answers the parked
+    card — the allowance is admitted. WITHOUT the signature the same frame is
+    refused and the card stays parked, which is the half that says admission is
+    decided by what the answer CARRIES rather than by what the relay forwarded
+    (``approval_answer`` keeps its ``prompt`` row).
+
+    BOTH HALVES IN ONE CELL on purpose: a signature-less refusal alone is
+    satisfiable by a route that is simply broken — a dead end refuses everything
+    — and a signed admission alone cannot show the signature was the deciding
+    fact. Together they pin the decision, on the same parked card and the same
+    session, so the two halves cannot be read out of different worlds.
+    """
+    rig = await _phone_over_relay(tmp_path, monkeypatch)
+    try:
+        parked = await _park_a_card(rig.live.handle)
+        pending = rig.live.handle._fold.projection.pending
+        assert pending is not None, "no card parked, so the answer proves nothing"
+        body = {
+            "op": "approval_answer",
+            "request_id": pending.request_id,
+            "approved": True,
+            "remember": False,
+        }
+        unsigned = await rig.command(dict(body))
+        assert unsigned.status_code != 200, unsigned.text
+        assert (
+            rig.live.handle._fold.projection.pending is not None
+        ), "an unsigned allow resolved the card"
+        challenge = (await rig.challenge(action="approve", request_id=pending.request_id)).json()[
+            "challenge"
+        ]
+        signed = await rig.command(
+            {
+                **body,
+                "operator_sig": rig.sign(
+                    action="approve", request_id=pending.request_id, challenge=challenge
+                ),
+                "operator_key_id": key_id_for(rig.device_point),
+                "operator_cert": rig.certificate,
+            }
+        )
+        assert signed.status_code == 200, signed.text
+        assert await parked is True, "the signed allow did not resolve the card"
+        assert rig.live.handle._fold.projection.pending is None
+    finally:
+        await rig.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_two_root_node_admits_a_signature_minted_for_device_a(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE TWO-ROOT CELL (slice (a)'s e2e), in the §11.1 isolation shape.
+
+    Two config roots on one host. The NODE's root holds the operator anchor, the
+    session, the runtime and the device record the runtime verifies against;
+    DEVICE A's root holds A's own copy of the pairing certificate and NOTHING of
+    the node's. The private half exists in NEITHER root — it is the in-memory
+    stand-in for the portal's WebCrypto key, as in the single-root cells — and
+    that is exactly the fact this cell adds over them: a signature made with a
+    key that exists only in device A's hands is what the node's parked card is
+    answered with, checked against an anchor that never saw A's private half.
+
+    The forwarding path is the product's own (the relay's session route mints the
+    challenge and carries the signed answer back), so the cell drives the same
+    ``operator_challenge`` / ``approval_answer`` pair the CLI and the desktop
+    use, under two roots instead of one.
+    """
+    from local_operator.operator.verify import key_id_for
+
+    node = tmp_path / "node"
+    device_a = tmp_path / "device-a"
+    node.mkdir()
+    device_a.mkdir()
+
+    # THE NODE'S ROOT: the anchor the runtime will verify against, and the device
+    # record the pairing flow writes there.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(node))
+    anchor = _install_operator_key(node)
+    device_key, device_point = await _new_device_key()
+    certificate = _issue_device_certificate(node, device_point, label="device a")
+    _store_device(node, device_spki=device_point, certificate=certificate, name="device a")
+
+    # DEVICE A'S ROOT: its own copy of the pairing record, through the same
+    # production writer — and then read back to prove the copy is real rather
+    # than assumed.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(device_a))
+    stored_a = _store_device(
+        device_a, device_spki=device_point, certificate=certificate, name="device a"
+    )
+    assert stored_a.device_id == key_id_for(device_point)
+    # What A's root must NOT hold: the node's operator key material. The anchor
+    # exists only under the node, and this is the direction that keeps "two
+    # roots" from being decoration.
+    from local_operator.operator.trust import staging_path
+
+    assert not staging_path(device_a).exists(), "device A's root holds the node's operator key"
+
+    rig = await _phone_over_relay(
+        node, monkeypatch, anchor=anchor, certificate=certificate, device_point=device_point
+    )
+    try:
+        parked = await _park_a_card(rig.live.handle)
+        pending = rig.live.handle._fold.projection.pending
+        assert pending is not None, "no card parked, so the answer proves nothing"
+        challenge = (await rig.challenge(action="approve", request_id=pending.request_id)).json()[
+            "challenge"
+        ]
+        signature = _device_signature(
+            device_key,
+            action="approve",
+            session_id=rig.session_id,
+            request_id=pending.request_id,
+            challenge=challenge,
+        )
+        reply = await rig.command(
+            {
+                "op": "approval_answer",
+                "request_id": pending.request_id,
+                "approved": True,
+                "remember": False,
+                "operator_sig": signature,
+                "operator_key_id": key_id_for(device_point),
+                "operator_cert": certificate,
+            }
+        )
+        assert reply.status_code == 200, reply.text
+        assert await parked is True, "device A's signature did not resolve the node's card"
+        assert rig.live.handle._fold.projection.pending is None
     finally:
         await rig.aclose()
 
@@ -2991,7 +3185,7 @@ async def test_a_connection_to_a_runtime_with_no_anchor_is_refused_with_the_type
         # re-reading English that has already been rewritten twice
         # (UX round 6, U1 + U6).
         assert reply.get("error_code") == "operator_authority_unconfigured", reply
-        assert "lop operator install" in reply.get("message", ""), reply
+        assert "one approval and one admin prompt" in reply.get("message", ""), reply
         assert live.handle._auto_approve is False
         conn.close()
     finally:

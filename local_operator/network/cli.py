@@ -94,6 +94,9 @@ _ACTIONS = (
     # The session plane's client half (mesh-session-mobility.md §9.3): listing what
     # the peers hold, and driving a session that lives on one of them.
     "sessions",
+    # THE APPROVAL RECORDS (remote-onboarding §2.3): the durable half of the one
+    # onboarding gesture — file, read, answer, and run when this build has a runner.
+    "approvals",
 )
 
 
@@ -264,6 +267,84 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
         caps.add_argument("capabilities", nargs="+", metavar="capability")
         caps.add_argument("--json", action="store_true")
 
+    # APPROVALS (remote-onboarding §2.3). ONE record per onboarding request, on
+    # the device that asked: `request` files it (the agent's first step), the
+    # operator answers with `approve` (which signs — the same presence-gated key
+    # `lop operator sign` uses) or `deny`, `list`/`show` are the badge reads, and
+    # `run` is the agent's execution path — which refuses truthfully while this
+    # build ships no install runner.
+    approvals = actions.add_parser("approvals", help="Onboarding approval records")
+    approval_actions = approvals.add_subparsers(dest="approvals_command")
+    approval_list = approval_actions.add_parser("list", help="Pending and recent approvals")
+    approval_list.add_argument("--json", action="store_true")
+    approval_show = approval_actions.add_parser("show", help="One approval record in full")
+    approval_show.add_argument("approval")
+    approval_show.add_argument("--json", action="store_true")
+    approval_request = approval_actions.add_parser(
+        "request", help="File an onboarding request (the agent's first step)"
+    )
+    approval_request.add_argument("--host", required=True, help="the host to onboard")
+    approval_request.add_argument("--user", default="", help="the login user on that host")
+    approval_request.add_argument("--name", default="", help="the device name the card shows")
+    approval_request.add_argument("--device", default="", help="mesh device id, when already known")
+    approval_request.add_argument(
+        "--fingerprint", default="", help="device fingerprint, when already known"
+    )
+    approval_request.add_argument(
+        "--host-key-fp", default="", help="the observed host key fingerprint"
+    )
+    approval_request.add_argument("--network", default="", help="the network to join (name or id)")
+    approval_request.add_argument(
+        "--role",
+        default="drive",
+        choices=("read", "drive", "admin"),
+        help="the member role to join with",
+    )
+    approval_request.add_argument(
+        "--credential-ref",
+        default="",
+        help="a secret-store name or path:... — a REFERENCE, never a value",
+    )
+    approval_request.add_argument(
+        "--expires", default="60m", type=_duration, help="the window (30s/10m/2h)"
+    )
+    approval_request.add_argument(
+        "--no-unattended",
+        action="store_true",
+        help="do not trust unattended sessions on the device",
+    )
+    approval_request.add_argument(
+        "--grant",
+        action="append",
+        default=[],
+        metavar="capability",
+        help="capability to grant on join (repeatable; default: approve)",
+    )
+    approval_request.add_argument(
+        "--session", default="", help="the session id this request is filed from"
+    )
+    approval_request.add_argument(
+        "--request-id",
+        default="",
+        help="resend the SAME id with the same payload to retry without duplicating",
+    )
+    approval_request.add_argument("--json", action="store_true")
+    approval_approve = approval_actions.add_parser(
+        "approve", help="Answer yes — signs with the operator key (Touch ID where offered)"
+    )
+    approval_approve.add_argument("approval")
+    approval_approve.add_argument("--json", action="store_true")
+    approval_deny = approval_actions.add_parser(
+        "deny", help="Answer no (settles in the safe direction)"
+    )
+    approval_deny.add_argument("approval")
+    approval_deny.add_argument("--json", action="store_true")
+    approval_run = approval_actions.add_parser(
+        "run", help="Execute an approved record (the agent's path)"
+    )
+    approval_run.add_argument("approval")
+    approval_run.add_argument("--json", action="store_true")
+
     peers = actions.add_parser("peers", help="Reachable peers right now")
     peers.add_argument("--json", action="store_true")
 
@@ -281,15 +362,15 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
             "device holds. Local sessions are `lop sessions` and `lop stop`."
         ),
     )
-    # ``--yolo`` IS ACCEPTED HERE AND THEN DECLINED by this verb's ``--create`` (see
-    # ``_cmd_sessions`` and both relay guards), so the global help sentence — which
-    # ``cli._propagate_global_flags`` adds to every subcommand — advertised something
-    # this verb refuses (QA round 1, Q3). The flag is still DECLARED THERE, once, so
-    # that ``--create --yolo`` gets the refusal sentence instead of "unrecognized
-    # arguments"; only the sentence about it changes. ``setattr`` rather than the bare
-    # attribute form because ``ArgumentParser`` is a typed object and a direct
-    # assignment is a pyright error.
-    setattr(net_sessions, "yolo_is_refused", True)
+    # ``--yolo`` IS CONDITIONAL ON THIS VERB, so the global help sentence — which
+    # ``cli._propagate_global_flags`` adds to every subcommand — would promise an
+    # unattended peer session unconditionally. The flag is DECLARED by the global
+    # pass, once; the sentence about it changes so the condition is visible BEFORE
+    # the create is sent, and the answer itself comes from the owner (design §2 OQ4:
+    # the device that would run the session decides, against ITS member row).
+    # ``setattr`` rather than the bare attribute form because ``ArgumentParser`` is
+    # a typed object and a direct assignment is a pyright error.
+    setattr(net_sessions, "yolo_needs_grant", True)
     net_sessions.add_argument("--peer", default="", help="the device to ask (id or name)")
     net_sessions.add_argument(
         "--all-peers", action="store_true", help="list every peer's sessions, merged"
@@ -4309,19 +4390,15 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             raise MeshRefusal(
                 "peer_required", "--create needs --peer: the peer mints the session id"
             )
-        # ``--yolo`` IS REFUSED HERE, BEFORE THE RELAY IS ASKED, and the sentence is
-        # the relay's own (literally — the two guards are spelled once each and kept
-        # in step by a test). A flag this verb inherits from the global set must not
-        # be silently dropped: ``lop network sessions --create --yolo`` looks
-        # exactly like ``lop exec --yolo`` at the call site, and accepting it while
-        # the far end ran gated would have been the worse answer of the two.
-        if getattr(args, "yolo", False):
-            raise MeshRefusal(
-                "not_permitted",
-                "a session created on another device cannot start unattended (yolo): that "
-                "would make that machine run tools with nobody there to see them. Create "
-                "it here, or start it on your own device with yolo.",
-            )
+        # ``--yolo`` IS FORWARDED, NOT JUDGED HERE, and that is the granted model
+        # (design §2 OQ4): the device that would RUN the session decides, checking
+        # ITS member row for us — a fact this side does not hold, so a check here
+        # could only refuse a granted member loudly or admit an ungranted one
+        # silently. The flag travels in the create frame below; the owner's answer,
+        # its refusal sentence included, comes back through ``_relay_answer``
+        # verbatim. The help sentence this verb publishes names the condition (see
+        # ``yolo_needs_grant`` above), and a NON-granted member is still refused — by
+        # the far end.
         profile = str(getattr(args, "profile", "") or "")
         agent_name = str(getattr(args, "agent_name", "") or "")
         agent_id = str(getattr(args, "create_agent_id", "") or "")
@@ -4346,6 +4423,11 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             cwd=str(getattr(args, "cwd", "") or ""),
             name=str(getattr(args, "name", "") or ""),
             prompt=str(getattr(args, "prompt", "") or ""),
+            # FORWARDED SO THE QUESTION CAN BE ASKED. The owner accepts it only
+            # against its own ``unattended`` grant (design §2 OQ4); dropping the
+            # flag here would leave a granted member unable to say what it wants,
+            # which is the dead end this slice removes.
+            yolo=bool(getattr(args, "yolo", False)),
             model=(
                 {
                     "provider": str(getattr(args, "hosting", "") or ""),
@@ -5815,6 +5897,276 @@ def _guard_credential_subcommand(args: argparse.Namespace) -> int:
     return 2
 
 
+#: The ``approvals run`` refusal while this build ships no install runner. PINNED
+#: as a constant because it is user-visible copy: it says exactly what was and was
+#: not done and names no terminal command (§2.9); unit tests assert the sentence
+#: so a later slice that fills the runner cannot leave it stranded on a live path.
+APPROVAL_RUNNER_MISSING_SENTENCE = (
+    "the install runner is not part of this build yet, so nothing was executed: this "
+    "approval stays approved and can be run from a build that ships the runner"
+)
+
+#: The step-runner seam's module (slice (b) fills it). Named here so the refusal
+#: above and the seam have ONE home; ``_approval_step_runner`` is the lookup.
+APPROVAL_RUNNER_MODULE = "local_operator.network.onboard"
+
+
+def _approval_step_runner(record: Mapping[str, Any]) -> Any | None:
+    """The install runner for this record, when this build ships one.
+
+    THE SEAM, stated as a contract so slice (b) fills it rather than re-inventing
+    the flow: a module at :data:`APPROVAL_RUNNER_MODULE` exposing ``step_runner``
+    -> a callable ``runner(record, *, root) -> dict`` which drives the
+    RECORD-SIDE phase machine (``approvals.begin_run`` → per-step
+    ``verify_for_run``/``append_receipt`` → ``mark_connected``/``mark_failed``)
+    and answers the frozen ``run`` shape ``{approval_id, state, steps, next}``.
+    None means this build has no runner, and the verb refuses truthfully instead
+    of half-executing.
+    """
+    import importlib.util
+
+    if importlib.util.find_spec(APPROVAL_RUNNER_MODULE) is None:
+        return None
+    module = importlib.import_module(APPROVAL_RUNNER_MODULE)
+    runner = getattr(module, "step_runner", None)
+    if runner is None:
+        return None
+    return runner(record)
+
+
+def _approval_lines(record: Mapping[str, Any]) -> list[str]:
+    """The human half of the same read, in the card's own order: what / where / who."""
+    block = record.get("device") or record.get("machine") or {}
+    what = record.get("what") or {}
+    lines = [f"approval {record.get('approval_id')} — {record.get('state')}"]
+    where = " ".join(
+        part
+        for part in (
+            f"{block.get('user')}@{block.get('host')}" if block.get("host") else "",
+            f"via {block.get('transport')}" if block.get("transport") else "",
+            f"({block.get('name')})" if block.get("name") else "",
+        )
+        if part
+    )
+    if where:
+        lines.append(f"  where  : {where}")
+    if block.get("host_key_fp"):
+        lines.append(f"           host key {block['host_key_fp']}")
+    scopes = [
+        name
+        for name, present in (
+            ("connect", what.get("connect")),
+            ("install", what.get("install")),
+            ("install operator anchor", what.get("anchor")),
+            (
+                (
+                    f"join {what.get('network_id')} as {what.get('role') or '?'}"
+                    if what.get("network_id")
+                    else ""
+                ),
+                what.get("network_id"),
+            ),
+            ("trust unattended sessions", what.get("unattended")),
+            ("".join(f"grant {g} " for g in what.get("grant") or []), what.get("grant")),
+        )
+        if present and name
+    ]
+    if scopes:
+        lines.append("  what   : " + ", ".join(scopes))
+    expires = record.get("expires_at")
+    if isinstance(expires, (int, float)) and expires:
+        lines.append(f"  expires: {time.strftime('%Y-%m-%d %H:%MZ', time.gmtime(float(expires)))}")
+    requested = record.get("requested_by") or {}
+    asked = " ".join(
+        part
+        for part in (
+            str(requested.get("surface") or ""),
+            str(requested.get("session_id") or ""),
+        )
+        if part
+    )
+    if asked:
+        lines.append(f"  asked by: {asked}")
+    return lines
+
+
+def _approval_signature_payload(record: Mapping[str, Any]) -> dict[str, Any]:
+    """The frozen ``{key_id}`` half of the approve/deny payload (§3.5)."""
+    signature = record.get("signature") or {}
+    return {"key_id": str(signature.get("key_id") or "")}
+
+
+def _cmd_approvals_request(args: argparse.Namespace) -> int:
+    """File the onboarding request: the card an operator will be asked to sign."""
+    from local_operator.network import approvals as approval_store
+    from local_operator.network.identity import load_or_mint
+    from local_operator.network.types import MeshRefusal
+
+    trio = approval_store.local_anchor_trio()
+    if trio is None:
+        raise MeshRefusal(
+            "approval_anchor_unavailable",
+            "operator authority is not set up on this machine yet, and the card has to "
+            "name the key it will install: set it up for this machine (one approval "
+            "and one admin prompt), then file the request",
+        )
+    network_id = ""
+    if args.network:
+        network_id = _resolve(args.network).network_id
+    try:
+        asked_by_device = load_or_mint().device_id
+    except (OSError, ValueError):
+        asked_by_device = ""
+    created_at = time.time()
+    what: dict[str, Any] = {
+        "connect": True,
+        "install": True,
+        "anchor": {key: trio[key] for key in ("key_id", "spki_fp", "statement_digest")},
+        "unattended": not args.no_unattended,
+        "grant": list(args.grant) or ["approve"],
+    }
+    if network_id:
+        what["network_id"] = network_id
+        what["role"] = args.role
+    record = approval_store.create_request(
+        kind=approval_store.KIND_DEVICE_ONBOARD,
+        request_id=args.request_id or approval_store.new_request_id(),
+        requested_by={
+            "session_id": args.session,
+            "device_id": asked_by_device,
+            "surface": "cli",
+        },
+        device={
+            "device_id": args.device,
+            "name": args.name or args.host,
+            "fingerprint": args.fingerprint,
+            "host": args.host,
+            "user": args.user,
+            "transport": "ssh",
+            "host_key_fp": args.host_key_fp,
+        },
+        what=what,
+        credential_ref=(
+            {"kind": "ssh", "ref": args.credential_ref} if args.credential_ref else None
+        ),
+        created_at=created_at,
+        expires_at=created_at + float(args.expires),
+    )
+    payload = {
+        "ok": True,
+        "approval_id": record["approval_id"],
+        "state": record["state"],
+        "device": record.get("device") or {},
+        "what": record.get("what") or {},
+        "expires_at": record["expires_at"],
+    }
+    return _emit(args, payload, _approval_lines(record))
+
+
+def _cmd_approvals_approve(args: argparse.Namespace) -> int:
+    """Answer yes: sign the decision over the record's canonical payload."""
+    from local_operator.network import approvals as approval_store
+
+    record = approval_store.load_record(args.approval)
+    decided_at = time.time()
+    # ONE signing implementation for every surface: the store's ``sign_decision``
+    # (the `lop operator sign` path), so "who may approve" cannot drift between
+    # the CLI verb and the desktop route.
+    signature_hex = approval_store.sign_decision(
+        kind=record["kind"],
+        request_id=record["request_id"],
+        request_digest=record["request_digest"],
+        decided_at=decided_at,
+    )
+    decided = approval_store.approve(
+        args.approval, signature_hex=signature_hex, decided_at=decided_at
+    )
+    payload = {
+        "ok": True,
+        "approval_id": decided["approval_id"],
+        "state": decided["state"],
+        "signature": _approval_signature_payload(decided),
+    }
+    return _emit(args, payload, _approval_lines(decided))
+
+
+def _cmd_approvals(args: argparse.Namespace) -> int:
+    """``lop network approvals <verb>`` — the approval record's surfaces.
+
+    Every verb reads the DEVICE-LOCAL store directly: no relay call, no socket.
+    A badge read on a machine whose relay is down must still answer, which is
+    exactly why the record lives in a flat directory rather than behind the
+    running relay (§2.3).
+    """
+    from local_operator.network import approvals as approval_store
+    from local_operator.network.types import MeshRefusal
+
+    verb = getattr(args, "approvals_command", None)
+    if verb == "list":
+        rows = approval_store.list_records()
+        payload = {"ok": True, "approvals": [approval_store.badge_row(row) for row in rows]}
+        # ONE BLOCK PER RECORD, FLATTENED: the card's own read for each, in order —
+        # the JSON half above is what a script parses; this is what a person scans.
+        lines = [line for row in rows for line in _approval_lines(row)]
+        return _emit(args, payload, lines or ["no approvals on this device"])
+    if verb == "show":
+        record = approval_store.load_record(args.approval)
+        return _emit(args, {"ok": True, "approval": record}, _approval_lines(record))
+    if verb == "request":
+        return _cmd_approvals_request(args)
+    if verb == "approve":
+        return _cmd_approvals_approve(args)
+    if verb == "deny":
+        decided = approval_store.deny(args.approval)
+        payload = {
+            "ok": True,
+            "approval_id": decided["approval_id"],
+            "state": decided["state"],
+            "signature": _approval_signature_payload(decided),
+        }
+        return _emit(args, payload, _approval_lines(decided))
+    # verb == "run" — the agent's execution path.
+    record = approval_store.load_record(args.approval)
+    if record.get("state") not in (approval_store.STATE_APPROVED, approval_store.STATE_FAILED):
+        raise MeshRefusal(
+            "approval_not_runnable",
+            f"this approval is {record.get('state')} — only an approved (or "
+            "retry-eligible failed) record can run",
+        )
+    # F4: re-derive the digest AND re-verify the signature BEFORE every step;
+    # the seam's runner calls this again per step, and calling it here means an
+    # already-tampered record refuses before any work starts.
+    approval_store.verify_for_run(args.approval)
+    runner = _approval_step_runner(record)
+    if runner is None:
+        raise MeshRefusal("approval_runner_missing", APPROVAL_RUNNER_MISSING_SENTENCE)
+    from local_operator.paths import config_dir
+
+    result = runner(record, root=config_dir())
+    view = approval_store.load_record(args.approval)
+    return _emit(args, {"ok": True, **result}, _approval_lines(view))
+
+
+def _guard_approvals_subcommand(args: argparse.Namespace) -> int:
+    """``lop network approvals`` with no verb is a usage error, not a default act.
+
+    Neither filing nor deciding is safe as a default: filing mints a card a
+    human will be asked about, and approving is the one authority-increasing
+    act in this family.
+    """
+    verb = getattr(args, "approvals_command", None)
+    if verb in ("list", "show", "request", "approve", "deny", "run"):
+        return _cmd_approvals(args)
+    print(
+        "usage: lop network approvals request --host <host> [--user U] [--json]\n"
+        "       lop network approvals list|show <id> [--json]\n"
+        "       lop network approvals approve|deny <id> [--json]\n"
+        "       lop network approvals run <id> [--json]",
+        file=sys.stderr,
+    )
+    return 2
+
+
 def _guard_member_subcommand(args: argparse.Namespace) -> int:
     """``lop network member`` with no verb is a usage error, not the destructive one.
 
@@ -6051,6 +6403,9 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "rename": _cmd_rename,
     "rm": _cmd_rm,
     "member": _guard_member_subcommand,
+    # ``approvals`` has sub-verbs, so it needs the same "tell me what you meant"
+    # guard ``member``/``identity``/``credential`` have.
+    "approvals": _guard_approvals_subcommand,
     "peers": _cmd_peers,
     "sessions": _cmd_sessions,
     "definitions": _cmd_definitions,
