@@ -155,3 +155,36 @@ def test_a_task_module_that_fails_to_import_is_not_left_registered(
     with pytest.raises(RuntimeError, match="boom"):
         bridge.instantiate_task(str(module_path), "broken")
     assert "osworld_task_broken" not in _sys.modules
+
+
+def test_model_client_providers_reads_the_registry_the_judge_will_use(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The judge preflight must ask the REGISTRY, never a copied list.
+
+    ``create_backend`` accepts exactly ``list_providers()``; a hand-kept copy
+    in our tree would drift from the pinned upstream the day it changes,
+    re-opening the silent-zero class this read exists to close. The stub
+    carries marker names, not the real ones, so passing proves the list came
+    from the module rather than from any literal -- and CI has no
+    ``desktop_env`` (installed only in the evaluation venv).
+    """
+    import sys
+    import types
+
+    if "desktop_env.evaluators.backends" in sys.modules:  # the evaluation venv: the real one
+        names = vendor_bridge.model_client_providers()
+        assert {"openai", "openai_compatible", "anthropic", "bedrock", "gemini"} <= set(names)
+        return
+
+    package = types.ModuleType("desktop_env")
+    setattr(package, "__path__", [])
+    evaluators = types.ModuleType("desktop_env.evaluators")
+    setattr(evaluators, "__path__", [])
+    backends = types.ModuleType("desktop_env.evaluators.backends")
+    setattr(backends, "list_providers", lambda: ["zeta", "alpha"])
+    monkeypatch.setitem(sys.modules, "desktop_env", package)
+    monkeypatch.setitem(sys.modules, "desktop_env.evaluators", evaluators)
+    monkeypatch.setitem(sys.modules, "desktop_env.evaluators.backends", backends)
+
+    assert vendor_bridge.model_client_providers() == ("zeta", "alpha")

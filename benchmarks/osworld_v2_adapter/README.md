@@ -324,6 +324,37 @@ does NOT create IAM roles or security groups; those are one-time human steps.
    worker writes into its own environment (OSWorld reads it from nowhere
    else); it is scrubbed on `close`.
 
+   The provider VALUE is checked too, and the check is deliberately narrow:
+   the value must be a **registered** provider name, or the known alias
+   `openrouter` — normalised to `openai_compatible` plus
+   `https://openrouter.ai/api/v1`, with an explicitly supplied
+   `OSWORLD_EVAL_MODEL_BASE_URL` always winning — and an `openai_compatible`
+   value must carry an endpoint. Case and surrounding space are normalised
+   before the lookup, so `OpenRouter ` is the alias rather than a refusal. With
+   no endpoint it does not reach a wrong-but-loud
+   failure: the vendored `OpenAIBackend` forwards no base URL, the client
+   targets `https://api.openai.com/v1/`, and the 401 is swallowed into the
+   same silent zero (measured against the pinned tree; refused by name before
+   allocation instead). The check reads the **same two channels the
+   requirement accepts**, `--infra` and `--secret`: the judge reads the
+   process environment and nothing else, so a provider supplied as a secret
+   ref is written there for the episode and cleared again on `close`.
+
+   **Not** checked, because no preflight can: a stale key, a model the
+   provider will not serve, an unreachable endpoint, an outage. Those pass
+   every static check — they construct a backend perfectly well — and then
+   fail at call time inside the judge's fail-closed `except`. Preflight proves
+   the judge is *addressed*; only the run proves it *answers*.
+
+   Spend, measured rather than assumed: one judge call **per judged
+   sub-check**, and each call is retried up to
+   `OSWORLD_EVAL_MODEL_RETRY_ATTEMPTS` (default 3) times on a transient error.
+   `task_003` defines two sub-checks (`rainy`, `snowy`) and takes both whenever
+   the corresponding composite exists — measured as two requests per episode —
+   so a judged episode now spends its judge call where it previously spent
+   nothing and scored 0. The call is what the judge wiring was always for, and
+   it is no longer silent.
+
 7. **Anything else the task's own source declares** → the value that requirement
    names, as a `--secret` ref or an `--infra` value (the refusal names which, and
    which substitute will also do). A task whose controller reads a value when the
