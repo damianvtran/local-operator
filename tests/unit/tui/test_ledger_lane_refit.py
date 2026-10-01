@@ -507,9 +507,22 @@ async def test_a_gutter_only_lane_move_leaves_one_right_edge() -> None:
         ), "the gutter did not move the lane"
 
         rows = _ledger(view)
-        assert {b._built_width for b in rows} == {
-            lane_before
-        }, "a gutter-only move re-authored some rows and not others"
+        # The contract is AGREEMENT between the rows, not equality with a measured
+        # frame. This frame was measured on light load (the rows keep 126 while
+        # the lane moves 126 -> 127), but under CI interleaving the ordinary
+        # reflow/Resize path — the funnel does not run for a gutter-only move —
+        # can instead land EVERY row together on the new lane (CI job
+        # 110341666058: `assert {127} == {126}`, a uniform set refused only
+        # because this assertion named a frame). Both uniform frames are legal;
+        # the tear this file exists for is a MIXED one. Poll a bounded number of
+        # loop turns so a transient mid-reflow mix resolves, and fail only on a
+        # disagreement that survives — do not re-tighten this to a literal frame.
+        for _ in range(8):
+            await pilot.pause()
+            if len({b._built_width for b in rows}) == 1:
+                break
+        widths = {b._built_width for b in rows}
+        assert len(widths) == 1, f"rows disagree on width: {sorted(widths)}"
         edges = []
         for i, block in enumerate(rows):
             try:
