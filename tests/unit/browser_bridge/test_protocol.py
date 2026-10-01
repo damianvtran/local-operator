@@ -108,3 +108,32 @@ def test_await_access_daemon_timeout_covers_the_extension_slice() -> None:
     from local_operator.browser_bridge.daemon import COMMAND_TIMEOUTS
 
     assert COMMAND_TIMEOUTS["await_access"] > 20.0
+
+
+def test_the_read_actions_are_protocol_methods_with_timeouts_and_a_version_floor() -> None:
+    # The same contract every bridge-only method holds: a METHODS entry without
+    # a daemon timeout passes the allowlist and then dies as "unknown method",
+    # and a capability-gated method without a version floor sends an older
+    # peer's operator to a switch that build never had (the download lesson).
+    from local_operator.browser_bridge.daemon import COMMAND_TIMEOUTS
+    from local_operator.browser_bridge.protocol import (
+        CAPABILITY_GATED_METHODS,
+        CAPABILITY_MIN_EXTENSION_VERSION,
+    )
+
+    for method in ("styles", "hit_test", "ancestors"):
+        assert method in METHODS
+        assert method in COMMAND_TIMEOUTS
+        assert COMMAND_TIMEOUTS[method] == 20.0
+        assert method in CAPABILITY_GATED_METHODS
+        # Floor = the first tree that ships the handlers; the literal is
+        # deliberate so a silent renumber of the tree cannot move the remedy.
+        assert CAPABILITY_MIN_EXTENSION_VERSION[method] == "0.1.21"
+
+
+def test_generated_ts_covers_the_read_actions() -> None:
+    # The generated union is the extension's only view of the method set: a
+    # method added to METHODS without regenerating would let the extension
+    # ship handlers the type union rejects.
+    rendered = gen_ts_render()
+    assert all(f"'{method}'" in rendered for method in ("styles", "hit_test", "ancestors"))
