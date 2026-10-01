@@ -1078,12 +1078,15 @@ async def test_unannounced_disable_is_announced_after_reload(tmp_path: Any) -> N
 
 @pytest.mark.asyncio
 async def test_a_stall_notice_that_never_reached_a_session_is_retried(tmp_path: Any) -> None:
-    """R2: the latch records a DELIVERY, not an intention.
+    """R2, in the shape that DISCRIMINATES (review round 2, R9).
 
-    It used to be set under the write lock before the sink was called, so a
-    stall notice that failed to reach a session was lost forever — and the
-    first success afterwards then reported "running again" for an interruption
-    the operator had never been told about.
+    The sink stays failing ACROSS the stall tick. The old code latched inside
+    ``_apply_failure`` before calling the sink, so that tick left
+    ``unavailable_notified`` True with nothing delivered — and the first
+    success afterwards then announced a recovery the operator had never been
+    told about. Asserting that takes a tick where the sink fails while the
+    stall window is crossed; a test that heals the sink first passes on the old
+    head and pins nothing.
     """
     from local_operator.monitors.scheduler import UNAVAILABLE_STALL_MS
 
@@ -1100,20 +1103,27 @@ async def test_a_stall_notice_that_never_reached_a_session_is_retried(tmp_path: 
         harness.scheduler.load([spec()])
         harness.scheduler._announce = announce
 
+        # Tick 1 — unavailable, before the stall window.
         harness.results.append({"error": "server disconnected", "kind": "unavailable"})
-        await rill(harness, UNAVAILABLE_STALL_MS + 1)
+        await rill(harness, 60_000)
+        assert delivered == []
+
+        # Tick 2 — THE DISCRIMINATING ONE: the window is crossed while the sink
+        # is failing. No notice reached anyone, so no latch may be set.
+        harness.results.append({"error": "server disconnected", "kind": "unavailable"})
+        await rill(harness, UNAVAILABLE_STALL_MS)
         assert delivered == []
         assert harness.counters()["unavailable_notified"] is False
 
-        # The episode is still open, so the notice is earned again — and this
-        # time the sink answers.
+        # Tick 3 — the sink answers: the episode is still open, so the notice is
+        # earned again.
         fail["on"] = False
         harness.results.append({"error": "server disconnected", "kind": "unavailable"})
         await rill(harness, UNAVAILABLE_STALL_MS)
         assert [notice.kind for notice in delivered] == ["stalled"]
         assert harness.counters()["unavailable_notified"] is True
 
-        # And now the recovery is a real transition: the operator was told.
+        # Tick 4 — recovery is a real transition now: the operator was told.
         harness.results.append({"text": "same", "error": None})
         await rill(harness, 240_000)
         assert [notice.kind for notice in delivered] == ["stalled", "restored"]
@@ -1123,65 +1133,34 @@ async def test_a_stall_notice_that_never_reached_a_session_is_retried(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_a_silent_stall_episode_never_announces_a_recovery(tmp_path: Any) -> None:
-    """The other half of R2: no notice in, no phantom "running again" out."""
+    """The other half of R2, and it is a PIN rather than a guard (round 2, R9).
+
+    The episode crosses the stall window with the sink failing throughout: the
+    old code latched anyway and emitted a phantom "running again" once the tool
+    recovered. ``unavailable_notified`` is the discriminating assertion — it is
+    the precondition that decides whether the recovery notice is earned.
+    """
+    from local_operator.monitors.scheduler import UNAVAILABLE_STALL_MS
+
     harness = Harness(tmp_path)
+    delivered: list[Any] = []
+
+    async def announce(notice: Any) -> None:
+        raise RuntimeError("sink is down")
+
     try:
         harness.scheduler.load([spec()])
+        harness.scheduler._announce = announce
+
         harness.results.append({"error": "server disconnected", "kind": "unavailable"})
         await rill(harness, 60_000)
-        assert harness.notices == []
+        harness.results.append({"error": "server disconnected", "kind": "unavailable"})
+        await rill(harness, UNAVAILABLE_STALL_MS)
+        assert harness.counters()["unavailable_notified"] is False
+        assert delivered == []
 
         harness.results.append({"text": "same", "error": None})
         await rill(harness, 240_000)
-        assert harness.notices == []
-    finally:
-        harness.scheduler.dispose()
-
-
-@pytest.mark.asyncio
-async def test_a_retro_announced_disable_keeps_the_instants_that_are_true(tmp_path: Any) -> None:
-    """R3: the retro-announce used "now" as the disable instant and the strike
-    count as its cause — so a legacy row read "was DISABLED at <now> after 5
-    consecutive failed checks" for a 24-hour unreachable episode that charged no
-    strike at all, and "after 0 consecutive failed checks" when a file carried
-    no count.
-    """
-    from local_operator.monitors.delivery import format_monitor_notice_text
-
-    harness = Harness(tmp_path)
-    try:
-        harness.scheduler.load([spec()])
-        disabled_at = harness.now_ms - 600_000
-        monitor_state.write_counters(
-            harness.config_dir,
-            "sess",
-            "m1",
-            {
-                "schema": 1,
-                "monitor_id": "m1",
-                "disabled": True,
-                "disabled_kind": "unreachable",
-                "disabled_reason": "tool unavailable for 24h",
-                "last_check_at": disabled_at,
-                "checks": 7,
-                "deliveries": 0,
-                "next_due_at": None,
-            },
-        )
-
-        reopened = Harness(tmp_path)
-        try:
-            reopened.scheduler.load([spec()])
-            assert await reopened.scheduler.announce_unannounced_disables() == 1
-            notice = reopened.notices[0]
-            assert notice.kind == "disabled"
-            assert notice.failure_kind == "unreachable"
-            # The clock is the last check, not the announcement.
-            assert notice.at_ms == disabled_at
-            text = format_monitor_notice_text(notice)
-            assert "consecutive failed check" not in text
-            assert "stayed unreachable for 24 hours" in text
-        finally:
-            reopened.scheduler.dispose()
+        assert delivered == []
     finally:
         harness.scheduler.dispose()

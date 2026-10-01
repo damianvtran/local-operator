@@ -185,27 +185,29 @@ def test_an_unknown_kind_raises_rather_than_reading_as_restored() -> None:
 def test_a_notice_leads_with_the_news_on_its_first_line() -> None:
     """D4: the collapsed card shows ONE line, so the news has to be on it."""
     first = format_monitor_notice_text(notice()).splitlines()[0]
-    assert first.index("was DISABLED") < first.index("after 5 consecutive failed checks")
-    # The source note rides at the END of the first line: it used to sit between
-    # the id and the news, spending the collapsed row's first cells on a tool
-    # name (D4).
-    assert first.rstrip().endswith("(via bash).")
-    assert "no longer watching" in first
+    assert first.index("was DISABLED") < first.index("no longer watching")
+    # The CONSEQUENCE leads and the cause is parenthesised (design round 2,
+    # D13; UX round 1, U5): the collapsed card is one line, and the cause was
+    # the half that survived while "it is no longer watching" fell off.
+    assert first.rstrip().endswith("(5 consecutive failed checks).")
+    # The source note rides right after the clock, where the collapsed headline
+    # can drop it whole without touching the news (D13).
+    assert "(via bash)" in first.split("—")[0]
 
 
 def test_an_unreachable_disable_is_not_reported_as_failed_checks() -> None:
     """R3 + Q2: unavailable ticks charge no strike, so the notice must not say
     "failed" — and it must not print a count it does not have."""
     unreachable = format_monitor_notice_text(notice(failure_kind="unreachable", failures=0))
-    assert "stayed unreachable for 24 hours" in unreachable
+    assert "(its tool stayed unreachable for 24 hours)" in unreachable
     assert "consecutive failed check" not in unreachable
 
     legacy = format_monitor_notice_text(notice(failures=0))
-    assert "after 0 consecutive" not in legacy
-    assert "after repeated failed checks" in legacy
+    assert "0 consecutive" not in legacy
+    assert "(repeated failed checks)" in legacy
 
     fatal = format_monitor_notice_text(notice(failure_kind="fatal", failures=0))
-    assert "cannot succeed" in fatal
+    assert "(a check that cannot succeed)" in fatal
 
 
 def test_the_stalled_notice_keeps_its_first_line_short() -> None:
@@ -213,8 +215,8 @@ def test_the_stalled_notice_keeps_its_first_line_short() -> None:
     the baseline consequence are on later lines."""
     lines = format_monitor_notice_text(notice(kind="stalled")).splitlines()
     assert lines[0].startswith("(monitor) 'watch' m1 could not run its check at ")
-    assert "without counting failures" in lines[0]
-    # The source note rides at the END of the first line, the same place the
-    # disabled notice keeps it (D4).
-    assert lines[0].rstrip().endswith("(via bash).")
+    assert lines[0].rstrip().endswith("it is retrying, without counting failures.")
+    # The source note sits after the clock, where the collapsed headline drops
+    # it whole (D13).
+    assert "(via bash)" in lines[0].split("—")[0]
     assert any(line.startswith("Reason: ") for line in lines[1:])

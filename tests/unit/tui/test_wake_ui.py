@@ -618,14 +618,93 @@ class TestMonitorBandStates:
         body = out.splitlines()[1:]
         assert "m2" in body[0]
         assert "m3" in body[1]
-        assert "… 2 more monitors" in out
+        assert "… 2 more monitors not shown" in out
+
+    @pytest.mark.asyncio
+    async def test_a_never_checked_watch_is_not_drawn_as_a_dormant_one(self) -> None:
+        """D10: a watch that has never run a check is overdue BY DEFINITION, so
+        an idle-first branch order rendered the one state this PR exists to
+        surface as a plain dormant row. The pair below is the whole finding —
+        same counters apart from the check count."""
+        now = int(time.time() * 1000)
+        spec, counters = _monitor("m1", "watch the deploy queue", due_in_ms=-7_200_000)
+        counters["checks"], counters["deliveries"] = 0, 0
+        spec.created_at = now - 7_200_000
+
+        _, out = await _paint([], [(spec, counters)])
+        assert "never checked" in out
+        assert "idle" not in out
+
+        counters["checks"] = 12
+        _, out = await _paint([], [(spec, counters)])
+        assert "idle" in out and "never checked" not in out
+
+    @pytest.mark.asyncio
+    async def test_a_muted_hint_does_not_repaint_the_due_clock(self) -> None:
+        """D11: one ``tone`` was applied to both the label and the health
+        clause, so the neutral 0-deliveries hint promoted the due clock from
+        ``dim`` to ``muted`` — measured on the frames by sampling the clock
+        cells, where a quiet row's boilerplate outranked a healthy row's."""
+        from rich.style import Style
+
+        from local_operator.tui import theme as theme_mod
+
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        muted = Style(color=theme_mod.semantic_color("muted"))
+        warning = Style(color=theme_mod.semantic_color("warning"))
+
+        spec, counters = _monitor("m1", "watch the deploy queue")
+        counters["checks"], counters["deliveries"] = 12, 0
+        row = WakePanel._monitor_fingerprint(spec, counters)
+        assert row[4] == "muted"
+        # The label is the clock, not a state word.
+        assert row[1] not in ("disabled", "stalled", "idle", "never checked")
+
+        panel = WakePanel.__new__(WakePanel)
+        text = WakePanel._monitor_section(
+            panel, (row,), room=4, dim=dim, muted=muted, warning=warning
+        )[1]
+
+        def style_of(needle: str) -> Any:
+            start = text.plain.index(needle)
+            for span in text.spans:
+                if span.start <= start and span.end >= start + len(needle):
+                    return span.style
+            return None
+
+        assert style_of(row[1]) == dim  # the clock keeps the dim ink
+        assert style_of("12 checks, 0 deliveries") == muted  # the hint keeps its own
+
+    @pytest.mark.asyncio
+    async def test_a_disabled_row_leads_with_a_cause_a_person_can_read(self) -> None:
+        """U4: the health slot carried the tool's raw argument banner, so the
+        one glance surface for a broken watch led with developer text."""
+        spec, counters = _monitor("m1", "watch the error budget", disabled=True)
+        counters["disabled_reason"] = "invalid arguments:\n- path: Extra inputs are not permitted"
+        counters["consecutive_failures"] = 5
+
+        _, out = await _paint([], [(spec, counters)])
+        assert "5 consecutive failed checks" in out
+        assert "invalid arguments" not in out
+
+    @pytest.mark.asyncio
+    async def test_a_disabled_row_keeps_a_reason_that_already_reads_as_a_sentence(self) -> None:
+        """The other half of U4: only a raw banner is replaced — the
+        informative reasons a person can act on stay verbatim."""
+        spec, counters = _monitor("m1", "watch the queue", disabled=True)
+        counters["disabled_reason"] = 'monitor can\'t watch "mcp__x": it is not in this tool set.'
+        counters["consecutive_failures"] = 5
+
+        _, out = await _paint([], [(spec, counters)])
+        assert "it is not in this tool set." in out
+        assert "consecutive failed checks" not in out
 
     @pytest.mark.asyncio
     async def test_the_header_never_says_watching_above_a_broken_row(self) -> None:
         """D7: "1 watching" above "disabled" contradicts the row itself."""
         spec, counters = _monitor("m1", "x", disabled=True, reason="boom")
         _, out = await _paint([], [(spec, counters)])
-        assert "Monitors · 1 monitor · 1 needs attention" in out
+        assert "Monitors · 1 of 1 needs attention" in out
         assert "watching" not in out
 
 
@@ -821,6 +900,39 @@ class TestMonitorDeltaBlock:
         # news cut off; the record stays in the expansion.
         assert "Last error" not in row
         assert "To restore" not in row
+
+    def test_a_notice_card_tells_the_human_what_they_can_do(self) -> None:
+        """U1: the notice's "what next" was the model's tool syntax. The card
+        body now carries the same remedy in the reader's words, while the
+        model-facing text keeps its own shape."""
+        from local_operator.harness.rows import (
+            MONITOR_HUMAN_REMEDY,
+            monitor_receipt_body,
+        )
+        from local_operator.monitors.delivery import (
+            MonitorNotice,
+            format_monitor_notice_text,
+        )
+
+        text = format_monitor_notice_text(
+            MonitorNotice(
+                monitor_id="m2",
+                name="ner-gpu-fleet-guard",
+                tool="bash",
+                kind="disabled",
+                at_ms=1_756_000_000_000,
+                checks=7,
+                deliveries=0,
+                failures=5,
+                detail="boom",
+            )
+        )
+        body = monitor_receipt_body(text)
+        assert MONITOR_HUMAN_REMEDY in body
+        assert "lop monitor cancel <session> <id>" in body
+        # The wire text the model was handed is untouched: the sentence is added
+        # by the card layer only.
+        assert MONITOR_HUMAN_REMEDY not in text
 
     def test_the_row_wears_the_monitors_own_name_and_glyph(self) -> None:
         """The name column says ``monitor`` and the glyph table knows it — not

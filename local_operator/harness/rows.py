@@ -805,6 +805,20 @@ MONITOR_ENVELOPE_PREFIX = "(monitor) "
 _MONITOR_CANCEL_LINE_PREFIX = "cancel with monitor("
 
 
+#: The human's half of a lifecycle notice's remedy (UX review round 1, U1).
+#:
+#: ``monitors.delivery`` writes the notice for the MODEL: its "what next" is
+#: ``monitor({op:"create",…})``, an agent tool call a person cannot type. The
+#: card is the surface a person reads, so the same remedy is stated there in
+#: their words, and "what next" was in the model's. Two routes, both real: the
+#: CLI's own external-writer path (``lop monitor cancel``) and asking the agent
+#: in the conversation the monitor belongs to.
+MONITOR_HUMAN_REMEDY = (
+    "For you: `lop monitor cancel <session> <id>` stops it (`lop monitor status` "
+    "lists both), or ask the agent in that conversation to re-arm the same call."
+)
+
+
 def monitor_receipt_body(text: str) -> str:
     """A monitor delivery's text minus the model-facing envelope prefix.
 
@@ -813,10 +827,19 @@ def monitor_receipt_body(text: str) -> str:
     ``(monitor) ``; the expansion kept it until design review round 1 (D2),
     which is the inconsistency this closes. Nothing else is rewritten: the
     expansion is what the model was handed (design §12), cancel hint and all.
+
+    A LIFECYCLE NOTICE gains :data:`MONITOR_HUMAN_REMEDY` below its own text
+    (UX review round 1, U1). Added HERE rather than in the wire text because the
+    card body is the surface a person reads while the model-facing text must
+    keep the shape the model was handed; the mobile fold calls the same
+    function, so the phone gets the sentence too.
     """
-    if text.startswith(MONITOR_ENVELOPE_PREFIX):
-        return text[len(MONITOR_ENVELOPE_PREFIX) :]
-    return text
+    body = (
+        text[len(MONITOR_ENVELOPE_PREFIX) :] if text.startswith(MONITOR_ENVELOPE_PREFIX) else text
+    )
+    if monitor_notice_kind(text) is not None:
+        return f"{body}\n{MONITOR_HUMAN_REMEDY}"
+    return body
 
 
 #: The phrases ``monitors.delivery`` opens each lifecycle notice with, ON ITS
@@ -849,6 +872,28 @@ def monitor_notice_kind(text: str) -> str | None:
     return None
 
 
+def _strip_source_notes(line: str) -> str:
+    """A notice's first line without its ``(via <tool>)`` notes.
+
+    Every notice names its source right after the clock — ``was DISABLED at
+    10:46 (via mcp__datadog_search_datadog_hosts)`` — which is where the
+    expansion should read it, but not what a one-line collapsed card has room
+    for: 36 cells of MCP tool name is part of what pushed the consequence out of
+    the row (design round 2, D13; UX round 1, U5). The note is dropped WHOLE,
+    parentheses and the spacing they owned included, so the clause around it
+    keeps its own punctuation.
+    """
+    out = line
+    while True:
+        start = out.find("(via ")
+        if start == -1:
+            return out
+        end = out.find(")", start)
+        if end == -1:
+            return out
+        out = " ".join((out[:start].rstrip() + out[end + 1 :]).split())
+
+
 def monitor_receipt_headline(text: str) -> str:
     """The human-readable headline of a monitor delivery.
 
@@ -874,12 +919,9 @@ def monitor_receipt_headline(text: str) -> str:
         # round 1, D4). The trailing source note is dropped here because it
         # would spend the row's first cells on the tool name; the expansion
         # keeps it.
-        head = text.split("\n", 1)[0]
+        head = _strip_source_notes(text.split("\n", 1)[0])
         if head.startswith(MONITOR_ENVELOPE_PREFIX):
             head = head[len(MONITOR_ENVELOPE_PREFIX) :]
-        note_at = head.rfind(" (via ")
-        if note_at != -1 and head.endswith(")."):
-            head = head[:note_at] + "."
         return head.strip()
 
     head, _, _ = text.partition("\n\n")
