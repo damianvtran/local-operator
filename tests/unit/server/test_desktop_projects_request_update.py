@@ -47,9 +47,32 @@ SESSION_A = "4e92693767fa"
 SESSION_B = "7b31c0d4a9e2"
 SESSION_C = "1f0a55e83b7c"
 
-#: The exact text the route must send for the ``payments`` test project (no
-#: title), with ``{today}`` left for the assertion to fill from the local date.
-EXPECTED_TEXT = REQUEST_UPDATE_TEMPLATE.format(display="payments", name="payments", today="{today}")
+#: The frozen check-in text, pinned LITERALLY here rather than derived from the
+#: implementation's own ``REQUEST_UPDATE_TEMPLATE``: a value built from that
+#: constant would track any drift silently, so a reworded sentence or a lost
+#: newline would keep the suite green. This literal is the authority; the
+#: delivery tests compare the wire body against it, and
+#: ``test_the_implementation_template_matches_the_frozen_literal`` checks the
+#: implementation still equals it (and its byte-exact digest).
+FROZEN_TEXT = (
+    'Status check-in for project "{display}" (key: {name}), requested from the Projects view.\n'
+    "\n"
+    "Please post a progress update for it now:\n"
+    '1. Call the `project` tool with op="update", name="{name}" and progress set to ONE dated '
+    "line that starts with {today}: what has changed since your last update, what is in flight, "
+    "and any blocker. Report only what is true; if nothing changed, say so in that line.\n"
+    "2. If the project's status no longer fits (planning, active, qa, validation, paused, done, "
+    'archived), change it in the same call with status="<new status>". Leave it unchanged if it '
+    'still fits; use "done" only when every requirement is closed.\n'
+    "3. Then reply with one short sentence confirming what you posted. Do not start new work "
+    "because of this message.\n"
+    "\n"
+    "If you are not working on this project, reply saying so and do not post an update."
+)
+
+#: sha256 of ``FROZEN_TEXT`` (bytes, utf-8) — the byte-exact pin a reviewer can
+#: recompute without reading the implementation at all.
+FROZEN_TEXT_SHA256 = "93be68ac9ebc05a6650695453435370da8dd5e414c45a5258c131fd150a62689"
 
 
 class _RecordingHandle(FakeHandle):
@@ -62,10 +85,11 @@ class _RecordingHandle(FakeHandle):
     the reading is structural rather than accidental.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, delay: float = 0.01) -> None:
         super().__init__()
         self.active = 0
         self.max_active = 0
+        self.delay = delay
 
     async def receive_peer_message(  # noqa: ANN001, ANN202
         self, text, *, mode="mailbox", wake=False, sender=None
@@ -76,7 +100,7 @@ class _RecordingHandle(FakeHandle):
             self.calls.append(
                 ("receive_peer_message", (text,), {"mode": mode, "wake": wake, "sender": sender})
             )
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(self.delay)
             return "delivered to the mailbox (will be read on the next turn)"
         finally:
             self.active -= 1
@@ -213,8 +237,8 @@ async def _own_record(deadline_s: float = 30.0) -> registry.SessionRecord:
     raise AssertionError("runtime never published a live record")
 
 
-async def _start_targets() -> _Targets:
-    handle = _RecordingHandle()
+async def _start_targets(*, delay: float = 0.01) -> _Targets:
+    handle = _RecordingHandle(delay=delay)
     registrant = RuntimeServer(handle, kind="tui")
     registrant.start()
     sleepers = _sleeper_procs(2)
@@ -283,7 +307,9 @@ async def test_delivery_sends_the_frozen_text_as_a_waking_mailbox_drop(api) -> N
         assert response.json()["message"] == "Requested an update from 1 session on payments."
 
         delivery = _last_delivery(targets.handle)
-        assert delivery["text"] == EXPECTED_TEXT.format(today=date.today().isoformat())
+        assert delivery["text"] == FROZEN_TEXT.format(
+            display="payments", name="payments", today=date.today().isoformat()
+        )
         # Mailbox drop with wake=True — the `send` tool's own default, NOT a steer.
         assert delivery["mode"] == "mailbox"
         assert delivery["wake"] is True
@@ -347,6 +373,89 @@ async def test_a_second_press_inside_the_window_dials_nothing_and_says_so(api) -
         assert " s ago" in body["message"]
         # No second dial.
         assert len(targets.handle.calls) == dials_after_first
+    finally:
+        targets.close()
+
+
+async def test_the_implementation_template_matches_the_frozen_literal() -> None:
+    """The route's own template must equal the literal pin, byte for byte.
+
+    The delivery tests compare the wire body against :data:`FROZEN_TEXT`, a
+    literal that does not move with the implementation — so this is the other
+    half of the pin: it fails if ``REQUEST_UPDATE_TEMPLATE`` is edited away from
+    the frozen wording, and the digest lets a reviewer verify the literal itself
+    without re-reading either side.
+    """
+    import hashlib
+
+    assert REQUEST_UPDATE_TEMPLATE == FROZEN_TEXT
+    assert hashlib.sha256(FROZEN_TEXT.encode("utf-8")).hexdigest() == FROZEN_TEXT_SHA256
+
+
+async def test_a_titled_project_uses_its_title_as_the_display_name(api) -> None:
+    """``{display}`` is the title when set; ``{name}`` stays the key.
+
+    The key is kept in the message even when a title exists, because the
+    ``project`` tool addresses rows by key — so only ``{display}`` follows the
+    title-else-key rule. This exercises that branch, which the untitled project
+    every other test uses cannot reach.
+    """
+    from datetime import date
+
+    client, _root = api
+    created = await client.post("/v1/desktop/projects", json={"name": "payments"})
+    project_id = created.json()["result"]["id"]
+    titled = await client.patch(
+        f"/v1/desktop/projects/{project_id}", json={"title": "Payments migration"}
+    )
+    assert titled.status_code == 200
+    linked = await client.post(
+        f"/v1/desktop/projects/{project_id}/links", json={"session_id": SESSION_A}
+    )
+    assert linked.status_code == 200
+
+    targets = await _start_targets()
+    try:
+        targets.publish(SESSION_A)
+        await _wait_live(SESSION_A)
+        response = await client.post(f"/v1/desktop/projects/{project_id}/request-update", json={})
+        assert response.status_code == 200
+        # The governing sentence names the DISPLAY name (the title).
+        assert response.json()["message"] == (
+            "Requested an update from 1 session on Payments migration."
+        )
+        delivery = _last_delivery(targets.handle)
+        assert delivery["text"] == FROZEN_TEXT.format(
+            display="Payments migration", name="payments", today=date.today().isoformat()
+        )
+    finally:
+        targets.close()
+
+
+async def test_a_call_during_an_in_flight_request_waits_then_re_evaluates(api) -> None:
+    """A concurrent call takes the project lock, waits, and then sees the stamp.
+
+    The per-project lock is what makes two presses safe: the second call cannot
+    dial alongside the first (concurrent daemon-class dials evict) and, once the
+    first stamps the cooldown, re-evaluates against it and refuses. Only the
+    POST-STAMP refusal is covered by the test above; this one drives the lock
+    branch — a second request entering while the first is still dialling.
+    """
+    client, _root = api
+    project_id = await _project_with(client, SESSION_A)
+    # A slow delivery keeps the first call inside its critical section long
+    # enough for the second to arrive and queue on the lock.
+    targets = await _start_targets(delay=0.4)
+    try:
+        targets.publish(SESSION_A)
+        await _wait_live(SESSION_A)
+        url = f"/v1/desktop/projects/{project_id}/request-update"
+        first, second = await asyncio.gather(client.post(url, json={}), client.post(url, json={}))
+        states = sorted([first.json()["result"]["state"], second.json()["result"]["state"]])
+        assert states == ["cooldown", "sent"], states
+        # Exactly ONE dial: the waiter re-evaluated and refused rather than
+        # dialling a second time.
+        assert len(targets.handle.calls) == 1
     finally:
         targets.close()
 
