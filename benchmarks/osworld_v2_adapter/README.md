@@ -325,11 +325,13 @@ does NOT create IAM roles or security groups; those are one-time human steps.
    else); it is scrubbed on `close`.
 
    The provider VALUE is checked too, and the check is deliberately narrow:
-   the value must be a **registered** provider name — or the known alias
-   `openrouter`, normalised to `openai_compatible` plus
+   the value must be a **registered** provider name, or the known alias
+   `openrouter` — normalised to `openai_compatible` plus
    `https://openrouter.ai/api/v1`, with an explicitly supplied
    `OSWORLD_EVAL_MODEL_BASE_URL` always winning — and an `openai_compatible`
-   value must carry an endpoint. With none it does not reach a wrong-but-loud
+   value must carry an endpoint. Case and surrounding space are normalised
+   before the lookup, so `OpenRouter ` is the alias rather than a refusal. With
+   no endpoint it does not reach a wrong-but-loud
    failure: the vendored `OpenAIBackend` forwards no base URL, the client
    targets `https://api.openai.com/v1/`, and the 401 is swallowed into the
    same silent zero (measured against the pinned tree; refused by name before

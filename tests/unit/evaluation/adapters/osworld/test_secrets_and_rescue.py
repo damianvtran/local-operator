@@ -284,6 +284,26 @@ async def test_the_openrouter_alias_becomes_the_registered_openai_compatible_con
 
 
 @pytest.mark.asyncio
+async def test_a_judge_provider_differing_only_in_case_or_padding_is_still_the_alias(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """Loud is not enough when the value is a spelling of the one we recommend.
+
+    The refusal message names `openrouter` as a known alias, so an operator who
+    types `OpenRouter ` and is refused has been told to do something they
+    believe they just did.
+    """
+    workspace = _workspace(tmp_path, {"task_judged": fixtures.JUDGED}, provider=None)
+    provider = FakeProvider()
+    adapter = OSWorldV2Adapter(provider_factory=lambda: provider, workspace_root=workspace)
+    await _prepared(adapter, episode_id, _judge_infra_with_provider("  OpenRouter "))
+    await adapter.reset_start(_reset(episode_id, "task_judged", tmp_path, _judge_secrets()))
+    assert provider.allocated is True
+    assert os.environ["OSWORLD_EVAL_MODEL_PROVIDER"] == "openai_compatible"
+    assert os.environ["OSWORLD_EVAL_MODEL_BASE_URL"] == "https://openrouter.ai/api/v1"
+
+
+@pytest.mark.asyncio
 async def test_an_explicit_judge_base_url_wins_over_the_alias_default(
     tmp_path: Path, episode_id: str, _stub_provider_registry: None
 ) -> None:

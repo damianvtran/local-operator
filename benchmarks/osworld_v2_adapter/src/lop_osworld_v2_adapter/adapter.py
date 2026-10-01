@@ -747,7 +747,8 @@ class OSWorldV2Adapter:
         two channels where this preflight used to read one, so it reads both.
 
         What is checked here, exactly: the value is a registered provider (or a
-        known alias, normalised to one), and an ``openai_compatible`` value
+        known alias, normalised to one, case and surrounding space aside), and an
+        ``openai_compatible`` value
         carries an endpoint. What is deliberately NOT checked is the half only a
         call can answer -- a stale key, a model the provider will not serve, an
         unreachable endpoint, an outage. Those construct a backend perfectly
@@ -755,25 +756,37 @@ class OSWorldV2Adapter:
         judged episode therefore cannot be promised.
         """
 
-        provider = self._judge_setting("OSWORLD_EVAL_MODEL_PROVIDER", secrets)
-        if provider is None:
+        raw_provider = self._judge_setting("OSWORLD_EVAL_MODEL_PROVIDER", secrets)
+        if raw_provider is None:
             # Unreachable for a judged task -- the missing-refs gate above
             # fires first -- so do not fabricate a refusal from absence.
             return
+        # Case and surrounding space do not make a different provider: refusing
+        # `OpenRouter ` while the refusal message names `openrouter` as a known
+        # alias would be a refusal the operator cannot act on, and every
+        # registry name is lowercase anyway. The registered lookup stays
+        # exact-first so a mixed-case registration is still honoured verbatim.
+        provider = raw_provider.strip()
         base_url = self._judge_setting("OSWORLD_EVAL_MODEL_BASE_URL", secrets)
-        alias = _JUDGE_PROVIDER_ALIASES.get(provider)
+        alias = _JUDGE_PROVIDER_ALIASES.get(provider.lower())
         if alias is None:
             available = vendor_bridge.model_client_providers()
-            if provider not in available:
+            registered = (
+                provider
+                if provider in available
+                else next((name for name in available if name.lower() == provider.lower()), None)
+            )
+            if registered is None:
                 raise JudgeUnavailable(
                     f"task {task_id!r} scores through the LLM judge but its "
-                    f"provider {provider!r} is not one the vendored evaluator "
+                    f"provider {raw_provider!r} is not one the vendored evaluator "
                     f"client can construct (registered: {', '.join(available)}; "
                     f"known aliases: {', '.join(sorted(_JUDGE_PROVIDER_ALIASES))}); "
                     "OSWorld's judge fails closed (bare `except Exception: return "
                     "False`), so the episode would grade a silent 0.0, which this "
                     "adapter refuses to seal"
                 )
+            provider = registered
         else:
             service_provider, default_base_url = alias
             provider = service_provider
