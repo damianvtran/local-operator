@@ -718,6 +718,50 @@ async def test_painted_rows_include_the_markdown_description(tmp_path: Path) -> 
         assert any("no description yet" in row for row in view._detail_page.painted_rows())
 
 
+async def test_a_full_cap_markdown_description_renders_and_the_page_scrolls(
+    tmp_path: Path,
+) -> None:
+    """Issue #1815: the raised cap is render-safe at its bound.
+
+    A full 2000-char description (the cap the schema and guide now promise)
+    renders through the markdown path on a page that scrolls it, and the ruler
+    keeps its live-DOM invariant while doing so — the same properties pinned
+    at shorter lengths, now pinned at the contract's own bound.
+    """
+    prefix = "## Scope\n\n"
+    sentence = "Cutover detail for the payments migration. "
+    tail = "\n## Closeout\n\n- parity on staging\n- window 2026-10-02\n"
+    description = prefix + sentence * 45 + tail
+    description += "x" * (2000 - len(description))
+    assert len(description) == 2000
+
+    session = _ProjectSession()
+    registry = ProjectRegistry(tmp_path)
+    registry.create_project(ProjectEdit(name="full-cap", title="Full cap", description=description))
+    session.project_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "full-cap")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        page = view._detail_page
+        rows = page.painted_rows()
+        assert any("## Scope" in row for row in rows)
+        assert any("Cutover detail" in row for row in rows)
+        assert page.max_scroll_y > 0
+        top = _dom_top_section(page)
+        assert top is not None
+        assert view.rendered_rows()[1].startswith(f"── {top} ")
+        await pilot.press("end")
+        await pilot.pause()
+        await pilot.pause()
+        top = _dom_top_section(page)
+        assert top is not None
+        assert view.rendered_rows()[1].startswith(f"── {top} ")
+
+
 async def test_the_toggle_hint_names_the_row_it_will_toggle(tmp_path: Path) -> None:
     """UX round 1, U3: `↵ toggle groundwork`, not a bare `toggle`.
 

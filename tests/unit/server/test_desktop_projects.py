@@ -21,7 +21,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from local_operator.config import ConfigManager
-from local_operator.projects import PROJECT_SCHEMA
+from local_operator.projects import DESCRIPTION_MAX, PROJECT_ROW_CAP, PROJECT_SCHEMA
 from local_operator.server.routes import capabilities, desktop_projects
 
 pytestmark = pytest.mark.asyncio
@@ -134,6 +134,43 @@ async def test_a_taken_name_is_a_409_and_invalid_values_are_422(api) -> None:
         assert bad.status_code == 422, body
     shape = await client.post("/v1/desktop/projects", json={"name": "x" * 65})
     assert shape.status_code == 422
+
+
+async def test_the_description_cap_is_2000_on_the_wire(api) -> None:
+    """Issue #1815: the wire model enforces the SAME raised cap as the tool —
+    at the cap accepted, one past it refused naming the limit."""
+    client, _root = api
+    at_cap = await client.post(
+        "/v1/desktop/projects", json={"name": "at-cap", "description": "d" * 2000}
+    )
+    assert at_cap.status_code == 200
+    over = await client.post(
+        "/v1/desktop/projects", json={"name": "over-cap", "description": "d" * 2001}
+    )
+    assert over.status_code == 422
+    assert "2000 characters" in json.dumps(over.json())
+
+
+async def test_the_listing_clamps_the_description_but_the_detail_does_not(api) -> None:
+    """QA round 1, Q1: raising the description cap to 2000 put full markdown
+    plans in every LISTING row (20 rows went 13,605 -> 48,805 chars). The
+    listing row is a scan surface, so it carries the same 160-cell clamp the
+    TUI's list rows and the tool's ``op='list'`` use; the EDIT and the DETAIL
+    read are the full-text surfaces, from a separate model."""
+    client, _root = api
+    long_description = "d" * DESCRIPTION_MAX
+    created = await client.post(
+        "/v1/desktop/projects", json={"name": "clamped", "description": long_description}
+    )
+    assert created.status_code == 200
+    project_id = created.json()["result"]["id"]
+
+    listed = (await client.get("/v1/desktop/projects")).json()["result"]["projects"][0]
+    # 160 ASCII cells: the clamp keeps the first 159 and marks the cut.
+    assert listed["description"] == "d" * (PROJECT_ROW_CAP - 1) + "\u2026"
+
+    detail = (await client.get(f"/v1/desktop/projects/{project_id}")).json()["result"]
+    assert detail["project"]["description"] == long_description
 
 
 async def test_milestone_routes_report_derived_status_and_refuse_unknowns(api) -> None:

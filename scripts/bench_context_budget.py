@@ -940,6 +940,35 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: (the empty-string reset; the whole-list replacement; the collision rule).
 #: The peel-off a future reduction can act on: dropping the two fields from
 #: the schema should take this ceiling back down ~241 billed.
+#:
+#: UPDATED (NO RAISE), 2026-09-30 — issue #1815: the ``project`` tool's
+#: ``description`` field text now ends "(<= 2000 chars)." where it said
+#: "(<= 240 chars)."; the schema's markdown promise is the contract, the old
+#: cap refused the prose it advertised, and the fix raises DESCRIPTION_MAX to
+#: 2000 with a remedy-bearing refusal. Neither the guide nor the refusal text
+#: rides the prefix, so the field rename is the whole measured delta.
+#: Re-derived after the fold onto ``origin/main`` ``2d58270b2`` (the #1831,
+#: #1856 and team-label folds rewrote the measured trees), same machine, the
+#: base in a detached worktree of that commit, the clean arm via ``env -i``
+#: (the arm CI renders):
+#:
+#:   base (origin/main 2d58270b2, clean)  104,809 chars = ~37,701 billed
+#:   head (this branch, clean)            104,810 chars = ~37,701 billed
+#:     = +1 char = +0.4 billed under the rounding — the 240 -> 2000 rename,
+#:       nothing else. Tiers arms read +762 (the documented config delta).
+#:
+#: Review rounds then moved the REFUSAL copy (remedy phrasing), the
+#: ``@project:`` element's cut order and the listing clamps — all of it
+#: runtime text, so the delta above is untouched: the script re-reads
+#: 104,810 on the clean arm, and "over the ...-character cap" appears nowhere
+#: in the ``project`` tool's serialized schema (checked directly against that
+#: JSON), which is the only text the ratchet can move.
+#:
+#: NO RAISE: a one-character edit cannot be why the permanent per-call ceiling
+#: moves, and it does not breach the binding reading: the clean arm reads
+#: ~37,701 billed against the 37,756 ceiling — ~55 billed of headroom, +0.4
+#: of it this change — while the tiers-configured reading sits above by the
+#: same documented 762-char config gap, not by anything here.
 BUDGET_BILLED_TOKENS = 37_756
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.

@@ -95,7 +95,16 @@ _SESSION_ID_RE = re.compile(r"^[a-f0-9]{12}$")
 #: ``q4``, ``payments-v2`` — short, lowercase, no spaces: a tag is a filter key.
 _TAG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,23}$")
 
-DESCRIPTION_MAX = 240
+#: Markdown prose describing the workstream; the surfaces RENDER it, not
+#: dump it. Raised 240 -> 2000 (issue #1815): the tool schema and
+#: guide://projects promised multi-paragraph markdown while this cap refused
+#: the prose they invited, and the refusal was a bare pydantic sentence.
+#: 2000 matches the sibling prose fields (teams, instruction-set
+#: descriptions) and every render surface stays bounded without it: listing
+#: rows clamp to PROJECT_ROW_CAP CELLS, the @project: snapshot trims with a
+#: marker, detail pages scroll. An over-cap write from the tool is refused
+#: with the submitted size and the remedy (project_tool._project_edit).
+DESCRIPTION_MAX = 2000
 PROGRESS_MAX = 1000
 TAGS_MAX = 8
 SESSIONS_MAX = 64
