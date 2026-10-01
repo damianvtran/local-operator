@@ -188,14 +188,32 @@ class Harness:
 
         return json.loads(state_path(self.root).read_text())
 
-    def nudge(self, device_id: str, conversation: str) -> None:
+    def nudge(self, device_id: str, conversation: str, acknowledged: int) -> None:
         """The ``/seen`` route's S6 half: this device acked, and the worker is told.
 
         Nothing else happens here on purpose — the receipt is the route's own
-        write (the tests call ``store.acknowledge`` for it) and the worker's
-        next pass reads the store to see the move.
+        write (the tests call ``store.acknowledge`` for it) and the worker's next
+        pass reads the store to see the move. ``acknowledged`` is the watermark
+        that receipt moved the conversation to, which is what the route hands
+        over and what the pass matches a hint against.
         """
-        self.worker.note_ack(device_id=device_id, conversation=conversation)
+        self.worker.note_ack(
+            device_id=device_id, conversation=conversation, acknowledged=acknowledged
+        )
+
+    def route_ack(
+        self, conversation: str, token: str, *, device_id: str | None = None
+    ) -> dict[str, Any]:
+        """The ``/seen`` route's two steps, in the route's own order and shapes.
+
+        The receipt first, then — only when a device acted — the nudge carrying
+        ``state()["revision"][1]``, the acknowledged value that receipt moved the
+        conversation to. A desk ack is ``device_id=None`` and nudges nobody.
+        """
+        state = self.store.acknowledge(conversation, token)
+        if device_id is not None:
+            self.nudge(device_id, conversation, state["revision"][1])
+        return state
 
     def receipts(self) -> list[tuple[Any, ...]]:
         """The ``receipts`` table, read raw: the read highwater from outside."""
@@ -856,8 +874,7 @@ def test_a_relay_ack_emits_one_silent_correction_excluding_the_actor(
 
     # The route's order: the receipt first (the read really moved), then the
     # nudge naming the device that made it move.
-    harness.store.acknowledge("session/shared", token)
-    harness.nudge(DEVICE_A, "session/shared")
+    harness.route_ack("session/shared", token, device_id=DEVICE_A)
     records = harness.worker.tick()
 
     assert [record.kind for record in records] == ["attention"]
@@ -883,11 +900,61 @@ def test_an_ack_with_no_other_device_emits_nothing(harness: Harness) -> None:
     harness.worker.tick()
     assert len(harness.plane.calls) == 1
 
-    harness.store.acknowledge("session/alone", token)
-    harness.nudge(DEVICE_A, "session/alone")
+    harness.route_ack("session/alone", token, device_id=DEVICE_A)
     assert harness.worker.tick() == []
     assert len(harness.plane.calls) == 1
     assert harness.worker.tick() == [], "the change was left in the detector state"
+
+
+def test_a_hint_is_not_applied_to_a_newer_change_of_the_same_conversation(
+    harness: Harness,
+) -> None:
+    """m2 (review round 2): the hint carries the watermark its own receipt moved
+    the conversation to, so a LATER receipt on the SAME conversation cannot match
+    it.
+
+    Without that term both hints for the one conversation apply, the two acting
+    devices are both excluded, and — with only A and B live — the correction is
+    dropped outright. A did not cause the read being corrected here (A's receipt
+    was already consumed by the previous pass, which corrected A itself); B did.
+    """
+    token = harness.publish("same")
+    harness.worker.tick()
+
+    unraced = harness.store.acknowledgement_map
+    fired: list[bool] = []
+
+    def raced_map() -> dict[str, int]:
+        """A's receipt lands inside the read, and A's nudge arrives after the
+        pass has taken its hints: the in-flight window round 1 named."""
+        if not fired:
+            fired.append(True)
+            harness.store.acknowledge("session/same", token)
+        return unraced()
+
+    harness.store.acknowledgement_map = raced_map  # type: ignore[method-assign]
+    try:
+        first = harness.worker.tick()
+    finally:
+        harness.store.acknowledgement_map = unraced  # type: ignore[method-assign]
+    assert [record.kind for record in first] == ["attention"]
+    assert "exclude" not in harness.plane.calls[-1][1], "the raced hint was applied"
+
+    # A's nudge arrives late, carrying the value its own receipt left behind.
+    harness.nudge(DEVICE_A, "session/same", harness.store.acknowledgement_map()["session/same"])
+
+    # A newer completion on that conversation, route-acked by B before the pass.
+    newer = str(uuid.uuid4())
+    harness.store.publish("session/same", newer, "entry-newer", "complete")
+    harness.route_ack("session/same", newer, device_id=DEVICE_B)
+
+    records = harness.worker.tick()
+
+    # No completion push: B's ack made the newer completion read before the pass,
+    # which is the point of the shape — only the correction is emitted.
+    assert [record.kind for record in records] == ["attention"]
+    _key, body = harness.plane.calls[-1]
+    assert body["exclude"] == [DEVICE_B], "a superseded hint excluded a device that did not act"
 
 
 def test_a_hint_is_applied_only_to_the_change_it_names(harness: Harness) -> None:
@@ -903,8 +970,8 @@ def test_a_hint_is_applied_only_to_the_change_it_names(harness: Harness) -> None
     token = harness.publish("desk-ack")
     harness.worker.tick()
 
-    harness.nudge(DEVICE_A, "session/elsewhere")
-    harness.store.acknowledge("session/desk-ack", token)
+    harness.nudge(DEVICE_A, "session/elsewhere", 1)
+    harness.route_ack("session/desk-ack", token)
     assert [record.kind for record in harness.worker.tick()] == ["attention"]
 
     _key, body = harness.plane.calls[-1]
@@ -917,7 +984,7 @@ def test_a_nudge_is_not_carried_onto_a_later_change(harness: Harness) -> None:
     or the desktop's, which write straight into the store — does not silently
     exclude a device that never acted.
     """
-    harness.nudge(DEVICE_A, "session/desk-ack")
+    harness.nudge(DEVICE_A, "session/desk-ack", 1)
     assert harness.worker.tick() == []
 
     token = harness.publish("desk-ack")
@@ -954,8 +1021,7 @@ def test_a_hint_that_races_a_pass_is_not_applied_to_it(harness: Harness) -> None
         as the route does it, and only then is the worker told."""
         if not fired:
             fired.append(True)
-            harness.store.acknowledge("session/raced", token)
-            harness.nudge(DEVICE_A, "session/raced")
+            harness.route_ack("session/raced", token, device_id=DEVICE_A)
         return unraced()
 
     harness.store.acknowledgement_map = racing_map  # type: ignore[method-assign]
@@ -978,12 +1044,10 @@ def test_a_duplicate_ack_does_not_double_emit(harness: Harness) -> None:
     token = harness.publish("retry")
     harness.worker.tick()
 
-    harness.store.acknowledge("session/retry", token)
-    harness.nudge(DEVICE_A, "session/retry")
+    harness.route_ack("session/retry", token, device_id=DEVICE_A)
     assert len(harness.worker.tick()) == 1
 
-    harness.store.acknowledge("session/retry", token)
-    harness.nudge(DEVICE_A, "session/retry")
+    harness.route_ack("session/retry", token, device_id=DEVICE_A)
     assert harness.worker.tick() == []
     assert len(harness.plane.calls) == 2, "the duplicate ack doubled the emit"
 
@@ -1000,8 +1064,7 @@ def test_a_heal_and_a_nudged_ack_in_one_pass_emit_once_each(harness: Harness) ->
     assert len(harness.worker.tick()) == 2
 
     harness.store.publish("session/healed", healed, "entry-heal", "complete")
-    harness.store.acknowledge("session/acked", other)
-    harness.nudge(DEVICE_A, "session/acked")
+    harness.route_ack("session/acked", other, device_id=DEVICE_A)
     records = harness.worker.tick()
 
     assert [record.kind for record in records] == ["completion", "attention"]
@@ -1025,9 +1088,8 @@ def test_the_emit_path_writes_no_receipt_and_no_delivery(harness: Harness) -> No
     assert len(harness.worker.tick()) == 2
     deliveries = harness.deliveries()
 
-    harness.store.acknowledge("session/no-auto-ack", token)
+    harness.route_ack("session/no-auto-ack", token, device_id=DEVICE_A)
     after_the_route = harness.receipts()
-    harness.nudge(DEVICE_A, "session/no-auto-ack")
     records = harness.worker.tick()
 
     assert [record.kind for record in records] == ["attention"], "a stale completion re-emitted"
@@ -1272,10 +1334,10 @@ def test_the_seen_route_nudges_the_worker_with_the_acting_device() -> None:
         """The ``note_ack`` surface, and nothing else."""
 
         def __init__(self) -> None:
-            self.nudged: list[tuple[str, str]] = []
+            self.nudged: list[tuple[str, str, int]] = []
 
-        def note_ack(self, *, device_id: str, conversation: str) -> None:
-            self.nudged.append((device_id, conversation))
+        def note_ack(self, *, device_id: str, conversation: str, acknowledged: int) -> None:
+            self.nudged.append((device_id, conversation, acknowledged))
 
     recorder = Recorder()
     daemon = MobileDaemon(
@@ -1295,7 +1357,8 @@ def test_the_seen_route_nudges_the_worker_with_the_acting_device() -> None:
         return status
 
     assert ack(device_id=device_id) == 200
-    assert recorder.nudged == [(device_id, f"session/{sid}")]
+    assert [entry[:2] for entry in recorder.nudged] == [(device_id, f"session/{sid}")]
+    assert recorder.nudged[0][2] == 1, "the nudge did not carry the receipt's watermark"
 
     # Everything below still acks and still nudges nobody: no field at all (the
     # desk/TUI path), a value that is not a string, an empty one, one past the
@@ -1305,7 +1368,9 @@ def test_the_seen_route_nudges_the_worker_with_the_acting_device() -> None:
     assert ack(device_id="") == 200
     assert ack(device_id="x" * (push_devices.MAX_FIELD_CHARS + 1)) == 200
     assert ack(device_id=str(uuid.uuid4())) == 200
-    assert recorder.nudged == [(device_id, f"session/{sid}")], "an unknown device was nudged"
+    assert [entry[:2] for entry in recorder.nudged] == [
+        (device_id, f"session/{sid}")
+    ], "an unknown device was nudged"
 
     # Q7: what the app's foreground refetch reads is the MACHINE's truth — the
     # conversation is read, the badge is zero, and there is no ghost row left
