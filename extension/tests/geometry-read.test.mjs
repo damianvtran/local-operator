@@ -236,25 +236,36 @@ test("ancestors: chain to html inclusive, depth bound, default 12", async () => 
   }
 });
 
-test("oversized id and role are clipped like className in every reader", async () => {
-  // Inline review finding (geometry-read.ts): `id` and `role` shipped verbatim
-  // in all three readers while `className` and the style values were capped. A
-  // page can put megabytes in either attribute, and the value would cross
-  // isolated world -> worker -> daemon and land in `ToolResult.details`, where
-  // BROWSER_TEXT_LIMIT_CHARS cannot bound it — the cap has to exist here. The
-  // inline map's property-name KEY is the same channel one layer in, so it is
-  // covered in the same pass.
+test("oversized tag, id, role and inline keys are bounded in every reader", async () => {
+  // Rounds 1 and 3 review findings (inline, geometry-read.ts): `id`/`role`
+  // shipped verbatim, then the inline map's property-name key, then `tag` —
+  // the last unclipped page-controlled string in all three readers. A page can
+  // put megabytes in any of them (a custom-element name has no grammar length
+  // bound: `createElement` accepts a 10,000-char name), and the value crosses
+  // isolated world -> worker -> daemon into `ToolResult.details`, where
+  // BROWSER_TEXT_LIMIT_CHARS cannot bound it — the cap has to exist here.
+  const LONG_TAG = "x".repeat(5000); // as `createElement(LONG_TAG)` accepts
   const LONG_ID = "i".repeat(5000);
   const LONG_ROLE = "r".repeat(5000);
-  // A CSSOM property name is page-controlled the same way: whatever
-  // `setProperty` accepted becomes a map key in the result.
+  // CSSOM names are page-controlled the same way: whatever `setProperty`
+  // accepted becomes a map key in the result.
   const LONG_PROPERTY = "--" + "n".repeat(5000);
+  // Two names sharing their first 119 characters, plus a distinct prefix, for
+  // the clipped-key dedup guard.
+  const SHARED_PREFIX_A = "--" + "s".repeat(5000) + "-a";
+  const SHARED_PREFIX_B = "--" + "s".repeat(5000) + "-b";
+  const DISTINCT_PREFIX = "--" + "d".repeat(5000);
   const html = element({ tagName: "HTML" });
   const card = element({
-    tagName: "SECTION",
+    tagName: LONG_TAG,
     id: LONG_ID,
     role: LONG_ROLE,
-    inline: [[LONG_PROPERTY, "v".repeat(500)]],
+    inline: [
+      [LONG_PROPERTY, "v".repeat(500)],
+      [SHARED_PREFIX_A, "first"],
+      [SHARED_PREFIX_B, "second"],
+      [DISTINCT_PREFIX, "third"],
+    ],
     parentElement: html,
   });
   const dom = {
@@ -278,25 +289,42 @@ test("oversized id and role are clipped like className in every reader", async (
       ["ancestors.chain[0]", ancestors.chain[0]],
     ];
     for (const [shape, entry] of shapes) {
-      for (const field of ["id", "role", "className"]) {
+      for (const field of ["tag", "id", "role", "className"]) {
         assert.ok(entry[field].length <= 120, `${shape}.${field} is bounded`);
       }
+      assert.equal(entry.tag.length, 120, `${shape}.tag clipped to the identity cap`);
       assert.equal(entry.id.length, 120, `${shape}.id clipped to the identity cap`);
       assert.equal(entry.role.length, 120, `${shape}.role clipped to the identity cap`);
+      assert.ok(entry.tag.endsWith("\u2026"), `${shape}.tag cut is visible`);
       assert.ok(entry.id.endsWith("\u2026"), `${shape}.id cut is visible`);
       assert.ok(entry.role.endsWith("\u2026"), `${shape}.role cut is visible`);
     }
 
-    // The inline map's KEY is the same class of channel as id/role: a page can
-    // `setProperty` an arbitrarily long ident, and the key crosses the same
-    // boundary. The oversized name is still REPORTED (clipped, not dropped),
-    // and its value stays under the value cap.
+    // The inline map's KEYS are the same class of channel: oversized names are
+    // still REPORTED (clipped, not dropped), values stay under the value cap,
+    // and two names sharing a cut prefix collapse to ONE deterministic key
+    // (the first declaration wins) while a distinct prefix keeps its own.
     const inlineKeys = Object.keys(styles.matches[0].inline);
-    assert.equal(inlineKeys.length, 1, "the oversized name is still reported");
-    assert.ok(inlineKeys[0].length <= 120, "styles.inline key is bounded");
-    assert.ok(inlineKeys[0].endsWith("\u2026"), "styles.inline key cut is visible");
+    assert.equal(inlineKeys.length, 3, "four names -> three keys after the cut");
+    for (const key of inlineKeys) {
+      assert.equal(key.length, 120, "every inline key sits at the identity cap");
+      assert.ok(key.endsWith("\u2026"), "every inline key cut is visible");
+    }
+    const sharedKeys = inlineKeys.filter((key) => key.startsWith("--" + "s".repeat(117)));
+    assert.equal(sharedKeys.length, 1, "names sharing a cut prefix collapse to one key");
     assert.equal(
-      styles.matches[0].inline[inlineKeys[0]].length,
+      styles.matches[0].inline[sharedKeys[0]],
+      "first",
+      "deterministic: the first declaration wins",
+    );
+    assert.equal(
+      styles.matches[0].inline["--" + "d".repeat(117) + "\u2026"],
+      "third",
+      "a distinct prefix keeps its own key",
+    );
+    const longPropertyKey = inlineKeys.find((key) => key.startsWith("--" + "n".repeat(117)));
+    assert.equal(
+      styles.matches[0].inline[longPropertyKey].length,
       200,
       "inline value still capped at 200",
     );

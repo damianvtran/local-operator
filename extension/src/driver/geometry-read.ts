@@ -19,11 +19,11 @@
  * 3. ALL caps, truncation and rounding happen INSIDE these functions, because
  *    the result crosses a process boundary (isolated world -> worker -> daemon
  *    -> tool) and the bound must exist at the SOURCE: 5 style matches, 30
- *    computed properties per element, 120-char identity strings and inline
- *    property names, 200-char values, 30 inline custom properties, 8 hit-test
- *    elements, and a 16-entry ancestor chain (default 12). A page that stuffs a
- *    100 KB custom property into an inline style must shrink it HERE, not at the
- *    model's door.
+ *    computed properties per element, 120-char identity strings (tag, id, role,
+ *    class) and inline property names, 200-char values, 30 inline custom
+ *    properties, 8 hit-test elements, and a 16-entry ancestor chain (default
+ *    12). A page that stuffs a 100 KB custom property into an inline style must
+ *    shrink it HERE, not at the model's door.
  *
  * 4. SHARED RESULT-SHAPE DECISIONS, because a second implementation reads this
  *    file as the source of truth:
@@ -37,17 +37,20 @@
  *      fabricates an empty-looking success.
  *    - `role` is the element's explicit `role` attribute ("" when absent).
  *      Implicit roles need the accessibility tree, which is `snapshot`'s job.
- *    - The three string identity fields — `id`, `role`, `className` — are ALL
- *      clipped at 120 characters (the ellipsis marks a cut), because each is a
- *      page-controlled attribute that can hold megabytes and all three leave
- *      the page with the result: the bound must exist before the isolated-world
- *      boundary, not be discovered in `ToolResult.details` where
- *      `BROWSER_TEXT_LIMIT_CHARS` cannot reach it. `tag` is a fixed vocabulary
- *      and needs no cap. The `inline` map's property-name KEYS take that same
- *      cap: a CSSOM name is page-controlled too (`setProperty` accepts an
- *      arbitrarily long `--…` ident) and the key crosses the same boundary —
- *      the raw name still performs the value lookup, only the emitted key is
- *      clipped, and the value itself stays under the 200-char value cap.
+ *    - The four string identity fields — `tag`, `id`, `role`, `className` —
+ *      are ALL clipped at 120 characters (the ellipsis marks a cut), because
+ *      each is a page-controlled string that can hold megabytes and all four
+ *      leave the page with the result: the bound must exist before the
+ *      isolated-world boundary, not be discovered in `ToolResult.details`
+ *      where `BROWSER_TEXT_LIMIT_CHARS` cannot reach it. `tag` is NOT exempt
+ *      as "known": custom-element names are page-chosen with no grammar length
+ *      bound (round-3 review measured a page reaching the reader with a
+ *      10,002-char `createElement` name), so it is clipped like the rest. The
+ *      `inline` map's property-name KEYS take that same cap: a CSSOM name is
+ *      page-controlled too (`setProperty` accepts an arbitrarily long `--…`
+ *      ident) and the key crosses the same boundary — the raw name still
+ *      performs the value lookup, only the emitted key is clipped, and the
+ *      value itself stays under the 200-char value cap.
  */
 
 export type GeometryRect = {
@@ -140,7 +143,8 @@ export const readStyles = (
   // characters because a computed value CAN be huge (`background-image` holding
   // a data URI is the pathological-but-real case) and this result leaves the
   // page. The identity strings share one 120-char cap for the same reason:
-  // `id`, `role` and the class list are page-controlled attributes too.
+  // `tagName` (custom-element names are page-chosen with no length bound),
+  // `id`, `role` and the class list are all page-controlled.
   const MAX_MATCHES = 5;
   const MAX_STYLES = 30;
   const MAX_INLINE = 30;
@@ -216,7 +220,7 @@ export const readStyles = (
       }
     }
     matches.push({
-      tag: el.tagName.toLowerCase(),
+      tag: clip(el.tagName.toLowerCase(), MAX_IDENTITY),
       id: attrOf(el, "id"),
       role: attrOf(el, "role"),
       className: attrOf(el, "class"),
@@ -242,8 +246,8 @@ export const hitTest = (x: number, y: number): HitTestResult | null => {
   // offsets a full styles read carries.
   const PROPS = ["display", "position", "visibility", "opacity", "z-index", "pointer-events"];
   const MAX_ELEMENTS = 8;
-  // The identity cap readStyles uses, for the same reason: id/role/class are
-  // page-controlled attribute strings and all three leave the page with this
+  // The identity cap readStyles uses, for the same reason: tag/id/role/class
+  // are all page-controlled strings and all four leave the page with this
   // result.
   const MAX_IDENTITY = 120;
   const MAX_VALUE = 200;
@@ -269,7 +273,7 @@ export const hitTest = (x: number, y: number): HitTestResult | null => {
     }
     const r = el.getBoundingClientRect();
     elements.push({
-      tag: el.tagName.toLowerCase(),
+      tag: clip(el.tagName.toLowerCase(), MAX_IDENTITY),
       id: attrOf(el, "id"),
       role: attrOf(el, "role"),
       className: attrOf(el, "class"),
@@ -320,8 +324,8 @@ export const ancestors = (selector: string, depth?: number): AncestorsResult | n
   ];
   const DEFAULT_DEPTH = 12;
   const MAX_DEPTH = 16;
-  // The identity cap readStyles uses (see there): every chain entry's id/role/
-  // class crosses the same boundary.
+  // The identity cap readStyles uses (see there): every chain entry's tag/id/
+  // role/class crosses the same boundary.
   const MAX_IDENTITY = 120;
   const MAX_VALUE = 200;
   const el = document.querySelector(selector);
@@ -347,7 +351,7 @@ export const ancestors = (selector: string, depth?: number): AncestorsResult | n
     }
     const r = node.getBoundingClientRect();
     chain.push({
-      tag: node.tagName.toLowerCase(),
+      tag: clip(node.tagName.toLowerCase(), MAX_IDENTITY),
       id: attrOf(node, "id"),
       role: attrOf(node, "role"),
       className: attrOf(node, "class"),
