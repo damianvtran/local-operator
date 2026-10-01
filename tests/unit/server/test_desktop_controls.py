@@ -843,7 +843,7 @@ async def test_provider_census_publishes_the_registry_view(desktop):
     token_plan = next(row for row in rows if row["id"] == "alibaba-token-plan")
     assert token_plan["brand"] == "QwenCloud", "the one explicit override"
     elevenlabs = next(row for row in rows if row["id"] == "elevenlabs")
-    assert elevenlabs["capabilities"] == ["stt"], "the wire fact behind speech_only"
+    assert elevenlabs["capabilities"] == ["stt", "tts"], "the wire fact behind speech_only"
     ollama = next(row for row in rows if row["id"] == "ollama")
     assert ollama["state"] == "local_unconfigured"
     # Sorted for a stable wire: the registry field is a frozenset.
