@@ -317,22 +317,20 @@ def test_the_report_block_is_spelled_in_exactly_one_place() -> None:
         "credential_expires_at": NOW + 1000,
         "last_authenticated_at": NOW,
     }
-    # The ROW's field order is the frozen one too: the constant is a tuple and the
-    # block above is built from it, so a reordering in one place is a reordering
-    # everywhere (ADR §3.2's literals write them in this order).
-    assert push_credentials.REPORT_DEVICE_FIELDS == (
-        "device_id",
-        "credential_live",
-        "credential_expires_at",
-        "last_authenticated_at",
-    )
+    # The row is emitted THROUGH the frozen tuple, so its order is the constant's
+    # order — this asserts the wiring rather than restating the literal, which
+    # lives in exactly one cell (`test_the_wire_names_are_the_frozen_ones`, where
+    # the document is the subject). Two copies of the literal would be two places
+    # to edit when the freeze moves, and a rebind that updated one of them would
+    # read as a pass (review round 1, NIT).
     assert list(row) == list(push_credentials.REPORT_DEVICE_FIELDS)
 
 
 def test_the_wire_names_are_the_frozen_ones() -> None:
     """Every machine→cloud name, against the ADR §3.2 freeze — verbatim.
 
-    The freeze is `damianvtran/local-operator-mobile` **`b03aeb1`** (§3.2's three
+    The freeze is `damianvtran/local-operator-mobile`
+    **`b03aeb15fcbff64c5bbd0c4117713a0285c28554`** (§3.2's three
     literals and its field table; §3.1 freezes the emit route as the ONE emit
     route and says S3 must not freeze two). A wire name is the one part of this
     module whose change breaks a CONTRACT rather than a test, so the strings
