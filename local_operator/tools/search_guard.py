@@ -28,21 +28,34 @@ hold, so the legitimate shapes pass untouched:
 
 1. its first word is a recursive-capable search binary
    (``grep egrep fgrep rg ripgrep ag ack find fd locate``) — ``git grep`` is
-   exempt because it is structured and honours .gitignore;
+   exempt because it is structured and honours .gitignore — or a walker that
+   needs no recursive flag at all (``du``, which descends by construction and
+   with no operand starts at ``.``);
 2. a recursive flag is present (``-r``/``-R``/bundled ``-rn``), or it is
    ``find``/``fd`` with a name/type/path predicate and no ``-maxdepth``;
 3. the search *root* is unbounded: no path operand at all, or a path that is
    ``.``/``./``/``..``/``/``/``~``, a bare glob, an unresolved ``$VAR``/``$(...)``,
-   or a known-heavy directory (``node_modules``, ``.git``, ``out``, ...).
+   a known-heavy directory (``node_modules``, ``.git``, ``out``, ...), the
+   SESSION STORE (``~/.local-operator`` and its ``sessions`` subtree), or a
+   REPOSITORY ROOT (a resolved directory holding ``.git`` or ``node_modules``
+   as a direct child).
 
 A single named file, a scoped directory (``grep -rn PATTERN src/``), a piped
 stage that reads stdin (``... | grep -v node_modules``, ``... | rg PATTERN``) and
 a quoted mention (``echo "grep -rn x ."``) all pass. So does ``find``/``fd``
 against a NAMED directory (``find ~/Downloads -name '*.png'``) — the author chose
-that scope, and only ``.``/``/``/``~``/a known-heavy dir counts as unbounded.
-Those are exactly the false-positive classes the tests pin, and the segment
-splitter is quote- and escape-aware so shell syntax the model writes never reads
-as a second command.
+that scope — and, at an unbounded/store/repo root, any ``find``/``fd`` that is
+SHALLOW or TIME-BOUNDED (``-maxdepth``, or ``-mmin``/``-mtime``/``-newer``):
+``find ~/.local-operator/sessions -maxdepth 2 -name transcript.jsonl -mmin -720``
+is the shape agents should write, so it passes. Those are exactly the
+false-positive classes the tests pin, and the segment splitter is quote- and
+escape-aware so shell syntax the model writes never reads as a second command.
+
+The two new root classes exist because "a named directory is the author's own
+scope" is true for ``~/Downloads`` and false for a checkout or the store: a walk
+of either is the multi-minute query this guard family exists to stop, and the
+store one has an API (the ``sessions`` tool, and the digest index behind
+``/resume``) that answers the same question in milliseconds.
 
 Escape hatch: prepend ``LOCAL_OPERATOR_ALLOW_UNBOUNDED_SEARCH=1`` to the command
 to run it as written. That is a per-call grant read off the command itself, so
@@ -53,6 +66,7 @@ from __future__ import annotations
 
 import os
 import re
+from dataclasses import dataclass
 
 #: The env var an agent sets inline to run an unbounded search as written.
 ALLOW_ENV = "LOCAL_OPERATOR_ALLOW_UNBOUNDED_SEARCH"
@@ -114,6 +128,97 @@ _IMPLICITLY_RECURSIVE = frozenset({"rg", "ripgrep", "ag", "ack"})
 #: pipe filter: `fd`/`locate` always walk. `find` is added to this reasoning by
 #: its own predicate branch rather than the flag scan.
 _ALWAYS_RECURSIVE = frozenset({"fd", "locate"})
+
+#: Programs that walk the tree BY CONSTRUCTION and have no recursive flag to
+#: scan for. `du` sums disk usage as it descends and, given no operand at all,
+#: starts at `.` exactly as `find` does — which is why it is a walker here and
+#: not a plain command. Kept OUT of ``SEARCH_PROGRAMS`` (whose members all have a
+#: recursion flag the classifier reads) and folded into :data:`ALL_PROGRAMS`
+#: instead, so the shared predicates that *are* flag-driven never see it.
+WALK_BY_CONSTRUCTION = frozenset({"du"})
+
+#: Every program this guard's ROOT rules apply to. A root class (store, repo,
+#: unbounded) is a property of the PATH, not of the program, so it is decided
+#: once and shared by the whole family.
+ALL_PROGRAMS = SEARCH_PROGRAMS | WALK_BY_CONSTRUCTION
+
+#: ``fd``'s own spelling of a depth bound (``-d N``, ``--max-depth N``). Accepted
+#: for ``fd`` ALONE: in GNU ``find``, ``-depth`` is post-order traversal — it
+#: changes the ORDER of the walk, not its size, so accepting ``-d`` for `find`
+#: would trade a refusal for a slower walk.
+_FD_DEPTH_RE = re.compile(r"(?<![\w-])(?:-d|--max-depth)(?![\w-])")
+
+#: A LITERAL duration, for the wrapper peel below (``timeout 300 find …``).
+_DURATION_RE = re.compile(r"^\d+(?:\.\d+)?[smhd]?$")
+
+#: Programs that run ANOTHER command, so the command word is theirs and not the
+#: first word's. Without this the guards have a blind spot precisely where an
+#: agent already knows it is about to be slow: `timeout 300 find / …`,
+#: `sudo find / …`, `env X=1 grep -rn …` all read as their wrapper (review m2).
+#: `bash -c`/`sh -c` are handled separately, because their argument is a COMMAND
+#: STRING that has to be parsed again rather than skipped.
+WRAPPER_WORDS = frozenset({"timeout", "sudo", "env", "time", "nice", "command", "nohup", "xargs"})
+
+#: Short flags of a wrapper that take their value as the NEXT token, so the value
+#: is not read as the command word (``timeout -s KILL 300 find …``).
+_WRAPPER_VALUE_FLAGS: dict[str, frozenset[str]] = {
+    "timeout": frozenset({"s", "k"}),
+    "sudo": frozenset({"u", "g", "p", "C", "h", "r", "t", "U", "D"}),
+    "nice": frozenset({"n"}),
+    "xargs": frozenset({"I", "n", "P", "s", "L", "a", "d", "E"}),
+}
+
+#: The same, spelled long and with a space rather than an ``=``.
+_WRAPPER_LONG_VALUE_FLAGS = frozenset(
+    {
+        "--signal",
+        "--kill-after",
+        "--user",
+        "--group",
+        "--prompt",
+        "--chdir",
+        "--adjustment",
+        "--max-args",
+        "--max-lines",
+        "--max-chars",
+        "--delimiter",
+        "--arg-file",
+    }
+)
+
+#: Shells whose ``-c`` argument is a command string. Their inner text is parsed
+#: with the SAME rules, recursively — the wrapper an agent reaches for to make a
+#: loop carry an inline grant (review Q3/m2).
+_SHELL_C_WORDS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "ash"})
+
+#: The deepest a ``bash -c '…'`` chain is followed. Bounded because the nesting is
+#: written by the model, not by us: a guard that recurses without a floor can be
+#: made to recurse for as long as the command is long.
+_MAX_PEEL_DEPTH = 3
+
+#: The store's directory name and the env var that can relocate it. Deliberately
+#: a literal rather than an import of ``local_operator.paths``: this module is a
+#: leaf (stdlib only) so the guard can be reasoned about — and tested — without
+#: the config layer, and ``paths.config_dir()`` resolves exactly these two terms.
+STORE_DIRNAME = ".local-operator"
+#: The subtree that actually holds conversations. The store class is scoped to it
+#: (plus the root itself) rather than to the whole config root — see
+#: :func:`_is_store_root`.
+_SESSIONS_DIRNAME = "sessions"
+CONFIG_DIR_ENV = "LOCAL_OPERATOR_CONFIG_DIR"
+#: The agent's scratch tree. It lives UNDER the store (``sessions/<id>/scratchpad``
+#: on this install, or wherever ``LOCAL_OPERATOR_SCRATCHPAD`` points), and it is
+#: the one part of the store an agent is TOLD to work in — so it is exempt from
+#: the store class rather than lumped in with the transcripts (review M4).
+SCRATCHPAD_DIRNAME = "scratchpad"
+SCRATCHPAD_ENV = "LOCAL_OPERATOR_SCRATCHPAD"
+#: A store root written as a shell would spell it: ``~/.local-operator``,
+#: ``$HOME/.local-operator`` or ``${HOME}/.local-operator``. Checked before the
+#: unresolved rule so the STORE nudge (which names the `sessions` tool) is what
+#: the model reads, instead of the generic unresolved-root one. The TAIL decides
+#: whether it is the store: the root itself and ``sessions/`` are, and a smaller
+#: child (``skills/``, ``attachments/``, the scratchpad) is not.
+_STORE_STR_RE = re.compile(r"^(?:~|\$HOME|\$\{HOME\})/\.local-operator")
 
 #: A heredoc opener: `<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"`.
 _HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
@@ -331,22 +436,117 @@ def _unquote(token: str) -> str:
 
 
 def _program(segment: str) -> str | None:
-    """The first word of a segment, unquoted and path-stripped (``/usr/bin/rg`` -> ``rg``)."""
-    word, _ = _read_word(segment)
-    if not word:
+    """The command word of a segment, unquoted, path-stripped and wrapper-peeled.
+
+    ``/usr/bin/rg`` -> ``rg``; ``timeout 300 find`` -> ``find``. The peel is what
+    closes the wrapper blind spot (review m2) — see :func:`_peel`.
+    """
+    program, _rest = _peel(segment)
+    return program
+
+
+def _peel(segment: str) -> tuple[str | None, str]:
+    """``(command word, text after it)`` with leading wrappers dropped.
+
+    Both guards read the command word, and both were reading the WRAPPER's: an
+    agent that writes ``timeout 300 find / …`` — which is what it does when it
+    suspects the search is slow — got a clean bill of health. The peel skips a
+    wrapper and its own flags, values and assignments, so the word that is
+    classified is the one that walks.
+
+    Best-effort by construction, and the failure mode is the OLD behaviour
+    (returning the wrapper word), never a block: an unparseable wrapper chain
+    returns what it has.
+    """
+    remainder, _assigns = _strip_env_assignments(segment)
+    text = remainder or segment
+    word, rest = _read_word(text)
+    for _ in range(_MAX_PEEL_DEPTH + 1):
+        literal = _unquote(word).strip()
+        if literal not in WRAPPER_WORDS:
+            return (os.path.basename(literal) or None), rest
+        rest = rest.lstrip()
+        value_flags = _WRAPPER_VALUE_FLAGS.get(literal, frozenset())
+        while True:
+            token, after = _read_word(rest)
+            if not token:
+                return None, ""
+            spelling = _unquote(token)
+            if spelling.startswith("-") and spelling != "-":
+                takes_value = (len(spelling) == 2 and spelling[1] in value_flags) or (
+                    spelling in _WRAPPER_LONG_VALUE_FLAGS
+                )
+                rest = after.lstrip()
+                if takes_value:
+                    _value, rest = _read_word(rest)
+                    rest = rest.lstrip()
+                continue
+            if _DURATION_RE.match(spelling) or ("=" in spelling and not spelling.startswith("=")):
+                # A bare duration is `timeout`'s; an assignment is `env`'s. Both
+                # are the wrapper's own arguments, never the command word.
+                rest = after.lstrip()
+                continue
+            word, rest = token, after
+            break
+    return None, ""
+
+
+def _shell_c_inner(segment: str, *, depth: int = 0) -> str | None:
+    """The command string inside ``bash -c '…'`` / ``sh -c '…'``, or ``None``.
+
+    The wrapper whose argument is a COMMAND rather than a target: skipping it
+    would hide the loop behind the shell's own name, which is both the natural
+    way to write a compound command and the only way to hang an inline grant on
+    one (review Q3). Bounded by :data:`_MAX_PEEL_DEPTH`.
+    """
+    if depth > _MAX_PEEL_DEPTH:
         return None
-    return os.path.basename(_unquote(word))
+    remainder, _assigns = _strip_env_assignments(segment)
+    text = remainder or segment
+    word, rest = _read_word(text)
+    literal = _unquote(word).strip()
+    if os.path.basename(literal) not in _SHELL_C_WORDS:
+        return None
+    rest = rest.lstrip()
+    while True:
+        token, after = _read_word(rest)
+        spelling = _unquote(token)
+        if not token:
+            return None
+        if spelling in ("-c", "--command"):
+            inner, _tail = _read_word(after.lstrip())
+            inner = inner.strip()
+            return inner or None
+        if not spelling.startswith("-"):
+            # `bash script.sh` — a SCRIPT, not a command string. Nothing to parse.
+            return None
+        rest = after.lstrip()
+
+
+def _is_file_like(path: str) -> bool:
+    """Does the final segment read as a FILENAME rather than a directory?
+
+    A single named file is never a tree walk, even under a heavy directory:
+    ``grep -rn foo build/notes.txt`` and ``grep -rn foo .worktrees/wt/src/x.py``
+    read one file, and the fleet reads worktrees by path every day (review M1).
+    Recognised by a filename suffix on the last segment, so a bare directory name
+    (``node_modules``) and a trailing slash (``node_modules/``) still read as
+    directories, and a dotfile (``.gitignore``) does too.
+    """
+    p = _unquote(path).strip()
+    parts = [seg for seg in re.split(r"[/\\]", p) if seg and seg != "."]
+    if not parts:
+        return False
+    last = parts[-1]
+    return bool(re.search(r"\.[A-Za-z0-9]{1,6}$", last)) and not last.startswith(".")
 
 
 def _is_unbounded_root(path: str) -> bool:
-    """Is ``path`` a search root that reaches the whole tree rather than a part of it?
+    """Is ``path`` a root that reaches the whole tree rather than a part of it?
 
-    A single named FILE is never a tree walk, even under a heavy directory:
-    ``grep -rn foo build/notes.txt`` and ``grep -rn foo .worktrees/wt/src/x.py``
-    read one file, and the fleet reads worktrees by path every day (review M1).
-    A file is recognised by a filename suffix on the last segment, so a bare
-    directory name (``node_modules``) and a trailing slash (``node_modules/``)
-    still read as directories.
+    This is the STRING rule only — the store and repository classes are decided
+    by :func:`_classify_root`, which calls this last so an existing verdict is
+    never lost to a probe.
     """
     p = _unquote(path).strip()
     if not p or _UNRESOLVED_RE.search(p):
@@ -360,26 +560,230 @@ def _is_unbounded_root(path: str) -> bool:
     parts = [seg for seg in re.split(r"[/\\]", p) if seg and seg != "."]
     if not parts:
         return True
-    # A filename (a dot in the final segment, and not a dotfile) is a FILE, so it
-    # is read rather than walked — never a tree walk regardless of its directory.
-    last = parts[-1]
-    if re.search(r"\.[A-Za-z0-9]{1,6}$", last) and not last.startswith("."):
+    # A filename is read, not walked — never a tree walk whatever it sits in.
+    if _is_file_like(p):
         return False
     return any(part in HEAVY_DIRS for part in parts)
 
 
-def _search_reason(segment: str) -> str | None:
-    """The reason this segment is an unbounded search, or None if it is fine."""
-    program = _program(segment)
-    if program is None or program not in SEARCH_PROGRAMS:
+def _resolve(path: str) -> str | None:
+    """Best-effort absolute path for a CONCRETE operand, or ``None``.
+
+    ``$VAR``/``$(...)``/backtick roots return ``None`` so the unresolved rule
+    keeps them: expanding them here would guess at the shell's environment and
+    could classify a path the command will not actually walk. Nothing here
+    raises — a path this layer cannot even make absolute is simply not a
+    candidate for the filesystem probes below.
+    """
+    p = _unquote(path).strip()
+    if not p or _UNRESOLVED_RE.search(p):
+        return None
+    try:
+        return os.path.abspath(os.path.expanduser(p))
+    except Exception:  # noqa: BLE001 — a path this layer cannot read is not a block
         return None
 
-    rest = segment
-    # Drop the program word itself, then any leading env assignments before it.
-    remainder, _assigns = _strip_env_assignments(segment)
-    if remainder:
-        rest = remainder
-    _, rest = _read_word(rest)  # consumes the program word
+
+def _store_roots() -> tuple[str, ...]:
+    """This machine's session-store roots, most specific first.
+
+    Resolved per call rather than cached: the env var is read from the
+    environment on every call by ``paths.config_dir()`` too, and a session can
+    set it inline — a cached root would then classify the store as bounded for
+    the rest of the process. ``STORE_DIRNAME`` mirrors ``paths.DEFAULT_CONFIG_DIRNAME``;
+    the two-term resolution (override, else ``$HOME``) mirrors ``paths.config_dir()``.
+    """
+    roots: list[str] = []
+    override = os.environ.get(CONFIG_DIR_ENV)
+    if override:
+        roots.append(os.path.abspath(os.path.expanduser(override)))
+    roots.append(os.path.join(os.path.expanduser("~"), STORE_DIRNAME))
+    return tuple(roots)
+
+
+def _is_store_root(path: str) -> bool:
+    """Does ``path`` name the part of the store that holds conversations?
+
+    NARROW ON PURPOSE (review M4). What this class exists for is the TRANSCRIPT
+    store: a walk of it is the multi-minute query, and the `sessions` tool answers
+    the same question in milliseconds. Everything else under the store root is an
+    ordinary directory an agent may reasonably search — ``skills/``,
+    ``attachments/``, ``agents/``, ``logs/``, the config file itself — and every
+    one of those PASSED before this class existed, so classing the whole root
+    would be a regression dressed as a guard.
+
+    So: the store root itself, and anything under ``<root>/sessions/``, with the
+    one exemption the agent is TOLD to work in — ``sessions/<id>/scratchpad/**``,
+    including the directory itself, and wherever ``LOCAL_OPERATOR_SCRATCHPAD``
+    points. A single named FILE is never a tree walk and passes, as it does under
+    a heavy directory.
+    """
+    p = _unquote(path).strip()
+    if not p or _is_file_like(p):
+        return False
+    if _is_scratchpad_path(p):
+        return False
+    literal = _STORE_STR_RE.match(p)
+    if literal is not None:
+        # A spelling we cannot resolve ($HOME): the TAIL decides, exactly as the
+        # resolved arm does — the root itself and `sessions/` are the store, and
+        # a smaller child is not.
+        tail = [seg for seg in p[literal.end() :].split("/") if seg]
+        return not tail or tail[0] == _SESSIONS_DIRNAME
+    resolved = _resolve(p)
+    if resolved is None:
+        return False
+    for root in _store_roots():
+        if resolved == root:
+            return True
+        if _is_under(resolved, os.path.join(root, _SESSIONS_DIRNAME)):
+            return True
+    return False
+
+
+def _is_under(path: str, root: str) -> bool:
+    """Is ``path`` the root itself, or inside it? Path-component exact."""
+    return path == root or path.startswith(root + os.sep)
+
+
+def _scratchpad_roots() -> tuple[str, ...]:
+    """Where ``LOCAL_OPERATOR_SCRATCHPAD`` points, when the variable is set.
+
+    Read per call rather than cached, like the store roots: a session sets it, and
+    a cached value would keep exempting a tree the current command is not in.
+    """
+    root = os.environ.get(SCRATCHPAD_ENV)
+    if not root:
+        return ()
+    try:
+        return (os.path.abspath(os.path.expanduser(root)),)
+    except Exception:  # noqa: BLE001 — an unreadable var is simply not a root
+        return ()
+
+
+def _is_scratchpad_path(path: str) -> bool:
+    """Is this the agent's own scratch tree rather than the transcript store?
+
+    Three spellings, because all three reach a real scratch read: the literal
+    ``$LOCAL_OPERATOR_SCRATCHPAD`` the harness prints at an agent, its resolved
+    path, and the ``sessions/<id>/scratchpad`` shape the store uses by default.
+    """
+    if path.startswith(f"${SCRATCHPAD_ENV}") or path.startswith(f"${{{SCRATCHPAD_ENV}}}"):
+        # The env spelling is the scratch tree exactly when the variable IS set;
+        # with it unset the unresolved rule still decides, which is the honest
+        # answer for a path this process cannot see.
+        return bool(os.environ.get(SCRATCHPAD_ENV))
+    resolved = _resolve(path)
+    if resolved is None:
+        return False
+    for root in _scratchpad_roots():
+        if _is_under(resolved, root):
+            return True
+    for root in _store_roots():
+        sessions = os.path.join(root, _SESSIONS_DIRNAME)
+        if not _is_under(resolved, sessions) or resolved == sessions:
+            continue
+        parts = resolved[len(sessions) + 1 :].split(os.sep)
+        if len(parts) >= 2 and parts[1] == SCRATCHPAD_DIRNAME:
+            return True
+    return False
+
+
+def _is_repo_root(path: str) -> bool:
+    """Does ``path`` resolve to a checkout whose walk hits vendored trees?
+
+    The probe is BEST-EFFORT and its failure mode is "not a repo", which is the
+    whole safety property: a path that is absent, is a file, or cannot be
+    stat'd falls back to the string rules and is never itself a reason to block.
+    A guard that refused a command because ``os.path.isdir`` raised would start
+    blocking legitimate searches on a host with an unreadable mount or a
+    dangling symlink, which is a worse failure than missing one repo root.
+    """
+    resolved = _resolve(path)
+    if resolved is None:
+        return False
+    try:
+        if not os.path.isdir(resolved):
+            return False
+        # `.git` is a DIRECTORY in a normal checkout and a FILE in a linked
+        # worktree, so it is tested with exists(); node_modules is a directory
+        # or it is not the tree the exclusion list is about.
+        return os.path.exists(os.path.join(resolved, ".git")) or os.path.isdir(
+            os.path.join(resolved, "node_modules")
+        )
+    except OSError:
+        return False
+
+
+def _classify_root(path: str) -> str | None:
+    """The class of an unbounded root (``store``/``repo``/``unbounded``), else None.
+
+    STRING rules first, then the filesystem probe. The order is what keeps the
+    MESSAGE honest: ``du -sh ~`` is an unbounded root because the author wrote
+    ``~``, not because this host happens to have a checkout under it, and a
+    message that called it "a repository root" was simply wrong (review m3).
+    The probe may only ever ADD a class, never relabel one the string rules
+    already reached.
+    """
+    if _is_scratchpad_path(path):
+        # BOUNDED, not merely unclassed: the scratch spelling is often a `$VAR`,
+        # which the unresolved rule below would otherwise call unbounded — and the
+        # whole point of the exemption is that the tree an agent is TOLD to work
+        # in is searchable (review M4).
+        return None
+    if _is_store_root(path):
+        return "store"
+    if _is_unbounded_root(path):
+        return "unbounded"
+    if _is_repo_root(path):
+        return "repo"
+    return None
+
+
+def _is_depth_bounded(rest: str, program: str) -> bool:
+    """Is this find-family walk bounded by DEPTH?
+
+    Depth is the only bound that makes a walk smaller. A time filter does not:
+    ``find`` still visits and stats every entry and filters afterwards, so
+    ``-mmin``/``-mtime``/``-newer`` prune the OUTPUT, not the walk — measured on
+    the real store, same predicate, ``find ~/.local-operator/sessions -name
+    transcript.jsonl -mmin -720`` took 41.7 s against 2.3 s with ``-maxdepth 2``
+    (review M3, and ``-atime``/``-ctime``/``-anewer`` are "older than" filters
+    that select MORE of the tree, not less). So the relaxation is depth-only, and
+    the measured shape still passes because it carries ``-maxdepth`` too.
+    """
+    if _MAXDEPTH_RE.search(rest):
+        return True
+    return program == "fd" and bool(_FD_DEPTH_RE.search(rest))
+
+
+@dataclass(frozen=True)
+class _Reason:
+    """Why a segment is blocked, plus the advice that fits THAT class.
+
+    A dataclass rather than a bare string because the class decides the fix: a
+    repo-root grep wants the `grep` tool, a store-root walk wants the `sessions`
+    tool, and `du` wants `df`. One flat message would either say nothing useful
+    or name a tool that does not do the job (`grep` cannot replace `du`).
+    """
+
+    text: str
+    advice: tuple[str, ...]
+    allow_env: str = ALLOW_ENV
+
+
+def _search_reason(segment: str) -> _Reason | None:
+    """The reason this segment is an unbounded search, or None if it is fine."""
+    # `_peel` consumes the env assignments, the command word and any wrapper
+    # chain, so `timeout 300 find /` is judged as `find` and its operands are read
+    # from the text AFTER the word that walks (review m2).
+    program, rest = _peel(segment)
+    if program is None:
+        return None
+    if program in WALK_BY_CONSTRUCTION:
+        return _walker_reason(program, segment)
+    if program not in SEARCH_PROGRAMS:
+        return None
     if not rest.strip():
         # Bare `grep` with no arguments reads stdin / errors — not a tree walk.
         return None
@@ -397,21 +801,135 @@ def _search_reason(segment: str) -> str | None:
     else:
         recursive = bool(_RECURSIVE_SHORT_RE.search(rest) or _RECURSIVE_LONG_RE.search(rest))
     is_find = program in ("find", "fd", "locate")
-    if not recursive:
-        if not (is_find and _FIND_PREDICATE_RE.search(rest) and not _MAXDEPTH_RE.search(rest)):
-            return None
+    if not recursive and not is_find:
+        return None
 
     # Operand tokens after the pattern: flags and their arguments are skipped.
     paths = _path_operands(rest, program)
-    unbounded = [p for p in paths if _is_unbounded_root(p)]
-    # A recursion with NO explicit path operand searches the cwd (`.`); for `fd`
-    # and `locate`, which default to a whole-disk / index scan, that is worse
-    # still, so the same substitution applies (QA Q3).
-    if not paths:
-        unbounded = ["."]
-    if not unbounded:
+
+    if is_find:
+        # The FIND FAMILY is judged on its roots first, because a DEPTH bound makes
+        # an otherwise unbounded root acceptable — and that decision has to happen
+        # BEFORE the predicate rule below, or a bounded walk with no `-maxdepth`
+        # spelled the predicate's way would still be refused.
+        roots = paths or ["."]
+        for root in roots:
+            cls = _classify_root(root)
+            if cls is None:
+                continue
+            if _is_depth_bounded(rest, program):
+                return None
+            return _Reason(
+                text=_root_text(program, root, cls, walking=True), advice=_advice("find", cls)
+            )
+        # Every root is BOUNDED — the author named a scope, and at a named scope
+        # the existing predicate rule already said this is fine (`find ~/Downloads
+        # -name '*.png'` is a legitimate bounded search). No new block is added
+        # here: the depth rule above only ever RELAXES what the root classes would
+        # otherwise refuse, it never refuses a named root.
         return None
-    return f"`{program}` recurses from an unbounded root ({', '.join(unbounded[:2])})"
+
+    if not recursive:
+        return None
+    # Every candidate root is classified, not just string-matched: the store and
+    # repository classes are decided by a probe, and a grep rooted at either is
+    # the walk this guard exists to stop.
+    for root in paths or ["."]:
+        cls = _classify_root(root)
+        if cls is None:
+            continue
+        return _Reason(
+            text=_root_text(program, root, cls, walking=False),
+            advice=_advice("grep", cls),
+        )
+    return None
+
+
+def _walker_reason(program: str, segment: str) -> _Reason | None:
+    """The du-shaped arm: a walker with no recursive flag and no depth escape.
+
+    ``du`` descends by construction, and given no operand at all it starts at
+    ``.`` exactly as ``find`` does — so the ROOT is the whole decision, and there
+    is no ``-maxdepth`` rule to apply because the tool's own ``-d``/``--max-depth``
+    is a reporting bound rather than a walk bound the string layer can vouch for.
+    """
+    _, rest = _peel(segment)
+    if not rest.strip():
+        # `du` with no operand: walks the cwd.
+        return _Reason(
+            text=_root_text(program, ".", "unbounded", walking=True), advice=_advice("du", None)
+        )
+    paths = _path_operands(rest, program) or ["."]
+    for root in paths:
+        cls = _classify_root(root)
+        if cls is None:
+            continue
+        return _Reason(text=_root_text(program, root, cls, walking=True), advice=_advice("du", cls))
+    return None
+
+
+#: How each root class reads in a refusal. `the session store` is spelled out
+#: rather than left as the raw path because the useful information is WHICH
+#: store the walk would read, not the string the model already typed.
+_ROOT_WORDS = {
+    "store": "the session store",
+    "repo": "a repository root",
+    "unbounded": "an unbounded root",
+}
+
+
+def _root_text(program: str, root: str, cls: str | None, *, walking: bool) -> str:
+    kind = _ROOT_WORDS.get(cls or "unbounded", "an unbounded root")
+    verb = "walks" if walking else "recurses from"
+    return f"`{program}` {verb} {kind} ({root})"
+
+
+#: The advice bullets, kept as named constants because the same sentence is
+#: quoted in tests and in the AGENTS.md inventory — a copy that drifted would be
+#: a second definition of what the escape hatch is called.
+_GREP_TOOL_BULLET = (
+    "use the `grep` tool — it is recursive, honours .gitignore, prunes those "
+    "trees, and is far faster (glob for filename patterns);"
+)
+_NARROW_BULLET = "narrow the path, e.g. `grep -rn PATTERN src/` instead of `.`;"
+_SESSIONS_BULLET = (
+    "search the stored conversations with the `sessions` tool (its stored-session "
+    "search and `peek`) or the `/resume` picker — both read a digest index, not "
+    "every transcript, so the answer arrives in milliseconds;"
+)
+_BOUND_BULLET = (
+    "bound the walk: `find ... -maxdepth N` or a time filter (`-mmin -60`), or use "
+    "the `glob` tool for a filename pattern;"
+)
+_DU_BULLET = (
+    "scope it, e.g. `du -sh <dir>` (add `-d 1` to keep the reporting shallow) "
+    "rather than a whole tree;"
+)
+_DF_BULLET = "use `df -h` for filesystem headroom — it answers that without walking anything."
+
+
+def _advice(family: str, cls: str | None) -> tuple[str, ...]:
+    """The actionable bullets for a refusal, by tool family and root class.
+
+    The STORE class leads with the `sessions` tool in every family: it is the
+    only advice that answers the question the walk was asked, and for `du` it is
+    the only one that is about conversations at all. The family then decides
+    what else is true — `grep`/`glob` for content search, `df` for sizes, and
+    never `grep` for `du`, which no search tool can replace.
+    """
+    store = cls == "store"
+    if family == "du":
+        return (_SESSIONS_BULLET, _DU_BULLET, _DF_BULLET) if store else (_DU_BULLET, _DF_BULLET)
+    if family == "find":
+        return (_SESSIONS_BULLET, _BOUND_BULLET) if store else (_BOUND_BULLET,)
+    return (
+        (_SESSIONS_BULLET, _GREP_TOOL_BULLET, _NARROW_BULLET)
+        if store
+        else (
+            _GREP_TOOL_BULLET,
+            _NARROW_BULLET,
+        )
+    )
 
 
 #: Short flags that take a value as the NEXT token; that token is not a path.
@@ -469,9 +987,12 @@ def _path_operands(rest: str, program: str) -> list[str]:
         return out
     # The pattern is the first non-flag word for grep-family and for `fd`/`locate`
     # (both take `PATTERN [PATH...]`), unless a pattern flag supplied it. `find`
-    # takes no pattern, so its first bare word is already a path.
+    # takes no pattern, so its first bare word is already a path — and `du` is
+    # the same shape as `find`: every bare word it takes is a PATH, so treating
+    # its first word as a pattern would swallow `du -sh src` and read it as
+    # "no operand, walks the cwd".
     skip_next = False
-    pattern_consumed = program == "find"
+    pattern_consumed = program in ("find", "du")
     for raw in words:
         if skip_next:
             skip_next = False
@@ -595,6 +1116,7 @@ def check_search_interception(
     *,
     enabled: bool = True,
     block_unbounded: bool = True,
+    _depth: int = 0,
 ) -> str | None:
     """Return a block message when ``command`` is an unbounded search, else None.
 
@@ -602,14 +1124,33 @@ def check_search_interception(
     leaves the caller to warn-and-run rather than refuse. The inline
     ``LOCAL_OPERATOR_ALLOW_UNBOUNDED_SEARCH`` grant is read per SEGMENT, so an
     agent can grant it to one command without a config change.
+
+    ``bash -c '…'``/``sh -c '…'`` are PARSED, not skipped (review m2/Q3): the
+    argument is a command string, so it is checked with these same rules — the
+    wrapper is how a compound command is written, and it must not be a way to
+    hide one. The grant on the wrapping segment carries into the inner command,
+    which is what makes ``ALLOW=1 bash -c '<search>'`` the working form for it.
     """
-    if not enabled:
+    if not enabled or _depth > _MAX_PEEL_DEPTH:
         return None
     for segment, piped in _segments(command):
         if _is_git_grep(segment):
             continue
         stripped, assigns = _strip_env_assignments(segment)
         if not stripped:
+            continue
+        inner = _shell_c_inner(stripped)
+        if inner is not None:
+            if _truthy(assigns.get(ALLOW_ENV)):
+                continue
+            nested = check_search_interception(
+                inner,
+                enabled=enabled,
+                block_unbounded=block_unbounded,
+                _depth=_depth + 1,
+            )
+            if nested is not None:
+                return nested
             continue
         program = _program(stripped)
         if piped and program in _STDIN_FILTER_PROGRAMS and not _has_path_operand(stripped):
@@ -638,10 +1179,9 @@ def _has_path_operand(segment: str) -> bool:
     Used only to decide whether a PIPED stage is a stream filter or a real walk:
     `... | grep -v node_modules` has no operand, `cat f | grep -rn p .` does.
     """
-    program = _program(segment)
+    program, rest = _peel(segment)
     if program is None or program not in SEARCH_PROGRAMS:
         return False
-    _, rest = _read_word(segment)
     return bool(_path_operands(rest, program))
 
 
@@ -649,17 +1189,22 @@ def _truthy(value: str | None) -> bool:
     return value is not None and value.strip().lower() not in ("", "0", "false", "no", "off")
 
 
-def _block_message(reason: str, command: str, *, blocked: bool) -> str:
-    """The refusal, stated so the model can act on it rather than guess."""
+def _block_message(reason: _Reason, command: str, *, blocked: bool) -> str:
+    """The refusal, stated so the model can act on it rather than guess.
+
+    ``command`` is accepted for the caller's symmetry and deliberately unused:
+    echoing the command back would put a credential the model typed into a second
+    place for no gain, and the model already knows what it asked for.
+    """
+    del command
     verb = "blocked" if blocked else "warning"
-    return (
-        f"{verb}: {reason} — a recursive search from the repository root walks "
-        "vendored and generated trees (node_modules, .git, out) that will not contain "
-        "the answer, and has taken tens of seconds where a scoped search takes "
-        "milliseconds.\n"
-        "Do one of:\n"
-        "  - use the `grep` tool — it is recursive, honours .gitignore, prunes those "
-        "trees, and is far faster (glob for filename patterns);\n"
-        "  - narrow the path, e.g. `grep -rn PATTERN src/` instead of `.`;\n"
-        f"  - to run it exactly as written, prefix it with `{ALLOW_ENV}=1`."
-    )
+    lines = [
+        f"{verb}: {reason.text} — a recursive search from the repository root "
+        "walks vendored and generated trees (node_modules, .git, out) that will "
+        "not contain the answer, and has taken tens of seconds where a scoped "
+        "search takes milliseconds.",
+        "Do one of:",
+    ]
+    lines.extend(f"  - {item}" for item in reason.advice)
+    lines.append(f"  - to run it exactly as written, prefix it with `{reason.allow_env}=1`.")
+    return "\n".join(lines)

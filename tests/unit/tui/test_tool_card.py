@@ -3515,6 +3515,29 @@ def test_the_live_advisory_is_a_persistent_state_line_not_output() -> None:
     assert advisory_row < body.index("… ")
 
 
+def test_the_query_budget_advisory_paints_through_the_same_state_line() -> None:
+    """The SECOND producer on the same line (review M5).
+
+    The string here is the one ``query_budget.advisory_message`` actually builds,
+    and it is longer and differently punctuated than the memory line — so this is
+    the render half of "the advisory reaches the card", not a second copy of the
+    memory case.
+    """
+    from local_operator.tools.query_budget import advisory_message
+
+    card = ToolCard("t", "bash", {"command": "find . -name x"})
+    card._expanded = True
+    card.set_live_advisory(advisory_message(12.0, "`find`", 60))
+    card.set_partial_detail("a\nb\nc")
+
+    body = card._build_content(80).plain
+    assert "QUERY BUDGET" in body
+    # The card bounds the line at its width — what matters here is that the new
+    # producer's text reaches the STATE LINE (with the header), not the output.
+    assert "this shell query (`find`)" in body
+    assert body.index("QUERY BUDGET") > body.index(LIVE_HEADER_RUNNING)
+
+
 def test_the_live_advisory_is_cleared_on_settle_and_on_an_explicit_clear() -> None:
     """The state line does not outlive the condition."""
     card = ToolCard("t", "bash", {"command": "echo hi"})

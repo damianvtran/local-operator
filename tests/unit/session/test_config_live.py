@@ -49,6 +49,7 @@ from local_operator.providers.failover import RetrySettings
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 from local_operator.spawn.policy import fork_cmux_placement, fork_mode
+from local_operator.tools.query_budget import Budget
 
 MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
 
@@ -231,6 +232,17 @@ def _native_hooks(_watcher: ConfigWatcher) -> bool:
     from local_operator.hook_forwarding import native_hooks_enabled
 
     return native_hooks_enabled()
+
+
+def _query_budget(watcher: ConfigWatcher) -> Budget:
+    """The query budget as the tool reads it, through its own reader.
+
+    Same shape as ``_search_interception`` above: the reader is the contract, so
+    the probe observes the resolved budget rather than a raw mapping.
+    """
+    from local_operator.tools.builtin import _query_budget_config
+
+    return _query_budget_config()
 
 
 def _search_interception(watcher: ConfigWatcher) -> tuple[bool, bool, bool]:
@@ -608,6 +620,12 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     "tools.search_interception.enabled": (False, lambda s, w: _search_interception(w)[0]),
     "tools.search_interception.block": (False, lambda s, w: _search_interception(w)[1]),
     "tools.search_interception.rg_excludes": (False, lambda s, w: _search_interception(w)[2]),
+    # ``bash.query_budget.*`` is the same shape: read per ``bash`` call through a
+    # fresh ``ConfigManager`` (``builtin._query_budget_config``), so an edit lands
+    # on the next command. Observed through that reader, not the raw mapping.
+    "bash.query_budget.enabled": (False, lambda s, w: _query_budget(w).enabled),
+    "bash.query_budget.stop": (False, lambda s, w: _query_budget(w).stop),
+    "bash.query_budget.seconds": (17, lambda s, w: _query_budget(w).seconds),
     # ``shell_environment.*`` is deliberately NOT here (review round 1, M2): the
     # policy is resolved once per process, so it is a NEW-LAUNCH key and the
     # non-LIVE guard below is what covers it, from the other direction.

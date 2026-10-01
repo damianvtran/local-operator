@@ -52103,20 +52103,30 @@ def _partial_text(partial_result) -> str:
 
 
 def _partial_advisory(partial_result) -> str | None:
-    """The memory advisory carried on a streaming update, or ``None``.
+    """The bounded-work advisory carried on a streaming update, or ``None``.
 
-    A sibling of :func:`_partial_text` because the advisory is not output: it
+    A sibling of :func:`_partial_text` because an advisory is not output: it
     travels in the update's ``details`` (never in the text), so the card can
     paint it as a persistent state line instead of as a line the command printed
     (design review D1/D2). Absent details, or a non-string value, read as "no
     advisory" rather than raising — a card must never fail to render because a
     producer sent a shape it did not expect.
+
+    TWO producers, in a fixed rank: the memory guard's line first, then the soft
+    query budget's. They are different conditions (the device is short of RAM vs
+    this command is a wide filesystem walk) and either can be the only one set,
+    so the reader has to know both or one of them silently never reaches the
+    card — which is exactly what the query budget did before this line existed
+    (review M5: the advisory rode the result and nothing the human watched).
     """
     details = getattr(partial_result, "details", None)
     if not isinstance(details, dict):
         return None
-    value = details.get("memory_advisory")
-    return value if isinstance(value, str) and value else None
+    for key in ("memory_advisory", "query_budget_advisory"):
+        value = details.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 class _TreeRow(Text):
