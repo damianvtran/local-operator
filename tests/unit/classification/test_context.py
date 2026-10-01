@@ -288,6 +288,65 @@ def test_mcp_goes_before_guides_and_guides_before_skills() -> None:
     assert set(skills_only["candidates"]) == {"skills"}
 
 
+def test_tool_rows_drop_after_projects_and_before_mcp_servers() -> None:
+    """The ``tool`` kind's rung-3 position, pinned against BOTH neighbours.
+
+    After projects (a project line's absence is still the cheapest: the
+    request names the work) and before MCP servers: a tool line points at a
+    tool the session ALREADY holds — its schema rides every request — while
+    an MCP/guide/skill line points at content the model would otherwise not
+    read. The wire key is the contract's (``tools``), and both neighbour
+    orders stay put, which the two tests above pin from the other side.
+    """
+    candidates = (
+        roster("skill", 6, description="d" * 100)
+        + roster("guide", 6, description="d" * 100)
+        + roster("mcp", 6, description="d" * 100)
+        + roster("tool", 6, description="d" * 100)
+        + roster("project", 6, description="d" * 100)
+    )
+    keys = {
+        "skill": "skills",
+        "guide": "guides",
+        "mcp": "mcp_servers",
+        "tool": "tools",
+        "project": "projects",
+    }
+
+    def lines_of(kinds: tuple[str, ...]) -> dict[str, list[str]]:
+        return {
+            keys[kind]: [candidate_line(item, 60) for item in candidates if item.kind == kind]
+            for kind in kinds
+        }
+
+    size_all = size_of(
+        {"request": "hi", "candidates": lines_of(("skill", "guide", "mcp", "tool", "project"))}
+    )
+    size_no_project = size_of(
+        {"request": "hi", "candidates": lines_of(("skill", "guide", "mcp", "tool"))}
+    )
+    size_no_tool = size_of({"request": "hi", "candidates": lines_of(("skill", "guide", "mcp"))})
+    assert size_no_tool < size_no_project < size_all
+
+    everything = build_state(
+        user_message="hi", context=None, candidates=candidates, max_chars=size_all
+    )
+    assert set(everything["candidates"]) == {"skills", "guides", "mcp_servers", "tools", "projects"}
+
+    # One step tighter: projects go first, and the tool rows are still present.
+    no_project = build_state(
+        user_message="hi", context=None, candidates=candidates, max_chars=size_no_project
+    )
+    assert set(no_project["candidates"]) == {"skills", "guides", "mcp_servers", "tools"}
+
+    # One step tighter than that: the tool kind is the second thing to give back,
+    # and the MCP servers are still present.
+    no_tool = build_state(
+        user_message="hi", context=None, candidates=candidates, max_chars=size_no_tool
+    )
+    assert set(no_tool["candidates"]) == {"skills", "guides", "mcp_servers"}
+
+
 def test_projects_go_before_mcp_because_their_lines_are_the_largest() -> None:
     """§8: the ladder spends the project kind first — drop-first is the honest
     priority when budget has to be given back.
