@@ -421,6 +421,22 @@ class AskQueue:
         self._refresh()
         self._kick()
 
+    def _reclaim_closed_drafts(self, records: Sequence[Mapping[str, Any]]) -> None:
+        """Drop in-flight taps for asks the FOLD no longer calls ``open``.
+
+        The deadline is a DERIVED status (``store.fold`` reads the clock), so
+        nothing is written when it elapses and :meth:`_settled` — the reclaim
+        site for the three transitions that DO append a row — never runs for it.
+        Reclaiming on the fold instead is what keeps a tap from outliving the ask
+        it belongs to, and ``reconcile`` is the path a deadline is observed on:
+        the armed ``ask_timeout`` wake fires it, and the boot drain reconciles
+        with it. A draft is not a durable fact, so dropping it returns the ask to
+        the state its log already states — closed.
+        """
+        for record in records:
+            if record.get("status") != store.STATUS_OPEN:
+                self._drafts.pop(str(record.get("ask_id")), None)
+
     def _kick(self) -> None:
         """Ask the session to reconcile soon. Best-effort, no loop required.
 
@@ -464,6 +480,12 @@ class AskQueue:
         # what keeps the live paths off the marker read entirely.
         marker = self._deliberate_stop_marker() if load_time else None
         records, present = self._fold_state(now)
+        # Before anything is delivered or published: this is the fold that can
+        # show an ask CLOSED by its deadline, and a tap for it must not ride the
+        # rows this reconcile goes on to publish (see
+        # :meth:`_reclaim_closed_drafts` for why the deadline needs its own
+        # reclaim site).
+        self._reclaim_closed_drafts(records)
         timeouts: list[tuple[int, CustomMessage]] = []
         responses: list[tuple[int, CustomMessage]] = []
         for record in records:
@@ -726,11 +748,20 @@ class AskQueue:
             expires_at = int(record.get("expires_at") or 0)
             if expires_at and stamp - expires_at > horizon_ms:
                 continue
-            rows.append(
-                store.pending_row(
-                    record, self._drafts.get(str(record.get("ask_id"))) if drafts else None
-                )
+            # A DRAFT IS PUBLISHED ONLY FOR AN OPEN ASK (review round 2's one new
+            # minor). Two reasons, and the first is the one that shows on the
+            # wire: the mirrored card that consumes this field is open-only, so
+            # the tap names a question nobody can still be offered; and the
+            # deadline is a DERIVED status, so between the deadline elapsing and
+            # the next ``reconcile`` the row already folds as ``timed_out`` while
+            # the tap is still in memory — publishing it there would state an
+            # in-flight answer for an ask the user can no longer answer.
+            draft = (
+                self._drafts.get(str(record.get("ask_id")))
+                if drafts and status == store.STATUS_OPEN
+                else None
             )
+            rows.append(store.pending_row(record, draft))
         rows.sort(
             key=lambda row: (
                 row.get("status") != store.STATUS_OPEN,
