@@ -2563,8 +2563,9 @@ _PROJECT_ROSTER_LIMIT = 12
 #: One project roster row's description bound (§8's "(truncated)"; the design
 #: states the cap exists and not its size). 160 is this repo's one scannable-row
 #: precedent — ``_ROW_CAP`` in the team/agent/project tools, cited by the design
-#: for `/project list` — applied so a 240-char project description cannot crowd
-#: the other kinds' lines out of the state before the ladder's own trimming runs.
+#: for `/project list` — applied so a cap-sized (2000-char) project description
+#: cannot crowd the other kinds' lines out of the state before the ladder's own
+#: trimming runs.
 _PROJECT_ROSTER_DESCRIPTION_LIMIT = 160
 
 

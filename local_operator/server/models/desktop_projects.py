@@ -45,6 +45,7 @@ from local_operator.projects import (
     ProjectStatus,
     milestone_status,
     progress_is_stale,
+    truncate_row,
 )
 
 
@@ -137,6 +138,13 @@ class ProjectSummary(BaseModel):
 
     id: str
     name: str
+    #: Clamped to ``PROJECT_ROW_CAP`` CELLS (the same ``truncate_row`` the TUI's
+    #: list rows and the tool's ``op='list'`` rows use) — a LISTING row is not
+    #: the place to carry a 2000-char markdown plan, and the raised description
+    #: cap (#1815) made the unclamped field a real payload: measured 20 rows
+    #: went 13,605 -> 48,805 chars on the desktop listing. The FULL text is the
+    #: detail view's job (``ProjectView.description``, ``GET .../{key}``), which
+    #: is a separate model and is NOT clamped (QA round 1, Q1).
     description: str = ""
     owner: str | None = None
     team: str | None = None
@@ -361,12 +369,18 @@ def project_view(project: Project, *, window: float | None = None) -> ProjectVie
 def project_summary(
     project: Project, *, live_sessions: int, window: float | None = None
 ) -> ProjectSummary:
-    """The compact wire row, with the counts the list/board render."""
+    """The compact wire row, with the counts the list/board render.
 
+    ``description`` is clamped to the same 160 CELLS the TUI's list rows and
+    the tool's ``op='list'`` rows use: the listing is a scan surface, and the
+    raised description cap (#1815) otherwise pays for a full markdown plan per
+    row on every list/board poll (QA round 1, Q1). The detail view serves the
+    full text from its own model.
+    """
     return ProjectSummary(
         id=project.id,
         name=project.name,
-        description=project.description,
+        description=truncate_row(project.description),
         owner=project.owner,
         team=project.team,
         title=project.title,
