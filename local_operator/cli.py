@@ -4573,6 +4573,14 @@ _CODE_PEER_UNREACHABLE = "peer_unreachable"
 #: that was reached and declined.
 _CODE_RELAY_REFUSED = "relay_refused"
 
+#: The code for "a local-store SET filter (``--failed``/``--paused``) was combined
+#: with a mesh listing flag". The two ask different questions and the wire cannot
+#: join them: a remote catalogue row carries no ``completion_kind``, so the mesh
+#: half would come back unfiltered — a silently wider answer than the flag
+#: promises. Refusing is the honest answer until the remote row shape carries an
+#: outcome to filter on (deferred; see the PR thread).
+_CODE_FILTER_LOCAL_ONLY = "filter_local_only"
+
 #: The refusal for the one case where the sentence's OWN module is what is
 #: missing: `network.cli` could not be imported, so this device's mesh code — not
 #: its relay process — is the reason no peer could be asked. Named rather than
@@ -4988,6 +4996,47 @@ def sessions_command(args: argparse.Namespace) -> int:
     if getattr(args, "failed", False):
         selected_kinds |= FAILED_OUTCOME_KINDS
 
+    # The flag NAMES the user actually gave, built once: the set-aware empty
+    # message and the mesh refusal below both name them rather than the whole
+    # pair. Order is the reading order (failed, then paused).
+    set_flags = [
+        flag
+        for flag, on in (
+            ("--failed", getattr(args, "failed", False)),
+            ("--paused", getattr(args, "paused", False)),
+        )
+        if on
+    ]
+
+    # A SET FILTER AND A MESH LISTING ASK DIFFERENT QUESTIONS, and the wire
+    # cannot join them: a remote catalogue row carries no ``completion_kind``
+    # (the mesh row shape predates the sets), so ``--peer``/``--all-peers``
+    # would hand back rows the filter never examined — an answer silently wider
+    # than the flag promises (review round 1, R2). Refuse the combination
+    # rather than quietly widen the question; each half is exact on its own.
+    mesh_flags = [
+        flag
+        for flag, on in (
+            ("--peer", bool(getattr(args, "peer", None))),
+            ("--all-peers", bool(getattr(args, "all_peers", False))),
+        )
+        if on
+    ]
+    if selected_kinds and mesh_flags:
+        message = (
+            f"{'/'.join(set_flags)} filter the local store by outcome kind and cannot be "
+            f"combined with {'/'.join(mesh_flags)}: a remote row carries no outcome to "
+            "filter on. Drop the mesh flag to see the local set, or the set flag to "
+            "list peers."
+        )
+        if args.json:
+            # ``--json`` means the caller parses this, so a refusal is a document
+            # (the same shape the mesh refusal below uses).
+            print(_json.dumps({"ok": False, "code": _CODE_FILTER_LOCAL_ONLY, "message": message}))
+        else:
+            print(message, file=sys.stderr)
+        return 1
+
     rows = session_rows(
         config_dir(),
         include_stored=args.all or bool(selected_kinds),
@@ -5063,7 +5112,16 @@ def sessions_command(args: argparse.Namespace) -> int:
         # `--all` asked about the STORE as well as the fleet; the live-only
         # empty line would answer a question the user did not ask (review
         # round 1, MINOR-5). The default listing keeps its established copy.
-        print("no lop sessions (live or stored)" if args.all else "no active lop sessions")
+        #
+        # A SET FILTER ASKS ABOUT THE STORE TOO, and the live-fleet line would be
+        # not just unhelpful but FACTUALLY FALSE on a store whose live sessions
+        # simply are not members — the plain listing shows sessions the filter's
+        # "no active sessions" line denies exist (review round 1, R1; QA round 1,
+        # Q2, reproduced independently). Name the set that came up empty.
+        if selected_kinds:
+            print(f"no stored sessions match {' or '.join(set_flags)}")
+        else:
+            print("no lop sessions (live or stored)" if args.all else "no active lop sessions")
         return 0
 
     # NEEDS is the column this release adds, and it earns its width: a parked

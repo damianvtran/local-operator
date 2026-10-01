@@ -19,6 +19,7 @@ import json
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 from local_operator import cli
 from local_operator.info.collect import (
@@ -27,6 +28,7 @@ from local_operator.info.collect import (
     session_rows,
     stored_sessions_by_outcome,
 )
+from local_operator.resume import recent_sessions
 from local_operator.session.attention import AttentionStore
 
 
@@ -111,7 +113,12 @@ def test_a_member_older_than_the_cap_still_appears(tmp_path: Path) -> None:
     _session(tmp_path, "f" * 12, age_s=10_000.0)  # the oldest, and the only failure
     _publish(tmp_path, "f" * 12, "error", reason="killed")
 
-    unfiltered = stored_sessions_by_outcome(tmp_path, frozenset(), limit=50)
+    # THE CONTROL IS A REAL CAP, not an empty set: ``frozenset()`` matches
+    # nothing BY CONSTRUCTION, so an assert on it would pass under a
+    # cap-before-filter mutant too and discriminate nothing (review round 1,
+    # R3). ``recent_sessions(..., 50)`` is the plain capped listing the filter
+    # is measured against, so this line actually establishes "outside the cap".
+    unfiltered = recent_sessions(tmp_path, 50)
     assert "f" * 12 not in {session_id for session_id, _ in unfiltered}, "outside the plain cap"
 
     matched = stored_sessions_by_outcome(tmp_path, FAILED_OUTCOME_KINDS, limit=50)
@@ -230,3 +237,102 @@ def test_a_store_without_an_attention_db_is_in_neither_set(tmp_path: Path) -> No
     _session(tmp_path, "a" * 12, age_s=100.0)
     assert stored_sessions_by_outcome(tmp_path, FAILED_OUTCOME_KINDS) == []
     assert stored_sessions_by_outcome(tmp_path, PAUSED_OUTCOME_KINDS) == []
+
+
+def test_an_empty_set_names_the_set_not_the_live_fleet(
+    tmp_path: Path, monkeypatch: Any, capsys: Any
+) -> None:
+    """THE EMPTY-MESSAGE CELL (review round 1, R1; QA round 1, Q2).
+
+    A set filter asks about the STORE, so the live-fleet line ("no active lop
+    sessions") is not just unhelpful but false on a store that HAS live
+    sessions, none of which are set members. The message must name the flag(s)
+    the user gave. Both-independent: the live listing's own copy is unchanged.
+    """
+    monkeypatch.setattr("local_operator.info.collect.session_rows", lambda root, **kwargs: [])
+    monkeypatch.setattr(cli, "config_dir", lambda: tmp_path)
+
+    def run(**flags: Any) -> tuple[int, str]:
+        namespace = {
+            "json": False,
+            "sessions_command": None,
+            "all": False,
+            "limit": None,
+            "paused": False,
+            "failed": False,
+        }
+        namespace.update(flags)
+        code = cli.sessions_command(argparse.Namespace(**namespace))
+        return code, capsys.readouterr().out
+
+    code, out = run(failed=True)
+    assert code == 0
+    assert "no stored sessions match --failed" in out
+    assert "no active lop sessions" not in out
+
+    code, out = run(paused=True)
+    assert "no stored sessions match --paused" in out
+
+    code, out = run(failed=True, paused=True)
+    assert "no stored sessions match --failed or --paused" in out
+
+    # The unfiltered listing's own copy is untouched, so the existing surface
+    # (and its tests) cannot drift.
+    code, out = run()
+    assert code == 0
+    assert "no active lop sessions" in out
+
+
+def test_a_set_filter_refuses_the_mesh_flags(tmp_path: Path, monkeypatch: Any, capsys: Any) -> None:
+    """THE MESH-BYPASS CELL (review round 1, R2).
+
+    A remote catalogue row carries no ``completion_kind``, so ``--peer`` /
+    ``--all-peers`` cannot be filtered — the combination is refused rather than
+    answered wider than the flag promises. Each half stays usable alone.
+    """
+    monkeypatch.setattr(cli, "config_dir", lambda: tmp_path)
+
+    def run(**flags: Any) -> tuple[int, str, str]:
+        namespace = {
+            "json": False,
+            "sessions_command": None,
+            "all": False,
+            "limit": None,
+            "paused": False,
+            "failed": False,
+            "peer": None,
+            "all_peers": False,
+        }
+        namespace.update(flags)
+        code = cli.sessions_command(argparse.Namespace(**namespace))
+        captured = capsys.readouterr()
+        return code, captured.out, captured.err
+
+    code, out, err = run(failed=True, peer="build-box")
+    assert code == 1
+    assert "--failed" in err and "--peer" in err
+    assert "local store" in err and "no outcome to filter on" in err
+    assert out == "", "a refusal is not a listing"
+
+    code, out, err = run(paused=True, all_peers=True)
+    assert code == 1
+    assert "--paused" in err and "--all-peers" in err
+
+    # ``--json`` callers parse the answer, so a refusal is a document there.
+    code = cli.sessions_command(
+        argparse.Namespace(
+            json=True,
+            sessions_command=None,
+            all=False,
+            limit=None,
+            paused=False,
+            failed=True,
+            peer="build-box",
+            all_peers=False,
+        )
+    )
+    document = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert document["ok"] is False
+    assert document["code"] == "filter_local_only"
+    assert "cannot be combined with --peer" in document["message"]
