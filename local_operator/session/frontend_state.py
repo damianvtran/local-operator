@@ -7514,6 +7514,21 @@ def context_block_numbers(data: dict[str, int], total: int) -> dict[str, int]:
     return numbers
 
 
+def slash_capabilities() -> list[SlashCapability]:
+    """The capability table, as a PUBLIC seam for callers outside this module.
+
+    ``frontend_state`` owns the one classification of every advertised slash
+    command (``FRONTEND_LOCAL`` vs ``AUTHORITATIVE_SESSION``), and other modules
+    need it to answer "can this surface run that command?" — the phone's sheet,
+    which offers only the routed set (issue #1869). They must not reach for the
+    private name to do it: a leading underscore is a promise the next refactor of
+    THIS module is free to break, and the phone's catalogue is not this module's
+    to keep in step (review round 1, R1-5). A thin delegate rather than a second
+    implementation, so there is still exactly one rule.
+    """
+    return _slash_capabilities()
+
+
 def _slash_capabilities() -> list[SlashCapability]:
     # Imported lazily so module import remains headless-safe; a full frontend
     # store needs the authoritative registry rather than a duplicated name list.

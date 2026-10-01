@@ -40,8 +40,8 @@ import {
 	usePinMarks,
 	useSessions,
 } from "../store";
+import { WideViewButton } from "../components/wide-view-button";
 import { applyTheme, getTheme, THEMES } from "../theme";
-import { applyWideView, getWideView } from "../lib/viewport";
 import { shortenHome } from "../lib/format";
 import { MARK_DATA_URI } from "../lib/mark";
 import { clampPinReason, pinRefusalReason } from "../lib/pin-refusal";
@@ -822,7 +822,6 @@ export function SessionListScreen() {
 	const pinMarks = usePinMarks();
 	const [home, setHome] = useState("");
 	const [themeOpen, setThemeOpen] = useState(false);
-	const [wide, setWide] = useState(getWideView);
 	/* The Projects sheet lives over THIS screen (the design's "reachable from the
 	   sessions screen"), next to the other footer entries. Its state is local:
 	   nothing on the list changes when the sheet opens, and the sheet re-reads
@@ -1277,27 +1276,12 @@ export function SessionListScreen() {
 				>
 					◐
 				</button>
-				{/* WIDE VIEW (issue #1870): the ONE control for the reading width. A
-				    toggle rather than a sheet because it is a single on/off with a
-				    persisted default of off; `aria-pressed` carries the state to
-				    assistive tech and the accent carries it to everyone else. Lives
-				    here, beside the theme, because it is the same kind of preference
+				{/* WIDE VIEW (issue #1870): the same control the session screen's
+				    header carries — one component, so the label and the pressed state
+				    cannot drift between the two places a reader can reach it. Lives
+				    here beside the theme because it is the same kind of preference
 				    (per-phone, persisted, not content). */}
-				<button
-					type="button"
-					onClick={() => {
-						applyWideView(!wide);
-						setWide(!wide);
-					}}
-					aria-label="wide view"
-					aria-pressed={wide}
-					className={cn(
-						"flex min-h-11 min-w-11 items-center justify-center rounded-md border bg-surface select-none active:bg-elevated",
-						wide ? "border-accent text-accent" : "border-control text-ink-muted",
-					)}
-				>
-					⇔
-				</button>
+				<WideViewButton />
 			</footer>
 			<ThemePicker open={themeOpen} onClose={() => setThemeOpen(false)} />
 			<ProjectsSheet open={projectsOpen} onClose={() => setProjectsOpen(false)} />

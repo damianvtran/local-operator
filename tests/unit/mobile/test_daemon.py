@@ -2511,23 +2511,131 @@ def test_a_routed_slash_answer_carries_its_words_to_the_phone(tmp_path, monkeypa
             json={"op": "slash_result", "command": command, "args": args, "images": []},
         )
 
-    outcomes.append({"kind": "notice", "text": "goal set", "style": "info", "data": {}})
+    # A completed mutation: the runtime NAMES it, so the receipt is a success.
+    outcomes.append(
+        {"kind": "notice", "text": "goal set", "style": "info", "data": {"type": "goal_set"}}
+    )
     said = run("goal", "ship it")
-    assert said.status_code == 200 and said.json() == {"ok": True, "detail": "goal set"}
+    assert said.status_code == 200
+    assert said.json() == {
+        "ok": True,
+        "detail": "goal set",
+        "tone": "success",
+        "refused": False,
+    }
 
+    # ``/context``: the two-slot shape. The rows are folded rather than dropped.
     outcomes.append(
         {"kind": "block", "text": "", "data": {"items": [["Messages", "~0"], ["Total", "~4k"]]}}
     )
     assert run("context").json()["detail"] == "Messages: ~0 · Total: ~4k"
 
-    outcomes.append({"kind": "noop", "text": "", "data": {"type": "agent_list"}})
-    assert run("agent").json()["detail"] == "ran /agent"
+    # ``/team``: the THREE-slot shape the real producer emits
+    # (``serving.py``: ``(display, "Led by X · N members", description)``). This
+    # is the cell the old fixture could not catch: a two-slot-only fold answers
+    # ``ran /team`` here and drops the roster (review round 1, R1-1; QA Q1).
+    outcomes.append(
+        {
+            "kind": "block",
+            "text": "",
+            "data": {
+                "type": "team_list",
+                "items": [("Release", "Led by manager · 2 members", "ships the thing")],
+            },
+        }
+    )
+    team = run("team").json()
+    assert team["detail"] == "Release: Led by manager · 2 members", team
+    assert team["tone"] == "neutral"
 
-    # A refusal travels as one: 422 and the runtime's own sentence, not a 200.
-    outcomes.append({"kind": "error", "text": "A loop is already running", "data": {}})
+    # ``/mcp`` with servers: a block with NO items — the roster rides ``text``
+    # (the runtime composes it, because the terminal draws its own panel).
+    outcomes.append(
+        {"kind": "block", "text": "2 MCP servers: alpha, beta", "data": {"type": "mcp"}}
+    )
+    assert run("mcp").json()["detail"] == "2 MCP servers: alpha, beta"
+
+    # ``/agent``: the listing block the runtime now sends, same three-slot rows.
+    outcomes.append(
+        {
+            "kind": "block",
+            "text": "",
+            "data": {
+                "type": "agent_list",
+                "items": [("reviewer", "role · proactive", "reads a diff")],
+            },
+        }
+    )
+    assert run("agent").json()["detail"] == "reviewer: role · proactive"
+
+    # A noop (a listing the frontend owns) is not silent and claims nothing.
+    outcomes.append({"kind": "noop", "text": "", "data": {"type": "agent_list"}})
+    fallback = run("agent").json()
+    assert fallback["detail"] == "ran /agent" and fallback["tone"] == "neutral"
+
+    # A REFUSAL answers 200 with ``style="warning"``: the draft is kept and the
+    # line paints neutral, so it does not read as a success (design round 1, D1;
+    # UX round 1, U3).
+    outcomes.append(
+        {"kind": "notice", "text": "usage: /model <provider>/<model-id>", "style": "warning"}
+    )
+    refused_soft = run("model", "nope").json()
+    assert refused_soft["refused"] is True and refused_soft["tone"] == "neutral"
+
+    # A hard refusal travels as 422 carrying the typed code, like every other 422
+    # on this route (review round 1, R1-3).
+    outcomes.append(
+        {"kind": "error", "text": "A loop is already running", "data": {"code": "loop_busy"}}
+    )
     refused = run("loop", "x")
     assert refused.status_code == 422
-    assert refused.json() == {"error": "A loop is already running"}
+    assert refused.json() == {"error": "A loop is already running", "code": "loop_busy"}
+
+    # An error outcome with no code is still a 422 with the sentence.
+    outcomes.append({"kind": "error", "text": "command failed", "data": {}})
+    bare = run("loop", "x")
+    assert bare.status_code == 422 and bare.json() == {"error": "command failed"}
+
+    # A hundred-row roster is one bounded notice line, not a screen of text.
+    outcomes.append(
+        {
+            "kind": "block",
+            "text": "",
+            "data": {
+                "type": "team_list",
+                "items": [(f"team-{i}", "Led by m · 1 member") for i in range(200)],
+            },
+        }
+    )
+    long_line = run("team").json()["detail"]
+    assert len(long_line) <= 400 and long_line.endswith("\u2026")
+    assert long_line.startswith("team-0: Led by m · 1 member")
+
+
+def test_the_phone_catalogue_drops_terminal_only_vocabulary() -> None:
+    """The sheet's copy is read on a TOUCH device (UX round 1, U5).
+
+    The registry's descriptions are written for a terminal: ``/effort``'s
+    "(shift+tab cycles)" names a key chord a phone cannot send, and ``/rename``
+    teaches ``/title --refresh`` — a flag whose only reason to be spelled out is
+    the terminal help table. Both are rewritten for the phone; every other row
+    ships the registry's words unchanged, so this stays an exception list rather
+    than a second catalogue.
+    """
+    from local_operator.slash_commands import SLASH_COMMANDS
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    described = {row["name"]: row["description"] for row in daemon.slash_commands()}
+
+    assert "shift+tab" not in described["effort"]
+    assert "/title" not in described["rename"]
+    # Everything else is still the registry's own words — the pin that keeps this
+    # from quietly becoming a parallel copy.
+    registry = {cmd.name: cmd.description for cmd in SLASH_COMMANDS}
+    overridden = {"effort", "rename"}
+    for name, description in described.items():
+        expected = description if name in overridden else registry[name]
+        assert description == expected, name
 
 
 def test_the_two_viewport_meta_copies_agree_and_match_the_runtime_constant() -> None:
