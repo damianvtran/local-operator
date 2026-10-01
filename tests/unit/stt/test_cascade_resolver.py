@@ -37,6 +37,13 @@ class FakeStore:
             raise RuntimeError("store unavailable")
         return bool(self.keys.get(provider))
 
+    async def get_persisted_api_key(self, provider, session_id=None, *, kinds=None):
+        """Rung 3's probe AND call-time seam: the key, from persisted rows only."""
+        self.probe_calls.append((provider, session_id))
+        if self.raises:
+            raise RuntimeError("store unavailable")
+        return self.keys.get(provider)
+
 
 def _no_radient(monkeypatch, *, present: bool = False):
     async def fake(_config_dir, _base_url, *, store=None):
@@ -98,7 +105,7 @@ async def test_elevenlabs_alone(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_openai_alone(monkeypatch) -> None:
     _no_radient(monkeypatch)
-    resolution = await _resolve(FakeStore({"openai": "oai-key"}))
+    resolution = await _resolve(FakeStore({"openai-key": "oai-key"}))
     assert resolution.path == AudioPath.PROVIDER_STT_OPENAI
 
 
@@ -106,7 +113,7 @@ async def test_openai_alone(monkeypatch) -> None:
 async def test_radient_wins_over_every_later_rung(monkeypatch) -> None:
     _no_radient(monkeypatch, present=True)
     resolution = await _resolve(
-        FakeStore({"elevenlabs": "el-key", "openai": "oai-key"}),
+        FakeStore({"elevenlabs": "el-key", "openai-key": "oai-key"}),
         model=_model(True),
     )
     assert resolution.path == AudioPath.PROVIDER_STT_RADIENT
@@ -116,7 +123,7 @@ async def test_radient_wins_over_every_later_rung(monkeypatch) -> None:
 async def test_elevenlabs_wins_over_openai_and_model_audio(monkeypatch) -> None:
     _no_radient(monkeypatch)
     resolution = await _resolve(
-        FakeStore({"elevenlabs": "el-key", "openai": "oai-key"}), model=_model(True)
+        FakeStore({"elevenlabs": "el-key", "openai-key": "oai-key"}), model=_model(True)
     )
     assert resolution.path == AudioPath.PROVIDER_STT_ELEVENLABS
 
@@ -166,7 +173,7 @@ async def test_the_rung_order_is_the_frozen_cascade_order() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "keys",
-    [{}, {"elevenlabs": "k"}, {"openai": "k"}, {"elevenlabs": "k", "openai": "k"}],
+    [{}, {"elevenlabs": "k"}, {"openai-key": "k"}, {"elevenlabs": "k", "openai-key": "k"}],
 )
 @pytest.mark.parametrize("radient_present", [False, True])
 @pytest.mark.parametrize("model_capable", [None, False, True])
@@ -191,7 +198,7 @@ async def test_probes_are_read_only_and_carry_the_session(monkeypatch) -> None:
     # The probe (``has_persisted_credential``) fixes ``read_only`` itself, so the
     # resolver's contract is "ask the probe, carry the session, never call the
     # call-time cascade": ``calls`` is empty.
-    assert store.probe_calls == [("elevenlabs", "sess-1"), ("openai", "sess-1")]
+    assert store.probe_calls == [("elevenlabs", "sess-1"), ("openai-key", "sess-1")]
     assert store.calls == []
 
 

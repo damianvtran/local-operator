@@ -34,6 +34,13 @@ class FakeStore:
             raise RuntimeError("store unavailable")
         return bool(self.keys.get(provider))
 
+    async def get_persisted_api_key(self, provider, session_id=None, *, kinds=None):
+        """Rung 3's probe AND call-time seam: the key, from persisted rows only."""
+        self.probe_calls.append((provider, session_id))
+        if self.raises:
+            raise RuntimeError("store unavailable")
+        return self.keys.get(provider)
+
 
 class FakeRadientClient:
     """Drop-in for ``RadientClient`` as the rung runner uses it (sync client)."""
@@ -190,7 +197,7 @@ async def test_all_rungs_fail_prefers_the_payment_refusal(rig) -> None:
     rig.behaviors["openai"]["error"] = APIError("up", status_code=500)
 
     with pytest.raises(cascade.SttUnavailable) as caught:
-        await rig.run({"elevenlabs": "el-key", "openai": "oai-key"})
+        await rig.run({"elevenlabs": "el-key", "openai-key": "oai-key"})
 
     exc = caught.value
     assert [attempt.outcome for attempt in exc.attempts] == ["failed", "failed", "failed"]
@@ -233,7 +240,7 @@ async def test_an_attempt_timeout_falls_forward(rig, monkeypatch) -> None:
     rig.behaviors["elevenlabs"]["delay"] = 5.0
     rig.behaviors["openai"]["text"] = "openai beats the stall"
 
-    outcome = await rig.run({"elevenlabs": "el-key", "openai": "oai-key"})
+    outcome = await rig.run({"elevenlabs": "el-key", "openai-key": "oai-key"})
     assert outcome.path == AudioPath.PROVIDER_STT_OPENAI
     assert outcome.text == "openai beats the stall"
     assert outcome.attempts[0].outcome == "failed"
@@ -265,7 +272,7 @@ async def test_the_overall_budget_skips_what_it_cannot_fund(rig, monkeypatch) ->
     rig.behaviors["elevenlabs"]["delay"] = 5.0
 
     with pytest.raises(cascade.SttUnavailable) as caught:
-        await rig.run({"elevenlabs": "el-key", "openai": "oai-key"})
+        await rig.run({"elevenlabs": "el-key", "openai-key": "oai-key"})
 
     attempts = caught.value.attempts
     assert [attempt.outcome for attempt in attempts] == ["failed", "skipped"]
@@ -337,7 +344,7 @@ async def test_the_token_executor_runs_only_the_named_rung(rig) -> None:
     fall-forward). The other BYO key is stored and still stays cold, which is
     the whole point of a token-targeted executor — a call can never land on a
     path the phone did not advertise."""
-    store = FakeStore({"elevenlabs": "el-key", "openai": "oa-key"})
+    store = FakeStore({"elevenlabs": "el-key", "openai-key": "oa-key"})
 
     outcome = await cascade.transcribe_backend(
         "provider_stt_elevenlabs",
@@ -411,7 +418,7 @@ async def test_the_token_executor_bounds_a_hung_rung_as_a_transport_failure(
             _WAV_BYTES,
             "audio/wav",
             config_dir=rig.audio_path.parent,
-            store=cast("AuthStore", FakeStore({"openai": "oa-key"})),
+            store=cast("AuthStore", FakeStore({"openai-key": "oa-key"})),
         )
     assert caught.value.status_code is None
     assert "did not respond within" in str(caught.value)
