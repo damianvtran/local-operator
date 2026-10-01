@@ -30,14 +30,28 @@ cannot drift apart.
 STATUS VOCABULARY (the pilot arm's record, not the sealed-bundle format).
 ``run_session_episode`` returns a :class:`SessionArmOutcome` with one of:
 ``completed`` (the model declared finish), ``agent_stop`` (the turn ended
-without a terminal batch), ``truncated`` (the step budget or the wall bound
-ended the run; the state reached is still scored), ``failed_pre_bundle`` (the
-environment never came up, including a REFUSAL TO START: the record sink
-refuses before ``launch`` when the volume cannot hold the expected record plus
-its seal reserve), ``failed`` (the run died mid-episode -- a bridge that could
-not re-establish its observation binding after a transport failure ends here
-too, with ``terminal_reason: "bridge-wedged"``, and never as ``agent_stop``,
-which reads as the model giving up).
+without a terminal batch), ``truncated`` (the step budget ended the run; the
+state reached is still scored), ``failed_pre_bundle`` (the environment never
+came up, including a REFUSAL TO START: the record sink refuses before
+``launch`` when the volume cannot hold the expected record plus its seal
+reserve), ``failed`` (the run died mid-episode -- a bridge that could not
+re-establish its observation binding after a transport failure ends here too,
+with ``terminal_reason: "bridge-wedged"``, and never as ``agent_stop``, which
+reads as the model giving up).
+
+``terminal_reason`` NAMES the ending and is never left ``None``: the
+terminalled paths carry ``finish`` / ``max-steps`` / ``bridge-wedged``; an
+``agent_stop`` carries the end-of-turn fact that ended the turn
+(``no-tool-call``, ``completion-claim``, ``empty-message``, ``provider-error``
+-- with the classified category in ``diagnostic`` -- ``no-progress``,
+``gate-stop``, ``wall-bound``, ``aborted``, ``stopped``, or a cut-off cause
+token such as ``continuation-limit``); a ``failed`` / ``failed_pre_bundle``
+carries the phase it died in (``environment-setup``, ``environment-allocation``,
+``record-sink``, ``session-arm``, else its exception class kebabed). The
+tokens are read from the shared end-of-turn vocabulary -- the final
+``agent_end`` frame, the terminal assistant message, the driver's own wall
+bound -- so no adapter-specific state is consulted (see
+``_agent_stop_terminal_reason`` and ``_failure_terminal_reason``).
 
 The record is a directory with ``events.jsonl`` (the session's own event
 stream, via ``headless_print.printable_event`` -- the same projection ``exec
@@ -135,6 +149,7 @@ from local_operator.evaluation.runner.provider_client import (
 )
 from local_operator.evaluation.runner.public_reply import tolerated_fields_note
 from local_operator.harness.types import (
+    AgentEndEvent,
     AgentEvent,
     ImageContent,
     Message,
@@ -142,6 +157,7 @@ from local_operator.harness.types import (
     TextContent,
 )
 from local_operator.headless_print import printable_event
+from local_operator.incidents import classify_incident, render_cut_off_reason
 from local_operator.mcp.config import load_all_mcp_configs
 from local_operator.mcp.tool_bridge import create_mcp_tool_name
 from local_operator.session.spec import ApprovalPolicy, SessionRoots, SessionSpec
@@ -801,6 +817,29 @@ class ActionBridge:
     @property
     def terminal(self) -> bool:
         return self._token is not None and self._token.terminal
+
+    @property
+    def last_assistant_message(self) -> Message | None:
+        """The last assistant message the stream ended on.
+
+        ``fold`` keeps it for the prose arm; the driver reads it back here so
+        an ``agent_stop``'s ``terminal_reason`` can name the message the turn
+        ended on without re-reading the record's ``events.jsonl``.
+        """
+
+        return self._last_assistant_message
+
+    @property
+    def completion_challenges_fired(self) -> int:
+        """How many completion-gate challenges this episode delivered.
+
+        One counter for BOTH arms -- the finish-call challenge and the prose
+        claim's -- exactly as the budget is one, so a reader of an
+        ``agent_stop`` can tell an ending that survived the gate from one the
+        gate never saw.
+        """
+
+        return self._completion_fired
 
     def _shown_blocks(self, observation: Observation) -> list[Any]:
         """The rendered state a finish can bind to, for the challenge.
@@ -1498,6 +1537,162 @@ def _first_record_failure(
     return errors[0] if errors else None
 
 
+#: The phases a dying run names, in the order that keeps the ACTIONABLE class
+#: when several ride one sentence. ``RpcRemoteError`` folds its structured
+#: cause into ``str()`` (see ``adapters/rpc.py``: anything invisible to ``str``
+#: never reaches the record), so the inner class -- the phase that died -- is
+#: what the record already SHOWS, and this scan reads that same sentence
+#: rather than a second representation of it.
+_FAILURE_REASON_MARKERS: tuple[tuple[str, str], ...] = (
+    ("EnvironmentSetupError", "environment-setup"),
+    ("UpstreamAllocationRefused", "environment-allocation"),
+    ("the record sink failed", "record-sink"),
+    ("SessionArmError", "session-arm"),
+)
+
+
+def _failure_terminal_reason(error: BaseException) -> str:
+    """The stable token naming why a run died before its record could close.
+
+    ``terminal_reason`` used to be ``None`` on every ``failed`` /
+    ``failed_pre_bundle`` outcome, so the record said a run died but never
+    where -- the same defect the ``agent_stop`` reasons fix, on the other
+    status that carried a ``None``. The token reads the SAME sentence the
+    diagnostic carries (the close-out's ``Class: message``), so a reader
+    bucketing on ``terminal_reason`` sees the phase and a reader reading the
+    diagnostic sees the phase's own words; an error that matches no known
+    phase falls back to its exception class, kebabed -- stable across runs,
+    and honest about being a class rather than an environment fact.
+    """
+
+    if isinstance(error, RecordSinkError):
+        return "record-sink"
+    rendered = f"{type(error).__name__}: {error}"
+    for marker, token in _FAILURE_REASON_MARKERS:
+        if marker in rendered:
+            return token
+    return re.sub(r"(?<!^)(?=[A-Z])", "-", type(error).__name__).lower()
+
+
+def _bounded_text(text: str, limit: int) -> str:
+    """One bounded, single-line excerpt for a diagnostic field.
+
+    Outcome fields stay summaries: the full text is in the record's
+    ``events.jsonl`` a line away, so the diagnostic carries enough to triage
+    from the outcome alone and no more.
+    """
+
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[: limit - 1].rstrip() + "…"
+
+
+def _bounded_text_keeping_tail(text: str, limit: int, *, tail: int) -> str:
+    """One bounded excerpt that keeps both ends of ``text``.
+
+    ``_bounded_text`` truncates from the END, which is right when the signal
+    leads. The repeated-error sentence inverts that: it OPENS with the
+    (roster-sized) tool-name list and ends with the reason the turn stopped
+    ("returned the same errors for N unchanged tool batches"), so a head-only
+    excerpt would drop the reason exactly when the roster grows. Same budget,
+    both ends kept; the full text stays in ``events.jsonl``.
+    """
+
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= limit:
+        return collapsed
+    head = collapsed[: limit - tail - 3].rstrip()
+    # Start the kept tail at a word boundary so the excerpt never opens
+    # mid-token; advancing only ever shortens it, so the budget holds.
+    start = len(collapsed) - tail
+    boundary = collapsed.find(" ", start)
+    kept = collapsed[boundary + 1 :] if boundary != -1 else collapsed[start:]
+    return f"{head} … {kept}"
+
+
+def _agent_stop_terminal_reason(
+    *,
+    wall_fired: bool,
+    end: AgentEndEvent | None,
+    message: Message | None,
+    challenges: int,
+) -> tuple[str, str | None]:
+    """Name why a turn ended with no terminal batch, plus the detail a reader needs.
+
+    THE RECORD USED TO SAY NOTHING. Every ending that is not a finish, a
+    truncation or a wedge fell through to ``status: "agent_stop"`` with
+    ``terminal_reason: None`` -- indistinguishable between the model stopping
+    on prose, the model claiming completion on prose, a message with nothing
+    in it, the wall bound, a cut-off, and a provider error. Arm 1796 re-derived
+    exactly that by hand, per record, from ``events.jsonl``, because a quarter
+    of its sample read as capability where it was infrastructure.
+
+    THE INPUTS ARE THE SHARED FACTS, never adapter state: the final
+    ``AgentEndEvent`` (``aborted`` / ``error`` / ``cut_off_cause`` -- the frame
+    the TUI, the phone and ``exec --json`` all read), the terminal assistant
+    message the bridge folds for the prose arm, and the driver's own wall
+    bound, whose abort reason never rides the event. Nothing here changes when
+    a turn ends, what it scored, or which status it lands in: the same episode
+    ends the same way, and the label only names which way that was.
+
+    Order is precedence: the wall bound is the driver's own act and outranks
+    whatever the provider was doing when it fired; a stamped cut-off cause
+    outranks the error text, because the session REWRITES an involuntary
+    cut-off into ``aborted=False, error=<cut-off notice>`` before any sink
+    sees it while the cause rides the same frame -- reading the error branch
+    first filed every cut-off as the provider's error (review round 1, R1-1);
+    else an error names the provider (classified through the shared incident
+    rules) or a host gate; an abort with no cause is named an abort; a clean
+    stop is read from the terminal message, the only account of it.
+    """
+
+    if wall_fired:
+        return "wall-bound", "the episode wall budget aborted the turn"
+    if end is None:
+        return "stopped", "the turn ended with no end-of-turn event recorded"
+    if end.cut_off_cause:
+        # BEFORE the error branch: the frame a sink sees for an involuntary
+        # cut-off is the session's rewrite (``aborted=False``, an error whose
+        # text reads like a provider failure) with the cause preserved beside
+        # it, so reading ``error`` first filed every cut-off as the
+        # provider's (review round 1, R1-1). The rewrite runs in
+        # ``Session._classify_cut_off`` before any handler is called, and
+        # "consumption on the end event is the established rule for this
+        # field" (session.py).
+        return end.cut_off_cause, _bounded_text(render_cut_off_reason(end.cut_off_cause), 400)
+    if end.error:
+        if end.error == "stopped by gate":
+            return "gate-stop", end.error
+        if end.error.startswith("No progress: "):
+            # The sentence names EVERY tool in the failing batch, so it grows
+            # with the model's roster (QA measured 4376 chars at 120 names);
+            # bound it like the siblings -- keeping the sentence's reason,
+            # which sits at its tail.
+            return "no-progress", _bounded_text_keeping_tail(end.error, 400, tail=140)
+        incident = classify_incident(end.error)
+        return "provider-error", _bounded_text(f"{incident.category}: {end.error}", 400)
+    if end.aborted:
+        return "aborted", "the turn was aborted and no cut-off cause was named"
+    if message is None:
+        return "empty-message", "the turn ended with no terminal assistant message"
+    text = (message.text or "").strip()
+    if not text:
+        # "no text content", not "no content" (QA round 1, Q-2): an image-only
+        # terminal message carried content; it just carried no text for this
+        # reader.
+        return "empty-message", "the terminal assistant message carried no text content"
+    note = f" (the completion gate challenged it {challenges} time(s))" if challenges else ""
+    if prose_claims_completion(text):
+        return "completion-claim", (
+            "the terminal message claims completion without acting: "
+            f"{_bounded_text(text, 200)!r}{note}"
+        )
+    return "no-tool-call", (
+        f"the terminal message carries no tool call: {_bounded_text(text, 200)!r}{note}"
+    )
+
+
 @dataclass(frozen=True)
 class SessionArmOutcome:
     """What happened in the pilot arm, and where its record lives."""
@@ -1507,6 +1702,12 @@ class SessionArmOutcome:
     record_root: Path | None
     score: Any | None = None
     steps: int = 0
+    #: The stable token naming why the run ended: ``finish`` / ``max-steps`` /
+    #: ``bridge-wedged`` on the terminalled paths; for an ``agent_stop`` or a
+    #: ``failed`` the reason read from the end-of-turn facts (see
+    #: ``_agent_stop_terminal_reason`` / ``_failure_terminal_reason``). Never
+    #: ``None`` on a returned outcome; a reader buckets on this rather than
+    #: re-deriving the ending from ``events.jsonl``.
     terminal_reason: str | None = None
     diagnostic: str | None = None
     rescue_required: bool = False
@@ -1574,6 +1775,7 @@ async def run_session_episode(
             status="failed_pre_bundle",
             episode_id=spec.episode_id,
             record_root=record_root,
+            terminal_reason="record-sink",
             diagnostic=error.sentence,
             duration_ms=int(time.time() * 1000) - started_ms,
         )
@@ -1735,6 +1937,14 @@ async def run_session_episode(
         #: The wedge stop: sent once, when the bridge ends the episode because
         #: its observation binding could not be re-established (see ``_sink``).
         wedge_stop_sent = False
+        #: Whether the wall bound fired (``_on_wall`` below). The driver's own
+        #: fact -- the abort reason never rides the end event -- and the
+        #: terminal-reason classifier reads it after the turn.
+        wall_fired = False
+        #: The LAST ``agent_end`` the sink saw: the shared statement of why the
+        #: episode's final turn ended, captured outside the record path so a
+        #: torn record cannot cost the outcome its reason.
+        last_turn_end: AgentEndEvent | None = None
         #: Bound by ``open_episode_session`` below; the sink reads it late
         #: (a wedge can only be set by a call, which only happens after the
         #: session is prompting, i.e. after this assignment).
@@ -1748,12 +1958,18 @@ async def run_session_episode(
             # event-fold error, a write after close) -- captured here, reported
             # in the outcome, and the run continues: a torn record stays
             # visible, and a paid episode is not lost to a logging fault.
-            nonlocal wedge_stop_sent
+            nonlocal wedge_stop_sent, last_turn_end
             try:
                 _on_event(record, bridge, event)
             except BaseException as error:  # noqa: BLE001 - see above
                 if not record_errors:
                     record_errors.append(error)
+            # The end frame is captured OUTSIDE the record path for the same
+            # reason the wedge stop is separated below: a torn record must not
+            # cost the outcome its terminal reason, and the reason is the run's
+            # own fact just like its status and steps.
+            if isinstance(event, AgentEndEvent):
+                last_turn_end = event
             # Separated from the record path deliberately: the stop below is
             # the driver's reaction to the WEDGE, not record bookkeeping, so a
             # raise in it must not read as a torn record (and a record error
@@ -1799,7 +2015,6 @@ async def run_session_episode(
             text, images = split_prompt_content(bridge.initial_blocks)
             prompt = PROMPT_HEADER.format(tool_name=declaration.tool_name) + "\n" + text
             wall_timer: asyncio.TimerHandle | None = None
-            wall_fired = False
 
             def _on_wall() -> None:
                 nonlocal wall_fired
@@ -1843,6 +2058,7 @@ async def run_session_episode(
 
         steps = bridge.steps
         terminal_reason = bridge.end_requested
+        stop_diagnostic: str | None = None
         if terminal_reason == "finish":
             status = "completed"
         elif terminal_reason == BRIDGE_WEDGED_TERMINAL:
@@ -1858,8 +2074,17 @@ async def run_session_episode(
         else:
             # The turn ended with no terminal batch. The runner calls the
             # close-equivalents of this an agent stop; the state reached is
-            # still scored, exactly as a truncation is.
+            # still scored, exactly as a truncation is -- and the reason now
+            # NAMES what ended it, where it used to be left unlabelled (see
+            # ``_agent_stop_terminal_reason``). Status, steps and score are
+            # untouched: only the record's account of the ending changes.
             status = "agent_stop"
+            terminal_reason, stop_diagnostic = _agent_stop_terminal_reason(
+                wall_fired=wall_fired,
+                end=last_turn_end,
+                message=bridge.last_assistant_message,
+                challenges=bridge.completion_challenges_fired,
+            )
 
         # --- score, then cleanup, then close (mirrors _close_out) -----------
         score: Any = None
@@ -1929,7 +2154,7 @@ async def run_session_episode(
         # session cannot score), so the wedge stays the reported diagnostic --
         # the root cause, not its sequel. Everywhere else a score failure is
         # the outcome's reason, exactly as before.
-        diagnostic = bridge.end_diagnostic
+        diagnostic = bridge.end_diagnostic or stop_diagnostic
         if score_error is not None:
             if terminal_reason != BRIDGE_WEDGED_TERMINAL:
                 raise score_error
@@ -1993,6 +2218,7 @@ async def run_session_episode(
             status="failed_pre_bundle" if adapter_session is None else "failed",
             episode_id=spec.episode_id,
             record_root=record_root,
+            terminal_reason=_failure_terminal_reason(error),
             diagnostic=f"{type(error).__name__}: {error}",
             rescue_required=rescue_required,
             rescue_complete=rescue_complete,
