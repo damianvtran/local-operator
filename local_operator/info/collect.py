@@ -277,6 +277,7 @@ def collect_sessions(
     now: float | None = None,
     include_stored: bool = False,
     stored_limit: int | None = None,
+    stored_kinds: frozenset[str] | None = None,
 ) -> SessionsInfo:
     """Every session on this machine, as ``lop sessions`` already describes them.
 
@@ -310,6 +311,15 @@ def collect_sessions(
     session for messaging either. ``stored_limit`` is the CLI's ``--limit``
     verbatim; ``None`` (no flag passed) becomes
     :data:`STORED_SESSIONS_DEFAULT_LIMIT` inside ``_stored_lines``.
+
+    ``stored_kinds`` (keyword, optional) restricts the STORED half to the
+    sessions whose latest recorded outcome kind is in the given set — the
+    ``--failed`` / ``--paused`` listing flags, whose vocabulary and
+    filter-before-limit rule live at :func:`stored_sessions_by_outcome`. It
+    says nothing about the LIVE half here; a caller asking a SET question drops
+    the live rows itself (``session_rows`` does — a running session is not a
+    member of any set), and a caller that wants the full listing passes
+    ``None``.
     """
     from local_operator.mobile.resources import session_resource_usage
     from local_operator.session.runtime import registry
@@ -425,7 +435,14 @@ def collect_sessions(
         )
 
     if include_stored and root is not None:
-        lines.extend(_stored_lines(root, {line.session_id for line in lines}, stored_limit))
+        lines.extend(
+            _stored_lines(
+                root,
+                {line.session_id for line in lines},
+                stored_limit,
+                kinds=stored_kinds,
+            )
+        )
 
     lines = _with_stored_outcomes(lines, root)
 
@@ -478,14 +495,25 @@ def collect_sessions(
     )
 
 
-def _with_stored_outcomes(lines: list[SessionLine], root: Path | None) -> list[SessionLine]:
-    """Each session's last stored outcome (kind and reason) attached to its row.
+def _outcome_states(root: Path | None, session_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
+    """Latest stored outcome STATE per session id, on ONE batched store read.
 
-    ONE READ FOR THE WHOLE LISTING rather than a lookup per row: ``state_many``
-    chunks its SQL parameters over one connection, so a fleet of forty sessions
-    costs what one costs. The read is also why the fields come from the store
-    and not from the record — see :attr:`SessionLine.completion_kind` for why
-    the OUTCOME is what answers "why did this die".
+    THE ONE IMPLEMENTATION both the listing's outcome columns and its
+    ``--paused`` / ``--failed`` set membership read through, so the two cannot
+    RESOLVE a row's kind differently.
+
+    Resolution, not snapshot: with a filter active the listing issues two reads
+    (the candidate-set read, then the enrichment read for the rows it kept),
+    each its own connection and its own ``state_many`` snapshot. A row could in
+    principle be selected under one state and enriched with another if an
+    outcome landed between them — benign and sub-millisecond, and stated here
+    rather than implied by "one read" (review round 1, R4).
+
+    ONE READ PER CALL: ``state_many`` chunks its SQL parameters over one
+    connection, so a fleet of forty sessions costs what one costs. The read is
+    also why the fields come from the store and not from the record — see
+    :attr:`SessionLine.completion_kind` for why the OUTCOME is what answers
+    "why did this die".
 
     THE STORE IS KEYED BY CONVERSATION IDENTITY, not by session id: a row's
     completion lives under ``session/<id>`` or ``agent/<id>``, and which one it
@@ -493,21 +521,17 @@ def _with_stored_outcomes(lines: list[SessionLine], root: Path | None) -> list[S
     reads the parent's name), not of the discovery record — a record in one run
     namespace can name either kind of conversation. Both spellings are therefore
     asked for in the same chunked read and ``session/`` wins a tie, which cannot
-    normally happen: ids are uuid4. A row whose identity is in neither is simply
-    a row with no recorded outcome.
-
-    REBUILT RATHER THAN MUTATED, because ``SessionLine`` is ``frozen=True`` and
-    that is a tested redaction invariant, not a habit (see the model's own
-    note): the row is the shape that must never grow a field a dump can reach,
-    so a second field-carrying constructor call is the cheap and legal way to
-    enrich it.
+    normally happen: ids are uuid4. An id whose identity is in neither — or
+    whose row carries no ``kind`` — is simply absent from the answer.
 
     TOLERANT, like every other read on this path and for the same reason an
     older runtime's record is: ``lop sessions`` is what a host mid-upgrade is
-    inspected WITH, so an unreadable or missing store leaves the two fields
-    empty and the listing otherwise intact. The store's own reader already
-    degrades to "no completion" states for a database that predates the
-    ``reason``/``cause`` columns, so no version handling is repeated here.
+    inspected WITH, so an unreadable or missing store yields ``{}`` (each
+    caller treats absence as "no recorded outcome" — an empty column, or
+    membership in neither set) and the listing otherwise intact. The store's
+    own reader already degrades to "no completion" states for a database that
+    predates the ``reason``/``cause`` columns, so no version handling is
+    repeated here.
 
     NO AMBIENT FALLBACK WHEN ``root`` IS NONE, deliberately: unlike
     ``AttentionStore()``'s own default, a listing built for a caller that named
@@ -515,15 +539,13 @@ def _with_stored_outcomes(lines: list[SessionLine], root: Path | None) -> list[S
     operator's machine. A caller that wants the read passes the root it read
     the rows from — the CLI and ``/info`` both do.
     """
-    from dataclasses import replace
-
     from local_operator.session.attention import AttentionStore
 
     if root is None:
-        return lines
-    ids = [line.session_id for line in lines if line.session_id]
+        return {}
+    ids = [session_id for session_id in dict.fromkeys(session_ids) if session_id]
     if not ids:
-        return lines
+        return {}
     # The store is opened against the SAME root the rows came from.
     store = AttentionStore(root / "attention.db")
     try:
@@ -532,12 +554,41 @@ def _with_stored_outcomes(lines: list[SessionLine], root: Path | None) -> list[S
         )
     except Exception:  # noqa: BLE001 — a listing must survive an unreadable store
         logger.debug("attention store unavailable for the sessions listing", exc_info=True)
+        return {}
+    resolved: dict[str, dict[str, Any]] = {}
+    for session_id in ids:
+        state = states.get(f"session/{session_id}") or {}
+        if not state.get("kind"):
+            state = states.get(f"agent/{session_id}") or {}
+        if state.get("kind"):
+            resolved[session_id] = state
+    return resolved
+
+
+def _with_stored_outcomes(lines: list[SessionLine], root: Path | None) -> list[SessionLine]:
+    """Each session's last stored outcome (kind and reason) attached to its row.
+
+    The enrichment half of :func:`_outcome_states`, which owns the one batched
+    store read and every tolerance around it; this function only decides what
+    an absent outcome means for the ROW — empty fields, so a pre-taxonomy
+    record still renders exactly as it always has.
+
+    REBUILT RATHER THAN MUTATED, because ``SessionLine`` is ``frozen=True`` and
+    that is a tested redaction invariant, not a habit (see the model's own
+    note): the row is the shape that must never grow a field a dump can reach,
+    so a second field-carrying constructor call is the cheap and legal way to
+    enrich it.
+    """
+    from dataclasses import replace
+
+    if root is None:
+        return lines
+    states = _outcome_states(root, (line.session_id for line in lines))
+    if not states:
         return lines
     enriched: list[SessionLine] = []
     for line in lines:
-        state = states.get(f"session/{line.session_id}") or {}
-        if not state.get("kind"):
-            state = states.get(f"agent/{line.session_id}") or {}
+        state = states.get(line.session_id) or {}
         enriched.append(
             replace(
                 line,
@@ -559,8 +610,90 @@ def _with_stored_outcomes(lines: list[SessionLine], root: Path | None) -> list[S
 #: and ``--all`` listed the entire store).
 STORED_SESSIONS_DEFAULT_LIMIT = 50
 
+#: The outcome kinds behind the ``--failed`` and ``--paused`` listing sets.
+#:
+#: THE VOCABULARY IS THE ATTENTION STORE'S OWN (``attention.py``'s completion
+#: kinds), so a listing can never quietly diverge from the receipts every other
+#: surface paints. The mapping to the two words an operator uses, and why each
+#: side of the line is where it is:
+#:
+#: * ``FAILED`` is ``error`` alone — the taxonomy's involuntary half: a cut-off
+#:   with no positive evidence of a deliberate act (a killed runtime, a death
+#:   nobody can explain). It is the half whose receipt reads as a failure on
+#:   every surface.
+#: * ``PAUSED`` is ``interrupted`` AND ``retired`` — the two kinds the product
+#:   ALREADY paints together as "Unseen interruption" (``catalog._stop_label``):
+#:   a deliberate stop (the stop ladder, ``/stop``, ``user-stop``) and a build
+#:   retirement (the update handover, "the runtime retired so the next engage
+#:   would run a newer build"). Both are UNFINISHED WORK that somebody resumes,
+#:   which is the question these sets exist to answer — and neither is a
+#:   failure, which is why ``error`` is not in this set.
+#:
+#: NOTHING ELSE IS IN EITHER SET, deliberately: ``complete`` is done, and
+#: ``closed`` is the neutral disposal receipt ("a receipt, not a verdict") that
+#: the taxonomy keeps out of every failure family; an id with no recorded
+#: outcome is in neither set, because the honest reading of "no row" is "not
+#: known" and a set a resume path selects from must never promote that into
+#: membership.
+FAILED_OUTCOME_KINDS = frozenset({"error"})
+PAUSED_OUTCOME_KINDS = frozenset({"interrupted", "retired"})
 
-def _stored_lines(root: Path, live_ids: set[str], limit: int | None) -> list[SessionLine]:
+
+def stored_sessions_by_outcome(
+    root: Path,
+    kinds: frozenset[str] | set[str],
+    *,
+    exclude_ids: set[str] | None = None,
+    limit: int | None = None,
+) -> list[tuple[str, float]]:
+    """``(id, mtime)`` for stored sessions whose LAST outcome kind is in ``kinds``.
+
+    THE FILTER-BEFORE-LIMIT RULE LIVES HERE, and it is a correctness
+    requirement, not an optimisation: a ``--failed`` listing must find a failed
+    session older than the newest fifty, so the candidates are enumerated
+    UNCAPPED (``recent_sessions(root, None)`` — the same single store walker
+    every listing uses, without paying for names), outcomes are read for the
+    whole set in one batched :func:`_outcome_states` read, and only then is the
+    recency cap applied to the MEMBERS. Filtering a capped list instead would
+    silently drop exactly the rows an operator most needs to find.
+
+    ``exclude_ids`` drops ids the caller knows are LIVE before the cap: a
+    running session is not "stored" and is not offered for resumption, and
+    letting one consume a cap slot would push a real member off the page.
+
+    ``limit=None`` is UNCAPPED — for a caller selecting a set to ACT on (the
+    bulk-resume path); a listing passes its own resolved cap. The order is
+    ``recent_sessions``'s own (newest first, id ascending on equal stamps), so
+    a capped answer is the newest members of the set.
+
+    ONE HONEST LIMIT, stated where a selector will read it: membership is the
+    attention store's latest RECORDED outcome, so a death whose outcome was
+    never imported is in neither set (and shows no WHY row anywhere). "Latest
+    recorded" also means a session resumed after its failure stays a member
+    until its next turn ends — the sets describe the last completed turn, not
+    liveness, which is why callers that act on them pass ``exclude_ids``.
+    """
+    from local_operator.resume import recent_sessions
+
+    candidates = recent_sessions(root, None)
+    if exclude_ids:
+        candidates = [candidate for candidate in candidates if candidate[0] not in exclude_ids]
+    states = _outcome_states(root, (session_id for session_id, _ in candidates))
+    matched = [
+        (session_id, mtime)
+        for session_id, mtime in candidates
+        if (states.get(session_id) or {}).get("kind") in kinds
+    ]
+    return matched[:limit] if limit is not None else matched
+
+
+def _stored_lines(
+    root: Path,
+    live_ids: set[str],
+    limit: int | None,
+    *,
+    kinds: frozenset[str] | None = None,
+) -> list[SessionLine]:
     """One ``SessionLine`` per STORED session: a directory with no live record.
 
     Read from the same ``resume.recent_session_rows`` scan the ``/resume``
@@ -584,28 +717,47 @@ def _stored_lines(root: Path, live_ids: set[str], limit: int | None) -> list[Ses
     is the number this module chose and advertises in ``--limit``'s help. The
     caller validates positivity; a given value is forwarded as-is because
     ``recent_session_rows`` owns slicing semantics.
+
+    ``kinds`` restricts the rows to the outcome SETS a filter asked for — the
+    membership rule and the filter-before-limit rule both live at
+    :func:`stored_sessions_by_outcome`. This path names only the MATCHED rows:
+    the candidates are enumerated uncapped WITHOUT names, and ``session_name``
+    runs on the survivors alone, because a set filter exists precisely to find
+    rows outside the newest page and paying a name read per skipped candidate
+    would make the search cost track the whole store rather than the answer.
     """
     from local_operator.resume import recent_session_rows
 
     resolved = STORED_SESSIONS_DEFAULT_LIMIT if limit is None else limit
     try:
-        rows = recent_session_rows(root, resolved)
+        if kinds is None:
+            candidates = [
+                (row.id, row.name, row.mtime) for row in recent_session_rows(root, resolved)
+            ]
+        else:
+            from local_operator.resume import session_name
+
+            matched = stored_sessions_by_outcome(root, kinds, exclude_ids=live_ids, limit=resolved)
+            candidates = [
+                (session_id, session_name(root / "sessions" / session_id), mtime)
+                for session_id, mtime in matched
+            ]
     except Exception:  # noqa: BLE001 — a listing must not fail on the store
         return []
     lines: list[SessionLine] = []
-    for row in rows:
+    for session_id, name, mtime in candidates:
         # Live wins: a session the registry just published for is not "stored",
         # and listing it twice would double-count one conversation in the
         # output the operator reads to decide what to send where.
-        if row.id in live_ids:
+        if session_id in live_ids:
             continue
         lines.append(
             SessionLine(
                 pid=0,
                 state="stored",
-                session_id=row.id,
-                conversation_name=row.name,
-                last_activity_s=row.mtime,
+                session_id=session_id,
+                conversation_name=name,
+                last_activity_s=mtime,
             )
         )
     return lines
@@ -616,6 +768,7 @@ def session_rows(
     *,
     include_stored: bool = False,
     stored_limit: int | None = None,
+    stored_kinds: frozenset[str] | None = None,
 ) -> list[dict[str, Any]]:
     """``lop sessions --json``'s rows, in its established key order.
 
@@ -633,10 +786,32 @@ def session_rows(
     consumer that must branch on key EXISTENCE per row is a worse contract than
     a stable shape with one nullable field. The extraction test asserts exactly
     this order, so the expectation is updated in the same change.
+
+    ``stored_kinds`` is the ``--failed`` / ``--paused`` SET filter, and when it
+    is given the answer is exactly the matched STORED rows: the live half is
+    dropped, because a running session is not a member of either set (it cannot
+    be resumed, and its receipt describes a turn that has ended) — so
+    ``lop sessions --failed`` answers the set question and nothing else. The
+    cap applies AFTER the filter (see :func:`stored_sessions_by_outcome`),
+    which is the difference between "a failed session older than the newest
+    fifty still shows" and a silently wrong answer.
     """
     from local_operator.session.placement import local_placement
 
-    info = collect_sessions(root, include_stored=include_stored, stored_limit=stored_limit)
+    info = collect_sessions(
+        root,
+        include_stored=include_stored,
+        stored_limit=stored_limit,
+        stored_kinds=stored_kinds,
+    )
+    lines: Sequence[SessionLine] = info.lines
+    if stored_kinds is not None:
+        # A SET FILTER ANSWERS A SET QUESTION: exactly the matched stored rows,
+        # nothing else. Membership in the sets is about the LAST COMPLETED TURN
+        # (see the kind constants), so a live row carrying a matching receipt is
+        # a session that has since been resumed — listing it beside the set
+        # would imply the resume path would touch it.
+        lines = tuple(line for line in lines if line.state == "stored")
     # THE FLEET'S OWN STALL BOUND, and what it left behind — READ OFF THE LINES rather
     # than scanned again here. ``collect_sessions`` does the one scan a listing needs
     # (the marker has to be read out of each candidate file, so a per-row call would
@@ -775,7 +950,7 @@ def session_rows(
             # about a dead pid's leftover dump (design review round 2, D8).
             "stall_held": line.stall_held,
         }
-        for line, stamp in zip(info.lines, _stamps(info.lines, root), strict=True)
+        for line, stamp in zip(lines, _stamps(lines, root), strict=True)
     ]
 
 
