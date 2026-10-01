@@ -677,6 +677,9 @@ def test_the_external_arm_accepts_an_injected_intent_like_the_session_arm() -> N
         "kubectl logs pod-x -c app --since=1h -p",
         "kubectl get pods --context prod",
         "kubectl get pods -o name",
+        # R10: the glued ``=`` spelling kubectl accepts. It was refused as
+        # "-o =json" until round 1 fixed it, and the fix had no pin.
+        "kubectl get pods -o=json",
         "kubectl get pods -o json | jq .items",
     ],
 )

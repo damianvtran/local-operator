@@ -275,11 +275,12 @@ class WakePanel(Container):
         are the whole reason the band can be read at a glance:
 
         - **The state word takes the DUE slot** for every state a reader must
-          not miss (``disabled`` / ``stalled`` / ``idle``), the way the wake row
-          already does for an owed fire. The band has no health column, and the
-          clock it replaces is the least informative thing in the row (design
-          review round 1, D1/D2 — at 60 columns the sentence after the name was
-          the first thing truncation took, and `idle` was invisible entirely).
+          not miss (``disabled`` / ``stalled`` / ``never checked`` / ``idle``),
+          the way the wake row already does for an owed fire. The band has no
+          health column, and the clock it replaces is the least informative
+          thing in the row (design review round 1, D1/D2 — at 60 columns the
+          sentence after the name was the first thing truncation took, and
+          `idle` was invisible entirely).
         - **The health sentence sits BEFORE the name and the interval**, so a
           narrow row loses `every 1m` and the label rather than the hint.
 
@@ -304,12 +305,21 @@ class WakePanel(Container):
         failing = fail_count > 0
         idle = (not disabled) and (not unavailable) and monitor_store.is_idle(row, now_ms)
         hint = monitor_store.health_hint(row, now_ms)
+        # BEFORE ``idle``, and the order is the whole finding (design round 2,
+        # D10): a watch that has never run a check is overdue by definition, so
+        # an idle-first order rendered the one state this PR exists to surface
+        # as a plain dormant row. ``idle`` then means exactly what it says — a
+        # watch that has run and is waiting — and the state word below is the
+        # one the reader gets.
+        never_checked = bool(hint) and hint.startswith("never checked")
 
         due = counters.get("next_due_at")
         if disabled:
             label = "disabled"
         elif unavailable:
             label = "stalled"
+        elif never_checked:
+            label = "never checked"
         elif idle:
             label = "idle"
         elif isinstance(due, int) and not isinstance(due, bool):
@@ -321,7 +331,11 @@ class WakePanel(Container):
         rank = 6
         health = ""
         if disabled:
-            health = " ".join(str(counters.get("disabled_reason") or "").split())
+            # The clause, not the stored string: a disabled row's "health" slot
+            # is the first thing a reader sees, and for the ladder it carried
+            # the tool's raw argument banner (UX round 1, U4). The raw error
+            # stays available in the expansions.
+            health = monitor_store.disabled_clause(row)
             ink, rank = "warning", 0
         elif unavailable:
             # AN UNAVAILABLE EPISODE OUTRANKS A STALE FAILURE COUNT (D3): the
@@ -330,13 +344,15 @@ class WakePanel(Container):
             # "retrying" is the cross-surface disagreement §D6 exists to stop.
             health = _band_health_clause(hint or "tool unavailable — retrying")
             ink, rank = "warning", 1
+        elif never_checked:
+            # The state word carries it; the clause would be the third spelling
+            # of one fact in a two-row band.
+            health = ""
+            ink, rank = "warning", 2
         elif idle:
             # The state word is the whole message here; the CLI carries the
             # "overdue by 3h" tail for readers who go looking.
             health = ""
-            ink, rank = "warning", 2
-        elif hint is not None and hint.startswith("never checked"):
-            health = _band_health_clause(hint)
             ink, rank = "warning", 3
         elif failing:
             health = f"{fail_count} failed"
@@ -474,11 +490,15 @@ class WakePanel(Container):
         # reading "1 watching" directly above a row reading "disabled" says
         # something the row itself contradicts (design review round 1, D7).
         broken = sum(1 for row in rows if row[4] == "warning")
-        count = f"{len(rows)} monitor" if len(rows) == 1 else f"{len(rows)} monitors"
         if broken:
-            attention = "1 needs attention" if broken == 1 else f"{broken} need attention"
-            header.append(f"{count} · {attention}", style=muted)
+            # "3 of 5 need attention" rather than "5 monitors · 3 need
+            # attention": the hidden-row marker below counts its own threes, and
+            # two bare threes in one block read as one number (design round 2,
+            # D12).
+            verb = "needs" if broken == 1 else "need"
+            header.append(f"{broken} of {len(rows)} {verb} attention", style=muted)
         else:
+            count = f"{len(rows)} monitor" if len(rows) == 1 else f"{len(rows)} monitors"
             header.append(f"{count} armed", style=muted)
 
         # WORST FIRST, then the cap: with two visible rows the ones behind the
@@ -493,7 +513,11 @@ class WakePanel(Container):
             row.append(monitor_id, style=muted)
             row.append(" ", style=dim)
             tone = warning if ink == "warning" else muted if ink == "muted" else dim
-            row.append(label, style=tone)
+            # The LABEL's ink is the state word's, never the health clause's:
+            # a muted hint (the neutral 0-deliveries one) promoted the due clock
+            # from dim to muted, so a quiet row's boilerplate outranked a healthy
+            # row's (design round 2, D11 — measured by sampling the clock cells).
+            row.append(label, style=warning if ink == "warning" else dim)
             # HEALTH BEFORE THE BOILERPLATE (D1): a narrow row then loses the
             # interval and the name, never the sentence that says what is wrong.
             if health:
@@ -503,7 +527,9 @@ class WakePanel(Container):
             row.append(f" · {every}", style=dim)
             lines.append(row)
         if marker:
-            lines.append(_overflow_line(f"… {len(rows) - len(visible)} more monitors", dim))
+            lines.append(
+                _overflow_line(f"… {len(rows) - len(visible)} more monitors not shown", dim)
+            )
         return lines
 
     # -- geometry (the TodoPanel budget discipline) ----------------------------

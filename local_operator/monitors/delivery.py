@@ -152,20 +152,26 @@ def format_monitor_notice_text(notice: MonitorNotice) -> str:
 
     if notice.kind == "disabled":
         if notice.failure_kind == "unreachable":
-            cause = "because its tool stayed unreachable for 24 hours"
+            cause = "its tool stayed unreachable for 24 hours"
         elif notice.failure_kind == "fatal":
-            cause = "after a check that cannot succeed"
+            cause = "a check that cannot succeed"
         elif notice.failures:
             plural = "" if notice.failures == 1 else "s"
-            cause = f"after {notice.failures} consecutive failed check{plural}"
+            cause = f"{notice.failures} consecutive failed check{plural}"
         else:
             # A legacy counters file that lost the count: state the fact without
             # a number rather than printing "after 0 consecutive failed checks"
             # (review round 1, R3).
-            cause = "after repeated failed checks"
+            cause = "repeated failed checks"
+        # CONSEQUENCE FIRST, cause in the parentheses (design round 2, D13; UX
+        # round 1, U5). The collapsed card is one line, and the CAUSE was the
+        # half that survived while "it is no longer watching" — the sentence
+        # that says the watch has stopped — fell off at every width <= 110. The
+        # source note rides right after the clock, where the collapsed headline
+        # can drop it whole.
         lines = [
-            f"(monitor) {who} was DISABLED at {clock} {cause} — it is no longer "
-            f"watching{source_note}."
+            f"(monitor) {who} was DISABLED at {clock}{source_note} — it is no "
+            f"longer watching ({cause})."
         ]
         if notice.detail:
             lines.append(f"Last error: {_clip(notice.detail)}")
@@ -185,8 +191,8 @@ def format_monitor_notice_text(notice: MonitorNotice) -> str:
 
     if notice.kind == "stalled":
         lines = [
-            f"(monitor) {who} could not run its check at {clock} — it is retrying, "
-            f"without counting failures{source_note}."
+            f"(monitor) {who} could not run its check at {clock}{source_note} — it is "
+            "retrying, without counting failures."
         ]
         if notice.detail:
             lines.append(f"Reason: {_clip(notice.detail)}")
@@ -195,12 +201,18 @@ def format_monitor_notice_text(notice: MonitorNotice) -> str:
             "it missed as one delta."
         )
         lines.append(f'Cancel with monitor({{op:"cancel",id:"{notice.monitor_id}"}}) if unwanted.')
+        # The same dormancy sentence the disable notice carries (UX round 1,
+        # U8): a stalled watch is equally dormant when its session closes, and
+        # this is the one sentence that explains why nothing is running. Not on
+        # ``restored`` — there the watch IS running, and the sentence would
+        # explain a state the reader is not in.
+        lines.append("Monitors tick only while this session is open.")
         return _bounded("\n".join(lines))
 
     # restored
     return _bounded(
-        f"(monitor) {who} is running again as of {clock} — the earlier interruption "
-        f"has ended{source_note}.\n"
+        f"(monitor) {who} is running again as of {clock}{source_note} — the earlier "
+        "interruption has ended.\n"
         "The next check diffs against the old baseline, so changes during the gap arrive "
         f'as one delta. Cancel with monitor({{op:"cancel",id:"{notice.monitor_id}"}}) once '
         "its goal is met."

@@ -416,3 +416,93 @@ def test_the_check_count_is_not_said_twice(
     out = capsys.readouterr().out
     assert out.count("12 checks") == 1
     assert "12 checks, 0 deliveries" in out
+
+
+def test_a_multiline_disable_reason_cannot_break_the_table(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """UX round 1, U3: the live shape is ``invalid arguments:\\n- path: …``, and
+    the raw reason printed its continuation at column 0 — a broken table row."""
+    from local_operator.cli import monitor_command
+    from local_operator.monitors.store import write_entry
+
+    write_entry(
+        tmp_path,
+        "msess01",
+        cwd="/w",
+        monitors=[
+            _row(
+                "m4",
+                disabled=True,
+                disabled_reason="invalid arguments:\n- path: Extra inputs are not permitted",
+                consecutive_failures=5,
+            )
+        ],
+    )
+
+    assert monitor_command(_args()) == 0
+
+    out = capsys.readouterr().out
+    lines = [line for line in out.splitlines() if line.strip()]
+    assert not any(line.startswith("- path:") for line in lines)
+    assert "disabled" in out
+    # U4: and the cell leads with a cause a person can read, not the banner.
+    assert "5 consecutive failed checks" in out
+    assert "invalid arguments" not in out
+
+
+def test_a_disable_reason_that_reads_as_a_sentence_is_kept(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from local_operator.cli import monitor_command
+    from local_operator.monitors.store import write_entry
+
+    write_entry(
+        tmp_path,
+        "msess01",
+        cwd="/w",
+        monitors=[
+            _row(
+                "m1",
+                disabled=True,
+                disabled_reason='monitor can\'t watch "mcp__x": it is not in this tool set.',
+                consecutive_failures=5,
+            )
+        ],
+    )
+
+    assert monitor_command(_args()) == 0
+
+    out = capsys.readouterr().out
+    assert "it is not in this tool set." in out
+    assert "consecutive failed checks" not in out
+
+
+def test_a_disabled_row_does_not_say_its_failure_count_twice(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D7's duplication in its disabled form: the clause is derived FROM the
+    count ("5 consecutive failed checks") when the reason is a raw banner, so
+    the standalone counter beside it repeats it."""
+    from local_operator.cli import monitor_command
+    from local_operator.monitors.store import write_entry
+
+    write_entry(
+        tmp_path,
+        "msess01",
+        cwd="/w",
+        monitors=[
+            _row(
+                "m2",
+                disabled=True,
+                disabled_reason="invalid arguments:\n- path: Extra inputs are not permitted",
+                consecutive_failures=5,
+            )
+        ],
+    )
+
+    assert monitor_command(_args()) == 0
+
+    out = capsys.readouterr().out
+    assert out.count("5 failed") == 0
+    assert "5 consecutive failed checks" in out

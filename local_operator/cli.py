@@ -7256,8 +7256,16 @@ def _monitor_detail(row: "dict[str, Any]") -> str:
     hint = monitor_store.health_hint(row, now)
 
     parts: list[str] = []
-    if row.get("disabled") and row.get("disabled_reason"):
-        parts.append(str(row["disabled_reason"]))
+    clause = ""
+    if row.get("disabled"):
+        # ``disabled_clause``, not the stored string: it folds the reason into
+        # one line (a live disable carries ``invalid arguments:\n- path: …``,
+        # which printed its continuation at column 0 and broke the table — UX
+        # round 1, U3) and prefers the counters' plain cause to a raw tool
+        # banner (U4). The row leads with it, so it has to be readable.
+        clause = monitor_store.disabled_clause(row)
+        if clause:
+            parts.append(clause)
     if hint:
         parts.append(hint)
     if monitor_store.is_idle(row, now) and not (hint and hint.startswith("never checked")):
@@ -7281,7 +7289,10 @@ def _monitor_detail(row: "dict[str, Any]") -> str:
     if age is not None:
         parts.append(f"last check {format_age(age)} ago")
     failures = int(row.get("consecutive_failures") or 0)
-    if failures:
+    if failures and not (clause and clause.startswith(f"{failures} ")):
+        # The disabled clause already carries the count when it was derived
+        # from it ("5 consecutive failed checks"), and a row that says both is
+        # the D7 duplication in another form.
         parts.append(f"{failures} failed")
     return " · ".join(parts)
 

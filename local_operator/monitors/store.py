@@ -326,6 +326,37 @@ def is_idle(row: Mapping[str, Any], now_ms: int) -> bool:
     return now_ms - due > _stale_threshold_ms(row)
 
 
+def disabled_clause(row: Mapping[str, Any]) -> str:
+    """The one-line cause a listing row leads with for a disabled monitor.
+
+    The stored reason is whatever disabled the watch, and for the ordinary
+    ladder that is the tool's own last error — one live class is a multi-line
+    argument banner (``invalid arguments:\\n- path: Extra inputs are not
+    permitted``), which is developer text on the surface a person reads to find
+    out what happened (UX review round 1, U4). A reason that already reads as
+    one sentence is KEPT, because that is the informative case ("monitor can't
+    watch …: it is not in this session's tool set."); only a raw multi-line
+    banner is replaced, by the failure the counters describe, in the words the
+    lifecycle notice already uses.
+
+    Whitespace is folded on the way out for the same round's U3: the CLI prints
+    this inside a table cell, and a reason that still carried its newline broke
+    the row onto column 0.
+    """
+    raw = str(row.get("disabled_reason") or "")
+    folded = " ".join(raw.split())
+    if folded and "\n" not in raw:
+        return folded
+    kind = str(row.get("disabled_kind") or "")
+    if kind == "unreachable":
+        return "its tool stayed unreachable for 24 hours"
+    if kind == "fatal":
+        return "a check that cannot succeed"
+    failures = row.get("consecutive_failures")
+    count = failures if isinstance(failures, int) and not isinstance(failures, bool) else 0
+    return f"{count} consecutive failed checks" if count else "repeated failed checks"
+
+
 def idle_detail(row: Mapping[str, Any], now_ms: int) -> str:
     """``overdue by 3h — session not open`` for an idle row (see :func:`is_idle`)."""
     due = row.get("next_due_at")
