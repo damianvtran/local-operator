@@ -10,6 +10,8 @@ way no live process would reveal.
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from local_operator import memory_guard as mg
@@ -438,6 +440,185 @@ async def test_the_guard_reads_only_the_pgid_it_was_handed() -> None:
     assert sample.bytes_used == 10240 * 1024
 
 
+# ---------------------------------------------------------------------------
+# Footprint, not RSS (2026-09-30 incident class)
+#
+# `ps` RSS is the resident subset of an owned set the kernel may have compressed or
+# swapped: a 4 GB hold read 37 MB of RSS and 4,113 MB of ri_phys_footprint on the
+# same pid, and the incident process read ~1.4 GB against ~198 GB. These pin that
+# the decision keys on the larger of the two and survives a dead `ps`.
+# ---------------------------------------------------------------------------
+
+_MIB = 1024 * 1024
+
+
+def _fp_guard(
+    ceiling_mb: int,
+    *,
+    footprints: dict[int, int | None],
+    ps: str = "",
+    pgid: int = 100,
+) -> mg.Guard:
+    budget = mg.Budget(
+        ceiling_mb=ceiling_mb,
+        soft_mb=int(ceiling_mb * 0.8),
+        available_mb=4096,
+        total_mb=16384,
+        reserve_mb=2048,
+        source="auto",
+        reason="test",
+    )
+    return mg.Guard(
+        pgid,
+        budget,
+        runner=_fake_runner(ps=ps),
+        footprint_probe=lambda pid: footprints.get(pid),
+    )
+
+
+def test_a_footprint_only_runaway_is_killed_while_rss_stays_small() -> None:
+    """(a) RSS 30 MB, footprint 400 MB, ceiling 100 MB: the shipped guard read only
+    the RSS (8/8 ticks over the ceiling, 0 kills — EVIDENCE E2)."""
+    guard = _fp_guard(100, footprints={100: 400 * _MIB}, ps="  100   100   30720")
+    sample = guard.sample_sync()
+    # A breach by the fork-free read is final: ``ps`` is not even spent on it.
+    assert sample.rss_bytes is None
+    assert sample.footprint_bytes == 400 * _MIB
+    assert sample.bytes_used == 400 * _MIB
+    assert guard.should_kill(sample) is True
+    assert "MEMORY LIMIT EXCEEDED" in guard.over_budget_message(sample)
+    assert "0.4 GB" in guard.over_budget_message(sample)
+
+
+def test_the_larger_of_rss_and_footprint_is_the_charge() -> None:
+    """Both instruments present and under the ceiling: the decision number is the
+    max, so a footprint that out-reads RSS is never hidden by it."""
+    guard = _fp_guard(100, footprints={100: 90 * _MIB}, ps="  100   100   30720")
+    sample = guard.sample_sync()
+    assert sample.rss_bytes == 30720 * 1024
+    assert sample.footprint_bytes == 90 * _MIB
+    assert sample.bytes_used == 90 * _MIB
+    assert sample.over_hard is False
+
+
+def test_the_footprint_of_every_member_is_summed() -> None:
+    ps = "\n".join(["  100   100   1024", "  101   100   1024"])
+    guard = _fp_guard(100, footprints={100: 60 * _MIB, 101: 60 * _MIB}, ps=ps)
+    sample = guard.sample_sync()
+    assert sample.bytes_used == 120 * _MIB
+    assert guard.should_kill(sample) is True
+
+
+def test_rss_alone_still_kills_where_no_footprint_reader_answers() -> None:
+    """A host with no fork-free reader (probe says None for every pid) keeps the
+    RSS decision it always had; the footprint arm only ever ADDS evidence."""
+    guard = _fp_guard(100, footprints={}, ps="  100   100   204800")
+    sample = guard.sample_sync()
+    assert sample.footprint_bytes is None
+    assert guard.should_kill(sample) is True
+
+
+def test_the_leader_alone_is_enough_when_ps_cannot_be_read() -> None:
+    """(b) The membership read failing used to mean NO reading and so no kill — the
+    kill path died under exactly the pressure it exists for (EVIDENCE E2/E5). The
+    group we spawned is ours: its leader's own fork-free footprint decides."""
+    guard = _fp_guard(100, footprints={100: 400 * _MIB}, ps="")  # ps -> (1, "")
+    sample = guard.sample_sync()
+    assert sample.membership == "leader"
+    assert sample.rss_bytes is None
+    assert guard.should_kill(sample) is True
+
+
+def test_a_leader_under_the_ceiling_with_ps_dead_is_not_killed() -> None:
+    guard = _fp_guard(100, footprints={100: 10 * _MIB}, ps="")
+    sample = guard.sample_sync()
+    assert sample.bytes_used == 10 * _MIB
+    assert guard.should_kill(sample) is False
+
+
+def test_nothing_measurable_never_kills() -> None:
+    """(c) ps dead AND no footprint reader: unknown, and unknown never kills."""
+    guard = _fp_guard(100, footprints={100: None}, ps="")
+    sample = guard.sample_sync()
+    assert sample.bytes_used is None
+    assert sample.membership == "none"
+    assert guard.should_kill(sample) is False
+
+
+def test_a_raising_footprint_probe_is_unknown_not_a_crash() -> None:
+    budget = mg.Budget(100, 80, 4096, 16384, 2048, "auto", "test")
+
+    def boom(pid: int) -> int | None:
+        raise OSError("libproc went away")
+
+    guard = mg.Guard(100, budget, runner=_fake_runner(), footprint_probe=boom)
+    sample = guard.sample_sync()
+    assert sample.bytes_used is None
+    assert guard.should_kill(sample) is False
+
+
+def test_the_advisory_fires_on_footprint() -> None:
+    """(d) 90 MB of footprint behind 1 MB of RSS crosses the 80 MB soft line."""
+    guard = _fp_guard(100, footprints={100: 90 * _MIB}, ps="  100   100   1024")
+    sample = guard.sample_sync()
+    assert sample.over_soft is True and sample.over_hard is False
+    notice = guard.soft_notice(sample)
+    assert notice is not None and "approaching the command budget" in notice
+    assert guard.soft_notice(sample) is None
+
+
+def test_a_cached_member_is_charged_only_while_it_is_still_in_our_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``ps`` fails the guard reuses the last membership, but a pid the kernel
+    has recycled to a stranger answers a different pgid and must not be charged."""
+    import os
+
+    ps = "\n".join(["  100   100   1024", "  101   100   1024"])
+    guard = _fp_guard(10_000, footprints={100: 10 * _MIB, 101: 10 * _MIB}, ps=ps)
+    assert guard.sample_sync().bytes_used == 20 * _MIB
+    guard._members_at = None  # make the next tick re-read ps...
+    guard.runner = _fake_runner(ps="")  # ...and have it fail
+
+    groups = {101: 100}
+    monkeypatch.setattr(os, "getpgid", lambda pid: groups[pid])
+    assert guard.sample_sync().bytes_used == 20 * _MIB  # still ours: cached, charged
+    groups[101] = 555  # recycled into another group
+    assert guard.sample_sync().bytes_used == 10 * _MIB
+
+
+def test_ps_is_read_at_most_once_per_refresh_while_footprints_answer() -> None:
+    """The fork is the probe that fails first, so a tick that can read footprints
+    without it does not pay it every 250 ms."""
+    calls: list[list[str]] = []
+    inner = _fake_runner(ps="  100   100   1024")
+
+    def counting(argv: list[str]) -> tuple[int, str]:
+        calls.append(argv)
+        return inner(argv)
+
+    budget = mg.Budget(100, 80, 4096, 16384, 2048, "auto", "test")
+    guard = mg.Guard(100, budget, runner=counting, footprint_probe=lambda pid: 10 * _MIB)
+    for _ in range(5):
+        guard.sample_sync()
+    assert [argv[0] for argv in calls].count("ps") == 1
+
+
+def test_a_failed_ps_is_retried_within_the_tick() -> None:
+    attempts: list[int] = []
+
+    def flaky(argv: list[str]) -> tuple[int, str]:
+        attempts.append(1)
+        return (1, "") if len(attempts) == 1 else (0, "  100   100   204800")
+
+    budget = mg.Budget(100, 80, 4096, 16384, 2048, "auto", "test")
+    guard = mg.Guard(100, budget, runner=flaky, footprint_probe=lambda pid: None)
+    sample = guard.sample_sync()
+    assert len(attempts) == 2
+    assert sample.rss_bytes == 204800 * 1024
+    assert guard.should_kill(sample) is True
+
+
 def test_should_kill_is_pure_over_a_none_usage() -> None:
     guard = _guard(100)
     sample = mg.Sample(
@@ -585,6 +766,81 @@ async def test_real_group_is_killed_at_the_ceiling_and_the_runtime_survives() ->
     finally:
         if proc.poll() is None:
             procstate.terminate_process_tree(pgid, force=True)
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(sys.platform != "darwin", reason="reads ri_phys_footprint via libproc")
+@pytest.mark.parametrize("ps_mode", ["small_rss", "ps_dead"])
+def test_a_real_footprint_runaway_is_killed_while_ps_reads_small_or_nothing(
+    ps_mode: str,
+) -> None:
+    """The incident shape against a REAL child and the REAL ``proc_pid_rusage`` read.
+
+    The child owns ~600 MB (touched, so it is dirty and counted) against a 300 MB
+    ceiling. ``ps`` is the one thing faked, and faked to what the incident saw: a
+    table row of 37 MB RSS (the measured reading beside a 4 GB hold, EVIDENCE E1),
+    or a ``ps`` that cannot answer at all (E5). A genuine RSS-below-footprint state
+    cannot be forced on demand — it needs the compressor to take the pages — so the
+    RSS side is injected and the FOOTPRINT side, the one the fix depends on, is the
+    kernel's own. The shipped guard read 0 kills in 8/8 ticks of this shape.
+    """
+    import os
+    import subprocess
+    import time
+
+    from local_operator import procstate
+
+    proc = subprocess.Popen(  # noqa: S603 — the test's own command
+        [
+            sys.executable,
+            "-c",
+            "import time; b = bytearray(b'\\x01') * (600 * 1024 * 1024); "
+            "print('ready', flush=True); time.sleep(60)",
+        ],
+        start_new_session=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    try:
+        assert proc.stdout is not None and proc.stdout.readline().strip() == "ready"
+        pgid = os.getpgid(proc.pid)
+        table = f"  {pgid}   {pgid}   37888"  # 37 MB of RSS, as measured beside a 4 GB hold
+
+        def ps_runner(argv: list[str]) -> tuple[int, str]:
+            if ps_mode == "ps_dead" or argv[:1] != ["ps"]:
+                return 1, ""
+            return 0, table
+
+        budget = mg.Budget(300, 240, 4096, 16384, 2048, "auto", "test")
+        guard = mg.Guard(pgid, budget, runner=ps_runner)  # default = the real footprint reader
+        killed_at = None
+        sample = None
+        for tick in range(20):
+            sample = guard.sample_sync()
+            if guard.should_kill(sample):
+                killed_at = tick
+                procstate.terminate_process_tree(pgid, force=True)
+                break
+            time.sleep(0.1)
+        assert killed_at is not None and killed_at <= 2, f"not killed promptly: {sample}"
+        assert sample is not None and sample.footprint_bytes is not None
+        assert sample.footprint_bytes >= 300 * _MIB
+        if ps_mode == "small_rss":
+            assert sample.footprint_bytes > 5 * 37888 * 1024  # the two instruments disagree
+        message = guard.over_budget_message(sample)
+        assert message.startswith("MEMORY LIMIT EXCEEDED: this command's process group reached ")
+        assert "GB, over the 0.3 GB budget" in message
+        deadline = time.time() + 5
+        while time.time() < deadline and proc.poll() is None:
+            time.sleep(0.05)
+        assert proc.poll() is not None, "the killed group was not reaped"
+    finally:
+        if proc.poll() is None:
+            procstate.terminate_process_tree(os.getpgid(proc.pid), force=True)
+            proc.wait(timeout=5)
+        if proc.stdout is not None:
+            proc.stdout.close()
 
 
 @pytest.mark.slow
