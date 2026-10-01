@@ -2168,6 +2168,139 @@ Screen.settings #input-dock #prompt-chevron {
  * pushed down a row. The markdown description declares nothing either: its
  * rhythm comes from the markdown blocks' own fills, not the sheet. */
 
+/* The form state (S6d parity P4): the same frame as the canvas and the detail
+ * — title, rule, body, footer, hints — with the body swapped for the create
+ * page. It is a one-axis scroll container of FIELDS; every field block takes
+ * the sheet's single sanctioned vertical space (`.gap-above`), exactly as the
+ * detail's section headings do, so nothing here declares a margin of its own
+ * and the minimalism guard's count stays at one. Horizontal padding is the
+ * only spacing this block adds. */
+/* The page's OWN class, which Textual derives from the widget's class name —
+ * `.projects-form` matched nothing, so every rule here was dead: the scrollbar
+ * measured 2 cells and painted Textual's stock blue-on-black track (design
+ * review round 1, D2). The fields scroll; the page does not, so the confirm row
+ * can be pinned below them. */
+.projects-form-page {
+    height: 1fr;
+    padding: 0;
+}
+
+.projects-form-fields {
+    height: 1fr;
+    padding: 0;
+    overflow: auto;
+    scrollbar-size-vertical: 1;
+    scrollbar-background: $lo-bg;
+    scrollbar-color: $lo-edge;
+    scrollbar-color-hover: $lo-dim;
+    scrollbar-color-active: $lo-muted;
+}
+
+/* One form-scoped rule for the inputs, for the reason every other surface here
+ * has one: stock `Input` is a 3-row box with a tall blue border — near-black
+ * slabs on light, stub ticks on dark, and the form measured 58 rows with 9
+ * visible at 80x24 (design review round 1, D3). Height 1, no border, the panel
+ * fill, and the app's "this is the one you are on" fill under the cursor. */
+.projects-form-fields Input {
+    border: none;
+    height: 1;
+    padding: 0 1;
+    background: $lo-sunken;
+    color: $lo-fg;
+}
+
+.projects-form-fields Input:focus {
+    background: $lo-tint-select;
+}
+
+/* The caret, in the form's own controls. Stock Textual draws it in the theme's
+ * near-white, which on this light ramp measured about 1:1 against the field's
+ * own fill — the one mark a reader needs while typing was the one mark they
+ * could not see (design review round 1 r3, D13). Same treatment as the
+ * composer's caret above: the surface colour on the foreground step. */
+.projects-form-fields .input--cursor,
+.projects-form-fields .text-area--cursor {
+    color: $lo-surface;
+    background: $lo-fg;
+}
+
+/* The selection band, in the form's own controls. Stock Textual paints `Input`
+ * selection with the theme's default blue and leaves the glyphs at the
+ * widget's colour — measured 1.41:1 on the light ramp, i.e. the text a reader
+ * had just selected became unreadable (design review round 1 r2, D9). The form
+ * takes the composer's treatment instead (`Editor .text-area--selection`):
+ * the ramp's selected-prose ground, with the ink NORMALISED to `fg`. */
+.projects-form-fields .input--selection,
+.projects-form-fields .text-area--selection {
+    background: $lo-edge;
+    color: $lo-fg;
+}
+
+/* The description editor keeps its own height (it is the one multi-line
+ * field), but shares the box treatment so the form has ONE control look. */
+.projects-form-fields TextArea {
+    border: none;
+    height: 6;
+    padding: 0 1;
+    background: $lo-sunken;
+    /* The INK is not optional: stock `TextArea` carries its own light-theme
+     * colour (`(224,224,224)` measured against this panel's `(229,224,213)`,
+     * i.e. the scaffold was invisible on light) — the same class of stock
+     * default the Input rule above exists for, caught in the light frame of
+     * this round. */
+    color: $lo-fg;
+    scrollbar-size-vertical: 1;
+    scrollbar-background: $lo-bg;
+    scrollbar-color: $lo-edge;
+}
+
+.projects-form-field {
+    width: 1fr;
+    height: auto;
+}
+
+.projects-form-label {
+    width: 1fr;
+    height: 1;
+}
+
+/* A field's quiet second line — the key's following rule, the chip preview,
+ * the known teams — and its refusal share one indentation, so a reader takes
+ * either as a note ABOUT the control above it rather than as the next field. */
+.projects-form-hint,
+.projects-form-error {
+    width: 1fr;
+    height: auto;
+    /* The hint is the LABEL's voice, not the value's: at full foreground it
+     * competed with the value it was explaining (design review round 1 r2,
+     * D11). */
+    color: $lo-muted;
+    /* One left edge: the label, the control's text and these lines all start at
+     * the same column, so a hint or a refusal reads as part of the field rather
+     * than as the next one (design review round 1, D6). */
+    padding-left: 1;
+}
+
+/* The `‹ value ›` rows (status, estimate unit): one line, focusable, and lit
+ * with the app's "this is the one you are on" fill while the cursor is here —
+ * the treatment ToolCard and the approval block take, for the same reason. */
+.projects-form-cycle {
+    width: 1fr;
+    height: 1;
+}
+
+.projects-form-cycle:focus {
+    background: $lo-tint-select;
+}
+
+/* The discard confirm: one line that OWNS the keyboard while it is up (the
+ * page hands it focus), so it reads as a question rather than as another
+ * field. No box — the transcript's own inline-confirm grammar. */
+.projects-form-confirm {
+    width: 1fr;
+    height: 1;
+}
+
 /* The pinned footer: the highlighted project's detail in the list view, the
  * aggregate counts elsewhere. ALWAYS one row plus its quiet lead-in, even when
  * empty: a footer that appeared and disappeared would move the canvas on every

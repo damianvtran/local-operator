@@ -69,6 +69,7 @@ from local_operator.tui.projects_render import (
     timeline_span,
 )
 from local_operator.tui.widgets.projects_detail import ProjectDetailPage
+from local_operator.tui.widgets.projects_form import FORM_FOOTER_HINT, ProjectsFormPage
 from local_operator.tui.widgets.subagent_view import READ_ONLY_NOTE, HintButton
 
 #: The view vocabulary, in the order ``1``/``2``/``3`` address it and ``v``
@@ -93,6 +94,22 @@ class ProjectsViewRefreshRequested(Message):
     a registry read, a runtime scan and per-session tail reads, all of which
     belong to the app so the widget can be exercised without a filesystem.
     """
+
+
+class ProjectsViewFormSubmitted(Message):
+    """The create form was submitted with values that passed local validation.
+
+    The page never writes (module docstring): the app performs the write
+    through the same ``registry.create_project`` core the ``project`` tool and
+    the slash verbs use, then recomposes and hands the page fresh data. A
+    refusal from the STORE (a taken name, the schema guard) comes back as an
+    in-form line, never a toast over a form that has already closed (spec
+    §7.7).
+    """
+
+    def __init__(self, *, edit: Any) -> None:
+        super().__init__()
+        self.edit = edit
 
 
 def _style_resolver() -> Callable[[str], Style]:
@@ -145,6 +162,17 @@ def _style_resolver() -> Callable[[str], Style]:
         # glyph where both apply — the marker column costs no width either way.
         "session": Style(color=color("accent")),
         "dim": Style(color=color("dim")),
+        # The quiet ink a LABEL wears — the form's field names. It is the same
+        # token `status_planning`/`status_done` take; it is named separately
+        # because `resolve` answers an unknown key with PLAIN ink rather than an
+        # error, and a form asking for a key the map does not carry would paint
+        # its labels in the terminal's default colour without saying so.
+        "muted": Style(color=color("muted")),
+        # The ink a REFUSAL wears. The form paints its in-field errors with it:
+        # guidance (`muted`) and a refusal must never read alike (design review
+        # round 1, D4), and the token is the same `warning` the app's own
+        # refusal receipts (`_notice_text`) take.
+        "refusal": Style(color=color("warning")),
         # A live session is the accent-of-success: the one fact the page exists
         # to surface ("what is actually running?").
         "live": Style(color=color("success")),
@@ -231,6 +259,39 @@ class ProjectsView(Vertical):
 
     can_focus = True
 
+    #: The actions that act on the CANVAS or on the project list. While the
+    #: FORM owns the page they must not fire from a key that bubbled past the
+    #: focused field: `↑`/`↓` are not an ``Input``'s own keys, so they reach
+    #: this view, and the canvas must not move under a form being filled in.
+    #: ``open_detail`` is in the set for the same reason (`d` is swallowed by a
+    #: field anyway, but a click on the canvas is not the only way in) and
+    #: ``esc`` is deliberately NOT — it is the form's own way out.
+    _CANVAS_ACTIONS = frozenset(
+        {
+            "show_list",
+            "show_board",
+            "show_timeline",
+            "cycle_view",
+            "open_detail",
+            "refresh",
+            "zoom_in",
+            "zoom_out",
+            "up",
+            "down",
+            "scroll_left",
+            "scroll_right",
+            "page_up",
+            "page_down",
+            "page_left",
+            "page_right",
+            "scroll_home",
+            "scroll_end",
+            "jump",
+            "next_section",
+            "prev_section",
+        }
+    )
+
     # Arrows CLAMP — this is the full-page mode AGENTS.md names as the second
     # member of the clamp exception (`/settings` is the first): its list is
     # several times its viewport, so the bottom is a destination, not a place
@@ -251,6 +312,9 @@ class ProjectsView(Vertical):
         # recorded fallback of the spec's D1 — `↵` keeps its shipped meaning
         # (open the conversation), and the detail takes the free letter.
         Binding("d", "open_detail", "Detail", show=False),
+        # `c` opens the CREATE form (P4) — the spec's own key for it, and one
+        # of the letters the canvases left free.
+        Binding("c", "create", "Create", show=False),
         Binding("r", "refresh", "Refresh", show=False),
         # Zoom is TIME resolution on the timeline (the org-chart "zoom is level
         # of detail" rule); in the other views it is inert and the footer sheds
@@ -339,6 +403,17 @@ class ProjectsView(Vertical):
             on_state_change=self._detail_state_changed,
         )
         self._detail_page.display = False
+        # The FORM state (P4): the create page. `c` opens it, `esc` pops one
+        # level, and its `ctrl+s` is the app's `resume` hotkey shadowed while
+        # the form owns the page — a full-page form owns its keys, which is
+        # why the footer advertises it (spec §7.7).
+        self._form_page = ProjectsFormPage(
+            on_submit=self._form_submitted,
+            on_cancel=self.close_form,
+            on_state_change=self._form_state_changed,
+            style_for=_style_resolver(),
+        )
+        self._form_page.display = False
         # The pinned footer: the highlighted project's detail in the list view,
         # aggregate counts elsewhere. ALWAYS one row (a footer that appeared
         # and disappeared would move the body on every view switch).
@@ -361,8 +436,13 @@ class ProjectsView(Vertical):
         self._timeline_hint = HintButton("3", lambda: self.action_show_timeline())
         self._next_hint = HintButton("v", lambda: self.action_cycle_view())
         self._refresh_hint = HintButton("r", lambda: self.action_refresh())
+        # The canvas's headline action: a reader who cannot see how to make a
+        # project cannot use the page at all (UX round 1, U1).
+        self._create_hint = HintButton("c", lambda: self.action_create())
         self._zoom_hint = HintButton("+/-", self._cycle_tier)
         self._exit_hint = HintButton("esc", self._leave_or_pop)
+        self._tab_hint = HintButton("tab", self._form_focus_next)
+        self._save_hint = HintButton("ctrl+s", self._form_save)
         self._state_hint = HintButton(READ_ONLY_NOTE)
         self._hints = Horizontal(classes="projects-view-hints")
 
@@ -397,6 +477,11 @@ class ProjectsView(Vertical):
         self._views = list(views)
         if own_session is not None:
             self._own_session = own_session
+        if view is not None and self._mode == "form":
+            # The same rule the detail obeys: an EXPLICIT canvas request
+            # outranks the open form. A plain recomposition (no `view`) leaves
+            # the form — and the draft in it — exactly as it is.
+            self._exit_form()
         if view is not None and self._mode == "detail":
             # An EXPLICIT canvas request outranks the open detail: the reader
             # asked for the board/timeline, not the page they were on.
@@ -611,6 +696,9 @@ class ProjectsView(Vertical):
         if self._mode == "detail":
             self._paint_detail_chrome()
             return
+        if self._mode == "form":
+            self._paint_form_chrome()
+            return
         muted = Style(color=theme_mod.semantic_color("muted"))
         dim = Style(color=theme_mod.semantic_color("dim"))
         # The nameless entry's set (S3b): whose projects the `◆` markers are,
@@ -683,6 +771,47 @@ class ProjectsView(Vertical):
             )
         self._paint_hints()
 
+    def _paint_form_chrome(self) -> None:
+        """Chrome for the form state (spec §5.5): identity, rule, one footer line.
+
+        The title states where the reader is rather than counting what exists —
+        no tracked total, no `◆` clause: none of them is about this surface,
+        and the key the reader is typing is the one fact the title cannot know
+        until the field says it. The rule is the plain one (the form has no
+        sections to be measured against) and the footer carries the notice when
+        there is one, else the sentence that names the form's one rule.
+        """
+        from rich.cells import cell_len
+
+        # The fields re-resolve their own ink from the LIVE resolver, so a theme
+        # switch reaches the form's labels and `‹ value ›` rows mid-fill.
+        self._form_page.restyle(_style_resolver())
+        muted = Style(color=theme_mod.semantic_color("muted"))
+        title = Text(no_wrap=True, overflow="ellipsis")
+        title.append("projects", style=Style(color=theme_mod.semantic_color("fg"), bold=True))
+        title.append(" · new project", style=muted)
+        self._title.update(title)
+        width = max(self.size.width - 2, 1)
+        self._paint_rule(width)
+        footer_width = self._detail.size.width or width
+        if self._notice is not None:
+            self._detail.update(self._notice_text(footer_width))
+        else:
+            sentence = FORM_FOOTER_HINT
+            if cell_len(sentence) > footer_width:
+                budget = max(footer_width - 1, 1)
+                kept: list[str] = []
+                used = 0
+                for char in sentence:
+                    size = cell_len(char)
+                    if used + size > budget:
+                        break
+                    kept.append(char)
+                    used += size
+                sentence = "".join(kept).rstrip() + "…"
+            self._detail.update(Text(sentence, style=muted, no_wrap=True))
+        self._paint_hints()
+
     def _paint_detail_chrome(self) -> None:
         """Chrome for the detail state: identity title, in-page ruler, freshness.
 
@@ -751,7 +880,11 @@ class ProjectsView(Vertical):
         """
         if width is None:
             width = max(self.size.width - 2, 1)
-        if self._mode == "detail":
+        if self._mode == "form":
+            # The form has no sections to measure against, so its rule is the
+            # shipped plain one — the `ruler is None` branch below.
+            ruler = None
+        elif self._mode == "detail":
             ruler = detail_ruler(
                 self._detail_page.section_anchors(),
                 int(self._detail_page.scroll_offset.y),
@@ -816,7 +949,11 @@ class ProjectsView(Vertical):
         before it is committed and ``esc`` is never dropped because it is the
         only way out.
         """
-        rungs = self._detail_hint_rungs() if self._mode == "detail" else self._canvas_hint_rungs()
+        rungs = self._canvas_hint_rungs()
+        if self._mode == "detail":
+            rungs = self._detail_hint_rungs()
+        elif self._mode == "form":
+            rungs = self._form_hint_rungs()
         width = max(self.size.width - 2, 1)
         chosen = rungs[-1]
         for leads, esc_label in rungs:
@@ -845,6 +982,8 @@ class ProjectsView(Vertical):
         # deferred pass in `_repaint` re-arms once the layout has settled.
         if self._mode == "detail":
             self._sync_detail_hints()
+        elif self._mode == "form":
+            self._sync_form_hints()
         else:
             self._sync_scroll_hint()
 
@@ -858,13 +997,54 @@ class ProjectsView(Vertical):
             self._next_hint,
             self._detail_hint,
             self._refresh_hint,
+            self._create_hint,
             self._open_hint,
             self._move_hint,
             self._page_hint,
             self._zoom_hint,
+            self._tab_hint,
+            self._save_hint,
             self._exit_hint,
             self._state_hint,
         )
+
+    def _form_hint_rungs(
+        self,
+    ) -> list[tuple[list[tuple[HintButton, str, bool]], str]]:
+        """The form's ONE rung (spec §4): `tab next field · ctrl+s save · esc cancel`.
+
+        One rung rather than a ladder, and that is a measurement rather than a
+        wish: the plan is 41 cells, which fits at the 60-column floor, so there
+        is nothing to shed. `esc` keeps its meaning in both states — it is what
+        gets a reader out of the form and out of the discard confirm.
+        """
+
+        def rung(
+            leads: list[tuple[HintButton, str, bool]], esc_label: str
+        ) -> tuple[list[tuple[HintButton, str, bool]], str]:
+            # `esc` is appended by the RUNG, exactly as the canvas ladders do it
+            # — the label is supplied per mode, so the button itself never
+            # carries one — and the state note is never painted here: the form
+            # is the surface, not a read-only view of one.
+            row = list(leads)
+            row.append((self._exit_hint, esc_label, bool(row)))
+            return (row, esc_label)
+
+        tab = (self._tab_hint, " next field", False)
+        save = (self._save_hint, " save", True)
+        return [rung([tab, save], "cancel")]
+
+    def _sync_form_hints(self) -> None:
+        """Arm the form's hints against what they would act on just now.
+
+        `ctrl+s save` and `tab next field` are disarmed while the discard
+        confirm is up: the page ignores both there (the confirm owns the
+        keyboard), and a lit key that does nothing is the defect
+        ``HintButton.set_actionable`` exists to prevent.
+        """
+        confirming = self._form_page.confirming
+        self._save_hint.set_actionable(not confirming)
+        self._tab_hint.set_actionable(not confirming)
 
     def _canvas_hint_rungs(
         self,
@@ -880,6 +1060,13 @@ class ProjectsView(Vertical):
         a gesture a reader finds by trying an arrow goes before a view they
         cannot discover, and the newest view types stay advertised on a
         narrow terminal (UX round 1, U3).
+
+        ``c create`` joined at the same rank as ``d detail`` (UX round 1, U1):
+        a reader who cannot see how to make a project cannot use the page, so
+        the two share the newest rungs and shed together. It was a BINDING
+        with no hint at all before this round — the create key existed and
+        nothing advertised it, which is the one failure this ladder exists to
+        prevent.
         """
 
         def rung(
@@ -914,6 +1101,7 @@ class ProjectsView(Vertical):
         board_hint = (self._board_hint, " board", True)
         timeline_hint = (self._timeline_hint, " timeline", True)
         refresh = (self._refresh_hint, " refresh", True)
+        create_hint = (self._create_hint, " create", True)
         open_hint = (self._open_hint, " open", True)
         detail_hint = (self._detail_hint, " detail", True)
         nxt = (self._next_hint, " next", True)
@@ -926,7 +1114,16 @@ class ProjectsView(Vertical):
         )
 
         all_leads = leads_of(
-            scroll, list_hint, board_hint, timeline_hint, nxt, refresh, open_hint, detail_hint, zoom
+            scroll,
+            list_hint,
+            board_hint,
+            timeline_hint,
+            nxt,
+            refresh,
+            create_hint,
+            open_hint,
+            detail_hint,
+            zoom,
         )
         return [
             rung(all_leads, "back to conversation", state=True),
@@ -940,6 +1137,7 @@ class ProjectsView(Vertical):
                     timeline_hint,
                     nxt,
                     refresh,
+                    create_hint,
                     open_hint,
                     detail_hint,
                 ),
@@ -947,17 +1145,28 @@ class ProjectsView(Vertical):
                 state=False,
             ),
             rung(
-                leads_of(scroll, list_hint, board_hint, timeline_hint, nxt, refresh, detail_hint),
+                leads_of(
+                    scroll,
+                    list_hint,
+                    board_hint,
+                    timeline_hint,
+                    nxt,
+                    refresh,
+                    create_hint,
+                    detail_hint,
+                ),
                 "back",
                 state=False,
             ),
             rung(
-                leads_of(scroll, list_hint, board_hint, timeline_hint, nxt, detail_hint),
+                leads_of(
+                    scroll, list_hint, board_hint, timeline_hint, nxt, create_hint, detail_hint
+                ),
                 "back",
                 state=False,
             ),
             rung(
-                leads_of(list_hint, board_hint, timeline_hint, nxt, detail_hint),
+                leads_of(list_hint, board_hint, timeline_hint, nxt, create_hint, detail_hint),
                 "back",
                 state=False,
             ),
@@ -1048,6 +1257,7 @@ class ProjectsView(Vertical):
         yield self._rule
         yield self._body
         yield self._detail_page
+        yield self._form_page
         yield self._detail
         with self._hints:
             yield self._scroll_hint
@@ -1057,10 +1267,13 @@ class ProjectsView(Vertical):
             yield self._next_hint
             yield self._detail_hint
             yield self._refresh_hint
+            yield self._create_hint
             yield self._open_hint
             yield self._move_hint
             yield self._page_hint
             yield self._zoom_hint
+            yield self._tab_hint
+            yield self._save_hint
             yield self._exit_hint
             yield self._state_hint
 
@@ -1151,6 +1364,13 @@ class ProjectsView(Vertical):
             return ""
 
         rows = [plain(self._title), plain(self._rule)]
+        if self._mode == "form":
+            # The form's rows ARE its fields: a readback that skipped them
+            # would leave this slice's headline surface unassertable — the
+            # same reason the detail's Markdown readback exists (P3, U6).
+            rows.extend(self._form_page.readback())
+            rows.append(plain(self._detail))
+            return rows
         if self._mode == "detail":
             # The detail state swaps the CANVAS rows for the page's own rows;
             # the title, rule and footer are the same boxes either way (S6d
@@ -1606,8 +1826,14 @@ class ProjectsView(Vertical):
 
     # -- leaving ------------------------------------------------------------
     def action_leave(self) -> None:
-        """``esc``: pop ONE level — detail → canvas keeps view and cursor —
-        and only the canvas exits the mode (spec §1: the shipped contract)."""
+        """``esc``: pop ONE level — form → canvas, detail → canvas keeps view and
+        cursor — and only the canvas exits the mode (spec §1)."""
+        if self._mode == "form":
+            # The FORM owns its own cancel: a clean form closes, a dirty one
+            # shows the inline discard confirm (spec §7.7). The view cannot
+            # answer that question, so it asks the page.
+            self._form_page.action_cancel_request()
+            return
         if self._mode == "detail":
             # Leaving by hand drops any refusal/pop sentence with the page it
             # belonged to (UX round 1, U1/U5).
@@ -1618,6 +1844,9 @@ class ProjectsView(Vertical):
 
     def _leave_or_pop(self) -> None:
         """The `esc` HINT's action: the button must do what the key does."""
+        if self._mode == "form":
+            self._form_page.action_cancel_request()
+            return
         if self._mode == "detail":
             # Leaving by hand drops any refusal/pop sentence with the page it
             # belonged to (UX round 1, U1/U5).
@@ -1625,6 +1854,191 @@ class ProjectsView(Vertical):
             self._exit_detail()
             return
         self._leave()
+
+    # -- the form state (S6d parity P4) -------------------------------------
+    def action_create(self) -> None:
+        """``c``: open the create form (spec §3), from the canvas or the detail."""
+        if self._mode in ("canvas", "detail"):
+            self._enter_form()
+
+    def _enter_form(self) -> None:
+        """Show the create page, reset to a fresh set of fields.
+
+        The reset is unconditional: `c` is a create, and a form that reopened
+        holding the last abandoned draft would submit a stranger's leftovers
+        (see ``ProjectsFormPage.reset``). The baseline a cancel returns to is
+        taken from the reset state, so an untouched form is CLEAN — `esc` then
+        closes immediately rather than asking about edits nobody made.
+        """
+        self._notice = None
+        # The team field's hint says which names exist (spec §7.7): read on
+        # entry from the registry `/team` uses, so it cannot drift from the
+        # vocabulary the reader is actually allowed to write. The lookup lives
+        # on the APP (it owns the team registry); a page mounted by a test host
+        # that is not an ``OperatorApp`` simply has none, and the hint falls back
+        # to its own honest sentence — the settings page's `getattr` rule.
+        lookup = getattr(self.app, "_known_team_names", None)
+        names: list[str] = []
+        if callable(lookup):
+            try:
+                found = lookup()
+                # Narrowed rather than assumed: ``getattr`` hands back an
+                # untyped callable, and the hint must not depend on the host
+                # answering with exactly a list.
+                if isinstance(found, (list, tuple)):
+                    names = [str(name) for name in found]
+            except Exception:  # noqa: BLE001 — a hint must never fail a keypress
+                names = []
+        self._form_page.set_known_teams(names)
+        #: Where a CANCEL returns to: a form opened from a project's own page
+        #: goes back to that page (spec §1), while a SAVE always lands on a
+        #: canvas — "cursor on the new project" only means something there.
+        self._form_from = "detail" if self._mode == "detail" else "canvas"
+        self._mode = "form"
+        self._form_page.reset()
+        self._form_page.display = True
+        self._body.display = False
+        self._detail_page.display = False
+        # The canvas actions disarm against the new mode; the active binding
+        # map is cached until this recomputes it (the app's recorded lesson).
+        self.refresh_bindings()
+        self._paint_chrome()
+        self.call_after_refresh(self._paint_chrome)
+        try:
+            self._form_page.focus_first()
+        except Exception:  # noqa: BLE001 — focus is a nicety
+            pass
+        self.call_after_refresh(self._form_page.arm_current)
+
+    def _exit_form(self, *, back: str | None = None) -> None:
+        """Leave the form for the state the reader came FROM (spec §1).
+
+        A create is often started from a project's own page (`detail --c-->
+        form`), and a cancel there puts the reader back on that page rather than
+        on the canvas — the promise the entry made. A SAVE passes
+        ``back="canvas"`` instead: the new project must be visible, and the
+        spec's "cursor on the new project" is a canvas fact. When the
+        remembered project has left the store, ``_resync_detail`` pops to the
+        canvas and says why.
+        """
+        destination = back or self._form_from
+        self._form_page.disarm_confirm()
+        self._form_page.display = False
+        self._mode = "canvas"
+        self._body.display = True
+        self._detail_page.display = False
+        if destination == "detail" and self._detail_project_id:
+            self._mode = "detail"
+            self._body.display = False
+            self._detail_page.display = True
+            self._resync_detail()
+        self.refresh_bindings()
+        self._paint_chrome()
+        self.call_after_refresh(self._paint_chrome)
+        try:
+            self.focus()
+        except Exception:  # noqa: BLE001 — focus is a nicety
+            pass
+
+    def close_form(self) -> None:
+        """Leave the form without writing — the page's own cancel route."""
+        if self._mode == "form":
+            self._exit_form()
+
+    def form_created(self, project_id: str, name: str) -> None:
+        """A create landed: leave the form, cursor on the new row, say so.
+
+        The CANVAS the reader came from is kept (spec §7.7: "back to the view
+        you came from") — ``focus_project`` would force the list canvas, which
+        is a different promise — while the cursor moves to the new project so
+        `↵` and `d` act on what was just made.
+        """
+        self._exit_form(back="canvas")
+        for index, view_row in enumerate(self._views):
+            project = view_row.get("project") if isinstance(view_row, dict) else None
+            if isinstance(project, dict) and str(project.get("id") or "") == str(project_id):
+                self._cursor = index
+                break
+        self._repaint()
+        self._scroll_cursor_into_view()
+        self.show_notice(f"created '{name}'")
+
+    def show_form_refusal(self, text: str) -> None:
+        """A STORE refusal, painted in the form (spec §7.7) — never a toast.
+
+        The page stays open with the reader's values intact: the refusal is
+        about one field, and losing the draft to read it would be the worse
+        trade. The sentence is the store's own (``store_error_text``'s rule at
+        the call site), so the form never invents a second wording for a rule
+        the store owns.
+        """
+        self._form_page.show_refusal(text)
+        self.call_after_refresh(self._paint_chrome)
+
+    def _form_submitted(self, edit: Any) -> None:
+        """The page's local validation passed — the APP performs the write."""
+        self.post_message(ProjectsViewFormSubmitted(edit=edit))
+
+    def _form_state_changed(self) -> None:
+        """The form changed something the chrome states: re-arm it."""
+        self.call_after_refresh(self._paint_chrome)
+
+    def _form_focus_next(self) -> None:
+        """The `tab` hint's action: the button must do what the key does."""
+        self._form_page.action_focus_next_field()
+
+    def _form_save(self) -> None:
+        """The `ctrl+s` hint's action."""
+        self._form_page.action_save()
+
+    @property
+    def wants_field_tab(self) -> bool:
+        """True while the FORM MODE is up — the app's `shift+tab` asks.
+
+        `shift+tab` is an app-wide PRIORITY binding (`cycle_effort`), so the
+        focused field can never see the chord; the app asks this page instead of
+        disarming every hotkey the way key capture does (see
+        :meth:`form_focus_previous`).
+
+        The claim is the WHOLE MESSAGE the mode is up, and that is the fix QA
+        round 2 (Q-4) measured: narrowing it to "not confirming" made the app
+        fall THROUGH the delegation for the chord, straight into
+        `action_cycle_effort` — every `shift+tab` at the discard question moved
+        a billable setting silently while a reader answered it. What must not
+        happen is the journey to the next field, and that is the belt inside
+        :meth:`form_focus_previous`, not the claim.
+
+        ``@property`` is load-bearing rather than decorative: without it the app
+        received the bound METHOD — always truthy — so the claim was never the
+        one asked about (QA round 1, Q-2).
+        """
+        return self._mode == "form"
+
+    def form_focus_previous(self) -> None:
+        """``shift+tab`` — the app's priority binding delegates here.
+
+        `shift+tab` is bound app-wide to ``cycle_effort`` with ``priority=True``
+        (the settings page's recorded trap: an app priority binding is matched
+        BEFORE the focused widget), so a form field can never see it. Rather
+        than disarming every hotkey the way key CAPTURE does, the app asks this
+        page first — the one key, delegated — which leaves ctrl+c and the rest
+        of the app's bindings exactly where they were.
+        """
+        if self._mode == "form" and not self._form_page.confirming:
+            self._form_page.focus_prev_field()
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """Disarm the canvas actions while the FORM owns the page.
+
+        Not a preference: `↑`/`↓` are not an ``Input``'s own keys, so they
+        bubble past the focused field to THIS view, and the canvas must not
+        move under a form the reader is filling in. ``esc`` is deliberately
+        NOT in the set — it is the form's own way out — and neither is `c`,
+        which is inert in form mode by its own guard.
+        """
+        if self._mode == "form" and action in self._CANVAS_ACTIONS:
+            return False
+        return super().check_action(action, parameters)
 
     # -- the detail state (S6d parity P2) -----------------------------------
     def action_open_detail(self) -> None:
