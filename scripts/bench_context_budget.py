@@ -889,7 +889,27 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: number that replaces this one. The peel-off a future reduction can act
 #: on: moving the role wording into ``guide://projects`` (read on demand)
 #: takes this back toward the base.
-#: RAISED 37,491 -> 37,732 for the ``team`` tool's ``label``/``aliases``
+#:
+#: RAISED 37,491 -> 37,515 for the ``sessions`` tool's per-op advertisement and
+#: the eval bridge's failure notice (``fix/sessions-resume-0930-9d2e``), on top
+#: of the projects entry above, stated with the arithmetic because the guard
+#: exists to make copy growth an explicit decision. THIS branch was cut at
+#: ``0dada4792`` and folded three times — onto ``fff390360``, then ``85ed0f7fd``
+#: (+ the tool:// reader), then ``ebb5fd496`` — so the ceiling is re-derived on
+#: the MERGED tree with THIS file's own method: the clean arm (the one CI
+#: renders) reads 104,139 chars = ~37,460 billed, the tiers-configured arm
+#: reads 104,901 = ~37,734 (the same 762-char config delta the entries above
+#: explain), and the ceiling is the clean reading plus the 55-token band =
+#: 37,515. The change's own component is +66 chars = +24 billed over the
+#: projects entry's clean folded head (104,073 -> 104,139), which is exactly
+#: the three platform-free strings measured during the first fold: sessions
+#: description 738 -> 746 = +8; sessions schema 3,241 -> 3,238 = -3 (the
+#: op-field description trimmed against the added ``help`` enum value); eval
+#: description 693 -> 754 = +61 (the eval result now reports failed ``tool()``
+#: calls in its own text). A local tiers-configured run reads 219 over
+#: (37,734 vs 37,515) — the recorded gap minus the band — and CI remains the
+#: binding reading; if any reading disagrees, the script wins.
+#: RAISED 37,515 -> 37,756 for the ``team`` tool's ``label``/``aliases``
 #: fields (the teams-label lane's core half: teams gain a local display label
 #: and extra addressing keys), stated with the arithmetic because the guard
 #: exists to make schema growth an explicit decision. Both are ADDITIONS to
@@ -897,18 +917,17 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: and they are create/update fields only: no new tool, no new op, nothing on
 #: the list/show path, nothing on any other tool.
 #:
-#: FOLDED ONTO THE HEAD ABOVE (a third fold for this branch: the projects
-#: raise and the main-side merges landed while it was open), re-derived
-#: against the merge-ref tree CI tests: the clean head measures 104,743
-#: chars = ~37,677 billed, so the ceiling is that + the 55-token band this
-#: file keeps = 37,732. The composition is exact, measured rather than
-#: summed: this branch's reading was 104,556 at the previous fold, the
-#: projects slice above adds its own +187 chars (68,573 -> 68,760 in
-#: ``tool_schemas``; every other counter byte-identical), and the new main's
-#: merges between the two folds add nothing net. This branch's own delta
-#: underneath remains +670 chars = +241 billed against its base (103,232 ->
-#: 103,902, measured ISOLATED with this script; the two fields and nothing
-#: else):
+#: FOLDED ONTO THE HEAD ABOVE (a fourth fold for this branch: the
+#: sessions-resume raise and the main-side merges landed while it was open),
+#: re-derived against the merge-ref tree CI tests: the clean head measures
+#: 104,809 chars = ~37,701 billed, so the ceiling is that + the 55-token band
+#: this file keeps = 37,756. The composition is exact, measured rather than
+#: summed: this branch's reading was 104,743 at the previous fold and the
+#: sessions-resume slice above adds its own +66 chars (68,760 -> 68,826 in
+#: ``tool_schemas``; every other counter byte-identical). This branch's own
+#: delta underneath remains +670 chars = +241 billed against its base
+#: (103,232 -> 103,902, measured ISOLATED with this script; the two fields
+#: and nothing else):
 #:
 #:   + tool_schemas    68,333 vs 67,663 = +670 chars = +241
 #:
@@ -921,7 +940,7 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: (the empty-string reset; the whole-list replacement; the collision rule).
 #: The peel-off a future reduction can act on: dropping the two fields from
 #: the schema should take this ceiling back down ~241 billed.
-BUDGET_BILLED_TOKENS = 37_732
+BUDGET_BILLED_TOKENS = 37_756
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

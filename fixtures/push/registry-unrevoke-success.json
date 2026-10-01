@@ -1,0 +1,37 @@
+{
+  "provenance": {
+    "kind": "synthetic",
+    "adr_ref": "damianvtran/local-operator-mobile@b03aeb15fcbff64c5bbd0c4117713a0285c28554 docs/adr/0006-push-and-ack-sync.md",
+    "core_ref": "damianvtran/local-operator@b77fec9d4",
+    "sections": [
+      "§3.1",
+      "§4"
+    ],
+    "how": "constructed from the ADR's literals at the pinned ref and cross-checked against the core's own builders (tests/unit/mobile/test_push_wire_contract.py); not captured from a running relay, because no relay route emits the machine-side shapes yet"
+  },
+  "shape": "unrevoke-success",
+  "route": "/api/push/devices/{device_id}/unrevoke",
+  "method": "POST",
+  "status": 200,
+  "required": {
+    "ok": "bool",
+    "device_id": "str"
+  },
+  "optional": {},
+  "forbidden": [
+    "token",
+    "device_key",
+    "credential_live",
+    "state"
+  ],
+  "example": {
+    "ok": true,
+    "device_id": "3f1c9a7b2d4e506182a3b4c5d6e7f809"
+  },
+  "notes": [
+    "OPERATOR ONLY: the caller must present this machine's operator key in the X-Lop-Operator-Key header, after the usual cookie gate — the refusal is registry-unrevoke-refusal-machine-only.json.",
+    "Clears EVERY marker the row carries (revoked_at and/or unpaired_at) and restores NO token and NO credential: the device must register again, which needs a live credential.",
+    "A row with no marker is a no-op that still answers ok — there is nothing to restore, and the caller reads the state back from the list route.",
+    "The key proves IDENTITY, never PERMISSION: a valid device_key for a tombstoned device is still refused by the state rules, and the way back never rests on it."
+  ]
+}
