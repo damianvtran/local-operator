@@ -411,6 +411,30 @@ relay:   GET /api/asks (aggregate) ; command op ask_respond via existing /comman
   window (the field would ship while the server default was still blocking) and a new client
   would take the flag-on path against a blocking backend.
 
+**A2 addendum (wire presence and the mirror's two extra keys).** The paragraph above is the
+rule; A2's implementation sharpens three things it left open, and every client codes against
+THIS wording:
+
+- **Presence ⇒ the flag is ON *and* this frame carries at least one ask row.** Absence ⇒
+  either nothing to render in this frame (the flag is on, the session has no asks, or the
+  frame's byte bound could not carry them) or the feature is off. "Supported but empty" is
+  deliberately **not expressible**, and no client may depend on it: an empty array still pays
+  for its keys on an attach frame with ~100 B of slack, so the empty case is published as
+  absence. The risky direction is unchanged — a blocking backend never publishes the fields at
+  all — and the old-client mirror covers the skew window either way. A2 also publishes
+  **`asks_truncated`** (true only when the wire bound dropped rows, absent when the list is
+  complete) so a client can never draw a prefix beside a full count and call it complete.
+- **The mirrored card's `head` is the OLDEST open ask**, not the first row of the published
+  list (which is open-first *newest*-first): a card that jumped to each new arrival would move
+  under a user's finger mid-tap. The divergence is named here rather than discovered; a later
+  PR may make the list lead with the oldest too.
+- **The legacy path answers ONE QUESTION AT A TIME.** `ask_respond` stays atomic per ask and
+  refuses a partial map; the mirrored card merges each tap into a per-ask DRAFT in the runtime
+  (never in the log, which is still written once, atomically, on the last question) and the
+  published row carries `draft_question_ids` so the card advances to the next unanswered
+  question. A draft is not a durable answer: a runtime death returns the ask to open, and the
+  index and aggregate routes never carry drafts.
+
 ---
 
 ## 5. Surfaces (all: queued + timed-out states honest; no surface may say "notified" it

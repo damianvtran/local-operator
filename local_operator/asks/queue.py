@@ -82,6 +82,13 @@ class AskQueue:
         #: it, inside which ``has_entry`` is still false and a re-entrant
         #: reconcile would hand the same row twice.
         self._handed: set[str] = set()
+        #: THE LEGACY DRAFT (design §4, A2 addendum): question id -> answer cell
+        #: for an ask being answered ONE QUESTION AT A TIME by the old mirrored
+        #: card. In-memory and per-runtime by design — it is not a durable fact
+        #: (the log stays atomic, written once every question has an entry), and
+        #: a runtime death simply returns the ask to its open state, which is the
+        #: truthful outcome for a partial answer nobody finished submitting.
+        self._drafts: dict[str, dict[str, list[str]]] = {}
 
     # -- paths -------------------------------------------------------------
 
@@ -287,6 +294,72 @@ class AskQueue:
         self._settled(ask_id)
         return {"ok": True}
 
+    def answer_one(
+        self,
+        ask_id: str,
+        question_id: str,
+        values: Sequence[str],
+        *,
+        by: str = "unknown",
+    ) -> dict[str, Any]:
+        """LEGACY INCREMENTAL ANSWER: one question of an ask, settled later.
+
+        The old mirrored card is a per-question flow (the blocking path advanced
+        one question at a time), so an old client can only ever send one cell.
+        :meth:`respond` — the NEW whole-ask path — deliberately refuses a partial
+        map, because the modern ops are atomic per ask and a partial submit is a
+        lost race rather than a step. This method is the bridge between the two:
+        it merges one cell into a per-ask draft, refuses a SECOND answer for the
+        same question (a repeat tap is a retry, not a change of mind), and hands
+        the completed draft to :meth:`respond` so the ask still settles in ONE
+        atomic log write.
+
+        Returns ``{"ok": True, "settled": bool, "waiting": [qid, ...]}`` for an
+        accepted cell — ``waiting`` names the questions the card should offer
+        next — or ``{"ok": False, "error": …}`` with the same refusal copy every
+        other answer path uses.
+        """
+        now = self._now()
+        record = self._find(ask_id, now)
+        if record is None:
+            return {"ok": False, "error": render.refusal_copy(None)}
+        refusal = render.refusal_copy(record)
+        if refusal:
+            return {"ok": False, "error": refusal}
+        ids = [str(q.get("id") or "") for q in (record.get("questions") or ())]
+        key = str(question_id)
+        if key not in ids:
+            return {
+                "ok": False,
+                "error": f"{key!r} is not a question on ask {ask_id}.",
+            }
+        draft = self._drafts.setdefault(ask_id, {})
+        if key in draft:
+            return {
+                "ok": False,
+                "error": f"{key!r} is already answered on ask {ask_id}; "
+                "answer the questions still waiting.",
+            }
+        draft[key] = [str(item) for item in (values or ())]
+        waiting = [qid for qid in ids if qid not in draft]
+        if waiting:
+            # Publish the partial so the mirrored card advances to the next
+            # question: the draft is what ``mirror_card`` reads to choose it.
+            self._refresh(now)
+            return {"ok": True, "settled": False, "waiting": waiting}
+        outcome = self.respond(ask_id, draft, by=by)
+        if not outcome.get("ok"):
+            # A refusal at settle time (a lost race against another surface)
+            # discards the draft with it: keeping it would let the next tap
+            # settle an ask the log has already closed.
+            self._drafts.pop(ask_id, None)
+            return outcome
+        return {"ok": True, "settled": True, "waiting": []}
+
+    def draft_question_ids(self, ask_id: str) -> list[str]:
+        """The question ids with an in-flight legacy answer, sorted."""
+        return sorted(self._drafts.get(str(ask_id), {}))
+
     def decline(self, ask_id: str, *, by: str = "unknown") -> dict[str, Any]:
         """Terminal-on-write: append ``declined`` (today's Esc, made explicit)."""
         now = self._now()
@@ -341,6 +414,10 @@ class AskQueue:
         is scheduled rather than awaited.
         """
         self.retire_deadline_wake(ask_id)
+        # A settled ask has no partial left to remember: the draft either just
+        # became the log's answers or the ask was declined/dismissed out from
+        # under it, and keeping it would advance a card for a closed ask.
+        self._drafts.pop(str(ask_id), None)
         self._refresh()
         self._kick()
 
@@ -624,7 +701,9 @@ class AskQueue:
 
     # -- the wire view and the derived index -------------------------------
 
-    def projection(self, now_ms: int | None = None) -> list[dict[str, Any]]:
+    def projection(
+        self, now_ms: int | None = None, *, drafts: bool = False
+    ) -> list[dict[str, Any]]:
         """The ``PendingAsk`` rows for a surface, open first, capped.
 
         A2 publishes this on the frontend state; it is built here so the fold is
@@ -647,7 +726,11 @@ class AskQueue:
             expires_at = int(record.get("expires_at") or 0)
             if expires_at and stamp - expires_at > horizon_ms:
                 continue
-            rows.append(store.pending_row(record))
+            rows.append(
+                store.pending_row(
+                    record, self._drafts.get(str(record.get("ask_id"))) if drafts else None
+                )
+            )
         rows.sort(
             key=lambda row: (
                 row.get("status") != store.STATUS_OPEN,
@@ -670,6 +753,26 @@ class AskQueue:
             logger.warning(
                 "ask index: could not write entry for %s", self._session_id, exc_info=True
             )
+        self._publish_state()
+
+    def _publish_state(self) -> None:
+        """Hand the new fold to the host's wire publisher, if it has one.
+
+        ``_refresh`` is the ONE place the queue's visible state changes —
+        enqueue, answer, decline, dismiss and every reconcile all end here — so
+        it is also where the wire has to be told (design §4: the frontend state,
+        the projection and the list rows publish the fold the moment it moves).
+        A PROBE rather than a direct call, for the reason every other optional
+        hook on this object is one: the session double in this package's tests
+        has no publisher, and a queue must not require a wire to exist.
+        """
+        publish = getattr(self._session, "publish_ask_state", None)
+        if not callable(publish):
+            return
+        try:
+            publish()
+        except Exception:  # noqa: BLE001 — a wire is never worth failing the log
+            logger.debug("ask: could not publish the ask state", exc_info=True)
 
     # -- the deadline wake row ---------------------------------------------
 

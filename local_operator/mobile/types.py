@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
@@ -467,6 +468,10 @@ ControlOp = Literal[
     "new_conversation",  # {} — the TUI's /new
     "resume_session",  # {session_id} — rebind the runtime to another transcript
     "approval_answer",  # {request_id, approved, remember}
+    # {request_id, value} — the LEGACY per-question answer. For one release it
+    # also carries a mirrored queued ask's synthetic id ``"<ask_id>.<qidx>"``,
+    # which the runtime maps onto the whole-ask queue (design §4, legacy
+    # mirror), so an old client's tap still resolves.
     "ask_answer",  # {request_id, value}
     # The QUEUED-ASK family (design §2.4). Additive, so NO ``PROTOCOL_VERSION``
     # bump for the same reason ``peer_message`` gives: an OLD registrant answers
@@ -567,6 +572,16 @@ EntryKind = Literal[
     # through its unknown-kind path, which is exactly what it rendered before
     # the runtime emitted reasoning at all.
     "reasoning",
+    # A queued ask SETTLING (design docs/design/ask-nonblocking.md §4): one row
+    # per answer, late answer or decline — ``details.status`` says which — and
+    # one row for the deadline that passed with nobody answering. They are
+    # distinct kinds rather than a generic notice because a client must be able
+    # to key an affordance on them (the timed-out ask stays answerable) and
+    # because the shared text already distinguishes them. A client that does not
+    # know the kind renders nothing new, which is exactly what it rendered
+    # before the queue existed.
+    "ask_response",
+    "ask_timeout",
 ]
 
 ToolState = Literal["composing", "queued", "running", "done", "failed", "interrupted"]
@@ -734,6 +749,40 @@ class AskOptionWire:
 
 
 @dataclass
+class PendingAskWire:
+    """One queued ask on the phone wire (design §4, frozen).
+
+    The mobile twin of ``session.frontend_state.PendingAskState`` — the same
+    frozen shape, because the phone and the desktop app must not be told about
+    one ask in two vocabularies. ``questions`` stays a list of plain dicts (the
+    log stores plain dicts and the wire carries the FULL question so a client
+    can draw a picker without re-deriving the ask), and ``answers`` holds secret
+    answers as KEYS ONLY — the value never leaves the session's memory store.
+    """
+
+    ask_id: str = ""
+    created_at: int = 0
+    expires_at: int = 0
+    timeout_s: int = 0
+    urgent: bool = False
+    status: str = "open"
+    delivered: bool = False
+    questions: list[dict[str, Any]] = field(default_factory=list)
+    answers: dict[str, list[str]] | None = None
+    answered_by: dict[str, Any] | None = None
+    answered_at: int | None = None
+    #: Question ids the LEGACY incremental path (design §4, A2 addendum) has
+    #: already taken in THIS runtime for a still-open ask. They are not settled
+    #: answers — the log holds none of them until the last question lands — and
+    #: they exist so the mirrored card advances to the next question between an
+    #: old client's taps. Absent on every ask answered the atomic way.
+    draft_question_ids: list[str] | None = None
+
+    def to_json(self) -> dict[str, Any]:
+        return {key: value for key, value in asdict(self).items() if value is not None}
+
+
+@dataclass
 class PendingRequest:
     """An approval gate or ask dialog waiting on the user — the phone's
     highest-priority render (branding.md §7: a question for the user is the
@@ -780,6 +829,44 @@ class PendingRequest:
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def ask_mirror_request(card: Mapping[str, Any]) -> PendingRequest:
+    """The legacy single-slot card for the mirrored question of a QUEUED ask (§4).
+
+    THE LEGACY MIRROR, client half: for one release a queued ask is ALSO
+    projected as today's per-question ``pending`` card, so an OLD desktop app or
+    native app — which reads ``pending`` and answers with the ``ask_answer`` op —
+    can still see and answer it. ``request_id`` is ``"<ask_id>.<qidx>"`` (built
+    by ``asks.store.mirror_request_id``, the one place that spelling lives) and
+    the runtime's own ``ask_answer`` maps it back onto the whole-ask queue.
+
+    ``card`` is the decision, not the raw rows: it comes from
+    ``asks.render.mirror_card``, which owns "which ask is the head, which
+    question is unanswered" for BOTH the server-side gate mirror and this
+    projection. Re-deriving that choice here is how two publishers would come to
+    disagree about which ask the user is looking at.
+    """
+    options = card.get("options") or []
+    return PendingRequest(
+        request_id=str(card.get("request_id") or ""),
+        kind="ask",
+        title=str(card.get("title") or "the agent is asking"),
+        detail="",
+        options=[
+            AskOptionWire(
+                label=str(option.get("label") or ""),
+                description=str(option.get("description") or ""),
+            )
+            for option in options
+            if isinstance(option, Mapping)
+        ],
+        secret=bool(card.get("secret")),
+        question_index=int(card.get("question_index") or 0),
+        question_total=int(card.get("question_total") or 1),
+        recommended=(card.get("recommended") if isinstance(card.get("recommended"), int) else None),
+        persist=bool(card.get("persist")),
+    )
 
 
 def ask_pending_request(
@@ -900,7 +987,28 @@ class SessionProjection:
     #: How many requests are waiting in total (>= 1 while ``pending`` is set).
     #: A parallel tool batch can open several approvals at once; the phone
     #: shows "1 of N" so the user knows more cards follow this one.
+    #:
+    #: THE APPROVAL QUEUE'S LENGTH, and it stays that: an open ASK is counted by
+    #: ``asks_open`` instead. ``pending`` may still carry a queued ask's mirrored
+    #: card during the one-release mirror window, and the count deliberately
+    #: does NOT include it — a badge that mixed the two would tell the user a
+    #: blocking approval was waiting when the agent had merely asked something.
     pending_count: int = 0
+    #: The session's queued asks (design §4), newest first with the OPEN ones in
+    #: front, and how many are still open.
+    #:
+    #: PRESENCE IS THE CAPABILITY PROXY (N2): both are ABSENT — ``None``, not
+    #: empty — unless queued asks are live in the runtime that published this
+    #: projection. A client may therefore treat the field's presence as "this
+    #: runtime has queued asks" and render the new surfaces; absence must render
+    #: exactly today's view.
+    #:
+    #: CLIENT RULE (N3): once ``asks`` is present, IGNORE any ``pending``/
+    #: ``pending_gate`` whose ``kind == "ask"`` — it is the legacy mirror of an
+    #: ask that is already in this list, and honouring both paints one ask
+    #: twice. Approvals (``kind != "ask"``) are unaffected.
+    asks: list[PendingAskWire] | None = None
+    asks_open: int | None = None
     usage: dict[str, int] = field(default_factory=dict)  # input/output tokens
     # -- the spend + context glance (phase 1 of the mobile parity program) --
     # The session's spend, as the canonical store holds it: the SAME inputs the
@@ -934,6 +1042,16 @@ class SessionProjection:
     def to_json(self) -> dict[str, Any]:
         data = asdict(self)
         data["pending"] = self.pending.to_json() if self.pending else None
+        if self.asks is not None:
+            data["asks"] = [row.to_json() for row in self.asks]
+        # N2: absence is the capability proxy, so a None field is POPPED rather
+        # than sent as null — ``asdict`` would otherwise emit both keys on every
+        # projection, which is precisely the false "this runtime has queued asks"
+        # the rule exists to prevent.
+        if self.asks is None:
+            data.pop("asks", None)
+        if self.asks_open is None:
+            data.pop("asks_open", None)
         return data
 
     def __post_init__(self) -> None:
@@ -1047,9 +1165,15 @@ def _projection_from_json(data: dict[str, Any], record: SessionRecord) -> Sessio
     base = {
         k: v
         for k, v in data.items()
-        if k in known and k not in ("transcript", "todos", "subagents", "pending")
+        if k in known and k not in ("transcript", "todos", "subagents", "pending", "asks")
     }
     projection = SessionProjection(**base)
+    # The ask rows are rebuilt through the dataclass for the same rolling-upgrade
+    # reason as every other nested shape: a NEW viewer reading an OLD payload
+    # gets no key at all (``None``, i.e. absence — the capability proxy), and a
+    # newer payload's extra keys are dropped rather than raising.
+    if isinstance(data.get("asks"), list):
+        projection.asks = build(PendingAskWire, data.get("asks") or [])
     projection.pid = record.pid
     projection.transcript = build(TranscriptEntry, data.get("transcript", []))
     # Todos arrive PHASED; rebuild the two nested dataclass levels, tolerating
