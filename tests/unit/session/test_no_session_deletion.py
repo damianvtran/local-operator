@@ -1011,6 +1011,18 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "that same temp FILE, only while the replace above is failing",
     ),
+    # The push handle key (`mobile/push_handles.py`): 32 random bytes at a fixed
+    # basename directly under the config root, beside mobile-seen.json and the
+    # device registry. `key_path(config_dir)` is config-root-derived with no
+    # session id and no caller input, so it cannot name a path under
+    # `sessions/`; the unlink runs only on the mint's own error path, clearing
+    # the file this call JUST created (O_EXCL create, then write/chmod failed).
+    (
+        "local_operator/mobile/push_handles.py::_mint_key",
+        "<path>.unlink",
+        "clears the fixed-basename key file this call JUST created, only on the "
+        "mint's error path; never session-derived",
+    ),
     (
         "local_operator/multiplexer/markers.py::_FileBackend.publish",
         "os.replace",
