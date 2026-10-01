@@ -548,6 +548,29 @@ def _secret_run(specification: str) -> str:
     return "lop secret run " + "--" + "secret " + specification + " -- npm publish"
 
 
+#: The literal word the harness's own help text uses where a store name goes. Built
+#: from parts for the reason ``_secret_run`` gives: this file is read through the pass
+#: it describes.
+SECRET_REFERENCE_PLACEHOLDER = "NA" + "ME"
+
+#: A store entry's name in the store's own grammar (caps, digits, underscores). A
+#: throwaway; nothing here is a stored secret.
+STORE_ENTRY_NAME = "_".join(["OPENROUTER", "API", "KEY", "DEV"])
+
+#: A value spelled like a store NAME (caps, digits, an underscore) that is, for the
+#: R1-1 residual rows, a stand-in for a real password. Throwaway; built from parts.
+RELEASED_CAPS_UNDERSCORE_VALUE = "_".join(["ADMIN", "PASS", "2024"])
+
+#: The refusal footer's sentence as ``harness/secret_sinks.py`` renders it.
+SECRET_NAME_REFUSAL_FOOTER = (
+    "or use `lop secret run "
+    + "--"
+    + "secret "
+    + SECRET_REFERENCE_PLACEHOLDER
+    + " -- …` for an environment variable."
+)
+
+
 POSITIVE_CASES: tuple[Case, ...] = (
     # --- added in round 2: the leaks the original corpus did not spell ---------
     # Every one of these was published at some point in this PR's own history, and
@@ -1763,6 +1786,56 @@ NEGATIVE_CASES: tuple[Case, ...] = (
     Case(
         "https://h/v1/flags?api_key=" + KEBAB_IDENTIFIER + "&page=2",
         "the api_key spelling of the same boundary",
+    ),
+    # --- 2026-10-01: a secret NAME is never masked or registered ---------------
+    # The secret-sink refusal teaches ``--secret <placeholder>`` in its footer and
+    # prints ``secret: <store-name>`` for the entry it refused. Both were masked,
+    # and the second was REGISTERED, which deleted the name from every later
+    # occurrence in the session; agents then copied the marker as if it were a
+    # name and the store lookup failed. Names must read in the clear; the VALUE
+    # half of every rule is unchanged (see the positives that keep masking).
+    Case(
+        SECRET_NAME_REFUSAL_FOOTER,
+        "the refusal footer's reference placeholder after --secret is a NAME, not a value",
+    ),
+    Case(
+        "--" + "secret " + SECRET_REFERENCE_PLACEHOLDER,
+        "a bare --secret followed by the reference placeholder",
+    ),
+    Case(
+        "secret" + ": " + SECRET_REFERENCE_PLACEHOLDER,
+        "a `secret:` line carrying the reference placeholder",
+    ),
+    Case(
+        "  secret" + ": " + STORE_ENTRY_NAME,
+        "the refusal's own `secret: <store-name>` line: a store-grammar NAME under a strong name",
+    ),
+    Case(
+        "secret" + ': "' + STORE_ENTRY_NAME + '"',
+        "the quoted spelling of the same line reaches the same verdict",
+    ),
+    # --- 2026-10-01, R1-1: the ACCEPTED RESIDUAL of the name release ------------
+    # These rows pin the released class so a later round has something to argue
+    # against rather than a silent hole. A value spelled exactly like a store NAME
+    # (caps, digits, at least one underscore) is read as a NAME on the assignment
+    # surfaces too, not only after a flag: the same judgement the flag arms already
+    # take (a ``--token`` argument of that spelling is a pinned negative above).
+    # Measured against ``origin/main``, every row below MASKED; none does now, and
+    # nothing is registered for containment. Rules that do not consult the value
+    # proof (DSN, bearer, vendor, query, header) still mask the same spelling in
+    # place. The lowercase/mixed-case boundary is pinned on the other side by
+    # ``IDENTIFIER_ARM_VALUES`` in the POSITIVE half, which keeps masking.
+    *(
+        Case(
+            _arm_spelling(name, spelling, RELEASED_CAPS_UNDERSCORE_VALUE),
+            f"{spelling}: R1-1 accepted residual, a caps+underscore value is read as a NAME",
+        )
+        for name, spelling in (
+            ("PASSWORD", "assignment"),
+            ("db_password", "docker-compose"),
+            ("SECRET_KEY", "export-prefixed"),
+            ("password", "JSON field"),
+        )
     ),
 )
 
