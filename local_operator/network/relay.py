@@ -10508,7 +10508,7 @@ def _install_systemd(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict
                 "no user unit is available here: this run's HOME is not the home "
                 "the systemd user manager supervises, so nothing was enabled. "
                 "That is what an isolated or redirected HOME looks like, and it "
-                "is expected."
+                "is expected. The relay can run in the foreground instead."
             ),
         }
     # Lingering BEFORE enable --now (mobile's ordering): without a user manager
