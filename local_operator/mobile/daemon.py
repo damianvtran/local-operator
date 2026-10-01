@@ -5117,9 +5117,11 @@ def build_app(daemon: MobileDaemon):
         exists to refuse. ``_push_operator_gate`` is what makes this route the
         machine's; a device session gets the refusal the app renders.
 
-        Clears ``revoked_at`` OR ``unpaired_at`` (they are different states with
-        different refusals) and restores no token: the device must register
-        again, which needs a live credential.
+        Clears EVERY marker the row carries — ``revoked_at`` and/or
+        ``unpaired_at``, different states with different refusals — and restores
+        no token: the device must register again, which needs a live credential.
+        ``push_devices.unrevoke`` carries the full reasoning, including why the
+        operator's result line names only the strongest marker it cleared.
         """
         denied = gate(request)
         if denied is not None:
