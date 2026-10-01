@@ -876,6 +876,13 @@ Only the skills relevant to the current turn are surfaced, and their bodies
 load on demand via `skill://<name>` reads, so your context isn't taxed by
 knowledge you aren't using. `/skills` lists what's loaded.
 
+Skills can also live in grouped libraries: `~/.local-operator/skills/<group>/<name>/SKILL.md`
+is discovered too (up to 3 levels below a skills root by default; set
+`LOCAL_OPERATOR_SKILL_MAX_DEPTH` to 1-5 to change it, `1` = flat only). A
+directory that holds a `SKILL.md` is a skill boundary and is never searched
+further, so a skill's own `references/` or `scripts/` folders never register as
+skills.
+
 You can also invoke one **by name** instead of leaving the choice to the
 router: type `$` in the composer to pick from your skills, then write the
 request: `$research compare these two API designs` loads that skill and
