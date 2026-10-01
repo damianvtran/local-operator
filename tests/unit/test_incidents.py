@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from local_operator.harness.message_types import (
@@ -820,3 +822,29 @@ def test_a_fired_stall_bound_has_a_class_of_its_own() -> None:
     assert "no plane reported" in render_cut_off_reason(
         STALL_BOUND_CAUSE, detail="its own stall bound fired: no plane reported for the whole bound"
     )
+
+
+def test_signal_receipt_detail_states_the_gap_and_never_names_a_sender() -> None:
+    """One parenthetical: the gap, the sender it cannot name, and that nobody asked.
+
+    The wording is the design round 1 one (D1/D5): the reader's vocabulary
+    ("nobody asked for a stop", next to ``runtime-killed``'s "no stop was asked
+    for") rather than the writer's ("no stop was staged"), and the count joined
+    with the same separator as the rest of the clause.
+    """
+    from local_operator.incidents import KILL_UNATTRIBUTED, render_signal_receipt_detail
+
+    detail = render_signal_receipt_detail(signal_name="SIGTERM", at=0)
+    assert detail.startswith(" (") and detail.endswith(")")
+    assert KILL_UNATTRIBUTED in detail
+    assert "SIGTERM received from an unidentified sender; nobody asked for a stop" in detail
+    assert detail.count("(") == 1, "one parenthetical, never nested"
+    assert "same uid or root" not in detail, "an inference the receipt never made"
+
+    counted = render_signal_receipt_detail(signal_name="SIGTERM", count=3)
+    assert "SIGTERM received 3 times, last from an unidentified sender" in counted, counted
+
+    # THE TIME IS LOCAL WITH ITS OFFSET (D3): the sentence is read days later, from
+    # another device, so the clock it is on travels with it.
+    dated = render_signal_receipt_detail(signal_name="SIGTERM", at=1_760_000_000.0)
+    assert re.search(r"received at \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{4}", dated), dated

@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -1371,3 +1372,235 @@ async def test_the_owner_path_restores_the_records_resolved_rows(tmp_path: Path)
     persisted = json.loads((directory / "subagent-roster.v1.json").read_text(encoding="utf-8"))
     assert persisted["jobs"], "the fixture wrote no rows"
     assert all("cut_off_cause" not in row for row in persisted["jobs"])
+
+
+# -- wave B (2026-09-30 20:00): a raw external SIGTERM must not read as the user's stop ----
+#
+# Forensics (`massfailure/REPORT.md`, session abd67a6355c1): seventeen sessions died
+# in-process inside 13 seconds, eleven recorded as ``interrupted|user-stop`` and seven
+# as ``error|disposed``, every one after an EXTERNAL SIGTERM with no marker and no ladder
+# call. The exec worker's SIGTERM handler aborted the turn (``session.abort``) without
+# noting any cause, so the aborted turn's own end — which publishes BEFORE the dispose
+# rung can note anything — fell to the taxonomy's default for "aborted, no cut-off cause":
+# the user's own stop. These cells drive the REAL handler through a recording loop (no real
+# signal is sent to the test process) against a REAL session with a turn in flight.
+
+
+class _RecordingLoop:
+    """Captures the callback ``_install_sigterm_handler`` registers.
+
+    The handler is the production one; only the signal DELIVERY is simulated, so the
+    test process is never signalled.
+    """
+
+    def __init__(self) -> None:
+        self.callbacks: dict[Any, Any] = {}
+
+    def add_signal_handler(self, sig: Any, callback: Any) -> None:
+        self.callbacks[sig] = callback
+
+
+async def _sigterm_a_session_mid_turn(
+    directory: Path, *, marker: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Park a real turn, deliver the exec worker's SIGTERM handler, return the row.
+
+    ``marker`` stages a stop marker for THIS run first (as a cooperating sender would),
+    keyed exactly as ``control._stop_marker_payload`` keys it. Returns the attention
+    state AFTER the aborted turn unwound and again after ``dispose``, so a mislabel
+    cannot hide in either window.
+    """
+    import signal as _signal
+
+    from local_operator import exec_worker
+    from local_operator.session.runtime import registry
+
+    directory.mkdir(parents=True, exist_ok=True)
+    session = _make_session(directory, stream=_never_yielding_stream())
+    await session.async_init()
+    task = asyncio.ensure_future(session.prompt("a turn that an external SIGTERM will cut"))
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not session._attention_run_request_dispatched:
+        await asyncio.sleep(0.005)
+    assert session._attention_run_request_dispatched, "the turn never reached the provider"
+    if marker is not None:
+        registry.write_stop_marker(
+            directory,
+            {
+                "session_id": session.session_id,
+                "pid": os.getpid(),
+                "started_at": None,
+                "at": time.time(),
+                "rung": "sigterm",
+                "killer": {"pid": 1, "argv0": "lop", "command": "lop stop"},
+                **marker,
+            },
+        )
+    loop = _RecordingLoop()
+    interrupted = asyncio.Event()
+    facts: dict[str, Any] = {}
+    sessions: list[Any] = [session]
+    install: Any = exec_worker._install_sigterm_handler
+    install(loop, sessions, interrupted, facts, None)
+    loop.callbacks[_signal.SIGTERM]()
+    assert interrupted.is_set()
+    await asyncio.wait_for(task, timeout=30)
+    identity = conversation_identity(directory)
+    after_abort = dict(AttentionStore().state(identity))
+    await asyncio.wait_for(session.dispose(), timeout=30)
+    after_dispose = dict(AttentionStore().state(identity))
+    return {"abort": after_abort, "dispose": after_dispose, "facts": facts}
+
+
+@pytest.mark.asyncio
+async def test_a_raw_external_sigterm_mid_turn_is_never_the_users_stop(tmp_path: Path) -> None:
+    """THE REGRESSION: no marker, no ladder — the row must tell the signal story.
+
+    Before the fix this cell read ``interrupted`` / ``user-stop`` (captured by running it
+    against the unfixed handler: ``kind='interrupted', cause='user-stop'``). The fixed
+    row is a cut-off ``error`` carrying the receipt's sentence: the signal, that it came
+    from an unidentified sender, and that nobody asked for a stop.
+    """
+
+    result = await _sigterm_a_session_mid_turn(tmp_path / "sessions" / "raw-sigterm")
+    for phase in ("abort", "dispose"):
+        state = result[phase]
+        assert state["kind"] == "error", (phase, state)
+        assert state["cause"] != "user-stop", (phase, state)
+        assert state["cause"] == "runtime-shutdown", (phase, state)
+        assert "SIGTERM received" in state["reason"], (phase, state)
+        assert "nobody asked for a stop" in state["reason"], (phase, state)
+    assert result["facts"]["signal"]["sanction"] == "none"
+
+
+@pytest.mark.asyncio
+async def test_a_sigterm_with_a_covering_deliberate_marker_still_reads_as_the_users_stop(
+    tmp_path: Path,
+) -> None:
+    """The pair to the cell above: POSITIVE evidence keeps the verdict exactly as before."""
+    result = await _sigterm_a_session_mid_turn(
+        tmp_path / "sessions" / "marked-sigterm", marker={"deliberate": True}
+    )
+    for phase in ("abort", "dispose"):
+        state = result[phase]
+        assert state["kind"] == "interrupted", (phase, state)
+        assert state["cause"] == "user-stop", (phase, state)
+    assert result["facts"]["signal"]["sanction"] == "marker"
+
+
+@pytest.mark.asyncio
+async def test_a_sigterm_with_an_involuntary_marker_names_its_actor_not_the_user(
+    tmp_path: Path,
+) -> None:
+    result = await _sigterm_a_session_mid_turn(
+        tmp_path / "sessions" / "involuntary-sigterm",
+        marker={
+            "deliberate": False,
+            "mechanism": "generation-prune",
+            "actor": "lop install prune",
+        },
+    )
+    for phase in ("abort", "dispose"):
+        state = result[phase]
+        assert state["kind"] == "error", (phase, state)
+        assert state["cause"] == "runtime-killed", (phase, state)
+        assert "lop install prune" in state["reason"], (phase, state)
+
+
+@pytest.mark.asyncio
+async def test_the_runtimes_idle_branch_note_reaches_the_published_row(tmp_path: Path) -> None:
+    """Runtime-side wave-B path against a REAL session: the helper ``_on_signal`` calls.
+
+    ``_work_in_flight`` can say idle while a turn (a ``wait`` tool) is still live; the
+    dispose then aborts it. With the receipt's verdict noted first, the published row
+    is the signal story (``runtime-shutdown``), not ``error|disposed`` and never the
+    user's stop. The two neighbours stay as they were: a deliberate stop noted first
+    is still ``interrupted|user-stop`` (``test_the_dispose_route_publishes_...``) and a
+    bare dispose is still ``disposed`` (``test_an_unnoted_dispose_of_a_LIVE_turn_...``).
+    """
+    from local_operator.session.runtime import process, signal_receipt
+
+    directory = tmp_path / "sessions" / "idle-branch"
+    directory.mkdir(parents=True)
+    session = _make_session(directory, stream=_never_yielding_stream())
+    await session.async_init()
+    task = asyncio.ensure_future(session.prompt("a turn a signal will cut"))
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not session._attention_run_request_dispatched:
+        await asyncio.sleep(0.005)
+    assert session._attention_run_request_dispatched
+
+    class _Handle:
+        _session = session
+
+    entry = signal_receipt.build_signal(
+        "SIGTERM", 15, at=time.time(), in_flight=False, action="stop", marker=None, covered=False
+    )
+    process._note_signal_cut_off(_Handle(), {"signals": [entry], "count": 1})
+    await asyncio.wait_for(session.dispose(), timeout=30)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    state = AttentionStore().state(conversation_identity(directory))
+    assert (state["kind"], state["cause"]) == ("error", "runtime-shutdown"), state
+    assert "SIGTERM received" in state["reason"]
+    assert "nobody asked for a stop" in state["reason"]
+
+
+@pytest.mark.asyncio
+async def test_the_real_routing_arms_the_cause_on_a_busy_session_and_the_row_agrees(
+    tmp_path: Path,
+) -> None:
+    """The wave-B shape end to end at unit level: the REAL routing + a REAL session.
+
+    A signal arrives while a turn is live (the busy branch — the wave-B shape). The
+    routing must arm the cause on the session BEFORE anything ends the turn, and the
+    turn's published row must then tell the signal's story rather than the user's. The
+    turn is ended here by ``session.abort`` — the same shape a tool aborting under the
+    signal produces (the victim transcript shows the ``wait`` tool's own "aborted"
+    result 171 ms after the signal) — because that is the ending no dispose rung gets
+    to note.
+    """
+    from local_operator.session.runtime import process
+
+    directory = tmp_path / "sessions" / "routed"
+    directory.mkdir(parents=True)
+    session = _make_session(directory, stream=_never_yielding_stream())
+    await session.async_init()
+    task = asyncio.ensure_future(session.prompt("a turn a signal will cut"))
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not session._attention_run_request_dispatched:
+        await asyncio.sleep(0.005)
+    assert session._attention_run_request_dispatched
+
+    class _Handle:
+        _session = session
+
+        def is_busy(self) -> bool:
+            return True  # work in flight: the drain branch, the wave-B shape
+
+    class _Runtime:
+        class _Record:
+            session_id = session.session_id
+            started_at = 1_760_000_000.0
+
+        _record = _Record()
+        _boot_build = None
+
+    state = process._SignalState(stop=asyncio.Event(), trigger={})
+    process._route_signal(_Handle(), _Runtime(), process.signal.SIGTERM, state=state)
+    assert state.draining is not None
+    # THE CAUSE IS ARMED, on the real session, before any ending:
+    assert session._cut_off_cause == "runtime-shutdown", session._cut_off_cause
+    assert "nobody asked for a stop" in session._cut_off_detail
+
+    # ... and an ending that never went through a dispose rung still reads the signal.
+    state.draining.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await state.draining
+    session.abort("terminated")
+    await asyncio.wait_for(task, timeout=30)
+    state_row = AttentionStore().state(conversation_identity(directory))
+    assert (state_row["kind"], state_row["cause"]) == ("error", "runtime-shutdown"), state_row
+    assert "SIGTERM received" in state_row["reason"]

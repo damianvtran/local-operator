@@ -1200,6 +1200,12 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "the runtime-stop.json FILE the ladder's own refusal withdraws (never a directory)",
     ),
     (
+        "local_operator/session/runtime/stop_ledger.py::_append",
+        "os.replace",
+        "logs/stop-sweeps.jsonl -> stop-sweeps.jsonl.1: a rotated FILE under "
+        "config_dir()/logs, built from a fixed basename; no session id reaches it",
+    ),
+    (
         "local_operator/session/runtime/registry.py::_reap_dead_record",
         "os.replace",
         "runtime/<pid>.json -> runtime/reaped/<pid>.json; both run_dir()-derived",
@@ -2564,6 +2570,8 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/cleanup.py::_write_record",  # tmp -> last-cleanup.json
         # tmp -> update-window.json (the update window's handover marker)
         "local_operator/session/runtime/inbox.py::write_update_window",
+        # stop-sweeps.jsonl -> stop-sweeps.jsonl.1 (a FILE under config_dir()/logs)
+        "local_operator/session/runtime/stop_ledger.py::_append",
         "local_operator/session/frontend_state.py::SnapshotJobs.__init__",  # str.replace
         "local_operator/session/frontend_state.py::SnapshotWakeScheduler.__init__",
         "local_operator/session/frontend_state.py::SnapshotSubagentComms.__init__",
