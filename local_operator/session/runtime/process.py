@@ -1399,29 +1399,56 @@ def _record_signal_receipt(
 
 
 def _note_signal_cut_off(handle: object, receipt: dict[str, Any] | None) -> None:
-    """Say, BEFORE ``stop`` is set, why a signal that cuts a turn is cutting it. Best-effort.
+    """Say, BEFORE anything else acts on a signal, what that signal is doing to a live turn.
 
-    THE IDLE-BRANCH HALF OF THE WAVE-B FIX (2026-09-30 20:00). ``_work_in_flight`` and
-    ``Session.disposal_cuts_a_turn`` are different questions, and a turn can be live
-    for the second while the first says "idle" (a ``wait`` tool in flight). That turn
-    gets no drain: ``stop.set()`` runs the dispose at once, which aborts it, and
-    whichever rung notes first decides the row. Unnoted, that was ``disposed`` (seven
-    rows) with no mention of the signal that caused it. Here the receipt's pairing —
-    through the SAME discriminator the exec worker and the boot reader use
-    (``signal_receipt.cut_off_verdict``) — adds the signal story to the cut.
+    RUNS ON BOTH BRANCHES OF THE ROUTING, and that widening is the wave-B fix
+    (2026-09-30 20:00). The turn's end event is published by whoever ends the
+    turn, and that is not always this runtime's disposal: a tool the signal
+    interrupts returns "aborted", the harness ends the turn, and the end event
+    — aborted, no error, no cause — reaches ``_publish_attention_outcome``
+    BEFORE any dispose rung gets to note anything. The taxonomy's default for
+    that shape is the USER's own stop, which is how eleven sessions that only
+    ever received an external SIGTERM were recorded as "stopped by the user".
+    Evidence for that shape, from one of the victims (session
+    ``b0cde841f189``, 2026-09-30): rows 251-253 at 20:00:11.545 are the
+    assistant's ``send``/``wait`` batch and the ``wait`` result ``aborted``, and
+    row 254 at 20:00:11.716 is ``interrupted``/``user-stop`` — 171 ms after the
+    signal, with the drain still waiting for its boundary and no marker anywhere.
 
-    Scoped as narrowly as the evidence: only when THIS disposal will abort a live turn
-    (so nothing is armed on an idle session, where an armed cause could brand a later
-    run), and only for an UNSANCTIONED signal or an involuntary marker — a covering
-    deliberate marker reads exactly as before, and the drain branch is untouched (its
-    ``runtime-shutdown`` is written at the dispose by ``serving``). Never raises.
+    WHY IT IS NOT LEFT TO THE DISPOSAL. The disposal's own note
+    (``serving._note_retirement_cut_off``) is gated on ``disposal_cuts_a_turn``
+    and runs at the END of the drain; everything published in between carries
+    whatever cause is armed, and arming it at arrival is what makes the row
+    honest for the whole window.
+
+    WHY THAT IS SAFE, and the constraint any change here must respect: the
+    cause is per-RUN state, cleared at the head of EVERY turn
+    (``Session._run_turn``), and consumed only by an end event that says
+    ``aborted`` — ``Session._classify_cut_off`` returns a normally-completed
+    turn untouched. So an armed cause can brand only the turn that was live when
+    the signal arrived, and cannot leak into a later run; the 2026-09-17
+    incident the neighbouring comments cite came from arming at a retirement
+    LATCH, which can run hours before the exit and while the process keeps
+    serving. This arms at the signal, and the turns it can affect are the ones
+    live at that instant.
+
+    It stays gated on a live turn this exit would cut (``disposal_cuts_a_turn``):
+    a signal arriving at a quiescent session arms nothing, because there is no
+    turn whose end could be branded. And it stays SILENT for a sanctioned
+    deliberate stop (``cut_off_verdict`` returns ``None`` there), so the socket
+    op and the ladder's own stop read exactly as they always have.
+
+    Scoped as narrowly as the evidence, and never raising: it runs inside a
+    signal callback.
     """
     try:
         from local_operator.session.runtime import signal_receipt
 
         if not receipt or not receipt.get("signals"):
             return
-        verdict = signal_receipt.cut_off_verdict(receipt["signals"][-1])
+        verdict = signal_receipt.cut_off_verdict(
+            receipt["signals"][-1], count=int(receipt.get("count") or 1)
+        )
         if verdict is None:
             return
         session = getattr(handle, "_session", None)
@@ -3538,6 +3565,68 @@ async def _hand_wakes_to_successor(handle: object) -> int:
 _SIGNAL_DRAIN_REASON = "shutdown-drain"
 
 
+class _SignalState:
+    """The signal path's mutable state for one ``amain`` run.
+
+    EXTRACTED SO THE ROUTING CAN BE EXERCISED DIRECTLY. It used to be three
+    closure locals (``draining``, ``signal_receipts``, ``trigger``) behind the
+    callback registered on the loop, and the routing is exactly the part a
+    reviewer cannot otherwise reach: which branch a signal takes, and what the
+    turn's end will be allowed to say about it. The 2026-09-30 waves (18:14 and
+    20:00) both turned on that decision, and the wave-B rows show the turn being
+    ended by someone other than the disposing runtime, so it is a decision worth
+    a cell of its own.
+    """
+
+    def __init__(self, stop: asyncio.Event, trigger: dict[str, str]) -> None:
+        self.stop = stop
+        self.trigger = trigger
+        #: The in-flight drain, if a signal has asked for one. Held so a REPEAT
+        #: signal cannot start a second drain.
+        self.draining: asyncio.Task[None] | None = None
+        #: The receipts written on this path (latest last), kept ONLY so the exit
+        #: log can name the signal's pairing; the file on disk is the artifact.
+        self.receipts: list[dict[str, Any] | None] = []
+
+
+def _route_signal(
+    handle: object, runtime: object, sig: signal.Signals, *, state: _SignalState
+) -> None:
+    """Route ONE termination signal: record it, name its effect, then leave.
+
+    THE ORDER IS THE CONTRACT, and every step of it is here rather than in the
+    loop callback so a test can drive the real thing:
+
+    1. the receipt (``_record_signal_receipt``) — the durable fact that the
+       signal arrived at all, written before anything else can set ``stop``;
+    2. the turn's cause (``_note_signal_cut_off``) — written on BOTH branches,
+       see that function for why the drain branch is not exempt;
+    3. the branch: an idle runtime leaves now, a busy one drains to its
+       boundary (bounded by ``SIGNAL_DRAIN_S``), and a repeat during a drain is
+       absorbed and logged.
+    """
+    state.receipts.append(
+        _record_signal_receipt(handle, runtime, sig, draining=state.draining is not None)
+    )
+    # BEFORE THE BRANCH, deliberately: see :func:`_note_signal_cut_off`. The
+    # drain branch is not exempt — it waits for the BOUNDARY, and the turn it
+    # waits for can be ended by somebody else first.
+    _note_signal_cut_off(handle, state.receipts[-1])
+    state.trigger.setdefault("why", sig.name)
+    if not _work_in_flight(handle):
+        state.stop.set()
+        return
+    if state.draining is None:
+        state.draining = asyncio.ensure_future(
+            _drain_for_signal(handle, runtime, state.stop, sig_name=sig.name)
+        )
+        return
+    logger.info(
+        "session runtime: %s repeated while draining; the drain bound is unchanged",
+        sig.name,
+    )
+
+
 async def _drain_for_signal(
     handle: object, runtime: object, stop: asyncio.Event, *, sig_name: str
 ) -> None:
@@ -4682,13 +4771,9 @@ async def amain(operator_cap: bytes | None = None) -> int:
     # their own reason from ``_clean_exit``; this covers the two triggers that
     # dispose directly.
     trigger: dict[str, str] = {}
-    #: The in-flight drain, if a signal has asked for one. Held so that a
-    #: REPEAT signal cannot start a second drain, and so nothing else needs to
-    #: know whether one is running.
-    draining: asyncio.Task[None] | None = None
-    #: The receipts ``_on_signal`` wrote (latest last), kept ONLY so the exit log can
-    #: name the signal's pairing; the file on disk is the artifact.
-    signal_receipts: list[dict[str, Any] | None] = []
+    # The drain task and the receipts this path writes live on ``routing``
+    # (:class:`_SignalState`), which the exit path below reads too.
+    routing = _SignalState(stop=stop, trigger=trigger)
 
     def _on_signal(sig: signal.Signals) -> None:
         """Leave — at the next boundary if a turn is in flight, right now if not.
@@ -4709,27 +4794,13 @@ async def amain(operator_cap: bytes | None = None) -> int:
         truly must end now. The repeat IS logged, because "the signal arrived
         twice and was absorbed" is the sort of thing an incident review has to
         be able to see afterwards.
+
+        THE ROUTING ITSELF LIVES IN :func:`_route_signal` — see that function
+        for the order (receipt, then the turn's cause, then the branch) and why
+        each step is where it is. This callback stays on the loop because that
+        is what the loop requires; it is not the interesting part.
         """
-        nonlocal draining
-        # FIRST, before anything that can set ``stop`` or start the drain: see
-        # :func:`_record_signal_receipt`. Its result is kept only for the exit log.
-        signal_receipts.append(
-            _record_signal_receipt(handle, runtime, sig, draining=draining is not None)
-        )
-        trigger.setdefault("why", sig.name)
-        if not _work_in_flight(handle):
-            _note_signal_cut_off(handle, signal_receipts[-1])
-            stop.set()
-            return
-        if draining is None:
-            draining = asyncio.ensure_future(
-                _drain_for_signal(handle, runtime, stop, sig_name=sig.name)
-            )
-            return
-        logger.info(
-            "session runtime: %s repeated while draining; the drain bound is unchanged",
-            sig.name,
-        )
+        _route_signal(handle, runtime, sig, state=routing)
 
     def _on_socket_stop() -> None:
         """The graceful ``stop`` op (``ServingSessionHandle.request_stop``).
@@ -4921,13 +4992,13 @@ async def amain(operator_cap: bytes | None = None) -> int:
     stall_beats = asyncio.ensure_future(_watch_stall_beats(stop))
     reaper_ran_clean_exit = False
     await stop.wait()
-    if draining is not None and not draining.done():
+    if routing.draining is not None and not routing.draining.done():
         # The stop came from somewhere else first (the reaper's idle drain, the
         # socket ``stop`` op, or the refresh branch) while a signal-driven drain
         # was still waiting. That drain's remaining job was to set ``stop``,
         # which has now happened, so it is cancelled rather than left to wake
         # against a session that is already disposing.
-        draining.cancel()
+        routing.draining.cancel()
     if not stall_beats.done():
         # The SUPERVISOR, so this reaches the live tick through its await rather
         # than skipping a dead one: a tick that died and was re-created is not
@@ -4947,10 +5018,10 @@ async def amain(operator_cap: bytes | None = None) -> int:
         # direct-dispose triggers (a signal, or the graceful ``stop`` op).
         boot = getattr(runtime, "_boot_build", None)
         receipt_line = ""
-        if signal_receipts and signal_receipts[-1]:
+        if routing.receipts and routing.receipts[-1]:
             from local_operator.session.runtime import signal_receipt as _receipt
 
-            described = _receipt.describe(signal_receipts[-1])
+            described = _receipt.describe(routing.receipts[-1])
             receipt_line = f"; signal receipt: {described}" if described else ""
         logger.info(
             "session runtime: exiting (%s, pid %d, %s)%s",

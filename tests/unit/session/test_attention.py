@@ -2297,7 +2297,8 @@ def test_an_unsanctioned_signal_receipt_tells_the_signal_story(tmp_path: Path) -
     )
     assert result is not None
     assert (result[0], result[1]) == ("error", "runtime-shutdown"), result
-    assert "SIGTERM received" in result[2] and "no stop was staged" in result[2], result[2]
+    assert "SIGTERM received" in result[2], result[2]
+    assert "nobody asked for a stop" in result[2], result[2]
     assert "unidentified sender" in result[2], result[2]
 
 
@@ -2330,3 +2331,36 @@ def test_a_covering_marker_outranks_the_receipt(tmp_path: Path) -> None:
     )
     assert result is not None
     assert (result[0], result[1]) == ("interrupted", "user-stop"), result
+
+
+def test_a_corroborated_deliberate_stop_outranks_an_unattributed_receipt(tmp_path: Path) -> None:
+    """The wake index's own ``stopped_at`` must beat a receipt (agent review round 1, MINOR 2).
+
+    A ladder stop whose marker WRITE failed (``_write_stop_marker`` swallows the
+    ``OSError``) but whose ``_park_wakes`` stamp landed leaves exactly this pair: a
+    receipt saying "a signal arrived that no marker explained" and a durable stop
+    stamp saying the session was stopped. The corroboration is the stronger evidence
+    — it is a record of a stop, where the receipt is only a record of a signal — so
+    the row must stay ``interrupted``/``user-stop``. Ordering the receipt above it
+    was this rung's own regression.
+    """
+    from local_operator.session.attention import bootstrap_transcript
+    from local_operator.wakes import store as wake_store
+
+    session_id = "stoppedrcpt"
+    _seed_started(tmp_path, session_id)
+    _write_record(tmp_path, session_id, 2**22 + 77)
+    _write_receipt(tmp_path, session_id, 2**22 + 77)
+    wake_store.write_entry(
+        tmp_path,
+        session_id,
+        cwd="/tmp",
+        schedules=[{"id": "w1", "message": "m", "every_ms": 60000, "next_due_at": 1}],
+        preserve={"stopped_at": int(time.time() * 1000)},
+    )
+    result = bootstrap_transcript(
+        Transcript(tmp_path / "sessions" / session_id), AttentionStore(tmp_path / "d.db")
+    )
+    assert result is not None
+    assert (result[0], result[1]) == ("interrupted", "user-stop"), result
+    assert "SIGTERM received" not in result[2], result[2]

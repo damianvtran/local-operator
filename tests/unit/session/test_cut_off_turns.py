@@ -1459,7 +1459,7 @@ async def test_a_raw_external_sigterm_mid_turn_is_never_the_users_stop(tmp_path:
     Before the fix this cell read ``interrupted`` / ``user-stop`` (captured by running it
     against the unfixed handler: ``kind='interrupted', cause='user-stop'``). The fixed
     row is a cut-off ``error`` carrying the receipt's sentence: the signal, that it came
-    from an unidentified sender, and that no stop was staged.
+    from an unidentified sender, and that nobody asked for a stop.
     """
 
     result = await _sigterm_a_session_mid_turn(tmp_path / "sessions" / "raw-sigterm")
@@ -1469,7 +1469,7 @@ async def test_a_raw_external_sigterm_mid_turn_is_never_the_users_stop(tmp_path:
         assert state["cause"] != "user-stop", (phase, state)
         assert state["cause"] == "runtime-shutdown", (phase, state)
         assert "SIGTERM received" in state["reason"], (phase, state)
-        assert "no stop was staged" in state["reason"], (phase, state)
+        assert "nobody asked for a stop" in state["reason"], (phase, state)
     assert result["facts"]["signal"]["sanction"] == "none"
 
 
@@ -1544,4 +1544,63 @@ async def test_the_runtimes_idle_branch_note_reaches_the_published_row(tmp_path:
 
     state = AttentionStore().state(conversation_identity(directory))
     assert (state["kind"], state["cause"]) == ("error", "runtime-shutdown"), state
-    assert "SIGTERM received" in state["reason"] and "no stop was staged" in state["reason"]
+    assert "SIGTERM received" in state["reason"]
+    assert "nobody asked for a stop" in state["reason"]
+
+
+@pytest.mark.asyncio
+async def test_the_real_routing_arms_the_cause_on_a_busy_session_and_the_row_agrees(
+    tmp_path: Path,
+) -> None:
+    """The wave-B shape end to end at unit level: the REAL routing + a REAL session.
+
+    A signal arrives while a turn is live (the busy branch — the wave-B shape). The
+    routing must arm the cause on the session BEFORE anything ends the turn, and the
+    turn's published row must then tell the signal's story rather than the user's. The
+    turn is ended here by ``session.abort`` — the same shape a tool aborting under the
+    signal produces (the victim transcript shows the ``wait`` tool's own "aborted"
+    result 171 ms after the signal) — because that is the ending no dispose rung gets
+    to note.
+    """
+    from local_operator.session.runtime import process
+
+    directory = tmp_path / "sessions" / "routed"
+    directory.mkdir(parents=True)
+    session = _make_session(directory, stream=_never_yielding_stream())
+    await session.async_init()
+    task = asyncio.ensure_future(session.prompt("a turn a signal will cut"))
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not session._attention_run_request_dispatched:
+        await asyncio.sleep(0.005)
+    assert session._attention_run_request_dispatched
+
+    class _Handle:
+        _session = session
+
+        def is_busy(self) -> bool:
+            return True  # work in flight: the drain branch, the wave-B shape
+
+    class _Runtime:
+        class _Record:
+            session_id = session.session_id
+            started_at = 1_760_000_000.0
+
+        _record = _Record()
+        _boot_build = None
+
+    state = process._SignalState(stop=asyncio.Event(), trigger={})
+    process._route_signal(_Handle(), _Runtime(), process.signal.SIGTERM, state=state)
+    assert state.draining is not None
+    # THE CAUSE IS ARMED, on the real session, before any ending:
+    assert session._cut_off_cause == "runtime-shutdown", session._cut_off_cause
+    assert "nobody asked for a stop" in session._cut_off_detail
+
+    # ... and an ending that never went through a dispose rung still reads the signal.
+    state.draining.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await state.draining
+    session.abort("terminated")
+    await asyncio.wait_for(task, timeout=30)
+    state_row = AttentionStore().state(conversation_identity(directory))
+    assert (state_row["kind"], state_row["cause"]) == ("error", "runtime-shutdown"), state_row
+    assert "SIGTERM received" in state_row["reason"]

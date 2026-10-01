@@ -2396,3 +2396,82 @@ def test_an_unattributed_death_is_classified_on_reconcile(monkeypatch, tmp_path:
     monkeypatch.setattr(group_reaper, "_owner_is_dead", lambda pid, gen: True)
     state = exec_mode.job_status("dead1")
     assert state["status"] == "interrupted" and state["stop_class"] == "unattributed-death"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM semantics are POSIX")
+def test_the_latest_signal_decides_when_a_run_is_signalled_twice(tmp_path: Path) -> None:
+    """One rule for every caller: the LATEST signal decides (agent review round 1, MINOR 3).
+
+    An unexplained SIGTERM followed by a stop somebody asked for must read as the
+    asked-for stop — the ladder stages its marker before it signals, so the second
+    arrival pairs. Deciding on the FIRST arrival instead (which this worker used to
+    do) made the same run ``cancelled``/``deliberate`` on the runtime paths and
+    ``unattributed-signal`` here, for one event.
+    """
+    import time as _time
+
+    from local_operator.session.runtime import registry
+
+    directory = tmp_path / "sessions" / "twice"
+    directory.mkdir(parents=True)
+
+    class _Session:
+        session_id = "twice0000001"
+        active_team_name = None
+
+        class _T:
+            pass
+
+        # ``_transcript``, the name the real ``Session`` carries: this is the
+        # attribute ``exec_worker._record_arrival`` reads the conversation
+        # directory from, so a double with the public spelling would silently
+        # report "no marker readable" and pass the negative case for the wrong
+        # reason.
+        _transcript = _T()
+        _transcript.directory = directory
+
+        def subscribe(self, handler):  # noqa: ANN001
+            return lambda: None
+
+        def abort(self, reason: str) -> None:
+            self.aborted = reason
+
+    class _Recorder:
+        """The loop slice the handler is installed on; the signal is delivered by hand."""
+
+        def __init__(self) -> None:
+            self.callbacks: dict[Any, Any] = {}
+
+        def add_signal_handler(self, sig: Any, callback: Any) -> None:
+            self.callbacks[sig] = callback
+
+    session = _Session()
+    facts: dict[str, Any] = {}
+    loop = _Recorder()
+    sessions: list[Any] = [session]
+    install: Any = exec_worker._install_sigterm_handler
+    install(loop, sessions, asyncio.Event(), facts, "twice-job")
+    loop_handler = loop.callbacks[exec_worker.signal.SIGTERM]
+
+    loop_handler()  # 1: nothing staged — nobody has asked yet
+    first = dict(facts["signal"])
+    assert first["sanction"] == "none"
+    assert exec_mode.classify_exit(130, facts)[0] == "interrupted"
+
+    registry.write_stop_marker(
+        directory,
+        {
+            "session_id": session.session_id,
+            "pid": os.getpid(),
+            "started_at": None,
+            "at": _time.time() - 1.0,
+            "rung": "sigterm",
+            "deliberate": True,
+            "killer": {"pid": 1, "argv0": "lop", "command": "lop stop"},
+        },
+    )
+    loop_handler()  # 2: the same run, now asked for
+    assert facts["signal_count"] == 2
+    assert facts["signal"]["sanction"] == "marker", "the latest arrival must win"
+    status, detail = exec_mode.classify_exit(130, facts)
+    assert status == "cancelled" and detail["stop_class"] == "deliberate", detail

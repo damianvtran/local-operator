@@ -714,11 +714,21 @@ def test_exec_loop_lifecycle_outcomes(exec_server, termination, expected):
         # Only the worker created by THIS fixture, under its private config,
         # is signalled. Never target ambient session discovery or cmux state.
         os.kill(status["pid"], signal.SIGTERM if termination == "term" else signal.SIGKILL)
-    deadline = time.monotonic() + 15
+    # THE WAIT IS CHEAP, AND LONG ENOUGH FOR THE POLL ITSELF (QA round 1, Q1).
+    # ``job_status(reconcile=True)`` shells out to ``ps`` to prove the owner is
+    # gone, and under fleet load one call measured 2.8-14 s — which is how a 15 s
+    # deadline lost to the very poll it was waiting on, on a ledger that was
+    # already correct. So the wall clock is generous, and only the ``kill`` case
+    # (whose answer IS produced by that reconciliation) asks for the fork at all.
+    deadline = time.monotonic() + 90
+    reconciled = 0
     while time.monotonic() < deadline:
-        status = job_status(job_id)
+        reconcile = termination == "kill" and reconciled < 10
+        status = job_status(job_id, reconcile=reconcile)
         if status["status"] not in ("starting", "running"):
             break
+        if reconcile:
+            reconciled += 1
         time.sleep(0.05)
     assert status["status"] == expected
     assert (

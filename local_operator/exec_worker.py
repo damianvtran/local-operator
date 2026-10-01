@@ -112,6 +112,15 @@ def _record_arrival(
     purpose: ``job_status`` ranks a status-less row as 0 and merges it with
     ``setdefault``, so it can neither regress nor spoof a state, and it closes the
     window between the signal and a SIGKILL inside the 5 s settle.
+
+    A SIGNAL THAT LANDS BEFORE THE SESSION EXISTS CANNOT BE PAIRED, and that gap
+    is stated rather than hidden (agent review round 1, MINOR 4): with no
+    session there is no conversation directory to read a stop marker from, so a
+    SIGTERM during provider discovery is recorded ``sanction: none`` and
+    classified ``unattributed-signal`` even where a ladder had staged a marker
+    for this run. The supervisor's own ``stop`` op is unaffected — it cancels the
+    lifetime and the row says ``via: control-stop``, which is deliberate evidence
+    that needs no marker.
     """
     try:
         import time as _time
@@ -132,7 +141,12 @@ def _record_arrival(
             action="stop",
         )
         entry.setdefault("at", _time.time())
+        # LATEST WINS, the rule ``signal_receipt.cut_off_verdict`` states for every
+        # caller: a later signal that a covering deliberate marker explains is a
+        # stop somebody asked for, and deciding on the FIRST would let an
+        # unexplained early SIGTERM outrank it on this path only.
         stop_facts["signal"] = entry
+        stop_facts["signal_count"] = int(stop_facts.get("signal_count") or 0) + 1
         stop_facts["session_id"] = session_id
         if job_id:
             from local_operator.exec_mode import _append_job_update
@@ -142,7 +156,7 @@ def _record_arrival(
         logging.getLogger(__name__).debug("exec signal receipt unavailable", exc_info=True)
 
 
-def _note_stop_cause(session: Any, signal_entry: dict[str, Any] | None) -> None:
+def _note_stop_cause(session: Any, signal_entry: dict[str, Any] | None, count: int = 1) -> None:
     """Say WHY this turn is about to be aborted, BEFORE ``session.abort`` runs.
 
     The aborted turn's own end event publishes ahead of any dispose rung, and an
@@ -158,7 +172,7 @@ def _note_stop_cause(session: Any, signal_entry: dict[str, Any] | None) -> None:
     try:
         from local_operator.session.runtime import signal_receipt
 
-        verdict = signal_receipt.cut_off_verdict(signal_entry)
+        verdict = signal_receipt.cut_off_verdict(signal_entry, count=count)
         if verdict is None:
             note_stop = getattr(session, "note_deliberate_stop", None)
             if callable(note_stop):
@@ -192,13 +206,12 @@ def _install_sigterm_handler(
     facts = stop_facts if stop_facts is not None else {}
 
     def handler() -> None:
-        # FIRST: the arrival receipt (see ``_record_arrival``). A repeat SIGTERM
-        # keeps the first signal as the cause rather than overwriting it.
-        if "signal" not in facts:
-            _record_arrival(session_box, job_id, facts)
+        # FIRST: the arrival receipt (see ``_record_arrival``). Every arrival is
+        # recorded, and the LATEST becomes the cause (see ``_record_arrival``).
+        _record_arrival(session_box, job_id, facts)
         session = session_box[0] if session_box else None
         if session is not None:
-            _note_stop_cause(session, facts.get("signal"))
+            _note_stop_cause(session, facts.get("signal"), int(facts.get("signal_count") or 1))
             try:
                 session.abort("terminated")
             except Exception:  # noqa: BLE001 — must never raise in a handler
