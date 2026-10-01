@@ -172,6 +172,13 @@ machine. The streamlined handover, step by step:
    report — no blind retries; a password prompt that does not accept the
    credential is a fact for the user, not a loop to grind.
 
+**If `ask` returns a receipt ("queued") rather than the answer** — the host queues
+asks — nothing above changes except WHEN each step runs. A receipt means the
+question is with the user: it is not an approval, and it is not a decline. Wait
+for the answer to arrive as a turn of its own, and run the command and relay the
+value only then. Never run anything privileged, or type a relayed secret, on the
+strength of a receipt.
+
 **If this session cannot ask** (a delegated child has no ask hook), the routes
 that work are: the parent runs the privileged step itself; the user types the
 password into THIS session's surface; or — only with the user's explicit

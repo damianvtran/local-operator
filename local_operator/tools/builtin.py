@@ -24144,11 +24144,13 @@ class AskParams(BaseModel):
     )
 
     # The `timeout` field ships with the queued-ask engine (design
-    # docs/design/ask-nonblocking.md §2.1) and its FULL calibration copy — the
-    # "1 h routine / 5-10 min urgent / up to 24 h" table and the reasoning — is
-    # deliberately NOT here: §9 puts the description rewrite in the flip PR, in
-    # the same change that makes the deadline live. What is advertised is what is
-    # true on both sides of the flip: the unit, the bounds and the default.
+    # docs/design/ask-nonblocking.md §2.1) and it is advertised in BOTH modes,
+    # because the bounds the model learns here survive the flip: with the queue
+    # dark the value cannot act (the blocking path awaits the host), but an
+    # out-of-range one is still refused, so the calibration is taught now rather
+    # than re-taught later. Only the CALIBRATION reasoning (why 5-10 min is
+    # "urgent") is mode-specific, and it lives in the mode's own tool
+    # description below, where a reader gets it with the consequence attached.
     #
     # An out-of-range value is REJECTED, never clamped (see `_bounds_error`): the
     # model calibrates from the rejection, and a silent clamp teaches it nothing
@@ -24292,6 +24294,117 @@ def _ask_report(questions: list[AskQuestion], answers: dict[str, list[str]]) -> 
     return "The user answered:\n" + "\n".join(lines)
 
 
+#: The RESTRAINT half of the `ask` description: the SAME text under both modes.
+#:
+#: It is factored out rather than duplicated because the brake and the triggers
+#: do not depend on how an ask settles — a question is worth the operator's
+#: attention or it is not, whether the tool parks on them or queues. Duplicating
+#: it would let the two modes drift into disagreeing about what warrants asking,
+#: which is the one thing about this tool that must not vary.
+_ASK_DESCRIPTION_RESTRAINT = (
+    "Ask the user to choose. LAST RESORT, not a checkpoint: research it, run "
+    "it, or delegate it to a subagent and decide yourself, then report what you "
+    "chose. Use this when the action is destructive or irreversible and the "
+    "user has not EXPLICITLY approved that action, when the REQUEST ITSELF has "
+    "two plausible readings that send the work in different directions and no "
+    "evidence picks between them, when you need something only the user has (a "
+    "credential, an access decision), or when the answer is genuinely theirs to "
+    "state (a preference, a name, a roster, how they want something delivered). "
+    "Two technical approaches is not ambiguity: weigh them, pick one, and say "
+    "why. Work the user already asked for is authorized: do not stop to confirm "
+    "it, re-ask what the conversation answered, or seek permission to continue "
+    "— but that never extends to an irreversible step by implication. "
+    "Once you HAVE decided a question is needed, this tool is the only channel: "
+    "never put the question in your reply text. A question buried in a report is "
+    "not seen and nothing waits on it, so writing one and continuing means you "
+    "decided anyway. Not stopping for an answer? Then do not phrase it as a "
+    "question — state the decision and what would change it. "
+    "When you do ask, do it here INSTEAD of writing lettered options "
+    "into your reply and waiting. Give each question at least two options, put "
+    "the consequence of each in its description, and mark the one you recommend "
+    "(it is moved to the top of the list and preselected). "
+    "Every question also offers the user a free-text answer, so the options do "
+    "not have to be exhaustive. "
+)
+
+#: The tail for a host whose ``ask`` BLOCKS: today's text, byte for byte. The
+#: queued engine ships dark, so this is what almost every session reads, and a
+#: wording change here would be a change to the shipping surface.
+_ASK_DESCRIPTION_INLINE = (
+    "Ask everything you need in ONE call: the user "
+    "answers the questions back to back rather than once per turn. "
+    "If you need a credential, password, or API key, set secret=true on that "
+    "question (options empty, id is the env-var name). The value is stored in "
+    "session memory and injected into bash; you will only ever see the key name. "
+    "Add persist=true when that credential will be needed again after this "
+    "session, and it is also saved to the operator's encrypted long-term store."
+)
+
+#: The tail for a host whose ``ask`` QUEUES (design §2.1/§3/§9.1). Three facts a
+#: model cannot infer, in the order it needs them:
+#:
+#: 1. the call is not the answer — the receipt says the ask is queued, and the
+#:    answer arrives later as its own turn, so the turn must NOT be spent
+#:    waiting on it;
+#: 2. A RECEIPT IS NOT CONSENT (design risk 1) — the whole reason this copy is
+#:    capitals, and the reason every guide that tells an agent to act after
+#:    asking carries the same rule;
+#: 3. the deadline, its calibration and what a deadline that passes means, then
+#:    the caps, because non-blocking asking is cheap for the model and expensive
+#:    for the human.
+#:
+#: The calibration is stated as the note's §3 table (1 h routine / 5-10 min
+#: urgent / up to 24 h non-urgent, 2 min floor) rather than as "the default is
+#: 3600": a default the model cannot calibrate against is a number, and the
+#: urgent case needs its own instruction (resolve it another way) because the
+#: timeout notice repeats it.
+_ASK_DESCRIPTION_QUEUED = (
+    "Ask everything you need in ONE call — the ask is answered as a whole, so "
+    "nothing is gained by splitting it across turns. This call returns at once "
+    "with a RECEIPT: it confirms the ask is queued and when it will time out. "
+    "The ANSWER ARRIVES LATER, as its own turn. A RECEIPT IS NOT CONSENT: do not "
+    "run anything the ask was meant to authorise until the answer arrives. "
+    "Continue with work that does not depend on it, and if nothing else remains, "
+    "end the turn saying what is queued rather than idling. Set `timeout` to how "
+    "long this should really wait — 1 h (3600) is routine, 5-10 minutes when "
+    "someone is expected to answer now, up to 24 h for something genuinely "
+    "non-urgent; the floor is 2 minutes. When the deadline passes with no answer "
+    "you get a timeout notice: take your own recommendation then, say in one "
+    "line what you assumed, and carry on. A late answer still reaches you and "
+    "says it was late. An urgent ask's timeout notice also tells you to resolve "
+    "the question without the operator (a `task` subagent); do that rather than "
+    "waiting. At most 8 asks can be open at once — do not re-ask a question you "
+    "already queued, and a second ask with identical question text, or a second "
+    "open secret question for a key already asked for, is refused. "
+    "If you need a credential, password, or API key, set secret=true on that "
+    "question (options empty, id is the env-var name). The value reaches session "
+    "memory when the user answers it and is injected into bash; you will only "
+    "ever see the key name, and it never appears in this conversation. "
+    "Add persist=true when that credential will be needed again after this "
+    "session, and it is also saved to the operator's encrypted long-term store."
+)
+
+
+def _ask_queue_enabled() -> bool:
+    """Whether THIS process mounts the queued-ask engine (design §6, D6).
+
+    The description has to branch rather than describe both modes, because the
+    two say opposite things about the same call — "you are parked on a human"
+    against "this returns at once" — and a reader asked to reconcile both
+    learns neither. ``execute_ask`` derives its own mode from the host's
+    ``enqueue_ask`` callable; this is the same fact one step earlier, read from
+    the one place that owns it (``asks.policy``) because a builder has no host.
+
+    Imported lazily and locally, like the policy read inside ``execute_ask``:
+    ``tools/builtin`` is the largest module in the tree and a module-scope
+    import of the ask package would ride every process that builds tools,
+    whether or not it can ask.
+    """
+    from local_operator.asks import policy
+
+    return policy.enabled()
+
+
 def build_ask_tool(context: ToolContext) -> AgentTool | None:
     """CreateIf builder: the tool exists only where a human can answer it.
 
@@ -24327,35 +24440,8 @@ def build_ask_tool(context: ToolContext) -> AgentTool | None:
         name="ask",
         label="Ask",
         description=(
-            "Ask the user to choose. LAST RESORT, not a checkpoint: research it, run "
-            "it, or delegate it to a subagent and decide yourself, then report what you "
-            "chose. Use this when the action is destructive or irreversible and the "
-            "user has not EXPLICITLY approved that action, when the REQUEST ITSELF has "
-            "two plausible readings that send the work in different directions and no "
-            "evidence picks between them, when you need something only the user has (a "
-            "credential, an access decision), or when the answer is genuinely theirs to "
-            "state (a preference, a name, a roster, how they want something delivered). "
-            "Two technical approaches is not ambiguity: weigh them, pick one, and say "
-            "why. Work the user already asked for is authorized: do not stop to confirm "
-            "it, re-ask what the conversation answered, or seek permission to continue "
-            "— but that never extends to an irreversible step by implication. "
-            "Once you HAVE decided a question is needed, this tool is the only channel: "
-            "never put the question in your reply text. A question buried in a report is "
-            "not seen and nothing waits on it, so writing one and continuing means you "
-            "decided anyway. Not stopping for an answer? Then do not phrase it as a "
-            "question — state the decision and what would change it. "
-            "When you do ask, do it here INSTEAD of writing lettered options "
-            "into your reply and waiting. Give each question at least two options, put "
-            "the consequence of each in its description, and mark the one you recommend "
-            "(it is moved to the top of the list and preselected). "
-            "Every question also offers the user a free-text answer, so the options do "
-            "not have to be exhaustive. Ask everything you need in ONE call: the user "
-            "answers the questions back to back rather than once per turn. "
-            "If you need a credential, password, or API key, set secret=true on that "
-            "question (options empty, id is the env-var name). The value is stored in "
-            "session memory and injected into bash; you will only ever see the key name. "
-            "Add persist=true when that credential will be needed again after this "
-            "session, and it is also saved to the operator's encrypted long-term store."
+            _ASK_DESCRIPTION_RESTRAINT
+            + (_ASK_DESCRIPTION_QUEUED if _ask_queue_enabled() else _ASK_DESCRIPTION_INLINE)
         ),
         parameters=AskParams.model_json_schema(),
         # read tier: asking a question changes nothing. Gating it behind the

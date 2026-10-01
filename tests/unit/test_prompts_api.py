@@ -1113,6 +1113,46 @@ may block for hours.
   someone catching up, not for someone watching live.
 </interactivity>"""
 
+#: The same two bodies when ``ask`` QUEUES (design ``docs/design/ask-nonblocking.md``
+#: §2.1/§6; the prompt half of the flip's §9.3). Literals for the same reason as
+#: the pair above, and one more of their own: the queued bodies say the OPPOSITE
+#: of the blocking ones about the same call — the receipt is not the answer, and
+#: the turn does not park — so an edit that quietly changed the mode's story has
+#: to change one of these literals and say why.
+ATTACHED_INTERACTIVITY_QUEUED = """<interactivity>
+An interface is attached to this session, so a question you ask WILL be
+presented to the operator: `ask` queues it and returns at once, and the answer
+arrives later as a turn of its own.
+
+- Ask when the answer is genuinely the operator's to give, and not otherwise.
+- A receipt is not consent: until the answer arrives, do not run anything the
+  ask was meant to authorise.
+- Do not idle on it. Continue with work that does not depend on the answer; if
+  nothing else remains, end the turn saying what is queued.
+- The question is presented even if nobody is looking at this exact moment. It
+  waits; it is not lost. A slow answer is not a refusal, and it is not a reason
+  to decide on the operator's behalf.
+- Write for a reader who may answer minutes later: say what you need and what
+  you will do with it.
+</interactivity>"""
+
+UNATTACHED_INTERACTIVITY_QUEUED = """<interactivity>
+No interface is attached to this session right now, so a question you ask is
+queued: it is kept durably, it is shown when a surface attaches, and it never
+blocks this turn.
+
+- Prefer to PROCEED with what you have, or finish the turn with a clear
+  statement of what you would have asked, over calling `ask`.
+- That statement is a decision you already took and the fact that would change
+  it, not a question left hanging.
+- Do not take an irreversible or destructive action to avoid asking; when the
+  choice genuinely needs a person, `ask` — a queued ask is durable and waits for
+  them — or stop and say so.
+- A receipt is not consent: the answer arrives later, as a turn.
+- The operator will read this conversation when they return, so write for
+  someone catching up, not for someone watching live.
+</interactivity>"""
+
 
 def test_a_detached_session_is_not_told_the_operator_is_unavailable() -> None:
     """The negative block states what was MEASURED and nothing more.
@@ -1156,6 +1196,102 @@ def test_an_attached_session_is_told_a_question_will_be_presented() -> None:
     # The positive text says the question WAITS; it never claims the operator is
     # looking at this moment, which is the fact the block cannot know.
     assert "screen" not in attached[-1].lower()
+
+
+def test_the_queued_interactivity_bodies_replace_the_blocking_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same two measured facts, and the OPPOSITE claim about the same call.
+
+    The blocking bodies tell a model its question parks the turn ("parked for
+    hours" / "may block for hours"). With the queue on, neither is true, and a
+    model told both would learn neither — so the mode selects a body, and the
+    selection is pinned in both directions rather than only where it changes.
+    """
+    from local_operator.asks import policy
+
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    attached = build_system_blocks(
+        [], "", "env", "2026-01-01", interactive=True, channel=CHANNEL_ASK
+    )
+    detached = build_system_blocks(
+        [], "", "env", "2026-01-01", interactive=False, channel=CHANNEL_ASK
+    )
+    assert attached[-1].endswith("\n\n" + ATTACHED_INTERACTIVITY_QUEUED)
+    assert detached[-1].endswith("\n\n" + UNATTACHED_INTERACTIVITY_QUEUED)
+    assert "parked for hours" not in attached[-1]
+    assert "may block for hours" not in detached[-1]
+    # And the dark default still ships today's bytes: the flip is the change
+    # that makes the queued claim true, so until then the shipped arm is the
+    # blocking one, not both and not the new one.
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", False)
+    inline = build_system_blocks([], "", "env", "2026-01-01", interactive=True, channel=CHANNEL_ASK)
+    assert inline[-1].endswith("\n\n" + ATTACHED_INTERACTIVITY)
+
+
+def test_the_queue_does_not_move_the_hub_or_no_channel_bodies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A queued ask changes where a QUESTION goes, not where a hub message goes.
+
+    The ``hub`` bodies describe a delegated child's channel to the session that
+    spawned it, and the no-channel bodies name no tool at all; neither has an
+    ask in it to re-describe. Pinned so a later edit to the ask mode cannot
+    quietly rewrite the population every child session renders.
+    """
+    from local_operator.asks import policy
+
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    child = build_system_blocks([], "", "env", "2026-01-01", interactive=True, channel=CHANNEL_HUB)
+    nothing = build_system_blocks(
+        [], "", "env", "2026-01-01", interactive=False, channel=CHANNEL_NONE
+    )
+    assert child[-1].endswith("\n\n" + CHILD_ATTACHED_INTERACTIVITY)
+    assert nothing[-1].endswith("\n\n" + NO_CHANNEL_UNATTACHED_INTERACTIVITY)
+
+
+def test_system_md_ships_the_ask_paragraph_for_the_process_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The paragraph a session reads must describe the mode that session is in.
+
+    Both arms are asserted, and the arms are MUTUALLY EXCLUSIVE by content —
+    "if the user answers nothing" is the blocking instruction to decide
+    immediately, and the queued arm replaces it with "wait for the timeout notice,
+    because the call did not answer". A prompt that carried both would be telling
+    the model to do two different things in the same breath.
+    """
+    from local_operator.asks import policy
+
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", False)
+    inline = " ".join(render_template("system.md", {}).split())
+    assert "If the user answers nothing, take your own recommendation" in inline
+    assert "Treat every `ask` as QUEUED" not in inline
+
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    queued = " ".join(render_template("system.md", {}).split())
+    assert "Treat every `ask` as QUEUED" in queued
+    assert "a receipt is never consent" in queued
+    # The urgent case resolves WITH the expertise reachable without the operator
+    # (design §9.2): an urgent ask whose deadline passed is not "carry on and
+    # see", and this is the paragraph the model reads before it ever asks.
+    assert "delegate the question to a `task` subagent" in queued
+    assert "If the user answers nothing" not in queued
+    # The restraint half is mode-independent and must survive both arms: the
+    # brake is the thing the two modes may never disagree about.
+    for text in (inline, queued):
+        assert "Deciding is your job; `ask` is the exception" in text
+
+
+def test_the_ask_flag_pair_refuses_both_members() -> None:
+    """Both arms true is the one impossible state, and it is refused loudly.
+
+    ``{{#if}}`` has no ``else``, so a half-supplied pair fails SILENTLY in both
+    directions; this pair's failure mode is the worst of the three, because the
+    two bodies contradict each other rather than merely omitting prose.
+    """
+    with pytest.raises(ValueError, match="ask_queued and ask_inline"):
+        render_template("system.md", {"ask_queued": True, "ask_inline": True})
 
 
 def test_interactivity_costs_the_same_whatever_the_attach_churn() -> None:
