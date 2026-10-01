@@ -42,6 +42,7 @@ from typing import Any, Callable, cast
 import pytest
 
 from local_operator import redaction_shapes
+from local_operator.harness import secret_sinks
 from local_operator.harness.redaction import (
     current_tool_source,
     summarize_arguments,
@@ -88,6 +89,9 @@ from tests.unit.secrets.credential_shape_corpus import (
     OPAQUE_UUID_VALUE,
     POSITIVE_CASES,
     PRE_ESCAPED_LINE,
+    SECRET_NAME_REFUSAL_FOOTER,
+    SECRET_REFERENCE_PLACEHOLDER,
+    STORE_ENTRY_NAME,
     TYPE_ANNOTATION_NEGATIVES,
     TYPE_ANNOTATION_POSITIVES,
     Case,
@@ -6098,6 +6102,23 @@ _CORPUS_GRADING_DIGEST = "a755ab0e8960419f719323ae343ef725e9f8662f278b1bfc66ba0e
 #:    ``NEGATIVE_CASES`` 199 -> 203; ``TYPE_ANNOTATION_POSITIVES`` is unchanged at 34.
 #:    Counts measured from the assembled tuples.
 _CORPUS_GRADING_DIGEST = "f1707c1f7bc4b8448998f19e32988b55fdbbb313f76f9ff7ae46de984c708211"
+#: MOVED on 2026-10-01 by the secret-NAME fix, and the argument is the measurement
+#: this constant's history always asks for: the 513 rows the constant above covered
+#: were loaded from ``git show HEAD:tests/unit/secrets/credential_shape_corpus.py``
+#: beside ``HEAD``'s module and this one, and every row graded FIELD FOR FIELD (masked
+#: text, label, value, window, ``complete``, ``exposed``) under both — **zero moved**,
+#: and that corpus under THIS module reproduces ``f1707c1f…`` byte for byte. The
+#: digest moves for the corpus's growth alone, 513 -> 518: five NEGATIVES (the refusal
+#: footer, a bare reference-placeholder flag, a ``secret:`` line carrying the
+#: placeholder, the refusal's own ``secret:`` line naming a store entry, and its quoted
+#: spelling). Four of the five were masked before (three of them REGISTERED nothing
+#: but the entry-name pair registered the name session-wide); the fifth is a regression
+#: row. ``POSITIVE_CASES`` is unchanged at 310 and ``NEGATIVE_CASES`` moves 203 -> 208.
+#: No value-side coverage moved: the positives that must keep masking (the lower-case
+#: ``--secret`` phrase, ``PASSWORD=`` and ``token=`` assignments, the hex ``AES_KEY``,
+#: the issuer and padded-base64 ``--token`` values, the five capitals flag values) are
+#: all among the 513 rows that did not move.
+_CORPUS_GRADING_DIGEST = "5db8279438387ec964e4c0c28733a5643d5813f56bd18de090df843ede9668ea"
 
 
 def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:
@@ -7910,3 +7931,136 @@ def test_the_shape_table_never_matches_its_own_source() -> None:
         "the shape table masks its own prose, leaving the file that documents the "
         f"shapes illegible: {[(hit.label, hit.window) for hit in hits]}"
     )
+
+
+# --- a secret NAME is never masked, and never becomes a redaction ------------
+#
+# The operator-visible incident (2026-10-01): an agent ran a command the secret-sink
+# refused, the refusal's footer taught ``--secret`` followed by a word the shape layer
+# had masked, the refusal's own ``secret:`` line naming the store entry was masked AND
+# registered (so the name was deleted from every later result), and the agent copied
+# the mask marker as if it were a store name: ``No secret named '<marker>'``. Three
+# parts, one test each, plus the driving test that proves the real chain.
+
+#: A name the query rule DOES mask in place (its value rule is name-blind). Used only
+#: to prove that masking-in-place no longer registers a name-grammar token.
+_QUERY_NAMED_TOKEN = "_".join(["ZZ", "DSN", "PROD"])
+
+
+def _refusal_for_a_name_bearing_command() -> tuple[str, str]:
+    """The REAL refusal text for ``lop secret run`` whose child echoes the exported variable.
+
+    Built from the scanner and ``refusal_text`` rather than pasted, so a change to the
+    footer's wording is exercised here instead of left behind in a fixture.
+    """
+    # The PRINTING form: the value is echoed back, which is what the sink refuses. (A
+    # length probe such as ``echo ${#VAR}`` is deliberately allowed, so it would never
+    # produce a refusal to drive.)
+    command = (
+        "lop secret run --"
+        + "secret "
+        + STORE_ENTRY_NAME
+        + " -- bash -c 'echo $"
+        + STORE_ENTRY_NAME
+        + "'"
+    )
+    result = secret_sinks.scan_command(command)
+    assert result.refused, "the driving command must be one the sink refuses"
+    return command, secret_sinks.refusal_text(result, text=command, tool_name="bash")
+
+
+def test_the_refusal_reaches_the_model_with_its_names_intact_and_registers_nothing() -> None:
+    """Drive the real chain: scan -> refusal -> store redaction AND the session hook.
+
+    FAIL-ON-REVERT, per clause (each measured by reverting it alone):
+
+    * the reference-placeholder verdict in ``_value_is_a_reference_to_a_credential``
+      (change A) -> the footer's ``--secret`` placeholder is masked and the
+      ``a refusal's names were rewritten`` assertion reds;
+    * the store-grammar clause in ``_value_is_not_a_credential`` (change B) -> the
+      refusal's ``secret:`` line is masked and registered, and the same assertion reds;
+    * the store-grammar refusal in ``is_registerable_component`` (change C) alone is
+      pinned by :func:`test_a_name_the_shape_layer_still_masks_in_place_is_not_registered`
+      (B shadows it on this input, so it cannot red here).
+    """
+    _command, refusal = _refusal_for_a_name_bearing_command()
+    assert SECRET_REFERENCE_PLACEHOLDER in refusal, "the footer no longer carries the placeholder"
+    assert f"secret: {STORE_ENTRY_NAME}" in refusal, "the refusal no longer names the entry"
+
+    store = VariableStore(cwd=".")
+    masked, report = store.redact_with_report(refusal)
+    assert masked == refusal, "a refusal's names were rewritten"
+    assert report.labels == ()
+    assert store.redaction_values() == [], "a name entered the session's redaction set"
+
+    session = _session()
+    session._variables = VariableStore(cwd=".")
+    assert session._redact_tool_result_text(refusal) == refusal
+    assert session._variables.redaction_values() == []
+    # ...and the deletion cascade that made the incident: a LATER result naming the
+    # entry, including inside a shell interpolation, still reads in the clear.
+    later = f'lop secret run --secret {STORE_ENTRY_NAME} -- sh -c "echo ${{{STORE_ENTRY_NAME}}}"'
+    assert session._redact_tool_result_text(later) == later
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        SECRET_NAME_REFUSAL_FOOTER,
+        "--" + "secret " + SECRET_REFERENCE_PLACEHOLDER,
+        "secret" + ": " + SECRET_REFERENCE_PLACEHOLDER,
+        "  secret" + ": " + STORE_ENTRY_NAME,
+        "secret" + ': "' + STORE_ENTRY_NAME + '"',
+        '{"secret": "' + STORE_ENTRY_NAME + '"}',
+    ],
+    ids=["footer", "flag-placeholder", "line-placeholder", "line-entry", "quoted", "json"],
+)
+def test_a_name_is_left_byte_identical_and_nothing_is_registered(text: str) -> None:
+    """The shape layer neither masks nor registers a NAME, on the bare scrub and the store.
+
+    FAIL-ON-REVERT: the ``footer`` and ``flag-placeholder`` rows red without change A;
+    ``line-entry``, ``quoted`` and ``json`` red without change B (the quoted and JSON
+    spellings reach the same predicate through ``_assignment_value_guard``, which the
+    rows prove rather than assume).
+    """
+    masked, hits = scrub_shapes_with_hits(text)
+    assert masked == text and hits == []
+    store = VariableStore(cwd=".")
+    assert store.redact_with_report(text)[0] == text
+    assert store.redaction_values() == []
+
+
+def test_a_name_the_shape_layer_still_masks_in_place_is_not_registered() -> None:
+    """The amplifier's gate: a masked name-grammar token is never promoted.
+
+    ``?secret=`` is a query rule whose value test is name-blind, so it still masks the
+    token IN PLACE (the value side is unchanged) — but a name-grammar token must not
+    become a session-wide redaction, because a promoted name is deleted from every
+    later result.
+
+    FAIL-ON-REVERT: the store-grammar refusal in ``is_registerable_component``
+    (change C). Without it the token is registered and both assertions red.
+    """
+    text = "https://h/cb?" + "secret=" + _QUERY_NAMED_TOKEN
+    store = VariableStore(cwd=".")
+    masked, report = store.redact_with_report(text)
+    assert masked != text and _QUERY_NAMED_TOKEN not in masked, "in-place masking was lost"
+    assert report.labels, "the detection was lost"
+    assert store.redaction_values() == [], "a name-grammar token was registered session-wide"
+    assert not redaction_shapes.is_registerable_component(_QUERY_NAMED_TOKEN)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "--" + "secret " + "correct_horse_battery",
+        "PASSWORD" + "=swordfish",
+        "token" + "=abcdefghijklmnop",
+        "--" + "password " + "PASSWORD",
+    ],
+    ids=["lowercase-name-flag", "password-assign", "token-assign", "caps-word-flag"],
+)
+def test_the_value_side_still_masks_beside_the_name_release(text: str) -> None:
+    """The release is scoped to NAMES: the pinned value-side positives keep masking."""
+    masked, hits = scrub_shapes_with_hits(text)
+    assert masked != text and hits
