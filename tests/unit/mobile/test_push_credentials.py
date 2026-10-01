@@ -317,8 +317,67 @@ def test_the_report_block_is_spelled_in_exactly_one_place() -> None:
         "credential_expires_at": NOW + 1000,
         "last_authenticated_at": NOW,
     }
-    # The route the heartbeat call would use is named here and nowhere else.
-    assert push_credentials.REPORT_ROUTE == "/v1/push/credentials"
+    # The ROW's field order is the frozen one too: the constant is a tuple and the
+    # block above is built from it, so a reordering in one place is a reordering
+    # everywhere (ADR §3.2's literals write them in this order).
+    assert push_credentials.REPORT_DEVICE_FIELDS == (
+        "device_id",
+        "credential_live",
+        "credential_expires_at",
+        "last_authenticated_at",
+    )
+    assert list(row) == list(push_credentials.REPORT_DEVICE_FIELDS)
+
+
+def test_the_wire_names_are_the_frozen_ones() -> None:
+    """Every machine→cloud name, against the ADR §3.2 freeze — verbatim.
+
+    The freeze is `damianvtran/local-operator-mobile` **`b03aeb1`** (§3.2's three
+    literals and its field table; §3.1 freezes the emit route as the ONE emit
+    route and says S3 must not freeze two). A wire name is the one part of this
+    module whose change breaks a CONTRACT rather than a test, so the strings
+    below are copied from the frozen document and asserted character for
+    character rather than described — an edit that “tidies” a route or renames an
+    envelope key fails here.
+
+    The literals are pinned in-tree and not read from the mobile repository: CI
+    has no checkout of it, and a test that reached across repositories would be a
+    flaky instrument rather than a gate.
+    """
+    assert push_credentials.REPORT_EMIT_ROUTE == "/v1/tunnels/{tunnel_id}/push/events"
+    assert push_credentials.REPORT_IDEMPOTENCY_HEADER == "Idempotency-Key"
+    assert push_credentials.REPORT_HEARTBEAT_ROUTE == "/v1/push/credentials"
+    assert push_credentials.REPORT_REGISTER_ROUTE == "/v1/push/register"
+    assert push_credentials.REPORT_VERSION_FIELD == "v"
+    assert push_credentials.REPORT_VERSION == 1
+
+    # The block's keys are `computer`/`devices` on all three carriers, and the
+    # row's four fields are exactly §3.2's table IN ITS ORDER — no more, no fewer,
+    # and not reshuffled: the cloud contract is `extra="forbid"`, so an extra field
+    # is a refused body, and §3.2 writes these four in this sequence. Asserted as a
+    # tuple rather than a set, because "the same four names" is what a set proves
+    # and this cell is about the frozen document.
+    assert (push_credentials.REPORT_COMPUTER_FIELD, push_credentials.REPORT_DEVICES_FIELD) == (
+        "computer",
+        "devices",
+    )
+    assert push_credentials.REPORT_DEVICE_FIELDS == (
+        "device_id",
+        "credential_live",
+        "credential_expires_at",
+        "last_authenticated_at",
+    )
+
+    # `v` belongs to the EMIT body, not to the block: §3.2 literals 1 and 3 (the
+    # register forward and the heartbeat) carry `{computer, devices}` with no
+    # version, so a transport that stamped `v` onto every carrier would be
+    # asserting a field the frozen document does not have there.
+    rig = Rig()
+    rig.device("device-a", expires_at=NOW + 1000)
+    block = rig.report.heartbeat()
+    assert block is not None
+    assert push_credentials.REPORT_VERSION_FIELD not in block
+    assert set(block) == {"computer", "devices"}
 
 
 def test_the_recorded_fact_is_the_one_that_was_sent_not_the_one_that_exists() -> None:

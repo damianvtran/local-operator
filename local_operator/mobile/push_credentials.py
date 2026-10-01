@@ -49,12 +49,15 @@ home: the Settings list and the report both answer "live?" by calling it, which
 is what review round 1's AR-1 restored after this branch briefly had the list
 render the stored flag while the report derived.
 
-**The wire is behind one seam, deliberately.** The ADR's §3.2 block is frozen
-against a payload the mobile lane is pinning; nothing here is sent from this
-part of the slice, and every wire name is spelled once, below, behind a TODO.
-The state machine, the bounds and the batching are testable without a network
-because the transport is an injected callable: the tests pass a recorder, and
-part 2 passes the cloud POST.
+**The wire is behind one seam, deliberately, and it is BOUND — not provisional.**
+Every machine→cloud name this module needs is spelled once, in the constants
+below, and those constants are the ADR §3.2 freeze at
+``damianvtran/local-operator-mobile`` **``b03aeb1``** (§3.2's three literals and
+its field table). The state machine, the bounds and the batching are testable
+without a network because the transport is an injected callable: the tests pass a
+recorder, and part 2 passes the cloud call. What is NOT in this module, by scope,
+is S5's emission — the cursor, the queue, the retry — and the cloud-side pause;
+these constants are what those bind to.
 """
 
 from __future__ import annotations
@@ -81,17 +84,52 @@ CARRIER_REGISTER = "register"
 CARRIER_EMIT = "emit"
 CARRIER_HEARTBEAT = "heartbeat"
 
-# TODO(push/ack-sync S4c/part 2 — bind to the ADR §3.2 freeze SHA): the five names
-# below are the ONLY place this module spells the wire, and they are provisional
-# until the payload freeze lands. The mobile lane is pinning §3.2; when it does,
-# this block is the whole binding and the callers (`CredentialFact.wire`, the
-# transport) do not move. ``REPORT_COMPUTER_FIELD`` is the ENVELOPE key every
-# §3.2 carrier sends beside the rows — the register forward, the emit body and
-# the heartbeat call all carry it (review round 1, AR-3: omitting it would have a
-# part-2 transport posting a body the cloud cannot route). Its VALUE is the
-# opaque per-account computer handle (ADR §3.2), which is the one thing here that
-# cannot be minted locally, so it is injected into the report rather than derived.
-REPORT_ROUTE = "/v1/push/credentials"
+# The machine→cloud wire, frozen once. ADR §3.2's three literals each spell a
+# route; §3.1 and the cloud ops note both freeze the emit's spelling and say in
+# as many words that S3 must not freeze two, so these are copied from the freeze
+# rather than paraphrased. The pin is `damianvtran/local-operator-mobile`
+# `b03aeb1` and `tests/unit/mobile/test_push_credentials.py` asserts every string
+# below against it, because a wire name is the one thing a later edit can change
+# without anything here breaking.
+#
+# An in-flight sibling (S3, the interface-fixture branch) spells three of these
+# as ``EMIT_ROUTE``/``IDEMPOTENCY_HEADER``/``PAYLOAD_VERSION`` for the same
+# values; whichever of the two branches lands second should import from the
+# other rather than keep a second copy, and the names are greppable against each
+# other for exactly that reason.
+
+#: THE ONE emit route (§3.2 literal 2, and the same route §3.1's completion and
+#: attention emits already use). ``{tunnel_id}`` is substituted by the transport,
+#: which is the only component that knows the tunnel.
+REPORT_EMIT_ROUTE = "/v1/tunnels/{tunnel_id}/push/events"
+
+#: The idempotency header that route carries (§3.1: ``Idempotency-Key: <emit key,
+#: §3.4>``). One key per emit, and a retry of the same emit reuses it — the cloud
+#: dedupes that into a duplicate ``202``, never a duplicate push.
+REPORT_IDEMPOTENCY_HEADER = "Idempotency-Key"
+
+#: The heartbeat's own call (§3.2 literal 3): the block and nothing else, and the
+#: only carrier that can report a lapse to an app that is closed.
+REPORT_HEARTBEAT_ROUTE = "/v1/push/credentials"
+
+#: The registration forward (§3.2 literal 1). The block rides a route that
+#: already exists rather than one of its own; named here because it is the third
+#: carrier this block can travel on (the forward itself is S7's).
+REPORT_REGISTER_ROUTE = "/v1/push/register"
+
+#: The EMIT body's payload version (§3.2 literal 2 and its field table). It
+#: belongs to the emit body, not to the block — the heartbeat and the register
+#: forward carry the block WITHOUT it (§3.2 literals 1 and 3) — so the transport
+#: that composes the emit owns it. Spelled here so every machine→cloud name lives
+#: in one place rather than two.
+REPORT_VERSION_FIELD = "v"
+REPORT_VERSION = 1
+
+#: The block's two keys, and the four fields of one row IN THE FROZEN ORDER —
+#: §3.2's literals write ``device_id``, ``credential_live``,
+#: ``credential_expires_at``, ``last_authenticated_at``, and the field table
+#: argues each one. ``REPORT_DEVICES_FIELD`` keeps its name and value: the
+#: in-flight S3 branch imports it from here.
 REPORT_COMPUTER_FIELD = "computer"
 REPORT_DEVICES_FIELD = "devices"
 REPORT_DEVICE_FIELDS = (
@@ -179,12 +217,15 @@ class CredentialFact:
         row: dict[str, Any] = {
             "device_id": self.device_id,
             "credential_live": self.live_at(now),
+            "credential_expires_at": self.credential_expires_at,
+            "last_authenticated_at": self.last_authenticated_at,
         }
-        if self.credential_expires_at is not None:
-            row["credential_expires_at"] = self.credential_expires_at
-        if self.last_authenticated_at is not None:
-            row["last_authenticated_at"] = self.last_authenticated_at
-        return row
+        # Emitted THROUGH the frozen tuple, so the row this sends cannot drift from
+        # the row §3.2 freezes even if the four names above are reordered: the
+        # constant decides the order and the membership, and the dict above only
+        # binds each name to its value. What the row does not hold is dropped
+        # rather than sent as a null.
+        return {name: row[name] for name in REPORT_DEVICE_FIELDS if row[name] is not None}
 
 
 @dataclass

@@ -387,15 +387,21 @@ def device_state(record: Mapping[str, Any]) -> str:
 
     One row can carry several markers (a device revoked, and then its computer
     unpaired), and this is the only place that decides which one wins. The
-    register route calls it before it writes, ``list`` calls it to render, and
-    the delivery gate the emit worker will read (S5/S4c) calls it too — so no two
-    consumers can read one row as two different states, which is the invariant
-    ADR §4 states and this function IS.
+    register route calls it before it writes, ``list`` calls it to render, and the
+    emit side reads it through :func:`credential_facts` — so no two consumers can
+    read one row as two different states, which is the invariant ADR §4 states and
+    this function IS.
 
     A row with no marker is ``live`` — including a row an earlier build wrote,
     which is the truth for it rather than a fallback: nothing marked it, so
     nothing has stopped it. ``absent`` is not a return value; a caller asking
     about a device that has no row at all has already answered that by looking.
+
+    Where its consumers are, for the next reader who greps for them: all of them
+    are inside this module (the register route, the per-device evaluation, ``list``
+    and the emit-side read, :func:`credential_facts`), and nothing outside
+    ``local_operator/mobile`` calls it yet — the daemon and the CLI read the
+    rendered ``state`` from those answers rather than resolving a row themselves.
     """
     for state, marker in _STATE_MARKERS:
         if record.get(marker):
@@ -956,7 +962,7 @@ def unrevoke(config_dir: Path, device_id: str, *, now: float | None = None) -> d
     caller that cannot present this machine's operator key before it gets here.
     This function is what the operator's surface calls once that gate has passed.
 
-    It clears EVERY marker the row carries — ``revoked_at`` and/or
+    It clears every RESTORABLE marker the row carries — ``revoked_at`` and/or
     ``unpaired_at``, the two different states with the two different refusals —
     and **restores no token and no credential**: ``credential_live`` and
     ``last_authenticated_at`` are left exactly as the last authenticated request
@@ -965,8 +971,15 @@ def unrevoke(config_dir: Path, device_id: str, *, now: float | None = None) -> d
     in a state nobody asked for: the operator's intent is "this device is welcome
     back", and stopping at the stronger marker would refuse its next
     registration under the weaker one, for a reason no one chose. A row with no
-    marker is a no-op that still answers ``ok``: there is nothing to restore, and
-    the caller can read the state back from ``list``.
+    restorable marker is a no-op that still answers ``ok``: there is nothing to
+    restore, and the caller can read the state back from ``list``.
+
+    ``expired_at`` is deliberately NOT among them, and the word "restorable" is
+    doing real work above: a lapse is not a decision about this device, and its
+    way back is the one every lapse has — sign in and register again, which is
+    what clears that marker (ADR §4 rule 2). This route is the operator's lever
+    over the two markers that ARE decisions, and widening it to the third would
+    make it a lever over authentication it cannot perform.
 
     The CLI's result line names the STRONGEST marker the pre-verb state implies
     (``device_state``) — ``revoked`` → ``unrevoked …``, ``unpaired`` → ``cleared

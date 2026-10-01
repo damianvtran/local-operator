@@ -1605,3 +1605,45 @@ def test_the_revoke_route_evaluates_the_device_that_names_itself() -> None:
     row = _stored(PAYLOAD["install_id"])
     assert row.get("revoked_at") is not None, "the route still revokes"
     assert row.get("last_authenticated_at"), "and it evaluated on the way"
+
+
+def test_unrevoke_does_not_clear_the_lapse_marker() -> None:
+    """``expired_at`` is not a RESTORABLE marker, and ``unrevoke`` says so.
+
+    The operator can give a revoked or unpaired device back; it cannot give a
+    LAPSED credential back, because a lapse is not a decision about the device —
+    its way back is the one every lapse has, signing in and registering again
+    (ADR §4 rule 2). Pinned because the sentence in ``unrevoke``'s docstring is a
+    claim about behaviour, and an unasserted claim is what review round 1 found
+    elsewhere on this branch.
+    """
+    client = _client()
+    registered = client.post("/api/push/register", json=PAYLOAD).json()
+    device_id = registered["device_id"]
+    key = push_devices.operator_key(config_dir())
+    assert isinstance(key, str) and key
+    # The row where "which markers does the way back clear" is a real question: it
+    # is revoked AND lapsed at once, so the precedence rule reads it as revoked.
+    _plant(
+        [
+            _record(
+                device_id=device_id,
+                revoked_at=STAMP,
+                expired_at=STAMP,
+                credential_live=False,
+                device_key=registered["device_key"],
+            )
+        ],
+        **{push_devices.OPERATOR_KEY_FIELD: key},
+    )
+
+    response = client.post(
+        f"/api/push/devices/{device_id}/unrevoke",
+        headers={push_devices.OPERATOR_KEY_HEADER: key},
+    )
+
+    assert response.status_code == 200, response.text
+    record = _stored_records()[0]
+    assert "revoked_at" not in record, "the restorable marker went"
+    assert record["expired_at"] == STAMP, "the lapse stands: only a register clears it"
+    assert push_devices.device_state(record) == push_devices.STATE_EXPIRED
