@@ -431,3 +431,129 @@ def test_a_row_whose_blob_columns_hold_text_reads_as_no_provider_rows(tmp_path: 
     connection.close()
 
     assert stored_provider_env_keys(tmp_path) == set()
+
+
+# ---------------------------------------------------------------------------
+# capabilities and brand: the two registry facts the provider view publishes
+# ---------------------------------------------------------------------------
+
+
+def test_every_row_declares_capabilities_from_the_closed_vocabulary() -> None:
+    """The field is a frozenset over ``{chat, tts, stt}``, on every row.
+
+    A row that predates the field keeps the default ``{"chat"}`` -- today's
+    truth for a wire that answers chat completions -- so this pins the
+    vocabulary rather than the set each row happens to carry.
+    """
+    from local_operator.providers.registry import CAPABILITY_VOCABULARY
+
+    assert CAPABILITY_VOCABULARY == frozenset({"chat", "tts", "stt"})
+    for definition in PROVIDER_REGISTRY:
+        assert isinstance(definition.capabilities, frozenset), definition.id
+        assert definition.capabilities, f"{definition.id} declares no capability"
+        assert definition.capabilities <= CAPABILITY_VOCABULARY, definition.id
+
+
+def test_elevenlabs_declares_stt_only_and_keeps_its_speech_only_flag() -> None:
+    """The wire fact and the enforcement flag are separate and both true.
+
+    ``speech_only`` is what keeps the provider off every chat surface today;
+    ``capabilities`` is the fact that flag was standing in for. Deriving one
+    from the other is explicitly a later change (the flags have pinned
+    enforcement sites), so landing the fact must not move the flag.
+    """
+    definition = get_provider_definition("elevenlabs")
+    assert definition is not None
+    assert definition.capabilities == frozenset({"stt"})
+    assert definition.speech_only is True
+
+
+def test_a_capability_outside_the_vocabulary_is_a_loud_construction_error() -> None:
+    """An unknown member fails at construction, naming the provider and member.
+
+    The set is consumed by surfaces that switch on it, so a typo'd member would
+    not raise anywhere downstream -- it would read as a provider that serves
+    nothing. ``dataclasses.replace`` re-runs ``__post_init__``, which is the
+    exact path a future edit takes.
+    """
+    import dataclasses
+
+    definition = get_provider_definition("openai")
+    assert definition is not None
+    with pytest.raises(ValueError) as raised:
+        dataclasses.replace(definition, capabilities=frozenset({"speech"}))
+    message = str(raised.value)
+    assert "openai" in message, message
+    assert "speech" in message, message
+
+
+def test_an_explicit_brand_wins_over_derivation() -> None:
+    """``QwenCloud`` is the one row the derivation gets wrong, so it says so.
+
+    The name is ``QwenCloud Token Plan`` whose first two words are the vendor's
+    cloud brand; the desktop's own override table carried exactly this value
+    before the field existed.
+    """
+    from local_operator.providers.registry import provider_brand
+
+    definition = get_provider_definition("alibaba-token-plan")
+    assert definition is not None
+    assert definition.brand == "QwenCloud"
+    assert provider_brand(definition) == "QwenCloud"
+
+
+def test_provider_brand_strips_one_trailing_parenthetical() -> None:
+    """The derivation the desktop's ``brandOf`` used, moved server-side.
+
+    A parenthetical is a login-flavour qualifier the row's id and detail column
+    already carry (``openai`` vs ``openai-device``); the brand is the title
+    before it. A name with no parenthetical is its own brand.
+    """
+    from local_operator.providers.registry import provider_brand
+
+    openai = get_provider_definition("openai")
+    assert openai is not None and openai.name == "OpenAI (ChatGPT Plus/Pro)"
+    assert provider_brand(openai) == "OpenAI"
+    deepseek = get_provider_definition("deepseek")
+    assert deepseek is not None
+    assert provider_brand(deepseek) == "DeepSeek"
+
+
+def test_every_registry_brand_is_pinned() -> None:
+    """All 25 brands, spelled out.
+
+    Written as a table rather than derived from ``name`` in the test, because a
+    property written the way the code computes it agrees with the code by
+    construction: the table is what catches a NAME change that would silently
+    re-brand a provider on the census and in both pickers (the desktop reads
+    ``brand`` when present and strips the parenthetical only as a fallback).
+    """
+    from local_operator.providers.registry import provider_brand
+
+    assert {definition.id: provider_brand(definition) for definition in PROVIDER_REGISTRY} == {
+        "openai": "OpenAI",
+        "openai-device": "OpenAI",
+        "anthropic": "Anthropic",
+        "kimi": "Kimi",
+        "xai": "xAI",
+        "xai-oauth": "xAI",
+        "deepseek": "DeepSeek",
+        "zai": "Z.AI",
+        "zai-oauth": "Z.AI",
+        "google": "Google",
+        "mistral": "Mistral AI",
+        "lmstudio": "LM Studio",
+        "ollama": "Ollama",
+        "vllm": "vLLM",
+        "llamacpp": "llama.cpp",
+        "openai-compatible": "OpenAI-compatible",
+        "openrouter": "OpenRouter",
+        "elevenlabs": "ElevenLabs",
+        "radient": "Radient",
+        "radient-key": "Radient",
+        "alibaba": "Alibaba Cloud",
+        "alibaba-token-plan": "QwenCloud",
+        "alibaba-token-plan-oauth": "QwenCloud Token Plan",
+        "typesafe": "TypeSafe",
+        "test": "Test",
+    }

@@ -148,3 +148,23 @@ async def test_the_skill_catalogue_key_is_advertised_unconditionally(test_app_cl
     assert response.status_code == 200
     features = _features(response.json())
     assert features.get("skill_catalogue", 0) >= 1
+
+
+@pytest.mark.asyncio
+async def test_the_provider_catalogue_and_mcp_verb_keys_are_advertised(test_app_client):
+    """The two keys the composer's provider and MCP argument lists gate on.
+
+    ``provider_catalogue`` is the new key that licenses the provider inline
+    lists (`/login` and `/logout` arguments) and the census row fields;
+    ``mcp_catalog`` is BUMPED to 2 by the document's new ``verbs`` field, which
+    is what the MCP argument list reads. Both are asserted as ``>=`` because
+    that is the comparison the client makes (``desktopFeatureEnabled``): a bump
+    for a future shape must keep this green, while an accidental absence —
+    which a client reads as "draw no list" — must not.
+    """
+    response = await test_app_client.get("/v1/capabilities")
+
+    assert response.status_code == 200
+    features = _features(response.json())
+    assert features.get("provider_catalogue", 0) >= 1
+    assert features.get("mcp_catalog", 0) >= 2

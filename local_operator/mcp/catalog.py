@@ -491,6 +491,70 @@ def _last_seen_tools(name: str, cfg: Any, digest: str, tool_cache: Any) -> tuple
     return count, saved_at
 
 
+@dataclass(frozen=True)
+class McpVerbRow:
+    """One ``/mcp`` verb: its copy, its blast radius, and what it offers.
+
+    ONE table for the verb rows both surfaces draw -- the TUI's argument list
+    and (through the ``verbs`` document field) the desktop composer's -- because
+    the descriptions were read from the TUI's inline literals, and a second
+    surface with its own copy is exactly how "every subcommand" answers differ
+    between hosts.
+
+    ``offers`` is the SERVER-SLOT filter, named as a class of servers rather
+    than a predicate a client would have to re-derive from config and ``auth.db``
+    (which it can, and should, read only through this row's facts):
+
+    - ``"all"`` -- every configured server, including foreign imports (whose
+      ``source.path`` the detail column shows so the refusal reads as something
+      the user saw coming). ``remove`` acts on the CONFIG.
+    - ``"oauth"`` -- servers an OAuth grant could apply to. Both ``login`` and
+      ``reauth`` list the FULL capable set: a signed-in server is still the one
+      a user re-authorizes, and filtering to signed-out servers only would make
+      ``reauth`` unfindable on the server it exists for.
+    - ``"signed_in"`` -- servers that hold a stored grant, because ``logout``
+      has nothing to remove otherwise. A server with no grant is a row whose
+      only outcome is a warning.
+    - ``None`` -- no rows at all: ``list`` takes no argument, and ``add``'s name
+      is new by definition.
+    """
+
+    verb: str
+    description: str
+    destructive: bool
+    offers: Literal["all", "oauth", "signed_in"] | None
+
+
+#: Every verb ``/mcp`` accepts, in the order the argument list offers them --
+#: ``list`` FIRST because the verbs below it destroy credentials or config
+#: entries, so the row a stray Enter lands on should be the one that only shows
+#: something. Membership is ``session.frontend_state.MCP_SUBCOMMANDS`` (kept in
+#: step by ``tests/unit/mcp/test_catalog.py``); NO verb is added here --
+#: ``reload`` is deliberately not one.
+#:
+#: ``destructive`` is a SAFETY flag, not a colour: the editor's destructive
+#: gate reads it off the highlighted row to make Enter FILL rather than RUN, so
+#: a fuzzy subsequence match cannot forget a credential the user never named.
+#: It is set for ``remove``/``logout``/``reauth`` for the same reason in both
+#: cases: ``reauth`` DELETES the stored grant before re-authorizing (see
+#: ``tui.app._mcp_logout``), so an abandoned browser round trip leaves the
+#: server with no credential at all. Do not narrow this set without re-checking
+#: that gate.
+MCP_VERB_ROWS: tuple[McpVerbRow, ...] = (
+    McpVerbRow("list", "Show every configured server and its status", False, None),
+    McpVerbRow("add", "Configure a new server (url, or a stdio command)", False, None),
+    McpVerbRow("remove", "Delete a server from local-operator's config", True, "all"),
+    McpVerbRow("login", "Authorize an OAuth server (opens the browser)", False, "oauth"),
+    McpVerbRow("logout", "Forget a server's stored OAuth credential", True, "signed_in"),
+    # The differentiating clause leads: at narrow widths the tail truncates,
+    # and "forget, then authorize again" is the part login does not already
+    # say.
+    McpVerbRow(
+        "reauth", "Forget first, then authorize — for an account or scope change", True, "oauth"
+    ),
+)
+
+
 def _row(
     name: str,
     cfg: MCPServerConfig,
@@ -722,6 +786,21 @@ def describe_servers(
         "status_source": "live" if applied else "config",
         "session_id": session_id if applied else None,
         "servers": servers,
+        # The verb vocabulary of the `/mcp` argument slot: what each subcommand
+        # does, whether it destroys something, and which servers it offers.
+        # Built FRESH per call rather than handed out as a shared table, because
+        # this lands in a document a client may hold and edit (the rows are
+        # plain JSON objects, and one shared dict mutated once would be every
+        # caller's bug).
+        "verbs": [
+            {
+                "verb": row.verb,
+                "description": row.description,
+                "destructive": row.destructive,
+                "offers": row.offers,
+            }
+            for row in MCP_VERB_ROWS
+        ],
         "operations": list(operations or []),
     }
 
@@ -759,9 +838,11 @@ def live_facts_from_snapshot(rows: object) -> dict[str, LiveFacts]:
 
 
 __all__ = [
+    "MCP_VERB_ROWS",
     "PROBE_TTL_S",
     "SOURCE_KINDS",
     "LiveFacts",
+    "McpVerbRow",
     "ProbeResult",
     "describe_servers",
     "live_facts_from_snapshot",

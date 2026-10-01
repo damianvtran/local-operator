@@ -69,6 +69,14 @@ PASTE_PROMPT_ATTR = "__lo_requires_paste_prompt__"
 #: fabricated key unchecked (review round 2, MAJOR 1).
 PASTE_IS_API_KEY_ATTR = "__lo_paste_is_api_key__"
 
+#: The closed vocabulary ``ProviderDefinition.capabilities`` accepts. A member
+#: outside this set is a construction error (see ``__post_init__``), not a
+#: capability a consumer silently never matches on: the strings are consumed by
+#: surfaces that switch on them (the speech lane's cascade, the desktop's
+#: composer), and a typo'd ``"speech"`` would look like a provider that simply
+#: serves nothing rather than like a mistake.
+CAPABILITY_VOCABULARY = frozenset({"chat", "tts", "stt"})
+
 
 @dataclasses.dataclass(frozen=True)
 class ProviderDefinition:
@@ -177,6 +185,36 @@ class ProviderDefinition:
     #: :func:`is_decision_only`, kept in step by
     #: ``tests/unit/providers/test_speech_only.py``.
     speech_only: bool = False
+    #: What this provider's WIRE actually serves, from
+    #: :data:`CAPABILITY_VOCABULARY` (``chat``/``tts``/``stt``).
+    #:
+    #: The default ``{"chat"}`` is today's truth for every entry whose wire
+    #: answers chat completions -- every row that predates this field. A row
+    #: declares its own set when that stops being true: ``elevenlabs`` carries
+    #: ``{"stt"}`` because its wire is speech-to-text only, and a future TTS
+    #: provider sets ``{"tts"}``. Nothing consumes it yet (the speech lane's
+    #: cascade reads its own rung list), so declaring it changes no behaviour;
+    #: it is the fact the surfaces WILL gate on, kept next to the wire it
+    #: describes so there is no second table to drift.
+    #:
+    #: Deliberately NOT derived from ``speech_only``/``decision_only``, and a
+    #: follow-up may derive ``speech_only`` from ``"chat" not in capabilities``
+    #: instead -- not this change, because both those flags have enforcement
+    #: sites pinned by their own tests and the derivation would be a behaviour
+    #: change dressed as a refactor.
+    capabilities: frozenset[str] = frozenset({"chat"})
+    #: The clean title a surface shows for this provider: the name MINUS the
+    #: trailing parenthetical that distinguishes login flavours (``"OpenAI"``
+    #: for ``"OpenAI (ChatGPT Plus/Pro)"``).
+    #:
+    #: ``""`` means DERIVE (:func:`provider_brand`) rather than store the same
+    #: string twice: the registry ``name`` is written for a CLI listing where
+    #: the id is not adjacent, and the derivation is right for every row whose
+    #: parenthetical is a flavour qualifier. An explicit value is for the rows
+    #: where derivation is WRONG -- ``alibaba-token-plan`` is the case
+    #: (``brand="QwenCloud"``, the product its users know, against a name whose
+    #: first two words are the vendor's cloud brand).
+    brand: str = ""
 
     def __post_init__(self) -> None:
         """Adopt the login callable's own paste requirement.
@@ -195,6 +233,17 @@ class ProviderDefinition:
             object.__setattr__(self, "requires_paste_prompt", True)
         if not self.paste_is_api_key and getattr(self.login, PASTE_IS_API_KEY_ATTR, False):
             object.__setattr__(self, "paste_is_api_key", True)
+        # LOUD on an unknown member: the set is consumed by surfaces that
+        # switch on it, so a member nothing matches would read as "this
+        # provider serves nothing", and finding that at a call site instead of
+        # at construction is the difference between a one-line fix and a hunt.
+        unknown = self.capabilities - CAPABILITY_VOCABULARY
+        if unknown:
+            raise ValueError(
+                f"provider {self.id!r} declares unknown capabilit"
+                f"{'y' if len(unknown) == 1 else 'ies'}: {sorted(unknown)!r}"
+                f" (vocabulary: {sorted(CAPABILITY_VOCABULARY)!r})"
+            )
 
     @property
     def login_kind(self) -> str | None:
@@ -587,6 +636,9 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         # is deliberately absent from every surface that offers or resolves a
         # CHAT model (`speech_only` above documents the enforcement sites).
         speech_only=True,
+        # The wire fact behind the flag above, declared where the wire is:
+        # ElevenLabs serves speech-to-text and nothing else.
+        capabilities=frozenset({"stt"}),
     ),
     ProviderDefinition(
         id="radient",
@@ -642,6 +694,10 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
             "qwencloud",
         ),
         name="QwenCloud Token Plan",
+        # The brand its users know: the name's first two words are the vendor's
+        # cloud brand, and the desktop's own override table carried exactly this
+        # value -- moved here so the registry is the one place it lives.
+        brand="QwenCloud",
         env_keys="ALIBABA_TOKEN_PLAN_API_KEY",
         login=create_api_key_login(
             "QwenCloud Token Plan",
@@ -752,6 +808,30 @@ def known_provider_ids() -> tuple[str, ...]:
     point is that it is derived here rather than hand-listed on the wire.
     """
     return tuple(sorted(set(_BY_ID) | set(_ALIASES)))
+
+
+def provider_brand(definition: ProviderDefinition) -> str:
+    """The clean title for ``definition``: ``brand`` when set, else derived.
+
+    ONE derivation for every surface that shows a provider's name away from its
+    id -- the desktop's picker rows and the TUI's rows read this rather than
+    each carrying the same parenthetical-stripping fallback (the UI's
+    ``brandOf`` keeps its copy only as the pre-existing fallback for a census
+    that predates ``brand``).
+
+    The derivation is the UI's, moved server-side: strip ONE trailing
+    parenthetical -- ``"OpenAI (ChatGPT Plus/Pro)"`` -> ``"OpenAI"`` -- because
+    the parenthetical is a login-flavour qualifier that the row's id and detail
+    column already carry. A name with no parenthetical is its own brand; the
+    rows where that is wrong (``alibaba-token-plan``) say so explicitly in
+    ``ProviderDefinition.brand``.
+    """
+    if definition.brand:
+        return definition.brand
+    name = definition.name.strip()
+    if name.endswith(")") and "(" in name:
+        return name[: name.index("(")].strip()
+    return name
 
 
 def list_login_providers() -> list[ProviderDefinition]:
