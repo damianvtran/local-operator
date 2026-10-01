@@ -70,12 +70,14 @@ from local_operator.operator.trust import (
     load_anchor,
     load_staged_anchor,
     staging_path,
+    statement_digest,
 )
 from local_operator.operator.verify import (
     ACTIONS,
     DeviceCert,
     key_id_for,
     signed_message,
+    spki_fp,
     verify_device_cert,
     verify_signature,
 )
@@ -281,7 +283,9 @@ __all__ = [
     "reset_reported_for_tests",
     "sign_challenge",
     "signed_message",
+    "spki_fp",
     "staging_path",
+    "statement_digest",
     "verify_device_cert",
     "verify_signature",
 ]

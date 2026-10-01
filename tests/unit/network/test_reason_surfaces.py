@@ -63,6 +63,23 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # Assigned to the payload's ``code`` key, not to a line: the human half of that
     # refusal is ``message``.
     ("local_operator/network/cli.py", "_cmd_service", "reason"): (1, "a payload key, not a line"),
+    # ``lop network start`` on Linux when a missing unit had to be installed first:
+    # the value read is the INSTALL receipt's own machine reason (``no_supervisor``
+    # / ``isolated_home`` / ``enable_failed`` / ``not_serving``) and it rides the
+    # payload's ``reason`` key — the same shape as ``_cmd_service`` above, again a
+    # key rather than a line; the human half is ``error``.
+    ("local_operator/network/relay.py", "_service_action_systemd", "reason"): (
+        1,
+        "the install receipt's machine reason, assigned to the payload's key",
+    ),
+    # The onboarding adapter COPIES the runner's own receipt row into the store's
+    # six fields: ``detail`` here was composed by the runner a moment earlier
+    # (never a peer's wire value), and this read is the field re-shape itself —
+    # no sentence of it is printed from this site.
+    ("local_operator/network/onboard_approvals.py", "append_receipt", "detail"): (
+        1,
+        "the runner's own receipt field, copied into the store row — not a wire read",
+    ),
     # The relay's OWN sentence for a session op (``runtime joining``), printed verbatim
     # on purpose: the wire facts (``outcome``/``engaged``/``admitted``) are the booleans
     # beside it, and UX round 3 removed the second copy of those from these lines.

@@ -2298,9 +2298,15 @@ What exists **now** so metered on-demand capacity is an extension:
 
 - `MemberRecord.kind` (`device` | `pool`) and `lifecycle`
   (`active` | `provisioning` | `draining` | `expired`) exist and nothing in the
-  pairing path assumes a human at the far end (§4.2). A pod is paired with
-  `--role drive --automated` (§5.2), which requires a human on the inviter only
-  and marks `kind: "pool"`.
+  pairing path assumes a human at the far end (§4.2). `--automated` is now
+  IMPLEMENTED (remote-onboarding slice (b)), and its meaning is frozen there:
+  "no human at the JOINING end". The joining device supplies its OWN derived code
+  as the transcription — the value a person at this end would have typed from
+  their own screen (§5.2) — and the inviting device still compares it against
+  its own derivation, so a mismatch refuses, spends the attempt and audits
+  `sas_mismatch`; the operator's confirm at the inviting device is the pairing's
+  only human act. The admitted row stays `kind: "device"`; when pools arrive
+  they will pass `--kind pool` — the flag is about the human, not the kind.
 - `net_sync` is a **reserved op name** with a reserved capability (`view`), so
   R22's cadence sync and its pre-spin-down sync are an implementation of a named
   op rather than a change to the envelope (§6.4).
@@ -2329,9 +2335,14 @@ provisioning, and session sync.
   `show`, `peers`, `member_rm`, `disconnect`, `panic`, `log`, `doctor`) and shell
   the CLI with `--json`.
 - **The invariant that matters:** the invite token never enters a tool result.
-  `invite` returns a path; `join` requires an interactive prompt for the SAS, so
-  the tool must tell the user to run it (or run it under a TTY it does not own)
-  and can never complete a pairing on its own. That is a *feature* of the
+  `invite` returns a path. `join` with a human at this end requires an
+  interactive prompt for the SAS, so the tool must tell the user to run it (or
+  run it under a TTY it does not own). With `--automated` (§12.4, implemented in
+  remote-onboarding slice (b)) the joining end needs no human at all — but a
+  pairing still cannot complete without a human SOMEWHERE: the inviting device
+  must confirm, the wire compares the two derived codes, and a mismatch refuses.
+  An automated join that nobody confirms simply runs out its window; there is no
+  path by which the joining side blesses itself. That is a *feature* of the
   security model, and the guide must say so.
 
 ---
