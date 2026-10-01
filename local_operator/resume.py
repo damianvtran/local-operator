@@ -1283,6 +1283,30 @@ def backfill_session_titles(
     return written
 
 
+def is_user_session_origin(origin: str) -> bool:
+    """Whether a parsed ``origin`` value keeps its session the user's own.
+
+    THE visibility rule, spelled ONCE here, and every surface that decides
+    whether a conversation is offered to a human reaches THIS function: the
+    store scan asks it of each marker it parses (:func:`_scan_sessions`, both
+    its cached skip and its fresh read -- which is also why it takes the parsed
+    VALUE rather than a directory; asking a path would re-read what the scan
+    already has in hand), :func:`is_user_session` is its directory-level
+    spelling for the consumers holding a path, and the mobile daemon's live
+    half asks it of a live runtime's marker (a record carries no origin). An
+    author minting a new origin registers it in :data:`USER_ORIGINS` and every
+    one of those sites follows -- one place to add, not two spellings to keep
+    in step by hand.
+
+    The direction is deliberate: any non-empty value is HIDDEN unless named,
+    so a value minted by a later code path is opt-OUT of every listing by
+    default, while a corrupt or unreadable marker reads as ``""`` -- the
+    user's own -- because hiding real work is the severe direction (see
+    :func:`session_origin`).
+    """
+    return not origin or origin in USER_ORIGINS
+
+
 def is_user_session(session_dir: Path) -> bool:
     """True when a human started this session, so a picker may offer it.
 
@@ -1300,9 +1324,11 @@ def is_user_session(session_dir: Path) -> bool:
     somebody else's work. Four consumers read this predicate and a fork is
     wanted in all four — the ``/resume`` picker, ``resume_dir``'s ``@latest``
     scan, the multiplexer's crash-restore binding, and the mobile session list.
+
+    The rule itself lives in :func:`is_user_session_origin`; this is the
+    directory-level spelling of it (read the marker, then ask).
     """
-    origin = session_origin(session_dir)
-    return not origin or origin in USER_ORIGINS
+    return is_user_session_origin(session_origin(session_dir))
 
 
 class _reverse_name(str):
@@ -1712,22 +1738,6 @@ def recent_sessions(
     ]
 
 
-def _is_hidden_origin(origin: str) -> bool:
-    """Whether a parsed ``origin`` value keeps its session OUT of the listing.
-
-    The exact negation of :func:`is_user_session`'s rule, spelled here so the
-    scan loop can ask the question twice — once of a CACHED verdict before any
-    syscall, once of a freshly parsed one — without the two spellings drifting.
-    ``USER_ORIGINS`` remains the single shared fact both consult, so a new
-    user-visible origin is still added in exactly one place.
-
-    Not delegated to :func:`is_user_session` itself because that takes a
-    directory and pays a stat plus a read to obtain the origin the scan already
-    has in hand; this loop must not pay a second stat per directory.
-    """
-    return bool(origin) and origin not in USER_ORIGINS
-
-
 def _recent_sessions_with_origin(
     config_dir: Path,
     limit: int | None = None,
@@ -2026,7 +2036,7 @@ def _scan_sessions(
                 and isinstance(previous, dict)
                 and previous.get("ino") == ino
                 and isinstance(previous.get("origin"), str)
-                and _is_hidden_origin(previous["origin"])
+                and not is_user_session_origin(previous["origin"])
             ):
                 # The marker is still on disk as far as this scan knows, so the
                 # entry is retained rather than dropped from the rewritten
@@ -2121,14 +2131,13 @@ def _scan_sessions(
                         # could not confirm it, and ``merged`` below is built
                         # from the names seen here.
                         seen.discard(entry.name)
-                # The same verdict :func:`is_user_session` reaches, spelled out
-                # here rather than delegated because this loop must not pay a
-                # second stat per directory to re-read the marker it just read.
-                # It is therefore the ONE place that has to be kept in step with
-                # that predicate by hand — ``USER_ORIGINS`` is the shared fact
-                # both consult, so a new user-visible origin is added there once
-                # rather than in two places that can drift.
-                if _is_hidden_origin(origin):
+                # THE ONE PREDICATE (:func:`is_user_session_origin`), asked of
+                # the marker this loop just read rather than of the directory --
+                # delegating through :func:`is_user_session` would pay a second
+                # stat per directory for the answer already in hand. One rule,
+                # one function: a new user-visible origin is registered in
+                # :data:`USER_ORIGINS` and nothing here changes.
+                if not is_user_session_origin(origin):
                     # Exported even though this scan re-read the marker: what
                     # ``load_catalog`` needs is the hidden SET, and a directory
                     # that took the slow path this poll (a fresh subagent, a

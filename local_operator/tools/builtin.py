@@ -13892,7 +13892,7 @@ async def _sessions_info(
             # Two situations land here, and until review round 1 they shared
             # one wrong sentence: a stored session genuinely past the
             # newest-first window, and one a listing scan excludes at ANY
-            # limit because its origin is hidden (``resume._is_hidden_origin``
+            # limit because its origin is hidden (``resume.is_user_session_origin``
             # — an ``agent-shell`` session never appears in a listing, so
             # "past the window" was false for it; QA round 1, Q1). The
             # per-row reads need only the id, so when the directory exists
