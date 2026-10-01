@@ -322,10 +322,15 @@ would classify a perfectly healthy UI host as `ABSENT` forever.
 - `PROTO_VERSION = 1` (`:16`), `MIN_SUPPORTED_PROTO = 1` (`:45`) — and these are
   a **window**, not an equality: `proto_supported(proto, low=..., high=...)`
   (`:48-49`). The invariant is written at `:20-45`.
-- `METHODS` (`:162-209`) — **20** methods: open, goto, read, snapshot,
-  screenshot, click, type, close, status, tabs, scroll, logs, request_access,
-  await_access, cancel_access, retitle, owner_recover, owner_finish,
-  owner_retain, owner_release. Each carries its rationale inline.
+- `METHODS` (`:162-209`) — **25** methods: open, goto, read, snapshot,
+  screenshot, click, type, close, status, tabs, scroll, logs, **styles,
+  hit_test, ancestors**, request_access, await_access, cancel_access, retitle,
+  owner_recover, owner_finish, owner_retain, owner_release, download, upload.
+  Each carries its rationale inline. (**AMENDED 2026-10-01:** `download`,
+  `upload` and the three structured reads postdate this document's base ref;
+  this list reflects the live source. The reads are served from one shared
+  host-free module, `extension/src/driver/geometry-read.ts`, and §4 has their
+  rows.)
 - `ORIGIN_PROMPT_TIMEOUT_MS = 60_000` (`:227`) and the timeout-chain invariant
   (`:217-226`): extension deny (60 s) < daemon prompt window (65 s) < session
   client timeout.
@@ -641,8 +646,9 @@ view/tab/profile design of §5–§7 and §11, and the sharing split of §12.
 
 ## 4. Capability matrix
 
-`BROWSER_ACTIONS` — **19** actions since PR #1323 (`download`, `upload`) — and
-the 22 `METHODS` (`protocol.py`). The file counts and `file:line` references
+`BROWSER_ACTIONS` — **22** actions (19 since PR #1323, plus the three
+structured reads **AMENDED 2026-10-01**: `styles`, `hit_test`, `ancestors`)
+— and the 25 `METHODS` (`protocol.py`). The file counts and `file:line` references
 below are the ones this document was written against; the live source is the
 constants themselves. "UI" is the UI host's v1 verdict.
 
@@ -662,6 +668,9 @@ below is now argued per row rather than asserted.
 | `close` | yes | destroys the view, closes the webContents (web-contents.md:1174), removes the tab; `tab_ambiguous` when several are open and no handle was given (existing code, existing copy) |
 | `scroll` | yes | the shared `scroll-expressions` JS + `moreBelow`/`moreRight` reporting |
 | `logs` | yes | `Runtime.enable` + `Log.enable` + `Runtime.consoleAPICalled`/`Log.entryAdded`/`Runtime.exceptionThrown` into the same ring-buffer shape and level vocabulary |
+| `styles` | yes | the shared `driver/geometry-read.ts` `readStyles` in the isolated world (`executeJavaScriptInIsolatedWorld`) — the SAME self-contained function the extension runs via `chrome.scripting.executeScript`, no arbitrary JS on either host (§12's vendoring). Bounds at the source: ≤5 matches, each a 2dp rect + the default computed-style set (+ caller `properties`, ≤20) + the element's own inline `--*` tokens |
+| `hit_test` | yes | same module, `hitTest(x, y)`: the `document.elementsFromPoint` stack at viewport coordinates, topmost first, ≤8 — the primitive behind "what is actually on top here" |
+| `ancestors` | yes | same module, `ancestors(selector, depth)`: the chain from the element to `<html>` inclusive, ≤16 (default 12), with the clip/layout style set. All three return the typed `element_not_found` on no match |
 | `tabs` | yes | the host's own registry (§6.2); handles redacted exactly as `commands/nav.ts:169` redacts them, "your own tab is marked `(yours)`" (`builtin.py:9358-9366`). **New in rev 2:** lists user-created tabs too, and shows a **full** handle only for a tab handed over to the *calling* session (§6.3) |
 | `request_access` | yes | reuses the shared pure policy modules (§12); the prompt renders in UI chrome (§9) |
 | `await_access` | yes | same bounded-slice polling contract (`await_access` budget 25 s, `protocol.py:263`) |
