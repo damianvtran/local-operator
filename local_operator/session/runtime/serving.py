@@ -527,6 +527,32 @@ def _on_session_loop(method: _F) -> _F:
     return cast(_F, marshalled)
 
 
+def _fork_entry_target(args: str) -> str | None:
+    """The transcript entry a routed ``/fork`` was asked to cut through, if any.
+
+    The desktop fork route carries its cut point in the slash ARGS, because the
+    routed-slash seam transports only strings — the same convention
+    ``/checkpoints_warm``, ``/wake``, ``/monitor`` and ``/desktop_mcp`` already
+    use for their own payloads. The payload is a JSON object, and the SHAPE is
+    deliberately strict: anything that is not exactly ``{"entry_id": <str>}``
+    with a non-empty string means "no cut point", so a typed ``/fork <text>``
+    (whose trailing text is a boot prompt, and which reaches the TUI's own
+    local handler rather than this seam) can never be mistaken for a cut, and a
+    payload a future client widens without this function being updated refuses
+    instead of cutting somewhere unintended.
+    """
+    if not args.strip():
+        return None
+    try:
+        payload = json.loads(args)
+    except ValueError:
+        return None
+    if not isinstance(payload, dict) or set(payload) != {"entry_id"}:
+        return None
+    entry_id = payload["entry_id"]
+    return entry_id if isinstance(entry_id, str) and entry_id else None
+
+
 class ServingSessionHandle(SessionHandle):
     """SessionHandle over a Session that the process hosting ``loop`` owns.
 
@@ -6325,6 +6351,21 @@ class ServingSessionHandle(SessionHandle):
 
             if getattr(session, "_compacting", False):
                 raise ValueError("Wait for compaction to finish before forking")
+            through_entry_id = _fork_entry_target(args)
+            if through_entry_id is not None:
+                # A NAMED cut point does NOT wait for a boundary, and that is a
+                # property of the request rather than an optimisation: the point
+                # it names is already committed, so the copy is the same whether
+                # it is taken now or after the live turn ends (``request_fork``
+                # below exists because "the next safe boundary" is still in the
+                # FUTURE). The transcript's own writer lock is what keeps the
+                # copy from racing an append or a compaction, exactly as the
+                # TUI's /fork relies on mid-turn.
+                snapshot = await session.fork_snapshot(through_entry_id=through_entry_id)
+                return SlashResult(
+                    kind="block",
+                    data={"type": "forked", "session_id": snapshot["fork_id"]},
+                )
             if getattr(session, "is_streaming", False):
                 if session.has_pending_fork():
                     raise ValueError("A fork is already waiting for a safe boundary")

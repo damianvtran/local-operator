@@ -1749,7 +1749,11 @@ class Transcript:
             return rows
 
     async def fork_snapshot(
-        self, *, message: str = "", is_compacting: Callable[[], bool] = lambda: False
+        self,
+        *,
+        message: str = "",
+        is_compacting: Callable[[], bool] = lambda: False,
+        through_entry_id: str | None = None,
     ) -> tuple[str, bool]:
         """Copy a committed transcript without racing append or file compaction.
 
@@ -1757,6 +1761,12 @@ class Transcript:
         a waiter cannot stop a filesystem copy, so retain the same ordering lock
         as `_commit` until the worker settles, even after repeated cancellation.
         The returned fork excludes live messages not yet durably committed.
+
+        ``through_entry_id`` names the transcript entry the copy must STOP at:
+        the child keeps the committed, paired prefix AT-OR-BEFORE that entry and
+        loses every conversation row after it — "fork the conversation from that
+        point on". It is the same copy either way, so the parent is untouched
+        whether or not a cut point is named.
         """
         from local_operator.fork import fork_session
         from local_operator.session.session import _paired_prefix
@@ -1764,14 +1774,40 @@ class Transcript:
         async with self._lock:
             if is_compacting():
                 raise ValueError("history is being rewritten; retry /fork when compaction finishes")
+            if through_entry_id is not None and not self.has_entry(through_entry_id):
+                # An UNKNOWN id must refuse rather than fall through: replay's
+                # own ``through_id`` leaves the journal untouched when it finds
+                # no such row, so an id from another session (or a stale view)
+                # would fork the WHOLE conversation — the one failure here that
+                # produces extra content instead of an error.
+                raise ValueError(
+                    "that message is not part of this conversation; "
+                    "pick a message from this session to fork from"
+                )
 
             def copy_snapshot() -> tuple[str, bool]:
                 # Replay resolves attachments and can traverse a long history.
                 # It belongs off-loop with the copy, under the same writer lock,
                 # or /fork would freeze the UI and the original tool it preserves.
                 history = self.build_llm_history()
-                paired = _paired_prefix(history, strict=True)
+                cut = (
+                    history
+                    if through_entry_id is None
+                    else self.build_llm_history(through_id=through_entry_id)
+                )
+                # ``strict`` is the whole discipline of a cut. The paired prefix
+                # is the longest prefix the child's first request may replay, so
+                # a cut aimed INSIDE an unfinished tool batch lands at-or-before
+                # that batch (the same exclusion the live journal tail gets)
+                # instead of truncating a call away from its results.
+                paired = _paired_prefix(cut, strict=True)
                 retained = {item.id for item in paired}
+                # Measured against the FULL history, never against ``cut``: every
+                # conversation row after the cut point is excluded, together with
+                # the rows the cut itself dropped. Journal rows the clone keeps
+                # wholesale (compaction, prune, custom) are not message ids, so
+                # they are not dropped here — ``fork_session`` keeps their bytes,
+                # which is what preserves the prune and attachment metadata.
                 excluded = frozenset(item.id for item in history if item.id not in retained)
                 compaction = next(
                     (row for row in reversed(self._entries) if row.type == ENTRY_COMPACTION), None
@@ -1783,6 +1819,19 @@ class Transcript:
                     # Canonical replay falls back to full history if its latest
                     # anchor disappears. Refuse BEFORE allocating a fork rather
                     # than resurrect summarized context or rewrite marker bytes.
+                    #
+                    # A named cut reaches this from two directions with two
+                    # different remedies, and the marker row's own presence is
+                    # what tells them apart: if the MARKER is gone too, the cut
+                    # landed before the summary, so a later message is the fix;
+                    # if the marker is retained, its anchor was trimmed with the
+                    # unpaired tail, so the fix is the original finishing that
+                    # batch — today's sentence, unchanged.
+                    if through_entry_id is not None and compaction.id in excluded:
+                        raise ValueError(
+                            "that message sits before the conversation's last summary; "
+                            "fork from a message after the summary instead"
+                        )
                     raise ValueError(
                         "compaction boundary is in an unfinished tool batch; "
                         "retry /fork after the original finishes that batch"

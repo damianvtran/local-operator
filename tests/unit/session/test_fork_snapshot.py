@@ -136,6 +136,139 @@ async def test_snapshot_refuses_malformed_interior_and_active_compaction(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_cut_through_an_entry_truncates_the_child_and_leaves_the_parent(
+    tmp_path: Path,
+) -> None:
+    """A named cut keeps the prefix through that entry and drops every later row."""
+    parent = Transcript(tmp_path / "sessions" / "parent000001")
+    asked = message("user", "keep me")
+    answered = message("assistant", "kept answer")
+    cut_at = message("user", "fork from here")
+    dropped = message("assistant", "after the cut")
+    await parent.append_messages([asked, answered, cut_at, dropped])
+    before = parent.path.read_bytes()
+
+    fork_id, omitted = await parent.fork_snapshot(through_entry_id=cut_at.id)
+
+    child = Transcript(parent.directory.parent / fork_id)
+    assert [item.id for item in child.build_llm_history()] == [asked.id, answered.id, cut_at.id]
+    # The row is not merely absent from the model's view: it was not copied.
+    assert dropped.id.encode() not in child.path.read_bytes()
+    assert omitted
+    assert parent.path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_cut_at_the_last_entry_is_todays_whole_copy(tmp_path: Path) -> None:
+    """Naming the newest entry equals naming none — the absent target is unchanged."""
+    parent = Transcript(tmp_path / "sessions" / "parent000001")
+    first = message("user", "one")
+    second = message("assistant", "two")
+    third = message("user", "three")
+    await parent.append_messages([first, second, third])
+    before = parent.path.read_bytes()
+
+    whole_id, omitted = await parent.fork_snapshot()
+    whole = Transcript(parent.directory.parent / whole_id)
+    assert not omitted
+    assert whole.path.read_bytes() == before
+
+    cut_id, cut_omitted = await parent.fork_snapshot(through_entry_id=third.id)
+    at_last = Transcript(parent.directory.parent / cut_id)
+    assert not cut_omitted
+    assert at_last.path.read_bytes() == before
+    assert parent.path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_cut_refuses_an_entry_that_is_not_in_this_conversation(tmp_path: Path) -> None:
+    """An unknown id must refuse, never silently fork MORE than was asked for."""
+    parent = Transcript(tmp_path / "sessions" / "parent000001")
+    await parent.append_message(message("user", "hello"))
+    before = parent.path.read_bytes()
+
+    with pytest.raises(ValueError, match="not part of this conversation"):
+        await parent.fork_snapshot(through_entry_id="ffffffffffffffff")
+
+    assert parent.path.read_bytes() == before
+    assert len(list((tmp_path / "sessions").iterdir())) == 1
+
+
+@pytest.mark.asyncio
+async def test_cut_never_lands_inside_an_unpaired_batch(tmp_path: Path) -> None:
+    """A cut aimed at a live batch lands AT-OR-BEFORE it, and is not a refusal."""
+    parent = Transcript(tmp_path / "sessions" / "parent000001")
+    asked = message("user", "hello")
+    call = message(
+        "assistant",
+        "",
+        tool_calls=[
+            ToolCall(id="a", name="bash", arguments={}),
+            ToolCall(id="b", name="bash", arguments={}),
+        ],
+    )
+    partial = message("tool", "first finished", tool_call_id="a")
+    await parent.append_messages([asked, call, partial])
+
+    for target in (call.id, partial.id):
+        fork_id, omitted = await parent.fork_snapshot(through_entry_id=target)
+        child = Transcript(parent.directory.parent / fork_id)
+        assert [item.id for item in child.build_llm_history()] == [asked.id]
+        assert omitted
+
+    # The cut re-evaluates against the pairing committed NOW, not a cached one,
+    # and it still honours "at-or-before": once the batch is complete, a cut on
+    # its LAST result carries it, while a cut on its first result does not.
+    second = message("tool", "second finished", tool_call_id="b")
+    await parent.append_message(second)
+    fork_id, omitted = await parent.fork_snapshot(through_entry_id=second.id)
+    child = Transcript(parent.directory.parent / fork_id)
+    assert [item.id for item in child.build_llm_history()] == [
+        asked.id,
+        call.id,
+        partial.id,
+        second.id,
+    ]
+    assert not omitted
+
+    fork_id, _ = await parent.fork_snapshot(through_entry_id=partial.id)
+    child = Transcript(parent.directory.parent / fork_id)
+    assert [item.id for item in child.build_llm_history()] == [asked.id]
+
+
+@pytest.mark.asyncio
+async def test_cut_refuses_when_it_would_drop_the_compaction_anchor(tmp_path: Path) -> None:
+    """A point older than the last summary's anchor refuses, in its own words."""
+    parent = Transcript(tmp_path / "sessions" / "parent000001")
+    summarized = message("user", "OLD SUMMARIZED CONTENT")
+    anchor = message("assistant", "kept after the summary")
+    await parent.append_messages([summarized, anchor])
+    await parent.append_compaction(
+        summary="summary", first_kept_entry_id=anchor.id, tokens_before=100
+    )
+    after = message("user", "after the summary")
+    later = message("assistant", "later still")
+    await parent.append_messages([after, later])
+    before = parent.path.read_bytes()
+
+    with pytest.raises(ValueError, match="before the conversation's last summary"):
+        await parent.fork_snapshot(through_entry_id=summarized.id)
+    assert parent.path.read_bytes() == before
+    assert len(list((tmp_path / "sessions").iterdir())) == 1
+
+    # Inside the summary's retained prefix the same transcript cuts cleanly: the
+    # refusal is about the named POINT, not about the conversation.
+    fork_id, _ = await parent.fork_snapshot(through_entry_id=after.id)
+    child = Transcript(parent.directory.parent / fork_id)
+    kept = [item.id for item in child.build_llm_history()]
+    # The compaction marker heads the child's replay, then the summary's
+    # retained prefix; the summarized row is carried as bytes but never replayed.
+    assert kept[1:] == [anchor.id, after.id]
+    assert summarized.id not in kept
+    assert later.id.encode() not in child.path.read_bytes()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("cancel", [False, True])
 async def test_copy_holds_writer_lock_until_worker_settles(
     tmp_path: Path, monkeypatch, cancel: bool

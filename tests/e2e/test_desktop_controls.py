@@ -39,6 +39,22 @@ STANDING_GOAL = "Complete two steps"
 LOOP_GOAL_TEXT = "Verify the fixture goal"
 
 
+def _message_row_ids(transcript: Path) -> list[str]:
+    """The ids of a transcript's conversation rows, oldest first.
+
+    Read off the FILE rather than through the reader route, because the claim
+    these cells make ("everything after the cut was not copied") is about bytes
+    on disk: a renderer's filter is exactly what a broken copy would still pass.
+    """
+    return [
+        row["id"]
+        for row in (
+            json.loads(line) for line in transcript.read_text().splitlines() if line.strip()
+        )
+        if row.get("type") == "message"
+    ]
+
+
 def _census(stream: ScriptedStream) -> list[str]:
     """The kinds of provider call this session has made, in call order.
 
@@ -826,6 +842,144 @@ async def test_desktop_interrupt_stops_the_turn_and_keeps_the_session(
             print(
                 "SHAPES: non-uuid request_id 422, an extra field 422, an unknown session "
                 "404 and a malformed id 404"
+            )
+    finally:
+        server.should_exit = True
+        await asyncio.wait_for(serving, 30)
+        listener.close()
+        if runtime is not None:
+            await runtime.aclose()
+        if handle is not None:
+            await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_fork_cut_through_a_named_entry(
+    headless_tui_env: Path, workspace: Path, monkeypatch
+):
+    """A fork taken AT a message — "fork the conversation from that point on".
+
+    Its own test rather than a cell inside ``test_desktop_control_surface``, and
+    that is structural: the neighbouring fork cells ride that test's whole
+    fixture (goals, asides, an MCP server), any of which can fail for its own
+    reason and mask this contract. What is claimed here is about BYTES on the
+    child's own transcript file — the thing a renderer's filter would still hide
+    even if the copy were wrong.
+
+    The refusal's STATUS is deliberately not pinned: see the comment at it.
+    """
+    root = headless_tui_env
+    token = secrets.token_hex(32)
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", token)
+    monkeypatch.delenv("LOCAL_OPERATOR_DESKTOP_ORIGINS", raising=False)
+    (root / "config.yml").write_text(
+        "version: 0.0.0\nvalues:\n  hosting: test\n  model_name: mock\n"
+    )
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    server = uvicorn.Server(uvicorn.Config(app, log_level="error"))
+    serving = asyncio.create_task(server.serve(sockets=[listener]))
+    runtime = handle = None
+    try:
+        await until(lambda: server.started)
+        async with httpx.AsyncClient(
+            base_url=f"http://127.0.0.1:{listener.getsockname()[1]}", timeout=30
+        ) as client:
+            client.headers["Authorization"] = "Bearer " + token
+            created = await client.post(
+                "/v1/desktop/sessions", json={"request_id": request_id(), "cwd": str(workspace)}
+            )
+            assert created.status_code == 200, created.text
+            sid = created.json()["result"]["session_id"]
+            target = "/v1/desktop/sessions/" + sid
+            # Generous tape, because the headless naming worker makes model calls
+            # of its own through this same stream (see the interrupt test below):
+            # pinning answers to exact indices lets the harness's bookkeeping,
+            # rather than the contract under test, decide whether this passes.
+            stream = ScriptedStream(
+                [text_turn(f"Answer {n}") for n in range(1, 4)] + [text_turn("Spare")] * 4
+            )
+            session = build_session(root / "sessions" / sid, stream, cwd=workspace)
+            handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(workspace))
+            runtime = RuntimeServer(handle, kind="daemon")
+            await runtime.start_in_process()
+            (root / "sessions" / sid / ".session.pid").write_text(str(os.getpid()))
+
+            # Real turns, admitted through the route the composer uses.
+            for text in ("First question", "Second question", "Third question"):
+                admitted = await client.post(
+                    target + "/messages", json={"request_id": request_id(), "text": text}
+                )
+                assert admitted.status_code == 200, admitted.text
+
+            parent_transcript = root / "sessions" / sid / "transcript.jsonl"
+            parent_ids = _message_row_ids(parent_transcript)
+            assert len(parent_ids) >= 3, parent_ids
+            # A row with conversation on BOTH sides of it, so the cut has
+            # something to keep and something to drop.
+            cut_index = len(parent_ids) // 2
+            parent_bytes = parent_transcript.read_bytes()
+            sessions_before = sorted(p.name for p in (root / "sessions").iterdir())
+
+            cut_fork = await client.post(
+                target + "/fork",
+                json={
+                    "request_id": request_id(),
+                    "boundary": "at_entry",
+                    "entry_id": parent_ids[cut_index],
+                },
+            )
+            assert cut_fork.status_code == 200, cut_fork.text
+            assert cut_fork.json()["result"]["data"]["boundary"] == "at_entry"
+            cut_child = cut_fork.json()["result"]["data"]["session_id"]
+            assert cut_child != sid
+            # EQUALITY, not "contains": the child's conversation rows are exactly
+            # the parent's prefix through the named entry, so nothing after it was
+            # copied AND nothing before it was dropped.
+            child_ids = _message_row_ids(root / "sessions" / cut_child / "transcript.jsonl")
+            assert child_ids == parent_ids[: cut_index + 1], child_ids
+            assert parent_transcript.read_bytes() == parent_bytes
+            print(
+                f"Fork at a named entry: {len(parent_ids)} parent rows -> "
+                f"{len(child_ids)} child rows, exactly the prefix through "
+                f"{parent_ids[cut_index]}; parent byte-unchanged"
+            )
+
+            # A point this conversation does not have REFUSES and creates nothing.
+            # Its STATUS is deliberately not pinned as a contract: the sentence is
+            # raised in the runtime, but an unrecognised error frame is re-raised
+            # as a plain RuntimeError by the attach client, which this route's
+            # ladder can only read as an unreachable owner — so it arrives as 503
+            # runtime_unreachable. The fork branch's PRE-EXISTING compaction refusal
+            # arrives identically (measured on the live plane), so pinning 503 here
+            # would freeze a defect as the contract; the fix belongs to the
+            # error-classification seam and is reported on the PR.
+            before_refusal = sorted(p.name for p in (root / "sessions").iterdir())
+            refused_fork = await client.post(
+                target + "/fork",
+                json={
+                    "request_id": request_id(),
+                    "boundary": "at_entry",
+                    "entry_id": "ffffffffffffffffffffffffffffffff",
+                },
+            )
+            assert refused_fork.status_code != 200, refused_fork.text
+            assert sorted(p.name for p in (root / "sessions").iterdir()) == before_refusal
+            assert parent_transcript.read_bytes() == parent_bytes
+
+            # The ABSENT target is still the call this route has always made.
+            whole_fork = await client.post(target + "/fork", json={"request_id": request_id()})
+            assert whole_fork.status_code == 200, whole_fork.text
+            assert whole_fork.json()["result"]["data"]["boundary"] == "next_safe"
+            whole_child = whole_fork.json()["result"]["data"]["session_id"]
+            assert (
+                root / "sessions" / whole_child / "transcript.jsonl"
+            ).read_bytes() == parent_bytes
+            # ...and the cut added exactly one session and the refusal none.
+            assert set(before_refusal) - set(sessions_before) == {cut_child}
+            print(
+                "No target: still boundary=next_safe, and the child is a byte-identical "
+                "copy of the parent; a foreign entry id refused without creating anything"
             )
     finally:
         server.should_exit = True
