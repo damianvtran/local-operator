@@ -897,7 +897,7 @@ def _failed_delivery_reason(details: object) -> str:
     return reason if isinstance(reason, str) else ""
 
 
-def _delivery_word_run(summary: str, *, partial: bool, is_send: bool) -> tuple[str, str]:
+def _delivery_word_run(summary: str, *, partial: bool, is_send: bool) -> tuple[str, str, str]:
     """Split a settled send summary into its delivery word and the rest.
 
     The word is the state's carrier on the collapsed row, and it was painted in
@@ -910,12 +910,17 @@ def _delivery_word_run(summary: str, *, partial: bool, is_send: bool) -> tuple[s
     which is every other tool and every send whose state carries no word.
     """
     if not (partial and is_send):
-        return "", summary
+        return "", "", summary
     for word in DELIVERY_OUTCOME_WORDS.values():
         prefix = f"{word} · "
         if summary.startswith(prefix):
-            return prefix, summary[len(prefix) :]
-    return "", summary
+            return "", prefix, summary[len(prefix) :]
+        # The QUIET form: the mode marker leads and the state word follows it
+        # (design round 1, N2), so the word is the middle run.
+        quiet_prefix = f"quiet · {prefix}"
+        if summary.startswith(quiet_prefix):
+            return "quiet · ", prefix, summary[len(quiet_prefix) :]
+    return "", "", summary
 
 
 def _switch_outcome_summary(summary: str, details: object) -> str:
@@ -3217,7 +3222,14 @@ class ToolCard(ExpandableActionBlock):
         if self.tool_name.lower() != "send":
             return False
         words = (*SWITCH_OUTCOME_WORDS.values(), *DELIVERY_OUTCOME_WORDS.values())
-        return self._summary.startswith(tuple(f"{word} · " for word in words))
+        prefixes = [f"{word} · " for word in words]
+        # A QUIET send's residual carries its mode marker IN FRONT of the word
+        # (``_delivery_outcome_summary``, design round 1 N2), and that form must
+        # still count as naming the outcome: the partial arm would otherwise
+        # append ``Partial`` under a row that already states the state -- the
+        # double word this guard exists to prevent, reintroduced by the marker.
+        prefixes += [f"quiet · {word} · " for word in DELIVERY_OUTCOME_WORDS.values()]
+        return self._summary.startswith(tuple(prefixes))
 
     def _partial_reason(self) -> str:
         """The body's LEADING line when the collapsed row must carry it too.
@@ -3238,19 +3250,25 @@ class ToolCard(ExpandableActionBlock):
         if not self._partial or not self._output:
             return ""
         head = self._output[0].strip()
-        if head.startswith(_PARTIAL_LEADS):
-            return head
-        # A SEND's amber states are the third claimant, for the same reason the
-        # other two exist: the line an operator must be able to read WHOLE is the
-        # verdict -- "do not send it again" / "check before resending" -- and it
-        # sat past the crop in BOTH the collapsed row and the expansion, at 100
-        # and 150 columns alike (UX round 1, U1). The receipt's own ``→ `` prefix
-        # is the second half of the test, exactly as ``_PARTIAL_LEADS`` is, so a
-        # card rebuilt from a payload whose text predates the receipt shape keeps
-        # the ordinary crop rather than promoting a line that is not the claim.
-        if self._is_send and head.startswith(_SEND_RECEIPT_LEAD):
-            return head
-        return ""
+        return head if head.startswith(_PARTIAL_LEADS) else ""
+
+    def _send_receipt_reason(self) -> str:
+        """A SEND's receipt line, claimed for the EXPANSION only.
+
+        Deliberately NOT part of :meth:`_partial_reason`, which feeds the
+        COLLAPSED row's status cap as well: the cap's cells are already spent on
+        the delivery word and the message (that is where this round's whole
+        distinction lives), and painting a truncated ``→ target (pid …`` there as
+        well would restate the target beside a summary that names it. The
+        expansion is the surface the finding is about — the sentence carrying
+        "do not send it again" / "check before resending" is unreadable there
+        because a captured output line is cropped, and only a claimed lead wraps
+        (UX round 1, U1).
+        """
+        if not self._partial or not self._output or not self._is_send:
+            return ""
+        head = self._output[0].strip()
+        return head if head.startswith(_SEND_RECEIPT_LEAD) else ""
 
     def _reset_reason(self) -> str:
         """The body's LEADING line when the call ran on a reset kernel.
@@ -3287,7 +3305,12 @@ class ToolCard(ExpandableActionBlock):
 
     def _promoted_lead(self) -> str:
         """The lead line the collapsed row claims, whichever state owns it."""
-        return self._failure_reason() or self._partial_reason() or self._reset_reason()
+        return (
+            self._failure_reason()
+            or self._partial_reason()
+            or self._reset_reason()
+            or self._send_receipt_reason()
+        )
 
     def _promoted_paint(self, fallback: Style) -> tuple[str, Style]:
         """``(glyph, ink)`` for the promoted lead line, in the state's own pair.
@@ -3307,7 +3330,7 @@ class ToolCard(ExpandableActionBlock):
             # disagree with it (review round 2, R2-6). Ordered the same way
             # `_promoted_lead` is, so the two cannot diverge.
             return ICON_ERROR, fallback
-        if self._partial_reason():
+        if self._partial_reason() or self._send_receipt_reason():
             return ICON_PARTIAL, bindings.style("tool.status.partial_glyph")
         if self._reset_reason():
             return ICON_SUCCESS, bindings.style("tool.status.partial_glyph")
@@ -3974,8 +3997,12 @@ class ToolCard(ExpandableActionBlock):
             row.append(row_chip, style=bindings.style(chip_element))
         # The state word leads the summary and takes the amber ink on its own run
         # (design round 1, D4); every other summary is one run.
-        word_run, rest = _delivery_word_run(summary, partial=self._partial, is_send=self._is_send)
+        before, word_run, rest = _delivery_word_run(
+            summary, partial=self._partial, is_send=self._is_send
+        )
         if word_run:
+            if before:
+                row.append(before, style=summary_style)
             row.append(word_run, style=bindings.style("tool.status.partial_glyph"))
             row.append(rest, style=summary_style)
         else:

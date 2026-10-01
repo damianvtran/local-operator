@@ -4214,6 +4214,17 @@ def test_settled_send_rows_lead_with_their_delivery_state() -> None:
     card.mark_done("receipt", {"delivery": {"state": "unconfirmed"}, "partial_result": True})
     quiet = card._build_row(100).plain
     assert "quiet · delivery unconfirmed · release-owner" in quiet
+    # The marker in front of the word must not reintroduce the double word: the
+    # partial arm's ``Partial`` fallback is suppressed by the same guard that
+    # covers the unprefixed form.
+    assert "Partial" not in quiet, quiet
+    # ...and the WORD, not the marker, carries the amber ink.
+    from local_operator.tui import bindings
+
+    quiet_text = card._build_row(100)
+    amber = bindings.style("tool.status.partial_glyph")
+    assert _style_at(quiet_text, "delivery unconfirmed") == amber
+    assert _style_at(quiet_text, "quiet") != amber
 
     # A delivered send keeps the mode marker: that is the sender's own
     # instruction, and "delivered" is what the row already implies.
@@ -4327,6 +4338,14 @@ def test_an_amber_send_promotes_its_receipt_line_into_the_expansion() -> None:
     )
     card = ToolCard("t", "send", {"target": "release-owner", "message": "gates green"})
     card.mark_done(receipt, {"delivery": {"state": "mailbox"}, "partial_result": True})
+    # The claim is for the EXPANSION: the COLLAPSED row must not gain a second,
+    # truncated receipt beside a summary that already names the target. Its cap
+    # carries the delivery word and the message, which is this round's whole
+    # distinction.
+    collapsed = card._build_row(100).plain
+    assert "→ release-owner" not in collapsed, collapsed
+    assert "wake unconfirmed" in collapsed
+
     card.toggle_expanded()
     # Wrapped, so the sentence is re-joined before it is matched: a claimed lead
     # is the line that survives WRAPPING rather than the crop every other row
