@@ -134,11 +134,22 @@ _WALK_DEPTH_CAP = 2
 #: reference is exactly where the added vocabulary is supposed to land, one
 #: read away instead of on every request. Re-measured through this file's own
 #: renderer; every other entry is byte-identical.
+#:
+#: RE-MEASURED 2026-10-01 by the browser read actions
+#: (``feat/browser-read-actions``): ``browser`` 1069 -> 1363, for the three
+#: read ops (styles/hit_test/ancestors) and their notes bullet — the detail
+#: the wire deliberately carries as verb NAMES only (the caps, the viewport-
+#: pixel semantics and the no-match behaviour live here and in
+#: ``guide://browser``). Measured through this file's own renderer; every
+#: other entry is byte-identical. Review round 1 then moved 1363 -> 1365:
+#: the ``properties`` field copy widened to name underscores (R1-2, ``_`` is
+#: a legal ident character), and this doc's parameters panel quotes the field
+#: copy, so the +11 chars are the panel's, counted rather than assumed.
 MEASURED_TOKENS: dict[str, int] = {
     "agent": 826,
     "ask": 948,
     "bash": 313,
-    "browser": 1069,
+    "browser": 1365,
     "console": 1141,
     "edit": 372,
     "eval": 379,
@@ -532,7 +543,13 @@ def test_the_tier_configured_arm_is_pinned_too(tmp_path, monkeypatch: pytest.Mon
 MOVED_WIRE_DETAIL: dict[str, tuple[str, ...]] = {
     "agent": ("companion agents are the canonical one",),
     "ask": ("Every question also offers the user a free-text answer",),
-    "browser": ("a redacted handle is not yours to drive",),
+    "browser": (
+        "a redacted handle is not yours to drive",
+        # The read actions' representative moved phrase: the hit-test ORDER is
+        # operationally load-bearing (the first entry is what receives the
+        # click) and now lives in tool://browser, not on the wire.
+        "topmost first",
+    ),
     "console": ("a terminal in another window has none",),
     "hub": (
         "the fast way to check on a running child",

@@ -82,8 +82,9 @@ def proto_supported(
 #: `extension/` after `97753b4c` without the bump the rule requires, so
 #: `97753b4c:extension` (`8a49f477…`) and `origin/main:extension` (`270538e3…`)
 #: both read `0.1.19`. Nothing shipped under it, so the repair is a renumber —
-#: see `docs/store/release-record.md`, v0.1.20.
-EXPECTED_EXTENSION_VERSION = "0.1.20"
+#: see `docs/store/release-record.md`, v0.1.20. 0.1.21 is the first tree that
+#: serves the structured read actions (`styles`/`hit_test`/`ancestors`).
+EXPECTED_EXTENSION_VERSION = "0.1.21"
 
 #: The first extension version that serves each capability-gated method.
 #:
@@ -101,7 +102,18 @@ EXPECTED_EXTENSION_VERSION = "0.1.20"
 #: that CAN serve it does so through `chrome.downloads`, which needs the optional
 #: permission — so an older build here is a build to UPDATE, and the copy says so
 #: instead of the retired "no extension build can" sentence.
-CAPABILITY_MIN_EXTENSION_VERSION: dict[str, str] = {"upload": "0.1.18", "download": "0.1.19"}
+#:
+#: The read actions (`styles`/`hit_test`/`ancestors`) all floor at 0.1.21 — the
+#: tree this runtime is released alongside — for the same reason: no earlier
+#: build carries the page functions or the command handlers at all, so an older
+#: peer is a peer to UPDATE, not one to re-toggle.
+CAPABILITY_MIN_EXTENSION_VERSION: dict[str, str] = {
+    "upload": "0.1.18",
+    "download": "0.1.19",
+    "styles": "0.1.21",
+    "hit_test": "0.1.21",
+    "ancestors": "0.1.21",
+}
 
 #: The two switches the OPERATOR owns, and the ONE spelling of each label.
 #:
@@ -146,7 +158,14 @@ CAPABILITY_SWITCH_LOCATION = (
 #: refusing those on a pre-feature peer would break a host that works today. This
 #: set is therefore exactly "the methods whose absence a peer cannot report as
 #: anything better than a bare `internal`" — which is what the refusal exists for.
-CAPABILITY_GATED_METHODS: frozenset[str] = frozenset({"download", "upload"})
+#:
+#: `styles`/`hit_test`/`ancestors` are gated because a build that predates them
+#: would answer the frame with a bare `internal` (its dispatch has no handler),
+#: which the tool can only render as "the bridge broke"; the gate turns the same
+#: peer into a typed, actionable `capability_unsupported` instead.
+CAPABILITY_GATED_METHODS: frozenset[str] = frozenset(
+    {"download", "upload", "styles", "hit_test", "ancestors"}
+)
 
 #: The first extension TREE that carried the ``owner_*`` ownership lifecycle
 #: (PR #798, ``ee146fb73``), whose manifest reads ``0.1.9`` — verify with
@@ -255,6 +274,19 @@ METHODS = (
     "tabs",
     "scroll",
     "logs",
+    # The structured READ actions, served by both non-cmux hosts (cmux carries
+    # no page-geometry primitive and degrades with a typed error, like
+    # scroll/logs). They exist so an agent debugging a layout can read numbers —
+    # rects, computed styles, the element stack at a point, the ancestor chain —
+    # instead of guessing from a screenshot: `styles` reports up to 5 matches
+    # with their computed styles and inline `--*` custom properties, `hit_test`
+    # the topmost-first element stack at viewport (x, y), `ancestors` the
+    # element's chain up to `document.documentElement`. All three run FIXED,
+    # self-contained page functions (driver/geometry-read.ts) that cap and round
+    # their output in the page; no arbitrary script ever crosses the wire.
+    "styles",
+    "hit_test",
+    "ancestors",
     # Site-permission flow (agent-legible approvals). ``request_access`` raises
     # the pending approval in the extension and returns immediately;
     # ``await_access`` blocks for a BOUNDED slice (the extension caps it well
@@ -350,6 +382,14 @@ COMMAND_TIMEOUTS = {
     # position; logs just drains a per-tab ring buffer already in memory.
     "scroll": 20.0,
     "logs": 20.0,
+    # The read actions run one bounded `chrome.scripting.executeScript` each
+    # (the same call class `read` makes, on the same 20 s budget): the page-side
+    # functions walk a capped number of elements and read computed styles, so
+    # the cost is bounded by construction and the deadline chain matches
+    # read/snapshot/screenshot exactly.
+    "styles": 20.0,
+    "hit_test": 20.0,
+    "ancestors": 20.0,
     # request_access only writes the pending record and raises the prompt
     # surfaces — it returns immediately, never waiting on the human.
     "request_access": 20.0,
