@@ -3324,7 +3324,12 @@ SETTINGS: tuple[Setting, ...] = (
         key="send.journal_unconfirmed",
         path=("send", "journal_unconfirmed"),
         section="tools",
-        label="Journal unconfirmed sends",
+        # Named for what it DOES, not for one of its two states (UX round 1,
+        # U7): the hook fires for BOTH amber states -- ``mailbox`` and
+        # ``unconfirmed`` -- and mailbox is the common one (the incident shape at
+        # ~5 s), so a label that said "unconfirmed" sent an operator who wanted
+        # the wake-failed notice looking in the wrong place.
+        label="Journal unacknowledged sends",
         kind=Kind.BOOL,
         default=False,
         help=(

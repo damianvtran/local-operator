@@ -273,6 +273,13 @@ class DeliveryOutcome:
             "attempts": self.attempts,
             "cause": self.cause,
             "route": self.route,
+            #: The CAUSE as a reader's clause (``detail``) beside the machine
+            #: token above: the TUI paints the failed row's status as
+            #: ``not delivered: <this>`` so the collapsed row names what went
+            #: wrong instead of restating the target the summary already
+            #: carries. Structured rather than parsed out of ``text``, which is
+            #: the renderers' one rule (design round 1, D3).
+            "reason": self.detail,
         }
 
 
