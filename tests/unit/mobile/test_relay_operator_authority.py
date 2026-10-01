@@ -465,6 +465,9 @@ def test_the_route_table_names_the_paths_this_build_actually_serves(
     assert "/api/push/register" in paths
     assert "/api/push/devices" in paths
     assert "/api/push/devices/{device_id:str}" in paths
+    # …and the way BACK, which is a different kind of route: the only push path
+    # that is not reachable from a device session (ADR 0006 §4 round 4 B1).
+    assert "/api/push/devices/{device_id:str}/unrevoke" in paths
     assert not [path for path in paths if path.startswith("/v1/")], paths
 
 
