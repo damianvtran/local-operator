@@ -983,15 +983,20 @@ def test_unrevoke_clears_every_marker_the_row_carries() -> None:
     """EVERY marker, not just the strongest (the mobile lane's follow-up, option (a)).
 
     A row can carry both — a device revoked, and then its computer unpaired — and
-    the ADR's "it clears the marker that is set" describes the two STATES a row
-    can be in, not a licence to leave the weaker marker behind. Restoring a
-    device and leaving it unpaired would refuse its next registration for a
-    reason nobody chose, and would make one operator intent take two commands.
+    ADR 0006 §3.1/§4 (that record lives in the mobile repository,
+    ``damianvtran/local-operator-mobile``) says the verb clears "the marker that
+    is set", which names the two STATES a row can be in rather than a licence to
+    leave the weaker one behind. Restoring a device and leaving it unpaired would
+    refuse its next registration for a reason nobody chose, and would make one
+    operator intent take two commands.
 
-    Pinned here because the behaviour is invisible from the outside: both
-    markers put the row in ONE state, so a cell that only asserts the resulting
-    state passes with either semantics. This one reads the STORE, and asserts the
-    device can register again — the consequence the weaker marker would have.
+    Pinned here because the claim is about the ARTIFACT, not about a projection of
+    it. A state assertion does redden under the one-marker shape — the row then
+    resolves to ``unpaired`` — but the state can only say the row is in no marked
+    state; it cannot name what was cleared. This cell reads the STORE, so the
+    absence asserted is both KEYS, and it then asserts the consequence the weaker
+    marker would have: the device can register again (200, where a surviving
+    ``unpaired_at`` is 403 ``device_unpaired``).
     """
     client = _client()
     registered = client.post("/api/push/register", json=PAYLOAD).json()

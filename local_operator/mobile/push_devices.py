@@ -631,12 +631,14 @@ def unrevoke(config_dir: Path, device_id: str, *, now: float | None = None) -> d
 
     The CLI's result line names the STRONGEST marker the pre-verb state implies
     (``device_state``) — ``revoked`` → ``unrevoked …``, ``unpaired`` → ``cleared
-    the unpaired marker on …``, no marker → ``nothing to clear on …`` — and its
-    ``state:`` clause reports the outcome the read-back found. The line
-    deliberately does NOT enumerate every marker it cleared: the strongest marker
-    is what the row *was*, one row is one line, and a sentence listing two
-    markers would describe it in two vocabularies at once (the mobile lane's
-    round-1 note, decided as "the loop is right, the prose was not").
+    the unpaired marker on …``, ``expired`` → ``nothing to clear on …`` plus "it
+    is expired, not revoked — signing in again is what resumes push", and no
+    marker → ``nothing to clear on …`` — and its ``state:`` clause reports the
+    outcome the read-back found. The line deliberately does NOT enumerate every
+    marker it cleared: the strongest marker is what the row *was*, one row is one
+    line, and a sentence listing two markers would describe it in two
+    vocabularies at once (the mobile lane's round-1 note, decided as "the loop is
+    right, the prose was not").
 
     Raises :class:`PushDeviceAbsent` for an id the registry does not hold. That is
     deliberately the opposite of :func:`revoke`'s leniency: "no such device" is
