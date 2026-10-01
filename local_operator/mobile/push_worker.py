@@ -168,13 +168,24 @@ class WorkerCursors:
     could be re-used for a different emit would let the cloud's dedupe swallow a
     real push. ``enabled_at`` records the instant the baseline was taken, which
     is what makes "nothing from before enabling is ever pushed" checkable rather
-    than implied.
+    than implied. ``digest_window`` is the pending coalescing window's identity
+    (see its own comment), and it is the one field here that is not a position.
     """
 
     publication_cursor: int = 0
     supersede_cursor: int = 0
     attention_sequence: int = 0
     enabled_at: float = 0.0
+    #: The pending coalescing window: ``{emit_id, publications, supersedes}``.
+    #:
+    #: DURABLE, and that is a contract requirement rather than tidiness (§3.4 as
+    #: merged at ``cc2569a4``): a digest is the one VISIBLE emit, so a restart
+    #: mid-window that re-minted its ``emit_id`` would put a second banner in
+    #: front of the user — the cloud dedupes on the key alone, and it may have
+    #: delivered the first one and lost the ``202``. The attention emit carries
+    #: no such field because the ADR accepts its caveat there: a duplicated
+    #: silent badge correction is harmless, a duplicated banner is not.
+    digest_window: dict[str, Any] | None = None
 
     def as_json(self) -> dict[str, Any]:
         return {
@@ -182,6 +193,7 @@ class WorkerCursors:
             "supersede_cursor": self.supersede_cursor,
             "attention_sequence": self.attention_sequence,
             "enabled_at": self.enabled_at,
+            "digest_window": self.digest_window,
         }
 
     @classmethod
@@ -204,7 +216,34 @@ class WorkerCursors:
         if not isinstance(enabled_at, (int, float)) or isinstance(enabled_at, bool):
             raise ValueError("push worker state has no usable 'enabled_at'")
         fields["enabled_at"] = float(enabled_at)
+        fields["digest_window"] = _usable_digest_window(data.get("digest_window"))
         return cls(**fields)
+
+
+def _usable_digest_window(value: object) -> dict[str, Any] | None:
+    """The persisted coalescing window, or ``None`` when it is not usable.
+
+    DROPPED rather than refused, unlike every other field here: refusing the file
+    re-baselines the cursors, which re-pushes this machine's whole backlog to
+    save one window's identity. Losing the identity costs at most one duplicate
+    banner for a window that was mid-flight when the file was written — and the
+    positions are what make it usable, so a window without them is not a window
+    at all.
+    """
+    if not isinstance(value, Mapping):
+        return None
+    emit_id = value.get("emit_id")
+    publications = value.get("publications")
+    supersedes = value.get("supersedes")
+    if not isinstance(emit_id, str) or not emit_id:
+        return None
+    if not isinstance(publications, list) or not isinstance(supersedes, list):
+        return None
+    if not all(isinstance(seq, int) and not isinstance(seq, bool) for seq in publications):
+        return None
+    if not all(isinstance(seq, int) and not isinstance(seq, bool) for seq in supersedes):
+        return None
+    return {"emit_id": emit_id, "publications": publications, "supersedes": supersedes}
 
 
 @dataclass(frozen=True)
@@ -732,24 +771,15 @@ class PushWorker:
         the signal, and the ALERT object the machine composes (a house state plus
         the count) is the text the user reads.
 
-        THE ID IS MINTED HERE, WHEN THE WINDOW CLOSES, and the key comes from it
-        (``digest_emit_key``). That is what makes :meth:`_attempt`'s retry the
-        SAME emit: a key re-derived per attempt would hand one batch a new
+        THE ID IS MINTED HERE, WHEN THE WINDOW CLOSES, and it is PERSISTED in the
+        state file — a restart that re-folds this same window must wear the SAME
+        key (§3.4 as merged at ``cc2569a4``). That is what makes an attempt the
+        same emit: a key re-derived per attempt would hand one batch a new
         identity on every pass, so a cloud that delivered but lost its ``202``
         could not dedupe, and the cursor would pin behind a batch that keeps
-        wearing new names (review round 1, B1). The item keeps the id, and the
-        pass that re-reads the same rows cannot fold them again while it is
-        pending (:meth:`_collect` skips positions a pending emit covers), so one
-        window wears one key for its whole life; the NEXT window mints its own.
-
-        THE WINDOW'S IDENTITY IS PROCESS-LOCAL, and that is disclosed rather than
-        implied: the queue is derived from the cursor, so a restart re-folds the
-        same rows under a fresh id. It is the same class of duplicate the
-        sequence-keyed attention emit already carries, and the remedy is the
-        same one — the badge and the list are read from the machine, so a
-        repeated "several conversations updated" banner costs a banner and never
-        a wrong count. A completion, whose key IS its content, re-derives
-        byte-identically and is unaffected.
+        wearing new names (review round 1, B1). The window's identity is the SET
+        OF POSITIONS it speaks for; a batch that has grown is a different window
+        and mints its own id, so a genuine second burst is never deduped away.
 
         A batch with no sequence behind it (only possible if two members share a
         key, which §3.4's content recipe makes a collision) is refused rather
@@ -760,7 +790,7 @@ class PushWorker:
         supersedes = tuple(sequence for _key, item in members for sequence in item.supersedes)
         if not publications and not supersedes:
             return None
-        emit_id = uuid.uuid4().hex
+        emit_id = self._window_emit_id(publications, supersedes)
         key = digest_emit_key(emit_id, self.computer)
         # The batch is formed from members that are all ready to go NOW, so the
         # digest inherits no deferral of its own: every member's gate has already
@@ -777,6 +807,37 @@ class PushWorker:
             conversations=conversations,
             emit_id=emit_id,
         )
+
+    def _window_emit_id(self, publications: tuple[int, ...], supersedes: tuple[int, ...]) -> str:
+        """The emit id for this window: the persisted one when it IS this window.
+
+        SAMENESS IS THE POSITION SET, exactly (§3.4). A restart mid-window
+        re-reads the same rows behind the same cursor, so the persisted
+        ``emit_id`` is reused and the retry wears the key the cloud may already
+        have seen. A batch that has grown, or that is a later burst, is a
+        DIFFERENT window and mints its own id — reusing the id there would let
+        the cloud dedupe a delivery whose update the user never saw, which is the
+        opposite failure.
+
+        Persisted at mint time rather than at the end of the pass, because the
+        wire attempt happens between the two: a process that dies after the cloud
+        took the emit and before the pass closed would otherwise come back with
+        no memory of which identity it used.
+        """
+        pending = self._cursors.digest_window
+        if isinstance(pending, dict) and (
+            pending.get("publications") == list(publications)
+            and pending.get("supersedes") == list(supersedes)
+        ):
+            return str(pending["emit_id"])
+        emit_id = uuid.uuid4().hex
+        self._cursors.digest_window = {
+            "emit_id": emit_id,
+            "publications": list(publications),
+            "supersedes": list(supersedes),
+        }
+        self._save()
+        return emit_id
 
     def _due(self, item: _PendingEmit, now: float, attended: bool) -> bool:
         """Whether this item may be attempted NOW.
@@ -929,10 +990,20 @@ class PushWorker:
     # -- positions -----------------------------------------------------------
 
     def _resolve(self, item: _PendingEmit) -> None:
-        """Close an item: it is accepted, or it is decided not to be sent."""
+        """Close an item: it is accepted, or it is decided not to be sent.
+
+        A digest takes its window's identity with it — §3.4 as merged at
+        ``cc2569a4`` clears it on the same three exits the completion path uses
+        (the cloud's ``202``, the third failure, the drop-with-log), and this
+        path adds its own: the gate that made the item moot. Leaving the id
+        behind would let the NEXT burst wear a key the cloud has already seen,
+        and its dedupe would swallow a real banner.
+        """
         self._pending.pop(item.key, None)
         self._resolved_publications |= set(item.publications)
         self._resolved_supersedes |= set(item.supersedes)
+        if item.kind == EVENT_DIGEST:
+            self._cursors.digest_window = None
 
     def _advance(self, now: float) -> None:
         """Move each cursor over everything resolved behind its lowest blocker.
@@ -1088,6 +1159,17 @@ class PushWorker:
         asserts it is flat rather than reaching into the private map.
         """
         return len(self._pending)
+
+    def pass_held(self) -> bool:
+        """Whether a pass is running right now (the single-claimant guard's state).
+
+        Read from INSIDE a pass, where the interesting fact is that the guard is
+        held: a cell that only asserts a nested pass emitted nothing cannot tell
+        the guard apart from any other reason it would have had nothing to do
+        (review round 2, R2-1 — the re-entrancy cell was green with the guard
+        removed, because the in-flight item was not due).
+        """
+        return self._pass.locked()
 
     def _save(self) -> None:
         """Atomic 0600 write of the cursors: same discipline as the registry.

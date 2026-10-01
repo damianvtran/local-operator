@@ -228,11 +228,19 @@ def digest_alert(kinds: Sequence[str], count: int) -> dict[str, str]:
     complete": the batch is whatever the burst rule held back, so a set that is
     entirely failures must not be announced as complete (the TUI's own design
     round 2, D8). A uniform set gets its real category out of the house
-    vocabulary, a mixed one says so, and a batch whose kinds could not be read
-    falls back to the same default a single unknown kind takes.
+    vocabulary, and a mixed one says so.
+
+    AN UNREADABLE BATCH MAKES NO CLAIM (review round 2, R2-4).
+    ``digest_subtitle`` answers "" for a set it cannot characterise, and the house
+    reads that as no claim at all — both desktop backends accept an empty
+    subtitle. A push cannot send an empty body, so the phrase is dropped and the
+    sentence becomes the count alone ("5 conversations need you"), which is true
+    of any batch. Falling back to ``BODY_COMPLETE`` — what this did first — is
+    exactly the claim the digest vocabulary exists to refuse.
     """
-    state = digest_subtitle(kinds) or BODY_COMPLETE
-    return {ALERT_TITLE_FIELD: APP_NAME, ALERT_BODY_FIELD: f"{state} · {count_phrase(count)}"}
+    state = digest_subtitle(kinds)
+    body = f"{state} · {count_phrase(count)}" if state else count_phrase(count)
+    return {ALERT_TITLE_FIELD: APP_NAME, ALERT_BODY_FIELD: body}
 
 
 def completion_payload(
