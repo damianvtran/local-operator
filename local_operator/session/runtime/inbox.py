@@ -152,21 +152,41 @@ _LOCK_RETRY_S = 0.005
 #: handful of notes between sessions) and far below "this file is a problem".
 MAX_INBOX_ROWS = 500
 
-#: The one-line note a COALESCED wake row carries above the envelope it kept,
-#: and the pattern that recovers its count. Both come from this ONE definition,
-#: because a coalesced row can be re-spooled by the deferral path
-#: (``process._drain_inbox_into``) and merged AGAIN on the next drain: the
-#: second merge must REPLACE this note with a note carrying the summed count,
-#: never nest a second one or double-count the fires already folded in. The
-#: count is also carried structurally (``InboxLine.wake_fires``), so the total
-#: survives a re-spool even when the note is not the thing being read.
+#: The ONE line a coalesced wake row carries, and the pattern that recovers its
+#: count so a re-coalesce REPLACES the note instead of nesting a second one.
+#: Derived from the string itself rather than re-spelled, because the two halves
+#: drifting apart is a silent failure (the note stops being strippable, and every
+#: handover adds another line) that only a test would catch.
+#:
+#: **IT SITS AFTER THE ENVELOPE, AND THAT IS THE POINT** (design round 1, D1). The
+#: envelope — ``(alarm) Scheduled wake w1 (20, every 20m) — cancel with …`` — is
+#: the identity of the row: it is what ``wake_receipt_headline`` folds into the
+#: human headline, what ``is_harness_notice_text`` recognises as harness-minted,
+#: and what the wake block keys on when it collapses. A note placed FIRST made
+#: the row anonymous: the collapsed surface showed the coalesce bookkeeping where
+#: the wake's name belongs, the receipt headline came out as this sentence, and
+#: the row stopped looking like the harness's own notice. So the collapsed
+#: surface carries identity, and the count shows on expand — the same rule the
+#: envelope's own ``(20, every 20m)`` follows.
+#:
+#: TWO DIFFERENT FACTS, deliberately both spelled (review round 1, NIT 1): the
+#: envelope's index is the OCCURRENCE the schedule advanced to (``20`` = the 20th
+#: fire of that schedule), and this note's count is how many of those fires were
+#: COALESCED into this row's delivery (``5`` = five spooled rows folded into one).
+#: They differ whenever the runtime drained mid-series, and neither is derivable
+#: from the other.
+#:
+#: One shape leads with something else: a LATE fire carries
+#: ``Session._missed_delivery_note`` as its first ``\n\n`` segment, so there the
+#: note follows that prefix — the same head a single un-coalesced fire would have,
+#: which is why this composition never makes the coalesce bookkeeping the row's
+#: identity. The prefix is rare by construction (only a one-shot overdue past
+#: ``MAX_ARM_MS``, or a resumed series) and unchanged by this fix.
 _COALESCED_NOTE = (
-    "(x{count} fires of this wake were coalesced while the runtime was handing over; "
-    "latest below)"
+    "(This wake fired {count} times while the runtime was being replaced; " "the latest is below.)"
 )
 _COALESCED_NOTE_RE = re.compile(
-    r"^\(x(\d+) fires of this wake were coalesced while the runtime was handing over; "
-    r"latest below\)\n\n"
+    "^" + re.escape(_COALESCED_NOTE).replace(re.escape("{count}"), r"(\d+)") + r"\n\n"
 )
 
 
@@ -582,6 +602,11 @@ def coalesce_wake_rows(lines: list[InboxLine]) -> list[InboxLine]:
     instead of nested, so the text says what the count says. Both halves are
     tested (``test_a_re_coalesce_replaces_the_note_instead_of_nesting_it``).
 
+    **The merged row keeps the envelope at its head** and puts the note between
+    the envelope and the message: the envelope is the row's identity (what the
+    receipt folds, what marks the text as harness-minted) and the note is
+    bookkeeping about the delivery. ``_COALESCED_NOTE`` carries the reasoning.
+
     Pure and total: it never raises, never writes, and never reorders what it
     does not merge.
     """
@@ -597,11 +622,19 @@ def coalesce_wake_rows(lines: list[InboxLine]) -> list[InboxLine]:
         last = indices[-1]
         latest = lines[last]
         fires = sum(lines[index].wake_fires for index in indices)
-        merged[last] = replace(
-            latest,
-            text=f"{_flagged_note(fires)}\n\n{_strip_coalesced_note(latest.text)}",
-            wake_fires=fires,
+        # The note goes AFTER the text's leading segment, which is the envelope for
+        # every fire that was not annotated as missed — see ``_COALESCED_NOTE``. A
+        # note a previous merge left in the remainder is stripped from the REMAINDER
+        # only, never from the leading segment, which is the identity this row's
+        # collapse and receipt read.
+        envelope, _, remainder = latest.text.partition("\n\n")
+        remainder = _strip_coalesced_note(remainder)
+        text = (
+            f"{envelope}\n\n{_flagged_note(fires)}\n\n{remainder}"
+            if remainder
+            else f"{envelope}\n\n{_flagged_note(fires)}"
         )
+        merged[last] = replace(latest, text=text, wake_fires=fires)
         folded.update(indices[:-1])
     if not merged:
         return list(lines)
@@ -614,17 +647,20 @@ def coalesce_wake_rows(lines: list[InboxLine]) -> list[InboxLine]:
 
 
 def _flagged_note(fires: int) -> str:
-    """The ONE line a coalesced row carries above the envelope it kept."""
+    """The ONE line a coalesced row carries, after the leading envelope."""
     return _COALESCED_NOTE.format(count=fires)
 
 
-def _strip_coalesced_note(text: str) -> str:
+def _strip_coalesced_note(remainder: str) -> str:
     """Drop a previous coalesce note so a re-coalesce can replace, not nest.
 
-    Anchored at the start and matched whole (note + the blank line that separates
-    it from the envelope), so text that merely mentions the phrase is untouched.
+    Takes the text AFTER the envelope (see ``coalesce_wake_rows``) and is anchored
+    at its start with the whole note — trailing blank line included — matched, so
+    the sentence is only ever removed where a previous merge put it: the head of
+    the remainder. The same words further down the wake's own message, or in a
+    single-fire row that was never merged, are left alone.
     """
-    return _COALESCED_NOTE_RE.sub("", text, count=1)
+    return _COALESCED_NOTE_RE.sub("", remainder, count=1)
 
 
 def _holds_owner_row(raw: bytes, command_id: str) -> bool:
@@ -752,15 +788,27 @@ def remove_wake_rows(session_dir: Path, wake_id: str) -> int:
     acceptable for a drain, which is delivering the rows it read; it is NOT
     acceptable here, where the rows we keep are exactly the ones nobody has seen.
     Truncating and rewriting through the SAME descriptor keeps that appender's
-    descriptor pointing at the live file, so a row it writes lands after our
-    payload as a clean line instead of vanishing.
+    descriptor pointing at the live file, so a row it writes after our rewrite
+    lands at the end of our payload as a clean line instead of vanishing.
+
+    **What it does NOT close, stated rather than left implicit.** An appender
+    writes UNLOCKED (``_NonBlockingLock``'s contract is retry-then-proceed, because
+    the appending side must never block the event loop), so a row written between
+    our ``_read_all`` and our ``ftruncate`` is read by neither pass and is LOST —
+    the same read→truncate window ``drain_inbox`` documents (PR #1319). Rewriting
+    through the live descriptor narrows the loss to that window instead of the
+    whole replace window (an orphaned ``O_APPEND`` fd loses everything after the
+    replace), but it does not remove it: a purge is not atomic against an
+    appender, and the honest claim is "keeps what it read, and what the appender
+    wrote before the truncate".
 
     **Best-effort by contract, and it never corrupts to make a deadline.** If the
-    non-blocking lock cannot be taken, another reader is mid-consume and splicing
-    bytes under it would be worse than leaving the rows: it returns 0 and says so.
-    The caller's fallback is the unchanged row, which part 1 of this fix
-    (:func:`coalesce_wake_rows`) still folds to ONE delivery rather than N.
-    Every failure path leaves the file byte-identical to what it read.
+    non-blocking lock cannot be taken, another reader owns the spool and nothing is
+    touched: it returns 0 with the file left byte-identical to what it found. The
+    caller's fallback is the unchanged rows, which part 1 of this fix
+    (:func:`coalesce_wake_rows`) still folds to ONE delivery rather than N. A
+    failed open or write returns 0 the same way, leaving the rows to the next
+    drain.
     """
     if not wake_id:
         return 0
