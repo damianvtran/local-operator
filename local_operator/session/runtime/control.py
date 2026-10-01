@@ -1933,15 +1933,20 @@ async def stop_all(
             [
                 {"session_id": o.session_id, "pid": o.pid, "method": o.method}
                 for o in outcomes
-                if _same_uid_pid(o.pid, acting)
+                if _was_acted_on(o.pid, acting)
             ],
             root=root,
         )
     return outcomes
 
 
-def _same_uid_pid(pid: int, acting: list[SessionRecord]) -> bool:
-    """Whether ``pid`` was one of the sweep's acted-on targets (not a refusal)."""
+def _was_acted_on(pid: int, acting: list[SessionRecord]) -> bool:
+    """Whether ``pid`` is one of the targets this sweep ACTED on.
+
+    Named for what it answers rather than for the comparison it performs: the
+    sweep's ``end`` row lists outcomes for the runtimes the sweep took down, and a
+    refused foreign target is not one of them (agent review round 1, NIT 1).
+    """
     return any(record.pid == pid for record in acting)
 
 

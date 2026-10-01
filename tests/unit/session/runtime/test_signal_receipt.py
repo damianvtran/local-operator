@@ -88,18 +88,34 @@ def test_a_covering_marker_sanctions_the_signal_and_is_snapshotted(tmp_path: Pat
 
 
 @pytest.mark.parametrize(
-    "overrides",
+    "case",
     [
-        {"pid": PID + 1},  # another run
-        {"session_id": "someone-else"},
-        {"started_at": STARTED + 500},
-        {"at": time.time() - signal_receipt.PAIR_WINDOW_S - 30},  # stale
-        {"at": time.time() + 60},  # staged AFTER the signal: cannot sanction it
+        ("another-run", {"pid": PID + 1}),
+        ("another-session", {"session_id": "someone-else"}),
+        ("another-start", {"started_at": STARTED + 500}),
+        # THE TWO CLOCK CASES COMPUTE THEIR STAMP IN THE BODY, never in the
+        # decorator: a value evaluated at COLLECTION time ages while the module is
+        # imported, and the "staged after the signal" case then measures a marker
+        # staged BEFORE it as soon as the run is a minute old — which is how this
+        # cell went red on CI (agent review round 1, MINOR 1). The offsets are
+        # relative to the moment the marker is written.
+        ("stale", {"at": -(signal_receipt.PAIR_WINDOW_S + 30)}),
+        ("staged-after-the-signal", {"at": +60.0}),
     ],
 )
 def test_a_marker_that_does_not_cover_the_run_or_the_moment_sanctions_nothing(
-    tmp_path: Path, overrides: dict[str, Any]
+    tmp_path: Path, case: tuple[str, dict[str, Any]]
 ) -> None:
+    """A marker must describe THIS run AND have been staged before the signal reached it.
+
+    The last row is the ordering invariant rather than a nicety: a marker written
+    AFTER the signal did not sanction it, so it may not narrate the death as a stop
+    somebody asked for.
+    """
+    _name, overrides = case
+    overrides = dict(overrides)
+    if "at" in overrides:
+        overrides["at"] = time.time() + overrides["at"]
     registry.write_stop_marker(tmp_path, _marker(**overrides))
     _record(tmp_path)
     entry = registry.read_signal_receipt(tmp_path)["signals"][0]  # type: ignore[index]
@@ -178,7 +194,7 @@ def test_an_unsanctioned_verdict_is_the_signal_story_on_existing_tokens() -> Non
     cause, detail = signal_receipt.cut_off_verdict(entry)  # type: ignore[misc]
     assert cause == "runtime-shutdown"
     assert "SIGTERM received" in detail and "unidentified sender" in detail
-    assert "no stop was staged" in detail
+    assert "nobody asked for a stop" in detail
     assert signal_receipt.describe({"signals": [entry], "count": 1})
 
 

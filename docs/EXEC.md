@@ -337,7 +337,8 @@ A foreground run exits 0 on success and nonzero on failure/cancellation. A
 background launcher exits after readiness (or reports `starting` after a
 bounded wait); its exit code is **not** the eventual execution result. Follow
 `lop exec --status JOB_ID` for `starting`, `running`, `succeeded`, `failed`,
-`cancelled` or `interrupted` (see below for which stop is which), and inspect its log. Worker termination disposes
+`cancelled` or `interrupted`, and inspect its log (the table below says which
+stop is which). Worker termination disposes
 the session before writing the terminal result. Abrupt death cannot truthfully
 report success: status reconciliation compares the PID's process-start identity
 and marks a proven-dead runtime interrupted. It never restarts a loop or cleans
@@ -347,14 +348,22 @@ up a successor's resources.
 
 Exit code 130 is shared by a stop somebody asked for and a SIGTERM nobody
 explained, so the terminal ledger row says which it was instead of calling both
-`cancelled` (the 2026-09-30 18:14 wave recorded twelve unexplained SIGTERMs as
-twelve cancellations):
+`cancelled` — an unexplained SIGTERM was recorded as a cancellation, which is
+the conflation this vocabulary removes.
+
+**One sentence on the words, because `interrupted` means two things.**
+`cancelled` = someone asked for this; `interrupted` = it ended without anyone
+asking, whether or not the cause can be named. Read `stop_class` for which.
+That is deliberately NOT the session surface's "interrupted", which is its word
+for a *deliberate* stop (`interrupted`/`user-stop`); on the ledger the deliberate
+case is `cancelled`/`deliberate`. The two surfaces are one `grep` apart, so read
+the pair, not the single word.
 
 | terminal `status` | `stop_class` | when |
 |---|---|---|
 | `cancelled` | `deliberate` | the supervisor's `stop`/`cancel` control op, or a SIGTERM that paired to a covering **deliberate** stop marker (`lop stop`'s ladder) |
 | `interrupted` | `attributed-involuntary` | a SIGTERM paired to a covering marker with `deliberate: false` (a prune/install/reclaim that named itself) — someone is named, nobody asked for the stop |
-| `interrupted` | `unattributed-signal` | a SIGTERM (or interrupt) with **no** covering marker. The sender is not knowable on macOS, and the row says so |
+| `interrupted` | `unattributed-signal` | a stop signal recorded by the receipt with **no** covering marker, or exit 130/143 with no receipt at all (`stop.via` says which — `signal` or `exit-code`) |
 | `interrupted` | `unattributed-death` | no terminal row at all and the owner is gone (reconciled by `--status`): SIGKILL, crash, OOM or power loss |
 | `succeeded` / `failed` | *(absent)* | a normal exit carries no stop keys |
 
@@ -364,6 +373,16 @@ On SIGTERM arrival the worker appends a status-less **arrival row**
 (`{"id", "signal": {...}}`) before it does anything else, so the signal is on
 record even if the worker is SIGKILLed inside its 5 s settle. Scripts that
 branched on `cancelled` to mean "terminated by SIGTERM" should read `stop_class`.
+
+Two shapes of 130/143 that the table cannot cover from the row alone: a signal
+that lands before the session exists (during provider discovery) has no
+conversation directory to read a stop marker from, so it is recorded
+`sanction: none` and classified `unattributed-signal` even if a ladder had staged
+a marker for that run — the supervisor's own `stop` op is unaffected, because it
+cancels the lifetime and the row says `via: control-stop`. And where a run
+received several signals, the **latest** one decides the classification (the
+others stay in the receipt's `signals` list with `count` giving the total): a
+later signal a covering deliberate marker explains is a stop somebody asked for.
 
 **Artifacts** (all best-effort; a failed write never changes a stop):
 
@@ -383,11 +402,20 @@ branched on `cancelled` to mean "terminated by SIGTERM" should read `stop_class`
   stop-all); each marker the sweep stages carries the same `sweep_id`. Rotated
   once past 256 KiB. A single `lop stop` is not a sweep and writes nothing.
 
+**Rendered times are local, with their offset** (`2026-09-30 20:00:03 -0400`).
+The durable fact is the receipt's epoch `at`; the sentence exists so a person
+reading a transcript days later, from another device, is not left guessing whose
+clock `20:00:03` is on.
+
 **Honest limits.** The *sender* is unavailable on macOS (the stdlib exposes no
-siginfo and asyncio discards it); an unsanctioned wave therefore yields one
+siginfo and asyncio discards it), which is why the receipt says "unidentified
+sender" rather than naming a party; an unsanctioned wave therefore yields one
 receipt per victim and **no** sweep row — never a fabricated one. SIGKILL, a
-crash and power loss leave nothing target-side. The TUI and `serve`/mobile daemons
-are not covered by the receipt.
+crash and power loss leave nothing target-side. The TUI and `serve`/mobile
+daemons are not covered by the receipt (their in-process sessions are ended by
+their own owner, not by a runtime receiving a signal), and neither is a turn
+ended by a party that never recorded a signal — for those the session surface's
+own vocabulary still applies.
 
 The job ID identifies the execution receipt; the session ID identifies the
 conversation. They are distinct. Receipts include the log path and, once ready,

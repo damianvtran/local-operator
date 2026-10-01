@@ -1006,8 +1006,20 @@ def _classify_orphaned_run(
                     ),
                 ),
             )
+    if _stopped_marker(directory):
+        return (
+            "interrupted",
+            DELIBERATE_CUT_OFF_CAUSE,
+            render_cut_off_reason(DELIBERATE_CUT_OFF_CAUSE),
+        )
     # THE TARGET'S OWN SIGNAL RECEIPT (``runtime-signal.json``), BELOW the marker arms
-    # and ABOVE the journal. A covering marker already answered above (it is the
+    # AND BELOW THE WAKE INDEX'S OWN STOP (``_stopped_marker``, checked just above):
+    # that corroboration is evidence a deliberate stop happened, and a receipt only
+    # says "a signal arrived that no marker explained" — so a ladder whose marker
+    # write failed (``_write_stop_marker`` swallows ``OSError``) but whose
+    # ``stopped_at`` stamp landed must still read ``user-stop``. Ordering them the
+    # other way round was this rung's own regression (agent review round 1, MINOR 2).
+    # A covering marker already answered above (it is the
     # acting party's attestation and outranks the victim's statement), so a receipt
     # reaching this rung is one that NO covering deliberate/involuntary marker
     # explained: the runtime recorded that a termination signal ARRIVED and that
@@ -1026,18 +1038,12 @@ def _classify_orphaned_run(
             # The SAME discriminator the in-process writer uses, so a death narrated
             # here and a live row for the same signal cannot disagree. ``None`` is a
             # deliberate stop the marker arms above already answered.
-            verdict = signal_receipt.cut_off_verdict(latest)
+            verdict = signal_receipt.cut_off_verdict(latest, count=int(receipt.get("count") or 1))
             if verdict is not None:
                 cause, detail = verdict
                 return ("error", cause, render_cut_off_reason(cause, detail=detail))
     except Exception:  # noqa: BLE001 — an unreadable receipt degrades to the rungs below
         logger.debug("signal receipt unreadable for %s", directory.name, exc_info=True)
-    if _stopped_marker(directory):
-        return (
-            "interrupted",
-            DELIBERATE_CUT_OFF_CAUSE,
-            render_cut_off_reason(DELIBERATE_CUT_OFF_CAUSE),
-        )
     # THE RUNTIME'S OWN STATEMENT, preferred over every inference below it.
     # Imported function-locally for the same reason the ``incidents`` import
     # above is: this runs at session boot, and an instrument that cannot be

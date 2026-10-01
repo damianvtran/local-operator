@@ -394,7 +394,9 @@ def stop_class_of(signal_entry: dict[str, Any] | None) -> str:
     return CLASS_DELIBERATE
 
 
-def cut_off_verdict(signal_entry: dict[str, Any] | None) -> tuple[str, str] | None:
+def cut_off_verdict(
+    signal_entry: dict[str, Any] | None, *, count: int = 1
+) -> tuple[str, str] | None:
     """``(cause, detail)`` a turn cut by this signal earns, or ``None`` when it was asked for.
 
     THE ONE SHARED DISCRIMINATOR for "what does a signal-cut turn say", used by the
@@ -413,6 +415,18 @@ def cut_off_verdict(signal_entry: dict[str, Any] | None) -> tuple[str, str] | No
       running") with the unidentified-sender sentence. The CAUSE TOKENS are the
       existing ones — a new token would ripple across every surface that switches
       on the taxonomy — so only the detail carries the new fact.
+
+    LATEST SIGNAL WINS, and the rule is stated here because three callers share
+    this function: the runtime's signal path, the boot-time reader and the exec
+    worker all pass the LAST entry of a run's signals (``count`` is the run's
+    total, for the rendered sentence). The reason it is the latest rather than
+    the first: pairing is decided per signal, so a later signal carrying a
+    covering deliberate marker is a stop somebody asked for, while an early
+    unmarked SIGTERM is only evidence that nobody had asked YET. Deciding on the
+    first would let an unexplained signal outrank the user's own later stop on
+    one surface and not on another, which is the disagreement this rule removes
+    (agent review round 1, MINOR 3). The earlier arrivals are not lost:
+    ``signals`` keeps them, and ``count`` says how many there were.
     """
     from local_operator.incidents import (
         involuntary_kill_detail,
@@ -438,6 +452,6 @@ def cut_off_verdict(signal_entry: dict[str, Any] | None) -> tuple[str, str] | No
         render_signal_receipt_detail(
             signal_name=str(entry.get("name") or ""),
             at=entry.get("at"),
-            unsanctioned=True,
+            count=int(count or 1),
         ),
     )

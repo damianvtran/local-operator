@@ -951,6 +951,14 @@ async def test_a_turn_that_outlives_the_bound_is_cut_at_the_bound(
                 )
 
                 state = AttentionStore().state(conversation_identity(directory))
+                # AND IT IS NOT THE USER'S OWN STOP, whatever else it says: this
+                # runtime received an EXTERNAL SIGTERM nobody staged a marker for,
+                # which is the one mislabel the stop-attribution work exists to
+                # remove (2026-09-30: eleven sessions recorded "stopped by the
+                # user" for a signal no person sent). The cause token above is
+                # allowed to be the tool's own error; the KIND is not negotiable.
+                assert state.get("cause") != "user-stop", state
+                assert state.get("kind") != "interrupted", state
                 # THE CAUSE TOKEN IS NOT GUARANTEED, and asserting it made this
                 # cell flake under load (F1, QA round 2).
                 # ``Session._classify_cut_off`` leaves an event that already
@@ -985,7 +993,14 @@ def _receipt(directory: Path) -> dict[str, Any] | None:
     return registry.read_signal_receipt(directory)
 
 
-async def _wait_receipt(directory: Path, timeout: float = 30.0) -> dict[str, Any]:
+async def _wait_receipt(directory: Path, timeout: float = 90.0) -> dict[str, Any]:
+    """Wait for the receipt a real runtime writes at signal arrival.
+
+    GENEROUS BY CONSTRUCTION (QA round 1, Q2): the arrival is one small staged
+    write on the runtime's own loop, but that loop may be seconds behind under
+    fleet load, and a bound that is tighter than the work it waits on turns a
+    correct product into a red cell. Measured flake at load >20 with a 30 s bound.
+    """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while loop.time() < deadline:
