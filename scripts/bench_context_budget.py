@@ -1066,7 +1066,25 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: The raise is not a regression of the wave: the wave's own -3,010 billed
 #: stands, and the net after this fold (96,947 = ~34,873) is still 2,828
 #: billed under the pre-wave head (105,315 = ~37,883).
-BUDGET_BILLED_TOKENS = 34_928
+#:
+#: RAISED 34,928 -> 35,088 for the browser read actions
+#: (``feat/browser-read-actions``), on top of the entry above and with the
+#: same arithmetic. Re-derived on the MERGED tree (this branch folded onto
+#: ``65ca8eaee``, the slimming wave already in) with this file's own method,
+#: the clean arm via ``env -i`` (the arm CI renders): base 96,947 chars =
+#: ~34,873 billed, head 97,393 = ~35,033 billed; the ceiling is the head
+#: reading plus the 55-token band this file keeps = 35,088. The change's own
+#: components, measured on the assembled ``browser`` entry (this file's own
+#: ``tool_schema_chars`` shape): description 979 -> 1,008 chars (the three
+#: verb names — the per-op detail went to ``tool://browser``, where the three
+#: new ops and their caps render on demand) and schema 2,583 -> 3,000 chars
+#: (two fields — ``properties`` list[str], ``depth`` int|None — plus the
+#: hit_test clause on the shared x/y descriptions); +446 chars = ~+160
+#: billed, EXACTLY the fold delta (96,947 -> 97,393). The two new fields are
+#: the feature's floor, so the raise is not a wording trade: with their
+#: descriptions trimmed to empty the delta shrinks by ~75 chars and the
+#: feature would still sit outside the old band.
+BUDGET_BILLED_TOKENS = 35_088
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
