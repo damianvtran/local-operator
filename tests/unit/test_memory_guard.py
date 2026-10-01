@@ -587,7 +587,7 @@ def test_a_cached_member_is_charged_only_while_it_is_still_in_our_group(
     ps = "\n".join(["  100   100   1024", "  101   100   1024"])
     guard = _fp_guard(10_000, footprints={100: 10 * _MIB, 101: 10 * _MIB}, ps=ps)
     assert guard.sample_sync().bytes_used == 20 * _MIB
-    guard._members_at = None  # make the next tick re-read ps...
+    guard._ps_next_at = 0.0  # make the next tick re-read ps...
     guard.runner = _fake_runner(ps="")  # ...and have it fail
 
     groups = {101: 100}
