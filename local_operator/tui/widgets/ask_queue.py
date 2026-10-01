@@ -6,7 +6,8 @@ Two widgets for one feature, and the split is the interaction model rather than
 a filing convention:
 
 * :class:`AskBar` — the **MINIMIZED** state: one line above the composer that
-  says how many asks are waiting and expands on a click or ``f7``. It is the
+  says how many asks are waiting and expands on a click or
+  :data:`ASK_TOGGLE_KEY`. It is the
   default presentation of a queued ask, so it must exist while the answer
   surface is NOT mounted: it is a child of the composer's own panel, never of
   ``#prompt-host`` (which reserves rows only while a card is in it).
@@ -192,7 +193,7 @@ def ask_rows(rows: Iterable[Any] | None) -> list[AskRow]:
     return out
 
 
-def queue_headline(open_count: int, timed_out_count: int) -> str:
+def queue_headline(open_count: int, timed_out_count: int, urgent_count: int = 0) -> str:
     """The queue's count, in ONE vocabulary for the bar and the list header.
 
     Two totals used to describe one queue: the bar counted the OPEN asks
@@ -206,6 +207,14 @@ def queue_headline(open_count: int, timed_out_count: int) -> str:
     if open_count:
         noun = "question" if open_count == 1 else "questions"
         parts.append(f"{open_count} {noun} waiting")
+    if urgent_count:
+        # URGENCY IN WORDS, because the bar's amber glyph is a hue and a hue is
+        # not a channel a reader without colour has: D8's own principle, which
+        # had reached the list row and not the bar (design round 2, D13). It
+        # also removes the mismatch D13 found — the glyph is painted from
+        # `any(row.urgent)`, so with no word for it the amber annotated the ONE
+        # question the bar happened to name, which need not be the urgent one.
+        parts.append(f"{urgent_count} urgent")
     if timed_out_count:
         noun = "ask" if timed_out_count == 1 else "asks"
         parts.append(f"{timed_out_count} {noun} timed out")
@@ -213,14 +222,16 @@ def queue_headline(open_count: int, timed_out_count: int) -> str:
 
 
 class AskBar(Widget):
-    """The minimized ask affordance: one line, click or ``f7`` to expand.
+    """The minimized ask affordance: one line, click or the toggle key to expand.
 
     Focusable so a keyboard can reach it, but it never TAKES focus on its own:
     §5.0's no-auto-mount/no-focus-steal rule covers this widget too. Clicking
     it focuses it as a side effect of the click (Textual focuses a focusable
     widget under a press), and Enter then toggles — so the pointer is the
     primary path and the keyboard is available without a second gesture. The
-    app's own ``f7`` binding is the route that does not need focus at all (UX
+    app's own :data:`ASK_TOGGLE_KEY` binding is the route that needs no
+    focus at all, and the tests pin that the key is one the composer does not
+    claim (UX
     round 1, U5: the bar's own Enter binding was unreachable, because nothing
     focuses a bar the user cannot see is focusable).
     """
@@ -236,12 +247,6 @@ class AskBar(Widget):
     #: this one does is clearer than a shadowing one anyway.
     BINDINGS = [Binding("enter", "expand_or_collapse", "Expand/collapse", show=False)]
 
-    #: The most of the head question the bar will ever spend, however wide the
-    #: terminal is (design D9 named the old fixed 48 as truncating with ~38
-    #: cells spare at 130 columns; the cap that remains is a *ceiling* on how
-    #: much of a model-authored sentence this row is worth, not the budget).
-    HEAD_CEILING = 48
-
     def __init__(self, widget_id: str = "ask-bar") -> None:
         super().__init__(id=widget_id)
         self._count = 0
@@ -249,6 +254,7 @@ class AskBar(Widget):
         self._head = ""
         self._expanded = False
         self._urgent = False
+        self._urgent_count = 0
         #: Whether there is anything to open at all — see `set_state`.
         self._present = False
         self.display = False
@@ -269,6 +275,7 @@ class AskBar(Widget):
         head: str = "",
         expanded: bool,
         urgent: bool = False,
+        urgent_count: int = 0,
         present: bool | None = None,
     ) -> None:
         """Repaint for the current queue.
@@ -294,6 +301,7 @@ class AskBar(Widget):
             or head != self._head
             or expanded != self._expanded
             or urgent != self._urgent
+            or urgent_count != self._urgent_count
             or present != self._present
         )
         self._count = count
@@ -301,6 +309,7 @@ class AskBar(Widget):
         self._head = head
         self._expanded = expanded
         self._urgent = urgent
+        self._urgent_count = urgent_count
         self._present = present
         # Nothing to open means no bar at all — not an empty one. A row of
         # blank chrome above the composer would push the dock down for nothing.
@@ -354,13 +363,18 @@ class AskBar(Widget):
             text = Text(no_wrap=True, overflow="ellipsis")
             text.append(ASK_MARKER, style=glyph_style)
             return text
-        base = f"{ASK_MARKER} {queue_headline(self._count, self._timed_out)}"
+        base = f"{ASK_MARKER} {queue_headline(self._count, self._timed_out, self._urgent_count)}"
         verb = "collapse" if self._expanded else "answer"
         tail = f" — {ASK_TOGGLE_KEY} or click to {verb}"
         head_part = f" · {self._head}" if self._head else ""
         used = cell_len(base)
         if head_part and used + cell_len(tail) + 8 <= avail:
-            room = min(self.HEAD_CEILING, avail - used - cell_len(tail) - 3)
+            # The whole room that is left, with no second ceiling on top of it:
+            # the tail is reserved first and the head gives way, so a further
+            # cap can only truncate where the row had space (design round 2,
+            # D14 — the old 48-cell ceiling still bit at 130 columns while the
+            # frame showed eleven empty cells before the chevron).
+            room = avail - used - cell_len(tail) - 3
             head_part = f" · {_clip_cells(self._head, room)}" if room >= 8 else ""
         else:
             head_part = ""
@@ -368,7 +382,9 @@ class AskBar(Widget):
             tail = ""
         text = Text(no_wrap=True, overflow="ellipsis")
         text.append(ASK_MARKER, style=glyph_style)
-        text.append(f" {queue_headline(self._count, self._timed_out)}", style=fg)
+        text.append(
+            f" {queue_headline(self._count, self._timed_out, self._urgent_count)}", style=fg
+        )
         if head_part:
             text.append(head_part, style=fg)
         if tail:
@@ -447,8 +463,21 @@ class AskQueueList(Widget):
     ]
 
     #: The header occupies the first painted line; a click on it selects
-    #: nothing, which is what `_row_at` returns for it.
+    #: nothing, which is what `_row_at` returns for it. ONE painted row by
+    #: construction — see `header_parts`, which drops whole hints rather than
+    #: letting the line wrap.
     HEADER_ROWS = 1
+
+    #: The header's hints, in the order they are SPENT — earlier entries are
+    #: kept longest, so the irreversible `d` outlives the reversible tips when
+    #: the row runs out of room (UX round 1, U7 asked for `d` to be named
+    #: precisely because it cannot be undone).
+    HEADER_HINTS = (
+        "enter answer",
+        "d decline",
+        "x dismiss",
+        "esc collapse",
+    )
 
     def __init__(
         self, rows: Sequence[AskRow], widget_id: str = "ask-queue-list", now_ms: int = 0
@@ -530,14 +559,31 @@ class AskQueueList(Widget):
 
     # -- the pointer ---------------------------------------------------------
 
+    def _top_inset(self) -> int:
+        """Rows between this widget's OUTER edge and its first painted row.
+
+        Taken from Textual's own regions rather than from a copied constant: the
+        panel carries ``padding: 1 1``, and ``event.y`` arrives relative to the
+        OUTER region, so a hit test that treated ``y`` as content-relative was a
+        row ahead of the paint — which is exactly what review round 2's MAJOR
+        found (a click opened the ask BELOW the one under the pointer, and the
+        last ask was unreachable). ``content_region - region`` is Textual's own
+        arithmetic for padding plus border, so it cannot drift from the
+        stylesheet the way a constant would.
+        """
+        try:
+            return max(0, int(self.content_region.y - self.region.y))
+        except Exception:  # noqa: BLE001 — pre-layout, when there is nothing to hit
+            return 0
+
     def _row_at(self, y: int) -> int | None:
         """The row index under a widget-relative y, or ``None`` for the header.
 
-        Read off the RENDERED line index rather than a row height constant, so
-        a header that wraps (or a row that grows) cannot silently shift every
-        hit by one.
+        Both offsets are MEASURED: the widget's own top inset, and a header that
+        is one painted line by construction (`header_parts` never wraps, and
+        `HEADER_HINTS` is spent rather than broken mid-phrase).
         """
-        index = y - self.HEADER_ROWS
+        index = y - self._top_inset() - self.HEADER_ROWS
         if 0 <= index < len(self._rows):
             return index
         return None
@@ -578,15 +624,47 @@ class AskQueueList(Widget):
 
     # -- paint ---------------------------------------------------------------
 
+    def header_parts(self, width: int) -> tuple[str, str]:
+        """``(headline, hint suffix)`` for a ONE-LINE header at this width.
+
+        Hints are added left to right and dropped from the right the moment one
+        would not fit, so the line never splits a key from its verb and never
+        spends a second row (design round 2, D12 — the header was free to wrap,
+        which both orphaned an ``x`` at the line end and shifted every pointer
+        hit by a row). A dropped hint is still TRUE — the key works — it is
+        merely not advertised, the same sacrifice order the bar uses one widget
+        up.
+
+        Public because the hit test and the tests both need the rule without
+        restating it.
+        """
+        waiting = sum(1 for row in self._rows if row.waiting)
+        urgent = sum(1 for row in self._rows if row.urgent)
+        headline = f"{ASK_MARKER} {queue_headline(waiting, len(self._rows) - waiting, urgent)}"
+        kept: list[str] = []
+        for hint in self.HEADER_HINTS:
+            if cell_len("  ·  ".join([headline, *kept, hint])) > width:
+                break
+            kept.append(hint)
+        return headline, ("  ·  " + "  ·  ".join(kept) if kept else "")
+
     def render(self) -> Text:
         fg = Style(color=theme_mod.semantic_color("fg"))
         muted = Style(color=theme_mod.semantic_color("muted"))
         warning = Style(color=theme_mod.semantic_color("warning"))
         bold = Style(bold=True)
-        waiting = sum(1 for row in self._rows if row.waiting)
+        # `content_size`, not `size`: the box the text is really painted in.
+        headline, hints = self.header_parts(max(1, int(self.content_size.width)))
         text = Text()
-        text.append(f"{ASK_MARKER} {queue_headline(waiting, len(self._rows) - waiting)}", style=fg)
-        text.append("  ·  enter answer · d decline · x dismiss · esc collapse\n", style=muted)
+        # `no_wrap` + ellipsis, so even a headline too long for one row is CUT
+        # rather than wrapped: a wrapped header is what shifted every hit below
+        # it (round 2, MAJOR-1).
+        header = Text(no_wrap=True, overflow="ellipsis")
+        header.append(headline, style=fg)
+        header.append(hints, style=muted)
+        text.append_text(header)
+        if self._rows:
+            text.append("\n")
         for index, row in enumerate(self._rows):
             selected = index == self._index
             mark = STATUS_MARKS.get(row.status, "●")
