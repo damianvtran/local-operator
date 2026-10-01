@@ -98,7 +98,13 @@ def test_a_move_of_a_session_a_recordless_process_holds_is_refused_then_succeeds
     try:
         refused = _move(server_b, SESSION, monkeypatch=monkeypatch)
         assert refused["ok"] is False, refused
-        assert refused["code"] == "busy", refused
+        # ``viewed_elsewhere``, NOT ``busy``: the producer's outcome for a
+        # recordless lease holder is ``viewed`` — the same token a live viewer
+        # produces (``_retire_local_runtime``'s no-record branch) — and the
+        # refusal taxonomy now carries that token to the wire instead of
+        # collapsing it, so a surface can offer Queue vs Wait. A TURN still
+        # reads ``busy``; this blocker is not one waiting on the turn clears.
+        assert refused["code"] == "viewed_elsewhere", refused
         assert f"pid {child.pid}" in refused["message"], refused
         assert "published no runtime record" in refused["message"], refused
         assert refused["changed"] is False

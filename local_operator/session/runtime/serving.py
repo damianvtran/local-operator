@@ -1979,6 +1979,49 @@ class ServingSessionHandle(SessionHandle):
                 logger.debug("could not release the job-delivery divert", exc_info=True)
         return True
 
+    def end_retire(self) -> bool:
+        """Release the retire latch: a committed departure that is NOT happening.
+
+        THE UNDO OF :meth:`begin_retire`, and it exists for exactly one caller —
+        the queued move's runtime watcher (``network/move_queue.py``, design
+        note §5.4). The sequence there is: latch (:meth:`begin_retire`), THEN
+        claim the queue record's ``paused`` phase under its lock
+        (``move_queue.claim_pause``) — because the claim is what makes a
+        concurrent ``--cancel-queued`` either lose (the move is started and the
+        cancel refuses) or win (the cancel lands first and the move must not
+        happen). When the cancel wins that race, the runtime has latched a
+        departure it must now abANDON: nothing else can stand it back up, and
+        a latched runtime refuses every admission (``prompt``,
+        ``receive_peer_message``) for the rest of its life, so "we committed and
+        then found the record cancelled" would wedge a session nobody moved.
+
+        REFUSES TO UNDO A DRAIN. ``_draining`` is :meth:`begin_drain`'s latch
+        and belongs to the exit path (a signal drain, a refresh handover);
+        clearing its cause would mislabel a departure the runtime is committed
+        to and is still executing. ``False`` when the retire latch was never
+        set, so a caller need not check first.
+
+        WHAT IT DOES NOT UNDO, the same omission :meth:`end_drain` documents:
+        deliveries already diverted to the transcript stay there (durable rows
+        that ride the next turn either way); the resume hook below re-installs
+        the live path for everything that settles after this returns.
+        """
+        if getattr(self, "_draining", False):
+            return False
+        if not getattr(self, "_exit_committed", False):
+            return False
+        self._retiring_cause = ""
+        self._retiring_detail = ""
+        self._exit_committed = False
+        session = getattr(self, "_session", None)
+        resume = getattr(session, "resume_job_deliveries_to_turns", None)
+        if callable(resume):
+            try:
+                resume()
+            except Exception:  # noqa: BLE001 — a failed undo must not block the abort
+                logger.debug("could not release the job-delivery divert", exc_info=True)
+        return True
+
     # -- the update window -------------------------------------------------
     #
     # The IDLE handover's admission window. ``begin_retire`` is a one-way door that
