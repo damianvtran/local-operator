@@ -2420,7 +2420,7 @@ def test_the_latest_signal_decides_when_a_run_is_signalled_twice(tmp_path: Path)
         active_team_name = None
 
         class _T:
-            pass
+            directory: Any = None
 
         # ``_transcript``, the name the real ``Session`` carries: this is the
         # attribute ``exec_worker._record_arrival`` reads the conversation
