@@ -617,13 +617,28 @@ def unrevoke(config_dir: Path, device_id: str, *, now: float | None = None) -> d
     caller that cannot present this machine's operator key before it gets here.
     This function is what the operator's surface calls once that gate has passed.
 
-    It clears the marker that is set — ``revoked_at`` OR ``unpaired_at``, the two
-    different states with the two different refusals — and **restores no token
-    and no credential**: ``credential_live`` and ``last_authenticated_at`` are
-    left exactly as the last authenticated request wrote them, because the device
-    must register again, and registering needs a live credential. A row with no
+    It clears EVERY marker the row carries — ``revoked_at`` and/or
+    ``unpaired_at``, the two different states with the two different refusals —
+    and **restores no token and no credential**: ``credential_live`` and
+    ``last_authenticated_at`` are left exactly as the last authenticated request
+    wrote them, because the device must register again, and registering needs a
+    live credential. A row carrying BOTH is restored in one act rather than left
+    in a state nobody asked for: the operator's intent is "this device is welcome
+    back", and stopping at the stronger marker would refuse its next
+    registration under the weaker one, for a reason no one chose. A row with no
     marker is a no-op that still answers ``ok``: there is nothing to restore, and
     the caller can read the state back from ``list``.
+
+    The CLI's result line names the STRONGEST marker the pre-verb state implies
+    (``device_state``) — ``revoked`` → ``unrevoked …``, ``unpaired`` → ``cleared
+    the unpaired marker on …``, ``expired`` → ``nothing to clear on …`` plus "it
+    is expired, not revoked — signing in again is what resumes push", and no
+    marker → ``nothing to clear on …`` — and its ``state:`` clause reports the
+    outcome the read-back found. The line deliberately does NOT enumerate every
+    marker it cleared: the strongest marker is what the row *was*, one row is one
+    line, and a sentence listing two markers would describe it in two
+    vocabularies at once (the mobile lane's round-1 note, decided as "the loop is
+    right, the prose was not").
 
     Raises :class:`PushDeviceAbsent` for an id the registry does not hold. That is
     deliberately the opposite of :func:`revoke`'s leniency: "no such device" is
