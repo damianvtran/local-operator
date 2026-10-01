@@ -14,6 +14,13 @@ always the state its filename claims):
                  answerable — the case where the count is not what is drawn
     list         EXPANDED onto the list of the three, with a timed-out row
     card         EXPANDED onto one ask's picker
+    card-timeout the picker of an ask that timed out UNDER it (the title flips)
+    list-late    the list with one ask answered after its deadline: it is absent
+                 from the rows AND from the count
+    list-refreshed the list after a snapshot drops two of its three asks (it
+                 follows the wire; it used to keep the stale rows)
+    list-long    the list with questions too wide for one row — the fixture the
+                 wrap defect needed (round 3)
     response     the ask_response card COLLAPSED
     response-open the same card with its Q&A open (ROW is ignored)
     timeout      the ask_timeout card collapsed, then opened with ROW=1
