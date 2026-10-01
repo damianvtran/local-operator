@@ -1691,6 +1691,7 @@ def _save_origin_cache(
     entries: dict[str, Any],
     *,
     revalidated_at: float | None = None,
+    create: bool = False,
 ) -> None:
     """Persist the verdicts AND the revalidation stamp, best-effort and atomically.
 
@@ -1704,9 +1705,35 @@ def _save_origin_cache(
     and how stale they are. An armed caller that found its entries changed
     passes the stamp it loaded so the write preserves it; ``None`` records
     "no revalidation is claimed" and reads exactly like a pre-stamp file.
+
+    ``create`` GATES THE ONE THING A READ PATH MAY NOT DO, and the default is
+    the strict answer. The desktop's read routes must leave the tree exactly as
+    they found it — ``tests/unit/server/test_desktop_reads_create_nothing.py``
+    snapshots an isolated root before and after EVERY route and asserts the
+    listings are equal — and the verdict cache lives inside that tree. A scan
+    that merely REFRESHED a stamp used to create ``cache/`` and
+    ``cache/origin-verdicts.json`` on a store that had neither, which is a
+    creation no read may make (CI, the ``desktop-reads-create-nothing`` job).
+    So with ``create=False`` this function writes ONLY when the file already
+    exists: it can refresh a stamp in place, and it can NEVER bring the file or
+    its directory into being (no ``mkdir``, no ``O_CREAT``). The single caller
+    that passes ``create=True`` is the entries-changed write — the write this
+    cache has always made, and the one that legitimately brings the file into
+    existence; keeping it is what preserves the pre-change behaviour on a store
+    that has no cache yet.
     """
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        if create:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        elif not path.exists():
+            # A STAMP-ONLY REFRESH NEVER CREATES ANYTHING. On a store with no
+            # cache yet this is the pre-stamp behaviour: the read writes
+            # nothing, and the next process revalidates (the conservative
+            # direction). The one-shot perf win applies where the cache
+            # exists, which is the common case — a populated store, the file
+            # brought into being by the entries-changed write above or by a
+            # long-lived polling path.
+            return
         tmp = path.with_suffix(f".{os.getpid()}.tmp")
         document: dict[str, Any] = {"version": ORIGIN_CACHE_VERSION, "entries": entries}
         if revalidated_at is not None:
@@ -2318,6 +2345,7 @@ def _scan_sessions(
         name: entry for name, entry in cached.items() if name in seen and isinstance(entry, dict)
     }
     merged.update(fresh)
+    entries_changed = merged != cached
     # Written when the entries changed, and ALSO when this scan completed a
     # revalidation: the stamp is what lets the NEXT process's first scan arm
     # the skip, and refreshing it is the one write a steady store pays — once
@@ -2325,11 +2353,17 @@ def _scan_sessions(
     # still writes nothing, so a steady store's picker open stays read-only as
     # before. The stamp passed through on an armed write is the one loaded; on
     # a revalidating write it is this scan's own completion moment.
-    if merged != cached or revalidate:
+    #
+    # ONLY THE ENTRIES WRITE MAY CREATE THE FILE (``create=entries_changed``):
+    # the stamp-only refresh is non-creating, so a read route on a store with
+    # no cache leaves the tree as it found it (see ``_save_origin_cache`` and
+    # ``tests/unit/server/test_desktop_reads_create_nothing.py``).
+    if entries_changed or revalidate:
         _save_origin_cache(
             cache_path,
             merged,
             revalidated_at=time.time() if revalidate else revalidated_at,
+            create=entries_changed,
         )
     # Newest first; EQUAL stamps break on the id, ascending, so the order is
     # a property of the store rather than of ``scandir`` on this filesystem.

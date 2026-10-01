@@ -1233,6 +1233,42 @@ class TestTheRevalidationWindow:
         after = json.loads(cache.read_text(encoding="utf-8"))["revalidated_at"]
         assert after == before, "an armed write must carry the loaded stamp through"
 
+    def test_the_stamp_write_never_creates_the_cache(self, tmp_path: Path) -> None:
+        """A READ PATH MAY NOT CREATE THE VERDICT CACHE, and the stamp write is
+        the write that could: on a store with no cache and nothing to persist
+        the pre-stamp scan wrote nothing, and a stamp refresh must not change
+        that (CI, the ``desktop-reads-create-nothing`` job: a mere stamp
+        refresh created ``cache/`` and ``cache/origin-verdicts.json`` on a
+        fresh root, and the desktop's read-route guard caught it).
+
+        Both halves are pinned: a scan with no entries creates NOTHING, and a
+        stamp-only refresh leaves the cache directory's NAME SET unchanged
+        (the refresh is an in-place rewrite, never a new file).
+        """
+        from local_operator import resume as resume_mod
+
+        # No session directories at all: no entries to persist, so the
+        # entries-changed write cannot fire and the read must write nothing.
+        (tmp_path / "sessions").mkdir()
+        resume_mod._SCAN_COUNT.pop(str(tmp_path), None)
+        _recent_sessions_with_origin(tmp_path)
+        assert not (tmp_path / "cache").exists(), "a read created the cache plane"
+
+        # With entries the cache legitimately comes into being (the write the
+        # cache has always made); a later STAMP-ONLY refresh must add no names.
+        _session(tmp_path, "a" * 12, origin="subagent", stamp=1000.0)
+        resume_mod._SCAN_COUNT.pop(str(tmp_path), None)
+        _recent_sessions_with_origin(tmp_path)
+        cache_dir = resume_mod.origin_cache_path(tmp_path).parent
+        assert sorted(path.name for path in cache_dir.iterdir()) == [resume_mod.ORIGIN_CACHE_NAME]
+
+        _expire_window(tmp_path)
+        resume_mod._SCAN_COUNT.pop(str(tmp_path), None)
+        _recent_sessions_with_origin(tmp_path)  # stamp-only refresh, in place
+        assert sorted(path.name for path in cache_dir.iterdir()) == [
+            resume_mod.ORIGIN_CACHE_NAME
+        ], "a stamp refresh added a name"
+
 
 def test_a_live_exec_record_labels_its_row_as_an_exec_run(tmp_path) -> None:
     """``kind`` reaches the row from the RECORD, through the real scan.
