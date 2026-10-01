@@ -947,27 +947,27 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: cap refused the prose it advertised, and the fix raises DESCRIPTION_MAX to
 #: 2000 with a remedy-bearing refusal. Neither the guide nor the refusal text
 #: rides the prefix, so the field rename is the whole measured delta.
-#: Re-derived after the fold onto ``origin/main`` ``bf9252705`` (the PR #1831
-#: fold rewrote the measured trees), same machine, the base in a detached
-#: worktree of that commit, the clean arm via ``env -i`` (the arm CI renders):
+#: Re-derived after the fold onto ``origin/main`` ``6700d9a1e`` (the #1831 and
+#: #1856 folds rewrote the measured trees), same machine, the base in a
+#: detached worktree of that commit, the clean arm via ``env -i`` (the arm CI
+#: renders):
 #:
-#:   base (origin/main bf9252705, clean)  104,073 chars = ~37,436 billed
-#:   head (this branch, clean)            104,074 chars = ~37,437 billed
-#:     = +1 char = +0.4 billed — the 240 -> 2000 rename, nothing else.
-#:   tiers arms, same trees: base 104,835 = ~37,710 / head 104,836 = ~37,711
-#:   — the 762-char config delta the entries above now explain.
+#:   base (origin/main 6700d9a1e, clean)  104,139 chars = ~37,460 billed
+#:   head (this branch, clean)            104,140 chars = ~37,460 billed
+#:     = +1 char = +0.4 billed under the rounding — the 240 -> 2000 rename,
+#:       nothing else (tiers arms: 104,901 / 104,902 = the documented
+#:       762-char config delta).
 #:
 #: Review rounds then moved the REFUSAL copy (remedy phrasing), the
 #: ``@project:`` element's cut order and the listing clamps — all of it
 #: runtime text, so the delta above is untouched: the script re-reads
-#: 104,074 on the clean arm, the rename is +1 char, and "over the
-#: ...-character cap" appears nowhere in the ``project`` tool's serialized
-#: schema (checked directly against that JSON), which is the only text the
-#: ratchet can move.
+#: 104,140 on the clean arm, and "over the ...-character cap" appears nowhere
+#: in the ``project`` tool's serialized schema (checked directly against that
+#: JSON), which is the only text the ratchet can move.
 #:
 #: NO RAISE: a one-character edit cannot be why the permanent per-call ceiling
 #: moves, and it does not breach the binding reading: the clean arm reads
-#: ~37,437 billed against the 37,491 ceiling — ~54 billed of headroom, +0.4
+#: ~37,460 billed against the 37,515 ceiling — ~55 billed of headroom, +0.4
 #: of it this change — while the tiers-configured reading sits above by the
 #: same documented 762-char config gap, not by anything here.
 BUDGET_BILLED_TOKENS = 37_756
