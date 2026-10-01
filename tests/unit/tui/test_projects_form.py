@@ -160,7 +160,10 @@ async def test_the_title_drives_the_key_until_the_key_is_touched(tmp_path: Path)
         assert page._key_input.value == "x"
         # … the hint SAYS it detached (agent review round 1, R1-3: only the
         # write path set it, so it went on claiming the key still followed).
-        assert any("key hint: set by hand" in row for row in view.rendered_rows())
+        assert any(
+            "key hint: set by hand — clear it to follow the title again" in row
+            for row in view.rendered_rows()
+        )
 
         # … and the title no longer moves it. (Focusing a field selects what is
         # in it, so the title is extended deliberately here.)
@@ -333,6 +336,131 @@ async def test_a_long_refused_create_keeps_the_sentence_in_the_form(
         rows = view.rendered_rows()
         assert any("error:" in row for row in rows), rows
         assert len(_store(tmp_path).list_projects()) == 1
+
+
+async def test_a_store_refusal_focuses_the_field_its_line_sits_under(
+    tmp_path: Path,
+) -> None:
+    """The receipt and the cursor agree (design review round 1, D5)."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha", "taken")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        page = await _open_form(pilot, view)
+
+        await pilot.press(*"taken")
+        await pilot.pause()
+        page._team_input.focus()
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+
+        assert view._mode == "form"
+        assert any("already exists" in row for row in view.rendered_rows())
+        assert app.focused is page._title_input, "focus must land where the line is"
+
+
+async def test_a_bracket_carrying_refusal_is_data_not_markup(tmp_path: Path) -> None:
+    """The sentence is a store message, and store messages carry brackets.
+
+    Textual's ``Static`` parses markup by default, so an unescaped sentence
+    would raise inside the handler that paints it (QA round 1, Q-3).
+    """
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        page = await _open_form(pilot, view)
+
+        sentence = "project ['taken'] is [not] a valid [name]"
+        page.show_refusal(sentence)
+        await pilot.pause()
+
+        rows = view.rendered_rows()
+        assert any(sentence in row for row in rows), rows
+
+
+async def test_the_controls_are_one_row_and_the_form_is_short(tmp_path: Path) -> None:
+    """The measured geometry behind D3: stock Inputs are 3-row bordered boxes.
+
+    The form measured 58 content rows with 9 visible at 80x24 before the rule;
+    it is 43 now, with one-row controls and a 1-cell themed scrollbar (D2/D3).
+    """
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        page = await _open_form(pilot, view)
+
+        assert page._title_input.styles.height is not None
+        assert page._title_input.region.height == 1, page._title_input.region
+        # No border: the stock Input paints a TALL one (which is half of why it
+        # was 3 rows). Textual renders an ABSENT edge as the empty string —
+        # measured `''` here against `'tall'` before the rule.
+        assert page._title_input.styles.border.top[0] == "", page._title_input.styles.border
+        assert page._fields_scroll.styles.scrollbar_size_vertical == 1
+        assert page._fields_scroll.virtual_size.height <= 46, page._fields_scroll.virtual_size
+
+
+async def test_the_discard_confirm_is_visible_wherever_the_form_is(tmp_path: Path) -> None:
+    """D1/Q-1: the question is pinned OUTSIDE the scroll body.
+
+    It used to be the last child of the scrolled page — measured at y=62 with
+    the viewport at scroll 0 at 80x24, i.e. a question nobody could see.
+    """
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        page = await _open_form(pilot, view)
+
+        await pilot.press(*"half typed")
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.pause()
+
+        assert page.confirming is True
+        page_box = page.region
+        confirm = page._confirm_row.region
+        assert confirm.height == 1, confirm
+        assert page_box.y <= confirm.y < page_box.y + page_box.height, (page_box, confirm)
+
+
+async def test_the_tab_order_runs_start_before_target(tmp_path: Path) -> None:
+    """N1: the dated pair reads in the direction a plan does."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        page = await _open_form(pilot, view)
+
+        order = page.fields()
+        assert order.index(page._start_input) < order.index(page._target_input)
+
+
+async def test_the_hints_state_the_rules_a_reader_cannot_guess(tmp_path: Path) -> None:
+    """D7/D8: the scaffold's saving rule, and how a `‹ value ›` row is stepped."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        await _open_form(pilot, view)
+
+        rows = view.rendered_rows()
+        assert any("nothing is saved" in row for row in rows), rows
+        assert any("← → change" in row for row in rows), rows
 
 
 # ---------------------------------------------------------------------------

@@ -122,12 +122,17 @@ class FormFieldBlock(Vertical):
         # theme token, and a browser-default colour is a second vocabulary
         # beside them (and the only one a theme switch would miss).
         self._label = label
+        self._refusal_ink = _styles(style_for)("refusal")
         self._label_widget = Static(
             Text(label, style=_styles(style_for)("muted")), classes="projects-form-label"
         )
         self._hint_text = hint
-        self._hint_widget = Static(hint, classes="projects-form-hint")
-        self._error_widget = Static("", classes="projects-form-error")
+        # ``markup=False`` on both: a hint can name a field a reader typed into,
+        # and a refusal sentence is a STORE message — Textual's ``Static`` parses
+        # markup by default, so a bracket-carrying sentence would raise inside
+        # the handler that paints it (QA round 1, Q-3).
+        self._hint_widget = Static(hint, classes="projects-form-hint", markup=False)
+        self._error_widget = Static("", classes="projects-form-error", markup=False)
         #: The refusal text, kept here rather than read back off the widget:
         #: Textual 8's ``Static`` exposes no ``renderable`` (measured — the
         #: attribute is gone), and the readback is what the tests assert on.
@@ -155,11 +160,19 @@ class FormFieldBlock(Vertical):
         old palette (the detail page's captured-resolver defect, UX round 1,
         U2).
         """
+        self._refusal_ink = _styles(style_for)("refusal")
         self._label_widget.update(Text(self._label, style=_styles(style_for)("muted")))
+        if self._error_text:
+            # The refusal line re-inks with its label (a theme switch must not
+            # leave it in the old palette while the guidance moves).
+            self._error_widget.update(Text(self._error_text, style=self._refusal_ink))
 
     def set_error(self, text: str) -> None:
+        # A refusal is a RECEIPT, not guidance: it wears the warning ink the
+        # app's other refusal sentences wear, so a reader can never mistake the
+        # line under a field for a hint about it (design review round 1, D4).
         self._error_text = text
-        self._error_widget.update(text)
+        self._error_widget.update(Text(text, style=self._refusal_ink))
         self._error_widget.display = bool(text)
 
     @property
@@ -243,11 +256,18 @@ class FormCycleRow(Static):
         return f"‹ {self._value} ›"
 
 
-class ProjectsFormPage(VerticalScroll):
+class ProjectsFormPage(Vertical):
     """The create form: the fields, their validation, and the refusal rows.
 
     Everything the form needs to be honest lives here; everything it needs to
     WRITE lives in the host, which it reaches only through ``on_submit``.
+
+    The FIELDS scroll and the confirm does not: the discard question is pinned
+    under them, outside the scroll body. It used to be the last child of a
+    58-row scrolled page, so at 80x24 it painted at y=62 while the viewport sat
+    at scroll 0 — the reader was asked a question they could not see (design
+    review round 1, D1 / QA round 1, Q-1). A pinned row also means the question
+    never moves the content it is asked about.
     """
 
     can_focus = True
@@ -319,6 +339,10 @@ class ProjectsFormPage(VerticalScroll):
             ESTIMATE_UNITS, "points", id="projects-form-unit", style_for=style_for
         )
 
+        #: The fields live in their own scroll container (see the class
+        #: docstring): the page itself does not scroll, so the confirm row can
+        #: be pinned under it.
+        self._fields_scroll = VerticalScroll(classes="projects-form-fields")
         self._key_block = FormFieldBlock(
             "key",
             self._key_input,
@@ -329,9 +353,14 @@ class ProjectsFormPage(VerticalScroll):
             "title", self._title_input, gap=False, style_for=style_for
         )
         self._description_block = FormFieldBlock(
-            "description", self._description, style_for=style_for
+            "description",
+            self._description,
+            hint="starter text — left as it is, nothing is saved",
+            style_for=style_for,
         )
-        self._status_block = FormFieldBlock("status", self._status_row, style_for=style_for)
+        self._status_block = FormFieldBlock(
+            "status", self._status_row, hint="← → change", style_for=style_for
+        )
         self._tags_block = FormFieldBlock(
             "tags", self._tags_input, hint=self._tags_hint(), style_for=style_for
         )
@@ -342,26 +371,35 @@ class ProjectsFormPage(VerticalScroll):
         self._target_block = FormFieldBlock("target date", self._target_input, style_for=style_for)
         self._start_block = FormFieldBlock("start date", self._start_input, style_for=style_for)
         self._estimate_block = FormFieldBlock("estimate", self._estimate_input, style_for=style_for)
-        self._unit_block = FormFieldBlock("estimate unit", self._unit_row, style_for=style_for)
-        self._confirm_row = Static(DISCARD_PROMPT, classes="projects-form-confirm")
+        self._unit_block = FormFieldBlock(
+            "estimate unit", self._unit_row, hint="← → change", style_for=style_for
+        )
+        # ``markup=False``: a refusal sentence is DATA — a store message can
+        # carry brackets — and Textual's ``Static`` parses markup by default,
+        # so a bracketed sentence would raise inside the handler painting it
+        # (QA round 1, Q-3).
+        self._confirm_row = Static(DISCARD_PROMPT, classes="projects-form-confirm", markup=False)
         self._confirm_row.display = False
 
     # -- composition --------------------------------------------------------
     def compose(self):  # type: ignore[override]
         # TITLE FIRST (the operator's ask, and the spec's row order): the title
         # is what a person has in mind when they reach for `c`, and the key is
-        # derived from it rather than the other way round.
-        yield self._title_block
-        yield self._key_block
-        yield self._description_block
-        yield self._status_block
-        yield self._tags_block
-        yield self._team_block
-        yield self._owner_block
-        yield self._target_block
-        yield self._start_block
-        yield self._estimate_block
-        yield self._unit_block
+        # derived from it rather than the other way round. START precedes
+        # TARGET: the pair reads in the direction a plan does (design review
+        # round 1, N1).
+        with self._fields_scroll:
+            yield self._title_block
+            yield self._key_block
+            yield self._description_block
+            yield self._status_block
+            yield self._tags_block
+            yield self._team_block
+            yield self._owner_block
+            yield self._start_block
+            yield self._target_block
+            yield self._estimate_block
+            yield self._unit_block
         yield self._confirm_row
 
     def on_mount(self) -> None:
@@ -418,8 +456,8 @@ class ProjectsFormPage(VerticalScroll):
             self._tags_input,
             self._team_input,
             self._owner_input,
-            self._target_input,
             self._start_input,
+            self._target_input,
             self._estimate_input,
             self._unit_row,
         ]
@@ -446,6 +484,10 @@ class ProjectsFormPage(VerticalScroll):
         without asking about edits nobody made (spec §7.7).
         """
         self._initial = self.snapshot()
+
+    def scroll_fields_home(self) -> None:
+        """Put the fields back at their first row (the page no longer scrolls)."""
+        self._fields_scroll.scroll_home(animate=False)
 
     def focus_first(self) -> None:
         try:
@@ -516,7 +558,11 @@ class ProjectsFormPage(VerticalScroll):
         path set it (agent review round 1, R1-3).
         """
         self._key_block.set_hint(
-            "follows the title until you edit it" if self._key_follows else "set by hand"
+            "follows the title until you edit it"
+            if self._key_follows
+            # How to get the behaviour BACK is the half a reader cannot guess
+            # (design review round 1, N2).
+            else "set by hand — clear it to follow the title again"
         )
 
     def on_text_area_changed(self, event: Any) -> None:
@@ -657,8 +703,12 @@ class ProjectsFormPage(VerticalScroll):
         `ctrl+s` again without losing the description.
         """
         self._title_block.set_error(sentence)
+        # The sentence lands under the TITLE, so that is where the cursor goes:
+        # a receipt that points at one field while the cursor sits in another is
+        # half a receipt, and the reader's next act is to fix what it names
+        # (design review round 1, D5).
         try:
-            self._key_input.focus()
+            self._title_input.focus()
         except Exception:  # noqa: BLE001 — focus is a nicety
             pass
 

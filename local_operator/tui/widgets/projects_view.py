@@ -168,6 +168,11 @@ def _style_resolver() -> Callable[[str], Style]:
         # error, and a form asking for a key the map does not carry would paint
         # its labels in the terminal's default colour without saying so.
         "muted": Style(color=color("muted")),
+        # The ink a REFUSAL wears. The form paints its in-field errors with it:
+        # guidance (`muted`) and a refusal must never read alike (design review
+        # round 1, D4), and the token is the same `warning` the app's own
+        # refusal receipts (`_notice_text`) take.
+        "refusal": Style(color=color("warning")),
         # A live session is the accent-of-success: the one fact the page exists
         # to surface ("what is actually running?").
         "live": Style(color=color("success")),
@@ -1952,15 +1957,22 @@ class ProjectsView(Vertical):
         """The `ctrl+s` hint's action."""
         self._form_page.action_save()
 
+    @property
     def wants_field_tab(self) -> bool:
-        """True while the FORM owns the keyboard — the app's `shift+tab` asks.
+        """True while the FORM (and not its confirm) owns the keyboard.
 
         `shift+tab` is an app-wide PRIORITY binding (`cycle_effort`), so the
         focused field can never see the chord; the app asks this page instead of
         disarming every hotkey the way key capture does (see
         :meth:`form_focus_previous`).
+
+        ``@property`` is load-bearing rather than decorative: without it the app
+        received the bound METHOD — always truthy — so the delegation ran on
+        every `shift+tab` in every mode and the confirm guard here never
+        executed. The behaviour happened to stay correct because
+        :meth:`form_focus_previous` guards on the mode itself, which is exactly
+        the kind of accident the property removes (QA round 1, Q-2).
         """
-        #: True while the FORM owns the keyboard (see `wants_field_tab`).
         return self._mode == "form" and not self._form_page.confirming
 
     def form_focus_previous(self) -> None:
@@ -1973,7 +1985,7 @@ class ProjectsView(Vertical):
         page first — the one key, delegated — which leaves ctrl+c and the rest
         of the app's bindings exactly where they were.
         """
-        if self._mode == "form":
+        if self._mode == "form" and not self._form_page.confirming:
             self._form_page.focus_prev_field()
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
