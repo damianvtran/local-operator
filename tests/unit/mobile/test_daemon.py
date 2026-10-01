@@ -2529,3 +2529,42 @@ def test_a_routed_slash_answer_carries_its_words_to_the_phone(tmp_path, monkeypa
     assert refused.status_code == 422
     assert refused.json() == {"error": "A loop is already running"}
 
+
+def test_the_two_viewport_meta_copies_agree_and_match_the_runtime_constant() -> None:
+    """Issue #1870: the viewport meta lives in TWO places that must move together.
+
+    ``web/index.html`` (the SPA shell) and the server-rendered login page in
+    ``daemon.py`` each carry a copy, and the wide-view toggle's runtime rewrite
+    (``web/src/lib/viewport.ts``) restores a THIRD spelling when it is switched
+    off. If any of the three differs, turning wide view off leaves a page whose
+    viewport is not the one the app shipped with, and a sign-in page that renders
+    at a different scale from the app it signs into. Compared as parsed text, not
+    as a substring of the whole page, so a reordered attribute is still the same
+    meta and a changed value is not.
+    """
+    import re
+    from pathlib import Path
+
+    from local_operator.mobile import daemon as daemon_module
+
+    web = Path(daemon_module.__file__).parent / "web"
+
+    def content_of(markup: str) -> str:
+        tag = re.search(r"<meta\b[^>]*name=\"viewport\"[^>]*>", markup, re.S)
+        assert tag is not None, "no viewport meta found"
+        value = re.search(r"content=\"([^\"]*)\"", tag.group(0))
+        assert value is not None, tag.group(0)
+        return value.group(1)
+
+    shell = content_of((web / "index.html").read_text())
+    login = content_of(daemon_module._LOGIN_HTML)
+    constant = re.search(
+        r"DEFAULT_VIEWPORT_CONTENT\s*=\s*\"([^\"]*)\"",
+        (web / "src" / "lib" / "viewport.ts").read_text(),
+    )
+    assert constant is not None, "DEFAULT_VIEWPORT_CONTENT not found in lib/viewport.ts"
+    assert shell == login == constant.group(1), (shell, login, constant.group(1))
+    # width=device-width is what makes iOS shrink the layout (not scroll it) when the
+    # keyboard opens, which the --lo-vvh pin depends on; initial-scale=1 keeps the
+    # default reading size. The wide mode is the only thing allowed to leave them.
+    assert "width=device-width" in shell and "initial-scale=1" in shell

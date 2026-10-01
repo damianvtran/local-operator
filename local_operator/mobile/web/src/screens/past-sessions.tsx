@@ -68,7 +68,7 @@ export function PastSessionsScreen() {
 	};
 
 	return (
-		<div className="mx-auto flex min-h-full w-full max-w-md flex-col">
+		<div className="mx-auto flex min-h-full w-full max-w-[var(--lo-column-max,28rem)] flex-col">
 			<header className="flex items-center gap-2 px-2 pt-[max(env(safe-area-inset-top),0.75rem)] pb-2">
 				<button
 					type="button"

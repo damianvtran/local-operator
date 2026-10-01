@@ -124,7 +124,7 @@ export function NewSessionScreen() {
 	};
 
 	return (
-		<div className="relative mx-auto flex h-dvh w-full max-w-md flex-col">
+		<div className="relative mx-auto flex h-dvh w-full max-w-[var(--lo-column-max,28rem)] flex-col">
 			<header className="flex items-center gap-2 px-2 pt-[max(env(safe-area-inset-top),0.75rem)] pb-3">
 				<button
 					type="button"
