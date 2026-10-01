@@ -31,8 +31,17 @@ _ROOT = 9900001
 
 @pytest.fixture(autouse=True)
 def _no_retry_pause(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The retry pause is real time between real forks; a fake runner needs none."""
+    """The retry pause is real time between real forks; a fake runner needs none.
+
+    Fake pids also "exist" by default: the all-gone fast path asks the kernel
+    (``procstate.pid_alive``), and a fixture pid above any allocatable pid would
+    otherwise read as gone and turn every retry cell into a different test. The
+    cells about a gone pid say so themselves.
+    """
+    from local_operator import procstate
+
     monkeypatch.setattr(mm, "PASS_PROBE_RETRY_PAUSE_S", 0.0)
+    monkeypatch.setattr(procstate, "pid_alive", lambda pid: True)
 
 
 class _Killer:
@@ -532,10 +541,10 @@ def test_a_runtime_root_is_never_a_candidate_even_when_the_recheck_is_dead() -> 
 
 def test_a_candidate_in_cooldown_is_named_and_withheld_and_another_is_not() -> None:
     killer = _Killer()
-    held: list[int] = []
+    held: list[frozenset[tuple[str, int]]] = []
 
-    def in_cooldown(fragment: mm.memory_guard.Fragment) -> bool:
-        held.append(fragment.pid)
+    def in_cooldown(lineage: frozenset[tuple[str, int]]) -> bool:
+        held.append(lineage)
         return True
 
     report = _pass(
@@ -543,15 +552,39 @@ def test_a_candidate_in_cooldown_is_named_and_withheld_and_another_is_not() -> N
         kill=killer,
         in_cooldown=in_cooldown,
     )
-    assert killer.fragments == [] and held == [9900002]
+    assert killer.fragments == [] and len(held) == 1 and ("pid", 9900002) in held[0]
     assert report.withheld_cause == "cooldown" and "pid 9900002" in report.reason
     killed = _pass(
         runner=_fake_runner(topology=_FRAGMENT_TOPOLOGY, rss=_FRAGMENT_RSS),
         kill=killer,
-        in_cooldown=lambda fragment: False,
+        in_cooldown=lambda lineage: False,
         identity_probe=_identity_probe({}),
     )
     assert killed.killed is not None
+    assert ("pid", 9900002) in killed.killed_lineage
+
+
+def test_a_runtimes_own_pid_and_group_are_never_lineage_keys() -> None:
+    """R2/Q2: every command of one session is a child of the runtime, and half of
+    them share its process group. Keying on either made the cooldown per-SESSION,
+    so a second unrelated runaway under the same runtime was withheld for 10 min."""
+    rows = {_ROOT: (1, _ROOT), 9900002: (_ROOT, _ROOT), 9900003: (_ROOT, 9900003)}
+    shares_runtime_group = mm.memory_guard.Fragment(pid=9900002, mb=1, ppid=_ROOT, pgid=_ROOT)
+    own_group = mm.memory_guard.Fragment(pid=9900003, mb=1, ppid=_ROOT, pgid=9900003)
+    first = mm.lineage_keys(shares_runtime_group, rows, [_ROOT])
+    second = mm.lineage_keys(own_group, rows, [_ROOT])
+    assert first == frozenset({("pid", 9900002)})
+    assert second == frozenset({("pid", 9900003), ("pgid", 9900003)})
+    assert not (first & second)
+
+
+def test_a_fragment_under_a_non_runtime_parent_keeps_that_parent_as_a_key() -> None:
+    """A respawning supervisor (``timeout``, a runner) is NOT a runtime, so its
+    children stay kin through it — that is the regrowth the cooldown is for."""
+    rows = {_ROOT: (1, _ROOT), 9900005: (_ROOT, 9900005), 9900006: (9900005, 9900005)}
+    fragment = mm.memory_guard.Fragment(pid=9900006, mb=1, ppid=9900005, pgid=9900005)
+    keys = mm.lineage_keys(fragment, rows, [_ROOT])
+    assert ("ppid", 9900005) in keys and ("pgid", 9900005) in keys
 
 
 # -- owner notification ------------------------------------------------------
@@ -646,7 +679,7 @@ def test_the_notice_is_spooled_to_the_owning_session_when_the_dial_fails(
         raise ConnectionRefusedError("no listener")
 
     monkeypatch.setattr("local_operator.mobile.peer_client.send_peer_message", refuse)
-    assert mm.notify_owner_of_kill(tmp_path, _event()) is True
+    assert mm.notify_owner_of_kill(tmp_path, _event()) == "spooled"
     lines = inbox.peek_inbox(tmp_path / "sessions" / "abc123abc123")
     assert len(lines) == 1
     assert "your process group (pid 9900002, 2 processes, 4.0 GB footprint)" in lines[0].text
@@ -667,7 +700,7 @@ def test_a_live_owner_is_dialled_and_nothing_is_spooled(
         return "delivered"
 
     monkeypatch.setattr("local_operator.mobile.peer_client.send_peer_message", accept)
-    assert mm.notify_owner_of_kill(tmp_path, _event()) is True
+    assert mm.notify_owner_of_kill(tmp_path, _event()) == "dialled"
     assert len(sent) == 1 and sent[0]["wake"] is False and sent[0]["mode"] == "mailbox"
     assert not (tmp_path / "sessions").exists()
 
@@ -675,5 +708,70 @@ def test_a_live_owner_is_dialled_and_nothing_is_spooled(
 def test_no_owning_runtime_means_the_owner_is_not_told_and_nothing_raises(
     tmp_path: Path,
 ) -> None:
-    assert mm.notify_owner_of_kill(tmp_path, _event(owner=None)) is False
+    assert mm.notify_owner_of_kill(tmp_path, _event(owner=None)) == "not_told"
     assert json.dumps(mm.owner_notice_text(_event()))  # renders without a registry
+
+
+def test_a_spooled_notice_is_logged_as_queued_never_as_told(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R5: a spool is read at the next runtime OPEN, so a live-but-unresponsive
+    runtime has NOT been told; the log must not say it was."""
+    from local_operator.session.runtime import registry
+
+    record = type("R", (), {"pid": _ROOT, "session_id": "abc123abc123"})()
+    monkeypatch.setattr(registry, "scan", lambda *a, **k: [(record, "live")])
+
+    async def refuse(*args: Any, **kwargs: Any) -> str:
+        raise TimeoutError("no ack")
+
+    monkeypatch.setattr("local_operator.mobile.peer_client.send_peer_message", refuse)
+    caplog.set_level("INFO", logger=mm.logger.name)
+    assert mm.notify_owner_of_kill(tmp_path, _event()) == "spooled"
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert "QUEUED, not delivered" in text and "told session" not in text
+
+
+def test_all_pids_gone_is_one_ps_call_and_reads_as_changed_not_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R7: ``ps -p`` exits 1 with empty output when every pid has gone. That is an
+    answer: not retried (3 forks), and the cause is "changed", not "unreadable"."""
+    from local_operator import procstate
+
+    monkeypatch.setattr(procstate, "pid_alive", lambda pid: False)
+    inner = _fake_runner(topology=_FRAGMENT_TOPOLOGY, rss=_FRAGMENT_RSS, recheck_unreadable=True)
+    runner, calls = _flaky(inner, match=["ps", "-o", "pid=,ppid=,pgid="], failures=99)
+    killer = _Killer()
+    report = _pass(runner=runner, kill=killer, identity_probe=_identity_probe({}))
+    assert len(calls) == 1
+    assert killer.fragments == [] and report.withheld_cause == "changed"
+    assert "gone" in report.reason and "could not be re-read" not in report.reason
+
+
+def test_the_retry_budget_bounds_the_whole_read_not_one_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R4: no new attempt starts once the budget is spent."""
+    clock = [0.0]
+    monkeypatch.setattr(mm.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(mm.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + s))
+    monkeypatch.setattr(mm, "PASS_PROBE_RETRY_PAUSE_S", 0.5)
+    calls: list[int] = []
+
+    def slow_fail(argv: list[str]) -> tuple[int, str]:
+        calls.append(1)
+        clock[0] += mm.PASS_READ_BUDGET_S  # one attempt eats the whole budget
+        return 1, ""
+
+    assert mm._run_with_retry(slow_fail, ["ps"]) == (1, "")
+    assert len(calls) == 1
+
+
+def test_the_default_identity_probe_never_signals_a_process() -> None:
+    """R1: ``os.kill(pid, 0)`` terminates the process on Windows, and the xplat probe
+    refuses it. The identity probe must not contain the call."""
+    import inspect
+
+    source = inspect.getsource(mm._default_identity_probe)
+    assert "os.kill" not in source.replace("``os.kill(pid, 0)``", "")

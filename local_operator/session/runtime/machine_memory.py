@@ -65,20 +65,28 @@ Runner = memory_guard.Runner
 FootprintProbe = memory_guard.FootprintProbe
 
 
-#: How long one of THIS pass's ``ps``/``top`` reads may run. Longer than the
+#: How long ONE ``ps``/``top`` read of THIS pass may run. Longer than the
 #: per-command guard's 5 s on purpose, and MEASURED: twelve ``ps -axo`` reads under
 #: the 2026-09-30 fleet load took 0.42 s min / 3.51 s mean / 13.60 s max, and every
 #: one past 5 s collapsed to "no data" — which is how the pass came to withhold
 #: four runaway kills (95-309 GB) with "the fragment's rows could not be re-read".
-#: The pass runs once a minute on a worker thread, so seconds cost nothing; the
-#: per-command guard runs inside a 250 ms poll and keeps its own, separate budget.
+#: This is a PER-ATTEMPT bound; the total a read may spend is
+#: :data:`PASS_READ_BUDGET_S`.
 PASS_PROBE_TIMEOUT_S = 15.0
 
-#: Attempts for the pass's table read and for the pre-signal re-check. A failure
-#: under pressure is not always a slow one (a ``ps`` that cannot fork returns at
-#: once), so a retry is worth its fork; three is the most a once-a-minute pass
-#: should spend before it falls back to the fork-free check or fails closed.
+#: The most attempts one read gets. A failure under pressure is not always a slow
+#: one (a ``ps`` that cannot fork returns at once), so a retry is worth its fork.
 PASS_PROBE_ATTEMPTS = 3
+
+#: The TOTAL a single logical read (the table, or the pre-signal re-check) may
+#: spend across all its attempts and pauses. Without it the worst case was three
+#: 15 s attempts per read — ~46 s for the table and again for the re-check, plus
+#: the memory read and the owner dial, i.e. 100+ s against a 60 s cadence. A
+#: ``ps`` that has not answered in 20 s is not going to; the fork-free fallback
+#: (re-check) or a fail-closed ``unknown`` (table) is the better use of the pass.
+#: The seat arms the next pass from this one's START and never overlaps two
+#: (``_MachineMemorySweep.kick``), so a long pass is a LATE pass, not a racing one.
+PASS_READ_BUDGET_S = 20.0
 
 #: Pause between attempts. Module-level so a test need not sleep for it.
 PASS_PROBE_RETRY_PAUSE_S = 0.5
@@ -102,21 +110,32 @@ def _default_runner(argv: list[str]) -> tuple[int, str]:
         return 1, ""
 
 
-def _run_with_retry(runner: Runner, argv: list[str]) -> tuple[int, str]:
-    """``runner(argv)`` up to :data:`PASS_PROBE_ATTEMPTS` times; the last answer.
+def _run_with_retry(
+    runner: Runner, argv: list[str], *, retry_if: Callable[[int, str], bool] | None = None
+) -> tuple[int, str]:
+    """``runner(argv)`` retried inside :data:`PASS_READ_BUDGET_S`; the last answer.
 
     A raising runner counts as a failed attempt (the pass's seams are
-    injectable, and a probe must never be the reason a pass dies).
+    injectable, and a probe must never be the reason a pass dies). No new attempt
+    starts once the budget is spent, so the budget is the real bound on the read
+    (an attempt in flight still runs to its own timeout).
+
+    ``retry_if`` lets a caller say that a non-zero exit is an ANSWER rather than a
+    failure — ``ps -p`` exits 1 when every pid is gone, which is information and
+    not a reason to fork twice more.
     """
+    deadline = time.monotonic() + PASS_READ_BUDGET_S
     code, out = 1, ""
     for attempt in range(PASS_PROBE_ATTEMPTS):
         try:
             code, out = runner(argv)
         except Exception:  # noqa: BLE001 — a failed probe is "no data"
             code, out = 1, ""
-        if code == 0:
+        if code == 0 or (retry_if is not None and not retry_if(code, out)):
             break
         if attempt < PASS_PROBE_ATTEMPTS - 1:
+            if time.monotonic() + PASS_PROBE_RETRY_PAUSE_S >= deadline:
+                break
             time.sleep(PASS_PROBE_RETRY_PAUSE_S)
     return code, out
 
@@ -182,6 +201,9 @@ class MemoryPassReport:
     unmeasured: int
     top: tuple[memory_guard.Fragment, ...] = ()
     killed: memory_guard.Fragment | None = None
+    #: The ended fragment's lineage keys (:func:`lineage_keys`) — what the seat's
+    #: cooldown remembers. Empty unless a stop was delivered.
+    killed_lineage: frozenset[tuple[str, int]] = frozenset()
     kill_withheld: bool = False
     #: WHY a stop was withheld: "cooldown" (the seat's rung) or "changed"
     #: (the snapshot no longer matches). Text that names the wrong cause sends
@@ -230,7 +252,7 @@ def machine_memory_pass(
     kill: Callable[[memory_guard.Fragment], bool] | None = None,
     total_mb: int | None = None,
     identity_probe: "IdentityProbe | None" = None,
-    in_cooldown: Callable[[memory_guard.Fragment], bool] | None = None,
+    in_cooldown: Callable[[frozenset[tuple[str, int]]], bool] | None = None,
     notify: "OwnerNotifier | None" = None,
 ) -> MemoryPassReport:
     """Run one aggregate pass; blocking, and the caller hands it to a thread.
@@ -402,7 +424,8 @@ def machine_memory_pass(
             top=top,
             reason=verdict.reason + f"; this pass does not apply (would end pid {candidate.pid})",
         )
-    if not kill_allowed or (in_cooldown is not None and in_cooldown(candidate)):
+    lineage = lineage_keys(candidate, rows_by_pid, roots)
+    if not kill_allowed or (in_cooldown is not None and in_cooldown(lineage)):
         return MemoryPassReport(
             state="act",
             fleet_mb=fleet_mb,
@@ -472,8 +495,36 @@ def machine_memory_pass(
         unmeasured=unmeasured,
         top=top,
         killed=candidate if delivered else None,
+        killed_lineage=lineage if delivered else frozenset(),
         reason=verdict.reason,
     )
+
+
+def lineage_keys(
+    fragment: memory_guard.Fragment,
+    rows_by_pid: dict[int, tuple[int, int]],
+    roots: Sequence[int],
+) -> frozenset[tuple[str, int]]:
+    """What makes two fragments the SAME runaway, as ``(kind, value)`` keys.
+
+    The cooldown exists to stop a war on one respawning process, so two fragments
+    are kin only when they share something a respawn would keep: the root pid, or a
+    process group / parent that is NOT a session runtime's. **A runtime's own pid
+    and process group are deliberately never keys.** A command fragment is normally
+    a direct child of its session runtime, and roughly half of those are not group
+    leaders (so they share the runtime's group): keying on either would make every
+    fragment of one session kin, i.e. a per-SESSION cooldown, and a second,
+    unrelated runaway in the same session would be withheld for ten minutes — the
+    52 GB / 350 GB shape of 2026-09-30, reproduced by review and QA on this PR's
+    first revision (R2/Q2).
+    """
+    runtime_pgids = {rows_by_pid[root][1] for root in roots if root in rows_by_pid}
+    keys: set[tuple[str, int]] = {("pid", fragment.pid)}
+    if fragment.pgid > 1 and fragment.pgid not in runtime_pgids:
+        keys.add(("pgid", fragment.pgid))
+    if fragment.ppid > 1 and fragment.ppid not in set(roots):
+        keys.add(("ppid", fragment.ppid))
+    return frozenset(keys)
 
 
 @dataclass(frozen=True)
@@ -497,7 +548,7 @@ class KillEvent:
 
 #: Tells the owning session about a delivered stop. Injectable so a test asserts
 #: the event without a registry or a socket.
-OwnerNotifier = Callable[[Path, KillEvent], None]
+OwnerNotifier = Callable[[Path, KillEvent], object]
 
 
 def _owner_runtime_pid(
@@ -576,12 +627,26 @@ def owner_notice_text(event: KillEvent) -> str:
 
 #: Deadline for dialling a live owner. The pass is on a worker thread once a
 #: minute, so seconds are free; a runtime that does not answer in this window is
-#: spooled to instead, which loses nothing.
+#: spooled to instead (see :func:`notify_owner_of_kill` for what that does and does
+#: not promise).
 OWNER_DIAL_DEADLINE_S = 5.0
 
 
-def notify_owner_of_kill(config_dir: Path, event: KillEvent) -> bool:
-    """Tell the session that owns a killed fragment. ``True`` when it was delivered.
+#: What :func:`notify_owner_of_kill` actually achieved. Three outcomes, kept apart
+#: because they are three different promises to the owner:
+#:
+#: * ``"dialled"`` — the runtime acknowledged the message; it reads it at its next
+#:   turn boundary.
+#: * ``"spooled"`` — the runtime did not answer, so the row sits in the session's
+#:   inbox and is delivered when a runtime next OPENS that session (boot, or the
+#:   first turn of an unengaged one). For a long-lived but wedged runtime that may
+#:   be a long time, and it must never be reported as "told".
+#: * ``"not_told"`` — nothing was written.
+NoticeOutcome = str
+
+
+def notify_owner_of_kill(config_dir: Path, event: KillEvent) -> NoticeOutcome:
+    """Tell the session that owns a killed fragment; return what was ACHIEVED.
 
     **WHY THIS EXISTS.** A machine-pass kill reached the supervisor's log and
     nowhere else (2026-09-30: seven runaway waves, the owning sessions never
@@ -593,16 +658,22 @@ def notify_owner_of_kill(config_dir: Path, event: KillEvent) -> bool:
     RUNTIME's run and does not fit ending a child while its runtime lives):
 
     1. the runtime is live, so DIAL it (``peer_client.send_peer_message``, the
-       ``peer_message`` control op) — the same path ``lop send`` uses. The
-       spool is not enough here on its own: ``inbox.drain_inbox`` runs at runtime
-       boot and once at the first turn, so a row appended to a LIVE runtime's
-       spool is not read until it next restarts.
+       ``peer_message`` control op) — the same path ``lop send`` uses. The spool is
+       not enough on its own: ``inbox.drain_inbox`` runs at runtime boot and once
+       at the first turn, so a row appended to a LIVE runtime's spool is not read
+       until it next restarts.
     2. when the dial fails (wedged, refused, no answer), SPOOL the row with
-       ``inbox.append_inbox`` under ``sessions/<session_id>/`` so the next open
-       drains it.
+       ``inbox.append_inbox`` under ``sessions/<session_id>/``.
 
-    Quiet (``wake=False``): the owner reads it at its next turn boundary rather
-    than a turn being started on its behalf.
+    **A DUPLICATE IS ACCEPTED, A LIE IS NOT.** A dial that times out AFTER the
+    runtime acknowledged internally falls through to the spool, so the owner can be
+    told twice. That is the at-least-once direction ``peer_client`` documents for
+    every sender ("delivery is UNCONFIRMED ... may still arrive"), and a second
+    copy of a one-paragraph notice costs a line of context; a notice that was
+    silently dropped would cost the owner the reason its command vanished. What is
+    NOT accepted is reporting more than happened: the return value and the log
+    distinguish ``dialled`` from ``spooled`` (see :data:`NoticeOutcome`), and the
+    spool log says when the row will be read.
 
     Never raises: a failed notice is logged and costs the notice, never the stop
     that already happened.
@@ -617,7 +688,7 @@ def notify_owner_of_kill(config_dir: Path, event: KillEvent) -> bool:
             "machine memory: no owning runtime found for fragment pid %s; the owner was not told",
             event.fragment.pid,
         )
-        return False
+        return "not_told"
     try:
         from local_operator.session.runtime import registry
 
@@ -630,10 +701,10 @@ def notify_owner_of_kill(config_dir: Path, event: KillEvent) -> bool:
             logger.warning(
                 "machine memory: runtime pid %s has no live record; owner not told", owner
             )
-            return False
+            return "not_told"
         session_id = str(getattr(record, "session_id", "") or "")
         if not session_id:
-            return False
+            return "not_told"
         text = owner_notice_text(event)
         sender = {"conversation_name": "machine memory guard"}
 
@@ -653,11 +724,17 @@ def notify_owner_of_kill(config_dir: Path, event: KillEvent) -> bool:
                 )
             )
             logger.info(
-                "machine memory: told session %s its fragment was ended (dialled)", session_id
+                "machine memory: session %s acknowledged the notice that its fragment was "
+                "ended (dialled)",
+                session_id,
             )
-            return True
+            return "dialled"
         except Exception as exc:  # noqa: BLE001 — fall through to the spool
-            logger.info("machine memory: dial of session %s failed (%s); spooling", session_id, exc)
+            logger.info(
+                "machine memory: dial of session %s failed (%s); spooling the notice",
+                session_id,
+                exc,
+            )
 
         from local_operator.session.runtime.inbox import InboxLine, append_inbox
 
@@ -666,13 +743,17 @@ def notify_owner_of_kill(config_dir: Path, event: KillEvent) -> bool:
             InboxLine(text=text, sender=sender, mode="mailbox", written_at=time.time()),
         )
         if written:
-            logger.info(
-                "machine memory: told session %s its fragment was ended (spooled)", session_id
+            logger.warning(
+                "machine memory: the notice for session %s is QUEUED, not delivered: its runtime "
+                "(pid %s) did not answer, so it is read the next time that session opens a runtime",
+                session_id,
+                owner,
             )
-        return written
+            return "spooled"
+        return "not_told"
     except Exception:  # noqa: BLE001 — a notice never undoes or fails a stop
         logger.warning("machine memory: could not notify the owner of pid %s", owner, exc_info=True)
-        return False
+        return "not_told"
 
 
 def _fragment_refusal(
@@ -722,7 +803,22 @@ def _fragment_refusal(
     else:  # nothing carried (a hand-built Fragment); fall back to its root row
         snapshot = ((fragment.pid, fragment.ppid, fragment.pgid),)
     csv = ",".join(str(pid) for pid, _ppid, _pgid in snapshot)
-    code, out = _run_with_retry(runner, ["ps", "-o", "pid=,ppid=,pgid=", "-p", csv])
+    # ``ps -p`` exits 1 with EMPTY output when none of the pids exist (verified on
+    # macOS) — but the runner also collapses a TIMEOUT or a failed fork to the same
+    # ``(1, "")``, and those ARE worth a retry. The two are told apart without a
+    # subprocess: an empty exit-1 is an ANSWER only when every pid of the walk is
+    # really gone (``procstate.pid_alive``), and then it is not retried — the
+    # fork-free check below names it "changed" instead of "unreadable".
+    from local_operator import procstate
+
+    def _not_all_gone(rc: int, text: str) -> bool:
+        if rc == 1 and not text.strip():
+            return any(procstate.pid_alive(pid) for pid, _ppid, _pgid in snapshot)
+        return True
+
+    code, out = _run_with_retry(
+        runner, ["ps", "-o", "pid=,ppid=,pgid=", "-p", csv], retry_if=_not_all_gone
+    )
     if code != 0:
         fallback = fork_free_identity_refusal(
             fragment, snapshot, identity_probe=identity_probe or _default_identity_probe
@@ -760,21 +856,22 @@ IdentityProbe = Callable[[int], "tuple[int, int] | None"]
 
 
 def _default_identity_probe(pid: int) -> tuple[int, int] | None:
-    """Existence by ``kill(pid, 0)``, then ``(ppid, pgid)`` by a syscall.
+    """``(ppid, pgid)`` by a syscall, cross-checked, or ``None`` = cannot confirm.
 
-    ``kill(pid, 0)`` first because it is the cheapest "is it still there" and its
-    ``ESRCH`` is unambiguous; ``EPERM`` (it exists under another account) is NOT
-    a pass — a process this one cannot read is one it must not judge — so only a
-    clean return or a readable row continues. The row then comes from
-    :func:`~local_operator.mobile.resources.direct_ppid_pgid` (``proc_pidinfo`` on
-    macOS, ``/proc/<pid>/stat`` on Linux), and for the pid's own ``pgid`` the
-    kernel is asked a second, independent way (``os.getpgid``): the two must
-    agree, or the row is treated as unreadable.
+    The row comes from :func:`~local_operator.mobile.resources.direct_ppid_pgid`
+    (``proc_pidinfo`` on macOS, ``/proc/<pid>/stat`` on Linux), which is itself the
+    existence proof: a pid that is gone, or that this account may not read, answers
+    ``None``, and a process this one cannot read is one it must not judge. For the
+    pid's own ``pgid`` the kernel is then asked a second, independent way
+    (``os.getpgid``): the two must agree, or the row is treated as unreadable.
+
+    **NO ``os.kill(pid, 0)`` HERE, deliberately.** An earlier draft used it as the
+    cheap "is it still there" step. On Windows signal 0 is ``TerminateProcess`` —
+    a liveness probe that ENDS the process — and ``scripts/xplat_probe.py``'s
+    ``static.posix_attributes`` rightly refused it (CI ``xplat-probe-linux`` and
+    ``-windows``). The direct reader makes it redundant on every platform that has
+    one, and it answers ``None`` on every platform that does not.
     """
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return None
     row = direct_ppid_pgid(pid)
     if row is None:
         return None
@@ -796,11 +893,12 @@ def fork_free_identity_refusal(
 
     The fallback for a ``ps`` that cannot be read. Each pid of the walk is a
     signal target, so each is compared — ``(ppid, pgid)`` against what the ranking
-    walked — exactly as the ``ps`` path does. A pid that is gone, or whose row the
-    kernel would not give us, is ``"unreadable"`` (not ``"changed"``): the summary
-    must send an operator to the right place. A readable row that differs is
-    ``"changed"``. Both withhold; this function can only ever say "go" when every
-    row has been positively confirmed, which is why it adds no kill authority.
+    walked — exactly as the ``ps`` path does. A pid that is GONE (a finished or
+    recycled process) or whose row differs is ``"changed"``; one that exists but
+    whose row the kernel would not give us is ``"unreadable"`` — the summary must
+    send an operator to the right place. Both withhold; this function can only
+    ever say "go" when every row has been positively confirmed, which is why it
+    adds no kill authority.
     """
     for pid, ppid, pgid in snapshot:
         try:
@@ -808,6 +906,16 @@ def fork_free_identity_refusal(
         except Exception:  # noqa: BLE001 — a probe that raises is "unknown"
             row = None
         if row is None:
+            from local_operator import procstate
+
+            if not procstate.pid_alive(pid):
+                # Gone, not merely unreadable: the snapshot is stale, and the
+                # operator should read "changed" (a recycled or finished process)
+                # rather than be sent looking for a probe that failed.
+                return (
+                    "changed",
+                    f"the fragment changed before the signal (pid {pid} is gone); withheld",
+                )
             return (
                 "unreadable",
                 f"the fragment's rows could not be re-read, and pid {pid} could not be "
