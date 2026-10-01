@@ -194,4 +194,50 @@ describe("the phone's slash sheet tap", () => {
 			images: [],
 		});
 	});
+
+	it("paints a refusal neutral, not as a success (D1)", async () => {
+		const api = await import("./api");
+		vi.mocked(api.sendCommand).mockResolvedValueOnce({
+			ok: true,
+			detail: "effort is not adjustable on test/e2e-model",
+			tone: "neutral",
+			refused: true,
+		});
+		const field = await openSheet();
+
+		fireEvent.click(screen.getByRole("button", { name: /\/compact/ }));
+
+		await waitFor(() =>
+			expect(screen.getByRole("status").textContent).toBe(
+				"effort is not adjustable on test/e2e-model",
+			),
+		);
+		const notice = screen.getByRole("status");
+		// The container follows the daemon's tone: a receipt is not a success, so
+		// the green wash (which the delivered-instruction ack owns) stays off it.
+		expect(notice.parentElement?.className).toContain("bg-elevated");
+		expect(notice.parentElement?.className).not.toContain("bg-success-wash");
+		// U3: a refused command keeps the line, so one word can be corrected
+		// instead of the whole command retyped.
+		expect(field.value).toBe("/compact");
+	});
+
+	it("keeps the green wash for a real acknowledgement (D1, the control)", async () => {
+		const api = await import("./api");
+		vi.mocked(api.sendCommand).mockResolvedValueOnce({
+			ok: true,
+			detail: "goal set",
+			tone: "success",
+			refused: false,
+		});
+		const field = await openSheet();
+
+		fireEvent.click(screen.getByRole("button", { name: /\/compact/ }));
+
+		await waitFor(() => expect(screen.getByRole("status").textContent).toBe("goal set"));
+		const notice = screen.getByRole("status");
+		expect(notice.parentElement?.className).toContain("bg-success-wash");
+		// A command that DID something clears the draft, as before.
+		expect(field.value).toBe("");
+	});
 });

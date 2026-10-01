@@ -1416,33 +1416,86 @@ def _bootstrap_mobile_attention() -> None:
             bootstrap_transcript(Transcript(directory, defer_materialise=True))
 
 
-def _slash_receipt_text(outcome: Any, command: str) -> str:
-    """One line of words for a routed slash outcome, for the phone's notice.
+#: The outcome types the runtime NAMES as a completed mutation, and therefore the
+#: only routed answers the phone paints in the success container. Deliberately a
+#: CLOSED set of the runtime's own words rather than a guess from ``style``: the
+#: runtime marks a completed write (``goal_set``, ``agent_attached``,
+#: ``team_attached``, ``forked``) but leaves an informational report and a
+#: completed write both at ``style="info"`` ("no goal set — /goal <text> to set
+#: one" beside "renamed to x"), so anything else defaults to neutral and fails
+#: safe when a new command ships without a type (design round 1, D1).
+_SLASH_SUCCESS_TYPES = frozenset({"goal_set", "agent_attached", "team_attached", "forked"})
 
-    The runtime's ``text`` when it has one — it is already written for a person
-    and is what every other surface prints. A ``block`` outcome (``/context``, the
-    team/goal listings) carries rows in ``data.items`` instead, which are folded
-    into one line rather than dropped: a command that ran and said nothing reads
-    as a dead tap. ``noop`` outcomes (``/agent`` bare: the list is drawn by the
-    frontend from its own profile resolver) have nothing to say, so they get the
-    same ``ran /…`` fallback the runtime's own receipt uses.
+#: A folded listing is one notice line on a phone. The rows are joined until this
+#: many characters and the remainder is elided, so a hundred-team roster cannot
+#: push the composer off the screen.
+_SLASH_RECEIPT_CHARS = 400
+
+
+#: Registry descriptions that name a TERMINAL affordance, rewritten for the
+#: phone's sheet. Only the rows that differ; see the catalogue builder.
+_PHONE_SLASH_DESCRIPTIONS = {
+    # "(shift+tab cycles)" is the TUI's own key chord — a phone has no shift and
+    # no tab, so the parenthetical is an instruction the reader cannot follow.
+    "effort": "Show or set this session's reasoning effort",
+    # The `/title --refresh` half exists to teach the terminal's help table a
+    # flag; the sheet's reader types `/rename <words>`.
+    "rename": "Name this conversation",
+}
+
+
+def _slash_receipt(outcome: Any, command: str) -> tuple[str, str, bool]:
+    """``(detail, tone, refused)`` for one routed slash outcome — the phone's line.
+
+    THE RUNTIME'S OWN WORDS FIRST. ``text`` is written for a person and is what
+    every other surface prints, so it passes through unchanged.
+
+    A ``block`` outcome carries ROWS INSTEAD (``/context``'s two-slot rows,
+    ``/team``'s and ``/agent``'s three-slot rows), and they are folded rather than
+    dropped — a command that ran and said nothing reads as a dead tap, which is
+    the defect this surface exists to remove (issue #1869). The fold takes EVERY
+    row of arity >= 2 as ``row[0]: row[1]``: the third slot is the TUI's own
+    description text and would triple the line, and keying on an exact arity is
+    what dropped every real listing, since no producer emits two-slot rows for a
+    roster (review round 1, R1-1; QA Q1). ``/mcp`` with servers configured carries
+    NEITHER text nor rows — its roster is a live panel on the terminal, which the
+    runtime says by putting the line in ``text``.
+
+    ``tone`` is the container, and ``refused`` is the outcome saying it did not do
+    the thing. One classification serves both readers: the composer paints the
+    neutral surface for a receipt and keeps the draft when ``refused``, so a
+    mistyped argument costs one word rather than the whole command (UX round 1,
+    U3), and the success wash is reserved for the outcomes the runtime names as a
+    completed mutation (design round 1, D1).
     """
     if not isinstance(outcome, dict):
-        return f"ran /{command}"
+        return f"ran /{command}", "neutral", False
     text = str(outcome.get("text") or "").strip()
-    if text:
-        return text
     data = outcome.get("data")
-    items = data.get("items") if isinstance(data, dict) else None
-    if isinstance(items, list):
-        pairs = [
-            f"{row[0]}: {row[1]}"
-            for row in items
-            if isinstance(row, (list, tuple)) and len(row) == 2
-        ]
-        if pairs:
-            return " · ".join(pairs)
-    return f"ran /{command}"
+    if not text:
+        items = data.get("items") if isinstance(data, dict) else None
+        if isinstance(items, list):
+            rows = []
+            for row in items:
+                if not isinstance(row, (list, tuple)) or len(row) < 2:
+                    continue
+                rows.append(f"{row[0]}: {row[1]}")
+            if rows:
+                text = " · ".join(rows)
+    if not text:
+        # Nothing to show and nothing claimed: the same ``ran /…`` the runtime's
+        # own receipt uses, so a noop (a listing the frontend owns) is not silent
+        # without pretending to have printed something.
+        text = f"ran /{command}"
+    tone = (
+        "success"
+        if isinstance(data, dict) and str(data.get("type") or "") in _SLASH_SUCCESS_TYPES
+        else "neutral"
+    )
+    refused = outcome.get("kind") == "error" or outcome.get("style") == "warning"
+    if len(text) > _SLASH_RECEIPT_CHARS:
+        text = text[: _SLASH_RECEIPT_CHARS - 1].rstrip() + "\u2026"
+    return text, tone, refused
 
 
 def _entry_for_session(daemon: "MobileDaemon", session_id: str) -> SessionEntry | None:
@@ -3674,22 +3727,33 @@ class MobileDaemon:
         cached — the registry is static.
         """
         if self._slash_commands is None:
+            # The PUBLIC seam, not the module's private `_slash_capabilities`:
+            # production code reaching into a leading-underscore name is a
+            # boundary the next refactor breaks silently (review round 1, R1-5).
             from local_operator.session.frontend_state import (
                 CommandScope,
-                _slash_capabilities,
+                slash_capabilities,
             )
             from local_operator.slash_commands import SLASH_COMMANDS
             from local_operator.tui.autocomplete import ArgumentMode
 
             routed = {
                 capability.command
-                for capability in _slash_capabilities()
+                for capability in slash_capabilities()
                 if capability.scope is CommandScope.AUTHORITATIVE_SESSION
             }
             self._slash_commands = [
                 {
                     "name": cmd.name,
-                    "description": cmd.description,
+                    # THE PHONE'S OWN COPY where the registry's names a control
+                    # this surface does not have (UX round 1, U5). The registry
+                    # description is written for a terminal: "(shift+tab cycles)"
+                    # is a key chord a touch device cannot send, and `/title
+                    # --refresh` points at a flag whose only reason to be spelled
+                    # out is the terminal help table. Every entry NOT listed here
+                    # ships the registry's words unchanged, so this stays a short
+                    # exception list rather than a second catalogue.
+                    "description": _PHONE_SLASH_DESCRIPTIONS.get(cmd.name, cmd.description),
                     "aliases": list(cmd.aliases),
                     "arguments": (
                         cmd.arguments.name.lower()
@@ -4503,17 +4567,27 @@ def build_app(daemon: MobileDaemon):
             # that knows this is a phone-shaped answer, rather than asking each
             # command to grow a second wording.
             outcome = reply.get("data")
+            detail, tone, refused = _slash_receipt(outcome, str(body.get("command", "")))
             if isinstance(outcome, dict) and outcome.get("kind") == "error":
                 # An error outcome is a refusal, so it travels as one (422 + the
                 # runtime's own sentence) instead of a 200 the composer would paint
                 # as a success. Built here rather than raised: this line sits past
-                # the ``try`` that maps exceptions to responses.
-                return JSONResponse(
-                    {"error": str(outcome.get("text") or "command failed")}, status_code=422
-                )
-            return JSONResponse(
-                {"ok": True, "detail": _slash_receipt_text(outcome, str(body.get("command", "")))}
-            )
+                # the ``try`` that maps exceptions to responses. THE TYPED CODE
+                # TRAVELS TOO, like every other 422 on this route (review round 1,
+                # R1-3): the outcome carries its category in ``data.code``
+                # (``loop_busy``, ``loop_invalid``), and a client that keys on the
+                # category rather than the sentence must not be told less here than
+                # anywhere else on the same route.
+                outcome_data = outcome.get("data") if isinstance(outcome, dict) else None
+                code = outcome_data.get("code") if isinstance(outcome_data, dict) else None
+                body_out: dict[str, Any] = {"error": detail}
+                if isinstance(code, str) and code:
+                    body_out["code"] = code
+                return JSONResponse(body_out, status_code=422)
+            # ``tone`` is the container and ``refused`` keeps the reader's draft;
+            # both are additive fields, so a client built before them reads
+            # ``detail`` exactly as it always did.
+            return JSONResponse({"ok": True, "detail": detail, "tone": tone, "refused": refused})
         return JSONResponse({"ok": True, "detail": reply.get("detail", "")})
 
     async def api_operator_challenge(request: Request) -> Response:

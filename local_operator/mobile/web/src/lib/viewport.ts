@@ -36,6 +36,17 @@
  *  pins the pair so the copies cannot drift apart. */
 export const DEFAULT_VIEWPORT_CONTENT = "width=device-width, initial-scale=1, viewport-fit=cover";
 
+/** THE FORCED LEGIBILITY TRADE-OFF, stated where a reader of this file will find it.
+ *
+ * Widening the layout shrinks the default text, and no choice of width avoids it:
+ * the engines open at the fit scale, so a 390pt phone lays out 512 CSS px at
+ * `scale = 390/512 = 0.762` and the 13px description text lands at ~9.9 PHYSICAL
+ * px (360pt: 0.703, ~9.1px; the 44px targets at 33.5 / 30.9px). Keeping 13px at
+ * >= 12 physical px at 360pt needs `width <= 390` — i.e. no widening at all, which
+ * is why this is a trade rather than a bug. It is opt-in, the default path is
+ * untouched, and pinching IN restores the scale. Widening the transcript COLUMN
+ * without shrinking the text is not something a viewport meta can do.
+ */
 /** The layout width, in CSS px, wide view asks for.
  *
  *  512 is the smallest round width that gives a visibly wider column (about 1.3x

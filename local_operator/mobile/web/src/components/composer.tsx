@@ -329,7 +329,7 @@ const CONTINUATION_ERROR = "Couldn’t continue this conversation. Try again.";
    is NOT disabled for an ended session: a disabled composer would change the
    draft, attachment and retained-envelope flows, and sending is a real way back.) */
 const ENDED_CONTINUATION_ERROR =
-	"This session has ended and couldn’t be woken just now. Send again, or tap resume to reopen it.";
+	"This session has ended and couldn’t be woken just now. Tap “Retry earlier instruction” to send it again, or reopen it from the sessions list.";
 const SLASH_ERROR = "Couldn’t run that command. Try again.";
 const STEER_ERROR = "Couldn’t send this instruction. Try again.";
 /* U5: one vocabulary for the retained instruction across the alert, the retry
@@ -411,6 +411,12 @@ export function Composer({
 	/* Success acknowledgement lives apart from `error` so it renders in the
 	   success token, not the danger alert (D11). */
 	const [notice, setNotice] = useState("");
+	/* WHICH CONTAINER the notice paints in (design round 1, D1). A receipt reports
+	   an OUTCOME, and the runtime leaves a completed write and a plain report at
+	   the same `style="info"` — so the daemon classifies and the tone travels on
+	   the reply. The success wash stays for a real acknowledgement (the delivered
+	   instruction above), which is what it was built for. */
+	const [noticeTone, setNoticeTone] = useState<"success" | "neutral">("success");
 	const [images, setImages] = useState<AttachedImage[]>([]);
 	const textRef = useRef(text);
 	const imagesRef = useRef(images);
@@ -794,7 +800,7 @@ export function Composer({
 			/* Slash input routes to the slash op rather than prompt — and only
 			   when there is no attachment, since a "/…" caption with an image
 			   is a prompt, not a command. */
-			if (trimmed.startsWith("/") && !trimmed.includes("\n") && images.length === 0) {
+			if (isSlash) {
 				const space = trimmed.indexOf(" ");
 				const command =
 					space === -1 ? trimmed.slice(1) : trimmed.slice(1, space);
@@ -814,10 +820,17 @@ export function Composer({
 					args,
 					images: [],
 				});
-				clearDraft();
+				/* THE DRAFT IS KEPT WHEN THE RUNTIME REFUSED THE ARGUMENT (UX round 1,
+				   U3). `/model nonexistent` answers 200 with "usage: /model <provider>/
+				   <model-id>" — the command ran and declined — and clearing the field
+				   there cost the reader the whole line to fix one word, while the 422
+				   path keeps it. One rule, both paths: keep what the user typed until
+				   the command actually did something. */
+				if (!receipt.refused) clearDraft();
 				/* What the command DID, in the runtime's words — a run that says nothing
 				   reads as a dead tap. */
 				setNotice(receipt.detail);
+				setNoticeTone(receipt.tone === "success" ? "success" : "neutral");
 				return;
 			} else {
 				const chosen =
@@ -1046,8 +1059,20 @@ export function Composer({
 
 			{notice ? (
 				/* D11: a delivered acknowledgement is a success — neutral/success
-				   token, never the danger container the failure alert uses. */
-				<div className="rounded-sm border border-success-border bg-success-wash px-3 py-2 text-body-sm text-success">
+				   token, never the danger container the failure alert uses. D1: a
+				   COMMAND RECEIPT is not a success — the runtime marks a refusal and
+				   a report the same way it marks a completed write, so a receipt
+				   paints in the neutral surface unless the daemon named it a real
+				   mutation. The distinction is then carried by the surface rather
+				   than by colour alone. */
+				<div
+					className={cn(
+						"rounded-sm border px-3 py-2 text-body-sm",
+						noticeTone === "success"
+							? "border-success-border bg-success-wash text-success"
+							: "border-control bg-elevated text-ink",
+					)}
+				>
 					<p role="status" aria-live="polite">{notice}</p>
 				</div>
 			) : null}

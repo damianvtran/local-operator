@@ -19668,87 +19668,20 @@ class OperatorApp(App[None]):
         """(name, kind-facts, summary) per role/specialist, roles first.
 
         ONE enumeration feeding both the listing block and the argument
-        picker, so the two can never disagree about which names `/agent`
-        accepts. Scope is deliberate: only rows tagged as delegation roles
-        (``is_role``) or explicitly authored specialists (``is_specialist``).
-        The registry also holds ordinary conversational and autosave agents;
-        offering those here would be noise at best and a privacy leak at
-        worst — the same boundary the `agent` tool's listing draws.
+        picker, so the two can never disagree about which names ``/agent``
+        accepts. The enumeration itself now lives in
+        ``agent_profiles.agent_listing_rows``, because the DETACHED runtime's
+        routed ``/agent`` must send the same rows: a session with no TUI had
+        only the ``noop`` the terminal's own resolver drew, so the phone's sheet
+        offered ``/agent`` and the tap delivered nothing (review round 1,
+        R1-2/U2). This method stays as the app's seam — the settings pane and the
+        picker read it — and is a delegate rather than a copy.
         """
         session = self._session
         registry = getattr(session, "agent_registry", None) if session is not None else None
-        from local_operator.action_class import PROACTIVE, class_from_tags
-        from local_operator.action_class import normalize as normalize_action_class
+        from local_operator.agent_profiles import agent_listing_rows
 
-        rows: list[tuple[str, str, str]] = []
-        seen: set[str] = set()
-        if registry is not None and hasattr(registry, "list_agents"):
-            from local_operator.agent_profiles import (
-                is_role,
-                is_specialist,
-                profile_from_agent,
-            )
-
-            try:
-                agents = list(registry.list_agents())
-            except Exception:
-                agents = []
-            roles: list[tuple[str, str, str]] = []
-            specialists: list[tuple[str, str, str]] = []
-            for agent in agents:
-                try:
-                    if is_role(agent):
-                        profile = profile_from_agent(registry, agent)
-                        facts = "role"
-                        # The CLASS leads the optional facts (design round 1,
-                        # D1): the settings pane truncates this line to 27
-                        # cells, and a marker appended after a configured
-                        # role's model/effort was the first thing cut — the
-                        # surface §8.1.3 puts forward as where the class is
-                        # visible could not show it on exactly the agents that
-                        # carry config detail.
-                        if normalize_action_class(profile.action_class) == PROACTIVE:
-                            facts += " · proactive"
-                        # Model/effort are facts a user picks a hat by; the
-                        # rest of the profile is what the attach applies.
-                        if profile.model:
-                            facts += f" · {profile.model}"
-                        if profile.effort:
-                            facts += f" · effort {profile.effort}"
-                        summary = (profile.when_to_use or profile.description or "").strip()
-                        roles.append((profile.name, facts, summary))
-                        seen.add(profile.name.lower())
-                    elif is_specialist(agent):
-                        summary = str(agent.description or "").strip()
-                        class_fact = (
-                            " · proactive" if class_from_tags(agent.tags) == PROACTIVE else ""
-                        )
-                        specialists.append((str(agent.name), f"specialist{class_fact}", summary))
-                        seen.add(str(agent.name).lower())
-                except Exception:
-                    continue
-            rows.extend(sorted(roles, key=lambda row: row[0].lower()))
-            rows.extend(sorted(specialists, key=lambda row: row[0].lower()))
-        # Packaged starters resolve without being installed (`resolve_profile`
-        # falls through to seeds), so `/agent reviewer` works on a fresh
-        # machine — the listing must therefore offer them too, or it would
-        # deny names the attach path accepts.
-        from local_operator.agent_profiles import list_seeds, load_seed
-
-        seeds: list[tuple[str, str, str]] = []
-        for seed_name in list_seeds():
-            if seed_name.lower() in seen:
-                continue
-            profile = load_seed(seed_name)
-            if profile is None:
-                continue
-            summary = (profile.when_to_use or profile.description or "").strip()
-            seed_facts = "role · packaged"
-            if normalize_action_class(profile.action_class) == PROACTIVE:
-                seed_facts += " · proactive"
-            seeds.append((profile.name, seed_facts, summary))
-        rows.extend(sorted(seeds, key=lambda row: row[0].lower()))
-        return rows
+        return agent_listing_rows(registry)
 
     def _agent_choices(self) -> list[ArgumentChoice]:
         """Roles/specialists the ``/agent`` argument list offers."""

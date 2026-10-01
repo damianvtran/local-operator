@@ -29,6 +29,7 @@ import { AsksSheet } from "../components/asks-sheet";
 import { ModelSheet } from "../components/model-sheet";
 import { Composer } from "../components/composer";
 import { GateSheet } from "../components/gate-sheet";
+import { WideViewButton } from "../components/wide-view-button";
 import { PendingCard } from "../components/pending-card";
 import { SubagentsPanel } from "../components/subagents-panel";
 import { TodosPanel } from "../components/todos-panel";
@@ -252,6 +253,13 @@ function Header({
 			    `blockingPending`, not `projection.pending`: once the runtime publishes
 			    `asks`, a mirrored ask is not a gate and must not make the approvals
 			    control claim this session "needs you" (design §4, client rule N3). */}
+			{/* THE READING WIDTH, where the reading happens (design round 1, D2).
+			    The toggle used to exist only on the conversation list, so a reader who
+			    noticed the narrow column had to leave the session, toggle it, and
+			    reopen — the state that motivated issue #1870 is discovered HERE. It is
+			    the same `WideViewButton` the list footer renders, so the two cannot
+			    disagree about the label or the pressed state. */}
+			<WideViewButton className="px-1.5" />
 			<button
 				type="button"
 				onClick={() => setGateOpen(true)}

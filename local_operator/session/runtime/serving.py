@@ -7327,11 +7327,16 @@ class ServingSessionHandle(SessionHandle):
         )
 
     async def _agent_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
-        """The routed ``/agent``: list in the invoker, ATTACH and CLASS here.
+        """The routed ``/agent``: list, ATTACH and CLASS all happen HERE.
 
-        The listing stays ``noop`` on purpose: its rows carry role/specialist
-        facts assembled by the frontend's own profile resolver, and a second
-        assembly here would be a second source of truth for the same list.
+        THE LISTING IS A BLOCK, NOT A ``noop`` (review round 1, R1-2/U2). It used
+        to answer a bare ``/agent`` with ``noop {"type": "agent_list"}`` on the
+        argument that only the terminal's frontend resolver draws those rows — but
+        a surface with no terminal (the phone) then painted the command it offered
+        in its sheet as silence. The rows now come from
+        ``agent_profiles.agent_listing_rows``, the ONE enumeration
+        ``OperatorApp._agent_profile_rows`` also delegates to, so this is not a
+        second assembly of the same list: both hosts send the same rows.
 
         The mutating forms do NOT stay ``noop``, for the reason spelled out in
         ``_team_slash``: attaching a profile mutates session state (the
@@ -7346,7 +7351,17 @@ class ServingSessionHandle(SessionHandle):
         only the local half existed).
         """
         if not arg:
-            return SlashResult(kind="noop", data={"type": "agent_list", "args": arg})
+            from local_operator.agent_profiles import agent_listing_rows
+
+            rows = agent_listing_rows(getattr(session, "agent_registry", None))
+            if not rows:
+                # The same sentence the app-hosted path answers, so one empty
+                # state cannot be worded two ways depending on which process
+                # happens to own the session.
+                return SlashResult(
+                    kind="notice", text="no agents yet. Ask the agent to create one.", style="info"
+                )
+            return SlashResult(kind="block", data={"type": "agent_list", "items": rows})
         first, _, rest = arg.partition(" ")
         if first.strip().casefold() == "class":
             return await self._agent_class_slash(session, rest.strip(), SlashResult)
@@ -7561,7 +7576,19 @@ class ServingSessionHandle(SessionHandle):
                     style="warning",
                 )
         if names:
-            return SlashResult(kind="block", data={"type": "mcp"})
+            # THE ROSTER TRAVELS WITH THE BLOCK (review round 1, R1-1). A terminal
+            # draws this block from its own live MCP panel, so the bare
+            # ``{"type": "mcp"}`` was enough there — but a surface WITHOUT a panel
+            # (the phone) was handed nothing to paint and fell back to "ran /mcp"
+            # with the roster it had just read thrown away. ``text`` is the line
+            # for those surfaces; the terminal's renderer returns on the block
+            # type before reading it, so nothing paints twice.
+            listed = ", ".join(sorted(names))
+            return SlashResult(
+                kind="block",
+                text=f"{len(names)} MCP {'server' if len(names) == 1 else 'servers'}: {listed}",
+                data={"type": "mcp"},
+            )
         # AN EMPTY ROSTER IS THE QUESTION — not an absent manager (QA round 1,
         # Q2). ``discover_and_load_mcp_tools`` does NOT raise for a discovery
         # failure: it catches, logs, and returns the manager alongside a

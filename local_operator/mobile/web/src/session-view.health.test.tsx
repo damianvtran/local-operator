@@ -133,7 +133,13 @@ beforeEach(() => {
 	mocks.resumeSession.mockImplementation(async () => ({ ok: true, pid: 42, session_id: "s1" }));
 	mocks.navigate.mockClear();
 });
-afterEach(cleanup);
+afterEach(() => {
+	cleanup();
+	/* The wide-view control writes a preference and a DOM attribute; leaving
+	   either behind would leak into the next render in this file. */
+	localStorage.clear();
+	delete document.documentElement.dataset.view;
+});
 
 describe("an ended session (U7)", () => {
 	it("says so and offers the documented resume, which reopens the conversation", async () => {
@@ -218,6 +224,32 @@ describe("an ended session (U7)", () => {
 		expect(screen.getByRole("button", { name: "resume" }).className).toContain(
 			"pointer-events-auto",
 		);
+	});
+
+	it("carries the wide-view control on the screen the reading happens on (D2, #1870)", () => {
+		slot = { projection: projection(), connected: true };
+		render(<SessionScreen sessionId="s1" />);
+
+		const control = screen.getByRole("button", { name: "wide view" });
+		// D3: a WORD, not the glyph alone — `⇔` reads as swap/pan with nothing to
+		// learn it from, and the word fits the same target.
+		expect(control.textContent).toBe("wide");
+		expect(control.getAttribute("aria-pressed")).toBe("false");
+
+		fireEvent.click(control);
+
+		const pressed = screen.getByRole("button", { name: "wide view" });
+		expect(pressed.getAttribute("aria-pressed")).toBe("true");
+		// D4: pressed is FILLED, not a hue change — the palette delta is ~1:1
+		// luminance in most shipped themes, so weight has to carry it.
+		expect(pressed.className).toContain("bg-accent");
+		expect(pressed.className).toContain("text-on-accent");
+		expect(document.documentElement.dataset.view).toBe("wide");
+		expect(localStorage.getItem("lo-mobile-wide-view")).toBe("1");
+
+		fireEvent.click(pressed);
+		expect(document.documentElement.dataset.view).toBeUndefined();
+		expect(localStorage.getItem("lo-mobile-wide-view")).toBeNull();
 	});
 
 	it("says where an ended session reopens, and that a send does it too (U18, #1875)", () => {
