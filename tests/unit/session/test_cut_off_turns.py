@@ -1505,3 +1505,43 @@ async def test_a_sigterm_with_an_involuntary_marker_names_its_actor_not_the_user
         assert state["kind"] == "error", (phase, state)
         assert state["cause"] == "runtime-killed", (phase, state)
         assert "lop install prune" in state["reason"], (phase, state)
+
+
+@pytest.mark.asyncio
+async def test_the_runtimes_idle_branch_note_reaches_the_published_row(tmp_path: Path) -> None:
+    """Runtime-side wave-B path against a REAL session: the helper ``_on_signal`` calls.
+
+    ``_work_in_flight`` can say idle while a turn (a ``wait`` tool) is still live; the
+    dispose then aborts it. With the receipt's verdict noted first, the published row
+    is the signal story (``runtime-shutdown``), not ``error|disposed`` and never the
+    user's stop. The two neighbours stay as they were: a deliberate stop noted first
+    is still ``interrupted|user-stop`` (``test_the_dispose_route_publishes_...``) and a
+    bare dispose is still ``disposed`` (``test_an_unnoted_dispose_of_a_LIVE_turn_...``).
+    """
+    from local_operator.session.runtime import process, signal_receipt
+
+    directory = tmp_path / "sessions" / "idle-branch"
+    directory.mkdir(parents=True)
+    session = _make_session(directory, stream=_never_yielding_stream())
+    await session.async_init()
+    task = asyncio.ensure_future(session.prompt("a turn a signal will cut"))
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not session._attention_run_request_dispatched:
+        await asyncio.sleep(0.005)
+    assert session._attention_run_request_dispatched
+
+    class _Handle:
+        _session = session
+
+    entry = signal_receipt.build_signal(
+        "SIGTERM", 15, at=time.time(), in_flight=False, action="stop", marker=None, covered=False
+    )
+    process._note_signal_cut_off(_Handle(), {"signals": [entry], "count": 1})
+    await asyncio.wait_for(session.dispose(), timeout=30)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    state = AttentionStore().state(conversation_identity(directory))
+    assert (state["kind"], state["cause"]) == ("error", "runtime-shutdown"), state
+    assert "SIGTERM received" in state["reason"] and "no stop was staged" in state["reason"]
