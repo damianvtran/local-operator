@@ -948,25 +948,29 @@ BUDGET_BILLED_TOKENS = 37_756
 #: cap refused the prose it advertised, and the fix raises DESCRIPTION_MAX to
 #: 2000 with a remedy-bearing refusal. Neither the guide nor the refusal text
 #: rides the prefix, so the field rename is the whole measured delta.
-#: Measured with THIS script, same machine, one tree after the other:
+#: Re-derived after the fold onto ``origin/main`` ``85ed0f7fd`` (the rebase
+#: rewrote the measured trees), same machine, the base in a detached worktree
+#: of that commit:
 #:
-#:   base (origin/main 302a061e5)     103,960 chars = ~37,396 billed
-#:   head (this branch)               103,961 chars = ~37,396 billed
+#:   base (origin/main 85ed0f7fd)     104,648 chars = ~37,643 billed
+#:   head (this branch)               104,649 chars = ~37,644 billed
 #:     = +1 char = +0.4 billed — the 240 -> 2000 rename, nothing else.
 #:
 #: Review round 1 then moved the REFUSAL copy (remedy phrasing) and the
 #: ``@project:`` element's cut order — all of it runtime text, so the delta
-#: above is untouched: re-measured after that round this script still reads
-#: 103,961 chars = ~37,396 billed, and "over the ...-character cap" appears
-#: nowhere in the ``project`` tool's serialized schema (checked directly
-#: against that JSON), which is the only text the ratchet can move.
+#: above is untouched: re-measured after that round on the folded trees, the
+#: script reads 104,649 chars = ~37,644 billed, and "over the
+#: ...-character cap" appears nowhere in the ``project`` tool's serialized
+#: schema (checked directly against that JSON), which is the only text the
+#: ratchet can move.
 #:
 #: NO RAISE: a one-character edit cannot be why the permanent per-call ceiling
-#: moves, and it does not breach the binding reading — by the recorded
-#: ~762-char platform gap that lives in ``tool_schemas``, CI's head is ~37,122
-#: against the 37,164 ceiling (~42 billed of headroom). The local reading
-#: sitting above the ceiling by the SAME 232 billed on both sides is the
-#: pre-existing recorded gap, not this change.
+#: moves, and it does not breach the binding reading. Both arms read ~265
+#: billed above the ceiling locally — the config gap this file now attributes
+#: to ``values.subagents`` (762 chars byte-exact in ``tool_schemas``, not a
+#: platform offset) — so the CI arm is the binding one: 104,649 - 762 =
+#: 103,887 chars = ~37,369 billed against the 37,378 ceiling, i.e. ~8 billed
+#: of headroom, and +0.4 of it is this change.
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
