@@ -1861,6 +1861,53 @@ switch still wins because every leg asks it first. Set it through
 and restores them; the alternative — running those tests on a real provider —
 would make the reply non-deterministic and need network and credit.
 
+## Resource guards: what ends a runaway process, and what you see when yours is ended
+
+Two guards bound memory, and both key on **footprint, not RSS**. `ps` RSS is only
+the resident subset of what a process owns; `ri_phys_footprint` (macOS, what
+Activity Monitor and `top` show) and Pss (Linux) count the whole owned set,
+compressed and swapped pages at their original size. Measured 2026-09-30: a node
+child holding 4 GB read 37-2,498 MB of RSS and 4,113 MB of footprint on the same
+pid, and the incident process owned ~198 GB while `ps` read ~1.4 GB. A number
+taken from `ps` alone is blind to that class; neither guard decides on it alone.
+
+- **Per command** (`memory_guard.Guard`, ticking beside every `bash` call and every
+  package-manager build step). Each tick reads the footprint of the group's members
+  with syscalls (no fork) and charges `max(rss, footprint)`; at the soft line
+  (80 %) it shows one advisory line, at the hard line it kills the **whole process
+  group** and the tool result starts `MEMORY LIMIT EXCEEDED: this command's process
+  group reached N GB, over the M GB budget for one command`. `ps` is only the
+  membership discovery arm (at most once a second, retried, with a 12 s budget —
+  it measured 0.4-13.6 s under fleet load); when it cannot be read, the leader the
+  guard itself spawned is still read fork-free and still kills. A tick where
+  nothing could be measured never kills. The ceiling is per command, not per
+  machine; raise it with `memory_mb` on the call or `bash.memory.limit_mb`.
+- **Machine-wide** (`session.runtime.machine_memory`, run by the wake supervisor
+  every minute). When the fleet's summed footprint reaches 85 % of RAM it ends the
+  single largest non-runtime fragment (never a runtime, never a foreign process).
+  Its reads are retried inside a 15 s budget, and when the pre-signal `ps`
+  re-check cannot be read it confirms every row's `(ppid, pgid)` by syscall
+  instead; anything it cannot confirm still withholds the stop. The cooldown after
+  a kill holds only the same root pid or parent, so a *different* runaway is
+  killable on the next pass. The owning session is told ("your process group
+  (pid X, N GB footprint) was ended by the memory guard") and one `machine memory
+  kill:` line carries who/what/how big in the supervisor log.
+
+**What this is not.** It is not a throttle: nothing is slowed, a process is ended.
+It does not make allocation safe — a fast allocator can outrun a 250 ms tick, and
+the per-command ceilings do not sum to a machine budget.
+
+**If your process was ended by a guard**, the message names the footprint; size the
+retry from it (stream or chunk, lower the batch size, cap the heap) rather than
+re-running the same command.
+
+**Bound your own rigs.** `timeout 900 ...` bounds time, not memory. Anything that
+fans out workers (a test runner, a build, an eval harness) should carry a memory cap
+of its own — a heap cap on node (`--max-old-space-size`), a worker count sized from
+available memory — and run in its own process group, because the guard can only end
+a group it owns. Do not hand-roll an unbounded runner when the repo already has a
+bounded one (the pytest worker cap above is the pattern).
+
 ## Who may merge: two tiers
 
 `main` is governed by a ruleset that requires **one approving review**, plus the
