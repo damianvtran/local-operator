@@ -77,12 +77,10 @@ def test_register_writes_the_record_and_answers_the_shape() -> None:
     record = records[0]
     assert sorted(record) == [
         "app_version",
-        "credential_live",
         "device_id",
         "device_key",
         "environment",
         "install_id",
-        "last_authenticated_at",
         "last_seen_at",
         "name",
         "platform",
@@ -96,12 +94,18 @@ def test_register_writes_the_record_and_answers_the_shape() -> None:
     assert record["name"] == "Damian's iPhone"
     assert record["registered_at"] == payload["registered_at"]
     assert record["last_seen_at"] == record["registered_at"]
-    # The key is stored machine-side (that is its whole purpose) and the register
-    # route is an authenticated request, so it IS the device's last authenticated
-    # moment — the credential record ADR §2.2 keeps beside the key.
+    # The key is stored machine-side — that is its whole purpose — and it is the
+    # ONE credential fact this route writes (review round 1, R4):
+    # ``credential_live`` and ``last_authenticated_at`` are per-device readings
+    # the register route cannot make, because it cannot attribute the request to
+    # the device (the cookie is the machine's, and on the Radient route the
+    # gateway injects it for every request and "cannot tell device A from device
+    # B"). Claiming either here would be the over-claim ADR §4 rule 2 exists to
+    # prevent, so the row carries neither until S4c's per-device route writes
+    # them.
     assert record["device_key"] == payload["device_key"]
-    assert record["credential_live"] is True
-    assert record["last_authenticated_at"] == record["registered_at"]
+    assert "credential_live" not in record
+    assert "last_authenticated_at" not in record
     # The atomic write leaves no temp file behind.
     assert not list(config_dir().glob(f".{PUSH_DEVICES_STORE_NAME}.*"))
 
@@ -411,12 +415,13 @@ def test_list_serves_the_settings_shape_and_omits_unknown_name() -> None:
     entry = devices[0]
     # Absence, not null, when the app never provided a label: the Settings shape
     # (ADR §3.1) minus the fields this device has none of, name omitted (the
-    # repo's absence rule).
+    # repo's absence rule). ``credential_live`` and ``last_authenticated_at`` are
+    # ABSENT here because the register route writes neither (review round 1, R4):
+    # the relay's per-device reading is S4c's route, and until it lands this
+    # store will not report a credential fact it never observed.
     assert sorted(entry) == [
         "app_version",
-        "credential_live",
         "device_id",
-        "last_authenticated_at",
         "last_seen_at",
         "platform",
         "registered_at",
@@ -426,8 +431,6 @@ def test_list_serves_the_settings_shape_and_omits_unknown_name() -> None:
     assert devices[1]["name"] == "Pixel"
     assert entry["platform"] == "ios" and devices[1]["platform"] == "android"
     assert entry["state"] == push_devices.STATE_LIVE
-    assert entry["credential_live"] is True
-    assert entry["last_authenticated_at"] == entry["last_seen_at"]
     # Reading is read-only: the list walk writes nothing, so a phone opening
     # Settings cannot bump anything.
     assert _store_path().read_bytes() == before
@@ -823,9 +826,12 @@ def test_a_re_register_clears_expired_at_and_mints_a_fresh_key() -> None:
     key = first.json()["device_key"]
     record = _stored_records()[0]
     assert "expired_at" not in record, "the re-register IS the act that clears it"
-    assert record["credential_live"] is True, "an authenticated register restores the flag"
-    assert record["last_authenticated_at"] > STAMP
     assert record["registered_at"] == _VALID_RECORD["registered_at"], "identity is stable"
+    # The re-register reports NO credential reading of its own (review round 1,
+    # R4): the planted row's reading is not refreshed, not cleared, and not
+    # invented — it is left exactly as the last per-device route wrote it.
+    assert record["credential_live"] is False
+    assert record["last_authenticated_at"] == STAMP
 
     # Returned once per call, and a rotation is a rotation: the previous key is
     # superseded, which is what makes a leaked key's window a single call wide.
@@ -886,12 +892,16 @@ def test_a_record_from_an_earlier_build_loads_and_reads_as_live() -> None:
     assert "credential_live" not in entry
     assert "last_authenticated_at" not in entry
     assert "device_key" not in entry
-    # The next register fills all three in, on the same row and the same id.
+    # The next register fills in the key — and, deliberately, NOT the two
+    # credential fields (review round 1, R4): those are per-device readings
+    # the register route cannot make, so they stay absent rather than being
+    # guessed at.
     refreshed = _client().post("/api/push/register", json=PAYLOAD).json()
     assert refreshed["device_id"] == legacy["device_id"], "an upgrade must not fork the device"
-    record = _stored_records()[0]
-    assert record["credential_live"] is True
-    assert record["device_key"] == refreshed["device_key"]
+    upgraded = _stored_records()[0]
+    assert upgraded["device_key"] == refreshed["device_key"]
+    assert "credential_live" not in upgraded
+    assert "last_authenticated_at" not in upgraded
 
 
 def test_unrevoke_is_operators_only_and_clears_the_markers() -> None:
@@ -907,10 +917,14 @@ def test_unrevoke_is_operators_only_and_clears_the_markers() -> None:
     client = _client()
     registered = client.post("/api/push/register", json=PAYLOAD).json()
     device_id = registered["device_id"]
+    key = push_devices.operator_key(config_dir())
+    assert isinstance(key, str) and key, "the daemon minted it with the registration"
     client.delete(f"/api/push/devices/{device_id}")
     # The lapse case: a credential that is not live, and a key that IS this
     # device's, so both "nothing was restored" and "the key survives" are
     # assertions about values that could have moved rather than tautologies.
+    # The planted store carries the machine's operator key — a store written by
+    # the daemon would, and one without it could not reach this route at all.
     planted = _record(
         device_id=device_id,
         revoked_at=STAMP,
@@ -918,7 +932,7 @@ def test_unrevoke_is_operators_only_and_clears_the_markers() -> None:
         last_authenticated_at=STAMP,
         device_key=registered["device_key"],
     )
-    _plant([planted])
+    _plant([planted], **{push_devices.OPERATOR_KEY_FIELD: key})
     before = _store_path().read_bytes()
 
     machine_only = {
@@ -938,7 +952,7 @@ def test_unrevoke_is_operators_only_and_clears_the_markers() -> None:
 
     restored = client.post(
         f"/api/push/devices/{device_id}/unrevoke",
-        headers={push_devices.OPERATOR_KEY_HEADER: push_devices.operator_key(config_dir())},
+        headers={push_devices.OPERATOR_KEY_HEADER: key},
     )
     assert restored.status_code == 200, restored.text
     assert restored.json() == {"ok": True, "device_id": device_id}
@@ -954,11 +968,12 @@ def test_unrevoke_is_operators_only_and_clears_the_markers() -> None:
     # and leaving ``unpaired_at`` behind would refuse it again for a reason
     # nobody chose.
     _plant(
-        [_record(device_id=device_id, unpaired_at=STAMP, revoked_at=STAMP, credential_live=False)]
+        [_record(device_id=device_id, unpaired_at=STAMP, revoked_at=STAMP, credential_live=False)],
+        **{push_devices.OPERATOR_KEY_FIELD: key},
     )
     again = client.post(
         f"/api/push/devices/{device_id}/unrevoke",
-        headers={push_devices.OPERATOR_KEY_HEADER: push_devices.operator_key(config_dir())},
+        headers={push_devices.OPERATOR_KEY_HEADER: key},
     )
     assert again.status_code == 200, again.text
     assert push_devices.device_state(_stored_records()[0]) == push_devices.STATE_LIVE
@@ -974,9 +989,11 @@ def test_unrevoke_of_an_id_this_computer_never_registered_is_a_404() -> None:
     """
     client = _client()
     client.post("/api/push/register", json=PAYLOAD)  # so an operator key exists
+    key = push_devices.operator_key(config_dir())
+    assert isinstance(key, str) and key
     response = client.post(
         "/api/push/devices/never-registered/unrevoke",
-        headers={push_devices.OPERATOR_KEY_HEADER: push_devices.operator_key(config_dir())},
+        headers={push_devices.OPERATOR_KEY_HEADER: key},
     )
     assert response.status_code == 404, response.text
     assert response.json()["code"] == push_devices.DEVICE_ABSENT_CODE
@@ -984,12 +1001,20 @@ def test_unrevoke_of_an_id_this_computer_never_registered_is_a_404() -> None:
 
 
 def test_the_operator_key_is_minted_with_the_first_device_and_never_listed() -> None:
-    """It belongs to the machine, not to a device, and no route renders it."""
+    """It belongs to the machine, not to a device, and no route renders it.
+
+    Read-only by design (review round 1, R5): the daemon is the store's only
+    writer, so this function answers ``None`` for a store that has no key yet
+    rather than minting one as a second writer.
+    """
     client = _client()
     assert not _store_path().exists(), "nothing is minted before a device exists"
+    assert push_devices.operator_key(config_dir()) is None, "no key yet, and no write"
+    assert not _store_path().exists(), "a read must not create the store"
+
     client.post("/api/push/register", json=PAYLOAD)
     key = push_devices.operator_key(config_dir())
-    assert len(key) >= 32
+    assert isinstance(key, str) and len(key) >= 32
     assert push_devices.operator_key(config_dir()) == key, "minted once"
     assert push_devices.verify_operator_key(config_dir(), key) is True
     assert push_devices.verify_operator_key(config_dir(), key + "x") is False
@@ -998,3 +1023,28 @@ def test_the_operator_key_is_minted_with_the_first_device_and_never_listed() -> 
     listed = client.get("/api/push/devices")
     assert key not in listed.text
     assert push_devices.OPERATOR_KEY_FIELD not in listed.text
+    # …and the key survives a later registration, including its own write path.
+    client.post(
+        "/api/push/register",
+        json={**PAYLOAD, "install_id": "00000000-1111-2222-3333-444444444444"},
+    )
+    assert push_devices.operator_key(config_dir()) == key
+
+
+def test_the_state_descriptions_are_the_modules_own_copy() -> None:
+    """The vocabulary's sentences live beside the names, not in a renderer.
+
+    Design round 1, D2: the legend rendered the four descriptions inline, so "one
+    vocabulary" covered the state NAMES but not the copy the app's Settings will
+    mirror. One description per state, plus ``absent`` — the fifth state of the
+    ADR's table, which no row can hold but a ``list`` can report (D4).
+    """
+    assert set(push_devices.STATE_DESCRIPTIONS) == set(push_devices.DESCRIBED_STATES)
+    assert set(push_devices.DEVICE_STATES) <= set(push_devices.DESCRIBED_STATES)
+    assert push_devices.STATE_ABSENT not in push_devices.DEVICE_STATES
+    for state, description in push_devices.STATE_DESCRIPTIONS.items():
+        assert description and description == description.strip(), state
+    # The precedence sentence is rendered FROM the table, so the explanation and
+    # the rule cannot drift (the same shape as ``PRECEDENCE`` itself).
+    assert push_devices.PRECEDENCE in push_devices.PRECEDENCE_SENTENCE
+    assert push_devices.PRECEDENCE == "revoked > unpaired > expired"

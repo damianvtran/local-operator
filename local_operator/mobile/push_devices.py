@@ -144,6 +144,38 @@ _STATE_MARKERS: tuple[tuple[str, str], ...] = (
 #: The precedence, rendered: ``"revoked > unpaired > expired"``.
 PRECEDENCE = " > ".join(state for state, _marker in _STATE_MARKERS)
 
+#: The state VOCABULARY, described once. The descriptions are the product's own
+#: words for each state — the CLI's legend renders them and the app's Settings
+#: will mirror them — so they live here rather than in a renderer, for the same
+#: reason the refusal sentences do: two surfaces that spell the same state two
+#: ways is the defect the single resolver exists to prevent, one layer up.
+#:
+#: ``absent`` is in the vocabulary but not in ``DEVICE_STATES``: no row can hold
+#: it (it IS the absence of a row), and ``list`` never renders it as a ``state``.
+#: It is here because the CLI shows it — a verb whose read-back finds the row
+#: gone, or a row an operator asks about after a 60-day drop — and the one word
+#: that needs explaining must not be the one word that is not explained.
+STATE_ABSENT = "absent"
+STATE_DESCRIPTIONS: dict[str, str] = {
+    STATE_LIVE: "registered, and push resumes on its next authenticated read",
+    STATE_EXPIRED: "notifications are paused for this device until you sign in again",
+    STATE_UNPAIRED: "this computer is no longer paired",
+    STATE_REVOKED: "this device was revoked on this computer",
+    STATE_ABSENT: "not in this computer's registry; it may register again",
+}
+#: The order the descriptions are rendered in: the four row states by precedence
+#: (weakest first, so the legend reads bottom-up as the escalation it is), then
+#: ``absent``, which is not a row state at all.
+DESCRIBED_STATES = (STATE_LIVE, STATE_EXPIRED, STATE_UNPAIRED, STATE_REVOKED, STATE_ABSENT)
+
+#: What the precedence MEANS, in one sentence, rendered from ``PRECEDENCE`` so
+#: the explanation and the rule cannot drift. A bare ``revoked > unpaired >
+#: expired`` is the wire's notation for a rule about one row carrying two
+#: markers; this is the same fact said to a person.
+PRECEDENCE_SENTENCE = (
+    "a device can carry more than one marker; the strongest is shown " f"({PRECEDENCE})"
+)
+
 #: The refusal codes and sentences of the register route (ADR §3.1). Spelled as
 #: constants because the same three sentences are the CLI's and, later, the
 #: app's copy: a router and a renderer that spell them separately will drift.
@@ -343,29 +375,33 @@ def device_key_matches(record: Mapping[str, Any], presented: object) -> bool:
     return hmac.compare_digest(stored.encode(), presented.encode())
 
 
-def operator_key(config_dir: Path) -> str:
-    """This machine's operator key, minting one when the store has none.
+def operator_key(config_dir: Path) -> str | None:
+    """This machine's operator key, or ``None`` when the store holds none yet.
 
     The key is the second half of "only the operator surface may unrevoke"
     (module docstring): the tunnel gateway cannot forward a header of our
     choosing, and a device that somehow did would still not have this value.
 
-    MINTING HERE IS THE UPGRADE PATH, not the normal one: ``register`` mints the
-    key as it writes the machine's first device, so a store in normal use always
-    has one. This branch exists for a store written by a build that predates the
-    key — the alternative is an operator who cannot unrevoke anything until some
-    device happens to launch the app. Called only by an owner-private local
-    process, and the write is the store's own atomic 0600 replace.
+    READ-ONLY, AND THAT IS THE POINT (review round 1, R5). Exactly one process
+    writes this store — the daemon — and the key is minted inside
+    :func:`register`, under that same lock, as part of a write the daemon was
+    making anyway. An earlier revision let the CLI mint here when the store had
+    none, which made a second process a writer for exactly the case the branch
+    existed for (a store written before this build): the CLI's read-modify-write
+    could interleave with a registration and lose one of the two, since
+    ``_LOCK`` and the atomic replace protect the file's integrity, not the
+    update. A caller with no key gets ``None`` and says so — an honest "not yet"
+    beats a write that can drop a device.
+
+    The consequence, stated rather than discovered: on a store written before
+    this build, the key does not exist until some device registers again, so
+    ``unrevoke`` is unavailable until then. That is the trade R5 asked for, and
+    it is one app launch wide.
     """
     with _LOCK:
         store = _load_store(config_dir)
-        existing = store.get(OPERATOR_KEY_FIELD)
-        if isinstance(existing, str) and existing:
-            return existing
-        key = secrets.token_urlsafe(32)
-        store[OPERATOR_KEY_FIELD] = key
-        _save(config_dir, store)
-        return key
+    key = store.get(OPERATOR_KEY_FIELD)
+    return key if isinstance(key, str) and key else None
 
 
 def verify_operator_key(config_dir: Path, presented: object) -> bool:
@@ -412,11 +448,21 @@ def register(config_dir: Path, body: object, *, now: float | None = None) -> dic
     that clears ``expired_at`` (that is why it is a different marker from
     ``revoked_at``), and a fresh ``install_id`` is refused on nothing at all.
 
-    A successful call also writes the machine's Credential record for the device
-    (ADR §2.2): a fresh ``device_key`` — returned ONCE, in this response only —
-    plus ``credential_live`` and ``last_authenticated_at``, which are honest here
-    because this route is behind the daemon's cookie gate, so the request that
-    reached it was authenticated.
+    A successful call also mints this device's per-device key (ADR §3.1) —
+    returned ONCE, in this response only — and stores it in the device's own row.
+
+    It does NOT write ``credential_live`` or ``last_authenticated_at``, and that
+    is a correction rather than an omission (review round 1, R4 / ADR §4 rule 2,
+    QA round 4 Q-F2). The flag is a PER-DEVICE fact, and this route cannot
+    attribute the request to the device: on the direct route the app holds the
+    machine's cookie (one cookie for every device of this computer), and on the
+    Radient route the edge STRIPS it and the gateway injects it on every request,
+    so "cannot tell device A from device B". A successful register therefore
+    proves an authenticated connection, not this device's live credential — and
+    the relay's per-device reading is where §4 rule 2 puts it: a request that
+    NAMES its device (``X-Lop-Device`` + the key minted here) is S4c's route, and
+    that is where those two fields are written. Until then ``list`` omits them
+    rather than over-claiming a flag the ADR has the cloud enforce against.
     """
     fields = _checked_registration(body)
     with _LOCK:
@@ -462,12 +508,15 @@ def register(config_dir: Path, body: object, *, now: float | None = None) -> dic
         # neither, and clearing one would undo a decision no request made.
         record.pop("expired_at", None)
         record["device_key"] = device_key
-        record["credential_live"] = True
-        record["last_authenticated_at"] = stamp
-        # The machine's operator key is minted WITH the first device rather than
-        # lazily by the CLI: the daemon writes this file under its own lock, so
-        # the normal path never has two writers (see :func:`operator_key`).
-        store.setdefault(OPERATOR_KEY_FIELD, secrets.token_urlsafe(32))
+        # The machine's operator key is minted WITH the first device, inside this
+        # daemon-side write rather than lazily by the CLI: exactly one process
+        # writes this file, so the normal path never has two writers (R5), and
+        # the conditional means a re-register costs a branch rather than a
+        # CSPRNG call (N3 — ``dict.setdefault`` would evaluate its default
+        # eagerly, minting 32 random bytes per registration and discarding
+        # them).
+        if not store.get(OPERATOR_KEY_FIELD):
+            store[OPERATOR_KEY_FIELD] = secrets.token_urlsafe(32)
         store["devices"] = _prune_locked(records)
         _save(config_dir, store)
         return {
