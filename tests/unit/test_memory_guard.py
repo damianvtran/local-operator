@@ -356,7 +356,13 @@ def _guard(ceiling_mb: int = 100, ps: str = "") -> mg.Guard:
         source="auto",
         reason="test",
     )
-    return mg.Guard(100, budget, runner=_fake_runner(ps=ps), footprint_probe=lambda pid: None)
+    return mg.Guard(
+        100,
+        budget,
+        runner=_fake_runner(ps=ps),
+        footprint_probe=lambda pid: None,
+        group_probe=lambda pgid: None,
+    )
 
 
 @pytest.mark.asyncio
@@ -458,6 +464,7 @@ def _fp_guard(
     footprints: dict[int, int | None],
     ps: str = "",
     pgid: int = 100,
+    group_probe: mg.GroupProbe | None = None,
 ) -> mg.Guard:
     budget = mg.Budget(
         ceiling_mb=ceiling_mb,
@@ -473,6 +480,7 @@ def _fp_guard(
         budget,
         runner=_fake_runner(ps=ps),
         footprint_probe=lambda pid: footprints.get(pid),
+        group_probe=group_probe or (lambda pgid: None),
     )
 
 
@@ -551,7 +559,9 @@ def test_a_raising_footprint_probe_is_unknown_not_a_crash() -> None:
     def boom(pid: int) -> int | None:
         raise OSError("libproc went away")
 
-    guard = mg.Guard(100, budget, runner=_fake_runner(), footprint_probe=boom)
+    guard = mg.Guard(
+        100, budget, runner=_fake_runner(), footprint_probe=boom, group_probe=lambda g: None
+    )
     sample = guard.sample_sync()
     assert sample.bytes_used is None
     assert guard.should_kill(sample) is False
@@ -598,7 +608,13 @@ def test_ps_is_read_at_most_once_per_refresh_while_footprints_answer() -> None:
         return inner(argv)
 
     budget = mg.Budget(100, 80, 4096, 16384, 2048, "auto", "test")
-    guard = mg.Guard(100, budget, runner=counting, footprint_probe=lambda pid: 10 * _MIB)
+    guard = mg.Guard(
+        100,
+        budget,
+        runner=counting,
+        footprint_probe=lambda pid: 10 * _MIB,
+        group_probe=lambda g: None,
+    )
     for _ in range(5):
         guard.sample_sync()
     assert [argv[0] for argv in calls].count("ps") == 1
@@ -612,11 +628,156 @@ def test_a_failed_ps_is_retried_within_the_tick() -> None:
         return (1, "") if len(attempts) == 1 else (0, "  100   100   204800")
 
     budget = mg.Budget(100, 80, 4096, 16384, 2048, "auto", "test")
-    guard = mg.Guard(100, budget, runner=flaky, footprint_probe=lambda pid: None)
+    guard = mg.Guard(
+        100, budget, runner=flaky, footprint_probe=lambda pid: None, group_probe=lambda g: None
+    )
     sample = guard.sample_sync()
     assert len(attempts) == 2
     assert sample.rss_bytes == 204800 * 1024
     assert guard.should_kill(sample) is True
+
+
+# ---------------------------------------------------------------------------
+# Review/QA round 1 (Q1, R3): descendants with `ps` dead, and a dead `ps` is not
+# hammered and never slows the kill clock.
+# ---------------------------------------------------------------------------
+
+
+def _group_guard(
+    ceiling_mb: int, *, footprints: dict[int, int], group: list[int] | None, ps: str = ""
+) -> mg.Guard:
+    budget = mg.Budget(ceiling_mb, int(ceiling_mb * 0.8), 4096, 16384, 2048, "auto", "test")
+    return mg.Guard(
+        100,
+        budget,
+        runner=_fake_runner(ps=ps),
+        footprint_probe=lambda pid: footprints.get(pid),
+        group_probe=lambda pgid: group,
+    )
+
+
+def test_a_descendant_allocator_is_killed_with_ps_dead() -> None:
+    """Q1: `timeout 900 python alloc.py` — the leader is a thin wrapper, the
+    allocator is its child, and `ps` is dead from tick 0. The shipped guard (and the
+    first revision of this one) measured ~0 and let it finish. The fork-free group
+    listing sees the child, so the breach is decided without `ps`."""
+    guard = _group_guard(100, footprints={100: 2 * _MIB, 101: 400 * _MIB}, group=[100, 101])
+    sample = guard.sample_sync()
+    assert sample.membership == "group"
+    assert sample.rss_bytes is None  # ps was never needed
+    assert sample.bytes_used == 402 * _MIB
+    assert guard.should_kill(sample) is True
+
+
+def test_a_late_spawned_allocator_is_seen_the_tick_it_appears() -> None:
+    """Q1's third shape: `sleep 4; ( python alloc.py )` — nothing was in the group
+    when `ps` first failed. The listing is re-read every tick, so the allocator is
+    charged on the tick it exists, with `ps` still dead."""
+    group = [100]
+    footprints = {100: 2 * _MIB}
+    guard = _group_guard(100, footprints=footprints, group=None)
+    guard.group_probe = lambda pgid: list(group)
+    assert guard.should_kill(guard.sample_sync()) is False
+    group.append(101)
+    footprints[101] = 400 * _MIB
+    assert guard.should_kill(guard.sample_sync()) is True
+
+
+def test_an_empty_group_listing_is_the_command_ending_not_a_reading() -> None:
+    """``[]`` is an ANSWER (nothing left to charge) and ``None`` is not: an empty
+    listing must not fall back to the leader's stale footprint, and must not kill."""
+    guard = _group_guard(100, footprints={100: 400 * _MIB}, group=[])
+    sample = guard.sample_sync()
+    assert sample.bytes_used is None and guard.should_kill(sample) is False
+
+
+def test_an_unanswerable_listing_falls_back_to_the_leader_and_cached_members() -> None:
+    guard = _group_guard(100, footprints={100: 400 * _MIB}, group=None)
+    sample = guard.sample_sync()
+    assert sample.membership == "leader" and guard.should_kill(sample) is True
+
+
+def test_a_failing_ps_is_not_hammered() -> None:
+    """R3: `_members_at` used to be stamped only on success, so a failing `ps` was
+    re-forked every tick — measured 40 forks in 5 s. The attempt is now stamped on
+    failure too, with a backoff, and single-flight."""
+    import time
+
+    calls: list[int] = []
+
+    def failing(argv: list[str]) -> tuple[int, str]:
+        calls.append(1)
+        return 1, ""
+
+    budget = mg.Budget(100, 80, 4096, 16384, 2048, "auto", "test")
+    guard = mg.Guard(
+        100,
+        budget,
+        runner=failing,
+        footprint_probe=lambda pid: None,  # no fork-free reader either: ps is the only source
+        group_probe=lambda pgid: None,
+    )
+    guard._ps_next_at = 0.0
+    start = time.monotonic()
+    for _ in range(20):
+        guard.sample_sync()
+        time.sleep(0.05)
+    assert time.monotonic() - start < 4.0
+    # 2 attempts per read, and a 2 s backoff between reads: at most 2 reads in 1 s+.
+    assert len(calls) <= 2 * 2, calls
+
+
+def test_a_hung_ps_never_slows_the_breach_check() -> None:
+    """R3: with `ps` hung, every tick used to block for the whole 12 s budget, so
+    the fork-free breach check ran once per 12 s instead of per tick. The `ps` read
+    now runs on its own thread; the tick waits at most the grace period for it."""
+    import threading
+    import time
+
+    release = threading.Event()
+
+    def hung(argv: list[str]) -> tuple[int, str]:
+        release.wait(30)
+        return 1, ""
+
+    budget = mg.Budget(100, 80, 4096, 16384, 2048, "auto", "test")
+    guard = mg.Guard(
+        100,
+        budget,
+        runner=hung,
+        footprint_probe=lambda pid: 10 * _MIB,
+        group_probe=lambda pgid: None,  # listing unavailable, so ps discovery is wanted
+    )
+    try:
+        slowest = 0.0
+        for _ in range(8):
+            t0 = time.monotonic()
+            guard.sample_sync()
+            slowest = max(slowest, time.monotonic() - t0)
+        assert slowest < 1.0, f"a tick waited {slowest:.2f}s on a hung ps"
+    finally:
+        release.set()
+        if guard._ps_thread is not None:
+            guard._ps_thread.join(5)
+
+
+def test_a_breach_is_decided_without_consulting_ps_at_all() -> None:
+    calls: list[int] = []
+
+    def counting(argv: list[str]) -> tuple[int, str]:
+        calls.append(1)
+        return 0, "  100   100   1024"
+
+    budget = mg.Budget(100, 80, 4096, 16384, 2048, "auto", "test")
+    guard = mg.Guard(
+        100,
+        budget,
+        runner=counting,
+        footprint_probe=lambda pid: 400 * _MIB,
+        group_probe=lambda pgid: None,
+    )
+    assert guard.should_kill(guard.sample_sync()) is True
+    assert calls == []
 
 
 def test_should_kill_is_pure_over_a_none_usage() -> None:
@@ -699,7 +860,13 @@ def test_the_over_budget_message_fits_the_card_at_large_device_sizes() -> None:
     )
     for total_mb in (36864, 131072):
         budget = mg.Budget(3300, 2640, 6600, total_mb, 2048, "auto", "test")
-        guard = mg.Guard(100, budget, runner=_fake_runner(), footprint_probe=lambda pid: None)
+        guard = mg.Guard(
+            100,
+            budget,
+            runner=_fake_runner(),
+            footprint_probe=lambda pid: None,
+            group_probe=lambda g: None,
+        )
         message = guard.over_budget_message(sample)
         assert cell_len(message) <= REASON_MAX_CELLS, (total_mb, cell_len(message))
 
@@ -768,21 +935,36 @@ async def test_real_group_is_killed_at_the_ceiling_and_the_runtime_survives() ->
             procstate.terminate_process_tree(pgid, force=True)
 
 
-@pytest.mark.slow
-@pytest.mark.skipif(sys.platform != "darwin", reason="reads ri_phys_footprint via libproc")
-@pytest.mark.parametrize("ps_mode", ["small_rss", "ps_dead"])
-def test_a_real_footprint_runaway_is_killed_while_ps_reads_small_or_nothing(
-    ps_mode: str,
-) -> None:
-    """The incident shape against a REAL child and the REAL ``proc_pid_rusage`` read.
+def _has_fork_free_footprint_reader() -> bool:
+    """macOS (``proc_pid_rusage``) or a Linux with ``smaps_rollup`` (Pss)."""
+    import os
 
-    The child owns ~600 MB (touched, so it is dirty and counted) against a 300 MB
-    ceiling. ``ps`` is the one thing faked, and faked to what the incident saw: a
-    table row of 37 MB RSS (the measured reading beside a 4 GB hold, EVIDENCE E1),
-    or a ``ps`` that cannot answer at all (E5). A genuine RSS-below-footprint state
-    cannot be forced on demand — it needs the compressor to take the pages — so the
-    RSS side is injected and the FOOTPRINT side, the one the fix depends on, is the
-    kernel's own. The shipped guard read 0 kills in 8/8 ticks of this shape.
+    return sys.platform == "darwin" or (
+        sys.platform.startswith("linux") and os.path.exists("/proc/self/smaps_rollup")
+    )
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(
+    not _has_fork_free_footprint_reader(), reason="needs a fork-free footprint reader"
+)
+@pytest.mark.parametrize("shape", ["small_rss", "ps_dead", "ps_dead_descendant"])
+def test_a_real_footprint_runaway_is_flagged_for_kill_by_the_real_readers(shape: str) -> None:
+    """The incident shapes against a REAL child, the REAL footprint reader and the REAL
+    fork-free group listing. What this proves, and no more: **the guard's decision**
+    — ``should_kill`` is True within 2 ticks and the message is right. It does not
+    kill: the group is reaped in ``finally`` by the test, because the kill primitive
+    is covered by ``test_real_group_is_killed_at_the_ceiling_and_the_runtime_survives``
+    and by ``execute_bash``'s own path.
+
+    ``ps`` is the one thing faked, and faked to what the incident saw: a table row
+    of 37 MB RSS (the reading beside a 4 GB hold, EVIDENCE E1), or a ``ps`` that
+    cannot answer at all (E5). ``ps_dead_descendant`` is QA's Q1: the group leader is
+    a thin wrapper (a shell) and the allocator is its CHILD, so a leader-only
+    fallback measures ~0 — only the group listing sees it. A genuine
+    RSS-below-footprint state cannot be forced on demand (it needs the compressor to take
+    the pages), so the RSS side is injected and the footprint side, the one the fix
+    depends on, is the kernel's own.
     """
     import os
     import subprocess
@@ -790,51 +972,51 @@ def test_a_real_footprint_runaway_is_killed_while_ps_reads_small_or_nothing(
 
     from local_operator import procstate
 
+    hold = (
+        "import time; b = bytearray(b'\\x01') * (600 * 1024 * 1024); "
+        "print('ready', flush=True); time.sleep(60)"
+    )
+    if shape == "ps_dead_descendant":
+        argv = ["sh", "-c", f'{sys.executable} -c "{hold}"; echo done']
+    else:
+        argv = [sys.executable, "-c", hold]
     proc = subprocess.Popen(  # noqa: S603 — the test's own command
-        [
-            sys.executable,
-            "-c",
-            "import time; b = bytearray(b'\\x01') * (600 * 1024 * 1024); "
-            "print('ready', flush=True); time.sleep(60)",
-        ],
+        argv,
         start_new_session=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         text=True,
     )
+    pgid = proc.pid
     try:
         assert proc.stdout is not None and proc.stdout.readline().strip() == "ready"
         pgid = os.getpgid(proc.pid)
         table = f"  {pgid}   {pgid}   37888"  # 37 MB of RSS, as measured beside a 4 GB hold
 
         def ps_runner(argv: list[str]) -> tuple[int, str]:
-            if ps_mode == "ps_dead" or argv[:1] != ["ps"]:
+            if shape != "small_rss" or argv[:1] != ["ps"]:
                 return 1, ""
             return 0, table
 
         budget = mg.Budget(300, 240, 4096, 16384, 2048, "auto", "test")
-        guard = mg.Guard(pgid, budget, runner=ps_runner)  # default = the real footprint reader
-        killed_at = None
+        guard = mg.Guard(pgid, budget, runner=ps_runner)  # default readers: the real ones
+        flagged_at = None
         sample = None
         for tick in range(20):
             sample = guard.sample_sync()
             if guard.should_kill(sample):
-                killed_at = tick
-                procstate.terminate_process_tree(pgid, force=True)
+                flagged_at = tick
                 break
             time.sleep(0.1)
-        assert killed_at is not None and killed_at <= 2, f"not killed promptly: {sample}"
+        assert flagged_at is not None and flagged_at <= 2, f"not flagged promptly: {sample}"
         assert sample is not None and sample.footprint_bytes is not None
         assert sample.footprint_bytes >= 300 * _MIB
-        if ps_mode == "small_rss":
-            assert sample.footprint_bytes > 5 * 37888 * 1024  # the two instruments disagree
+        assert sample.rss_bytes is None or sample.rss_bytes < 100 * _MIB
+        if shape == "ps_dead_descendant":
+            assert sample.membership == "group"  # the descendant was found without ps
         message = guard.over_budget_message(sample)
         assert message.startswith("MEMORY LIMIT EXCEEDED: this command's process group reached ")
         assert "GB, over the 0.3 GB budget" in message
-        deadline = time.time() + 5
-        while time.time() < deadline and proc.poll() is None:
-            time.sleep(0.05)
-        assert proc.poll() is not None, "the killed group was not reaped"
     finally:
         if proc.poll() is None:
             procstate.terminate_process_tree(os.getpgid(proc.pid), force=True)

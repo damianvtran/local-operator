@@ -235,6 +235,15 @@ def _darwin_libproc() -> Any | None:
         # the one place the library is loaded, so :func:`_darwin_ppid_pgid` cannot
         # call it with ctypes' default ``int`` coercion of a ``void *`` (which
         # truncates on arm64).
+        # ``proc_listpids(type, typeinfo, buffer, buffersize)`` — same reason; the
+        # buffer is a ``void *`` that is NULL for the size query.
+        lib.proc_listpids.restype = ctypes.c_int
+        lib.proc_listpids.argtypes = [
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_int,
+        ]
         lib.proc_pidinfo.restype = ctypes.c_int
         lib.proc_pidinfo.argtypes = [
             ctypes.c_int,
@@ -341,6 +350,85 @@ def direct_ppid_pgid(pid: int) -> tuple[int, int] | None:
         return _darwin_ppid_pgid(pid)
     if sys.platform.startswith("linux"):
         return _linux_ppid_pgid(pid)
+    return None
+
+
+#: ``proc_listpids``'s selector for "every pid in the process group ``typeinfo``".
+_PROC_PGRP_ONLY = 2
+
+#: Headroom, in pids, added to the size query's answer before the fetch. A group
+#: that forks between the two calls would otherwise have its newest members
+#: truncated away silently; the kernel never writes past the buffer it is given,
+#: so this only widens what one tick can see, it is not a safety margin.
+_PGRP_LIST_SLACK = 64
+
+
+def _darwin_group_pids(pgid: int) -> list[int] | None:
+    """The pids in process group ``pgid`` via ``proc_listpids(PROC_PGRP_ONLY)``.
+
+    ``None`` when the host cannot answer (no libproc, a refused call); an EMPTY
+    list when the kernel answers and the group has no members, which is the
+    command having ended. Two calls — a size query (``NULL, 0``) and a sized
+    fetch — because the call returns BYTES and an undersized buffer silently
+    truncates the list rather than failing. Measured against
+    ``ps -axo pid=,pgid=`` on a ``sh -c "sleep & sleep & wait"`` group: identical
+    sets. No subprocess and no table walk, which is why the per-command guard can
+    use it as its PRIMARY membership source: ``ps`` is the first instrument to
+    time out under the memory pressure the guard exists for (0.42-13.6 s measured).
+    """
+    lib = _darwin_libproc()
+    if lib is None or pgid <= 0:
+        return None
+    try:
+        import ctypes
+
+        needed = lib.proc_listpids(_PROC_PGRP_ONLY, pgid, None, 0)
+        if needed < 0:
+            return None
+        if needed == 0:
+            return []
+        count = needed // ctypes.sizeof(ctypes.c_int) + _PGRP_LIST_SLACK
+        buffer = (ctypes.c_int * count)()
+        written = lib.proc_listpids(_PROC_PGRP_ONLY, pgid, buffer, ctypes.sizeof(buffer))
+        if written < 0:
+            return None
+        return [pid for pid in buffer[: written // ctypes.sizeof(ctypes.c_int)] if pid > 0]
+    except Exception:  # noqa: BLE001 — any probe failure is just missing data
+        return None
+
+
+def _linux_group_pids(pgid: int) -> list[int] | None:
+    """The pids whose ``/proc/<pid>/stat`` ``pgrp`` is ``pgid``, or ``None``.
+
+    A scan of ``/proc`` (one small read per process), the Linux analogue of the
+    call above; ``None`` only when ``/proc`` itself is unreadable. A process that
+    exits mid-scan is simply not listed.
+    """
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return None
+    members: list[int] = []
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        row = _linux_ppid_pgid(int(entry))
+        if row is not None and row[1] == pgid:
+            members.append(int(entry))
+    return members
+
+
+def direct_group_pids(pgid: int) -> list[int] | None:
+    """Members of process group ``pgid`` by a FORK-FREE read, or ``None`` = unknown.
+
+    The guard's membership source that does not depend on ``ps``. ``[]`` is an
+    ANSWER (the group is empty) and ``None`` is not one, and callers must not
+    conflate them: unknown never kills, an empty group has nothing to kill.
+    """
+    if sys.platform == "darwin":
+        return _darwin_group_pids(pgid)
+    if sys.platform.startswith("linux"):
+        return _linux_group_pids(pgid)
     return None
 
 
