@@ -973,8 +973,16 @@ class SessionTable:
                     config_dir(),
                     [conversation["session_id"] for conversation in conversations],
                 )
-            except (push_handles.PushHandleKeyCorrupt, OSError):
-                logger.warning("push handles unavailable for the unread aggregate", exc_info=True)
+            except (push_handles.PushHandleKeyCorrupt, OSError) as exc:
+                # One bounded line, no ``exc_info`` (the log hygiene the
+                # device registry states at `_push_call`): a phone polling
+                # the badge must not write a traceback per attempt while the
+                # key stands unreadable -- the sentence IS the diagnosis.
+                logger.warning(
+                    "push handles unavailable at %s: %s",
+                    push_handles.key_path(config_dir()),
+                    exc,
+                )
             else:
                 for conversation, handle in zip(conversations, handles, strict=True):
                     conversation["push_handle"] = handle
