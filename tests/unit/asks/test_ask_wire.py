@@ -782,6 +782,40 @@ def test_a_declined_ask_drops_its_draft(tmp_path: Path) -> None:
     assert queue.draft_question_ids(ask_id) == []
 
 
+def test_a_deadline_reclaims_the_partial_and_the_closed_row_carries_no_draft(
+    tmp_path: Path,
+) -> None:
+    """Review round 2's one new minor: the timed-out transition is DERIVED in the
+    fold, so it never passes through ``_settled`` — the tap had to be reclaimed
+    where the deadline is observed, and a closed ask's row must never state it."""
+    session, queue = _live_session(tmp_path)
+    clock = getattr(queue, "_test_clock")
+    ask_id = _multi_question_ask(queue)
+    queue.answer_one(ask_id, "q0", ["yes"], by="mirror")
+
+    # While the ask is OPEN the tap rides the rows — that is what advances the
+    # mirrored card — so this cell discriminates rather than asserting absence
+    # against a field that is never there.
+    open_row = next(row for row in queue.projection(drafts=True) if row["ask_id"] == ask_id)
+    assert open_row["draft_question_ids"] == ["q0"]
+
+    # Let the deadline elapse WITHOUT a reconcile first: this is the window the
+    # review measured, where the fold already says ``timed_out`` (it reads the
+    # clock) while the tap is still in memory, and a publish in it folds the
+    # clock rather than waiting for the tick.
+    record = queue.find(ask_id)
+    assert record is not None
+    clock["now"] = int(record["expires_at"]) + 1
+    late_row = next(row for row in queue.projection(drafts=True) if row["ask_id"] == ask_id)
+    assert late_row["status"] == store.STATUS_TIMED_OUT
+    assert "draft_question_ids" not in late_row
+
+    # ...and the live reconcile (the armed ``ask_timeout`` wake, and the boot
+    # drain) RECLAIMS the entry rather than leaving it to the runtime's lifetime.
+    asyncio.run(queue.reconcile(clock["now"]))
+    assert queue.draft_question_ids(ask_id) == []
+
+
 def test_the_session_bridge_stores_a_secret_at_the_tap_and_keeps_the_key(tmp_path: Path) -> None:
     """The legacy path must not put a secret value anywhere durable, not even in
     a draft held across taps."""
