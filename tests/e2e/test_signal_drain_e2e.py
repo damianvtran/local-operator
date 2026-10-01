@@ -951,6 +951,14 @@ async def test_a_turn_that_outlives_the_bound_is_cut_at_the_bound(
                 )
 
                 state = AttentionStore().state(conversation_identity(directory))
+                # AND IT IS NOT THE USER'S OWN STOP, whatever else it says: this
+                # runtime received an EXTERNAL SIGTERM nobody staged a marker for,
+                # which is the one mislabel the stop-attribution work exists to
+                # remove (2026-09-30: eleven sessions recorded "stopped by the
+                # user" for a signal no person sent). The cause token above is
+                # allowed to be the tool's own error; the KIND is not negotiable.
+                assert state.get("cause") != "user-stop", state
+                assert state.get("kind") != "interrupted", state
                 # THE CAUSE TOKEN IS NOT GUARANTEED, and asserting it made this
                 # cell flake under load (F1, QA round 2).
                 # ``Session._classify_cut_off`` leaves an event that already
@@ -966,5 +974,120 @@ async def test_a_turn_that_outlives_the_bound_is_cut_at_the_bound(
                 assert state.get("cause") in ("", "runtime-shutdown"), state
             finally:
                 await session.dispose()
+    finally:
+        await rig.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Stop attribution: the receipt a REAL runtime writes at signal arrival
+# ---------------------------------------------------------------------------
+#
+# The 2026-09-30 18:14 and 20:00 waves left victims with no record of the signal
+# that took them. These cells deliver a real SIGTERM to a real runtime and read the
+# artifact it leaves (``runtime-signal.json``): the signal's name and number, that no
+# stop was staged for it, that the sender is unavailable, and the run key. No cell
+# signals a process this file did not spawn.
+
+
+def _receipt(directory: Path) -> dict[str, Any] | None:
+    return registry.read_signal_receipt(directory)
+
+
+async def _wait_receipt(directory: Path, timeout: float = 90.0) -> dict[str, Any]:
+    """Wait for the receipt a real runtime writes at signal arrival.
+
+    GENEROUS BY CONSTRUCTION (QA round 1, Q2): the arrival is one small staged
+    write on the runtime's own loop, but that loop may be seconds behind under
+    fleet load, and a bound that is tighter than the work it waits on turns a
+    correct product into a red cell. Measured flake at load >20 with a 30 s bound.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        found = _receipt(directory)
+        if found is not None:
+            return found
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"no signal receipt appeared in {directory}")
+
+
+@pytest.mark.asyncio
+async def test_an_idle_runtime_leaves_a_receipt_for_an_unsanctioned_sigterm(
+    headless_tui_env: Path,
+) -> None:
+    config = headless_tui_env
+    rig = _Rig(config)
+    try:
+        with bounded(90, "signal receipt: idle SIGTERM"):
+            directory = rig.seed_and_spawn("rcptidle01")
+            record = await _wait_record(config, "rcptidle01")
+            os.kill(rig.children["rcptidle01"].pid, signal.SIGTERM)
+            assert rig.children["rcptidle01"].wait(timeout=30) == 0
+            receipt = _receipt(directory)
+            assert receipt is not None, "an idle runtime wrote no receipt for a SIGTERM"
+            entry = receipt["signals"][0]
+            assert (entry["name"], entry["number"]) == ("SIGTERM", 15)
+            assert entry["sanction"] == "none" and entry["stop_marker"] is None
+            assert entry["action"] == "stop" and entry["in_flight"] is False
+            assert entry["sender"]["state"] == "unavailable"
+            assert (receipt["kind"], receipt["session_id"]) == ("runtime", "rcptidle01")
+            assert receipt["pid"] == record.pid
+            assert registry.read_stop_marker(directory) is None, "nothing staged a stop"
+    finally:
+        await rig.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_runtime_signalled_mid_turn_writes_its_receipt_before_the_drain_ends(
+    headless_tui_env: Path,
+) -> None:
+    """The receipt lands AT ARRIVAL: while the turn is still in flight, not at exit."""
+    config = headless_tui_env
+    rig = _Rig(config)
+    try:
+        with bounded(150, "signal receipt: SIGTERM mid-turn"):
+            directory = rig.seed_and_spawn("rcptbusy01")
+            await _wait_record(config, "rcptbusy01")
+            await rig.park("rcptbusy01")
+            await _wait_record(config, "rcptbusy01", busy=True)
+            os.kill(rig.children["rcptbusy01"].pid, signal.SIGTERM)
+            receipt = await _wait_receipt(directory)
+            entry = receipt["signals"][0]
+            assert entry["action"] == "drain" and entry["in_flight"] is True
+            assert entry["sanction"] == "none"
+            assert rig.children["rcptbusy01"].poll() is None, "the drain must still be running"
+            os.kill(rig.children["rcptbusy01"].pid, signal.SIGTERM)  # a repeat
+            await asyncio.sleep(0.5)
+            again = _receipt(directory)
+            assert again is not None and again["count"] == 2
+            assert again["signals"][-1]["action"] == "repeat-absorbed"
+    finally:
+        await rig.aclose()
+
+
+@pytest.mark.asyncio
+async def test_stop_all_leaves_one_sweep_and_markers_that_name_it(
+    headless_tui_env: Path,
+) -> None:
+    from local_operator.session.runtime import stop_ledger
+
+    config = headless_tui_env
+    rig = _Rig(config)
+    try:
+        with bounded(120, "stop sweep ledger: stop_all"):
+            for session_id in ("sweepe2e01", "sweepe2e02", "sweepe2e03"):
+                rig.seed_and_spawn(session_id)
+            for session_id in ("sweepe2e01", "sweepe2e02", "sweepe2e03"):
+                await _wait_record(config, session_id)
+            outcomes = await control.stop_all(
+                timeout_s=10.0, own_pid=None, _root=config, _command="lop stop --all"
+            )
+            assert {o.method for o in outcomes} == {"socket"}
+            rows = stop_ledger.read_sweeps(config)
+            assert [r["phase"] for r in rows] == ["begin", "end"], rows
+            assert len(rows[0]["targets"]) == 3 and len(rows[1]["outcomes"]) == 3
+            for session_id in ("sweepe2e01", "sweepe2e02", "sweepe2e03"):
+                marker = registry.read_stop_marker(rig.directories[session_id])
+                assert marker is not None and marker["sweep_id"] == rows[0]["sweep_id"]
     finally:
         await rig.aclose()

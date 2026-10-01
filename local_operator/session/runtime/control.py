@@ -85,7 +85,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from local_operator import procstate
 from local_operator.buildwatch import KEPT_MATCHES, KEPT_UNSETTLED, moved_and_unsettled
 from local_operator.paths import config_dir
-from local_operator.session.runtime import registry
+from local_operator.session.runtime import registry, stop_ledger
 from local_operator.session.runtime.types import (
     HEARTBEAT_TIMEOUT_S,
     RUN_DIRNAME,
@@ -876,6 +876,7 @@ def _stop_marker_payload(
     deliberate: bool = True,
     actor: str = "",
     mechanism: str = "",
+    sweep_id: str = "",
 ) -> dict[str, Any]:
     """The durable evidence ONE act on a runtime leaves behind.
 
@@ -910,6 +911,11 @@ def _stop_marker_payload(
       has already been taught.
     * ``build`` — the TARGET's ``version@source_ref``, because the question
       this answers is which runtime died.
+    * ``sweep_id`` — present ONLY when the act was one target of a multi-session
+      sweep (:func:`stop_all`): the id of the ``stop-sweeps.jsonl`` rows that name
+      the whole sweep, so a victim joins to its sweep. Absent rather than empty
+      otherwise, so every marker a single stop writes stays byte-identical to what
+      every reader has already been taught.
 
     ``Any`` rather than ``SessionRecord`` because two record kinds carry the same
     run: a ``SessionRecord`` for a runtime that is up, and the ``BootRecord`` of
@@ -950,6 +956,8 @@ def _stop_marker_payload(
     if not deliberate:
         payload["actor"] = actor
         payload["mechanism"] = mechanism
+    if sweep_id:
+        payload["sweep_id"] = sweep_id
     return payload
 
 
@@ -960,6 +968,7 @@ def note_involuntary_stop(
     mechanism: str,
     actor: str = "",
     command: str = "",
+    sweep_id: str = "",
 ) -> bool:
     """Stage the durable stop marker for a runtime an INVOLUNTARY act is about to take away.
 
@@ -1025,6 +1034,7 @@ def note_involuntary_stop(
         deliberate=False,
         actor=actor,
         mechanism=mechanism,
+        sweep_id=sweep_id,
     )
     try:
         registry.write_stop_marker(session_dir(root, session_id), payload)
@@ -1088,7 +1098,9 @@ def withdraw_involuntary_stop(record: Any, root: Path, *, mechanism: str) -> boo
     return True
 
 
-def _write_stop_marker(record: SessionRecord, root: Path, rung: Method, *, command: str) -> None:
+def _write_stop_marker(
+    record: SessionRecord, root: Path, rung: Method, *, command: str, sweep_id: str = ""
+) -> None:
     """Stage the durable stop marker BEFORE the step it attests to.
 
     RETURNS NOTHING, because a return value here would be a second, weaker
@@ -1122,7 +1134,7 @@ def _write_stop_marker(record: SessionRecord, root: Path, rung: Method, *, comma
     a caller that ever moves one of these calls below its rung has broken the
     thing the file is for.
     """
-    payload = _stop_marker_payload(record, rung, command=command)
+    payload = _stop_marker_payload(record, rung, command=command, sweep_id=sweep_id)
     try:
         registry.write_stop_marker(session_dir(root, record.session_id), payload)
     except OSError:
@@ -1171,7 +1183,7 @@ def _withdraw_staged_stop_marker(record: SessionRecord, root: Path) -> None:
 
 
 async def _graceful_stop(
-    record: SessionRecord, timeout_s: float, root: Path, *, command: str
+    record: SessionRecord, timeout_s: float, root: Path, *, command: str, sweep_id: str = ""
 ) -> bool:
     """Rung 1: ask the runtime to stop itself, wait out the clean exit.
 
@@ -1201,7 +1213,7 @@ async def _graceful_stop(
     reply = await _exchange(record, {"op": "stop"}, reply_timeout_s=timeout_s)
     if reply is None or reply.get("op") != "ack":
         return False
-    _write_stop_marker(record, root, "socket", command=command)
+    _write_stop_marker(record, root, "socket", command=command, sweep_id=sweep_id)
     return await _await_stopped(record, timeout_s, root)
 
 
@@ -1276,6 +1288,7 @@ async def stop_session(
     _root: Path | None = None,
     _command: str = "control.stop_session",
     on_wait: Callable[[str], None] | None = None,
+    _sweep_id: str = "",
 ) -> StopOutcome:
     """Stop one live session by its discovery record. Never raises.
 
@@ -1449,7 +1462,7 @@ async def stop_session(
     # Rung 1 — the graceful op. Both its failure shapes are scheduled misses:
     # an unreachable socket means already-gone-or-crashed, an error reply
     # means an older runtime. Either way the ladder continues.
-    if await _graceful_stop(record, timeout_s, root, command=_command):
+    if await _graceful_stop(record, timeout_s, root, command=_command, sweep_id=_sweep_id):
         wakes = await _park_wakes(record, root)
         monitors = await _park_monitors(record, root)
         _recover_record(record, root)
@@ -1618,7 +1631,7 @@ async def stop_session(
     # that the process never gets to handle (frozen, starved) is
     # indistinguishable afterwards from a crash, UNLESS the sender said so
     # before sending.
-    _write_stop_marker(record, root, "sigterm", command=_command)
+    _write_stop_marker(record, root, "sigterm", command=_command, sweep_id=_sweep_id)
     # Rung 2 is a REQUEST, so its wait must outlast the receiver's own drain
     # (``SIGTERM_GRACE_S``). Rung 3's budget is deliberately not this one: see
     # ``SIGKILL_CONFIRM_S``.
@@ -1664,7 +1677,7 @@ async def stop_session(
     # stop the user had asked for. The write is immediately before the signal
     # and names sigkill, so the next reader learns which rung killed it, that
     # it was deliberate, and who did it.
-    _write_stop_marker(record, root, "sigkill", command=_command)
+    _write_stop_marker(record, root, "sigkill", command=_command, sweep_id=_sweep_id)
     # ``hard_kill_signal()`` is SIGKILL on POSIX — the identical value this rung
     # has always sent there — and None on Windows, where it selects the
     # terminate-the-tree path above instead of raising AttributeError.
@@ -1839,6 +1852,14 @@ async def stop_all(
     own token explicitly, and ``tests/unit/test_cli_stop.py`` pins that the CLI
     does.
 
+    ONE SWEEP RECORD PER CALL (``stop_ledger``): a ``begin`` row naming every
+    target is written BEFORE the first marker or signal, an ``end`` row with the
+    outcomes after, and each marker this call stages carries the sweep's id. Only
+    when at least one target is acted on — N=0 writes nothing, and a single
+    :func:`stop_session` is not a sweep. This is the one wave a cooperating party
+    can record as a unit; a wave nobody staged anything for leaves per-victim
+    receipts and no sweep row, by design.
+
     Sequential, not concurrent: the graceful rung waits up to ``timeout_s``
     per uncooperative session, and a fan-out would hold every target's wait
     open at once — the opposite of what a user pressing a kill switch wants
@@ -1853,9 +1874,34 @@ async def stop_all(
     """
     root = _root if _root is not None else config_dir()
     outcomes: list[StopOutcome] = []
-    for record in _stop_targets(root, own_pid=own_pid):
-        if only_pids is not None and record.pid not in only_pids:
-            continue
+    # THE TARGET LIST IS FIXED BEFORE ANYTHING ACTS, so the sweep's ``begin`` row
+    # can name every target ahead of the first marker or signal (see
+    # ``stop_ledger``). A target another account owns is REFUSED, never acted on,
+    # so it is not a sweep target: a sweep is the set of runtimes this process is
+    # about to take down, and N=0 of those writes no row at all.
+    candidates = [
+        record
+        for record in _stop_targets(root, own_pid=own_pid)
+        if only_pids is None or record.pid in only_pids
+    ]
+    acting = [record for record in candidates if _same_uid(record)]
+    sweep_id = ""
+    if acting:
+        sweep_id = stop_ledger.begin_sweep(
+            mechanism="stop-all",
+            command=_command,
+            targets=[
+                {
+                    "session_id": record.session_id,
+                    "pid": record.pid,
+                    "rec_kind": record.kind,
+                    "name": record.conversation_name or record.session_id,
+                }
+                for record in acting
+            ],
+            root=root,
+        )
+    for record in candidates:
         if not _same_uid(record):
             outcomes.append(
                 StopOutcome(
@@ -1878,9 +1924,30 @@ async def stop_all(
                 _root=root,
                 _command=_command,
                 on_wait=on_wait,
+                _sweep_id=sweep_id,
             )
         )
+    if sweep_id:
+        stop_ledger.end_sweep(
+            sweep_id,
+            [
+                {"session_id": o.session_id, "pid": o.pid, "method": o.method}
+                for o in outcomes
+                if _was_acted_on(o.pid, acting)
+            ],
+            root=root,
+        )
     return outcomes
+
+
+def _was_acted_on(pid: int, acting: list[SessionRecord]) -> bool:
+    """Whether ``pid`` is one of the targets this sweep ACTED on.
+
+    Named for what it answers rather than for the comparison it performs: the
+    sweep's ``end`` row lists outcomes for the runtimes the sweep took down, and a
+    refused foreign target is not one of them (agent review round 1, NIT 1).
+    """
+    return any(record.pid == pid for record in acting)
 
 
 #: Outcomes that count as "the session is no longer running", i.e. the stop

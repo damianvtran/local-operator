@@ -665,3 +665,32 @@ async def test_the_unpublished_surface_is_closed_before_it_is_reported(
     with pytest.raises(RuntimeError, match="never published its record"):
         await start_exec_control(session, cwd="/tmp")
     assert order == ["closed"], "the runtime this run started was left behind"
+
+
+def test_a_supervisor_stop_is_classified_deliberate_not_unattributed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(c) the supervisor's ``stop`` op cancels the run's lifetime (the socket half is pinned by
+    ``test_stop_op_aborts_rather_than_disposing_under_the_run``); the worker's terminal row must
+    then read ``cancelled`` / ``deliberate`` / ``via control-stop`` and never ``unattributed-*``.
+
+    Drives the REAL ``exec_worker.run`` path that observes that cancellation (on the main
+    thread, because it installs a real SIGTERM handler through its own loop) and hands the
+    carried facts to the REAL ledger classifier.
+    """
+    from local_operator import exec_mode, exec_worker
+
+    async def _cancelled(*_a: Any, **_k: Any) -> int:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr("local_operator.exec_session.run_session", _cancelled)
+    parsed = exec_worker.build_parser().parse_args(["--prompt", "p"])
+    facts: dict[str, Any] = {}
+    factory: Any = lambda: FakeSession()  # noqa: E731 — a test double, not a SessionProtocol
+    code = exec_worker.run(parsed, session_factory=factory, stop_facts=facts)
+    assert code == exec_worker.EXIT_INTERRUPTED
+    assert facts["via"] == "control-stop" and "signal" not in facts
+    status, detail = exec_mode.classify_exit(code, facts)
+    assert status == "cancelled"
+    assert detail["stop_class"] == "deliberate" and detail["stop"]["via"] == "control-stop"
+    assert "unattributed" not in json.dumps(detail)
