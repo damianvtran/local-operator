@@ -15393,15 +15393,38 @@ class Session:
             # in one step, so the cheap proof must also bound the current
             # history. Reuse the planner's conservative ruler, not a second
             # token heuristic calibrated to typical tool outputs.
-            current_bound = compaction_api.messages_tokens_upper_bound(
-                self._render_history(messages)
-            )
+            # The SAME byte figure the plan gate below will use, taken off the
+            # same render. Without it this gate is BYTE-BLIND, and that is a
+            # reachable hole rather than a theoretical one: the plan gate
+            # (:meth:`_plan_compaction`) passes ``wire_bytes`` at both of its
+            # token gates, but this gate returns BEFORE it, so a payload over
+            # the 16 MB soft trigger while under every token threshold answers
+            # "no pass due" here and the plan gate is never reached at that
+            # boundary. Measured on a 24-frame screenshot history at the wire
+            # ruler's own frame size (19,293,593 bytes of payload, a
+            # 29,081-token upper bound against a 600k/800k trigger, a
+            # provider-reported 60k): zero compaction events at the boundary,
+            # against one for the identical history as soon as this gate is
+            # bypassed — no provider figure — or reached through the post-turn
+            # gate.
+            #
+            # Costs one byte sum over a list this line already rendered and
+            # throws away — no tokenizer, ``_wire_bytes_of`` is structural —
+            # which is the same trade the plan gate's own pre-gate makes and
+            # for the same reason. Bytes, like advice, can only make a pass
+            # fire EARLIER, so the monotonicity the upper-bound proof on the
+            # token side depends on is untouched; a figure that over-states
+            # this render can at worst fall through to a plan gate that
+            # re-derives its own and returns ``below_threshold``.
+            rendered = self._render_history(messages)
+            current_bound = compaction_api.messages_tokens_upper_bound(rendered)
             if not _should_compact(
                 compaction_api,
                 max(provider_reported, current_bound),
                 self.effective_model.context_window,
                 settings,
                 self._has_pending_advisory(settings),
+                self._wire_bytes_of(compaction_api, rendered),
             ):
                 # A background pass that just landed still has to reach the
                 # loop, or the run accumulator keeps the history the pass
@@ -16027,7 +16050,12 @@ class Session:
             advisor_hint=(
                 advisor_hint
                 if advisory_ok
-                and not self._fires_on_size_alone(compaction_api, context_tokens, settings)
+                and not self._fires_on_size_alone(
+                    compaction_api,
+                    context_tokens,
+                    settings,
+                    self._wire_bytes_of(compaction_api, llm_history),
+                )
                 else None
             ),
         )
@@ -16713,7 +16741,9 @@ class Session:
             await self._emit(CompactionEndEvent(reason=reason, success=False))
             return CompactionOutcome(ran=False, reason="failed", detail=f"compaction failed: {exc}")
 
-    def _fires_on_size_alone(self, compaction_api: Any, context_tokens: int, settings: Any) -> bool:
+    def _fires_on_size_alone(
+        self, compaction_api: Any, context_tokens: int, settings: Any, wire_bytes: int
+    ) -> bool:
         """Would this context have compacted with NO advice at all?
 
         The one place that question is asked, because two different decisions
@@ -16726,6 +16756,24 @@ class Session:
         Asked through the same ``should_compact`` the gate itself uses, with
         ``advisory_ok=False``, so this is a reading of the one resolved trigger
         rather than a second notion of the ceiling.
+
+        ``advisory_ok=False`` is the whole meaning of "alone": advice is the
+        one input this question exists to exclude. ``wire_bytes`` is REQUIRED
+        and is NOT advice — the byte term is size, and leaving it out made this
+        predicate answer "the advice caused it" for a payload the byte trigger
+        would have fired by itself. Those two are exactly the inputs
+        ``should_compact`` OR-s in above its token term; excluding one and
+        forgetting the other is how a size pass came to claim advisor credit —
+        and, through :meth:`_settle_advisor`, to switch the advisor OFF for the
+        rest of the session on a pass it never caused. That is the round-5
+        MINOR-2 outcome re-entered through the byte arm. It is a required
+        argument rather than a defaulted one for that reason: a default of 0
+        would restore the identical blind spot at the next call site.
+
+        Both callers hold the payload the pass will actually send, so neither
+        invents a figure: ``_plan_compaction`` measures the post-prune
+        ``llm_history`` it just gated on, and :meth:`_pass_may_run_off_the_turn`
+        measures ``plan.llm_history`` from that same plan.
         """
         return _should_compact(
             compaction_api,
@@ -16733,6 +16781,7 @@ class Session:
             self.effective_model.context_window,
             settings,
             False,
+            wire_bytes,
         )
 
     def _pass_may_run_off_the_turn(self, plan: _CompactionPlan) -> bool:
@@ -16762,10 +16811,15 @@ class Session:
         Expressed through :meth:`_fires_on_size_alone`, which is also what
         decides whether the advisor may be credited with a pass — the two
         answers have to come from one question, or a pass could be deferred as
-        "advisory" while being attributed to size, or the reverse.
+        "advisory" while being attributed to size, or the reverse. Both call it
+        with the plan's own ``llm_history``, so "size alone" is read off the
+        payload the pass would send rather than off a token figure for it.
         """
         return not self._fires_on_size_alone(
-            plan.compaction_api, plan.context_tokens, plan.settings
+            plan.compaction_api,
+            plan.context_tokens,
+            plan.settings,
+            self._wire_bytes_of(plan.compaction_api, plan.llm_history),
         )
 
     def _spawn_compaction_pass(self, plan: _CompactionPlan, *, reason: str) -> None:
