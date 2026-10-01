@@ -103,6 +103,7 @@ from local_operator.session.runtime.types import (
     INPUT_MODE_CAPABILITY,
     OPERATOR_SIGNATURE_CAPABILITY,
     PEER_MESSAGE_ID_CAPABILITY,
+    QUEUED_MOVE_CAPABILITY,
     RUNTIME_RECORD_KIND,
     ClientKind,
     ClientLocality,
@@ -1028,6 +1029,43 @@ _SYNC_LOCAL_OPS = frozenset(
         "event_unmute",
     }
 )
+
+
+#: How often the queued move's watcher re-checks the boundary and the record
+#: (design note §5.4). Half a second is the worst-case latency between a turn
+#: ending and the move pausing, and the poll is one tiny-file read plus one hop
+#: to the session loop.
+QUEUED_MOVE_TICK_S = 0.5
+
+#: Default for ``network.move.attach_window_s``: how long a queued move holds
+#: for attached clients to convert to remote viewers or detach cleanly before
+#: the retirement commits. Matches the existing handoff announcements' window
+#: (OQ13); the key is read at the moment of use so an operator's change lands
+#: on the next queued move without a runtime restart.
+QUEUED_MOVE_DEFAULT_WINDOW_S = 30.0
+
+
+def _queued_move_window_s(root: Path) -> float:
+    """The attach window for a queued move, clamped to sanity.
+
+    ``read_config`` is the network package's one reader for ``network.*`` keys;
+    a malformed value is the default rather than an error — a move must not
+    fail on a config typo — and the clamp bounds a hostile or fat-fingered
+    value to an hour.
+    """
+    from local_operator.network.store import read_config
+
+    try:
+        value = float(
+            read_config(
+                ("network", "move", "attach_window_s"),
+                QUEUED_MOVE_DEFAULT_WINDOW_S,
+                root=root,
+            )
+        )
+    except (TypeError, ValueError):
+        return QUEUED_MOVE_DEFAULT_WINDOW_S
+    return max(0.0, min(value, 3600.0))
 
 
 def _running_loop() -> asyncio.AbstractEventLoop | None:
@@ -1961,6 +1999,18 @@ class RuntimeServer:
                 # and the desktop gates the move on seeing this exact string —
                 # so a partial owner must NOT have it.
                 + ([EXCLUSIVE_MOVE_CAPABILITY] if hasattr(handle, "begin_retire") else [])
+                # The queued move's own gate, and it needs BOTH latches: the
+                # intent install er is the flag (no fence), but the cancel
+                # race's unwind (``end_retire``) is what keeps a latched-and-
+                # abandoned departure from wedging the session. A handle
+                # missing either half must not advertise it, so the relay
+                # fails closed instead of installing an intent nobody can
+                # honour.
+                + (
+                    [QUEUED_MOVE_CAPABILITY]
+                    if hasattr(handle, "begin_retire") and hasattr(handle, "end_retire")
+                    else []
+                )
                 # A SECOND string for the same op, because the one above is a
                 # bare presence flag with no version handshake and cannot say
                 # "this owner also pages pre-compaction history". The page
@@ -2146,6 +2196,20 @@ class RuntimeServer:
         #: facade admitted now would engage the successor from its own cwd
         #: (review round 2, N6). Monotonic: a runtime never un-latches.
         self._retirement_committed = False
+        #: The queued move's intent (design note §5.4), or ``None``. A FLAG,
+        #: deliberately NOT ``_exclusive_move_fence`` above: the fence refuses
+        #: attach admission, while the queued move's contract is the opposite
+        #: — announce attached clients and hold a bounded window for them. Set
+        #: by the ``queue_move`` op (this device's relay delivers it), cleared
+        #: by the watcher when the record ends under it or the retirement
+        #: commits. Runtime memory only, by design: the durable record is the
+        #: relay-owned file, and a dead runtime's intent re-arms from it.
+        self._queued_move: dict[str, Any] | None = None
+        #: The watcher's last stage ("", "finishing", "paused", "retiring") —
+        #: what the relay's delivery polls see in the ``queue_move`` reply.
+        self._queued_move_stage = ""
+        #: The one watcher task, started on the first ``queue_move`` op.
+        self._queued_move_task: asyncio.Task[None] | None = None
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._unsubscribe: Callable[[], None] | None = None
@@ -5796,6 +5860,16 @@ class RuntimeServer:
                             self._exclusive_move_fence = None
                 else:
                     detail = await self._retire_for("moved")
+            elif op == "queue_move":
+                # THE QUEUED MOVE'S INTENT (design note §5.4; the sender is
+                # always this device's relay, ``network/move_queue.py``). The
+                # intent is a FLAG — deliberately not ``_exclusive_move_fence``,
+                # whose whole job is refusing attach admission, which is the
+                # opposite of what the queue does: attached clients are to be
+                # announced and given a window to follow or detach. Handled
+                # HERE, with the retire family, because it is a lifecycle op
+                # that must not trigger the post-ack refresh.
+                detail = self._queue_move_op(conn, frame)
             elif op == "refresh_if_idle":
                 # The viewer-side belt for the runtime's own self-refresh
                 # (design-runtime-autorefresh §3.3): a `lop --resume` in the
@@ -6359,6 +6433,244 @@ class RuntimeServer:
         logger.info("session runtime: retiring (%s)", reason_label)
         await self._handle_call_on_session_loop(request_stop)
         return "retiring"
+
+    # -- the queued move (design note §5.4) ---------------------------------
+
+    def _queue_move_op(self, conn: _ClientConn, frame: dict[str, Any]) -> dict[str, Any]:
+        """The ``queue_move`` op body: install/refresh the intent, report the stage.
+
+        Idempotent by construction — re-sending the intent is the same intent
+        (the driver re-delivers after a runtime restart; see
+        ``network/move_queue.py``) — and deliberately cheap: it only records the
+        intent and makes sure the watcher exists. The work happens at the
+        boundary, in :meth:`_queued_move_watch`.
+        """
+        if conn.kind != "attach" or id(conn.writer) not in self._clients:
+            # Same shape gate as ``desktop_watch``: the queue's sender is a
+            # live attach connection (this device's relay). A refusal travels
+            # as the dispatcher's error frame.
+            raise ValueError("a queued move requires a live attach connection")
+        if not callable(getattr(self._handle, "begin_retire", None)) or not callable(
+            getattr(self._handle, "end_retire", None)
+        ):
+            # The capability advertises exactly this pair; the check here is
+            # belt to the wire's braces, and the sentence matches the relay's
+            # own fold so both ends say one thing.
+            raise ValueError("this runtime cannot queue a move; reload it first")
+        to_device = str(frame.get("to_device") or "")
+        to_name = str(frame.get("to_name") or "") or to_device
+        existing = self._queued_move or {}
+        self._queued_move = {
+            "to_device": to_device,
+            # The FIRST delivery's instant is kept: it is when the user asked,
+            # and a re-delivery after a restart must not re-date the request.
+            "at": float(existing.get("at") or time.time()),
+            "to_name": to_name,
+        }
+        self._ensure_queued_move_watcher()
+        return {
+            "stage": self._queued_move_stage or "queued",
+            "to_device": to_device,
+            "to_name": to_name,
+        }
+
+    def _ensure_queued_move_watcher(self) -> None:
+        """Start the watcher if it is not already running (idempotent)."""
+        task = self._queued_move_task
+        if task is not None and not task.done():
+            return
+        loop = _running_loop()
+        if loop is None:
+            # A reduced host driving the op body off the runtime loop has
+            # nowhere to schedule this; the intent stays set and a later op
+            # from the loop path starts the watcher. Belt, not the wire path.
+            return
+        self._queued_move_task = loop.create_task(self._queued_move_watch())
+
+    async def _queued_move_watch(self) -> None:
+        """Watch for the queued move's safe point; then pause, announce, retire.
+
+        THE SEQUENCE (design note §5.4), and each step's reason:
+
+        1. THE RECORD GATES EVERYTHING. A ``--cancel-queued``, a fold by the
+           relay, or a commit that overtook this runtime all read the same way:
+           the intent is dead and this stands down. Re-read before every step,
+           so a cancel is still honoured while the move is ``finishing``.
+        2. THE BOUNDARY is ``is_busy`` — the design's own predicate (a live
+           turn, a parked gate, a running goal loop, live subagents and
+           background jobs). The queue refuses to drain turns; it waits for
+           one to end.
+        3. THE LATCH (``begin_retire``) runs its check and its commit as ONE
+           hop, and from there every admission refuses: this is the design's
+           ``paused`` — "quiesced: no new turns admitted".
+        4. THE CLAIM (``move_queue.claim_pause``) writes ``paused`` on the
+           record under the same lock ``--cancel-queued`` takes. It is the
+           cancel point of no return, and doing it in THIS order (latch, then
+           claim) is what makes the cancel race correct: a cancel that wins
+           the lock leaves the claim unwritable, and the latch is then
+           released with ``end_retire`` so the session serves again — a
+           latched runtime left holding a cancelled move would refuse every
+           admission for the rest of its life.
+        5. ANNOUNCE + WINDOW. ``move_pending`` goes to every attached client,
+           then the bounded window (``network.move.attach_window_s``, default
+           30 s) runs. Skipped entirely when NO attach client is registered:
+           there is nobody the window could be for, and every other case pays
+           30 s for an empty room. (A client that attaches during the window
+           is admitted — no fence is held, by design — and hears the
+           retirement below like everyone else.)
+        6. RETIRE: the ordinary ``retiring`` announcement, carrying
+           ``reason: "moved"`` and the destination's name in ``to`` — the
+           frame a client turns into ``MOVED_REASON``, going cold WITHOUT the
+           local re-engage a build refresh would justify — then the ordinary
+           stop request. The copy that follows is the relay's
+           (``network/move_queue.py``); this runtime's part ends here.
+        """
+        try:
+            await self._queued_move_run()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — a watcher must never take the server down
+            logger.warning(
+                "queued move: the watcher failed for %s", self._record.session_id, exc_info=True
+            )
+            self._queued_move = None
+            self._queued_move_stage = ""
+
+    async def _queued_move_run(self) -> None:
+        """One pass's loop body — split from the wrapper for the try/finally above."""
+        from pathlib import Path
+
+        from local_operator.network import move_queue
+
+        session_id = self._record.session_id
+        # Function-local like the import above: this module deliberately keeps
+        # its stdlib path imports at the point of use rather than widening the
+        # module namespace for one reader.
+        root = Path(getattr(self, "_config_root", None) or config_dir())
+
+        while True:
+            if self._closed.is_set() or self._queued_move is None:
+                return
+            movement = dict(self._queued_move)
+            to_device = str(movement.get("to_device") or "")
+            to_name = str(movement.get("to_name") or "") or to_device
+
+            # 1. THE RECORD GATES EVERYTHING. A small JSON read; kept
+            #    synchronous because it is a file read of a few hundred bytes
+            #    on a half-second cadence, not a per-turn cost.
+            try:
+                record = move_queue.read_record(root, session_id)
+            except Exception:  # noqa: BLE001 — an unreadable record is "stand by"
+                record = None
+            phase = str((record or {}).get("phase") or "")
+            already_claimed = phase == move_queue.QUEUE_PHASE_PAUSED
+            if not already_claimed and phase not in (
+                move_queue.QUEUE_PHASE_QUEUED,
+                move_queue.QUEUE_PHASE_FINISHING,
+            ):
+                # Absent, or terminal for this runtime's purposes (cancelled,
+                # failed, resumed, or already copying): the intent is dead.
+                # ``paused`` is handled above: a previous process claimed the
+                # pause and died before retiring, and the claim IS the
+                # commitment — this process re-runs the tail.
+                self._queued_move = None
+                self._queued_move_stage = "cancelled" if not phase else phase
+                return
+
+            # 2. THE BOUNDARY.
+            #    ``getattr`` probe rather than a direct call: the base
+            #    ``SessionHandle`` protocol does not publish ``is_busy``, and a
+            #    reduced host without it has no turn to wait for — the same
+            #    probe shape the dispatcher's other capability reads use.
+            busy_probe = getattr(self._handle, "is_busy", None)
+            busy = (
+                bool(await self._handle_call_on_session_loop(busy_probe))
+                if callable(busy_probe)
+                else False
+            )
+            if busy:
+                self._queued_move_stage = "finishing"
+                await asyncio.sleep(QUEUED_MOVE_TICK_S)
+                continue
+
+            # 3. THE LATCH.
+            if not already_claimed:
+                begin_retire = getattr(self._handle, "begin_retire", None)
+                latched = (
+                    await self._handle_call_on_session_loop(
+                        begin_retire,
+                        "moved",
+                        f"moving to {to_name}" if to_name else "moving to another device",
+                    )
+                    if callable(begin_retire)
+                    else False
+                )
+                if not latched:
+                    # Work arrived between the probe and the latch (the latch
+                    # re-checks in its own synchronous step): back to waiting.
+                    self._queued_move_stage = "finishing"
+                    await asyncio.sleep(QUEUED_MOVE_TICK_S)
+                    continue
+
+                # 4. THE CLAIM — the cancel race's fulcrum.
+                _claimed, outcome = await asyncio.to_thread(
+                    move_queue.claim_pause, root, session_id
+                )
+                if outcome not in ("claimed", "already"):
+                    # The cancel (or a fold) took the lock first. Release the
+                    # latch so the session serves again and stand down; the
+                    # record already says why (cancelled / failed / ahead).
+                    # ``already`` is NOT an error: the record says ``paused``,
+                    # which is this very step done by an earlier instance of
+                    # this process — the claim IS the commitment, so proceed.
+                    released = False
+                    end_retire = getattr(self._handle, "end_retire", None)
+                    if callable(end_retire):
+                        released = await self._handle_call_on_session_loop(end_retire)
+                    logger.info(
+                        "queued move: stood down for %s (record was %s, latch released: %s)",
+                        session_id,
+                        outcome,
+                        released,
+                    )
+                    self._queued_move = None
+                    self._queued_move_stage = "cancelled"
+                    return
+            self._queued_move_stage = "paused"
+
+            # 5. ANNOUNCE + WINDOW.
+            viewers = [conn for conn in list(self._clients.values()) if conn.kind == "attach"]
+            if viewers:
+                frame = {
+                    "op": "move_pending",
+                    "session_id": session_id,
+                    "to": to_name,
+                    "to_device": to_device,
+                }
+                await asyncio.gather(*(self._send_to(conn, frame) for conn in viewers))
+                window = _queued_move_window_s(root)
+                if window > 0:
+                    await asyncio.sleep(window)
+
+            # 6. RETIRE.
+            self._queued_move_stage = "retiring"
+            await self.announce_retiring("moved", to=to_name)
+            self._retirement_committed = True
+            request_stop = getattr(self._handle, "request_stop", None)
+            if callable(request_stop):
+                await self._handle_call_on_session_loop(request_stop)
+            else:
+                # The queue op gates on the retire pair, not on this call, so
+                # a handle without ``request_stop`` can reach here in a
+                # reduced host. The announcement is already out: say what
+                # could not be done rather than pretending the session left.
+                logger.warning(
+                    "queued move: handle for %s has no request_stop; the runtime stays up",
+                    session_id,
+                )
+            self._queued_move = None
+            self._queued_move_stage = ""
+            return
 
     async def _already_admitted(self, op: str, frame: dict[str, Any]) -> bool:
         """Is this a retry of a turn the transcript already carries?

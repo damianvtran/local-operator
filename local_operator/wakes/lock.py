@@ -181,14 +181,29 @@ class WakeWriteLock:
         *,
         timeout_s: float = LOCK_WAIT_S,
         name: str = WAKE_LOCK_NAME,
+        busy_sentence: str = "",
     ) -> None:
-        # ``name`` is injectable for the ONE other lock that reuses this class
+        # ``name`` is injectable for the other locks that reuse this class
         # rather than copying its platform handling: Aida's root-level
         # ``ensure.lock`` (``local_operator.aida.state``), which guards her
-        # state files rather than a session's wakes. Every existing caller
-        # keeps the default and the session-directory location.
+        # state files rather than a session's wakes, and the mesh move queue's
+        # per-record lock (``network/move_queue.py``), whose record is written
+        # by the relay and by ``--cancel-queued`` from another process. Every
+        # existing caller keeps the default and the session-directory
+        # location.
         self.path = Path(directory) / name
         self.timeout_s = timeout_s
+        #: The refusal a timed-out acquire raises, injectable for the same
+        #: reason ``name`` is: the queue lock's copy must talk about the move
+        #: queue, not about wakes (a person reading "this conversation's
+        #: wakes" off a move-cancel button would chase the wrong subsystem).
+        #: Empty (the default) keeps the wake wording every existing caller
+        #: has always shown.
+        self.busy_sentence = busy_sentence or (
+            "Another writer is applying a change to this conversation's wakes. "
+            "Retry in a moment — on a very large conversation this can take a "
+            "while, and a later retry will succeed."
+        )
         self._fd: int | None = None
 
     def acquire(self) -> None:
@@ -219,11 +234,7 @@ class WakeWriteLock:
                     self._fd = fd
                     return
                 if time.monotonic() >= deadline:
-                    raise WakeLockBusy(
-                        "Another writer is applying a change to this conversation's wakes. "
-                        "Retry in a moment — on a very large conversation this can take a "
-                        "while, and a later retry will succeed."
-                    )
+                    raise WakeLockBusy(self.busy_sentence)
                 time.sleep(sleep_s)
                 sleep_s = min(sleep_s * 1.5, _LOCK_RETRY_SLEEP_MAX_S)
         except BaseException:
