@@ -1807,6 +1807,29 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         # disagree about one machine's state.
         raise HTTPException(503, {"code": error.code, "message": error.sentence}) from None
     except ConnectionError as error:
+        if getattr(error, "runtime_alive", False):
+            # THE OWNER IS ALIVE AND SIMPLY DID NOT ANSWER THIS REQUEST IN TIME
+            # (``OwnerAckTimeout``, which carries the ``runtime_alive`` mark for
+            # exactly this check). The generic arm below would call that
+            # ``runtime_unreachable`` and hand the renderer a reconnect-and-
+            # reconcile remedy for a socket that is up and a runtime that is
+            # mid-turn — the refusal the design says must carry its disposition
+            # (``docs/design-ownerless-session-attach.md`` D6/D8). Same retryable
+            # shape as the ``RuntimeUnresponsiveError`` arm above, because it is
+            # the same fact and calls for the same client behaviour: the request
+            # was not served, and resending the SAME request is safe — an
+            # admission is at-most-once per request id (the receipt journal),
+            # and an answer gate re-issues under its own idempotent settle.
+            raise HTTPException(
+                503,
+                {
+                    "code": RUNTIME_BUSY,
+                    "message": RUNTIME_UNREACHABLE_MESSAGE,
+                    "retryable": True,
+                    "retry_after_ms": RUNTIME_BUSY_RETRY_AFTER_MS,
+                },
+                headers={"Retry-After": str(max(1, RUNTIME_BUSY_RETRY_AFTER_MS // 1000))},
+            ) from None
         # A cold session that cannot start a runtime reports WHY -- but only when
         # the reason arrives as an `ActionableConnectionError`, whose TYPE is
         # what certifies the message as one of the vetted configuration

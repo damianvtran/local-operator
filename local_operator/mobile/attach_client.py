@@ -216,7 +216,20 @@ class OwnerAckTimeout(ConnectionError, TimeoutError):
     ``TimeoutError`` lets code
     that wants to tell a slow owner from a dead one ask, rather than parse the
     message. See docs/design-aside-deadline.md §2.
+
+    ``runtime_alive`` is the DISPOSITION, and it is a class attribute rather than
+    a sentence for the same reason ``RuntimeUnresponsiveError`` carries it
+    (``session/attached.py``): the control ladder classifies a bare
+    ``ConnectionError`` as unreachable (dial refused, socket died) and must not
+    do that for an owner that ACCEPTED the socket and is merely slow — that case
+    is retryable, and a duck check on a class attribute is what lets the ladder
+    say so without importing this module (``mobile.projects`` reaches the server
+    package, so a module-scope import there would close an import cycle).
     """
+
+    #: The owner holds a live connection; the request is worth resending.
+    #: Read through ``getattr`` by ``server/routes/desktop_sessions.py``'s ladder.
+    runtime_alive = True
 
 
 class _RefitReport(NamedTuple):

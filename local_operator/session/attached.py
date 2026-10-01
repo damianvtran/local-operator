@@ -2881,7 +2881,25 @@ class AttachedSession:
                     # it. Passing None made that token unreachable from this arm
                     # (review round 2, NIT-2).
                     self._note_read_cold_reason(self._runtime_record, self._runtime_pid)
-                return False
+                    # A READ IS SERVED FROM DISK, so a connected-but-unsynced owner
+                    # is simply a cold READ and nothing more.
+                    return False
+                # A CONTROL CALL IS NOT A READ, and this arm is where the two part
+                # company. ``owner_reachable`` answers a question about the
+                # SOCKET, so it is True for exactly the window a read's expired
+                # dial is deliberately kept open in (``_retain_unsynced_dial``)
+                # while canonical state has still not arrived. Returning from here
+                # as though the call was served left the route one line later at
+                # ``bridge.remote.frontend_state``, which raises
+                # ``RuntimeError("frontend state has not synchronized")`` — and the
+                # ladder turned that into a generic ``503 runtime_unreachable``,
+                # a reconcile remedy for an owner that was alive and about to
+                # answer. Await the retained dial's OWN sync instead (the same
+                # future the retained dial exists to adopt), bounded by the
+                # control envelope, and refuse TYPED if it still has not landed.
+                if self._frontend_store is None:
+                    await self._await_retained_sync(control_budget)
+                return True
             # THE OWNER SEAM, NOT THE LOCAL REGISTRY (mesh slice DB2). This asked
             # ``find_runtime_record`` directly, which is a scan of THIS machine's
             # run directory — so for a session another device holds it answered
@@ -2983,6 +3001,45 @@ class AttachedSession:
             self._note_read_cold_reason(record, record.pid)
         else:
             self._read_cold_reason = None
+
+    async def _await_retained_sync(self, budget: float | None) -> None:
+        """Wait for a RETAINED dial's canonical sync, or refuse with the typed error.
+
+        The CONTROL half of the read's retention policy, and it exists because the
+        two callers ask different questions of the same socket. A read's expired
+        attach keeps its authenticated dial open so a late sync still installs state
+        (:meth:`_await_late_sync`); in that window ``owner_reachable`` is True while
+        ``_frontend_store`` is still None, so a control caller that took the socket
+        fact for a served call would reach ``frontend_state`` one line later and
+        raise a bare ``RuntimeError`` — which the route ladder answers as a generic
+        ``503 runtime_unreachable``, the reconcile remedy for an owner that is
+        alive and merely has not spoken yet.
+
+        So the wait is on the landing task the retained dial already owns, bounded
+        by the caller's control envelope. Both outcomes are honest and neither is a
+        guess: a sync that lands installs canonical state (the landing task does
+        that itself), and an envelope that expires is raised as the typed
+        :class:`RuntimeUnresponsiveError`, whose ``runtime_alive`` the ladder turns
+        into a RETRYABLE refusal. The task is SHIELDED, never cancelled and never
+        re-dialled: a control call giving up must not close the socket the read
+        path deliberately kept, and a second dial here would be exactly the
+        duplicate connection the retention policy was written to avoid (design
+        risk 2).
+        """
+        task = self._sync_landing_task
+        if task is not None and not task.done():
+            timeout = SYNC_LANDING_DEADLINE_S if budget is None else budget
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+            except TimeoutError:
+                # AN EXPIRY IS NOT EVIDENCE THAT NOTHING LANDED — the distinction
+                # ``_await_late_sync`` draws for its own deadline, and the reason
+                # the verdict below is taken from the store rather than the clock.
+                pass
+            except Exception:  # noqa: BLE001 — a failed landing is no landing
+                logger.debug("retained sync did not land for %s", self._session_id, exc_info=True)
+        if self._frontend_store is None:
+            raise RuntimeUnresponsiveError(_SYNC_UNRESPONSIVE_REASON)
 
     def _note_read_cold_reason(self, record: SessionRecord | None, owner: int | None) -> None:
         """Classify why a read is cold, in the wire's three-token vocabulary.
@@ -3167,7 +3224,25 @@ class AttachedSession:
         The owner validates again across the socket. This early identity check
         prevents a stale desktop popup from accidentally answering a newer gate
         while a reconnect or a multi-question ask advances in another window.
+
+        ONE BOUNDED RETRY, and it is here rather than in a route so every attached
+        surface inherits it (desktop, the mobile relay, any viewer): a control
+        envelope that expires against an owner which is ALIVE usually means the
+        answer landed and only the acknowledgement was lost, so the honest thing
+        to do is ask once more under the same id rather than report a transport
+        failure over a question the operator can no longer see. The retry is
+        duplicate-safe by construction — it requires the SAME request id and the
+        same connected client, and the owner's settle is idempotent (a repeat
+        answers with the value the first attempt recorded). Anything the retry
+        refuses is read against the gate's OWN state: if the gate is gone, the
+        first attempt settled it and the receipt is a success; if it is still
+        parked, the refusal is real and travels unchanged.
         """
+        # Lazily imported, the constraint the two other ``mobile`` imports in this
+        # file observe: ``mobile.projects`` reaches ``server.models``, so a
+        # module-scope import here would make ``session`` depend on ``mobile``.
+        from local_operator.mobile.attach_client import OwnerAckTimeout
+
         pending = self.pending_gate
         client = self._client
         if (
@@ -3177,11 +3252,55 @@ class AttachedSession:
             or not client.connected
         ):
             raise ValueError("this question is no longer pending")
-        if pending.kind == "approval" and type(approved) is bool:
-            return await client.approval_answer(request_id, approved)
-        if pending.kind == "ask" and value is not None and question_index == pending.question_index:
-            return await client.ask_answer(request_id, value, question_index=question_index)
-        raise ValueError("the answer does not match the current question")
+
+        async def _issue() -> str:
+            if pending.kind == "approval" and type(approved) is bool:
+                return await client.approval_answer(request_id, approved)
+            if (
+                pending.kind == "ask"
+                and value is not None
+                and question_index == pending.question_index
+            ):
+                return await client.ask_answer(request_id, value, question_index=question_index)
+            raise ValueError("the answer does not match the current question")
+
+        try:
+            return await _issue()
+        except (OwnerAckTimeout, RuntimeUnresponsiveError):
+            # The owner did not acknowledge inside the envelope. It may still have
+            # settled the gate while the ack was in flight, so before spending the
+            # retry ask the fact rather than the clock.
+            if not self._gate_answer_still_pending(request_id, client):
+                return _settled_gate_receipt(pending, approved)
+        try:
+            return await _issue()
+        except OperatorAuthorityRequired:
+            # A REFUSAL rather than a settlement: the card is STILL parked and
+            # this connection is not the console that may clear it (the route
+            # answers this one 422 with ``still_pending``). Re-raised so the
+            # retry can never turn it into a receipt.
+            raise
+        except Exception:  # noqa: BLE001 — classified by the gate's own state below
+            if self._gate_answer_still_pending(request_id, client):
+                raise
+        return _settled_gate_receipt(pending, approved)
+
+    def _gate_answer_still_pending(self, request_id: str, client: Any) -> bool:
+        """Is ``request_id``'s gate still parked on this facade, over a live socket?
+
+        The retry's discriminator between "the owner settled it and the ack was
+        lost" and "the owner is genuinely not answering". It reads the folded
+        state rather than the error: the settle travels as a pending-gate update
+        on the same pump the lost ack would have used, so by the time the retry
+        has returned, a gate that settled is gone from ``pending_gate``. A gate
+        still holding the same id says the refusal was real.
+        """
+        return (
+            client is not None
+            and client.connected
+            and self.pending_gate is not None
+            and self.pending_gate.request_id == request_id
+        )
 
     async def ask_respond(
         self,
@@ -9585,6 +9704,20 @@ async def _await_handler(result: Any) -> None:
     sync-or-async handler contract without weakening types at the call site.
     """
     await result
+
+
+def _settled_gate_receipt(pending: Any, approved: bool | None) -> str:
+    """The receipt for a gate whose answer LANDED even though its ack did not.
+
+    The owner's own vocabulary, spelled once here rather than at the retry site:
+    an approval settles as ``approved``/``denied`` and a question as ``answered``
+    (``session/runtime/serving.py::approval_answer``/``ask_answer``). Returning it
+    is what lets the retry report the SETTLEMENT the operator caused instead of a
+    transport error over a card that is already gone from their screen.
+    """
+    if getattr(pending, "kind", "") == "approval":
+        return "approved" if approved else "denied"
+    return "answered"
 
 
 def _journal_witnessed_cut_off(transcript: Any, store: Any, cause: str) -> None:
