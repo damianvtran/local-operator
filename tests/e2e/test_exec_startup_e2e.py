@@ -721,11 +721,14 @@ def test_exec_loop_lifecycle_outcomes(exec_server, termination, expected):
             break
         time.sleep(0.05)
     assert status["status"] == expected
-    assert status.get("stop_class") == {
-        "term": "unattributed-signal",
-        "kill": "unattributed-death",
-        "stop": "deliberate",
-    }[termination], status
+    assert (
+        status.get("stop_class")
+        == {
+            "term": "unattributed-signal",
+            "kill": "unattributed-death",
+            "stop": "deliberate",
+        }[termination]
+    ), status
     before = len(requests)
     assert json.loads(run("exec", "--status", job_id, stdin="").stdout)["status"] == expected
     assert len(requests) == before, "Status/reconciliation must never restart iterations"
