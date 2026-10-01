@@ -1255,8 +1255,9 @@ def _legible_input_refusal(
         tail = f"A degraded retry ({steps}) was also refused, so it was not re-sent unchanged."
     elif policy_declined:
         # M1 / Q-3: this is NOT "unavailable" -- the ladder existed and the
-        # call's retry policy declined it (an isolated errand's one-attempt
-        # contract, or retries disabled outright). A future reader must be
+        # call's retry policy declined it (retries disabled outright: an
+        # isolated errand, or a caller that turned them off). A future reader
+        # must be
         # able to tell the two states apart from the message alone.
         tail = (
             "This call's retry policy declined a degraded retry, so it was not re-sent unchanged."
@@ -3556,11 +3557,13 @@ async def stream_with_failover(
         retry = dataclasses.replace(retry, enabled=False)
         route_state = None
 
-    # The isolated errand's ONE auth-class re-resolve has been spent. Latched
-    # per REQUEST so a pool of dead keys cannot turn a decorative call into a
-    # walk: the errand makes at most TWO AUTH attempts, and the second only
-    # when the read-only re-resolve produced a bearer that differs from the one
-    # the provider just rejected.
+    # The isolated errand's ONE rotation-class re-resolve has been spent.
+    # Latched per REQUEST so a pool of dead keys cannot turn a decorative call
+    # into a walk: the errand makes at most TWO AUTH attempts, and the second
+    # only when the failure is on the class the TURN's own rotation acts on
+    # (`is_rotation_eligible`) AND the read-only re-resolve produced a bearer
+    # that differs from the one the provider just rejected — a sibling if the
+    # pool has one, otherwise the same account force-refreshed.
     #
     # "Two auth attempts", not "two wire attempts": the pre-existing fast-mode
     # refusal re-ask (below, and deliberately NOT gated on `retry.enabled`)
@@ -4299,9 +4302,14 @@ async def stream_with_failover(
                         # attempt: the same bytes fail identically on every
                         # other account, so there is nothing to rotate to and
                         # nothing for an errand to ask. Nor does the errand ever
-                        # SLEEP — a rate limit says wait, and an errand must not
-                        # (the sibling ask is a different account, not a
-                        # second try at a throttled one).
+                        # take a BACKOFF sleep — a rate limit says wait, and an
+                        # errand must not (the sibling ask is a different
+                        # account, not a second try at a throttled one). The
+                        # store's own refresh bookkeeping is the one wait left:
+                        # a forced refresh that finds the cross-process refresh
+                        # lease held waits ~50 ms once before serving or
+                        # giving up (`AuthStore._ensure_oauth_fresh`), which is
+                        # bookkeeping rather than backoff, and it is bounded.
                         isolated_auth_resolved = True
                         sibling = await _resolve_access_for_provider(
                             auth,
@@ -4819,6 +4827,10 @@ async def _resolve_access_for_provider(
         to ask. A store whose token endpoint cannot mint a new bearer answers
         with the same string, which the retry latch rejects, so this can never
         become a second attempt on a throttled account.
+
+        The only wait this leg can incur is the store's own: ``AuthStore`` waits
+        ~50 ms once on a contended cross-process refresh lease before it serves
+        or gives up — bookkeeping, not backoff, and it is bounded.
         """
         flags = _model_flags(True)  # force_refresh + read_only (+ model_id)
         if oauth_store is not None:
