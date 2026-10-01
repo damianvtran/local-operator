@@ -476,12 +476,14 @@ is the reported defect and it is the one that has to be shown working.
    mtime pre-check), never on a clock: a clock is what made a just-written skill
    unreadable in round 1.
 4. **Symlinks and mid-walk mutation.** `scan_skills_dir` is depth-bounded
-   (originally one level; now `LOCAL_OPERATOR_SKILL_MAX_DEPTH`, default 3, the
-   depth cap being what cuts a symlink loop off), realpath-dedupes and swallows
-   `OSError`, so a symlink loop or a directory vanishing mid-walk yields a
-   shorter list, never an exception. The fingerprint uses the same walk and so
-   the same `OSError` tolerance; do not make it stricter than the scanner it
-   gates.
+   (originally one level; now `LOCAL_OPERATOR_SKILL_MAX_DEPTH`, default 3),
+   realpath-dedupes and swallows `OSError`, so a symlink loop or a directory
+   vanishing mid-walk yields a shorter list, never an exception. The depth cap
+   bounds how DEEP a loop goes, not how MUCH it costs: the ancestor cut, not
+   the depth cap, is what cuts a symlink loop off, because a link back up to an
+   ancestor would otherwise re-walk the subtree below it once per level (agent
+   review round 1, MINOR-3). The fingerprint uses the same walk and so the same
+   `OSError` tolerance; do not make it stricter than the scanner it gates.
 5. **Concurrent refresh from two children.** The lock serialises the refresh,
    but serialising is not sufficient on its own: the thread that loses the race
    must still RE-LOOK-UP the name after the lock releases, because the winner
