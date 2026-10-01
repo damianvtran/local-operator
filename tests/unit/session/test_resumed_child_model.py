@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import yaml
@@ -28,6 +29,9 @@ from local_operator.harness.types import (
     StreamTextDelta,
     TextContent,
 )
+from local_operator.model.configure import create_stream_fn
+from local_operator.providers.auth_store import AuthStore
+from local_operator.providers.failover import ProviderError
 from local_operator.session.model_selection import read_model_selection
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
@@ -862,3 +866,143 @@ async def test_a_legacy_role_pinned_manager_still_decides_its_workers_model(tmp_
         assert "on its parent's model (openrouter/qwen/qwen3.8-max)" in text
     finally:
         await revived.dispose()
+
+
+# ---------------------------------------------------------------------------
+# The failover DEFAULT on the resume path: a pin that cannot serve walks the
+# configured chain instead of dying beside it (2026-09-30 fleet incident)
+# ---------------------------------------------------------------------------
+
+PINNED = "anthropic/claude-sonnet-5-5"
+HOP = "deepseek/deepseek-flash"
+
+
+def _conversation_text(request: ChatRequest) -> str:
+    """The text blocks of every message, joined — the same read
+    ``RecordingStream.selectors_for`` does, shared so the two rigs filter
+    conversations identically."""
+    return " ".join(
+        block.text
+        for message in request.messages
+        for block in (getattr(message, "content", None) or [])
+        if isinstance(block, TextContent)
+    )
+
+
+class _ScriptedWire:
+    """A wire client that raises or streams scripted events, and reports every
+    ACTUAL call — the ``ScriptedClient`` shape from
+    tests/unit/providers/test_failover.py, plus the call report, because a walk
+    builds a client for a target before it may call it (a target without a
+    usable credential is built and then skipped UNCALLED), and only calls
+    count here."""
+
+    def __init__(self, events: object, on_call=None) -> None:
+        self._events = events
+        self._on_call = on_call
+
+    async def stream(self, request: ChatRequest, api_key: str | None, oauth_access=None):
+        if self._on_call is not None:
+            self._on_call(request)
+        if isinstance(self._events, Exception):
+            raise self._events
+        for event in self._events:  # type: ignore[union-attr]
+            yield event
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_pinned_child_whose_pin_cannot_serve_ends_on_the_chain_target(
+    tmp_path, monkeypatch
+):
+    """The incident's resume shape, on the PRODUCT's own routing stack: a
+    child pinned by its effort tier is resumed while the pin's credential is
+    unusable; under the shipped default the walk descends the configured
+    chain, the resumed run COMPLETES on the chain target, and the job row
+    keeps the pin as requested while naming the target as effective.
+
+    The rig is a real ``SessionStreamFn`` — the object every session routes
+    through — with ``_client_for`` scripted per spec: the pin serves the
+    launch run, refuses once the resume phase flips, and the cross-vendor
+    hop serves the resumed child. ``_abortable_sleep`` is stubbed so the
+    probation re-ask spends no wall time. The parent's own post-completion
+    notification turn rides the same stream, so calls are read through the
+    resume instruction only — the file's ``selectors_for`` discipline.
+    """
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    _write_tiers(config_dir, hi=PINNED)
+
+    auth = AuthStore(tmp_path / "auth.db")
+    auth.upsert_credential("anthropic", {"key": "ka1", "source": "login"})
+    auth.upsert_credential("openrouter", {"key": "ko1", "source": "login"})
+    auth.upsert_credential("deepseek", {"key": "kd1", "source": "login"})
+    settings = {
+        "retry": {
+            "baseDelayMs": 1,
+            "fallbackChains": {"default": [HOP]},
+        }
+    }
+    stream = create_stream_fn(auth, settings, session_id="parent")
+
+    phase = {"resume": False}
+    calls: list[tuple[str, str]] = []  # (selector, conversation text)
+
+    def note_call(request: ChatRequest) -> None:
+        provider = request.model.provider
+        calls.append((f"{provider}/{request.model.model_id}", _conversation_text(request)))
+
+    def scripted_client_for(self, spec: ModelSpec):
+        if spec.model_id == "claude-sonnet-5-5" and phase["resume"]:
+            return _ScriptedWire(
+                ProviderError(
+                    429,
+                    "quota reset pending",
+                    retryable=True,
+                    kind="quota",
+                    retry_after_ms=45_000,
+                ),
+                note_call,
+            )
+        return _ScriptedWire(
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")], note_call
+        )
+
+    monkeypatch.setattr(
+        "local_operator.model.configure.SessionStreamFn._client_for", scripted_client_for
+    )
+
+    async def no_sleep(delay_ms: int, signal: Any) -> None:
+        return None
+
+    monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", no_sleep)
+
+    parent = Session(
+        model=BIRTH,
+        stream_fn=stream,
+        tools=[],
+        transcript=Transcript(tmp_path / "sess"),
+        system_blocks_provider=lambda: ["stable"],
+    )
+    try:
+        job_id = parent._launch_subagent(label="review", prompt="review it", effort="hi")
+        await wait_for(lambda: _completed(parent, job_id))
+        first = parent.jobs.get(job_id)
+        assert first is not None and first.model_label == PINNED
+
+        phase["resume"] = True
+        text = await _hub_resume(parent, job_id)
+        new_id = _resumed_id(parent, text)
+        await wait_for(lambda: _completed(parent, new_id))
+
+        row = parent.jobs.get(new_id)
+        assert row is not None
+        assert row.requested_model_label == PINNED
+        assert row.model_label == HOP
+        # The resumed child's own calls: the pin was asked, probation's one
+        # same-credential re-ask was spent on it (both refusing), and then
+        # the configured hop served the run — no bare failure, no refusal.
+        resumed_calls = [selector for selector, text in calls if RESUME_PROMPT in text]
+        assert resumed_calls == [PINNED, PINNED, HOP], resumed_calls
+    finally:
+        await parent.dispose()
+        auth.close()

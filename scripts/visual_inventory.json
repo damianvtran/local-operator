@@ -138,6 +138,8 @@
       "reset-offered",
       "projects",
       "wakes",
+      "pinned",
+      "pinned-open",
       "retired",
       "top"
     ],

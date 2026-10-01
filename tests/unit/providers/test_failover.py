@@ -6888,6 +6888,11 @@ async def test_pinned_usage_refusal_earns_a_capped_probation_re_ask_per_credenti
     earns one bounded same-credential re-ask PER CREDENTIAL (wait = the
     advertised 45s, capped at 60s, floored by the existing backoff) BEFORE
     rotation, and the walk that follows descends in same-family order.
+
+    The settings below pin the STRICT ``retry.pinnedFallback: same-family``
+    opt-in EXPLICITLY — this test was written for the strict default and
+    keeps covering the strict policy; the shipped default descends the
+    cross-vendor hop last and is covered by its own tests.
     """
     events: list[str] = []
     sleeps: list[int] = []
@@ -6910,8 +6915,9 @@ async def test_pinned_usage_refusal_earns_a_capped_probation_re_ask_per_credenti
     settings = {
         "retry": {
             "baseDelayMs": 1,
+            "pinnedFallback": "same-family",
             # Cross-vendor FIRST in config, same-vendor second: the descent
-            # must reorder to the same-vendor target, and the strict default
+            # must reorder to the same-vendor target, and the strict policy
             # must keep the cross-vendor one out entirely.
             "fallbackChains": {
                 "default": ["deepseek/deepseek-flash", "openrouter/anthropic/claude-opus-5"]
@@ -7011,10 +7017,12 @@ async def test_pinned_probation_caps_a_multi_hour_reset_then_treats_it_as_spent(
 async def test_pinned_descent_orders_pin_preserving_then_same_vendor_then_stops(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """T2/P2: the descent order is pin-preserving → same-vendor → (refused)
-    cross-vendor. The pin-preserving route is asked first even though the
-    cross-vendor target is FIRST in config, then the same-vendor sibling;
-    the cross-vendor target is never asked at all."""
+    """T2/P2 (STRICT opt-in, pinned explicitly below): the descent order is
+    pin-preserving → same-vendor → (refused) cross-vendor. The pin-preserving
+    route is asked first even though the cross-vendor target is FIRST in
+    config, then the same-vendor sibling; the cross-vendor target is never
+    asked at all. The default's cross-vendor-last descent is covered by the
+    ``default_*`` tests beside this one."""
     specs_seen: list[str] = []
 
     async def client_for(spec: ModelSpec) -> Any:
@@ -7035,6 +7043,7 @@ async def test_pinned_descent_orders_pin_preserving_then_same_vendor_then_stops(
     settings = {
         "retry": {
             "baseDelayMs": 1,
+            "pinnedFallback": "same-family",
             "fallbackChains": {
                 "default": [
                     "deepseek/deepseek-flash",
@@ -7067,9 +7076,10 @@ async def test_pinned_descent_orders_pin_preserving_then_same_vendor_then_stops(
 async def test_pinned_route_fails_visibly_rather_than_crossing_vendors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """T3/P3: with no same-family target that can serve, the strict default
-    FAILS the child with a legible error — the pin, the cause and BOTH
-    remedies — and never asks the cross-vendor target."""
+    """T3/P3 (STRICT opt-in, pinned explicitly below): with no same-family
+    target that can serve, the strict policy FAILS the child with a legible
+    error — the pin, the cause and BOTH remedies — and never asks the
+    cross-vendor target."""
     specs_seen: list[str] = []
 
     async def client_for(spec: ModelSpec) -> Any:
@@ -7084,6 +7094,7 @@ async def test_pinned_route_fails_visibly_rather_than_crossing_vendors(
     settings = {
         "retry": {
             "baseDelayMs": 1,
+            "pinnedFallback": "same-family",
             "fallbackChains": {"default": ["deepseek/deepseek-flash"]},
         }
     }
@@ -7122,11 +7133,12 @@ async def test_pinned_route_fails_visibly_rather_than_crossing_vendors(
 async def test_pinned_route_with_no_chain_still_fails_legibly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """F3: strictness is a property of the (pin, policy) pair, not of a chain
-    happening to expand. With NO fallbackChains configured, a pinned child
-    now fails with the legible refusal — pin, cause, both remedies, and the
-    nothing-configured note — where it used to surface the raw provider
-    error with no pin named and no way out."""
+    """F3 (STRICT opt-in, pinned explicitly below): strictness is a property
+    of the (pin, policy) pair, not of a chain happening to expand. With NO
+    fallbackChains configured, a strictly-pinned child fails with the legible
+    refusal — pin, cause, both remedies, and the nothing-configured note —
+    where it used to surface the raw provider error with no pin named and no
+    way out."""
 
     def pinned_call(request: ChatRequest, api_key: str | None, oauth_access: Any = None):
         raise ProviderError(429, "quota reset pending", retryable=True, retry_after_ms=45_000)
@@ -7139,7 +7151,8 @@ async def test_pinned_route_with_no_chain_still_fails_legibly(
 
     monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", no_sleep)
 
-    settings = {"retry": {"baseDelayMs": 1}}  # no fallbackChains at all
+    settings = {"retry": {"baseDelayMs": 1, "pinnedFallback": "same-family"}}
+    # ^ no fallbackChains at all
     auth = FakeAuth({"anthropic": ["ka1"]})
 
     with pytest.raises(ProviderError) as caught:
@@ -7349,6 +7362,341 @@ async def test_opt_in_cross_vendor_descent_is_recorded_loudly(
 
     assert settles and settles[0][0] == FallbackTarget("deepseek/deepseek-flash", None)
     assert "cross-vendor descent for pinned anthropic/claude-sonnet-5-5" in settles[0][1]
+
+
+async def test_default_pinned_child_descends_cross_vendor_last_and_serves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The SHIPPED default (no ``retry.pinnedFallback`` key) walks the chain:
+    family-first, cross-vendor last, and the descent is recorded.
+
+    The 2026-09-30 incident shape: the pin's credential is unusable, the
+    chain holds a same-vendor sibling that also cannot serve and a
+    cross-vendor hop that can. Under the strict default this child died
+    instantly beside a working hop; under the default it walks — same-vendor
+    sibling BEFORE the cross-vendor hop even though the chain lists the
+    cross-vendor one first — and the settle reason must carry the descent
+    clause, which is the disclosure the default is traded on."""
+    specs_seen: list[str] = []
+    settles: list[tuple[Any, str]] = []
+
+    async def client_for(spec: ModelSpec) -> Any:
+        specs_seen.append(f"{spec.provider}/{spec.model_id}")
+        if spec.model_id in ("claude-sonnet-5-5", "claude-opus-5"):
+            return ScriptedClient(ProviderError(None, "model unavailable"))
+        return ScriptedClient([StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")])
+
+    async def no_sleep(delay_ms: int, signal: Any) -> None:
+        return None
+
+    monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", no_sleep)
+
+    settings = {
+        "retry": {
+            "baseDelayMs": 1,
+            "maxRetries": 0,
+            # NO ``pinnedFallback`` key: the shipped default is under test.
+            # Cross-vendor FIRST in config; ordering must still hold the
+            # same-vendor sibling in front of it.
+            "fallbackChains": {"default": ["deepseek/deepseek-flash", "anthropic/claude-opus-5"]},
+        }
+    }
+    auth = FakeAuth({"anthropic": ["ka1"], "deepseek": ["kd1"]})
+    state = _pinned_state()
+    state.on_settle = lambda target, reason: settles.append((target, reason))
+
+    got = await _collect(
+        stream_with_failover(
+            _request("anthropic", "claude-sonnet-5-5"),
+            auth,
+            settings,
+            client_for,
+            route_state=state,
+        )
+    )
+
+    assert specs_seen == [
+        _PIN,
+        "anthropic/claude-opus-5",
+        "deepseek/deepseek-flash",
+    ], specs_seen
+    assert any(isinstance(event, StreamTextDelta) and event.delta == "ok" for event in got)
+    # The LAST settle is the cross-vendor descent itself: the same-vendor hop
+    # settled first (the pin→sibling edge), then the sibling→cross-vendor edge
+    # carries the clause this default is traded on.
+    assert settles[-1][0] == FallbackTarget("deepseek/deepseek-flash", None)
+    assert "cross-vendor descent for pinned anthropic/claude-sonnet-5-5" in settles[-1][1]
+    # ... and the same-vendor edge before it did NOT claim a cross-vendor
+    # descent.
+    assert "cross-vendor" not in settles[0][1], settles
+
+
+async def test_default_pinned_exhaustion_fails_legibly_with_hops_tried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The SHIPPED default's exhausted walk names the hops it tried.
+
+    Every configured hop fails; the child must fail with the NEW legible copy
+    — pin, cause, the hops by name, and the remedy — never the strict refusal
+    it used to print (which blamed a policy that no longer filtered
+    anything) and never a bare provider error. The hop list is asserted
+    against the selectors the walk actually ATTEMPTED, because the copy's
+    claim is "Every configured hop was tried"."""
+    specs_seen: list[str] = []
+
+    async def client_for(spec: ModelSpec) -> Any:
+        specs_seen.append(f"{spec.provider}/{spec.model_id}")
+        return ScriptedClient(ProviderError(None, "model unavailable"))
+
+    async def no_sleep(delay_ms: int, signal: Any) -> None:
+        return None
+
+    monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", no_sleep)
+
+    settings = {
+        "retry": {
+            "baseDelayMs": 1,
+            "fallbackChains": {"default": ["anthropic/claude-opus-5", "deepseek/deepseek-flash"]},
+        }
+    }
+    auth = FakeAuth({"anthropic": ["ka1"], "deepseek": ["kd1"]})
+
+    with pytest.raises(ProviderError) as caught:
+        await _collect(
+            stream_with_failover(
+                _request("anthropic", "claude-sonnet-5-5"),
+                auth,
+                settings,
+                client_for,
+                route_state=_pinned_state(),
+            )
+        )
+
+    message = str(caught.value)
+    assert f"Pin {_PIN} failed; add another hop or fix credentials." in message
+    assert "Last failure: unknown: model unavailable." in message
+    attempted_hops = specs_seen[1:]
+    assert attempted_hops == ["anthropic/claude-opus-5", "deepseek/deepseek-flash"], specs_seen
+    hops_list = ", ".join(attempted_hops)
+    assert f"Every configured hop was tried and could not serve it: {hops_list}." in message
+    assert "retry.fallbackChains" in message, "the remedy names the config key"
+    assert "refused by retry.pinnedFallback" not in message, "no stale strict blame"
+    assert "allow cross-vendor" not in message, "the strict copy's remedy is not this one"
+    # Layout: the remedy's leading phrase must land in the dock row's span.
+    assert message.index("add another hop") + len("add another hop") <= 58
+
+
+async def test_default_pinned_no_chain_fails_legibly_new_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The SHIPPED default with no chain: legible, and pointing at the key.
+
+    A pinned child with no ``fallbackChains`` under the default cannot
+    descend anywhere, and the failure must say that — not print the strict
+    copy about same-family hops (no policy refusal happened here) and never
+    a bare provider error."""
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return ScriptedClient(ProviderError(None, "model unavailable"))
+
+    async def no_sleep(delay_ms: int, signal: Any) -> None:
+        return None
+
+    monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", no_sleep)
+
+    settings = {"retry": {"baseDelayMs": 1}}  # no fallbackChains at all
+
+    with pytest.raises(ProviderError) as caught:
+        await _collect(
+            stream_with_failover(
+                _request("anthropic", "claude-sonnet-5-5"),
+                FakeAuth({"anthropic": ["ka1"]}),
+                settings,
+                client_for,
+                route_state=_pinned_state(),
+            )
+        )
+
+    message = str(caught.value)
+    assert f"Pin {_PIN} failed; add a hop to retry.fallbackChains." in message
+    assert "Last failure: unknown: model unavailable." in message
+    assert "No fallback hop is configured." in message
+    assert "Fix:" not in message, "the lead already carries the remedy (design review D6)"
+    assert "same-family" not in message, "no strict-policy copy under the default"
+    assert message.index("add a hop") + len("add a hop") <= 58
+
+
+async def test_pinned_fallback_disabled_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``retry.modelFallback: false``: the walk stays on the pin, and an
+    exhausted pinned child names the switch by its /settings row LABEL
+    (**Model fallback**) with the remedy inside the dock row's leading cells
+    — not a bare provider error (the shape it used to get), and not the raw
+    stored key (design review round 1, D2)."""
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return ScriptedClient(ProviderError(None, "model unavailable"))
+
+    async def no_sleep(delay_ms: int, signal: Any) -> None:
+        return None
+
+    monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", no_sleep)
+
+    settings = {
+        "retry": {
+            "baseDelayMs": 1,
+            "modelFallback": False,
+            "fallbackChains": {"default": ["deepseek/deepseek-flash"]},
+        }
+    }
+    auth = FakeAuth({"anthropic": ["ka1"], "deepseek": ["kd1"]})
+
+    with pytest.raises(ProviderError) as caught:
+        await _collect(
+            stream_with_failover(
+                _request("anthropic", "claude-sonnet-5-5"),
+                auth,
+                settings,
+                client_for,
+                route_state=_pinned_state(),
+            )
+        )
+
+    message = str(caught.value)
+    assert (
+        f"Pin {_PIN} failed; turn fallback on in /settings (Model fallback),"
+        " or fix the pinned model." in message
+    )
+    assert "Last failure: unknown: model unavailable." in message
+    assert "retry.modelFallback" not in message, "the row label, not the raw key"
+    # Design review round 1, D2: the remedy must land in the dock row's span.
+    assert message.index("turn fallback on") + len("turn fallback on") <= 58
+
+
+async def test_pinned_child_with_retry_disabled_fails_legibly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``retry.enabled: false`` + a pin: the retry-disabled fast path raises
+    the same legible failure shape as the walk tail, naming the /settings row
+    by label — never the bare provider error a pinned child used to get.
+
+    Agent review round 1, F1 / QA round 1, Q-1: with the whole cascade off
+    the walk's tail is unreachable (the fast path raises first), so the
+    pinned-child contract is honoured AT the fast path."""
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return ScriptedClient(ProviderError(None, "model unavailable"))
+
+    async def no_sleep(delay_ms: int, signal: Any) -> None:
+        return None
+
+    monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", no_sleep)
+
+    settings = {
+        "retry": {
+            "baseDelayMs": 1,
+            "enabled": False,
+            "fallbackChains": {"default": ["deepseek/deepseek-flash"]},
+        }
+    }
+
+    with pytest.raises(ProviderError) as caught:
+        await _collect(
+            stream_with_failover(
+                _request("anthropic", "claude-sonnet-5-5"),
+                FakeAuth({"anthropic": ["ka1"]}),
+                settings,
+                client_for,
+                route_state=_pinned_state(),
+            )
+        )
+
+    message = str(caught.value)
+    assert message.startswith(f"Pin {_PIN} failed; turn fallback on")
+    assert "(Retry failed calls)" in message, "the switch's /settings label, not its key"
+    assert "retry.enabled" not in message
+    assert "Last failure: unknown: model unavailable." in message
+    assert caught.value.__cause__ is not None, "the original failure stays chained"
+    assert message.index("turn fallback on") + len("turn fallback on") <= 58
+
+
+async def test_pinned_retry_disabled_transport_failure_is_legible_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The transport-error fast path wraps too: a timeout-shaped failure on a
+    pinned route with ``retry.enabled: false`` raises the same legible copy
+    (agent review round 1, F1), quoting the wrapped diagnosis."""
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return ScriptedClient(TimeoutError("read stalled"))
+
+    async def no_sleep(delay_ms: int, signal: Any) -> None:
+        return None
+
+    monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", no_sleep)
+
+    settings = {"retry": {"baseDelayMs": 1, "enabled": False}}
+
+    with pytest.raises(ProviderError) as caught:
+        await _collect(
+            stream_with_failover(
+                _request("anthropic", "claude-sonnet-5-5"),
+                FakeAuth({"anthropic": ["ka1"]}),
+                settings,
+                client_for,
+                route_state=_pinned_state(),
+            )
+        )
+
+    message = str(caught.value)
+    assert message.startswith(f"Pin {_PIN} failed; turn fallback on")
+    assert "(Retry failed calls)" in message
+    assert "Last failure: timeout: TimeoutError: read stalled." in message
+
+
+@pytest.mark.parametrize(
+    "error, expected",
+    [
+        (ProviderError(None, "model unavailable"), "model unavailable"),
+        (
+            ProviderError(
+                429, "quota reset pending", retryable=True, kind="quota", retry_after_ms=45_000
+            ),
+            "rate limit or quota exceeded (HTTP 429, retry in 45s): quota reset pending",
+        ),
+    ],
+)
+async def test_unpinned_retry_disabled_raises_the_bare_error_unchanged(
+    monkeypatch: pytest.MonkeyPatch, error: ProviderError, expected: str
+) -> None:
+    """NEGATIVE CONTROL for the fast-path wrap: with no pin marker the
+    retry-disabled raises stay exactly what they were — the bare provider
+    error, no pin, no /settings copy."""
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return ScriptedClient(error)
+
+    async def no_sleep(delay_ms: int, signal: Any) -> None:
+        return None
+
+    monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", no_sleep)
+
+    settings = {"retry": {"baseDelayMs": 1, "enabled": False}}
+
+    with pytest.raises(ProviderError) as caught:
+        await _collect(
+            stream_with_failover(
+                _request("anthropic", "claude-sonnet-5-5"),
+                FakeAuth({"anthropic": ["ka1"]}),
+                settings,
+                client_for,
+                route_state=FailoverRouteState(),  # UNPINNED
+            )
+        )
+
+    assert str(caught.value) == expected
+    assert not str(caught.value).startswith("Pin")
 
 
 async def test_unpinned_route_sequences_are_byte_for_byte_unchanged(
