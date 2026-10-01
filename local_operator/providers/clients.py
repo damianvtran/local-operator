@@ -4639,6 +4639,31 @@ class MockClient:
         # U6/N2). A real provider decides per request; the mock's closest
         # analogue is the newest instruction.
         last_user = next((m for m in reversed(request.messages) if m.role == "user"), None)
+        # ``[hang]``: a request that NEVER returns. The one shape that leaves a
+        # runtime busy with nothing this process can read as a step — the
+        # parent's own provider request is not a term of
+        # ``process._step_in_flight`` (its stream counter is CHILD-only) and a
+        # stream that has yielded only its start commits no transcript row — so
+        # a turn parked here reports neither movement nor an executing step.
+        # The 2026-10-01 progress-gated signal drain is why that shape needs a
+        # marker at all: it is the ONLY one the drain's bound still disposes,
+        # so the escalated exit cannot be reached end to end without it.
+        # Scoped to the NEWEST user instruction, like ``[bash:N]`` and for its
+        # reason: a marker that stayed in the transcript would hang every later
+        # request of the session.
+        hangs = (
+            last_user is not None
+            and request.messages
+            and request.messages[-1] is last_user
+            and "[hang]" in last_user.text
+        )
+        if hangs:
+            # Park forever: the consumer sees a request in flight and nothing
+            # else, which is the marker's whole contract. Cancellation at
+            # teardown is the only way out, as for a real provider that has
+            # stopped answering.
+            await asyncio.Event().wait()
+            return
         wants_tool = last_user is not None and "[tool]" in last_user.text
         # ``[bash:N]`` fires ONCE per prompt: only when the newest message is
         # the user's. After the tool result comes back the newest message is

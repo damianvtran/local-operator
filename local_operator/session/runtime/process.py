@@ -2635,12 +2635,15 @@ class _SignalDrainBound:
       (:func:`_step_in_flight` — a tool batch, a compaction, a child lane's
       provider request). Either one restarts the clock.
     * A turn that keeps reporting either is NEVER cut by the bound, however
-      long it runs; it leaves at its turn boundary. The residual is stated
-      rather than implied: a parent model call that streams nothing and opens
-      no readable step for the whole bound is indistinguishable from a stall
-      here (see ``_step_in_flight`` for why the parent's own request is not
-      one of its terms) and is reaped — the same residual ``_work_motion``
-      documents.
+      long it runs; it leaves at its turn boundary. THE RESIDUAL IS A BLIND
+      SPOT, stated rather than implied: the parent's own provider request is
+      INVISIBLE to both probes — ``_step_in_flight``'s stream counter is
+      CHILD-only (see its docstring), and a request that has yielded nothing
+      commits no row — so a turn parked on a silent parent request reports
+      neither movement nor an executing step, is indistinguishable from a
+      stall for the whole bound, and is reaped. ``_work_motion`` documents the
+      same blind spot; it is named here so the next reader can widen the
+      probes rather than discover it.
     * ONLY SILENCE AND IDLENESS TOGETHER REAP: no movement AND no step for
       ``SIGNAL_DRAIN_S`` disposes, byte for byte the old exit.
     * WHAT STILL KILLS A WEDGED-BUT-BEATING RUNTIME IS SIGKILL — the

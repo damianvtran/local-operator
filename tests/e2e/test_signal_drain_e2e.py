@@ -902,10 +902,13 @@ async def test_a_turn_that_outlives_the_bound_rides_through(
     cleanly after it, and the reaping exit's own line never appears.
 
     The reap half of the new rule — nothing moving and no step executing —
-    cannot be driven from this harness: the only long-turn shape the mock can
-    park holds a tool batch open for its whole duration, which is exactly the
-    state the fix spares. It is pinned at unit level instead (see
-    ``test_signal_drain.py::test_a_turn_with_no_progress_and_no_step_is_reaped_at_the_bound``).
+    cannot be reached from THIS park shape: a batch open in the real tool is
+    exactly the state the fix spares. It is pinned two ways elsewhere: at unit
+    level, by
+    ``test_signal_drain.py::test_a_turn_with_no_progress_and_no_step_is_reaped_at_the_bound``
+    — and end to end by the journal suite's SIGTERM cell, whose turn hangs on
+    the mock's ``[hang]`` parent request, the one shape the bound still
+    disposes.
     """
     config = headless_tui_env
     bound_s = 3.0
