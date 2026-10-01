@@ -445,7 +445,7 @@ def test_a_contradicted_pre_read_halts_files_a_fresh_request_and_runs_nothing_mo
     assert "OS" in failing["detail"] or "os" in failing["detail"]
     # The fresh-request refile went through the adapter with the finding.
     assert fake.refiled and fake.refiled[0]["check"] == "os"
-    assert "A fresh request ap_fresh000" in failing["detail"]
+    assert "A new request ap_fresh000" in failing["detail"]
     # NOTHING state-changing ran: the only transport calls are the connect and
     # the pre-read itself.
     run_calls = [c for c in transport.calls if c[0] == "run"]

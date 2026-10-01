@@ -10427,8 +10427,8 @@ def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, Any
         "steps": [],
         "reason": "no_supervisor",
         "error": (
-            "no supported user service supervisor found (launchctl on macOS, "
-            "systemctl --user on Linux); the relay can run in the foreground instead"
+            "no supported user service supervisor found (launchd on macOS, "
+            "systemd on Linux); the relay can run in the foreground instead"
         ),
     }
 
@@ -10451,10 +10451,9 @@ def _install_launchd(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict
                 "no LaunchAgent is available here: this run's HOME is not the home "
                 "launchd supervises, so launchd cannot own a unit for it and nothing "
                 "was installed. That is what an isolated or redirected HOME looks "
-                "like, and it is expected. Run the relay in the foreground with "
-                "`lop network serve` (or skip the start with `lop network init "
-                "--no-start` / `lop network serve --no-launchd`); from a normal login, "
-                "`lop network start` uses the real home's LaunchAgent."
+                "like, and it is expected. The relay can run in the foreground "
+                "instead; from a normal login it can be started as a background "
+                "service."
             ),
         }
     plist_path().parent.mkdir(parents=True, exist_ok=True)
@@ -10542,8 +10541,9 @@ def _install_systemd(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict
         "steps": steps,
         "reason": "not_serving",
         "error": (
-            f"the systemd user unit is {last_state}; if another relay already held "
-            f"the port, stop it and restart the service. See {log_path()}"
+            f"the relay service did not start ({last_state}); another copy of Local "
+            f"Operator may already be using that connection — ask Local Operator to "
+            f"stop it and try again. See {log_path()}"
         ),
     }
 
@@ -10627,8 +10627,8 @@ def uninstall(
                 if addressable
                 else (
                     "no LaunchAgent to remove here: this run's HOME is not the one launchd "
-                    "supervises, so nothing was loaded or unloaded. `--no-start` (or "
-                    "`serve --no-launchd`) is how to run without launchd at all."
+                    "supervises, so nothing was loaded or unloaded. The relay can run in "
+                    "the foreground here instead."
                 )
             )
         elif sys.platform.startswith("linux") and is_supported():
@@ -10645,8 +10645,7 @@ def uninstall(
         else:
             steps.append(
                 "no user service supervisor on this platform: nothing was loaded or "
-                "unloaded. `lop network serve` (or `--no-start`) is how the relay runs "
-                "here."
+                "unloaded. The relay runs in the foreground here."
             )
     receipt: dict[str, Any] = {
         "ok": True,

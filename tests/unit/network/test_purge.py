@@ -228,7 +228,9 @@ def test_uninstall_reports_an_isolated_home_instead_of_a_launchd_error(
     started = relay.install(port=4097)
     assert started["ok"] is False
     assert started.get("reason") == "isolated_home"
-    assert "--no-start" in str(started["error"]) or "serve" in str(started["error"])
+    # D8/§2.9 repave: the note names the state and the product's own fallback,
+    # never a terminal command (the old tail spelled two `lop network …` forms).
+    assert "foreground" in str(started["error"])
     assert "launchd" in str(started["error"])
 
     action = relay.service_action("start")
