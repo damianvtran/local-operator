@@ -59,9 +59,17 @@ a drifted digest fails CI rather than being quietly refreshed.
   report block's own pair) with a type per field, plus `forbidden` where the shape
   has one. A field is either named in a shape block **or** in
   `payload-forbidden-fields.json` — never both, never neither.
+- **`same_as`** means *this file does not restate the shape* — it names the file
+  whose `required`/`optional`/`forbidden` blocks govern it too. `registry-register-
+  rotation.json` uses it for the register response, so there is one home for that
+  allow-list; the test resolves the pointer and asserts the inheritance, so a
+  restatement that disagrees is refused rather than ignored.
 - **`example` / `payload` / `body`** are the concrete literal. `body` is the whole
   emit body (payload plus the `devices` report block); `payload` is the object the
-  core builds before the block is attached.
+  core builds before the block is attached. **Every filed `example` is validated
+  against the blocks that govern it** — required present, optional allowed,
+  nothing else, `forbidden` absent — because the literal is the text the app and
+  the cloud copy from.
 - **`notes`** carry the constraint, not the description: why a field is optional,
   what a code means, which ADR rule a shape exists to satisfy.
 
@@ -72,7 +80,15 @@ a drifted digest fails CI rather than being quietly refreshed.
   `tests/unit/mobile/test_push_wire_contract.py` drives the **real** registry
   builders and routes and asserts their responses against `registry-*.json`.
   Both compare against the filed literals — the equality is the guard, so adding a
-  field to a builder fails, and removing one fails too.
+  field to a builder fails, and removing one fails too. The emit cells' **input**
+  is the test's own (`DEVICE_ROWS` / `COMPLETION_INPUT`), never read back from the
+  file they check: an input taken from the expected output makes the comparison a
+  tautology.
+- **The `devices` block's pair is enforced per row**, on both sides — the rows the
+  test builds and the rows the file files — against `report_block_required` /
+  `report_block_optional`. A block row with an extra field, a retyped timestamp or
+  a missing `credential_live` fails, and a file with no deny list and no closed
+  body fails as an unguarded shape.
 - **Check `provenance.kind` in a test, not the path.** A suite that reads a fixture
   by name after a rename is the case that field exists for (the mobile repo's rule).
 - The refusal files are asserted **exactly**: `code` and `error` are copy the app

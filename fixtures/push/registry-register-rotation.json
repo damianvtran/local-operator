@@ -14,14 +14,6 @@
   "method": "POST",
   "status": 200,
   "same_as": "registry-register-response.json",
-  "required": {
-    "ok": "bool",
-    "device_id": "str",
-    "device_key": "str",
-    "registered_at": "int"
-  },
-  "optional": {},
-  "forbidden": [],
   "example": {
     "ok": true,
     "device_id": "3f1c9a7b2d4e506182a3b4c5d6e7f809",
@@ -29,6 +21,7 @@
     "registered_at": 1789000000
   },
   "notes": [
+    "THE SHAPE IS INHERITED, not restated: `same_as` names the file whose required/optional/forbidden blocks govern this response too, and tests/unit/mobile/test_push_wire_contract.py resolves and asserts that inheritance instead of trusting it. Two copies of one allow-list is how the two drift, and an empty `forbidden: []` here would be a guard that is not one.",
     "Idempotent on (install_id, platform): device_id and registered_at are STABLE across a re-register, and only the key (and the declarative metadata) is replaced — a device rotating its push token nightly cannot accumulate rows.",
     "Q29: after a re-register the FIRST key no longer matches (device_key_matches is constant-time over the stored key), so the device_key shown here is the only live one. There is no 409 in this model — the key is stored as the key, not as a hash.",
     "The device's own next authenticated register is the delivery path for a rotated key; the machine never pushes a key to a device.",

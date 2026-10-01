@@ -41,7 +41,6 @@
   "forbidden": [
     "token",
     "device_key",
-    "device_key_matches",
     "install_id",
     "environment",
     "operator_key"

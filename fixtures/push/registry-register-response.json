@@ -26,7 +26,6 @@
     "environment",
     "app_version",
     "name",
-    "device_key_matches",
     "operator_key"
   ],
   "example": {
