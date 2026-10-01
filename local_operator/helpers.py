@@ -1092,24 +1092,62 @@ def get_posix_shell_path() -> str | None:
         return None
 
 
+#: Environment marker: THIS process lineage has already reconciled PATH
+#: through the login-shell capture in :func:`setup_cross_platform_environment`.
+#:
+#: WHY A MARKER AND NOT A CACHE. The capture costs a full ``$SHELL -l -i -c``
+#: round-trip — measured 0.9-1.3 s on the operator's machine and the single
+#: most expensive step of a ``lop exec`` launch — and it exists so a
+#: launchd-born tree recovers the user's real PATH before it propagates into
+#: every tool shell. But PATH, once reconciled, is INHERITED: a child that
+#: starts from a primed parent already carries the exact value the capture
+#: would produce, and re-running the capture down a tree of N spawned runs
+#: pays the round-trip N times for one answer that is already in the
+#: environment.
+#:
+#: The marker travels the same way PATH does — by inheritance — so it can only
+#: claim "an ancestor of THIS process primed THIS environment", which is
+#: exactly the claim a child needs. A sibling launched from a bare terminal
+#: has no marker and pays the capture itself, exactly as today (fail-open in
+#: the safe direction: a missing marker means "reconcile", never "trust").
+#: It is set only when the capture actually returned a value; a fallback to
+#: the inherited PATH leaves children free to retry.
+PATH_PRIMED_ENV = "LOCAL_OPERATOR_PATH_PRIMED"
+
+
 def setup_cross_platform_environment():
     """
     Updates the current process's PATH environment variable based on the OS.
     Call this function early in your application's startup.
+
+    Skips the whole round-trip when an ancestor already primed this
+    environment; see :data:`PATH_PRIMED_ENV` for why inheritance is a sound
+    substitute for a cache here.
     """
+    if os.environ.get(PATH_PRIMED_ENV) == "1" and os.environ.get("PATH"):
+        logger.debug(
+            "PATH already reconciled by an ancestor (%s=1); skipping the " "login-shell round-trip",
+            PATH_PRIMED_ENV,
+        )
+        return
     logger.debug(f"Setting up subprocess environment for OS: {platform.system()}...")
 
     original_path = os.environ.get("PATH", "")
     logger.debug(f"Initial PATH: {original_path}")
 
     user_effective_path_str = None
+    #: Whether the OS-specific getter actually ANSWERED (vs. the fallback to
+    #: the inherited PATH below); only a real answer marks the lineage.
+    retrieved = False
 
     # Determine the OS and call the appropriate function
     os_name = platform.system()
     if os_name == "Windows":
         user_effective_path_str = get_windows_registry_path()
+        retrieved = user_effective_path_str is not None
     elif os_name in ["Darwin", "Linux"]:
         user_effective_path_str = get_posix_shell_path()
+        retrieved = user_effective_path_str is not None
     else:
         logger.warning(f"Unsupported OS: {os_name}. Cannot automatically retrieve effective PATH.")
         return
@@ -1181,6 +1219,14 @@ def setup_cross_platform_environment():
             "Could not retrieve or construct a valid effective PATH. "
             "Subprocess calls will use the initial (possibly empty) PATH."
         )
+
+    # Mark the lineage ONLY when the capture was a real answer: every child we
+    # spawn inherits this PATH, and with the marker set none of them pays the
+    # round-trip again (see ``PATH_PRIMED_ENV``). A fallback to the inherited
+    # PATH deliberately leaves the marker unset, so a transient capture failure
+    # does not pin a bare PATH onto the whole process tree.
+    if retrieved and os.environ.get("PATH"):
+        os.environ[PATH_PRIMED_ENV] = "1"
 
     # Optional: Verification step (example)
     # Try to find a common command expected to be in the user's path

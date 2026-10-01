@@ -969,6 +969,22 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: ~37,701 billed against the 37,756 ceiling — ~55 billed of headroom, +0.4
 #: of it this change — while the tiers-configured reading sits above by the
 #: same documented 762-char config gap, not by anything here.
+
+#: RAISED 37,756 -> 37,938 for the bulk-resume SET form
+#: (``feat/sessions-bulk-resume-1001``), stated with the arithmetic because the
+#: guard exists to make copy growth an explicit decision. Re-derived on the
+#: MERGED tree (this branch folded onto ``8a7ba1dd0``, the team-label raise
+#: above already in) with this file's own method, the clean arm via ``env -i``:
+#: 105,315 chars = ~37,883 billed, so the ceiling is that reading plus the
+#: 55-token band this file keeps = 37,938. The change's own components,
+#: measured on the assembled tool entry (this file's own ``tool_schema_chars``
+#: shape, name+description+JSON schema): ``sessions`` description 746 -> 838
+#: chars (the four new accepted inputs in the derived per-op summary and one
+#: prose clause naming the set form) and ``sessions`` schema 2,938 -> 3,351
+#: chars (four boolean fields -- ``paused``/``failed``/``all``/``dry_run`` --
+#: with lean one-clause descriptions); +505 of the +506-char fold delta
+#: (104,809 -> 105,315), the two raises composing because their measured
+#: surfaces are disjoint (one tool each).
 #:
 #: LOWERED 37,756 -> 34,746 for the slimming wave (audit items 2+3,
 #: ``feat/tool-slimming-1001``): the JSON schema descriptions of the eight
@@ -1028,7 +1044,29 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: the band — as every configured local run has since the tiers delta
 #: existed; CI renders the clean arm and is the binding reading. If any
 #: reading disagrees, the script wins.
-BUDGET_BILLED_TOKENS = 34_746
+#:
+#: RAISED 34,746 -> 34,928 for the bulk-resume SET form
+#: (``feat/sessions-bulk-resume-1001``), on top of the entry above, stated with
+#: the arithmetic because the guard exists to make copy growth an explicit
+#: decision. Re-derived on the MERGED tree (this branch folded onto
+#: ``31f981550``, the slimming wave above already in) with this file's own
+#: method, the clean arm via ``env -i`` (the arm CI renders): 96,947 chars =
+#: ~34,873 billed, so the ceiling is that reading plus the 55-token band this
+#: file keeps = 34,928. The change's own components, measured on the assembled
+#: tool entry (this file's own ``tool_schema_chars`` shape,
+#: name+description+JSON schema): ``sessions`` description 746 -> 838 chars
+#: (the four new accepted inputs in the derived per-op summary and one prose
+#: clause naming the set form) and ``sessions`` schema 2,938 -> 3,351 chars
+#: (four boolean fields — ``paused``/``failed``/``all``/``dry_run`` — with lean
+#: one-clause descriptions); +505 chars = ~+182 billed, EXACTLY the fold delta
+#: (96,442 -> 96,947), because the two changes' surfaces are disjoint — the
+#: wave slimmed the eight worked tools, this one grows ``sessions`` alone,
+#: re-measured on the merged tree rather than summed from the two entries.
+#:
+#: The raise is not a regression of the wave: the wave's own -3,010 billed
+#: stands, and the net after this fold (96,947 = ~34,873) is still 2,828
+#: billed under the pre-wave head (105,315 = ~37,883).
+BUDGET_BILLED_TOKENS = 34_928
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

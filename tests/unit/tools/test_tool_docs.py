@@ -125,6 +125,15 @@ _WALK_DEPTH_CAP = 2
 #: :func:`test_cut_wire_prose_moved_into_the_tool_doc`: a doc growing without
 #: a wire shrinking (or a wire shrinking with the detail deleted outright)
 #: fails there by phrase.
+#: RE-MEASURED AGAIN 2026-10-01 by ``feat/sessions-bulk-resume-1001`` (the
+#: bulk-resume SET form), on top of the wave's table above: ``sessions``
+#: 738 -> 850 — in THIS change the only entry that moves, for the four new
+#: accepted inputs on ``resume``
+#: (``paused``/``failed``/``all``/``dry_run``, plus ``limit`` joining the
+#: op's set) and the rewritten summary/refusal lines — the ``op='help'``
+#: reference is exactly where the added vocabulary is supposed to land, one
+#: read away instead of on every request. Re-measured through this file's own
+#: renderer; every other entry is byte-identical.
 MEASURED_TOKENS: dict[str, int] = {
     "agent": 826,
     "ask": 948,
@@ -148,7 +157,7 @@ MEASURED_TOKENS: dict[str, int] = {
     "read_variable": 74,
     "secret": 209,
     "send": 614,
-    "sessions": 738,
+    "sessions": 850,
     "task": 505,
     "team": 540,
     "team_delete": 93,
