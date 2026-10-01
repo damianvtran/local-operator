@@ -4732,6 +4732,92 @@ async def test_session_stream_feeds_last_context_into_anthropic_ttl(tmp_path) ->
     assert session._context_tokens_hint == 200_000
 
 
+def _revoked_bearer_stream(tmp_path, handler):
+    """A real stream fn over a real ``AuthStore`` holding ONE OAuth row whose
+    stored bearer the wire refuses.
+
+    ``expires`` is in the future, so the row is current by the store's own
+    reckoning and no resolve would refresh it unprompted: the token was revoked
+    out of band, and only the WIRE can find that out. The patched refresh
+    function mints a new bearer, which is what a real token endpoint does.
+    """
+    store = AuthStore(tmp_path / "auth.db")
+    _row = {
+        "refresh": "r-1",
+        "access": "stale-token",
+        "expires": int(time.time() * 1000) + 3_600_000,
+        "account_id": "acct-1",
+    }
+    store.upsert_credential("anthropic", dict(_row))
+
+    async def refresh(creds: dict[str, Any]) -> dict[str, Any]:
+        return {**creds, "access": "fresh-token", "expires": int(time.time() * 1000) + 3_600_000}
+
+    store._refresh_fn = lambda provider: refresh  # type: ignore[method-assign]
+    stream = create_stream_fn(store, {}, session_id="session-on-a-revoked-bearer")
+    stream._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    stream._transport.http = stream._http
+
+    def put_back_on_the_stale_bearer() -> None:
+        """Meet the errand with the situation the turn just repaired, rather
+        than with the repair itself (a successful refresh persists)."""
+        store.upsert_credential("anthropic", dict(_row))
+
+    return store, stream, put_back_on_the_stale_bearer
+
+
+@pytest.mark.asyncio
+async def test_the_title_errand_repairs_the_same_revoked_bearer_the_turn_does(
+    tmp_path, monkeypatch
+) -> None:
+    """Issue #1814, one layer up from the failover driver and over real bytes.
+
+    The reported session is healthy: its turn presents the stored bearer, the
+    wire refuses it, and the turn's own rotation repairs it. The naming errand
+    runs the same resolve through the same store and used to fail on the very
+    same token — a frozen ``CALL_FAILED``, rendered to the user as "could not
+    reach the model", on a session whose turns ran fine. Nothing here is a fake
+    at the layer under test: a real ``Session`` drives a real stream fn, the
+    real ``AuthStore`` holds one OAuth row, and the wire is a mocked transport.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    tokens: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        token = request.headers.get("authorization", "").removeprefix("Bearer ")
+        tokens.append(token)
+        if token == "stale-token":
+            return httpx.Response(
+                401,
+                json={
+                    "type": "error",
+                    "error": {"type": "authentication_error", "message": "invalid token"},
+                },
+            )
+        return httpx.Response(
+            200, content=_anthropic_sse(10_000), headers={"content-type": "text/event-stream"}
+        )
+
+    store, stream, put_back = _revoked_bearer_stream(tmp_path, handler)
+    session = _anthropic_session(tmp_path, "sess", stream, blocks=["instructions", "env"])
+    try:
+        await session.prompt("hello")
+        assert tokens == ["stale-token", "fresh-token"], "the turn beside the errand was not served"
+        put_back()
+        tokens.clear()
+        text = await session.complete_once("name this conversation", "hello")
+    finally:
+        await session.dispose()
+        await stream.close()
+        store.close()
+
+    assert tokens == ["stale-token", "fresh-token"], (
+        "the errand did not repair its own bearer: it presented the revoked token, "
+        "was refused, and never asked the account for a new one"
+    )
+    assert text == "ok"
+
+
 @pytest.mark.asyncio
 async def test_session_stream_hint_is_per_conversation_not_per_stream_fn(
     tmp_path,

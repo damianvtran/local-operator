@@ -1410,8 +1410,9 @@ def _legible_input_refusal(
         tail = f"A degraded retry ({steps}) was also refused, so it was not re-sent unchanged."
     elif policy_declined:
         # M1 / Q-3: this is NOT "unavailable" -- the ladder existed and the
-        # call's retry policy declined it (an isolated errand's one-attempt
-        # contract, or retries disabled outright). A future reader must be
+        # call's retry policy declined it (retries disabled outright: an
+        # isolated errand, or a caller that turned them off). A future reader
+        # must be
         # able to tell the two states apart from the message alone.
         tail = (
             "This call's retry policy declined a degraded retry, so it was not re-sent unchanged."
@@ -2083,6 +2084,25 @@ def is_invalidated_credential_error(error: BaseException) -> bool:
     # anthropic surfaces revocation as invalid_request_error + "revoked";
     # "revoked" alone is the generic marker both shapes share.
     return "revoked" in lowered
+
+
+def is_rotation_eligible(error: BaseException) -> bool:
+    """Whether credential rotation may act on this failure at all.
+
+    ONE definition, because two callers MUST agree on it: the ordinary turn's
+    rotation, and the isolated errand's single permitted extra attempt — an
+    errand has to recover exactly where its turn does, and nowhere else.
+
+    The set is the turn's own: a retryable failure (5xx/429/transport — the
+    account may simply not be the one that should serve this), an outright
+    auth error, or a bare 401/403. A request the provider READ and refused
+    (``kind == "request"``: a 4xx that is not auth/quota/timeout) is
+    DETERMINISTIC in its bytes — the same request fails identically on every
+    other account — so it is not here, and nothing rotates on it.
+    """
+    if not isinstance(error, ProviderError):
+        return False
+    return error.retryable or error.auth_error or error.status in (401, 403)
 
 
 def is_direct_credential_rotation_error(error: BaseException) -> bool:
@@ -3733,11 +3753,13 @@ async def stream_with_failover(
         retry = dataclasses.replace(retry, enabled=False)
         route_state = None
 
-    # The isolated errand's ONE auth-class re-resolve has been spent. Latched
-    # per REQUEST so a pool of dead keys cannot turn a decorative call into a
-    # walk: the errand makes at most TWO AUTH attempts, and the second only
-    # when the read-only re-resolve produced a bearer that differs from the one
-    # the provider just rejected.
+    # The isolated errand's ONE rotation-class re-resolve has been spent.
+    # Latched per REQUEST so a pool of dead keys cannot turn a decorative call
+    # into a walk: the errand makes at most TWO AUTH attempts, and the second
+    # only when the failure is on the class the TURN's own rotation acts on
+    # (`is_rotation_eligible`) AND the read-only re-resolve produced a bearer
+    # that differs from the one the provider just rejected — a sibling if the
+    # pool has one, otherwise the same account force-refreshed.
     #
     # "Two auth attempts", not "two wire attempts": the pre-existing fast-mode
     # refusal re-ask (below, and deliberately NOT gated on `retry.enabled`)
@@ -4497,26 +4519,44 @@ async def stream_with_failover(
                     if (
                         request.isolated
                         and not isolated_auth_resolved
-                        and (exc.auth_error or exc.status in (401, 403))
+                        and is_rotation_eligible(exc)
                     ):
                         # The one widening of the isolated budget, and it is
-                        # auth-shaped only. Deployment reality: a pool can
-                        # hold a stale key while the TURN beside us rotates
-                        # past it and stays healthy, so the errand's read-only
-                        # resolve keeps landing on the dead row (the pick is a
-                        # hash of the session id — re-firing the errand later
-                        # picks the same row) and every naming call for such a
-                        # session fails forever. One extra request, and only
-                        # here, buys the title back: a READ-ONLY re-resolve
-                        # with the rejected bearer hidden may serve the errand
-                        # from a sibling — the resolve's own sanctioned move
-                        # (see `_resolve_access_for_provider`) — while the
-                        # sticky pointer, the block list and the demotion set
-                        # stay exactly as they were, so the turn beside us
-                        # keeps resolving to precisely what it did before.
-                        # Non-auth failures (5xx, 429, request-kind, transport)
-                        # keep the exactly-one-attempt behaviour: a rate limit
-                        # says wait, and an errand must not.
+                        # shaped exactly like the TURN's rotation — the same
+                        # class of failure, on the same predicate the ordinary
+                        # arm above delegates on. Deployment reality: a pool can
+                        # hold a stale key, or a session can be sticky to an
+                        # account the provider is currently refusing for a
+                        # reason unrelated to its bytes, while the TURN beside
+                        # us rotates past it and stays healthy. The errand's
+                        # read-only resolve keeps landing on that row (the pick
+                        # is a hash of the session id — re-firing the errand
+                        # later picks the same row) and every naming call for
+                        # such a session fails forever. One extra request, and
+                        # only here, buys the title back: a READ-ONLY re-resolve
+                        # hides the rejected bearer and may serve the errand
+                        # from a sibling, and — when the pool has no sibling to
+                        # offer — re-reads the SAME account the way the turn's
+                        # first rotation leg would (see
+                        # `_resolve_access_for_provider`). Both legs are the
+                        # resolve's own sanctioned moves: the sticky pointer,
+                        # the block list and the demotion set stay exactly as
+                        # they were, so the turn beside us keeps resolving to
+                        # precisely what it did before.
+                        #
+                        # A request the provider READ and refused (a 4xx that
+                        # is not auth/quota/timeout) is still exactly-one-
+                        # attempt: the same bytes fail identically on every
+                        # other account, so there is nothing to rotate to and
+                        # nothing for an errand to ask. Nor does the errand ever
+                        # take a BACKOFF sleep — a rate limit says wait, and an
+                        # errand must not (the sibling ask is a different
+                        # account, not a second try at a throttled one). The
+                        # store's own refresh bookkeeping is the one wait left:
+                        # a forced refresh that finds the cross-process refresh
+                        # lease held waits ~50 ms once before serving or
+                        # giving up (`AuthStore._ensure_oauth_fresh`), which is
+                        # bookkeeping rather than backoff, and it is bounded.
                         isolated_auth_resolved = True
                         sibling = await _resolve_access_for_provider(
                             auth,
@@ -4589,9 +4629,11 @@ async def stream_with_failover(
                     # over to the fallback chain (a DIFFERENT provider) instead,
                     # which is the thing left that might actually succeed.
                     break
-                if exc.retryable or exc.auth_error or exc.status in (401, 403):
+                if is_rotation_eligible(exc):
                     # Delegate: (b) refresh same account, then (c) rotate —
-                    # resolve_next_key owns the decision (PR-04/05).
+                    # resolve_next_key owns the decision (PR-04/05). The same
+                    # predicate gates the isolated errand's one extra attempt,
+                    # so the two recovery classes cannot drift apart.
                     error = exc
                     continue
                 # A request the provider READ and refused (kind=="request": a
@@ -4939,27 +4981,43 @@ async def _resolve_access_for_provider(
     the turn is already on and decides nothing.
 
     The one thing ``read_only`` DOES allow is answering a caller that comes
-    back with the bearer it was just handed rejected outright (``error`` set):
-    the resolve then asks for a SIBLING by hiding the rejected row from that
-    single resolve instead of rotating onto it — see the resolver's
-    ``read_only`` branch. That is the isolated errand's one sanctioned second
-    attempt (deployment reality: pools contain stale keys, and one stale row
-    must not permanently silence a decorative call), and it still decides
-    nothing about routing.
+    back with the bearer it was just handed rejected (``error`` set), because a
+    decorative call must be able to serve ITSELF from where the turn already is
+    without taking any routing decision of its own. The re-resolve makes the
+    turn's two rotation legs, read-only, in the turn's own order of preference:
+
+    - a SIBLING, by hiding the rejected row from that single resolve instead of
+      rotating onto it — see the resolver's ``read_only`` branch. This is tried
+      FIRST (the turn's own ``resolve_next_key`` force-refreshes the same
+      account first, deliberately inverted here: a fresh token on the row the
+      provider just rejected is the candidate least likely to work while a
+      healthy sibling is never asked at all);
+    - when the pool has no sibling to offer, the SAME account force-refreshed —
+      the turn's leg (b), and the only repair a revoked-out-of-band bearer has.
+      Without it a single-account pool failed naming forever while the turn
+      beside it rotated the same token and stayed healthy (issue #1814).
+
+    Both are one sanctioned extra attempt in total, and neither decides
+    anything about routing.
 
     ``rejected_credential_id`` names the ROW whose bearer was just rejected, and
-    it is what makes that sibling leg correct for OAuth. Two reasons it cannot
+    it is what makes the sibling leg correct for OAuth. Two reasons it cannot
     be left to the bearer string alone:
 
     - A forced refresh of the SAME row returns a new bearer, which
       ``resolve_next_key``'s ``_accept`` treats as a fresh candidate. Under
-      ``read_only`` the refresh-same-account leg is therefore SKIPPED entirely
-      (see below): re-presenting the account the provider just rejected, with a
-      fresh token, spends the errand's one extra attempt on the credential least
-      likely to work while the healthy sibling is never asked. An expired token
-      is the turn's problem to fix, on the turn's own rotation.
+      ``read_only`` the sibling leg therefore SKIPS the refresh-same-account
+      ordering the ordinary path uses, so that a pool WITH a sibling does not
+      spend the errand's one extra attempt re-presenting the credential least
+      likely to work — and, when there is no sibling, the same
+      force-refresh is taken on its own (``_same_account_refresh``), which is
+      exactly the leg the ordinary path would have spent its turn on. An
+      expired token is the turn's problem to fix, on the turn's own rotation.
     - A row's bearer can rotate underneath us (the concurrent turn refreshing
-      it), so a key-only exclusion would let the rejected row back in.
+      it), so a key-only exclusion would let the rejected row back in. The same
+      ID is why the sibling leg passes it on EVERY resolve it makes — which is
+      also why the same-account leg cannot go through ``_access`` and has to ask
+      the store without exclusions.
     """
     # Presence test, not a nominal one: stores exposing only get_api_key take
     # the bare-bearer path and get wrapped at the bottom of this function.
@@ -5005,6 +5063,32 @@ async def _resolve_access_for_provider(
         flags.update(_exclusion_flags(exclude))
         return await oauth_store.get_oauth_access(provider, session_id, **flags)
 
+    async def _same_account_refresh() -> str | None:
+        """The account we were just handed, asked again with a FORCED refresh.
+
+        The turn's first rotation leg (``resolve_next_key``'s (b)), taken
+        read-only, and it deliberately carries NO exclusion: the whole point is
+        to re-read the row the errand was just refused on, so hiding it — which
+        is what ``_exclusion_flags`` does to every other resolve in this errand,
+        on the row's ID as well as its bearer — would leave the leg with nothing
+        to ask. A store whose token endpoint cannot mint a new bearer answers
+        with the same string, which the retry latch rejects, so this can never
+        become a second attempt on a throttled account.
+
+        The only wait this leg can incur is the store's own: ``AuthStore`` waits
+        ~50 ms once on a contended cross-process refresh lease before it serves
+        or gives up — bookkeeping, not backoff, and it is bounded.
+        """
+        flags = _model_flags(True)  # force_refresh + read_only (+ model_id)
+        if oauth_store is not None:
+            record = await oauth_store.get_oauth_access(provider, session_id, **flags)
+            if record is not None:
+                records[record.access_token] = record
+                return record.access_token
+        # A store exposing only ``get_api_key`` has nothing to refresh: the
+        # bearer comes back unchanged and the latch above rejects it.
+        return await auth.get_api_key(provider, session_id, **flags)
+
     async def _key(*, force_refresh: bool = False, exclude: str | None = None) -> str | None:
         flags = _model_flags(force_refresh)
         flags.update(_exclusion_flags(exclude))
@@ -5026,7 +5110,10 @@ async def _resolve_access_for_provider(
                 # the errand's single extra attempt there means the healthy
                 # sibling is never asked at all (an OAuth pool whose refresh
                 # SUCCEEDS therefore stayed permanently unnamed). Re-authing a
-                # stale account is the turn's job, on the turn's own rotation.
+                # stale account while a healthy sibling is on offer is the
+                # turn's job, on the turn's own rotation; with no sibling to
+                # offer, the same account IS the turn's own move and is taken
+                # below.
                 #
                 # ``_rotate_sibling`` blocks or demotes the failing row and
                 # moves session stickiness — routing decisions that belong to
@@ -5044,7 +5131,46 @@ async def _resolve_access_for_provider(
                 # ``test_a_store_on_the_protocols_exact_signature_keeps_one_attempt``.
                 record = await _access(exclude=ctx.previous_key)
                 if record is None:
-                    return await _key(exclude=ctx.previous_key)
+                    key = await _key(exclude=ctx.previous_key)
+                    if key is not None:
+                        return key
+                    # NO SIBLING. The turn's rotation has two legs — refresh the
+                    # account it is on, then move to another — and the errand
+                    # inverts them on purpose (sibling FIRST), because a
+                    # refreshed token on the row the provider just rejected is
+                    # the candidate least likely to work while a healthy sibling
+                    # is sitting right there. When the pool has no sibling the
+                    # inversion has nothing to buy, and the leg the turn would
+                    # actually take is the one that repairs the failure this
+                    # class is made of: a bearer the STORE believes is current
+                    # and the WIRE refuses (revoked or rotated out of band, so
+                    # the row's ``expires`` says nothing about it). Without this
+                    # the errand had no move at all, and a single-account pool
+                    # failed naming forever while the turn beside it
+                    # force-refreshed the same row and was served — issue #1814.
+                    #
+                    # ``read_only`` still holds: the refresh is the account's own
+                    # bookkeeping (a rotated token is persisted, as
+                    # ``AuthStore._resolve`` documents), and no block, demotion or
+                    # sticky write rides along. Stores without a refresh
+                    # capability answer with the same bearer, which the retry
+                    # latch rejects — so this cannot become a second attempt on a
+                    # throttled account.
+                    if is_direct_credential_rotation_error(ctx.error):
+                        # The same rule the ordinary rotation applies: a
+                        # valid-but-denied token (402/403/quota) and a provider-
+                        # side fault are not the CREDENTIAL's problem, so
+                        # refreshing it cannot help and the turn skips this leg
+                        # too. The sibling ask above is the errand's whole
+                        # answer on that class.
+                        return None
+                    logger.debug(
+                        "isolated errand: no sibling for %s, re-reading the same "
+                        "account after %s",
+                        provider,
+                        type(ctx.error).__name__,
+                    )
+                    return await _same_account_refresh()
             elif ctx.last_chance:
                 # Family-scoped rotation blocks ride only with usage-aware
                 # routing: on the opt-out path no preflight probe exists to
