@@ -295,6 +295,65 @@ def read_stop_marker(conversation_dir: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+#: THE SIGNAL RECEIPT: what a RUNTIME writes about a termination signal the
+#: moment it ARRIVES — the target-side half of the pair whose acting-side half is
+#: the stop marker above.
+#:
+#: WHY A SECOND FILE AND NOT A FIELD IN ``runtime-stop.json``. The marker's whole
+#: value is that it is written by the party that ACTS and never by the target
+#: (see :func:`stop_marker_path`'s neighbours): a target that wrote into it would
+#: overwrite, last-writer-wins, the very statement of the sanctioned sender it
+#: exists to preserve. So the target gets its own artifact, and a reader pairs the
+#: two (``signal_receipt``) — a signal with a covering marker was sanctioned, one
+#: without was not.
+#:
+#: WHY IT EXISTS AT ALL. On 2026-09-30 at 18:14 twelve exec workers and two
+#: runtimes were signalled inside seventeen seconds and the only surviving facts
+#: were an exit code and one journal row that a later boot overwrote: nothing
+#: recorded WHEN the signal arrived, WHICH signal, or that nobody had staged a
+#: stop for it. The journal could not carry it (written at exit only, one
+#: overwritten row, no row at all for an idle runtime or an exec worker).
+#:
+#: THE SENDER IS NOT IN IT, and cannot be on this platform: the stdlib exposes no
+#: siginfo (``signal.sigwaitinfo`` is absent on macOS) and asyncio discards it, so
+#: the receipt says ``sender: unavailable`` rather than guessing. Never removed by
+#: a runtime: evidence persists until a NEW run (different run key) replaces it.
+SIGNAL_RECEIPT_NAME = "runtime-signal.json"
+
+
+def signal_receipt_path(conversation_dir: Path) -> Path:
+    """Where one conversation's signal receipt lives."""
+    return conversation_dir / SIGNAL_RECEIPT_NAME
+
+
+def write_signal_receipt(conversation_dir: Path, payload: dict[str, Any]) -> Path:
+    """Stage-write the signal receipt (0600, :func:`publish`'s shape, no fsync).
+
+    Raises only when the write itself fails; the caller (``signal_receipt.record``)
+    is what makes it best-effort, because this runs on a signal-arrival path that
+    must never be delayed or failed by an instrument. Deliberately does NOT create
+    the conversation directory, for :func:`write_stop_marker`'s reason — and a
+    runtime whose directory is not materialised yet falls back to a log line.
+    There is no ``remove_`` counterpart on purpose: see :data:`SIGNAL_RECEIPT_NAME`.
+    """
+    target = signal_receipt_path(conversation_dir)
+    _staged_write(target, payload, prefix=f".{SIGNAL_RECEIPT_NAME}.")
+    return target
+
+
+def read_signal_receipt(conversation_dir: Path) -> dict[str, Any] | None:
+    """The signal receipt as a dict, or ``None`` when there is none.
+
+    Tolerant like :func:`read_stop_marker`: unreadable or malformed means "no
+    usable evidence", never an exception on a classification path run at boot.
+    """
+    try:
+        data = json.loads(signal_receipt_path(conversation_dir).read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 #: THE EXIT REQUEST: the file an EXPLICIT DELETE leaves in a conversation
 #: directory to ask that conversation's runtime to leave.
 #:

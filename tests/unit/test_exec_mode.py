@@ -1433,7 +1433,7 @@ def test_worker_records_exit_in_ledger(monkeypatch, tmp_path: Path, capsys) -> N
     logs_dir = _redirect_logs_dir(monkeypatch, tmp_path)
     logs_dir.mkdir(parents=True)
     monkeypatch.setattr(sys, "argv", ["exec_worker", "--prompt", "x", "--job-id", "job1"])
-    monkeypatch.setattr(exec_worker, "run", lambda _p, session_factory=None: 0)
+    monkeypatch.setattr(exec_worker, "run", lambda _p, session_factory=None, stop_facts=None: 0)
 
     assert exec_worker.main() == 0
     records = exec_mode.read_job_records()
@@ -1527,7 +1527,7 @@ def test_exec_worker_main_wraps_errors(monkeypatch: pytest.MonkeyPatch, capsys) 
     """main() maps unexpected failures to exit 1 with the log-line on stderr."""
     monkeypatch.setattr(sys, "argv", ["exec_worker", "--prompt", "x"])
 
-    def boom(_parsed: argparse.Namespace, session_factory=None) -> int:
+    def boom(_parsed: argparse.Namespace, session_factory=None, stop_facts=None) -> int:
         raise RuntimeError("worker exploded")
 
     monkeypatch.setattr(exec_worker, "run", boom)
@@ -2017,7 +2017,7 @@ def test_worker_exit_record_follows_the_config_dir_override(
     home_logs = Path.home() / ".local-operator" / "logs"
 
     monkeypatch.setattr(sys, "argv", ["exec_worker", "--prompt", "x", "--job-id", "jobx"])
-    monkeypatch.setattr(exec_worker, "run", lambda _p, session_factory=None: 0)
+    monkeypatch.setattr(exec_worker, "run", lambda _p, session_factory=None, stop_facts=None: 0)
 
     assert exec_worker.main() == 0
 

@@ -77,6 +77,7 @@ def _entry_owners() -> dict[str, str]:
     )
     from local_operator.session.runtime.inbox import INBOX_NAME
     from local_operator.session.runtime.registry import (
+        SIGNAL_RECEIPT_NAME,
         STOP_MARKER_NAME,
         TURN_JOURNAL_NAME,
     )
@@ -94,6 +95,7 @@ def _entry_owners() -> dict[str, str]:
         CREATED_AT_NAME: "session.creation",
         TURN_JOURNAL_NAME: "session.runtime.registry",
         STOP_MARKER_NAME: "session.runtime.registry",
+        SIGNAL_RECEIPT_NAME: "session.runtime.registry",
         INBOX_NAME: "session.runtime.inbox",
         FORK_BOUNDARY_NAME: "fork",
         DESKTOP_MARKER_NAME: "session.retention",
@@ -249,6 +251,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         5,
         "the store's own roots and log file (``~/.local-operator``, ``logs``, "
         "``runtime.log``, the agent home): the directories a session lives UNDER",
+    ),
+    "local_operator/session/runtime/stop_ledger.py": (
+        1,
+        "``SWEEPS_FILE``: the machine-level stop-sweep ledger under ``<config>/logs`` "
+        "(beside ``exec-jobs.jsonl``), history about a SWEEP, never a file in a session",
     ),
     "local_operator/config.py": (1, "``config.yml``, the store's configuration file"),
     # ``STORE_DIRNAME``/``_SESSIONS_DIRNAME`` are the store ROOT's name and the

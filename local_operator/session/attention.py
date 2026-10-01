@@ -710,6 +710,17 @@ def _durable_stop_marker(directory: Path) -> dict[str, Any] | None:
     return registry.read_stop_marker(directory)
 
 
+def _durable_signal_receipt(directory: Path) -> dict[str, Any] | None:
+    """The runtime's own signal receipt for this conversation, or ``None``.
+
+    Read from the CONVERSATION directory for the reason :func:`_durable_stop_marker`
+    states: it must outlive the record it describes.
+    """
+    from local_operator.session.runtime import registry
+
+    return registry.read_signal_receipt(directory)
+
+
 def _stop_marker_covers_run(
     marker: dict[str, Any],
     directory: Path,
@@ -995,6 +1006,38 @@ def _classify_orphaned_run(
                     ),
                 ),
             )
+    # THE TARGET'S OWN SIGNAL RECEIPT (``runtime-signal.json``), BELOW the marker arms
+    # and ABOVE the journal. A covering marker already answered above (it is the
+    # acting party's attestation and outranks the victim's statement), so a receipt
+    # reaching this rung is one that NO covering deliberate/involuntary marker
+    # explained: the runtime recorded that a termination signal ARRIVED and that
+    # nothing had been staged for it. The CAUSE TOKENS are unchanged
+    # (``runtime-shutdown``, and ``runtime-killed`` when no signal is named) — only
+    # the detail gains the receipt's facts, via a new renderer, so no surface that
+    # switches on a cause learns a new one. A receipt for another run is refused
+    # (``signal_receipt.covers_run``), which keeps an earlier run's signal from
+    # narrating a later death.
+    try:
+        from local_operator.session.runtime import signal_receipt
+
+        receipt = _durable_signal_receipt(directory)
+        if receipt is not None and signal_receipt.covers_run(receipt, directory.name, dead):
+            from local_operator.incidents import render_signal_receipt_detail
+
+            latest = receipt["signals"][-1]
+            detail = render_signal_receipt_detail(
+                signal_name=str(latest.get("name") or ""),
+                at=latest.get("at"),
+                unsanctioned=latest.get("sanction") != "marker",
+                count=int(receipt.get("count") or 1),
+            )
+            return (
+                "error",
+                "runtime-shutdown",
+                render_cut_off_reason("runtime-shutdown", detail=detail),
+            )
+    except Exception:  # noqa: BLE001 — an unreadable receipt degrades to the rungs below
+        logger.debug("signal receipt unreadable for %s", directory.name, exc_info=True)
     if _stopped_marker(directory):
         return (
             "interrupted",

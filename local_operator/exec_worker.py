@@ -10,6 +10,20 @@ SIGTERM safety: SIGTERM is the expected shutdown signal for these detached
 jobs. The handler aborts the running turn and lets the async main flush its
 renderer output and dispose the session before exiting 130 — a hard kill
 here would truncate the log mid-write and leak provider connections.
+
+STOP ATTRIBUTION (the 2026-09-30 18:14 wave: twelve of these workers signalled
+inside seventeen seconds, every ledger row an anonymous ``cancelled``): the exit
+code 130 is shared by a deliberate stop and an unexplained SIGTERM, so the
+terminal row carries what the worker KNEW about the stop. The SIGTERM handler
+writes an ARRIVAL row to the ledger before it does anything else (no ``status``
+key, so it merges without regressing state and survives a SIGKILL inside the
+settle window), pairing the signal with any stop marker staged for this run
+(``session/runtime/signal_receipt``); a supervisor ``stop`` marks ``via``
+``control-stop``. ``main`` hands those facts to ``update_job_exit``, which
+classifies the run: exit 130/143 with deliberate evidence is ``cancelled``; with
+none it is ``interrupted`` (the sender is not knowable on this platform, so the
+ledger says so instead of calling it a cancellation). A normal exit carries none
+of these keys.
 """
 
 from __future__ import annotations
@@ -86,10 +100,54 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _record_arrival(
+    session_box: list[SessionProtocol], job_id: str | None, stop_facts: dict[str, Any]
+) -> None:
+    """Record that SIGTERM arrived: the exec worker's signal receipt. NEVER RAISES.
+
+    The ledger IS this worker's receipt (it has no turn journal, and its
+    conversation directory may not exist yet when a signal lands during provider
+    discovery), so the arrival is appended to ``exec-jobs.jsonl`` immediately and
+    kept in ``stop_facts`` for the terminal row. The row has NO ``status`` key on
+    purpose: ``job_status`` ranks a status-less row as 0 and merges it with
+    ``setdefault``, so it can neither regress nor spoof a state, and it closes the
+    window between the signal and a SIGKILL inside the 5 s settle.
+    """
+    try:
+        import time as _time
+
+        from local_operator.session.runtime import signal_receipt
+
+        session = session_box[0] if session_box else None
+        directory = getattr(getattr(session, "_transcript", None), "directory", None)
+        session_id = str(getattr(session, "session_id", "") or "")
+        entry = signal_receipt.observe(
+            directory,
+            session_id=session_id,
+            pid=os.getpid(),
+            started_at=None,
+            name=signal.SIGTERM.name,
+            number=int(signal.SIGTERM.value),
+            in_flight=session is not None,
+            action="stop",
+        )
+        entry.setdefault("at", _time.time())
+        stop_facts["signal"] = entry
+        stop_facts["session_id"] = session_id
+        if job_id:
+            from local_operator.exec_mode import _append_job_update
+
+            _append_job_update({"id": job_id, "signal": entry})
+    except Exception:  # noqa: BLE001 — an instrument must never fail the handler
+        logging.getLogger(__name__).debug("exec signal receipt unavailable", exc_info=True)
+
+
 def _install_sigterm_handler(
     loop: asyncio.AbstractEventLoop,
     session_box: list[SessionProtocol],
     interrupted: asyncio.Event,
+    stop_facts: dict[str, Any] | None = None,
+    job_id: str | None = None,
 ) -> None:
     """SIGTERM -> signal ``interrupted``; async_main returns 130 (CL-03).
 
@@ -102,7 +160,13 @@ def _install_sigterm_handler(
     default handling.
     """
 
+    facts = stop_facts if stop_facts is not None else {}
+
     def handler() -> None:
+        # FIRST: the arrival receipt (see ``_record_arrival``). A repeat SIGTERM
+        # keeps the first signal as the cause rather than overwriting it.
+        if "signal" not in facts:
+            _record_arrival(session_box, job_id, facts)
         session = session_box[0] if session_box else None
         if session is not None:
             try:
@@ -232,6 +296,7 @@ def _default_session_factory(
 def run(
     parsed: argparse.Namespace,
     session_factory: Callable[[], SessionProtocol | Awaitable[SessionProtocol]] | None = None,
+    stop_facts: dict[str, Any] | None = None,
 ) -> int:
     """Build the session, run one prompt, return the exit code.
 
@@ -241,7 +306,14 @@ def run(
 
     ``session_factory`` is injectable for tests; the default wires the real
     engine through the shared composition root.
+
+    ``stop_facts`` is the CARRIER for what this run learned about how it was
+    stopped (``signal`` entry, ``via``), filled in place for ``main`` to hand to
+    the ledger. Optional and keyword-last so every existing caller — the suite
+    calls ``run(parsed, session_factory=...)`` — is unchanged; ``None`` makes a
+    private dict, so a caller that does not care pays nothing.
     """
+    facts: dict[str, Any] = stop_facts if stop_facts is not None else {}
     from local_operator.exec_session import run_session
     from local_operator.exec_startup import resolve_startup
 
@@ -255,7 +327,9 @@ def run(
         loop = asyncio.get_running_loop()
         interrupted = asyncio.Event()
         session_box: list[SessionProtocol] = []
-        _install_sigterm_handler(loop, session_box, interrupted)
+        _install_sigterm_handler(
+            loop, session_box, interrupted, facts, getattr(parsed, "job_id", None)
+        )
         # After the kill switch, deliberately: the two handlers are independent,
         # but a failure inside this registration (``signal.signal`` on a
         # non-main thread raises) must not be able to cost the run its SIGTERM
@@ -294,12 +368,26 @@ def run(
             # BaseException — unhandled it would skip main()'s terminal ledger
             # write, leaving reconciliation to report a deliberate stop as an
             # abrupt `interrupted`. Deliberate termination is `cancelled`.
+            #
+            # AND IT IS THE ONE PATH THAT PROVES THE STOP WAS ASKED FOR: only the
+            # supervisor's control op cancels the lifetime, so the ledger can
+            # classify this exit as deliberate without any marker.
+            facts.setdefault("via", "control-stop")
             return EXIT_INTERRUPTED
 
     try:
-        return asyncio.run(async_main())
-    except (KeyboardInterrupt, asyncio.CancelledError):
+        code = asyncio.run(async_main())
+    except KeyboardInterrupt:
+        # SIGINT's default disposition: nobody staged it and this worker has no
+        # handler for it, so it is recorded as an interrupt of unknown origin.
+        facts.setdefault("via", "interrupt")
         return EXIT_INTERRUPTED
+    except asyncio.CancelledError:
+        facts.setdefault("via", "control-stop")
+        return EXIT_INTERRUPTED
+    if code == EXIT_INTERRUPTED and "signal" in facts:
+        facts.setdefault("via", "signal")
+    return code
 
 
 def main() -> int:
@@ -328,8 +416,9 @@ def main() -> int:
     from local_operator.logger import configure_cli_logging
 
     configure_cli_logging()
+    stop_facts: dict[str, Any] = {}
     try:
-        code = run(parsed)
+        code = run(parsed, stop_facts=stop_facts)
     except Exception as exc:  # noqa: BLE001 — a log file is the only surface
         sys.stderr.write(f"exec_worker error: {exc}\n")
         code = 1
@@ -337,7 +426,7 @@ def main() -> int:
         try:
             from local_operator.exec_mode import update_job_exit
 
-            update_job_exit(parsed.job_id, code)
+            update_job_exit(parsed.job_id, code, stop=stop_facts)
         except Exception:  # noqa: BLE001 — best-effort ledger
             pass
     # Flush before returning: the spawner owns this file's lifetime and the

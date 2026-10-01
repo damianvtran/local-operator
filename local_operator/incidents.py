@@ -42,6 +42,7 @@ not re-import them; the values and their per-record notes live in that module.
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -704,6 +705,37 @@ def involuntary_kill_detail(
         render_involuntary_attribution(mechanism=mechanism, actor=actor, killer_pid=killer_pid)
         or f" ({KILL_UNATTRIBUTED})"
     )
+
+
+def render_signal_receipt_detail(
+    *, signal_name: str = "", at: object = None, unsanctioned: bool = True, count: int = 1
+) -> str:
+    """The parenthetical a runtime's OWN signal receipt gives a ``runtime-shutdown`` reason.
+
+    Scalar arguments, for the reason :func:`render_stop_attribution` gives: the
+    receipt's schema belongs to its writer (``session/runtime/signal_receipt``).
+
+    SAYS WHAT WAS RECORDED AND NOTHING MORE. The sender is not knowable on this
+    platform, so an unsanctioned signal is rendered as arriving from "an
+    unidentified sender" with the explicit statement that no stop was staged — it
+    never names a party, and it leads with :data:`KILL_UNATTRIBUTED` so a marked
+    death and an unmarked one are not read as one sentence. The parenthetical opens
+    as an aside (see :func:`_render_cut_off_detail`) and is ONE pair, never nested.
+    """
+    parts: list[str] = []
+    if unsanctioned:
+        parts.append(KILL_UNATTRIBUTED)
+    name = signal_name or "a termination signal"
+    when = ""
+    if isinstance(at, (int, float)) and not isinstance(at, bool) and at:
+        when = " at " + time.strftime("%H:%M:%S", time.localtime(float(at)))
+    if unsanctioned:
+        parts.append(f"{name} received{when} from an unidentified sender; no stop was staged")
+    else:
+        parts.append(f"{name} received{when}")
+    if count > 1:
+        parts.append(f"{count} signals received")
+    return f" ({', '.join(parts)})"
 
 
 def is_cut_off_cause(cause: str) -> bool:

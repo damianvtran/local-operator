@@ -1351,6 +1351,53 @@ def _bind_boot_instrumentation(
         return None
 
 
+def _record_signal_receipt(
+    handle: object, runtime: object, sig: signal.Signals, *, draining: bool
+) -> dict[str, Any] | None:
+    """Write the target-side receipt for a termination signal that just arrived.
+
+    CALLED AS THE FIRST STATEMENT OF ``_on_signal``, before ``stop.set()`` or the
+    drain, because every later step can lose the evidence: a drain can be
+    SIGKILLed mid-wait, and the turn journal is written at exit only (and not at
+    all for an idle runtime). The 2026-09-30 18:14 wave left two runtimes whose
+    only record was one journal row a later boot overwrote. See
+    ``signal_receipt`` for what the receipt can say (and that the SENDER is
+    unavailable on this platform) and ``registry.SIGNAL_RECEIPT_NAME`` for why it
+    is a file of its own.
+
+    Runs on the loop thread as a loop callback, not in the C-level handler, so one
+    small staged write is legal here. BEST-EFFORT AND NEVER RAISES: a signal path
+    must not be delayed or failed by an instrument. ``draining`` says a drain was
+    already in force, which is how a REPEAT signal is told from the first.
+    """
+    try:
+        from local_operator.session.runtime import signal_receipt
+
+        session = getattr(handle, "_session", None)
+        directory = getattr(getattr(session, "_transcript", None), "directory", None)
+        server_record = getattr(runtime, "_record", None)
+        session_id = str(
+            getattr(session, "session_id", "") or getattr(server_record, "session_id", "") or ""
+        )
+        started_at = getattr(server_record, "started_at", None)
+        in_flight = _work_in_flight(handle)
+        action = "repeat-absorbed" if draining else ("drain" if in_flight else "stop")
+        return signal_receipt.record(
+            Path(directory) if directory is not None else None,
+            kind="runtime",
+            session_id=session_id,
+            pid=os.getpid(),
+            started_at=started_at if isinstance(started_at, (int, float)) else None,
+            name=sig.name,
+            number=int(sig.value),
+            in_flight=in_flight,
+            action=action,
+        )
+    except Exception:  # noqa: BLE001 — see the docstring: never fail a signal path
+        logger.debug("signal receipt unavailable", exc_info=True)
+        return None
+
+
 def _note_journal_exit(handle: object, cause: str) -> None:
     """Tell the turn journal why this runtime is leaving. Best-effort.
 
@@ -4604,6 +4651,9 @@ async def amain(operator_cap: bytes | None = None) -> int:
     #: REPEAT signal cannot start a second drain, and so nothing else needs to
     #: know whether one is running.
     draining: asyncio.Task[None] | None = None
+    #: The receipts ``_on_signal`` wrote (latest last), kept ONLY so the exit log can
+    #: name the signal's pairing; the file on disk is the artifact.
+    signal_receipts: list[dict[str, Any] | None] = []
 
     def _on_signal(sig: signal.Signals) -> None:
         """Leave — at the next boundary if a turn is in flight, right now if not.
@@ -4626,6 +4676,11 @@ async def amain(operator_cap: bytes | None = None) -> int:
         be able to see afterwards.
         """
         nonlocal draining
+        # FIRST, before anything that can set ``stop`` or start the drain: see
+        # :func:`_record_signal_receipt`. Its result is kept only for the exit log.
+        signal_receipts.append(
+            _record_signal_receipt(handle, runtime, sig, draining=draining is not None)
+        )
         trigger.setdefault("why", sig.name)
         if not _work_in_flight(handle):
             stop.set()
@@ -4855,11 +4910,18 @@ async def amain(operator_cap: bytes | None = None) -> int:
         # The reaper logs its own line from ``_clean_exit``; these are the
         # direct-dispose triggers (a signal, or the graceful ``stop`` op).
         boot = getattr(runtime, "_boot_build", None)
+        receipt_line = ""
+        if signal_receipts and signal_receipts[-1]:
+            from local_operator.session.runtime import signal_receipt as _receipt
+
+            described = _receipt.describe(signal_receipts[-1])
+            receipt_line = f"; signal receipt: {described}" if described else ""
         logger.info(
-            "session runtime: exiting (%s, pid %d, %s)",
+            "session runtime: exiting (%s, pid %d, %s)%s",
             trigger.get("why") or "unknown",
             os.getpid(),
             boot.label() if boot is not None else "<unknown>",
+            receipt_line,
         )
         # BEFORE the dispose, and that is the whole ordering: a turn still open
         # here is about to be aborted, and the exit cause this runtime knows
