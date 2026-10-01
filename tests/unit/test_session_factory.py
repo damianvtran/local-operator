@@ -3765,6 +3765,45 @@ def test_the_backfill_stamps_only_what_the_machine_itself_wrote(tmp_path: Path) 
     assert resume_mod.backfill_session_origins(tmp_path) == 1
 
 
+def test_a_fragment_opener_with_a_role_preamble_stamps_subagent(tmp_path: Path) -> None:
+    """The fragment path honours ``condense=False``, so the preamble's newline
+    survives the recovery and the sweep can match it.
+
+    Regression for review round 1, R1-2: ``backfill_session_origins`` asks
+    ``session_name(..., condense=False)`` precisely so the ``[role: X]\n``
+    preamble is not flattened into a space before ``_ROLE_PREAMBLE`` can match.
+    The strict-parse branch always respected that; the FRAGMENT branch — a
+    first line past the scan window, e.g. one carrying a pasted screenshot —
+    used to condense regardless, so a delegated run whose first line was long
+    was classified as the user's own and only got the origin-scan sentinel.
+    """
+    directory = tmp_path / "sessions" / "frag_role"
+    directory.mkdir(parents=True)
+    entry = {
+        "id": "e1",
+        "ts": 0,
+        "type": "message",
+        "payload": {
+            "kind": "message",
+            "role": "user",
+            "content": [
+                {"text": "[role: reviewer]\nYou are an INDEPENDENT reviewer."},
+                # Bulk AFTER the text, base64-image-shaped: the line runs past
+                # the scan window while the text value (and its closing quote)
+                # stay inside it — exactly how a pasted screenshot fragments.
+                {"data": "A" * 70_000, "mime_type": "image/png"},
+            ],
+        },
+    }
+    (directory / resume_mod.TRANSCRIPT_NAME).write_text(json.dumps(entry) + "\n", encoding="utf-8")
+
+    assert resume_mod.session_name(directory, condense=False).startswith("[role: reviewer]\n")
+    assert resume_mod.backfill_session_origins(tmp_path) == 1
+    assert not resume_mod.is_user_session(directory)
+    assert (directory / resume_mod.ORIGIN_NAME).exists()
+    assert not (directory / resume_mod.ORIGIN_SCAN_SENTINEL_NAME).exists()
+
+
 def test_stamping_a_session_does_not_reset_its_retention_clock(tmp_path: Path) -> None:
     """Retention sorts and age-expires on the DIRECTORY's mtime, and creating
     a file inside a directory moves it.
