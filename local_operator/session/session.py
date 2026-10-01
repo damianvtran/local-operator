@@ -19887,7 +19887,13 @@ class Session:
                     f'MCP server {detail} is connected but no longer lists "{name}"',
                 )
             return ("unavailable", f"MCP server {detail} is disconnected")
-        except Exception:  # noqa: BLE001 — a manager that cannot answer is not proof of absence
+        except Exception:  # noqa: BLE001 — fail CLOSED, and the states are the reason
+            # A manager that cannot answer is not proof of absence, so this does
+            # NOT invent "unavailable" (which would suspend the strike ladder
+            # forever on a broken probe). Every other absent-tool answer on this
+            # path is fail-closed too: the tool is treated as GONE, which keeps
+            # today's behaviour and lets the ordinary ladder disable a monitor
+            # nothing can run.
             logger.debug("monitor availability probe failed for %s", name, exc_info=True)
             return ("gone", "")
 
@@ -20067,9 +20073,9 @@ class Session:
                 skipped=delivery.skipped,
             )
         )
-        self._send_monitor_message(message)
+        self._send_monitor_message(message, busy=busy)
 
-    def _send_monitor_message(self, message: CustomMessage) -> None:
+    def _send_monitor_message(self, message: CustomMessage, *, busy: bool) -> None:
         """Hand one ``monitor_prompt`` to the session: busy rides the boundary,
         idle opens a turn.
 
@@ -20079,8 +20085,15 @@ class Session:
         ride the COURTESY lane (an immediate-interrupt poll would otherwise
         cancel the tool it landed inside), and ``_peer_arrival`` must be marked
         AFTER the put so the woken tool's drain finds it.
+
+        ``busy`` is the caller's LATCHED reading rather than a fresh probe: the
+        busy-resume note is decided before ``_emit`` is awaited, so re-reading
+        ``_is_streaming`` here could give a delta the note without the queue
+        lane (a turn that ended during the await) or the lane without the note
+        (a turn that started) — the two must describe one moment (review round
+        1, R4).
         """
-        if self._is_streaming:
+        if busy:
             self._courtesy_wake_count += 1
             self._steering_queue.put_nowait(message)
             self._peer_arrival.mark(MONITOR_PROMPT_MESSAGE_TYPE)
@@ -20100,6 +20113,11 @@ class Session:
         cap.
         """
         text = format_monitor_notice_text(notice)
+        # The lane is decided ONCE, before the emit is awaited and before the
+        # message is built: the same latch the delivery path makes, so a turn
+        # that starts or ends during the await cannot split the message's lane
+        # from its note (review round 1, R4).
+        busy = self._is_streaming
         message = CustomMessage(
             custom_type=MONITOR_PROMPT_MESSAGE_TYPE,
             attribution="user",
@@ -20124,7 +20142,7 @@ class Session:
                 skipped=0,
             )
         )
-        self._send_monitor_message(message)
+        self._send_monitor_message(message, busy=busy)
 
     async def _deliver_patience_wake(self, due: DueWake) -> None:
         """Deliver one fired patience wait: hidden, watermark-checked, bounded.

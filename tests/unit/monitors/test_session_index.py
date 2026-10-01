@@ -405,7 +405,7 @@ async def test_the_delivered_count_clause_tracks_the_counters(
             if entry.type == "message" and entry.payload.get("custom_type") == "monitor_prompt"
         ]
         text = rows[-1].payload["details"]["text"]
-        assert "3 delivers of change so far." in text
+        assert "3 deliveries of change so far." in text
         assert "never delivered" not in text
     finally:
         await session.dispose()

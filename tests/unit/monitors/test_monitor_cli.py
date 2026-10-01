@@ -325,3 +325,94 @@ def test_an_unavailable_episode_is_named_in_the_tail(
 
     assert monitor_command(_args()) == 0
     assert "tool unavailable since" in capsys.readouterr().out
+
+
+def test_the_hint_leads_the_row_so_a_narrow_table_keeps_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D6: the hint was appended last, so at 80 columns every hint was cut
+    while the counters beside it survived — the one fact the row exists for,
+    lost to the terminal width."""
+    from local_operator.cli import monitor_command
+    from local_operator.monitors.store import write_entry
+
+    now = int(time.time() * 1000)
+    write_entry(
+        tmp_path,
+        "msess01",
+        cwd="/w",
+        monitors=[_row("m1", checks=12, deliveries=0, next_due_at=now + 30_000)],
+    )
+    monkeypatch.setenv("COLUMNS", "80")
+
+    assert monitor_command(_args()) == 0
+
+    out = capsys.readouterr().out
+    assert "0 deliveries" in out
+
+
+def test_the_full_hint_sentence_reaches_the_cli(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The band shows a hint's STATE clause; the surfaces with room show the
+    whole shared sentence, and this pins that the long form is still produced."""
+    from local_operator.cli import monitor_command
+    from local_operator.monitors.store import write_entry
+
+    now = int(time.time() * 1000)
+    write_entry(
+        tmp_path,
+        "msess01",
+        cwd="/w",
+        monitors=[_row("m1", checks=0, deliveries=0, created_at=now - 3_600_000)],
+    )
+
+    assert monitor_command(_args()) == 0
+
+    assert "never checked — its session was not open since arming" in capsys.readouterr().out
+
+
+def test_an_unhosted_row_does_not_say_the_session_is_closed_twice(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D7: "overdue by 2h — session not open" and "never checked — its session
+    was not open since arming" are one fact said twice."""
+    from local_operator.cli import monitor_command
+    from local_operator.monitors.store import write_entry
+
+    now = int(time.time() * 1000)
+    write_entry(
+        tmp_path,
+        "msess01",
+        cwd="/w",
+        monitors=[_row("m1", checks=0, deliveries=0, next_due_at=now - 7_200_000)],
+    )
+
+    assert monitor_command(_args()) == 0
+
+    out = capsys.readouterr().out
+    assert "never checked — its session was not open since arming" in out
+    assert out.count("session not open") == 0
+
+
+def test_the_check_count_is_not_said_twice(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D7's other form: the zero-deliveries hint opens with the check count, so
+    the counter beside it must not repeat it."""
+    from local_operator.cli import monitor_command
+    from local_operator.monitors.store import write_entry
+
+    now = int(time.time() * 1000)
+    write_entry(
+        tmp_path,
+        "msess01",
+        cwd="/w",
+        monitors=[_row("m1", checks=12, deliveries=0, next_due_at=now + 30_000)],
+    )
+
+    assert monitor_command(_args()) == 0
+
+    out = capsys.readouterr().out
+    assert out.count("12 checks") == 1
+    assert "12 checks, 0 deliveries" in out

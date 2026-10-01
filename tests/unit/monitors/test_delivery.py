@@ -113,8 +113,10 @@ def test_the_zero_delivery_clause_appears_only_at_zero() -> None:
     assert "It never delivered a change since arming (7 checks)." in never
     with_deliveries = format_monitor_notice_text(notice(deliveries=3))
     assert "never delivered" not in with_deliveries
-    assert "3 delivers of change so far." in with_deliveries
-    assert "1 deliver of change so far." in format_monitor_notice_text(notice(deliveries=1))
+    assert "3 deliveries of change so far." in with_deliveries
+    # QA round 1, Q1: the shipped text said "1 deliver"; the plan's wording is
+    # "N deliveries so far".
+    assert "1 delivery of change so far." in format_monitor_notice_text(notice(deliveries=1))
 
 
 def test_the_stalled_notice_names_the_remedy_and_the_baseline() -> None:
@@ -159,3 +161,60 @@ def test_the_notice_error_is_clipped_to_one_line() -> None:
     assert "\n" not in text.split("Last error: ")[1].split("\n")[0]
     assert "second line" in text  # whitespace-collapsed, not dropped
     assert len(text) <= NOTICE_MAX_CHARS
+
+
+# ---------------------------------------------------------------------------
+# Remediation round 1 — the notice copy (review R3/R6, QA Q1/Q2, design D4/D9)
+# ---------------------------------------------------------------------------
+
+
+def test_an_unknown_kind_raises_rather_than_reading_as_restored() -> None:
+    """R6: ``NOTICE_KINDS`` is the dispatch's vocabulary, not a test fixture.
+
+    The formatter used to fall through to the "running again" wording, so a
+    producer that misspelled a kind told the operator a watch had recovered.
+    """
+    import pytest
+
+    assert set(NOTICE_KINDS) == {"disabled", "stalled", "restored"}
+    with pytest.raises(ValueError) as caught:
+        format_monitor_notice_text(notice(kind="expired"))
+    assert "expired" in str(caught.value)
+
+
+def test_a_notice_leads_with_the_news_on_its_first_line() -> None:
+    """D4: the collapsed card shows ONE line, so the news has to be on it."""
+    first = format_monitor_notice_text(notice()).splitlines()[0]
+    assert first.index("was DISABLED") < first.index("after 5 consecutive failed checks")
+    # The source note rides at the END of the first line: it used to sit between
+    # the id and the news, spending the collapsed row's first cells on a tool
+    # name (D4).
+    assert first.rstrip().endswith("(via bash).")
+    assert "no longer watching" in first
+
+
+def test_an_unreachable_disable_is_not_reported_as_failed_checks() -> None:
+    """R3 + Q2: unavailable ticks charge no strike, so the notice must not say
+    "failed" — and it must not print a count it does not have."""
+    unreachable = format_monitor_notice_text(notice(failure_kind="unreachable", failures=0))
+    assert "stayed unreachable for 24 hours" in unreachable
+    assert "consecutive failed check" not in unreachable
+
+    legacy = format_monitor_notice_text(notice(failures=0))
+    assert "after 0 consecutive" not in legacy
+    assert "after repeated failed checks" in legacy
+
+    fatal = format_monitor_notice_text(notice(failure_kind="fatal", failures=0))
+    assert "cannot succeed" in fatal
+
+
+def test_the_stalled_notice_keeps_its_first_line_short() -> None:
+    """The stalled line's headline is the news, not the record: the reason and
+    the baseline consequence are on later lines."""
+    lines = format_monitor_notice_text(notice(kind="stalled")).splitlines()
+    assert lines[0].startswith("(monitor) 'watch' m1 could not run its check at ")
+    assert "without counting failures" in lines[0]
+    # The source note rides at the END of the first line, the same place the
+    # disabled notice keeps it (D4).
+    assert lines[0].rstrip().endswith("(via bash).")
+    assert any(line.startswith("Reason: ") for line in lines[1:])

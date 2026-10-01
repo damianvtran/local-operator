@@ -624,10 +624,6 @@ def test_required_and_type_errors_refused() -> None:
         ("glob", {"pattern": "*.py", "path": "/tmp"}),
         ("read", {"path": "/x"}),
         ("read", {"range": "1-5"}),
-        # A stray intent key: BOTH paths build their tool the same way, so both
-        # answer alike (the session path in a real session lifts it — see
-        # ``test_injected_intent_key_is_stripped_at_tick_and_accepted_at_arm``).
-        ("glob", {"pattern": "x", "i": "narrate"}),
     ],
 )
 def test_in_session_and_external_verdicts_agree(tool_name: str, args: dict[str, Any]) -> None:
@@ -641,6 +637,27 @@ def test_in_session_and_external_verdicts_agree(tool_name: str, args: dict[str, 
         assert external is None
     else:
         assert external == in_session, (tool_name, args, in_session, external)
+
+
+def test_the_external_arm_accepts_an_injected_intent_like_the_session_arm() -> None:
+    """ARITY DOES NOT DEPEND ON THE DOOR (review round 1, MAJOR R1).
+
+    ``external_monitor_verdict`` builds its tool from the raw ``TOOL_BUILDERS``,
+    and the raw schema has NOT been through ``apply_intent_schema`` — the
+    transform ``create_tools`` applies and a real session therefore resolves.
+    Without applying it here too, the external arm kept the ``i``, refused it,
+    and disagreed with both the session arm and the tick about the same call.
+    """
+    args = {"pattern": "x", "i": "narrate"}
+    assert readonly.monitor_call_verdict(intent_tool("glob"), args) is None
+    assert readonly.external_monitor_verdict("glob", args) is None
+
+    # The parity is accept-parity on the injected key ONLY: a genuinely
+    # undeclared key is still refused from both doors, so the transform cannot
+    # become an accept-bypass for anything else.
+    stray = {"pattern": "x", "path": "/tmp"}
+    assert readonly.monitor_call_verdict(intent_tool("glob"), stray) is not None
+    assert readonly.external_monitor_verdict("glob", stray) is not None
 
 
 # ---------------------------------------------------------------------------

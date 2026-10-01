@@ -138,7 +138,10 @@ Nothing stops silently.
 
 The list surfaces say what a row's counters alone cannot: `idle` (overdue
 because no session is hosting it), `never checked`, `N checks, 0 deliveries —
-nothing has changed`, and `tool unavailable since HH:MM — retrying`.
+nothing has changed`, and `tool unavailable since HH:MM — retrying`. The
+status band is a two-row glance surface, so it carries the STATE in the due
+slot (`disabled` / `stalled` / `idle`) and the state clause of a hint; the
+`lop monitor status` table and the expanded receipt carry each hint whole.
 
 ## No action needed is a first-class outcome
 

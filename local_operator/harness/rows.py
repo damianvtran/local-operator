@@ -819,6 +819,36 @@ def monitor_receipt_body(text: str) -> str:
     return text
 
 
+#: The phrases ``monitors.delivery`` opens each lifecycle notice with, ON ITS
+#: FIRST LINE. Read from the text rather than from a field because both paths
+#: that build a receipt block — the live ``MonitorDeltaEvent`` and the replayed
+#: ``monitor_prompt`` row — hand the widget the formatted text and nothing else,
+#: so a kind carried on the event would be lost on one of them and the two
+#: would render differently for the same notice.
+_NOTICE_MARKERS: tuple[tuple[str, str], ...] = (
+    (" was DISABLED ", "disabled"),
+    (" could not run its check ", "stalled"),
+    (" is running again ", "restored"),
+)
+
+
+def monitor_notice_kind(text: str) -> str | None:
+    """The lifecycle kind of a monitor delivery, or ``None`` for a delta.
+
+    ONE definition for every reader (the receipt card's ink and its bounded
+    headline today): a monitor delta's first line is its envelope
+    (``… : N changes at …``), which carries none of these phrases, so a delta
+    can never be mistaken for a notice.
+    """
+    if not text.startswith(MONITOR_ENVELOPE_PREFIX):
+        return None
+    first = text.split("\n", 1)[0]
+    for marker, kind in _NOTICE_MARKERS:
+        if marker in first:
+            return kind
+    return None
+
+
 def monitor_receipt_headline(text: str) -> str:
     """The human-readable headline of a monitor delivery.
 
@@ -835,6 +865,23 @@ def monitor_receipt_headline(text: str) -> str:
     review, F1, reproduced at width 160). The inline-clause strip stays as
     shape-closing for a producer that ever moves it onto the identity line.
     """
+    if monitor_notice_kind(text) is not None:
+        # A NOTICE's headline is its FIRST LINE, and only that line: the kinds
+        # are written one sentence per line with no blank separator, so the
+        # paragraph rule below would collapse the whole multi-sentence block
+        # into a row that cannot show it — the collapsed card became the entire
+        # notice, 529 characters of it, with the news cut off (design review
+        # round 1, D4). The trailing source note is dropped here because it
+        # would spend the row's first cells on the tool name; the expansion
+        # keeps it.
+        head = text.split("\n", 1)[0]
+        if head.startswith(MONITOR_ENVELOPE_PREFIX):
+            head = head[len(MONITOR_ENVELOPE_PREFIX) :]
+        note_at = head.rfind(" (via ")
+        if note_at != -1 and head.endswith(")."):
+            head = head[:note_at] + "."
+        return head.strip()
+
     head, _, _ = text.partition("\n\n")
     lines = [
         line
