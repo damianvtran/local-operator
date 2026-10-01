@@ -1577,10 +1577,17 @@ def _value_is_not_a_credential(value: str, *, name: str, strong: bool) -> bool:
     # :func:`_is_a_name_in_the_store_grammar`, whose reading the flag arms already take.
     #
     # ACCEPTED RESIDUAL, the same one those arms state: a real credential spelled
-    # all-caps-and-underscore is read as a NAME and released here. It is still masked by
-    # every rule that does not consult this predicate (vendor prefixes, DSNs, PEM,
-    # headers), and the cost of the other direction — deleting a store name the operator
-    # must be able to read — is the incident above.
+    # all-caps-and-underscore is read as a NAME and released here, on every ASSIGNMENT
+    # spelling (plain ``=``, ``:``, quoted, JSON) and not only after a flag. It is still
+    # masked by every rule that does not consult this predicate (vendor prefixes, DSNs,
+    # PEM, bearer, query, headers), and the cost of the other direction — deleting a
+    # store name the operator must be able to read — is the incident above. The released
+    # class is pinned as corpus negatives (R1-1) so it cannot widen silently.
+    #
+    # THE BOUNDARY IS CASE: a lowercase or mixed-case store name (the store keeps case)
+    # is NOT released — it is indistinguishable from a passphrase, and the lowercase
+    # corpus positives pin that — so a ``secret:`` line naming one still masks and
+    # registers exactly as it did before this change (QA Q1; not a regression).
     if _is_a_name_in_the_store_grammar(value):
         return True
     if value.startswith("_") and not strong:
@@ -3949,8 +3956,11 @@ def is_registerable_component(value: str) -> bool:
     later result in the session.
 
     The accepted tradeoff: a real value spelled all-caps-and-underscore stops being
-    contained session-wide. It is still masked IN PLACE wherever a rule fires — the
-    same read the flag arms already take for a credential flag's one-part argument.
+    contained session-wide. It is still masked IN PLACE wherever a rule that does not
+    consult the value proof fires (DSN, bearer, query, header, vendor); the assignment
+    and flag spellings read it as a reference and release it, as the clause in
+    :func:`_value_is_not_a_credential` states — the same read the flag arms already
+    take for a credential flag's one-part argument.
     """
     # Length only. The word-shape refusal was added to stop ``Basic
     # authentication`` poisoning a session, and the header rules now need their

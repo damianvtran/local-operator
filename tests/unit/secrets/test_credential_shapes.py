@@ -5336,6 +5336,34 @@ def test_a_mask_that_stopped_inside_a_credential_is_an_exposure(
     assert (contained.complete, contained.exposed) == (True, False)
 
 
+def test_the_exposure_grader_inherits_the_name_release_and_nothing_wider() -> None:
+    """A partly-masked NAME-spelled value files no rotation demand; a real token still does.
+
+    ``_exposure_claimable`` reuses ``_value_is_not_a_credential`` (strong arm), so the
+    store-grammar clause there (R1-2) reaches the grader as well as the mask: a value
+    spelled like a store name that a rule masked only in part is UNCLAIMABLE, which
+    means it neither claims containment nor escalates. That is the intended reading
+    (an entry name must not file a rotation ticket), and the mirror is asserted with
+    it so the case cannot pass by a grader that never escalates.
+
+    FAIL-ON-REVERT: the store-grammar clause in ``_value_is_not_a_credential``. Without
+    it the NAME-spelled value is claimable, its surviving tail grades ``exposed`` and
+    ``reached_model`` flips to True.
+    """
+    import local_operator.redaction_shapes as rs
+
+    def graded(value: str) -> tuple[bool, bool]:
+        hit = rs.ShapeHit(label="dsn-password", value=value, window=value)
+        # The mask stopped six characters into the value: the tail is still readable.
+        text = f"PASSWORD={REDACTION_MARKER}{value[6:]}"
+        graded_hit = rs._only_fully_masked([hit], text)[0]
+        return graded_hit.exposed, rs.shape_report([graded_hit]).reached_model
+
+    assert graded(STORE_ENTRY_NAME) == (False, False)
+    # ...and a value that is NOT spelled like a name keeps the escalation.
+    assert graded("Zk4Wm1B4" + "dR6-tail9") == (True, True)
+
+
 def test_the_fragment_floor_is_pinned_from_both_sides() -> None:
     """``_FRAGMENT_WINDOW`` is the floor this check is built on, and it is pinned.
 
@@ -6104,21 +6132,27 @@ _CORPUS_GRADING_DIGEST = "a755ab0e8960419f719323ae343ef725e9f8662f278b1bfc66ba0e
 _CORPUS_GRADING_DIGEST = "f1707c1f7bc4b8448998f19e32988b55fdbbb313f76f9ff7ae46de984c708211"
 #: MOVED on 2026-10-01 by the secret-NAME fix, and the argument is the measurement
 #: this constant's history always asks for: the 513 rows the constant above covered
-#: were loaded from ``git show HEAD:tests/unit/secrets/credential_shape_corpus.py``
-#: beside ``HEAD``'s module and this one, and every row graded FIELD FOR FIELD (masked
+#: were loaded from ``git show origin/main:tests/unit/secrets/credential_shape_corpus.py``
+#: beside ``origin/main``'s module and this one, and every row graded FIELD FOR FIELD (masked
 #: text, label, value, window, ``complete``, ``exposed``) under both — **zero moved**,
 #: and that corpus under THIS module reproduces ``f1707c1f…`` byte for byte. The
-#: digest moves for the corpus's growth alone, 513 -> 518: five NEGATIVES (the refusal
-#: footer, a bare reference-placeholder flag, a ``secret:`` line carrying the
-#: placeholder, the refusal's own ``secret:`` line naming a store entry, and its quoted
-#: spelling). Four of the five were masked before (three of them REGISTERED nothing
-#: but the entry-name pair registered the name session-wide); the fifth is a regression
-#: row. ``POSITIVE_CASES`` is unchanged at 310 and ``NEGATIVE_CASES`` moves 203 -> 208.
-#: No value-side coverage moved: the positives that must keep masking (the lower-case
+#: digest moves for the corpus's growth alone, 513 -> 522: nine NEGATIVES. Five are the
+#: NAME rows (the refusal footer, a bare reference-placeholder flag, a ``secret:`` line
+#: carrying the placeholder, the refusal's own ``secret:`` line naming a store entry,
+#: and its quoted spelling). Measured against ``origin/main``'s module, the footer, the bare
+#: flag, the entry line and the quoted line were MASKED before, and the entry line also
+#: REGISTERED the name session-wide; the ``secret:`` line carrying the placeholder was
+#: not masked before and is a regression row. The other four are the R1-1 rows that PIN
+#: the accepted residual of the name release on the assignment surfaces (a plain ``=``
+#: assignment, a docker-compose ``:`` line, an ``export`` line and a JSON field, each
+#: carrying a caps+underscore value): all four were MASKED before and none is now.
+#: ``POSITIVE_CASES`` is unchanged at 310 and ``NEGATIVE_CASES`` moves 203 -> 212. No
+#: value-side coverage moved: the positives that must keep masking (the lower-case
 #: ``--secret`` phrase, ``PASSWORD=`` and ``token=`` assignments, the hex ``AES_KEY``,
 #: the issuer and padded-base64 ``--token`` values, the five capitals flag values) are
-#: all among the 513 rows that did not move.
-_CORPUS_GRADING_DIGEST = "5db8279438387ec964e4c0c28733a5643d5813f56bd18de090df843ede9668ea"
+#: all among the 513 rows that did not move (graded field for field against ``origin/main``'s
+#: module and corpus: 0 moved; the old corpus under this module is ``f1707c1f…``).
+_CORPUS_GRADING_DIGEST = "46a1a6fa34c99c604620527adc3f627430d475bc4a8ba597accb8a8dc62477cc"
 
 
 def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:
