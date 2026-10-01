@@ -358,6 +358,29 @@ async def test_team_patch_preserves_unloaded_briefs(api):
     assert invalid.status_code == 422
 
 
+async def test_team_create_and_patch_carry_label_and_aliases(api):
+    """The desktop route can set the display metadata, and the catalogue carries it."""
+    client, root = api
+    created = await client.post(
+        "/v1/desktop/teams",
+        json=mutation(name="audit", manager="manager", label="Audit Crew", aliases=["ac"]),
+    )
+    assert created.status_code == 200, created.text
+
+    listed = (await client.get("/v1/desktop/teams")).json()["result"]["teams"]
+    row = next(t for t in listed if t["name"] == "audit")
+    assert row["label"] == "Audit Crew"  # via model_dump, like the rest
+    assert row["aliases"] == ["ac"]
+    assert "instructions" not in row  # ... and still withholds the briefs
+
+    # A label of "" resets to the derived default; aliases replace wholesale.
+    patched = await client.patch("/v1/desktop/teams/audit", json=mutation(label="", aliases=[]))
+    assert patched.status_code == 200, patched.text
+    team = TeamRegistry(root).get_team_by_name("audit")
+    assert team is not None
+    assert team.label == "Audit" and team.aliases == []
+
+
 async def test_many_chats_same_profile_and_replayed_creation(api):
     client, root = api
     body = mutation(cwd=str(root), target={"kind": "agent", "name": "reviewer"})

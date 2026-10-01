@@ -504,17 +504,21 @@ def test_the_seams_are_served_by_the_slice_and_refuse_without_a_relay(root: Path
 def test_the_session_move_contract_is_frozen() -> None:
     """V and DB build against these names; a change here is a contract change.
 
-    ``engagement`` is the ONE member added since the freeze (``engage_on_arrival``,
-    which the desktop never sets), and it is ``NotRequired`` — so the document a
-    reader parses is byte-identical for every move that did not ask for it, and the
-    addition is additive in the strict sense: no existing key changed spelling, type
-    or meaning, and a move that was refused is unaffected. Widening the phase list
-    would NOT have been additive — arriving live is not a phase of the transfer —
-    which is why ``MOVE_RESULT_PHASES`` and ``MOVE_OPENABLE_PHASES`` are asserted
-    unchanged right here.
+    ``engagement`` was the first member added since the freeze (``engage_on_arrival``,
+    which the desktop never sets); ``queue`` is the second (``--queue``, the queued
+    move of §5.4). BOTH are ``NotRequired`` — so the document a reader parses is
+    byte-identical for every move that did not ask for them, and each addition is
+    additive in the strict sense: no existing key changed spelling, type or meaning,
+    and a move that was refused is unaffected. Widening the phase list would NOT have
+    been additive — arriving live is not a phase of the transfer, and a queued move's
+    phases are words about the QUEUE — which is why ``MOVE_RESULT_PHASES`` and
+    ``MOVE_OPENABLE_PHASES`` are asserted unchanged right here, and the queue's own
+    sequence is asserted separately, additively.
     """
     assert mobility.MOVE_RESULT_PHASES == ("prepared", "handing_off", "committed", "done")
     assert mobility.MOVE_OPENABLE_PHASES == {"committed", "done"}
+    # The queued move's additive half of the vocabulary, in its own order.
+    assert mobility.MOVE_QUEUE_PHASES == ("queued", "finishing", "paused", "copying", "resumed")
     assert set(mobility.SessionMoveResult.__annotations__) == {
         "ok",
         "session_id",
@@ -525,6 +529,21 @@ def test_the_session_move_contract_is_frozen() -> None:
         "phase",
         "phases",
         "engagement",
+        "queue",
+    }
+    # The queue block's own shape: a projection of the source's record, so a
+    # reader tolerates missing keys (``total=False``) rather than re-validating
+    # a file another device owns.
+    assert set(mobility.MoveQueueBlock.__annotations__) == {
+        "session_id",
+        "request_id",
+        "to_device",
+        "to_name",
+        "phase",
+        "phases",
+        "detail",
+        "code",
+        "updated_at",
     }
     # AND IT IS OPTIONAL — asserted on a DOCUMENT rather than through
     # ``__required_keys__``, which cannot answer this module: PEP 563 stringizes every

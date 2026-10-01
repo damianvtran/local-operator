@@ -1090,11 +1090,12 @@ async def test_a_remote_gate_card_names_the_device_and_a_local_one_does_not() ->
     """The dock card's remote hint, both halves of the condition.
 
     An allow pressed in the origin viewer is refused by the OWNER's runtime by
-    design (``operator_challenge`` never crosses the mesh; the origin holds no
-    key a peer can verify), so the card the user is about to answer must say
-    where the gesture happens. A local card must NOT carry the line — that
-    half also pins the byte-identical claim the feature rests on: nothing about
-    a local gate's frame changes.
+    design (the owner takes an allow only as a signature from a device the
+    operator has paired with it — never as a bare gesture from the requesting
+    device), so the card the user is about to answer must say where the gesture
+    happens. A local card must NOT carry the line — that half also pins the
+    byte-identical claim the feature rests on: nothing about a local gate's
+    frame changes.
     """
     hinted = "runs on demo-laptop — allow there (Touch ID) or its paired phone; deny works here"
 

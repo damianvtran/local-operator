@@ -1226,6 +1226,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         value: str | None = None,
         approved: bool | None = None,
         question_index: int | None = None,
+        deadline: float | None = None,
     ) -> str:
         """Answer the runtime's open approval gate; returns its receipt.
 
@@ -1235,8 +1236,15 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         in another window. The runtime validates again on its side; this check is
         what keeps the wrong answer from being sent at all.
 
-        Same declaration reasoning as :meth:`bind_runtime`: a HARD access from
-        ``desktop_sessions.py``.
+        ``deadline`` is the caller's own budget for the WHOLE call, a
+        ``time.monotonic()`` instant by which it must have returned, or ``None``
+        for a caller with no such window. It is optional and defaulted so an
+        implementor that ignores it stays correct (it simply keeps one full
+        acknowledgement envelope per attempt); an implementor that honours it
+        makes its attempts SHARE the window rather than spend one each, which is
+        what keeps the desktop answer route's worst case inside the renderer's
+        20 s per-op deadline. Absent, the caller's disposition may be delivered
+        after the caller has stopped listening.
         """
         ...
 

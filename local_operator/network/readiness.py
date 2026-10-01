@@ -160,7 +160,16 @@ def _open_store(root: Path) -> Any | None:
 
 
 def operator_fact() -> dict[str, Any]:
-    """The operator-authority level and what it rests on. Never raises."""
+    """The operator-authority level and what it rests on. Never raises.
+
+    ``verify_only`` (remote-onboarding §2.5, OQ6): an anchor this host can
+    VERIFY with but cannot SIGN with — the node-side case, where authority was
+    installed as public data and the private half lives on the operator's own
+    devices. The level is what the anchor CLAIMS; ``verify_only`` is the extra
+    fact that stops the claim from being read as "signs here": a host can be
+    ``operator-presence`` and still hold no key, because the anchor says which
+    backend the OPERATOR's machine uses, not what this machine has.
+    """
     try:
         from local_operator.operator import operator_authority_report
 
@@ -172,9 +181,13 @@ def operator_fact() -> dict[str, Any]:
             "anchor_installed": False,
             "anchor_root_owned": False,
             "presence": False,
+            "verify_only": False,
         }
+    level = _bounded(report.get("level") or "unreported", 60)
+    installed_levels = ("operator-presence", "operator-file-only")
+    verify_only = level in installed_levels and not _can_sign_here()
     return {
-        "level": _bounded(report.get("level") or "unreported", 60),
+        "level": level,
         # EVERY carried string goes through the shape guard, reasons included:
         # the module's rule is "any text that merely LOOKS like a credential is
         # withheld rather than sent", and a reason is text this device did not
@@ -183,7 +196,38 @@ def operator_fact() -> dict[str, Any]:
         "anchor_installed": bool(report.get("anchor_installed")),
         "anchor_root_owned": bool(report.get("anchor_root_owned")),
         "presence": bool(report.get("presence")),
+        "verify_only": verify_only,
     }
+
+
+def _can_sign_here() -> bool:
+    """Whether THIS host holds the private half, probed without prompting.
+
+    The probe is the operator module's own signer lookup (the anchor names the
+    backend), and it is the ONLY sound question to ask: a keychain query from
+    an unsigned process cannot see a ``secure-enclave`` item (the -25300 trap),
+    so anything cheaper than the real loader would answer "no key" for a host
+    that has one. ``False`` on every failure — a broken agent is "cannot sign
+    NOW", which is the fact this answer is for — and the signer is closed
+    immediately, because a probe must leave nothing running.
+    """
+    try:
+        from local_operator.operator.keychain import choose_backend
+        from local_operator.operator.trust import load_anchor
+        from local_operator.paths import config_dir
+
+        loaded = load_anchor()
+        backend_name = loaded.anchor.backend if loaded.usable and loaded.anchor else "auto"
+        signer: Any = choose_backend(backend_name, config_root=config_dir()).load()
+        if signer is None:
+            return False
+        try:
+            signer.close()
+        except Exception:  # noqa: BLE001 — closing a probe is best-effort
+            pass
+        return True
+    except Exception:  # noqa: BLE001 — see above: "cannot sign", not a crash
+        return False
 
 
 def git_identity_fact(home: Path | None = None) -> dict[str, Any]:
@@ -699,7 +743,12 @@ def _label(member: Any) -> str:
 def _peer_too_old_rows(member: Any) -> list[dict[str, Any]]:
     """One row per peer-side check for a peer that predates this report."""
     detail = "the peer predates readiness reporting, so its answer is not available"
-    remedy = f"`lop-update` on {_label(member)}, then `lop network restart` there and re-check"
+    # §2.9 (QA round 1, Q3): a remedy names a product action, and the action here
+    # is an update ON THE PEER — the old sentence printed two ``lop-`` commands.
+    remedy = (
+        f"if {_label(member)} is running an older build, ask Local Operator to update "
+        "it, then re-check"
+    )
     return [
         _capability_row(
             device_id=member.device_id,
@@ -759,6 +808,22 @@ def operator_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> d
         )
     level = str(fact.get("level") or "")
     reason = _bounded(fact.get("reason") or "", 200)
+    # THE VERIFY-ONLY HOST (OQ6): an anchor is installed — public data — but the
+    # private half is not on this host, so nothing can be SIGNED there. The row
+    # stays ok (the authority exists and approvals can be answered) while saying
+    # where the signing actually happens; the level values are unchanged.
+    if fact.get("verify_only") and level in ("operator-presence", "operator-file-only"):
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_OPERATOR_AUTHORITY,
+            ok=True,
+            detail=(
+                f"operator authority is installed on {peer_label}: approvals for "
+                "offloaded work can be signed from your devices"
+            ),
+            source=SOURCE_PEER,
+        )
     if level == "operator-presence":
         return _capability_row(
             device_id=member.device_id,
@@ -804,9 +869,13 @@ def operator_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> d
         code=code,
         detail=sentence,
         remedies=[
-            f"run `lop operator install` on {peer_label} (one privileged step), then "
-            "approvals for offloaded work can be answered from this device or your "
-            "paired phone"
+            # §2.9: a remedy names a PRODUCT action, never a terminal command — and
+            # never a surface the reader may not have (design round 1, D1/D2: no
+            # ship of a Mesh tab exists until the setup card does, so the interim
+            # action is the agent path).
+            f"ask Local Operator to set up operator authority on {peer_label} (one "
+            "approval and one admin password prompt), then approvals for offloaded work "
+            "can be answered from your devices"
         ],
         source=SOURCE_PEER,
     )
@@ -868,9 +937,12 @@ def build_suffix(comparison: BuildComparison) -> str:
     if comparison.state == "unknown":
         return ""
     if comparison.state == "behind":
+        # §2.9 (QA round 1, Q3's disposition): the suffix names the ACTION, not
+        # the command — "run `lop-update` there" was the last command-shaped
+        # remedy in this report.
         return (
             f"  build {comparison.peer_version} — behind this device "
-            f"({comparison.own_version}); run `lop-update` there"
+            f"({comparison.own_version}); ask Local Operator to update it there"
         )
     return f"  build {comparison.peer_version}"
 
@@ -904,9 +976,7 @@ def build_row(
                 f"the build stamp {peer_label} runs did not arrive (it predates build "
                 "reporting, or sent none), so build parity is not known"
             ),
-            remedies=[
-                f"`lop-update` on {peer_label}, then `lop network restart` there and re-check"
-            ],
+            remedies=[f"ask Local Operator to update the build on {peer_label}, then re-check"],
             source=SOURCE_PEER,
             observed=observed,
         )
@@ -921,7 +991,9 @@ def build_row(
                 f"the build versions are not comparable (this device {own_version or 'unknown'}, "
                 f"{peer_label} {peer_version}), so build parity is not known"
             ),
-            remedies=["`lop-update` on both devices, then re-check"],
+            remedies=[
+                "ask Local Operator to update both devices to a comparable build, then " "re-check"
+            ],
             source=SOURCE_PEER,
             observed=observed,
         )
@@ -947,7 +1019,8 @@ def build_row(
                 f"runs {own_version} — work offloaded there runs its older build"
             ),
             remedies=[
-                f"`lop-update` on {peer_label}, then `lop network restart` there and re-check"
+                f"ask Local Operator to update it there ({peer_label} runs an older "
+                "build), then re-check"
             ],
             source=SOURCE_PEER,
             observed=observed,
@@ -962,7 +1035,7 @@ def build_row(
             f"{peer_label} is ahead ({peer_version} > {own_version}) — this side may lack "
             "capabilities the peer expects"
         ),
-        remedies=["`lop-update` on this device, then re-check"],
+        remedies=["ask Local Operator to update this device, then re-check"],
         source=SOURCE_PEER,
         observed=observed,
     )

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from local_operator.classification.context import KIND_DROP_ORDER, Candidate
+from local_operator.classification.context import KIND_DROP_ORDER, Candidate, shortlist
 from local_operator.classification.recommend import (
     DEFAULT_MAX_RECOMMENDATIONS,
     NONE_OPTION,
@@ -112,6 +112,81 @@ def test_no_project_candidates_means_no_project_question() -> None:
     plan = build_questions(three_kinds())
     assert "recommend_project" not in plan.kinds
     assert "recommend_project" not in plan.options
+
+
+def test_a_tool_gets_a_question_and_the_kind_rides_before_project() -> None:
+    """The incident's kind: session-management tools are a choice of their own.
+
+    Ordered by ``QUESTION_KIND_ORDER`` (the exact reverse of the state ladder's
+    drop order), so the tool question sits after the three content kinds and
+    before projects. Option text is the same ``candidate_line`` text the state
+    carries — a model reconciling two descriptions of one resource is the §6
+    defect this reuses the helper to avoid.
+    """
+    sessions = candidate(
+        "sessions",
+        kind="tool",
+        description=(
+            "Manage OTHER local `lop` sessions (top-level and stored; subagents " "are `hub`'s)."
+        ),
+        resource_url="tool://sessions",
+    )
+    plan = build_questions(three_kinds() + [sessions])
+    assert [question.id for question in plan.questions] == [
+        "recommend_skill",
+        "recommend_guide",
+        "recommend_mcp",
+        "recommend_tool",
+    ]
+    question = plan.questions[-1]
+    assert question.instructions.startswith("Which tool, if any, would actually help")
+    criteria = criteria_of(question)
+    assert criteria["sessions"] == (
+        "sessions: Manage OTHER local `lop` sessions (top-level and stored; subagents "
+        "are `hub`'s)."
+    )
+    assert criteria[NONE_OPTION] == NONE_OPTION_TEXT
+    assert plan.kind_of("recommend_tool") == "tool"
+
+
+def test_the_session_management_turn_shape_reaches_a_tool_recommendation() -> None:
+    """ "the incident left sessions stopped — resume them and message Aida": the
+    whole package path, deterministically — roster in, block out.
+
+    A vendor answer that picks ``sessions`` must map back to the tool candidate
+    and render as its URL, which is what the audit lane's ``tool://`` reader
+    serves. The message text selects nothing here (the shortlist runs upstream,
+    and every candidate survives it at this size) — the assertion is that the
+    kind rides the full pipeline, question text, answer map and block included.
+    """
+    workstream = [
+        candidate(
+            "sessions",
+            kind="tool",
+            description=(
+                "Manage OTHER local `lop` sessions (top-level and stored; subagents "
+                "are `hub`'s)."
+            ),
+            resource_url="tool://sessions",
+        ),
+        candidate(
+            "send",
+            kind="tool",
+            description="Hand a message to another local lop session on this machine (no cmux).",
+            resource_url="tool://send",
+        ),
+        candidate("minerva-deploy", kind="skill", description="Deploy a Minerva service"),
+    ]
+    message = "the incident left sessions stopped — resume them and message Aida"
+    kept = shortlist(workstream, message, 24)
+    assert {item.name for item in kept} >= {"sessions", "send"}
+    plan = build_questions(kept)
+    assert "recommend_tool" in plan.kinds
+    response = response_of(plan, recommend_tool=("sessions", 1.0))
+    resources = collect_resources(response, plan, max_recommendations=3)
+    assert [item.resource_url for item in resources] == ["tool://sessions"]
+    block = render_block(resources)
+    assert "tool://sessions" in block
 
 
 def test_every_question_ends_with_an_explicit_none() -> None:

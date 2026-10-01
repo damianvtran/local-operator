@@ -532,6 +532,64 @@ def test_an_offload_to_a_peer_that_cannot_move_is_refused_before_the_invite(
     assert (server_b.root / "sessions" / SESSION).is_dir()
 
 
+def test_an_offload_carries_the_sessions_unattended_authority_on_the_invite(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defect 2, the MOVE half: the invite carries the session's auto authority.
+
+    The step that would APPLY it — the destination's runtime construction — runs
+    on the other device, so the bit must travel WITH the invite, exactly like
+    ``wait_s`` and ``engage_on_arrival`` beside it. Read from THIS device's stamp
+    (the session's own record of the authority it was created or re-stamped with)
+    and sent on EVERY invite so the key's presence does not depend on a boolean:
+    an older destination ignores it and a MISSING key reads as off.
+
+    Two halves in one cell, because a field that reads True whatever the session
+    says is a field that carries nothing: the carried session sends True and the
+    destination STAMPS it (the construction reads the stamp, not the invite); a
+    session that never set the bit sends False. Nothing here asserts the
+    destination's runtime — the stamp write and the construction's re-check have
+    their own cells — this one pins the WIRE hop, which is the one a refactor
+    deletes most quietly.
+    """
+    from dataclasses import replace
+
+    from local_operator.session.placement import read_stamp, write_stamp
+
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin", settings=server_b.settings)
+    _owned_session(server_a)
+    carried = read_stamp(server_a.root, SESSION)
+    assert carried is not None
+    write_stamp(server_a.root, replace(carried, unattended=True))
+
+    frames: list[dict[str, Any]] = []
+    real = mobility.LinkTransport.ask
+
+    def capture(self: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        frames.append(dict(frame))
+        return real(self, frame)
+
+    monkeypatch.setattr(mobility.LinkTransport, "ask", capture)
+
+    result = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
+    assert result["ok"] is True, result
+    invites = [frame for frame in frames if frame.get("phase") == "invite"]
+    assert invites, frames
+    assert invites[0].get("unattended") is True, invites[0]
+    arrived = read_stamp(server_b.root, SESSION)
+    assert arrived is not None and arrived.unattended is True, arrived
+
+    # The other direction, on a second session in the same rig.
+    second_id = "9f3ac1e0b7d3"
+    _owned_session(server_a, second_id)
+    frames.clear()
+    moved = _move(server_a, second_id, to=server_b.identity.device_id, monkeypatch=monkeypatch)
+    assert moved["ok"] is True, moved
+    second = [frame for frame in frames if frame.get("phase") == "invite"]
+    assert second and second[0].get("unattended") is False, second[0]
+
+
 def test_a_second_offload_after_a_round_trip_is_a_real_move_not_a_stale_signal(
     pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1036,8 +1094,8 @@ def test_an_offload_returns_the_destinations_refusal_instead_of_waiting_it_out(
     session_id = "ef56ab12cd34"
     invited = server_b.identity.device_id
     sentence = (
-        "This session is open in another terminal or attached client. "
-        "Disconnect that client, then move again."
+        "This conversation is open in another window or app. "
+        "Close that window and try again, or queue the move to run at the next safe point."
     )
     progress = mobility.progress_for(server_a)
     try:
@@ -1269,3 +1327,61 @@ def test_the_cli_envelope_is_the_published_bound_less_its_margin(
         assert seen == [
             mobility.move_client_bound_s(30.0, keep=keep, to=to) - mobility.MOVE_CLIENT_MARGIN_S
         ], (keep, to, seen)
+
+
+class TestViewedIsTheViewerBlocker:
+    """Q1 (QA round 1): the exclusive-observer refusal is ``viewed``, not ``busy``.
+
+    §5.4's whole point is the split a notice offers Queue vs Wait from: a live
+    TURN is ``busy`` (waiting clears it), while another attached client is
+    ``viewed`` (waiting cannot clear it — the queue can). ``_RetireOutcome``'s
+    vocabulary always named the second case ``viewed``, but the producer
+    collapsed every ``kept:`` answer into ``busy``, so the wire never carried
+    ``viewed_elsewhere`` for a viewer. These cells drive the real
+    ``_retire_local_runtime`` with a canned client: the runtime's own sentence
+    (matched through the SHARED constant) classifies as ``viewed``; anything
+    else the runtime keeps itself for stays ``busy``.
+    """
+
+    def _stub(self, monkeypatch: pytest.MonkeyPatch, answer: str) -> None:
+        from types import SimpleNamespace
+
+        from local_operator.mobile import attach_client as attach_mod
+
+        class StubClient:
+            def __init__(self, *_a: Any, **_k: Any) -> None: ...
+
+            async def connect(self, record: Any, session_id: str) -> None: ...
+
+            async def retire_now(self, *, exclusive: bool = False) -> str:
+                assert exclusive is True, "a move must ask under the fence"
+                return answer
+
+            def close(self) -> None: ...
+
+        monkeypatch.setattr(attach_mod, "AttachClient", StubClient)
+        monkeypatch.setattr(
+            attach_mod,
+            "find_runtime_record",
+            lambda root, session_id: (
+                SimpleNamespace(capabilities=["exclusive-move-v1"], session_id=session_id),
+                4321,
+            ),
+        )
+
+    def test_the_viewer_refusal_is_viewed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from local_operator.session.runtime.types import VIEWED_MOVE_REFUSAL
+
+        self._stub(monkeypatch, f"kept: {VIEWED_MOVE_REFUSAL}")
+        outcome = mobility._retire_local_runtime(tmp_path, SESSION)  # noqa: SLF001
+        assert outcome["result"] == "viewed", outcome
+        assert outcome["sentence"] == VIEWED_MOVE_REFUSAL
+
+    def test_a_turn_refusal_stays_busy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._stub(monkeypatch, "kept: busy")
+        outcome = mobility._retire_local_runtime(tmp_path, SESSION)  # noqa: SLF001
+        assert outcome["result"] == "busy", outcome

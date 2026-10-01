@@ -2959,3 +2959,414 @@ def test_import_hub_team_without_a_suggestion_carries_no_notice(tmp_path: Path) 
 
     assert outcome.model_notice is None
     assert outcome.team.model_suggestion is None
+
+
+# --- Labels and aliases: display metadata and extra addressing keys ---------------
+
+
+def test_default_label_derives_a_title_case_name() -> None:
+    """The derived default splits on every legal name separator, keeps the rest."""
+    assert teams_module._default_label("data-quality") == "Data Quality"
+    assert teams_module._default_label("lopdev") == "Lopdev"
+    assert teams_module._default_label("radient-net") == "Radient Net"
+    assert teams_module._default_label("my.team_name") == "My Team Name"
+    assert teams_module._default_label("Already") == "Already"
+
+
+def test_create_persists_the_derived_label_and_normalizes_a_custom_one(
+    tmp_path: Path,
+) -> None:
+    registry = TeamRegistry(tmp_path)
+    derived = registry.create_team(TeamEditFields(name="data-quality"))
+    # Persisted, not just displayed: the value is durable from this write on.
+    assert derived.label == "Data Quality"
+    dumped = yaml.safe_load((registry.teams_dir / derived.id / "team.yml").read_text())
+    assert dumped["label"] == "Data Quality"
+    assert dumped["aliases"] == []
+
+    custom = registry.create_team(
+        TeamEditFields(name="rad-1", label="  Rad   One\t ", aliases=["Rad", "r1"])
+    )
+    # Whitespace collapses to the stored shape; everything else is preserved.
+    assert custom.label == "Rad One"
+    assert custom.aliases == ["Rad", "r1"]
+    assert teams_module.display_form(custom.name, custom.label) == "Rad One (rad-1)"
+
+
+def test_label_refuses_over_cap_and_control_characters(tmp_path: Path) -> None:
+    registry = TeamRegistry(tmp_path)
+    team = registry.create_team(TeamEditFields(name="ops"))
+    with pytest.raises(ValueError, match="at most 80"):
+        registry.update_team(team.id, TeamEditFields(label="x " * 41))
+    with pytest.raises(ValueError, match="control characters"):
+        registry.create_team(TeamEditFields(name="other", label="a\u200bb"))
+    # An empty label is legal: it means "derive", not an error.
+    assert registry.update_team(team.id, TeamEditFields(label="")).label == "Ops"
+
+
+def test_update_label_none_leaves_and_empty_resets_to_derived(tmp_path: Path) -> None:
+    registry = TeamRegistry(tmp_path)
+    team = registry.create_team(TeamEditFields(name="ops", label="Ops Display"))
+
+    assert registry.update_team(team.id, TeamEditFields(description="d")).label == "Ops Display"
+    assert registry.update_team(team.id, TeamEditFields(label=None)).label == "Ops Display"
+
+    # An explicit "" is a RESET to the derived default, not "no label".
+    assert registry.update_team(team.id, TeamEditFields(label="")).label == "Ops"
+    # A whitespace-only value normalizes to "" and resets the same way.
+    assert registry.update_team(team.id, TeamEditFields(label="   ")).label == "Ops"
+    # ... and a custom value replaces it again.
+    assert registry.update_team(team.id, TeamEditFields(label="Second")).label == "Second"
+
+
+def test_aliases_validate_shape_cap_and_casefold_duplicates(tmp_path: Path) -> None:
+    registry = TeamRegistry(tmp_path)
+    team = registry.create_team(TeamEditFields(name="alpha", aliases=["A1", "a2"]))
+    assert team.aliases == ["A1", "a2"]
+
+    with pytest.raises(ValueError, match="1-64 characters"):
+        registry.create_team(TeamEditFields(name="spacey", aliases=["has space"]))
+    with pytest.raises(ValueError, match="listed more than once"):
+        registry.create_team(TeamEditFields(name="dup", aliases=["one", "ONE"]))
+    with pytest.raises(ValueError, match="at most 8"):
+        registry.create_team(TeamEditFields(name="many", aliases=[f"a{i}" for i in range(9)]))
+    with pytest.raises(ValueError, match="own name"):
+        registry.create_team(TeamEditFields(name="selfy", aliases=["selfy"]))
+    # A provided list REPLACES the stored one; the empty list clears it.
+    assert registry.update_team(team.id, TeamEditFields(aliases=["fresh"])).aliases == ["fresh"]
+    assert registry.update_team(team.id, TeamEditFields(aliases=[])).aliases == []
+
+
+def test_name_and_alias_keys_do_not_collide_casefolded(tmp_path: Path) -> None:
+    registry = TeamRegistry(tmp_path)
+    registry.create_team(TeamEditFields(name="alpha", aliases=["first"]))
+
+    # name vs name / alias vs name / name vs alias / alias vs alias.
+    with pytest.raises(ValueError, match="already exists"):
+        registry.create_team(TeamEditFields(name="ALPHA"))
+    with pytest.raises(ValueError, match="is the name of team"):
+        registry.create_team(TeamEditFields(name="beta", aliases=["ALPHA"]))
+    with pytest.raises(ValueError, match="already an alias of team"):
+        registry.create_team(TeamEditFields(name="first"))
+    with pytest.raises(ValueError, match="already an alias of team"):
+        registry.create_team(TeamEditFields(name="beta", aliases=["FIRST"]))
+
+    # The update path is the same rule: a rename onto another row's alias is
+    # refused; a rename onto one's OWN still-listed alias is refused too, since
+    # the written state would carry the name as an alias -- dropping the alias
+    # in the same write lands the rename.
+    beta = registry.create_team(TeamEditFields(name="beta", aliases=["b"]))
+    with pytest.raises(ValueError, match="already an alias of team"):
+        registry.update_team(beta.id, TeamEditFields(name="First"))
+    with pytest.raises(ValueError, match="own name"):
+        registry.update_team(beta.id, TeamEditFields(name="b"))
+    renamed = registry.update_team(beta.id, TeamEditFields(name="b", aliases=[]))
+    assert renamed.name == "b" and renamed.aliases == []
+
+
+def test_lookup_resolves_aliases_casefolded_name_first(tmp_path: Path) -> None:
+    registry = TeamRegistry(tmp_path)
+    registry.create_team(TeamEditFields(name="data-quality", aliases=["dq", "DataQ2"]))
+
+    # Aliases resolve casefolded; the name path resolves as before.
+    for key in ("dq", "DQ", "DataQ2", "data-quality"):
+        resolved = registry.get_team_by_name(key)
+        assert resolved is not None, key
+        assert resolved.name == "data-quality", key
+    assert registry.get_team_by_name("nope") is None
+
+
+def test_lookup_prefers_a_name_over_a_hand_edited_alias_collision(tmp_path: Path) -> None:
+    """Writers keep the namespaces disjoint; a hand-edited row can still collide.
+
+    The name-first order is what keeps resolution deterministic when the
+    editors' rule never saw one side.
+    """
+
+    def write(row_id: str, body: dict[str, Any]) -> None:
+        row = tmp_path / "teams" / row_id
+        row.mkdir(parents=True)
+        (row / "team.yml").write_text(
+            yaml.safe_dump(
+                {
+                    "id": row_id,
+                    "created_date": "2026-01-01T00:00:00Z",
+                    "description": "",
+                    "manager": "manager",
+                    "members": [],
+                    **body,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    write("11111111-2222-3333-4444-555555555551", {"name": "shared"})
+    write("11111111-2222-3333-4444-555555555552", {"name": "other", "aliases": ["shared"]})
+
+    resolved = TeamRegistry(tmp_path).get_team_by_name("shared")
+    assert resolved is not None and resolved.name == "shared"
+
+
+def test_legacy_team_yml_without_label_loads_and_persists_the_derived_one(
+    tmp_path: Path,
+) -> None:
+    """Old rows load unchanged, render the raw name, and persist a default on write."""
+    row_id = "11111111-2222-3333-4444-555555555555"
+    row = tmp_path / "teams" / row_id
+    row.mkdir(parents=True)
+    (row / "team.yml").write_text(
+        yaml.safe_dump({"id": row_id, "name": "lopdev", "created_date": "2026-01-01T00:00:00Z"}),
+        encoding="utf-8",
+    )
+    registry = TeamRegistry(tmp_path)
+    team = registry.get_team_by_name("lopdev")
+    assert team is not None
+    assert team.label == "" and team.aliases == []
+    # The shared rule paints the raw name while the label is only the (absent)
+    # derived default; the derived value is still what PERSISTS on the write.
+    assert teams_module.display_form(team.name, team.label) == "lopdev"
+
+    registry.update_team(team.id, TeamEditFields(description="touched"))
+    assert registry.get_team(team.id).label == "Lopdev"
+
+
+def test_team_yml_with_label_aliases_and_an_unknown_key_still_loads(tmp_path: Path) -> None:
+    """Additive both ways: the new fields load here, unknown extras are ignored."""
+    row_id = "11111111-2222-3333-4444-555555555555"
+    row = tmp_path / "teams" / row_id
+    row.mkdir(parents=True)
+    (row / "team.yml").write_text(
+        yaml.safe_dump(
+            {
+                "id": row_id,
+                "name": "crew",
+                "created_date": "2026-01-01T00:00:00Z",
+                "label": "Crew Display",
+                "aliases": ["c"],
+                "future_field": {"nested": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    team = TeamRegistry(tmp_path).get_team_by_name("c")
+    assert team is not None
+    assert (team.label, team.aliases) == ("Crew Display", ["c"])
+
+
+def test_dump_round_trip_carries_label_and_aliases() -> None:
+    team = Team(
+        id="t",
+        name="ops",
+        created_date=datetime.now(timezone.utc),
+        label="Ops Team",
+        aliases=["o"],
+    )
+    dumped = team.model_dump(mode="json")
+    assert dumped["label"] == "Ops Team" and dumped["aliases"] == ["o"]
+    again = Team.model_validate(dumped)
+    assert (again.label, again.aliases) == ("Ops Team", ["o"])
+
+
+def test_import_hub_team_labels_the_published_spelling_when_it_mapped(
+    tmp_path: Path,
+) -> None:
+    registry = TeamRegistry(tmp_path)
+    outcome = registry.import_hub_team(
+        {"name": "Feature Release Crew", "members": [], "instructions": "You ship."}
+    )
+    assert outcome.team.name == "Feature-Release-Crew"
+    assert outcome.team.label == "Feature Release Crew"
+    # The shared rule: the label is the published name's spaces for the name's
+    # hyphens, so it paints alone -- no restated key in parentheses.
+    assert teams_module.display_form(outcome.team.name, outcome.team.label) == (
+        "Feature Release Crew"
+    )
+
+
+def test_import_hub_team_labels_a_collision_suffix(tmp_path: Path) -> None:
+    registry = TeamRegistry(tmp_path)
+    registry.create_team(TeamEditFields(name="Release-Crew"))
+    outcome = registry.import_hub_team(
+        {"name": "Release-Crew", "members": [], "instructions": "You ship."}
+    )
+    assert outcome.team.name == "Release-Crew-2"
+    assert outcome.team.label == "Release-Crew"
+
+
+def test_import_hub_team_leaves_an_unchanged_name_to_the_derived_default(
+    tmp_path: Path,
+) -> None:
+    registry = TeamRegistry(tmp_path)
+    outcome = registry.import_hub_team(
+        {"name": "release-crew", "members": [], "instructions": "You ship."}
+    )
+    assert outcome.team.name == "release-crew"
+    # Nothing custom is stored; the derived default (persisted at the save)
+    # still gives the row its display label.
+    assert outcome.team.label == "Release Crew"
+
+
+def test_import_hub_team_suffixes_past_a_local_alias(tmp_path: Path) -> None:
+    """The collision loop must be alias-aware: create_team refuses a name that
+    collides with a local alias, so the pull has to move the candidate on."""
+    registry = TeamRegistry(tmp_path)
+    registry.create_team(TeamEditFields(name="other", aliases=["Shared"]))
+    outcome = registry.import_hub_team(
+        {"name": "Shared", "members": [], "instructions": "You ship."}
+    )
+    assert outcome.team.name == "Shared-2"
+
+
+def test_cli_list_and_show_render_label_first_with_the_key(tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    registry = TeamRegistry(config_dir)
+    registry.create_team(TeamEditFields(name="data-quality", label="Data Quality", aliases=["dq"]))
+
+    listed = _run_teams_cli(config_dir, "list")
+    assert listed.returncode == 0, listed.stderr
+    # The shared rule: the derived default paints alone (it carries the
+    # space-vs-hyphen information), so no key in parentheses on this row.
+    assert "Data Quality" in listed.stdout
+    assert "(data-quality)" not in listed.stdout
+
+    # Addressed by the ALIAS: the header paints the shared form and the
+    # aliases line names the key that was used (D5).
+    shown = _run_teams_cli(config_dir, "show", "dq")
+    assert shown.returncode == 0, shown.stderr
+    assert "╭─ Team Data Quality" in shown.stdout
+    assert "Aliases: dq" in shown.stdout
+
+
+def test_cli_create_carries_label_and_repeatable_alias(tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    result = _run_teams_cli(
+        config_dir,
+        "create",
+        "feature-release",
+        "--label",
+        "Feature Release",
+        "--alias",
+        "fr",
+        "--alias",
+        "fr-v2",
+    )
+    assert result.returncode == 0, result.stderr
+    team = TeamRegistry(config_dir).get_team_by_name("fr")
+    assert team is not None
+    assert team.label == "Feature Release"
+    assert team.aliases == ["fr", "fr-v2"]
+
+
+# --- The shared display rule (D2) and its companions --------------------------------
+
+
+def test_display_form_covers_the_four_frozen_cases() -> None:
+    """name / label / ``label (name)``, the casefold carve-outs included."""
+    form = teams_module.display_form
+    assert form("lopdev", "") == "lopdev"  # legacy row: nothing over the key
+    assert form("lopdev", "Lopdev") == "lopdev"  # derived AND casefolds: noise
+    assert form("org", "Org") == "org"
+    assert form("data-quality", "Data Quality") == "Data Quality"  # derived, informative
+    assert form("ops", "Platform Reliability") == "Platform Reliability (ops)"
+    assert form("ops", "OPS") == "OPS"  # chosen but casefolds: the key adds nothing
+
+
+def test_enrichment_label_only_for_a_chosen_different_label() -> None:
+    """A description column prefixes nothing a name column already says (D2)."""
+    enrich = teams_module.enrichment_label
+    assert enrich("data-quality", "Data Quality") == ""  # derived: the name says it
+    assert enrich("lopdev", "Lopdev") == ""
+    assert enrich("ops", "OPS") == ""
+    assert enrich("ops", "") == ""
+    assert enrich("ops", "Platform Reliability") == "Platform Reliability"
+
+
+def test_default_label_upcases_the_initialism_allowlist() -> None:
+    """D3: six common initialisms keep their upper-case spelling."""
+    assert teams_module._default_label("qa-tester") == "QA Tester"
+    assert teams_module._default_label("pergamon-ai") == "Pergamon AI"
+    assert teams_module._default_label("api") == "API"
+    assert teams_module._default_label("ux-reviewer") == "UX Reviewer"
+    assert teams_module._default_label("tui.ui") == "TUI UI"
+    # ... and stays Title Case everywhere else: the allowlist is exactly six
+    # tokens, so a plausible-looking neighbour is NOT upcased by default.
+    assert teams_module._default_label("it-ops") == "It Ops"
+
+
+def test_rename_re_derives_a_derived_label_and_keeps_a_custom_one(tmp_path: Path) -> None:
+    """D3b: a stored label that is only the OLD name's default follows the rename."""
+    registry = TeamRegistry(tmp_path)
+    derived = registry.create_team(TeamEditFields(name="lopdev"))
+    assert derived.label == "Lopdev"  # persisted by the create's save
+    renamed = registry.update_team(derived.id, TeamEditFields(name="lop-dev"))
+    assert renamed.name == "lop-dev"
+    assert renamed.label == "Lop Dev"
+
+    custom = registry.create_team(TeamEditFields(name="ops", label="Platform Reliability"))
+    kept = registry.update_team(custom.id, TeamEditFields(name="ops-v2"))
+    assert kept.label == "Platform Reliability"
+    # An explicit label in the same write still wins over the re-derive.
+    again = registry.update_team(renamed.id, TeamEditFields(name="lop-v3", label="Chosen"))
+    assert again.label == "Chosen"
+
+
+def test_import_hub_team_drops_a_carried_label_that_cannot_fit(tmp_path: Path) -> None:
+    """R1-1: the carried spelling is a display decoration; a long one must not
+    refuse the pull -- the row imports and the derived default paints."""
+    registry = TeamRegistry(tmp_path)
+    unspaced = registry.import_hub_team(
+        {"name": "q" * 100, "members": [], "instructions": "You ship."}
+    )
+    # The name truncates to the local cap; the 100-char published spelling
+    # fits no label, so the row keeps the derived default instead.
+    assert len(unspaced.team.name) == 64
+    assert unspaced.team.label == teams_module._default_label(unspaced.team.name)
+    assert unspaced.renamed_from == "q" * 100
+
+    spaced = registry.import_hub_team(
+        {"name": "Feature " * 12, "members": [], "instructions": "You ship."}
+    )
+    assert spaced.team.label == teams_module._default_label(spaced.team.name)
+
+
+def test_bounded_display_form_keeps_the_key_on_the_line() -> None:
+    """N1: an over-cap composed form truncates the LABEL, never the key."""
+    long_label = "Platform Reliability and Quality Assurance Organisation for Operations"
+    form = teams_module.bounded_display_form("ops", long_label)
+    assert len(form) <= teams_module._TEAM_LISTING_CAP
+    assert form.endswith(" (ops)")
+    assert "…" in form
+    # Forms without a keyed tail pass through: a long NAME is what you type,
+    # and ellipsizing it would hide the addressable string itself.
+    name = "q" * 60
+    assert teams_module.bounded_display_form(name, "") == name
+    assert (
+        teams_module.bounded_display_form("ops", "Platform Reliability")
+        == "Platform Reliability (ops)"
+    )
+
+
+def test_bounded_display_form_leaves_a_name_past_the_cap_whole() -> None:
+    """R2-1: with no room for a label cell the row is returned WHOLE -- the
+    negative-room slice cut into the keyed tail and the re-append duplicated
+    the key on names past ~44 cells."""
+    name = "n" * 45
+    out = teams_module.bounded_display_form(name, "X")
+    assert out == f"X ({name})"
+    assert out.count(name) == 1
+
+    # The reviewer's hub repro: a 49-char local name carrying the published
+    # spelling as its (chosen-class) label, exactly what the import writes.
+    long_name = "Quarterly-Compliance-Reporting-and-Analytics-Crew"
+    carried = "Quarterly Compliance Reporting and Analytics Crew"
+    hub_out = teams_module.bounded_display_form(long_name, carried)
+    assert hub_out == f"{carried} ({long_name})"
+    assert hub_out.count(long_name) == 1
+
+    # And the boundary stays: a name WITH room still binds under the cap.
+    bounded = teams_module.bounded_display_form(
+        "q" * 40, "Chosen Label Long Enough To Need The Bound"
+    )
+    assert len(bounded) <= teams_module._TEAM_LISTING_CAP
+    assert bounded.endswith(f" ({'q' * 40})")
+    assert "…" in bounded

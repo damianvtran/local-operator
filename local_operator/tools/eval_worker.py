@@ -208,6 +208,41 @@ _ACTIVE_BRIDGE: tuple[str, bool] = ("", False)
 _BRIDGE_FRAME_LIMIT = 1_000_000
 _EXECUTION_THREAD = threading.get_ident()
 
+#: The is_error tool results the CURRENT cell's ``tool()`` calls produced, and
+#: their total count. Reset per request (``_handle``), appended by
+#: ``_call_tool``. The cell may consume them as data, and the parent still
+#: reports them in the eval result's own text: the incident's thirteen refused
+#: calls were invisible because only a dict the cell ignored carried them.
+_TOOL_FAILURES: list[dict[str, str]] = []
+_TOOL_FAILURE_COUNT = 0
+#: Bound the retained failures and each retained text — the notice points at
+#: what failed; it is not a second copy of every result.
+_TOOL_FAILURE_LIMIT = 8
+_TOOL_FAILURE_TEXT_LIMIT = 700
+
+
+def _record_tool_failure(name: str, call_id: str, result: dict[str, Any]) -> None:
+    """Keep one failed call's name and error text for the cell's report.
+
+    The text is the result's first text block, collapsed to one line (the
+    notice is a numbered list, and a multi-line error would forge entries),
+    bounded so a pathological result cannot balloon the protocol frame. Past
+    the retained limit only the count grows — the count is what the parent
+    needs to say "N failed" even when the tail was elided.
+    """
+    global _TOOL_FAILURE_COUNT
+    _TOOL_FAILURE_COUNT += 1
+    if len(_TOOL_FAILURES) >= _TOOL_FAILURE_LIMIT:
+        return
+    text = ""
+    for block in result.get("content") or []:
+        if isinstance(block, dict) and block.get("type") == "text":
+            text = " ".join(str(block.get("text") or "").split())
+            break
+    if len(text) > _TOOL_FAILURE_TEXT_LIMIT:
+        text = text[: _TOOL_FAILURE_TEXT_LIMIT - 1].rstrip() + "…"
+    _TOOL_FAILURES.append({"name": str(name), "call_id": str(call_id), "text": text})
+
 
 def _call_tool(name: str, **arguments: Any) -> dict[str, Any]:
     """Execute one approved harness tool and return its structured ToolResult.
@@ -254,6 +289,11 @@ def _call_tool(name: str, **arguments: Any) -> dict[str, Any]:
         result = response.get("tool_result")
         if not isinstance(result, dict):
             raise RuntimeError("Harness tool bridge returned an invalid result.")
+        if bool(result.get("is_error")):
+            # Recorded BEFORE returning it to the cell: whether or not the cell
+            # reads it, the parent's next response carries it into the eval
+            # result text (see the module-level note on ``_TOOL_FAILURES``).
+            _record_tool_failure(name, call_id, result)
         return result
 
 
@@ -841,6 +881,11 @@ def _handle(namespace: dict[str, Any], request: dict[str, Any]) -> dict[str, Any
         # would be visible to the NEXT cell) and must not leave a live bridge
         # behind that a background thread could call ``tool()`` through.
         return _variables_response(namespace, request)
+    # One cell's failures never carry into the next — the same per-request rule
+    # ``display``/``tool`` follow.
+    _TOOL_FAILURES.clear()
+    global _TOOL_FAILURE_COUNT
+    _TOOL_FAILURE_COUNT = 0
     display_sink = _DisplaySink(DISPLAY_CHAR_LIMIT)
     # Rebound per request (see _make_display).
     namespace["display"] = _make_display(display_sink)
@@ -916,6 +961,11 @@ def _handle(namespace: dict[str, Any], request: dict[str, Any]) -> dict[str, Any
         "error": _scrub_secrets(error) if error is not None else None,
         "result": _scrub_secrets(result) if result is not None else None,
         "display": [_scrub_secrets(item) for item in display_sink.finish()],
+        # The failed ``tool()`` calls this cell made, for the parent's result
+        # text. Structured (not pre-rendered) so the parent owns the wording
+        # and the tests can assert on the data, not on prose.
+        "tool_failures": list(_TOOL_FAILURES),
+        "tool_failure_count": _TOOL_FAILURE_COUNT,
     }
 
 

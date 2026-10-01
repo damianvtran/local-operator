@@ -287,6 +287,15 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         "Session._republish_journalled_outcome",
         "reason",
     ): (1, "the attention marker's own field, written to the store, never rendered"),
+    # The move queue's record projection: ``detail`` is the RECORD'S OWN phase
+    # sentence, copied into the receipt payload a front end reads — the same
+    # class as the ack's payload key above. Nothing renders it into a line in
+    # this function, and the record being projected is this device's own queue
+    # row, not a peer's reason token in need of a gloss.
+    ("local_operator/network/move_queue.py", "payload", "detail"): (
+        1,
+        "the record's own detail, projected into the receipt payload, not rendered",
+    ),
 }
 
 _ROOT = Path(local_operator.__file__).parent

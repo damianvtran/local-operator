@@ -516,6 +516,20 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<config>/network/, oldest first, and logs each deletion in the surviving log",
     ),
     (
+        "local_operator/network/approvals.py::sweep",
+        "os.unlink",
+        # The retention sweep (remote-onboarding §2.4) prunes a terminal record's
+        # FILE and its .lock FILE, both minted by record_path()/lock_path() from
+        # the approval id under <config>/network/approvals/ — a device-local store
+        # beside sessions/, never inside one, and neither path takes a session id
+        # or any caller-supplied string (new_approval_id() is crockford-random).
+        # Two calls of this shape: the record and the lock. No cleanup-path move is
+        # possible or wanted — the store is this device's, not a session's.
+        "Prunes a terminal approval's record FILE and its lock FILE under "
+        "<config>/network/approvals/; both paths approval-id-derived, never session-derived",
+        2,
+    ),
+    (
         "local_operator/network/cli.py::_cmd_disconnect",
         "<path>.unlink",
         "`lop network disconnect`: deletes THIS network's <id>.secrets.json FILE under "
@@ -541,6 +555,26 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Removes the agent tool's own `tempfile.mkstemp` invite-token FILE (system temp, "
         "prefix lop-join-) once the join it was written for has run; a leaked copy is a "
         "live credential until it is redeemed",
+    ),
+    (
+        "local_operator/network/move_queue.py::_write_record_raw",
+        "os.replace",
+        "Atomic write of the queued move's record FILE <config>/network/queue/"
+        "move-<session_id>.json (design note §5.4): a tmp FILE over its target, both "
+        "direct children of queue/, a sibling of sessions/ — the record is relay-owned "
+        "and never copied",
+    ),
+    (
+        "local_operator/network/move_queue.py::_write_record_raw",
+        "os.unlink",
+        "Removes only this call's own .move-<id>.<rand>.tmp sidecar in "
+        "<config>/network/queue/, and only on the failure path",
+    ),
+    (
+        "local_operator/network/move_queue.py::sweep_terminal",
+        "<path>.unlink",
+        "Sweeps terminal queue records past the TTL out of <config>/network/queue/ "
+        "(the glob's own move-*.json matches); the directory is a sibling of sessions/",
     ),
     # -- the session STAMP: `sessions/<id>/mesh.json` ------------------------
     # THE ONE MESH FILE THAT REALLY IS INSIDE A SESSION DIRECTORY, so it is argued
