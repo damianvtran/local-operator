@@ -82,9 +82,10 @@
       }
     ],
     "scroller": {
-      "scrollH": 2147,
+      "scrollH": 2248,
       "clientH": 660
-    }
+    },
+    "text": "asks \u00b7 7 questions\u2715Queued \u2014 the agent is continuing; expires in 12 m1/2Which sequencing should the rollout use?layout first \u00b7 recommendedthe smallest diff reaches the wheelroster firstthe change the operator reportedboth togetherone patch, one contract to readskip \u2014 send no answer2/2Which surfaces must the verification cover?phone \u00b7 recommendedthe bundle that ships in the wheelterminalthe viewer reading the same folddesktopthe third surface on the same wirechoose any that applyskip \u2014 send no answersend answersdeclineQueued \u2014 the agent is continuing; expires in 9 mAnswer the second ask first?yes \u00b7 recommendedanswers the newest row firstnoleaves it for the head asksend answerdeclineAsk me the second one too.openthis conversation has ended \u2014 answering may need it reopenedQueued \u2014 the agent is continuing; expires in 14 mAnswer this one from its own conversation?yes \u00b7 recommendedthis row belongs to the screen's sessionsend answerdeclineAsks behind a decisionopenQueued \u2014 the agent is continuing; expires in 13 mAnd record this one as a follow-up?skip \u2014 send no answersend answerdeclineAsks behind a decisionopenQueued \u2014 the agent is continuing; expires in 12 mShip behind the flag while this decision is pending?yes \u00b7 recommendedone more session for the same queuesend answerdeclineTimed out \u2014 the agent moved on; you can still answerThe deadline passed \u2014 does the answer still hold?it holds \u00b7 recommendedthe agent will be told latechangedsay what changedsend answerdeclinedismiss \u2014 send no replyAnswered \u2014 the agent was toldShip the phone surface behind the flag?yes \u2014 dark until the flipDeclined \u2014 the agent was toldTake the long route through the relay?\u2014"
   },
   "390x844-recommended": {
     "drag": {
@@ -92,7 +93,7 @@
       "x": 195,
       "y": 224,
       "scrollTop": 0,
-      "max": 1487,
+      "max": 1588,
       "remaining": 4
     },
     "open": true,
@@ -157,12 +158,32 @@
       }
     ],
     "scroller": {
-      "scrollH": 2147,
+      "scrollH": 2248,
       "clientH": 660
-    }
+    },
+    "text": "asks \u00b7 7 questions\u2715Queued \u2014 the agent is continuing; expires in 12 m1/2Which sequencing should the rollout use?layout first \u00b7 recommendedthe smallest diff reaches the wheelroster firstthe change the operator reportedboth togetherone patch, one contract to readskip \u2014 send no answer2/2Which surfaces must the verification cover?phone \u00b7 recommendedthe bundle that ships in the wheelterminalthe viewer reading the same folddesktopthe third surface on the same wirechoose any that applyskip \u2014 send no answersend answersdeclineQueued \u2014 the agent is continuing; expires in 9 mAnswer the second ask first?yes \u00b7 recommendedanswers the newest row firstnoleaves it for the head asksend answerdeclineAsk me the second one too.openthis conversation has ended \u2014 answering may need it reopenedQueued \u2014 the agent is continuing; expires in 14 mAnswer this one from its own conversation?yes \u00b7 recommendedthis row belongs to the screen's sessionsend answerdeclineAsks behind a decisionopenQueued \u2014 the agent is continuing; expires in 13 mAnd record this one as a follow-up?skip \u2014 send no answersend answerdeclineAsks behind a decisionopenQueued \u2014 the agent is continuing; expires in 12 mShip behind the flag while this decision is pending?yes \u00b7 recommendedone more session for the same queuesend answerdeclineTimed out \u2014 the agent moved on; you can still answerThe deadline passed \u2014 does the answer still hold?it holds \u00b7 recommendedthe agent will be told latechangedsay what changedsend answerdeclinedismiss \u2014 send no replyAnswered \u2014 the agent was toldShip the phone surface behind the flag?yes \u2014 dark until the flipDeclined \u2014 the agent was toldTake the long route through the relay?\u2014"
   },
   "390x844-foreign": {
-    "open": true,
+    "open": false,
+    "loading": false,
+    "empty": false,
+    "cards": [],
+    "scroller": null,
+    "text": null
+  },
+  "390x844-ended": {
+    "drag": {
+      "dy": -8,
+      "x": 195,
+      "y": 224,
+      "scrollTop": 947,
+      "max": 1588,
+      "remaining": -8
+    },
+    "open": {
+      "tap": "tapped",
+      "hash": "#/s/asks-foreign"
+    },
     "loading": false,
     "empty": false,
     "cards": [
@@ -224,9 +245,10 @@
       }
     ],
     "scroller": {
-      "scrollH": 2232,
+      "scrollH": 2248,
       "clientH": 660
-    }
+    },
+    "text": "asks \u00b7 7 questions\u2715Queued \u2014 the agent is continuing; expires in 12 m1/2Which sequencing should the rollout use?layout first \u00b7 recommendedthe smallest diff reaches the wheelroster firstthe change the operator reportedboth togetherone patch, one contract to readskip \u2014 send no answer2/2Which surfaces must the verification cover?phone \u00b7 recommendedthe bundle that ships in the wheelterminalthe viewer reading the same folddesktopthe third surface on the same wirechoose any that applyskip \u2014 send no answersend answersdeclineQueued \u2014 the agent is continuing; expires in 9 mAnswer the second ask first?yes \u00b7 recommendedanswers the newest row firstnoleaves it for the head asksend answerdeclineAsk me the second one too.openthis conversation has ended \u2014 answering may need it reopenedQueued \u2014 the agent is continuing; expires in 14 mAnswer this one from its own conversation?yes \u00b7 recommendedthis row belongs to the screen's sessionsend answerdeclineAsks behind a decisionopenQueued \u2014 the agent is continuing; expires in 13 mAnd record this one as a follow-up?skip \u2014 send no answersend answerdeclineAsks behind a decisionopenQueued \u2014 the agent is continuing; expires in 12 mShip behind the flag while this decision is pending?yes \u00b7 recommendedone more session for the same queuesend answerdeclineTimed out \u2014 the agent moved on; you can still answerThe deadline passed \u2014 does the answer still hold?it holds \u00b7 recommendedthe agent will be told latechangedsay what changedsend answerdeclinedismiss \u2014 send no replyAnswered \u2014 the agent was toldShip the phone surface behind the flag?yes \u2014 dark until the flipDeclined \u2014 the agent was toldTake the long route through the relay?\u2014"
   },
   "390x844-stacked": {
     "viewport": [
@@ -344,9 +366,10 @@
       }
     ],
     "scroller": {
-      "scrollH": 2147,
+      "scrollH": 2248,
       "clientH": 660
-    }
+    },
+    "text": "asks \u00b7 7 questions\u2715Queued \u2014 the agent is continuing; expires in 12 m1/2Which sequencing should the rollout use?layout first \u00b7 recommendedthe smallest diff reaches the wheelroster firstthe change the operator reportedboth togetherone patch, one contract to readskip \u2014 send no answer2/2Which surfaces must the verification cover?phone \u00b7 recommendedthe bundle that ships in the wheelterminalthe viewer reading the same folddesktopthe third surface on the same wirechoose any that applyskip \u2014 send no answersend answersdeclineQueued \u2014 the agent is continuing; expires in 9 mAnswer the second ask first?yes \u00b7 recommendedanswers the newest row firstnoleaves it for the head asksend answerdeclineAsk me the second one too.openthis conversation has ended \u2014 answering may need it reopenedQueued \u2014 the agent is continuing; expires in 13 mAnswer this one from its own conversation?yes \u00b7 recommendedthis row belongs to the screen's sessionsend answerdeclineAsks behind a decisionopenQueued \u2014 the agent is continuing; expires in 13 mAnd record this one as a follow-up?skip \u2014 send no answersend answerdeclineAsks behind a decisionopenQueued \u2014 the agent is continuing; expires in 12 mShip behind the flag while this decision is pending?yes \u00b7 recommendedone more session for the same queuesend answerdeclineTimed out \u2014 the agent moved on; you can still answerThe deadline passed \u2014 does the answer still hold?it holds \u00b7 recommendedthe agent will be told latechangedsay what changedsend answerdeclinedismiss \u2014 send no replyAnswered \u2014 the agent was toldShip the phone surface behind the flag?yes \u2014 dark until the flipDeclined \u2014 the agent was toldTake the long route through the relay?\u2014"
   },
   "390x844-answered": {
     "submit": "sent",
@@ -412,17 +435,18 @@
       }
     ],
     "scroller": {
-      "scrollH": 1622,
+      "scrollH": 1723,
       "clientH": 660
-    }
+    },
+    "text": "asks \u00b7 5 questions\u2715Asks behind a decisionopenQueued \u2014 the agent is continuing; expires in 12 mShip behind the flag while this decision is pending?yes \u00b7 recommendedone more session for the same queuesend answerdeclineQueued \u2014 the agent is continuing; expires in 9 mAnswer the second ask first?yes \u00b7 recommendedanswers the newest row firstnoleaves it for the head asksend answerdeclineAsk me the second one too.openthis conversation has ended \u2014 answering may need it reopenedQueued \u2014 the agent is continuing; expires in 13 mAnswer this one from its own conversation?yes \u00b7 recommendedthis row belongs to the screen's sessionsend answerdeclineAsks behind a decisionopenQueued \u2014 the agent is continuing; expires in 13 mAnd record this one as a follow-up?skip \u2014 send no answersend answerdeclineAnswered \u2014 the agent was toldWhich sequencing should the rollout use?layout first \u2014 the smallest diff reaches the wheelWhich surfaces must the verification cover?phone \u2014 the bundle that ships in the wheelTimed out \u2014 the agent moved on; you can still answerThe deadline passed \u2014 does the answer still hold?it holds \u00b7 recommendedthe agent will be told latechangedsay what changedsend answerdeclinedismiss \u2014 send no replyAnswered \u2014 the agent was toldShip the phone surface behind the flag?yes \u2014 dark until the flipDeclined \u2014 the agent was toldTake the long route through the relay?\u2014"
   },
   "390x844-refusal": {
     "drag": {
       "dy": 115,
       "x": 195,
       "y": 224,
-      "scrollTop": 989,
-      "max": 989,
+      "scrollTop": 1090,
+      "max": 1090,
       "remaining": 115
     },
     "open": true,
@@ -487,9 +511,10 @@
       }
     ],
     "scroller": {
-      "scrollH": 1649,
+      "scrollH": 1750,
       "clientH": 660
-    }
+    },
+    "text": "asks \u00b7 5 questions\u2715Asks behind a decisionopenQueued \u2014 the agent is continuing; expires in 12 mShip behind the flag while this decision is pending?yes \u00b7 recommendedone more session for the same queuesend answerdeclineQueued \u2014 the agent is continuing; expires in 9 mAnswer the second ask first?yes \u00b7 recommendedanswers the newest row firstnoleaves it for the head asksend answerdeclineAsk me the second one too.openthis conversation has ended \u2014 answering may need it reopenedQueued \u2014 the agent is continuing; expires in 13 mAnswer this one from its own conversation?yes \u00b7 recommendedthis row belongs to the screen's sessionsend answerdeclineAsks behind a decisionopenQueued \u2014 the agent is continuing; expires in 13 mAnd record this one as a follow-up?skip \u2014 send no answersend answerdeclineAnswered \u2014 the agent was toldWhich sequencing should the rollout use?layout first \u2014 the smallest diff reaches the wheelWhich surfaces must the verification cover?phone \u2014 the bundle that ships in the wheelTimed out \u2014 the agent moved on; you can still answerThe deadline passed \u2014 does the answer still hold?it holds \u00b7 recommendedthe agent will be told latechangedsay what changedalready answered by desktop.send answerdeclinedismiss \u2014 send no replyAnswered \u2014 the agent was toldShip the phone surface behind the flag?yes \u2014 dark until the flipDeclined \u2014 the agent was toldTake the long route through the relay?\u2014"
   },
   "390x844-loading": {
     "open": true,
@@ -499,7 +524,8 @@
     "scroller": {
       "scrollH": 44,
       "clientH": 44
-    }
+    },
+    "text": "asks\u2715reading asks\u2026"
   },
   "390x844-settled": {
     "viewport": [
@@ -545,7 +571,8 @@
     "scroller": {
       "scrollH": 44,
       "clientH": 44
-    }
+    },
+    "text": "asks\u2715nothing waiting \u2014 questions the agent asks will appear here."
   },
   "390x844-bar-light": {
     "viewport": [
@@ -630,8 +657,9 @@
       }
     ],
     "scroller": {
-      "scrollH": 1622,
+      "scrollH": 1723,
       "clientH": 660
-    }
+    },
+    "text": "asks \u00b7 5 questions\u2715Asks behind a decisionopenQueued \u2014 the agent is continuing; expires in 11 mShip behind the flag while this decision is pending?yes \u00b7 recommendedone more session for the same queuesend answerdeclineQueued \u2014 the agent is continuing; expires in 8 mAnswer the second ask first?yes \u00b7 recommendedanswers the newest row firstnoleaves it for the head asksend answerdeclineAsk me the second one too.openthis conversation has ended \u2014 answering may need it reopenedQueued \u2014 the agent is continuing; expires in 13 mAnswer this one from its own conversation?yes \u00b7 recommendedthis row belongs to the screen's sessionsend answerdeclineAsks behind a decisionopenQueued \u2014 the agent is continuing; expires in 12 mAnd record this one as a follow-up?skip \u2014 send no answersend answerdeclineAnswered \u2014 the agent was toldWhich sequencing should the rollout use?layout first \u2014 the smallest diff reaches the wheelWhich surfaces must the verification cover?phone \u2014 the bundle that ships in the wheelTimed out \u2014 the agent moved on; you can still answerThe deadline passed \u2014 does the answer still hold?it holds \u00b7 recommendedthe agent will be told latechangedsay what changedsend answerdeclinedismiss \u2014 send no replyAnswered \u2014 the agent was toldShip the phone surface behind the flag?yes \u2014 dark until the flipDeclined \u2014 the agent was toldTake the long route through the relay?\u2014"
   }
 }
