@@ -75,6 +75,7 @@ const EXPECTED_MODULES = [
   "ax-compact.ts",
   "deadline.ts",
   "errors.ts",
+  "geometry-read.ts",
   "origin-policy.ts",
   "psl.gen.ts",
   "scroll-expressions.ts",

@@ -38,7 +38,7 @@
  *      Implicit roles need the accessibility tree, which is `snapshot`'s job.
  */
 
-export interface GeometryRect {
+export type GeometryRect = {
   x: number;
   y: number;
   top: number;
@@ -48,7 +48,7 @@ export interface GeometryRect {
   height: number;
 }
 
-export interface GeometryElement {
+export type GeometryElement = {
   tag: string;
   id: string;
   role: string;
@@ -56,31 +56,31 @@ export interface GeometryElement {
   rect: GeometryRect;
 }
 
-export interface StyleMatch extends GeometryElement {
+export type StyleMatch = GeometryElement & {
   styles: Record<string, string>;
   inline: Record<string, string>;
 }
 
-export interface StylesResult {
+export type StylesResult = {
   count: number;
   matches: StyleMatch[];
   truncated: boolean;
 }
 
-export interface HitTestMatch extends GeometryElement {
+export type HitTestMatch = GeometryElement & {
   styles: Record<string, string>;
 }
 
-export interface HitTestResult {
+export type HitTestResult = {
   count: number;
   elements: HitTestMatch[];
 }
 
-export interface AncestorMatch extends GeometryElement {
+export type AncestorMatch = GeometryElement & {
   styles: Record<string, string>;
 }
 
-export interface AncestorsResult {
+export type AncestorsResult = {
   count: number;
   chain: AncestorMatch[];
 }
