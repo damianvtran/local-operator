@@ -781,6 +781,154 @@ SWITCH_OUTCOME_WORDS: dict[str, str] = {
     "partial": "switched (error)",
 }
 
+#: The collapsed-row word for a settled send whose delivery is honest but not
+#: whole (design note A.4's ``details.delivery.state``).
+#:
+#: ``delivered`` and ``failed`` are deliberately absent. A delivered send keeps
+#: the mode marker that says HOW it was asked for (``wake`` vs ``quiet``) --
+#: replacing it with ``delivered`` would trade the sender's own instruction for a
+#: word the row already implies -- and ``failed`` rides the existing error arm,
+#: whose reason line is the failure itself.
+#:
+#: Both words LEAD, replacing the mode marker, for the reason ``_send_summary``
+#: documents at length: the row builder truncates from the right, so the
+#: discriminator has to be the first thing painted or a 37-cell conversation name
+#: buries it. ``wake unconfirmed`` rather than a bare ``unconfirmed`` on the
+#: mailbox arm because that is the fact that failed: the message is in the
+#: mailbox and the WAKE is what did not answer.
+DELIVERY_OUTCOME_WORDS: dict[str, str] = {
+    "mailbox": "wake unconfirmed",
+    # ``delivery unconfirmed``, not a bare ``unconfirmed`` (design round 1, D2 =
+    # UX round 1, U3): the residual sits beside the mailbox row and differs from
+    # it by one glyph and one dropped word, so the word has to say WHAT is
+    # unconfirmed -- the delivery, not the wake. It is also the word the desktop
+    # row and the model-facing copy already use.
+    "unconfirmed": "delivery unconfirmed",
+}
+
+#: The constant word a FAILED send's status cap leads with (design round 1, D3).
+#: ``failed`` is deliberately NOT in the table above: there the word REPLACES the
+#: mode marker, which would put the state in the summary slot while the cap went
+#: on restating the target. On a failed row the cap is where the outcome belongs
+#: (the ``interrupted`` precedent), and this word is the same one the desktop row
+#: paints, so one state reads the same on both surfaces.
+SEND_NOT_DELIVERED_WORD = "not delivered"
+
+#: The prefix a SEND's result line opens with, which is what makes it eligible to
+#: be the expanded body's claimed lead (UX round 1, U1). A flag alone is not
+#: enough here either: ``details.delivery.state`` says the RESULT is not whole,
+#: while this says THIS LINE is the receipt.
+_SEND_RECEIPT_LEAD = "→ "
+
+
+def _delivery_outcome_summary(summary: str, args: dict[str, object], details: object) -> str:
+    """Replace the send row's mode marker with its delivery word, when it has one.
+
+    Read from ``details.delivery.state``, never sniffed from the result text: the
+    renderers' one rule is that state comes from structured details, and the
+    prose is model-facing copy the card must not parse. An absent or unknown
+    state keeps the argument summary unchanged, which is what a card rebuilt from
+    an older payload gets.
+    """
+    from local_operator.tools.builtin import peer_send_mode_label
+
+    if not isinstance(details, Mapping):
+        return summary
+    delivery = details.get("delivery")
+    state = delivery.get("state") if isinstance(delivery, Mapping) else None
+    word = DELIVERY_OUTCOME_WORDS.get(state) if isinstance(state, str) else None
+    if not word:
+        return summary
+    #: The legacy top-level flag, which is the REQUEST (see the nested payload's
+    #: own ``wake`` key for the status): it is what tells a quiet send from a
+    #: wake send, and it is the only place that fact lives on this result.
+    wake_requested = bool(details.get("wake"))
+    marker = _scalar_text(peer_send_mode_label(args))
+    prefix = f"{marker} · "
+    if not marker or not summary.startswith(prefix):
+        return summary
+    rest = summary[len(prefix) :]
+    # A QUIET send keeps its mode marker (design round 1, N2). ``wake
+    # unconfirmed`` carries the mode inside the word -- the wake is the thing that
+    # did not answer -- but the residual's word says only that the DELIVERY is
+    # unproven, and for a send that asked for no turn at all that is the fact the
+    # operator has to see before deciding whether to wake it: the message may sit
+    # in a mailbox nobody will read. Painting ``quiet`` first and then the state
+    # costs one short word in front of the discriminator the truncation rule
+    # protects, and only on this arm.
+    if state == "unconfirmed" and not wake_requested:
+        return f"{marker} · {word} · {rest}"
+    return f"{word} · {rest}"
+
+
+def _cap_failed_reason(reason: str, room: int) -> str:
+    """``<word>: <cause>`` inside ``room`` cells, the word never cut mid-string.
+
+    Split on the first ``": "`` -- the shape :meth:`ToolCard._send_failed_reason`
+    composes, so there is no second separator to confuse it -- and spend the room
+    on the word first. Too narrow even for the word means the ordinary truncation
+    (a cap of 8 cells cannot hold a 13-cell constant), which is the only case
+    where the discriminator still loses.
+    """
+    word, separator, cause = reason.partition(": ")
+    if not separator:
+        return truncate_cells(reason, room)
+    if cell_len(word) >= room:
+        return truncate_cells(word, room)
+    budget = room - cell_len(word) - len(separator)
+    if budget < 2:
+        return word
+    return f"{word}{separator}{truncate_cells(cause, budget)}"
+
+
+def _failed_delivery_reason(details: object) -> str:
+    """The cause clause a FAILED send's row prints, or ``""``.
+
+    Read from ``details.delivery`` rather than sniffed out of the result text --
+    the same rule the summary word follows -- and only for the ``failed`` state:
+    an amber row's cause is already in the receipt line the expansion promotes.
+    """
+    if not isinstance(details, Mapping):
+        return ""
+    delivery = details.get("delivery")
+    if not isinstance(delivery, Mapping) or delivery.get("state") != "failed":
+        return ""
+    reason = delivery.get("reason")
+    return reason if isinstance(reason, str) else ""
+
+
+def _delivery_word_run(
+    summary: str, *, partial: bool, is_send: bool, marker: str
+) -> tuple[str, str, str]:
+    """Split a settled send summary into its delivery word and the rest.
+
+    The word is the state's carrier on the collapsed row, and it was painted in
+    the summary's own ``dim`` token -- measured 4.18:1 on the dark card and
+    3.46:1 on the light theme's surface, both under the 4.5:1 text floor, while
+    the failed row's word gets its own role ink (design round 1, D4). Returning
+    the word as its own run is what lets the caller paint it in the partial pair
+    the amber glyph already uses (8.64:1 / 6.06:1) instead of minting a colour of
+    its own. An empty first element means "paint the whole summary as one run",
+    which is every other tool and every send whose state carries no word.
+    """
+    if not (partial and is_send):
+        return "", "", summary
+    for word in DELIVERY_OUTCOME_WORDS.values():
+        prefix = f"{word} · "
+        if summary.startswith(prefix):
+            return "", prefix, summary[len(prefix) :]
+        # The PREFIXED form: the mode marker leads and the state word follows it
+        # (design round 1, N2), so the word is the middle run. The marker is
+        # THIS row's, asked of the same function that built the summary -- the
+        # first version enumerated ``quiet`` and therefore missed the ``now``
+        # marker a steer with ``wake=false`` carries, which painted the word in
+        # the summary's ink AND the ``Partial`` fallback beside it (agent review
+        # round 2, MINOR-1).
+        marker_prefix = f"{marker} · {prefix}" if marker else ""
+        if marker_prefix and summary.startswith(marker_prefix):
+            return f"{marker} · ", prefix, summary[len(marker_prefix) :]
+    return "", "", summary
+
 
 def _switch_outcome_summary(summary: str, details: object) -> str:
     """The settled switch row: the outcome word replaces the ``model`` marker.
@@ -1495,6 +1643,21 @@ class ToolCard(ExpandableActionBlock):
         #: unreachable from the state an operator scans unless the flag rides here
         #: too (design review D1). Set in :meth:`_absorb_result`.
         self._partial = False
+        #: Whether this card is a SEND. Read by two presentations that must agree
+        #: on it: the amber state word's own ink run (D4) and the receipt line the
+        #: expansion claims (U1). Bound once here rather than re-derived per
+        #: paint, and reset with the rest of the per-result state in
+        #: :meth:`_absorb_result`.
+        self._is_send = False
+        #: The mode marker this row's summary leads with (``now`` / ``quiet`` /
+        #: ``wake``), bound per result for the readers of the prefixed form.
+        self._send_mode_marker = ""
+        #: The cause clause of a FAILED send's delivery (``details.delivery
+        #: ["reason"]``), and empty for every other row. The collapsed row's cap
+        #: leads with :data:`SEND_NOT_DELIVERED_WORD` and then this (D3); reading
+        #: it from the structured payload is what keeps the card from parsing the
+        #: result prose.
+        self._delivery_failed_reason = ""
         #: True when the result came back from a call that ran on a FRESH kernel
         #: after a reset (``details["kernel_reset"]``, set by ``tools/eval.py``
         #: only for a call that really ran). Read by the COLLAPSED row the way
@@ -2454,11 +2617,33 @@ class ToolCard(ExpandableActionBlock):
         cleaned result text.
         """
         self._added, self._removed = _diff_counts(details)
-        if self.tool_name.lower() == "send":
+        # Reset per result, like the flags below and for the same reason: a card
+        # written once is still rebuilt from a payload, and neither of these may
+        # be inherited from a previous body.
+        self._is_send = self.tool_name.lower() == "send"
+        self._delivery_failed_reason = _failed_delivery_reason(details) if self._is_send else ""
+        # THE MODE MARKER this row's summary was built with, read from the same
+        # function that built it: the two readers of the ``<marker> · <word> · ``
+        # form (the double-word guard and the amber ink run) must ask about the
+        # marker this row actually has, not about a list of the ones we thought
+        # of (agent review round 2, MINOR-1).
+        self._send_mode_marker = ""
+        if self._is_send:
+            from local_operator.tools.builtin import peer_send_mode_label
+
+            self._send_mode_marker = _scalar_text(peer_send_mode_label(self._args))
+        if self._is_send:
             # Re-derived from the arguments every time, so a card that settles
-            # twice (a replay over a live row) never stacks outcome words.
-            self._summary = _switch_outcome_summary(
-                _strip_control_sequences(_summary_from_args("send", self._args)), details
+            # twice (a replay over a live row) never stacks outcome words. The
+            # delivery word wins over the model-switch one: one result cannot be
+            # both, and reading the nested delivery state first is what keeps a
+            # future switch arm from claiming a send row.
+            self._summary = _delivery_outcome_summary(
+                _switch_outcome_summary(
+                    _strip_control_sequences(_summary_from_args("send", self._args)), details
+                ),
+                self._args,
+                details,
             )
         # Reset per result, with the fetch flags below and for the same reason: a
         # card is written once, but a rebuilt card must never inherit the previous
@@ -3046,11 +3231,31 @@ class ToolCard(ExpandableActionBlock):
         return head
 
     def _switch_row_names_its_outcome(self) -> bool:
-        """Whether this is a settled model-switch row whose summary leads with
-        its own outcome word (``_switch_outcome_summary``)."""
-        return self.tool_name.lower() == "send" and self._summary.startswith(
-            tuple(f"{word} · " for word in SWITCH_OUTCOME_WORDS.values())
-        )
+        """Whether this is a settled send row whose summary leads with its own
+        outcome word -- a model switch (``_switch_outcome_summary``) or a send
+        whose delivery is amber (``_delivery_outcome_summary``).
+
+        The no-double-word rule: the partial arm would otherwise append
+        ``Partial``/the promoted disclosure under a row that already states the
+        outcome, painting the same fact twice (design note D).
+        """
+        if self.tool_name.lower() != "send":
+            return False
+        words = (*SWITCH_OUTCOME_WORDS.values(), *DELIVERY_OUTCOME_WORDS.values())
+        prefixes = [f"{word} · " for word in words]
+        # A send that asked for no turn carries its mode marker IN FRONT of the
+        # word (``_delivery_outcome_summary``, design round 1 N2), and that form
+        # must still count as naming the outcome: the partial arm would otherwise
+        # append ``Partial`` under a row that already states the state -- the
+        # double word this guard exists to prevent, reintroduced by the marker.
+        # The marker is THIS row's, not a hard-coded ``quiet``: a steer with
+        # ``wake=false`` reads ``now · delivery unconfirmed · …`` (agent review
+        # round 2, MINOR-1).
+        if self._send_mode_marker:
+            prefixes += [
+                f"{self._send_mode_marker} · {word} · " for word in DELIVERY_OUTCOME_WORDS.values()
+            ]
+        return self._summary.startswith(tuple(prefixes))
 
     def _partial_reason(self) -> str:
         """The body's LEADING line when the collapsed row must carry it too.
@@ -3073,6 +3278,24 @@ class ToolCard(ExpandableActionBlock):
         head = self._output[0].strip()
         return head if head.startswith(_PARTIAL_LEADS) else ""
 
+    def _send_receipt_reason(self) -> str:
+        """A SEND's receipt line, claimed for the EXPANSION only.
+
+        Deliberately NOT part of :meth:`_partial_reason`, which feeds the
+        COLLAPSED row's status cap as well: the cap's cells are already spent on
+        the delivery word and the message (that is where this round's whole
+        distinction lives), and painting a truncated ``→ target (pid …`` there as
+        well would restate the target beside a summary that names it. The
+        expansion is the surface the finding is about — the sentence carrying
+        "do not send it again" / "check before resending" is unreadable there
+        because a captured output line is cropped, and only a claimed lead wraps
+        (UX round 1, U1).
+        """
+        if not self._partial or not self._output or not self._is_send:
+            return ""
+        head = self._output[0].strip()
+        return head if head.startswith(_SEND_RECEIPT_LEAD) else ""
+
     def _reset_reason(self) -> str:
         """The body's LEADING line when the call ran on a reset kernel.
 
@@ -3088,9 +3311,32 @@ class ToolCard(ExpandableActionBlock):
         head = self._output[0].strip()
         return head if head.startswith(_RESET_LEADS) else ""
 
+    def _send_failed_reason(self) -> str:
+        """The status cap's text for a FAILED SEND: the state word, then the cause.
+
+        The cap used to carry the result sentence, which opens ``could not deliver
+        to {target}:`` -- so the whole cell budget went on restating the target the
+        summary already names, and the cause, which is the part an operator acts
+        on, sat beyond the crop at every width (design round 1, D3). The word
+        leads and the cause follows, the shape the ``interrupted`` slot already
+        uses. Unlike that slot this TRUNCATES rather than dropping whole: a dropped
+        reason leaves a bare ``✗`` at 60 columns, where the word still fits.
+
+        Empty for every other row, which keeps the ordinary error path (and its
+        tests) byte-identical.
+        """
+        if not self._delivery_failed_reason:
+            return ""
+        return f"{SEND_NOT_DELIVERED_WORD}: {self._delivery_failed_reason}"
+
     def _promoted_lead(self) -> str:
         """The lead line the collapsed row claims, whichever state owns it."""
-        return self._failure_reason() or self._partial_reason() or self._reset_reason()
+        return (
+            self._failure_reason()
+            or self._partial_reason()
+            or self._reset_reason()
+            or self._send_receipt_reason()
+        )
 
     def _promoted_paint(self, fallback: Style) -> tuple[str, Style]:
         """``(glyph, ink)`` for the promoted lead line, in the state's own pair.
@@ -3110,7 +3356,7 @@ class ToolCard(ExpandableActionBlock):
             # disagree with it (review round 2, R2-6). Ordered the same way
             # `_promoted_lead` is, so the two cannot diverge.
             return ICON_ERROR, fallback
-        if self._partial_reason():
+        if self._partial_reason() or self._send_receipt_reason():
             return ICON_PARTIAL, bindings.style("tool.status.partial_glyph")
         if self._reset_reason():
             return ICON_SUCCESS, bindings.style("tool.status.partial_glyph")
@@ -3775,7 +4021,21 @@ class ToolCard(ExpandableActionBlock):
             # See `bindings.BY_ELEMENT["tool.row.chip_running"].note`.
             chip_element = "tool.row.chip_settled" if not running else "tool.row.chip_running"
             row.append(row_chip, style=bindings.style(chip_element))
-        row.append(summary, style=summary_style)
+        # The state word leads the summary and takes the amber ink on its own run
+        # (design round 1, D4); every other summary is one run.
+        before, word_run, rest = _delivery_word_run(
+            summary,
+            partial=self._partial,
+            is_send=self._is_send,
+            marker=self._send_mode_marker,
+        )
+        if word_run:
+            if before:
+                row.append(before, style=summary_style)
+            row.append(word_run, style=bindings.style("tool.status.partial_glyph"))
+            row.append(rest, style=summary_style)
+        else:
+            row.append(summary, style=summary_style)
 
         # ONE right-aligned tail: the slot and the status share a single pad,
         # so the slot is a COLUMN instead of trailing the summary wherever
@@ -4077,7 +4337,7 @@ class ToolCard(ExpandableActionBlock):
             abbreviates = False
         else:
             danger = bindings.style("tool.status.error_glyph")
-            glyph, reason, tint = ICON_ERROR, self._error, danger
+            glyph, reason, tint = ICON_ERROR, self._send_failed_reason() or self._error, danger
             abbreviates = True
 
         runs: list[tuple[str, Style]] = []
@@ -4087,7 +4347,15 @@ class ToolCard(ExpandableActionBlock):
                 # Uncapped, the caller clamps downstream and the reason rides
                 # whole; capped, it has to fit in front of the glyph.
                 room = max(0, cap - cell_len(f"{glyph}  ") - cell_len(duration))
-                if abbreviates:
+                if self._delivery_failed_reason:
+                    # THE WORD SURVIVES; THE CAUSE GIVES WAY (design round 1,
+                    # D3). Truncating the composed string cut the discriminator
+                    # itself at 60 columns (``not delive…``), which is the very
+                    # cell the finding is about: the 13-cell constant is what the
+                    # cap exists to carry, and it fits at every width the row is
+                    # drawn at, so the cause is what stops short.
+                    reason = _cap_failed_reason(reason, room)
+                elif abbreviates:
                     reason = truncate_cells(reason, room)
                 elif cell_len(reason) > room:
                     reason = ""

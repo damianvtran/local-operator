@@ -13181,12 +13181,12 @@ async def execute_send(
     mode = "steer" if params.now else "mailbox"
     sender = await _send_sender_identity(context)
 
-    from local_operator.mobile.peer_send import deliver_peer_message
+    from local_operator.mobile.peer_send import deliver_peer_message_outcome
 
     try:
         # Awaited directly — this execute is already async; an asyncio.run here
         # would try to nest a loop inside the running one.
-        detail = await deliver_peer_message(
+        outcome = await deliver_peer_message_outcome(
             record,
             session_id=(record.session_id if record is not None else cold_session_id),
             text=message,
@@ -13195,18 +13195,16 @@ async def execute_send(
             sender=sender,
         )
     except RuntimeError as exc:
-        # A protocol-level refusal (an older registrant that does not know the
-        # op, a handle that cannot receive): the peer answered, and its answer
-        # was no. Nothing was delivered, so the model may safely retry elsewhere.
+        # A PRE-DELIVERY REFUSAL (an unengaged target, live or cold). The peer
+        # answered, and its answer was no; no message id was ever minted, so no
+        # ``delivery`` object rides this result — the model may retry elsewhere.
         return _error(tool_call_id, "send", f"could not deliver: {exc}")
     except (ConnectionError, OSError, ValueError) as exc:
-        # The connection or the ack failed — which is NOT the same as the
-        # message not arriving. The receive side commits the message before it
-        # acks, so a dropped socket or an ack timeout (asyncio.TimeoutError is
-        # an OSError subclass) can mean "delivered, receipt lost". Saying
-        # "could not deliver" here would assert a non-delivery this side cannot
-        # know, and a model that believes it retries and duplicates the message
-        # (review round 1, MINOR-3).
+        # DEFENSIVE, and deliberately kept: the outcome builder classifies every
+        # transport fault into a state, so what reaches here is a fault it could
+        # not classify (the frame reader's own read fault). The honesty rule is
+        # unchanged — no acknowledged result is NOT an undelivered message — so
+        # this must never become the confident arm.
         target = (
             f"{record.conversation_name or record.session_id} (pid {record.pid})"
             if record is not None
@@ -13219,41 +13217,71 @@ async def execute_send(
             "The message may or may not have arrived — "
             "check with the peer before resending, or it may be delivered twice.",
         )
+
+    details: dict[str, Any]
+    target_ref: str
     if record is not None:
-        name = record.conversation_name or record.session_id
-        clause = ""
+        details = {"pid": record.pid, "mode": mode, "wake": bool(params.wake)}
+        target_ref = f"peer:{record.conversation_name or record.session_id}"
+    else:
+        details = {"session_id": cold_session_id, "mode": mode, "wake": bool(params.wake)}
+        target_ref = f"peer:{cold_session_id}"
+    # The nested outcome payload, IDENTICAL on the live result and the persisted
+    # row (``provider_payload.details`` is this dict), so a replay paints what
+    # live painted. ``is_error`` is set from the same source, and the amber
+    # ``partial_result`` flag only for the two states that are honest but
+    # incomplete (design note A.4).
+    details["delivery"] = outcome.details()
+    if outcome.partial:
+        details["partial_result"] = True
+        # THE SECOND, OPTIONAL SURFACE for the same fact (design note B): the
+        # result above already carries the cause, the id and the retry advice,
+        # so this writes nothing unless ``send.journal_unconfirmed`` is on — the
+        # gate is read inside the session method, so there is one reader of the
+        # key. ``force`` is the config-independent case, and its premise is
+        # narrower than the first version of this comment claimed (agent review
+        # round 1, MINOR-3): a COMPLETED call's result row is durable either way
+        # — ``harness/loop.py`` appends every call of the batch, and it does so
+        # BEFORE it consults the abort signal — but a call the abort CANCELS is
+        # paired with a synthetic ``aborted`` result instead, which carries
+        # neither the message id nor the cause. For an aborted call this row is
+        # therefore the only durable record that a message may already have
+        # landed.
+        journal = getattr(context, "journal_send_notice", None) if context is not None else None
+        if callable(journal):
+            # ``Any``: the hook is a host seam (a session method, or a test's
+            # awaitable), and ``callable`` narrowing would otherwise pin it to
+            # ``object`` and make the await unverifiable.
+            await cast(Any, journal)(
+                # THE ROW IS READ BY A PERSON (design round 2 D5 = UX round 2 U8 =
+                # QA round 2 Q1). It is the one surface this change made visible,
+                # and it used to speak the raw state token ("is mailbox") and the
+                # model's own tool syntax -- a `sessions` call with `op=…` kwargs a
+                # reader at a terminal cannot run. It now uses the shared state
+                # WORD (``DeliveryOutcome.state_word``, the same table the TUI
+                # row paints) and the neutral next step every other surface
+                # already used.
+                text=(
+                    f"delivery to {outcome.target}: {outcome.state_word} "
+                    f"(id {outcome.message_id}); do not resend it — check the "
+                    "target's transcript first, and retry only if it is absent"
+                ),
+                message_id=outcome.message_id,
+                state=outcome.state,
+                target=outcome.target,
+                force=bool(signal is not None and signal.aborted),
+            )
+
+    clause = ""
+    if not outcome.is_error:
         if patience_ms is not None:
             clause = await _arm_send_patience(
-                context, requested_ms=patience_ms, target_ref=f"peer:{name}"
+                context, requested_ms=patience_ms, target_ref=target_ref
             )
-        return _text(
-            tool_call_id,
-            "send",
-            f"→ {name} (pid {record.pid}): {detail}{clause}{skipped_clause(skipped)}",
-            details={"pid": record.pid, "mode": mode, "wake": bool(params.wake)},
-        )
-    # A session with no runtime: the receipt names the session rather than a
-    # pid, because there is no process to name and claiming one would be a lie
-    # the model might then try to signal. The clause is normally empty here — a
-    # stored fallback happens only when the live scan matched NOTHING, and a
-    # live match that was merely unengaged returns the refusal instead — but it
-    # is composed once for both receipts, so a future stored delivery cannot
-    # silently drop the fact that a live namesake was skipped.
-    clause = ""
-    if patience_ms is not None:
-        clause = await _arm_send_patience(
-            context, requested_ms=patience_ms, target_ref=f"peer:{cold_session_id}"
-        )
-    return _text(
-        tool_call_id,
-        "send",
-        f"→ {cold_session_id} (not running): {detail}{clause}{skipped_clause(skipped)}",
-        details={
-            "session_id": cold_session_id,
-            "mode": mode,
-            "wake": bool(params.wake),
-        },
-    )
+        clause += skipped_clause(skipped)
+    if outcome.is_error:
+        return _error(tool_call_id, "send", f"{outcome.text}{clause}", details=details)
+    return _text(tool_call_id, "send", f"{outcome.text}{clause}", details=details)
 
 
 async def _arm_send_patience(

@@ -58,10 +58,12 @@ from local_operator.mobile.types import (
     ask_pending_request,
 )
 from local_operator.session.runtime.server import (
+    AckDetail,
     SessionHandle,
     has_durable_history,
     image_blocks,
     image_blocks_in_thread,
+    receives_message_id,
 )
 from local_operator.session.runtime.types import RUNNING_SUBAGENT_STATUSES
 
@@ -82,6 +84,17 @@ logger = logging.getLogger(__name__)
 #: the app's own business and the runtime's loop is free by then (see
 #: :meth:`_on_app`) — only on how long a caller waits for the answer.
 _APP_HOP_TIMEOUT_S = 10.0
+
+#: The delivery dict for a reduced ``Session`` that answered a plain receipt.
+#: Such a session commits its row before it acks (the pre-field contract), so
+#: the honest reading is "committed" rather than an absent state the sender
+#: would have to interpret. Mirrors ``serving._peer_delivery_absent``.
+_ABSENT_PEER_DELIVERY: dict[str, Any] = {
+    "message_id": "",
+    "committed": True,
+    "queued": False,
+    "duplicate": False,
+}
 
 
 async def _await_future(future: asyncio.Future[Any]) -> Any:
@@ -620,7 +633,8 @@ class TuiSessionHandle(SessionHandle):
         mode: str = "mailbox",
         wake: bool = False,
         sender: dict[str, Any] | None = None,
-    ) -> str:
+        message_id: str | None = None,
+    ) -> AckDetail:
         # Session.receive_peer_message is a COROUTINE that must run on the host's
         # event loop (it touches _context.messages, the transcript, and may
         # spawn a turn). `_on_app` only runs SYNC callables on the Textual
@@ -630,15 +644,47 @@ class TuiSessionHandle(SessionHandle):
         # coroutine. Do NOT call the coroutine directly off-loop.
         sender = sender or {}
 
-        def schedule() -> "Future[str]":
+        def schedule() -> "Future[Any]":
             session = self._session()
             owner_loop = asyncio.get_running_loop()
+            # The keyword is probed on the SESSION OBJECT rather than assumed
+            # from this handle's own signature. The dispatch gates on the HANDLE
+            # (that is what the wire sees and what the record advertises), and a
+            # handle can outlive a session object that predates the carriage — a
+            # reduced double in a test, a session an older build made. Handing
+            # the keyword over blind raised a TypeError INSIDE this hop
+            # callback, where it surfaced as an empty card list instead of an
+            # error (QA round 1, Q2).
+            kwargs: dict[str, Any] = {"mode": mode, "wake": wake, "sender": sender}
+            if receives_message_id(session):
+                kwargs["message_id"] = message_id
             return asyncio.run_coroutine_threadsafe(
-                session.receive_peer_message(text, mode=mode, wake=wake, sender=sender),
-                owner_loop,
+                session.receive_peer_message(text, **kwargs), owner_loop
             )
 
-        fut = await self._on_app(schedule)
+        # A BUSY TERMINAL IS NOT A REFUSAL (design note A.2's hop-timeout fix).
+        # ``_on_app`` gives up after its budget, but Textual cannot cancel a
+        # callback it has already queued -- it runs when the app's turn settles
+        # -- so the message IS on its way. Raising here would let the generic
+        # ``except Exception`` in the runtime's dispatch turn a delivery-in-
+        # progress into an ``error`` frame, and the sender would print "could
+        # not deliver" for a message it is about to receive. Instead the hop
+        # expiry answers with the honest half-fact: queued, not yet taken.
+        try:
+            fut = await self._on_app(schedule)
+        except TimeoutError:
+            return AckDetail(
+                "queued — the terminal is busy; it lands when its turn settles",
+                {},
+                {
+                    "delivery": {
+                        "message_id": message_id or "",
+                        "committed": False,
+                        "queued": True,
+                        "duplicate": False,
+                    }
+                },
+            )
         detail = await asyncio.wrap_future(fut)
         # Optimistic phone echo, matching steer(): put the card on the
         # projection now so an attached phone paints it without waiting for the
@@ -646,7 +692,11 @@ class TuiSessionHandle(SessionHandle):
         self._fold.note_peer_message(text, sender=sender)
         if self._on_projection is not None:
             self._on_projection()
-        return str(detail)
+        return AckDetail(
+            str(detail),
+            {},
+            {"delivery": getattr(detail, "delivery", None) or _ABSENT_PEER_DELIVERY},
+        )
 
     async def recall_steer(self, command_id: str) -> str:
         """Recall one queued steer by the Message id its producer supplied."""

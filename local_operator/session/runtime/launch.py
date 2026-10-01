@@ -860,12 +860,25 @@ async def _deliver(record: Any, session_id: str, work: Errand) -> tuple[str, boo
             return LEAVING_DETAIL, False
         return "runtime ready", False
     if isinstance(work, PeerMessageErrand):
+        # THE CARRIAGE RIDES THE ERRAND'S OWN ``command_id`` (design note §C:
+        # "put it on the wire there too"). Without it the id never left this
+        # process, so an engaged send's disk probe could never hit (the receiver
+        # names its row with its own id), its verdict claimed "not in its
+        # transcript" from a probe that could not have found anything, and -- the
+        # part that matters -- a re-run of this errand after a ``ConnectionError``
+        # had no id for the receiver to dedupe on, which appended the message a
+        # second time (agent review round 1, MAJOR).
+        #
+        # ``None`` rather than ``""`` when there is no id: the client omits the
+        # key entirely, so a sender with nothing to offer keeps the frame
+        # byte-identical to the pre-carriage one.
         detail = await send_peer_message(
             record,
             text=work.text,
             mode=work.mode,
             wake=work.wake,
             sender=work.sender,
+            message_id=work.command_id or None,
         )
         return detail, False
 

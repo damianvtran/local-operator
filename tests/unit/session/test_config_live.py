@@ -37,6 +37,7 @@ from local_operator.harness.types import (
     StreamEndEvent,
     StreamTextDelta,
 )
+from local_operator.mobile.peer_send import journal_unconfirmed_enabled
 from local_operator.model.configure import (
     SessionStreamFn,
     _anthropic_cache_ttl_1h_min_context_tokens,
@@ -629,6 +630,13 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     "bash.query_budget.enabled": (False, lambda s, w: _query_budget(w).enabled),
     "bash.query_budget.stop": (False, lambda s, w: _query_budget(w).stop),
     "bash.query_budget.seconds": (17, lambda s, w: _query_budget(w).seconds),
+    # LIVE because the reader re-reads the file per call: the send tool asks
+    # ``journal_unconfirmed_enabled()`` at the moment it writes the notice, and
+    # that function builds a fresh ``ConfigManager(config_dir())`` every time
+    # (``mobile/peer_send.py``), so a write from another process lands on the very
+    # next send. The observer is that function, on the watched directory, so the
+    # probe moves exactly when the send path would.
+    "send.journal_unconfirmed": (True, lambda s, w: journal_unconfirmed_enabled()),
     # ``shell_environment.*`` is deliberately NOT here (review round 1, M2): the
     # policy is resolved once per process, so it is a NEW-LAUNCH key and the
     # non-LIVE guard below is what covers it, from the other direction.
