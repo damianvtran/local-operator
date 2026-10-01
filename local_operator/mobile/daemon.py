@@ -5302,9 +5302,11 @@ def build_app(daemon: MobileDaemon):
         exists to refuse. ``_push_operator_gate`` is what makes this route the
         machine's; a device session gets the refusal the app renders.
 
-        Clears EVERY marker the row carries — ``revoked_at`` and/or
+        Clears every RESTORABLE marker the row carries — ``revoked_at`` and/or
         ``unpaired_at``, different states with different refusals — and restores
         no token: the device must register again, which needs a live credential.
+        ``expired_at`` is deliberately outside this route: a lapse is not a decision
+        about the device and signing in again is what clears it.
         ``push_devices.unrevoke`` carries the full reasoning, including why the
         operator's result line names only the strongest marker it cleared.
         """
