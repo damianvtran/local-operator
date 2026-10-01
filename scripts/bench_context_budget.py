@@ -828,16 +828,23 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #:         consequence stay, -79
 #:
 #: Both sides measured with THIS script on this machine (the base in a
-#: detached checkout of origin/main), so the recorded local-vs-CI gap cancels
-#: out of the subtraction: CI head is 104,521 - the 762-char gap = 103,759
-#: chars = ~37,323 billed, and the ceiling is CI head + 55 (the band this file
-#: keeps) = 37,378. The remaining cue cost is the price of making the
-#: reference discoverable at all — with no cue, no agent knows it exists,
-#: which is exactly the op-ambiguity failure the audit measured. The
-#: schema-slimming wave (audit fix list item 2) works this surface next and
-#: should ratchet the ceiling back down. A local run still reads above the
-#: ceiling by the same recorded 762-char gap (37,597 vs 37,378), so CI remains
-#: the binding reading, and the tighten band below (1,200) is not in play.
+#: detached checkout of origin/main) under a tiers-CONFIGURED
+#: ``values.subagents``. That config is the one variable the ``agent``/``task``
+#: docs read, and measuring it alone explains the number the entries above
+#: record as a "platform gap": the 762-char difference between this machine's
+#: configured reading and CI's is exactly the config delta in ``tool_schemas``
+#: (68,665 vs 67,903, byte-exact) — with the config equal, the machine and CI
+#: read identically. The ceiling follows the CLEAN arm, because that is what
+#: CI renders and this gate compares: 104,521 - 762 = 103,759 chars = ~37,323
+#: billed, + the 55-token band = 37,378. The remaining cue cost is the price
+#: of making the reference discoverable at all — with no cue, no agent knows
+#: it exists, which is exactly the op-ambiguity failure the audit measured.
+#: The schema-slimming wave (audit fix list item 2) works this surface next
+#: and should ratchet the ceiling back down. A LOCAL run under a clean config
+#: reads 103,759 = ~37,323 and passes with the same 55 headroom; a
+#: tiers-configured box renders the 762-char-larger surface above (219 over
+#: the ceiling), which is that config dependence, not an unfixable platform
+#: offset. The tighten band below (1,200) is not in play.
 BUDGET_BILLED_TOKENS = 37_378
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
