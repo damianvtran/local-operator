@@ -7897,17 +7897,28 @@ class Session:
         self._steering_queue.put_nowait(message)
         self.refresh_frontend_state()
 
-    async def fork_snapshot(self, message: str = "") -> dict[str, Any]:
+    async def fork_snapshot(
+        self, message: str = "", *, through_entry_id: str | None = None
+    ) -> dict[str, Any]:
         """Fork the committed prefix without interrupting the live agent loop.
 
         Both in-process callers and socket-attached front ends use this same admission path.
         The transcript lock, not a viewer or a turn interruption, defines the
         copy boundary; active history rewrites are refused explicitly.
+
+        ``through_entry_id`` names the entry the copy stops at (see
+        :meth:`Transcript.fork_snapshot`): the child keeps the committed prefix
+        up to it and loses everything after. A named cut point is already
+        committed, so it needs no turn boundary — which is why this method is
+        also the correct one for a mid-turn fork, unlike the deferred
+        :meth:`request_fork` below.
         """
         busy = self._is_streaming or self._turn_lock.locked()
         await self._ensure_selected_model()
         fork_id, omitted = await self._transcript.fork_snapshot(
-            message=message, is_compacting=lambda: self._compacting
+            message=message,
+            is_compacting=lambda: self._compacting,
+            through_entry_id=through_entry_id,
         )
         return {
             "fork_id": fork_id,

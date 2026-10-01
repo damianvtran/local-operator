@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal, get_args
@@ -56,9 +57,40 @@ class Credential(Input):
 
 
 class Fork(Input):
+    """Where a fork's copy stops, and the optional first turn it carries.
+
+    ``next_safe`` is the historical form: the child takes the whole committed
+    conversation and the runtime waits for a turn boundary if one is running.
+    ``at_entry`` names a transcript entry (a message the client is showing) and
+    the child stops there — the committed, paired prefix at-or-before it, with
+    every later conversation row absent. A named point is already committed, so
+    that form never waits for a boundary.
+
+    The two fields are validated together so an ``at_entry`` request can never
+    arrive without its target: without that, ``at_entry`` would silently fall
+    back to a whole-conversation fork, the one failure shape that hands the
+    caller MORE history than it asked for.
+    """
+
     request_id: RequestID
     message: str = Field(default="", max_length=200_000)
-    boundary: Literal["next_safe"] = "next_safe"
+    boundary: Literal["next_safe", "at_entry"] = "next_safe"
+    #: The entry the cut lands at-or-before. Bounded rather than patterned:
+    #: entry ids are minted in more than one shape here (turn messages, custom
+    #: rows), and ``has_entry`` — not a regex — is what decides whether one is
+    #: real. Existence is checked against the conversation, so a foreign id is a
+    #: refusal, never a fork of the wrong history.
+    entry_id: str | None = Field(default=None, max_length=128)
+
+    @model_validator(mode="after")
+    def target_matches_boundary(self):
+        if self.boundary == "at_entry":
+            if not self.entry_id:
+                raise ValueError("Choose the message to fork from")
+            return self
+        if self.entry_id:
+            raise ValueError("Forking from a message needs boundary 'at_entry'")
+        return self
 
 
 class Stop(Input):
@@ -419,7 +451,13 @@ async def fork(session_id: str, body: Fork, request: Request):
         async def execute():
             assert bridge.remote is not None
             await bridge.remote.bind_runtime()
-            result = await bridge.remote.route_shared_slash("fork", "")
+            # The cut point rides the routed-slash payload, because that seam
+            # carries strings: a JSON object in the args slot, the same way
+            # ``/checkpoints_warm``, ``/wake`` and ``/monitor`` carry theirs from
+            # this plane. Absent (``""``) is exactly the old call, so a caller
+            # that names no target is wire- and behaviour-identical.
+            payload = json.dumps({"entry_id": body.entry_id}) if body.entry_id else ""
+            result = await bridge.remote.route_shared_slash("fork", payload)
             child_id = result["data"]["session_id"]
             data: dict[str, Any] = {
                 "session_id": child_id,
