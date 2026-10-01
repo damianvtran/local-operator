@@ -175,7 +175,9 @@ Skills (deliberate design choices, user-requested):
 - On-disk format identical to the ecosystem: `<skills-root>/<name>/SKILL.md`
   + YAML frontmatter (`name`, `description`, `enabled`, `hide` /
   `disable-model-invocation`). Roots: walk-up `<cwd>/.local-operator/skills`,
-  `~/.local-operator/skills`. Non-recursive scan, deterministic sort
+  `~/.local-operator/skills`. Bounded-depth scan (default 3, env
+  `LOCAL_OPERATOR_SKILL_MAX_DEPTH`; a directory holding a `SKILL.md` is a
+  boundary and is never descended into), deterministic sort
   (name.lower, name, path).
 - **Semantic selection**: an `EmbeddingBackend` protocol with two impls —
   `ApiEmbedder` (OpenAI-compatible `/v1/embeddings` via configured provider)

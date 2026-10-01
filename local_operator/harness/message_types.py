@@ -42,7 +42,7 @@ owns one of these markers or lives in the owning package: ``local_operator.sessi
 and ``local_operator.tools`` are barred for a runner by that same denylist, so a
 marker left in either keeps ``harness/render.py`` unimportable and the hoist
 pointless. The harness is the layer both sides already share — the deliberately
-shared one, and the one the denylist allows — so these nine markers live here:
+shared one, and the one the denylist allows — so these markers live here:
 one definition each, imported by its owner rather than defined next to it.
 
 WHEN A MARKER BELONGS HERE, AND WHEN IT DOES NOT
@@ -243,6 +243,15 @@ SESSION_MCP_RECOVERY_MESSAGE_TYPE = "session_mcp_recovery"
 #: — a resumed session that reconnects has a tool inventory that contradicts
 #: "unavailable" (recoverable, and the recovery record clears it), where a
 #: stale "available" would send the model at tools that are not there.
+#:
+#: DEDUPED at the journal write: identical cards (same server, byte-identical
+#: rendered text) do not re-append while outstanding, and the guard re-arms on
+#: a changed reason, a live recovery, or the 24 h staleness reminder — so
+#: surfaces render ONE row per state change rather than one per boot/resume
+#: (measured: 96 identical rows for one expired grant over ~29 h,
+#: ``session/notice_guard.py``). The TYPE's contract is unchanged; only the
+#: repetition is, and the rule lives with the writer in
+#: ``Session.journal_mcp_unavailable``.
 SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE = "session_mcp_unavailable"
 
 #: Custom-message type journaled by the session when the account SERVING it
@@ -304,6 +313,27 @@ HUB_MESSAGE_TYPE = "hub_message"
 #: tell a real reminder from the newest already-injected one without importing
 #: the tool layer.
 TODO_REMINDER_MESSAGE_TYPE = "todo_reminder"
+
+#: The custom-message type of a queued ask's ANSWER (design
+#: ``docs/design/ask-nonblocking.md`` §2.3). It carries
+#: ``status ∈ {answered, late, declined}``: a DECLINE deliberately rides the same
+#: type as an answer, because both are response-shaped facts about one ask and a
+#: second type would be a second registration to forget, a second render branch
+#: to miss, and a row that silently drops. The id is deterministic
+#: (``ask-response-<ask_id>``) so a re-delivery is a constant-time transcript
+#: check rather than a second row.
+#:
+#: Defined HERE rather than beside the queue: the shared renderer
+#: (``harness/render.py``) and the TUI/phone projections must name it, and the
+#: queue's own module imports the tool layer, which the renderer may not.
+ASK_RESPONSE_MESSAGE_TYPE = "ask_response"
+
+#: The custom-message type of a queued ask's DEADLINE NOTICE. Always
+#: ``status == "timed_out"``, attribution ``"system"``: nobody denied anything,
+#: the window closed. ``hidden`` in the wake sense — a human surface shows the
+#: ask's STATE, not this row — while the text still reaches the model (the
+#: ``wake_prompt`` shape).
+ASK_TIMEOUT_MESSAGE_TYPE = "ask_timeout"
 
 #: The custom-message type the completion-time project check injects at the
 #: yield boundary (``Session._project_continuation``). Defined here beside

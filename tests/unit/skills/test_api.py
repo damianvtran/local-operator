@@ -586,6 +586,59 @@ class TestResolverRefreshOnMiss:
         assert "Unknown skill: blank" in content
         assert "no 'description'" in content
 
+    def test_grouped_skill_authored_mid_session_resolves(self, tmp_path: Path) -> None:
+        # #1818: the refresh's fingerprint must see a skill two levels down.
+        root = tmp_path / "roots"
+        root.mkdir()
+        skills: dict[str, Skill] = {}
+        resolver = make_skill_resolver(skills, [root])
+        before = resolver("skill://grouped-late")
+        assert before is not None and "Unknown skill: grouped-late" in before
+
+        self._write_skill_file(root / "minerva", "grouped-late", body="# grouped body")
+        after = resolver("skill://grouped-late")
+        assert after is not None and "# grouped body" in after
+        assert skills["grouped-late"].base_dir == root / "minerva" / "grouped-late"
+
+    def test_grouped_skill_repaired_in_place_resolves(self, tmp_path: Path) -> None:
+        root = tmp_path / "roots"
+        md = self._write_skill_file(root / "grp", "fixme", description=None)
+        skills: dict[str, Skill] = {}
+        resolver = make_skill_resolver(skills, [root])
+        broken = resolver("skill://fixme")
+        assert broken is not None and "no 'description'" in broken
+
+        st = md.stat()
+        md.write_text("---\ndescription: repaired\n---\n# fixed body")
+        import os
+
+        os.utime(md, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+        fixed = resolver("skill://fixme")
+        assert fixed is not None and "# fixed body" in fixed
+
+    def test_surviving_miss_names_the_nested_cause(self, tmp_path: Path) -> None:
+        root = tmp_path / "roots"
+        self._write_skill_file(root / "minerva", "blank", description=None)
+        resolver = make_skill_resolver({}, [root])
+        content = resolver("skill://blank")
+        assert content is not None
+        assert "Unknown skill: blank" in content
+        assert str(root / "minerva" / "blank" / "SKILL.md") in content
+        assert "no 'description'" in content
+
+    def test_skill_internals_and_overdeep_trees_are_not_resolvable(self, tmp_path: Path) -> None:
+        root = tmp_path / "roots"
+        self._write_skill_file(root / "grp", "real")
+        self._write_skill_file(root / "grp" / "real" / "references", "cheatsheet")
+        self._write_skill_file(root / "a" / "b" / "c" / "d", "overdeep")
+        skills: dict[str, Skill] = {}
+        resolver = make_skill_resolver(skills, [root])
+        for name in ("cheatsheet", "overdeep"):
+            content = resolver(f"skill://{name}")
+            assert content is not None and f"Unknown skill: {name}" in content
+        ok = resolver("skill://real")
+        assert ok is not None and "# body" in ok
+
 
 class TestUrlNameDecodesPercentEncoding:
     """R11: the safety check runs on the DECODED name, so the decode is load-bearing.

@@ -171,7 +171,13 @@ from local_operator.scratchpad import (
     scratchpad_env_injection,
 )
 from local_operator.text_bounds import OUTPUT_TRUNCATION_MARKER, clip_head_tail
-from local_operator.tools import group_reaper, search_guard, shell_env, sleep_guard
+from local_operator.tools import (
+    group_reaper,
+    query_budget,
+    search_guard,
+    shell_env,
+    sleep_guard,
+)
 from local_operator.tools.confinement import ToolConfinement, confinement_of
 from local_operator.tools.spill import (
     SPILL_ENTRY_LIMIT_BYTES,
@@ -2272,6 +2278,48 @@ def _search_interception_config() -> tuple[bool, bool, bool]:
     return enabled, block, rg_excludes
 
 
+def _query_budget_config() -> query_budget.Budget:
+    """Read the ``bash.query_budget`` keys at CALL time.
+
+    A fresh ``ConfigManager`` per call so an edit lands on the next command,
+    exactly as ``_search_interception_config`` and ``_configured_memory_budget``
+    do — the three readers exist side by side because each answers a different
+    question and each degrades to its own constants.
+
+    The unreadable-config probe runs FIRST for the reason the search-interception
+    reader documents in full: this runs at the top of every ``execute_bash``,
+    before the child environment is built, and an unguarded ``ConfigManager``
+    would MOVE a broken config aside (``config.yml.bad.<ts>``) before
+    ``shell_env``'s strict-mode read ever sees it. A config that cannot be read
+    means "the constants' defaults", which for this guard are the protective
+    ones (enabled, stop, 60 s).
+    """
+    enabled = query_budget.QUERY_BUDGET_ENABLED_DEFAULT
+    stop = query_budget.QUERY_BUDGET_STOP_DEFAULT
+    seconds = query_budget.QUERY_BUDGET_SECONDS_DEFAULT
+    try:
+        from local_operator.tools.shell_env import _config_file_is_unreadable
+
+        if _config_file_is_unreadable(config_dir() / CONFIG_FILE_NAME):
+            return query_budget.Budget(enabled=enabled, stop=stop, seconds=seconds)
+        config = ConfigManager(config_dir())
+        enabled = bool(config.get_nested_value(query_budget.QUERY_BUDGET_ENABLED_PATH, enabled))
+        stop = bool(config.get_nested_value(query_budget.QUERY_BUDGET_STOP_PATH, stop))
+        raw_seconds = config.get_nested_value(query_budget.QUERY_BUDGET_SECONDS_PATH, seconds)
+        # Guard the TYPE as well as the value: a hand-edited config.yml can hold a
+        # string where a number belongs, and a bad value must degrade to the
+        # default rather than raise inside the guard that is supposed to protect
+        # the command. `bool` is excluded because it is an `int` in Python.
+        if isinstance(raw_seconds, (int, float)) and not isinstance(raw_seconds, bool):
+            seconds = int(raw_seconds)
+    except Exception:  # noqa: BLE001 — config trouble must never change what a command does
+        pass
+    # A budget of 0 or less would stop every query instantly, which is a config
+    # mistake rather than a request; the floor keeps the guard meaningful and the
+    # off switch (enabled/stop) is the way to say "do not stop".
+    return query_budget.Budget(enabled=enabled, stop=stop, seconds=max(1, seconds))
+
+
 #: One generated ripgrep config per session directory, written once. `rg` reads
 #: the file named by ``RIPGREP_CONFIG_PATH`` on every invocation, so a search the
 #: guard does NOT block (a scoped `rg`, or any `rg` under an inline grant) still
@@ -3744,6 +3792,15 @@ async def execute_bash(
         if _si_block:
             return _error(tool_call_id, "bash", interception)
         logger.warning("bash: %s", interception)
+    # Soft query budget: the static guard above refuses an unbounded ROOT; this
+    # bounds the AGGREGATE of a query that got through it. The measured shape is a
+    # depth- AND time-bounded `find` piped into a per-file `grep` loop — every
+    # piece reasonable on its own, the whole thing a multi-minute walk of the
+    # session store (tools/query_budget.py). Resolved once here; the tick lives in
+    # the wait loops below, beside the memory tick, so neither adds a poll loop.
+    _qb = _query_budget_config()
+    query_cls = query_budget.query_class(params.command) if _qb.enabled else None
+    query_allowed = query_budget.allow_slow_query(params.command)
     # Long-sleep refusal: a FOREGROUND call that is mostly `sleep 1500; tail
     # log` holds the session where a hub note cannot reach it (notes are
     # delivered at tool boundaries, and a running bash is not one) — measured
@@ -4194,6 +4251,11 @@ async def execute_bash(
                     "tool_name": "bash",
                     "running": True,
                     "memory_advisory": advisory,
+                    # The query-budget advisory travels the same way and for the
+                    # same reason: as its own field it reaches the card's
+                    # persistent state line, where a line prepended to the output
+                    # head would scroll off a chatty command.
+                    "query_budget_advisory": query_advisory,
                 },
             )
         )
@@ -4212,6 +4274,13 @@ async def execute_bash(
     # never reported as "continues in the background" (§10).
     memory_exceeded = False
     memory_sample: memory_guard.Sample | None = None
+    # The query budget's state, beside the memory guard's and for the same shape
+    # of reason. ``query_started`` is the SPAWN time, so the advisory and the stop
+    # measure the COMMAND — and a run that detaches into a background job keeps
+    # counting from that origin rather than restarting its budget on detach.
+    query_started = loop.time()
+    query_exceeded = False
+    query_advisory: str | None = None
     next_update = loop.time() + 0.5
     # The memory tick rides the SAME 250 ms cadence as the timeout/abort wait, so
     # it adds no loop and no new blocking call. The guard's sample() runs the ps
@@ -4242,6 +4311,27 @@ async def execute_bash(
         notice = guard.soft_notice(sample)
         if notice:
             memory_advisory = notice
+        return False
+
+    def _query_tick() -> bool:
+        """Advisory once at the soft mark, kill at the budget; True on a stop.
+
+        Pure wall-clock, read off the SAME loop iteration as the timeout/abort
+        wait: no sampling, no subprocess, no thread hop, so this tick cannot
+        stall the frame the way an unguarded read would. ``query_started`` is the
+        SPAWN time, so what is measured is the command, and a run that detaches
+        into a background job keeps counting from the same origin.
+        """
+        nonlocal query_exceeded, query_advisory
+        if query_cls is None:
+            return False
+        elapsed = loop.time() - query_started
+        if query_advisory is None and _qb.advisory_due(elapsed):
+            query_advisory = query_budget.advisory_message(elapsed, query_cls, _qb.seconds)
+        if _qb.stop_due(elapsed, allowed=query_allowed):
+            query_exceeded = True
+            _kill()
+            return True
         return False
 
     def _detach_to_job(jobs: Any, headline: str) -> ToolResult:
@@ -4284,6 +4374,9 @@ async def execute_bash(
             timed_out_bg = False
             cancelled_bg = False
             memory_exceeded_bg = False
+            query_stopped_bg = False
+            query_elapsed_bg = 0.0
+            query_advisory_bg: str | None = None
             bg_sample: memory_guard.Sample | None = None
             bg_deadline = asyncio.get_running_loop().time() + remaining_timeout
             bg_wait = asyncio.create_task(process.wait())
@@ -4344,6 +4437,22 @@ async def execute_bash(
                             memory_exceeded_bg = True
                             _kill()
                             break
+                    # The query budget rides the same wait, from the SPAWN time
+                    # (``query_started``), so a command that detached via steering
+                    # or background=True keeps the elapsed time it already spent —
+                    # the alternative would let a query restart its budget simply
+                    # by being backgrounded.
+                    if query_cls is not None:
+                        query_elapsed_bg = asyncio.get_running_loop().time() - query_started
+                        if query_advisory_bg is None and _qb.advisory_due(query_elapsed_bg):
+                            query_advisory_bg = query_budget.advisory_message(
+                                query_elapsed_bg, query_cls, _qb.seconds
+                            )
+                            report_progress({"query_budget_advisory": query_advisory_bg})
+                        if _qb.stop_due(query_elapsed_bg, allowed=query_allowed):
+                            query_stopped_bg = True
+                            _kill()
+                            break
                     await asyncio.wait({bg_wait}, timeout=0.25)
                     # The status line a human reads in the TUI while the job
                     # runs. Deliberately a heartbeat and not the output itself:
@@ -4351,7 +4460,9 @@ async def execute_bash(
                     # tail), and mirroring it into a field every renderer
                     # repaints per frame would pay for it many times over.
                     report_progress(_bash_progress_line(stdout_chunks, stderr_chunks, context))
-                await cleanup(kill=cancelled_bg or timed_out_bg or memory_exceeded_bg)
+                await cleanup(
+                    kill=cancelled_bg or timed_out_bg or memory_exceeded_bg or query_stopped_bg
+                )
             except asyncio.CancelledError:
                 # Manager cancellation is deliberately immediate. Convert it
                 # into process cleanup first, then preserve cancellation so the
@@ -4383,6 +4494,14 @@ async def execute_bash(
                         "memory_ceiling_bytes": guard.hard_bytes if guard else None,
                     }
                 )
+            if query_stopped_bg:
+                head = query_budget.stop_message(query_elapsed_bg, query_cls or "")
+                report_progress(
+                    {
+                        "query_budget_stopped": True,
+                        "query_budget_seconds": _qb.seconds,
+                    }
+                )
             if cancelled_bg:
                 head = "CANCELLED (process killed)"
             out, err, footer, _spill_details = await asyncio.to_thread(
@@ -4395,7 +4514,15 @@ async def execute_bash(
                 not (stdout_chunks.omitted_bytes or stderr_chunks.omitted_bytes),
             )
             summary = _bash_output_summary(out, err) + footer
-            return "\n".join(part for part in (head, f"exit code: {code}", summary) if part)
+            parts = [head] if head else []
+            # The advisory rides into the job result as well as the live card: the
+            # job may have finished after the model stopped watching, and a receipt
+            # only the card carried would be invisible by the time the result is
+            # read (the same reason the stop is a result line and not a log entry).
+            if query_advisory_bg is not None and not query_stopped_bg:
+                parts.append(query_advisory_bg)
+            parts.extend((f"exit code: {code}", summary))
+            return "\n".join(part for part in parts if part)
 
         def _kill_unstarted() -> None:
             """Teardown for a cancel that lands before the runner is entered.
@@ -4519,6 +4646,12 @@ async def execute_bash(
                 next_mem_sample = loop.time() + mem_tick
                 if await _memory_tick():
                     break
+            # The query budget rides the same iteration. It is checked every
+            # tick (not on the memory cadence) because it needs no probe at all —
+            # it is a clock read, and a stop that waited a 250 ms tick to be
+            # noticed is a quarter-second of the very thing it exists to bound.
+            if _query_tick():
+                break
             if loop.time() >= next_update:
                 _emit_update()
                 next_update = loop.time() + 0.5
@@ -4569,6 +4702,23 @@ async def execute_bash(
                 # command can carry a credential (see the abort branch above).
                 f"{message}\n{_redact_tool_text(params.command, context)}\n"
                 f"{_redact_tool_text(partial, context)}",
+            )
+        if query_exceeded:
+            # The same rule the memory branch above states, for the same reason:
+            # a command the guard STOPPED must never be reported as "continues in
+            # the background".
+            _reap_synchronously()
+            partial = await asyncio.to_thread(_bash_partial_summary, stdout_chunks, stderr_chunks)
+            return _error(
+                tool_call_id,
+                "bash",
+                f"{query_budget.stop_message(loop.time() - query_started, query_cls or '')}\n"
+                f"{_redact_tool_text(params.command, context)}\n"
+                f"{_redact_tool_text(partial, context)}",
+                details={
+                    "query_budget_stopped": True,
+                    "query_budget_seconds": _qb.seconds,
+                },
             )
         return _detach_to_job(
             jobs,
@@ -4686,6 +4836,16 @@ async def execute_bash(
             details["memory_peak_bytes"] = guard.peak_bytes
             details["memory_ceiling_bytes"] = guard.hard_bytes
         return _error(tool_call_id, "bash", "\n".join(parts) + footer, details=details)
+    if query_exceeded:
+        # Same head position and the same ordinary-_error choice as the memory
+        # line above: the argument was satisfiable, the harness's own budget said
+        # stop, and the line makes that ATTRIBUTABLE so the model narrows the query
+        # rather than re-running it identically and losing another minute.
+        parts.insert(0, query_budget.stop_message(loop.time() - query_started, query_cls or ""))
+        details = dict(spill_details or {})
+        details["query_budget_stopped"] = True
+        details["query_budget_seconds"] = _qb.seconds
+        return _error(tool_call_id, "bash", "\n".join(parts) + footer, details=details)
     # ONE advisory line when the command is shaped like a credential dump, so the
     # model learns the safer form at the moment it needs it rather than after the
     # secret is already in the transcript. It rides the RESULT, not the stream:
@@ -4702,7 +4862,7 @@ async def execute_bash(
     # anywhere. Short (see ``_BRIEF_ADVICE``) and near the top is what makes it
     # survive both truncations.
     notice = credential_dump_notice(params.command)
-    # The three advisories are inserted AFTER the exit-code line and in a fixed
+    # The advisories are inserted AFTER the exit-code line and in a fixed
     # rank, and the index is computed rather than hard-coded: the TIMEOUT head is
     # inserted at position 0 BEFORE this block, so a literal index put the
     # missing-tool line ABOVE `exit code:` on the timeout path — the one path
@@ -4717,6 +4877,20 @@ async def execute_bash(
     insert_at = head_index + 1
     if notice:
         parts.insert(insert_at, notice)
+        insert_at += 1
+    # The query-budget advisory rides the same head window, ranked below the
+    # credential notice (a secret already in the transcript outranks a slow
+    # command) and above the scratch nudge (a query that just spent 10 s of the
+    # turn is the thing to act on next). It is only emitted when the command
+    # actually crossed the soft mark — the ORDINARY command carries nothing, and
+    # the elapsed value is the same one the live card showed, so the result and
+    # the card cannot disagree.
+    if query_cls is not None and query_advisory is None:
+        _elapsed = loop.time() - query_started
+        if _qb.advisory_due(_elapsed):
+            query_advisory = query_budget.advisory_message(_elapsed, query_cls, _qb.seconds)
+    if query_advisory:
+        parts.insert(insert_at, query_advisory)
         insert_at += 1
     # The scratch nudge rides the SAME head window and for the same measured
     # reason (a line at the end of a long result is the first thing the card
@@ -7798,7 +7972,7 @@ def build_read_tool() -> AgentTool:
         label="Read",
         description=(
             "Read a file, line range, or internal URL (skill://, guide://, mcp://, "
-            "scratchpad://). "
+            "scratchpad://, tool://). "
             "PNG/JPEG/GIF/WebP/HEIC files come back as a viewable image. "
             "Python files read whole return a structural summary; use a "
             "range or raw=true for exact text."
@@ -13892,7 +14066,7 @@ async def _sessions_info(
             # Two situations land here, and until review round 1 they shared
             # one wrong sentence: a stored session genuinely past the
             # newest-first window, and one a listing scan excludes at ANY
-            # limit because its origin is hidden (``resume._is_hidden_origin``
+            # limit because its origin is hidden (``resume.is_user_session_origin``
             # — an ``agent-shell`` session never appears in a listing, so
             # "past the window" was false for it; QA round 1, Q1). The
             # per-row reads need only the id, so when the directory exists
@@ -20743,8 +20917,7 @@ def build_console_tool(context: ToolContext | None) -> AgentTool | None:
             "running a command, with a real terminal grid, that keeps running and keeps its "
             "output while its tab is closed. Use it for things `bash` cannot host — a "
             "full-screen TUI, a REPL, an installer, an interactive prompt — and NOT for "
-            "ordinary commands: `bash` returns output directly, cannot wedge on a prompt, and "
-            "cannot leave a process running behind your turn. The surface handle names this "
+            "ordinary commands: `bash` returns output directly. The surface handle names this "
             "host (`con:`). `list` shows surfaces the USER opened too; read those rather than "
             "asking them to repeat their output. Playbook: `guide://console`."
         ),
@@ -24143,6 +24316,25 @@ class AskParams(BaseModel):
         description="The questions to ask, put to the user one screen at a time.",
     )
 
+    # The `timeout` field ships with the queued-ask engine (design
+    # docs/design/ask-nonblocking.md §2.1) and its FULL calibration copy — the
+    # "1 h routine / 5-10 min urgent / up to 24 h" table and the reasoning — is
+    # deliberately NOT here: §9 puts the description rewrite in the flip PR, in
+    # the same change that makes the deadline live. What is advertised is what is
+    # true on both sides of the flip: the unit, the bounds and the default.
+    #
+    # An out-of-range value is REJECTED, never clamped (see `_bounds_error`): the
+    # model calibrates from the rejection, and a silent clamp teaches it nothing
+    # while it keeps asking for an hour where it meant five minutes.
+    timeout: int | str | None = Field(
+        default=None,
+        description=(
+            "How long to wait for an answer: seconds (int) or a duration string "
+            'like "30m"/"2h". Default 3600 (1 h); min 120 (2 min); max 86400 '
+            "(24 h). Out-of-range values are rejected, never clamped."
+        ),
+    )
+
 
 #: What the tool reports when the user closed the picker without choosing.
 #: Deliberately NOT an error result: refusing to answer is a decision, and a
@@ -24404,6 +24596,45 @@ async def execute_ask(
             "wired into this session, so this process cannot put one in front of the "
             "operator. A delegated child's route to them is `hub` to its parent; "
             "otherwise decide without them.",
+        )
+    # THE QUEUED-ASK DOOR (design docs/design/ask-nonblocking.md §2.1).
+    #
+    # ``enqueue_ask`` is bound by the session only while the flag is on AND a
+    # host installed an ask surface, so its presence IS the mode: present means
+    # the ask is recorded durably and answered later (a RECEIPT comes back, and
+    # the tool returns at once); absent means today's blocking await, unchanged.
+    #
+    # THE TIMEOUT IS VALIDATED ON BOTH PATHS, above the branch, so the model
+    # gets the same bounds error whichever mode the host is in — a calibration
+    # it learns now is still true after the flip.
+    from local_operator.asks import policy as _ask_policy
+
+    bounds_error = (
+        _ask_policy.parse_timeout_param(params.timeout)[1] if params.timeout is not None else None
+    )
+    if bounds_error is not None:
+        return _error(tool_call_id, "ask", bounds_error)
+    enqueue: Any = getattr(context, "enqueue_ask", None) if context is not None else None
+    if callable(enqueue):
+        # ``Any`` is deliberate: ``callable()`` narrows an untyped callable to
+        # ``Callable[..., object]``, which would make every ``outcome.get`` below
+        # a type error on a value whose real shape is a mapping.
+        outcome: Any = enqueue(params.questions, params.timeout, tool_call_id=tool_call_id)
+        if not outcome.get("ok"):
+            return _error(
+                tool_call_id,
+                "ask",
+                str(outcome.get("error") or "this ask could not be queued."),
+            )
+        # NO QUESTION REPETITION: the model has just written them, and echoing
+        # them back buys nothing but tokens. What the receipt must carry is the
+        # part the model cannot know — that the answer arrives LATER, that a
+        # receipt is not permission to act, and when the deadline falls.
+        return _text(
+            tool_call_id,
+            "ask",
+            str(outcome.get("text") or ""),
+            details=dict(outcome.get("details") or {}),
         )
     answers = await ask_user(params.questions)
     if not answers or not any(any(text.strip() for text in chosen) for chosen in answers.values()):

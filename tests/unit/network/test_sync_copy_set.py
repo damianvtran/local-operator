@@ -251,6 +251,18 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``runtime.log``, the agent home): the directories a session lives UNDER",
     ),
     "local_operator/config.py": (1, "``config.yml``, the store's configuration file"),
+    # ``STORE_DIRNAME``/``_SESSIONS_DIRNAME`` are the store ROOT's name and the
+    # conversations subtree under it, not entries inside a session: they are the
+    # names ``paths.py`` declares for the same directories (see the entry above),
+    # held here as literals only so ``search_guard`` stays a stdlib-only leaf that
+    # can be reasoned about without the config layer. A session directory
+    # travelling between devices carries neither.
+    "local_operator/tools/search_guard.py": (
+        2,
+        "``STORE_DIRNAME``/``_SESSIONS_DIRNAME``: the store ROOT's name "
+        "(``.local-operator``) and its conversations subtree (``sessions``) — the "
+        "directories a session lives UNDER, the same values ``paths.py`` declares",
+    ),
     "local_operator/config_watch.py": (1, "the same file, watched"),
     "local_operator/config_migrations.py": (1, "the marker recording which migrations ran"),
     "local_operator/logger.py": (1, "the process log at the store root"),
@@ -289,6 +301,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``GRACE_FILE``: the first-run marker under ``<config>/hub/`` — the hub update "
         "runner's own install-level state, beside ``sessions/``, never inside a session",
     ),
+    "local_operator/skills/discovery.py": (
+        1,
+        "``_SKILL_FILE`` (``SKILL.md``): the marker FILENAME looked for inside skill "
+        "directories under a skills root — a discovery convention of the skills tree, "
+        "never an entry a session directory holds (the config.yml / action-tool "
+        "identifier-not-a-path case)",
+    ),
     # Aida's own store lives at the CONFIG root (``<config>/aida/``), beside
     # ``sessions/`` rather than inside one: her state, onboarding stamp,
     # escalation tray and ensure lock are this INSTALL's records, and a session
@@ -323,6 +342,10 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/providers/qwencloud_console.py": (1, "a SECRET's name"),
     "local_operator/mobile/auth.py": (1, "the mobile session COOKIE's name"),
     "local_operator/mobile/seen.py": (1, "the mobile seen-store under the store root"),
+    "local_operator/mobile/push_devices.py": (
+        1,
+        "the mobile push-device registry under the store root",
+    ),
     "local_operator/secrets/keys.py": (
         2,
         "``secrets/`` and its registration ticket: the credential store at the config root",
@@ -347,6 +370,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/session/retention.py": (
         1,
         "``sessions`` itself: the directory the entries live IN",
+    ),
+    "local_operator/asks/store.py": (
+        2,
+        "``ASKS_DIRNAME`` (``asks``) and ``SESSIONS_DIRNAME`` (``sessions``): the two "
+        "directories the queue's paths are built UNDER, never entries of a session "
+        "directory. The third constant in that module, ``ASKS_LOG_NAME`` "
+        "(``asks.jsonl``), IS an entry of one and is classified instead — it sits in "
+        "``sync.COPY_SET_NAMES``, so a session moved with an open ask carries the "
+        "question with it.",
     ),
     "local_operator/session/attachments.py": (
         1,

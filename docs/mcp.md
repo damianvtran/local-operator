@@ -154,6 +154,24 @@ stored through the Settings screen but cannot be referenced — rename it to
   connection after `disconnect_all`. When the breaker trips or auto-reconnect
   is abandoned, parked deferred executes fail promptly with
   `McpConnectionError` instead of hanging.
+- **Notice dedupe:** the `session_mcp_unavailable` warning is written **once
+  per state change**. An identical card (same server, byte-identical rendered
+  text) is not appended again while it stays outstanding — the guard sits at
+  the journal write, so every surface that reads the transcript (TUI, desktop
+  UI, mobile fold, relay) sees one notice — and "outstanding" means the
+  replay still shows it: a compaction that drops the card releases the
+  suppression. The card re-emits when the rendered card changes, when a live
+  recovery is later superseded by a new failure, or after a 24 h staleness
+  reminder (`MCP_UNAVAILABLE_REMIND_S`, so a condition the operator scrolled
+  past re-surfaces rather than going silent for good; the reminder is
+  checked on the next incident attempt, not on a timer, so an abandoned
+  server shows nothing new until something attempts it again). A recovery
+  that happened in an earlier process is invisible to the durable record, so
+  an identical re-failure straight after a restart stays quiet until the
+  24 h reminder — bounded by it. Motivation, measured: one expired grant
+  re-flagged on every boot/resume — 96 byte-identical rows over ~29 h on
+  session `1375449bf925`. See `local_operator/session/notice_guard.py` and
+  `Session.journal_mcp_unavailable`.
 - **Tool names:** `mcp__<server>_<tool>`, both parts sanitized. Collisions
   between distinct origins (e.g. `my-server` + `a_b` vs `my` + `server_a_b`,
   which both mint `mcp__my_server_a_b`) are resolved deterministically by the

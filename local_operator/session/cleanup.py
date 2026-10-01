@@ -386,6 +386,20 @@ def remove_session_dir(
         target.parent / CLEANUP_LOG_NAME,
     )
     shutil.rmtree(target)
+    if config_dir is not None:
+        # The ask INDEX lives OUTSIDE the session directory (see
+        # ``asks/store.py`` on why the cross-session view cannot be a scan of
+        # 4,000 session dirs), so the guards above — and this removal — are the
+        # only things that can keep it in step. The reader sweeps an entry whose
+        # session directory is gone, so this is belt-and-braces; doing it at the
+        # one place a directory is destroyed is what keeps the aggregate view
+        # from briefly listing a conversation nobody can open.
+        try:
+            from local_operator.asks import store as ask_store
+
+            ask_store.remove_entry(config_dir, target.name)
+        except Exception:  # noqa: BLE001 — the sweep is the backstop
+            logger.debug("session cleanup: could not drop the ask index entry", exc_info=True)
     return True
 
 
@@ -1055,6 +1069,33 @@ def _has_spooled_mail(directory: Path) -> bool:
         return True
 
 
+def _has_open_asks(directory: Path) -> bool:
+    """Whether this session has an ask that can still be ANSWERED (design §2.2).
+
+    The guard's invariant is that nothing which can still happen is silently
+    destroyed, so the question is not "is there an ask file" but "is any ask
+    still live". ``open`` obviously counts. So does ``timed_out`` and ``late``:
+    an ask past its deadline is still answerable for the 7-day window, and the
+    design's whole point is that a late answer is accepted and attributed —
+    deleting the log would destroy a question the user can see on their phone.
+
+    FAIL-CLOSED on anything unreadable, like every probe in this module: the
+    fold may raise on a hand-edited line, and an ask file that cannot be read is
+    an ask that might be open.
+    """
+    try:
+        from local_operator.asks import store as ask_store
+
+        records = ask_store.fold(ask_store.read_events(directory), ask_store.now_ms())
+        return any(
+            record.get("status")
+            in (ask_store.STATUS_OPEN, ask_store.STATUS_TIMED_OUT, ask_store.STATUS_LATE)
+            for record in records
+        )
+    except Exception:  # noqa: BLE001 — unprovable is "yes"
+        return True
+
+
 def _guard(
     directory: Path, config_dir: Path, now: float, *, live_owner_gone: bool = False
 ) -> str | None:
@@ -1086,6 +1127,8 @@ def _guard(
             return "has an armed monitor"
         if _has_spooled_mail(directory):
             return "has unread spooled mail"
+        if _has_open_asks(directory):
+            return "has an open ask"
     except Exception as exc:  # noqa: BLE001 — a guard that cannot answer keeps
         logger.warning("session cleanup: guard failed for %s (%r); keeping it", directory.name, exc)
         return f"guard failed: {type(exc).__name__}"

@@ -70,6 +70,18 @@ _AMBIENT_VARS = (
     # ``test_bash_long_sleep_guard.py`` asserts. Read off the command's own
     # assignments only, never the process environment.
     "LOCAL_OPERATOR_ALLOW_LONG_SLEEP",
+    # The queued-ask flag's escape hatch (``asks/policy.NONBLOCKING_ASK``, read
+    # from ``LOP_ASK_NONBLOCKING``). The same ESCAPE-HATCH class as the two
+    # above: an operator or a QA rig that exported it would silently switch
+    # every blocking-ask cell in the suite onto the queued path, and the cells
+    # that PIN today's behaviour would go green while asserting nothing. The
+    # e2e cells that want it on set it through ``monkeypatch`` explicitly.
+    "LOP_ASK_NONBLOCKING",
+    # The soft query budget's escape hatch (``tools/query_budget.ALLOW_ENV``), the
+    # same ESCAPE-HATCH class and scrubbed for the same reason: an inherited value
+    # would waive the stop every cell in ``test_query_budget.py`` asserts. Read off
+    # the command's own assignments only, never the process environment.
+    "LOCAL_OPERATOR_ALLOW_SLOW_QUERY",
     # The org destination guard's escape hatch (``providers/radient_credentials``
     # ``ORG_ALLOW_NONCANONICAL_ENV``): the explicit, OFF-by-default opt-in that
     # lets the CLI send a signed-in account's bearer to a NON-canonical hub. An
@@ -252,6 +264,15 @@ _AMBIENT_VARS = (
     # override names absolute paths and would survive that — a developer who
     # exports it gets a different prompt than CI from the same tree.
     "LOCAL_OPERATOR_ECOSYSTEM_INSTRUCTIONS",
+    # The skill scanner's depth cap (``skills.discovery.SKILL_MAX_DEPTH_ENV``,
+    # default 3), read at CALL time by both the walk and the fingerprint. It is
+    # scrubbed rather than harmless-listed because the cells that assert the
+    # DEFAULT walk (a flat root staying flat, a grouped skill at depth 2-3 being
+    # found) measure that default: a developer who exports ``=1`` would make
+    # every one of those cells discover only the flat skill while still looking
+    # like it tested the grouped library. Tests that want a specific depth set
+    # it through ``monkeypatch`` explicitly.
+    "LOCAL_OPERATOR_SKILL_MAX_DEPTH",
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
     # The provider registry's ONLY callable ``env_keys`` resolver prefers this

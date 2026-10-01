@@ -2276,6 +2276,32 @@ class AttachClient:
             fields["question_index"] = question_index
         return await self._request("ask_answer", **fields)
 
+    async def ask_respond(self, ask_id: str, answers: dict[str, list[str]], *, by: str = "") -> str:
+        """Answer a QUEUED ask, ATOMIC per ask (design §2.4).
+
+        One body for all of the ask's questions, so there is no per-question wire
+        race to lose: the blocking path answered one question at a time and a
+        client that died mid-way left the ask half-settled.
+        """
+        fields: dict[str, Any] = {"ask_id": ask_id, "answers": answers}
+        if by:
+            fields["by"] = by
+        return await self._request("ask_respond", **fields)
+
+    async def ask_decline(self, ask_id: str, *, by: str = "") -> str:
+        """Decline a queued ask: explicit "no answer, decide yourself"."""
+        fields: dict[str, Any] = {"ask_id": ask_id}
+        if by:
+            fields["by"] = by
+        return await self._request("ask_decline", **fields)
+
+    async def ask_dismiss(self, ask_id: str, *, by: str = "") -> str:
+        """Dismiss a TIMED-OUT ask from the view. Injects nothing, ever."""
+        fields: dict[str, Any] = {"ask_id": ask_id}
+        if by:
+            fields["by"] = by
+        return await self._request("ask_dismiss", **fields)
+
     async def recall_steer(self, command_id: str) -> str:
         """Unsend the queued steer submitted under ``command_id`` (v4)."""
         return await self._request("recall_steer", command_id=command_id)

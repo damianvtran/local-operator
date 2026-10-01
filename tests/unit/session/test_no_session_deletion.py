@@ -996,10 +996,52 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ),
     ("local_operator/mobile/seen.py::SeenStore._persist_locked", "os.replace", "temp FILE"),
     ("local_operator/mobile/seen.py::SeenStore._persist_locked", "os.unlink", "temp FILE"),
+    # The push device registry (`mobile/push_devices.py`): one JSON store at a fixed
+    # basename directly under the config root, beside mobile-seen.json. `_save`'s
+    # target and its mkstemp temp file both come from `store_path(config_dir)` — no
+    # session id and no caller input — so neither can name a path under `sessions/`.
+    (
+        "local_operator/mobile/push_devices.py::_save",
+        "os.replace",
+        "temp FILE -> <config_dir>/mobile-push-devices.json; both names are "
+        "config-root-derived with a fixed basename",
+    ),
+    (
+        "local_operator/mobile/push_devices.py::_save",
+        "os.unlink",
+        "that same temp FILE, only while the replace above is failing",
+    ),
     (
         "local_operator/multiplexer/markers.py::_FileBackend.publish",
         "os.replace",
         "temp FILE -> pane marker",
+    ),
+    # -- the queued-ask index (design docs/design/ask-nonblocking.md §2.2) ----
+    # Every path here is built from ``config_dir()/asks/`` plus a session id the
+    # caller already holds, ending in ``<session_id>.json`` — a FILE, never a
+    # directory, and never inside ``sessions/`` (the index deliberately lives
+    # outside the session directory so a cross-session read is O(sessions with
+    # asks); see ``asks/store.py``'s module docstring). ``read_index``'s unlink
+    # is the TTL sweep of exactly those stale entry FILES.
+    (
+        "local_operator/asks/store.py::write_entry",
+        "os.replace",
+        "temp FILE -> asks/<session_id>.json (index lives outside sessions/)",
+    ),
+    (
+        "local_operator/asks/store.py::write_entry",
+        "os.unlink",
+        "temp FILE -> asks/<session_id>.json",
+    ),
+    (
+        "local_operator/asks/store.py::remove_entry",
+        "<path>.unlink",
+        "asks/<session_id>.json FILE (the one cleanup calls beside the rmtree)",
+    ),
+    (
+        "local_operator/asks/store.py::read_index",
+        "<path>.unlink",
+        "stale asks/<session_id>.json FILE, swept from the same directory scan",
     ),
     (
         "local_operator/skills/index.py::SkillIndex._persist_cache",

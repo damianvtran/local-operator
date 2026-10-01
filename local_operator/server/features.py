@@ -51,6 +51,27 @@ def feature_flags() -> dict[str, Any]:
         # bug, so the sentence stands alone.
         "commands": 2,
         "catalogues": 1,
+        # The SESSIONLESS skill catalogue: `GET /v1/desktop/skills` answers
+        # for an explicit `cwd` (home when omitted) with no session at all,
+        # and every answer — sessionless or session form — carries `version`,
+        # the skill tree's own identity (a digest of the runtime's
+        # `roots_fingerprint`), so a composer can cache the vocabulary per
+        # folder and refetch exactly when the tree changes.
+        #
+        # ITS OWN KEY rather than a bump of `catalogues`, by the rule
+        # `session_catalogue_page` states below — a client must be able to ASK
+        # whether the daemon understands the sessionless form BEFORE it sends
+        # one — and the half `session_search` adds: gating a working surface on
+        # the newer sibling would hide it. On a backend without this key the
+        # route REQUIRES `session_id`, so a sessionless call is a 422, and a
+        # client that does not see this key must say "update the backend"
+        # instead of attempting an operation whose failure it cannot classify
+        # (the shape `radient_org` states below). `catalogues` itself also has
+        # other consumers whose behaviour must not version-split: they render
+        # the model and command catalogues perfectly well against a backend
+        # that cannot serve a sessionless skill read, and bumping would hide a
+        # working surface because a newer one is missing.
+        "skill_catalogue": 1,
         "profile_catalogue": 1,
         "team_catalogue": 1,
         # Agent Hub update availability: GET /v1/desktop/hub/updates (a store read,

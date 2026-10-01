@@ -137,6 +137,23 @@ superseded tokens409 carrying `code: superseded_completion_token`, unknown
 sessions404, and unauthenticated callers401. Reads and subscriptions do not
 mutate the receipt store.
 
+The relay's aggregate unread read is `GET /api/attention/unread` (auth-gated
+like the rest; a 404 on an older relay means "unknown", never zero):
+`{count, revision, degraded, conversations}`. `count` counts conversations
+-- a conversation with three unread completions counts once -- over the same
+rows `GET /api/sessions` serves, under the listing's own predicate (the
+user's own conversations: subagent and scheduled origins are out, as are
+conversations with no directory); `conversations` lists exactly the unread
+rows, in the listing's order, each with its current completion token, kind
+and revision pair; `revision` is the store's equality token (compare it,
+never order by it). The same numbers ride the list payload as a top-level
+`unread` block, a SIBLING of `degraded` rather than a member of
+`capabilities`: a missing capability key reads as "this build lacks it",
+while an absent `unread` must mean "unknown -- do not touch the badge".
+Whenever `degraded` is non-empty (the store or the listing could not be
+read), `count` is absent from both surfaces rather than 0: a store that
+could not be read is not an empty pile.
+
 The relay maintains its existing projection ordering while alive. A new,
 authenticated and source-fenced SSE connection starts with an authoritative
 snapshot; its first projection may have a lower counter after daemon restart.

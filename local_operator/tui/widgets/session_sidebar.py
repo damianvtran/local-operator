@@ -32,6 +32,7 @@ from local_operator.resume import (
 from local_operator.session.preview import AGENT_OPENED_MARK, opener_role
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import BLURRED_SPINNER_INTERVAL_S, animation_focused
+from local_operator.tui.composer_focus import composer_may_take_focus, focus_is_claimed
 from local_operator.tui.session_catalog import CatalogEntry, rank_entries
 from local_operator.tui.terminal_title import SPINNER_FRAMES
 from local_operator.tui.widgets.session_picker import (
@@ -313,42 +314,105 @@ _PEER_HEADER_PREFIX = "peer:"
 
 
 class SessionSidebar(Widget, can_focus=True):
-    #: A pointer press on this list acts on the row under the pointer and nothing
-    #: else: it does NOT move the keyboard (design round, D1).
+    #: A pointer press on this list moves the keyboard to it — a row, the pin
+    #: cell and the panel's dead space alike — and the list wears the shipped
+    #: focus ground. Three rules bound that: the two from the issue #1357
+    #: decision (`### lopdev — design decision: click-to-focus`, recorded on
+    #: the issue), plus the footer-chip exemption reconciled with #1841:
     #:
-    #: With Textual's default (``True``) the click-to-focus walk lands on this
-    #: widget (``Screen._forward_event`` -> ``get_focusable_widget_at``,
-    #: ``screen.py:1933-1939``, consulting ``Widget.focus_on_click``) and the
-    #: keyboard LEAVES the composer. Measured on the design round's frames at
-    #: 120x40: a click anywhere in the panel — a row and the dead space below the
-    #: list alike — dimmed the composer's chevron, took the caret, and then
-    #: swallowed everything typed next (four typed keys, a 0-cell frame delta,
-    #: the draft untouched). The user cannot even tell that state apart from
-    #: "nothing holds the keys", and nothing on the frame says typing is going
-    #: nowhere. The gesture is complete when the click lands — it attached a
-    #: session or it missed — and this list has no text input, so it has nothing
-    #: to do with the keys afterwards.
+    #: * the press is refused while a hard claimant holds the keyboard — a live
+    #:   approval or ask, the aside, a full-page mode or pushed screen, a
+    #:   read-only composer. Those surfaces need the keys they hold, so a press
+    #:   may act on the row but must not take them (G7); the guard lives in
+    #:   :meth:`focus_on_click`, which Textual's click-to-focus walk consults
+    #:   before any handler here runs;
+    #: * in the narrow drawer placement a row press CLOSES the panel and the
+    #:   keyboard goes back to the composer (G8/T1n), so a closed panel is never
+    #:   left holding the keyboard — a hidden widget owning it is the "typed
+    #:   input going nowhere" state arriving by another route;
+    #: * the footer chip's cells are EXEMPT: the chip is a control with its own
+    #:   action (#1841), so its press toggles the ⌥ layer and the keyboard
+    #:   stays where it was — one cell off the chip is a normal press on the
+    #:   panel and focuses the list.
     #:
-    #: ``can_focus`` deliberately stays ``True``: the list keeps its keyboard
-    #: mode and its arrows/``enter``/cursor tint unchanged, entered only on
-    #: purpose (``f9``, or ``/sidebar focus`` — its own footer names the key) and
-    #: left with Esc or ``f9`` again. The app already behaves this way in the one
-    #: click path that DOES act: clicking the attached session's own row focuses
-    #: the editor itself (:meth:`OperatorApp.on_session_sidebar_selected`), so
-    #: this only makes the rest of the panel agree with it.
+    #: What makes the press safe is no longer "the list never gets the
+    #: keyboard". The composer-focus change forbade the press for a real reason
+    #: — the walk left the keyboard on a widget with no text input, and every
+    #: typed key went nowhere (measured then at 120x40: four typed keys, a
+    #: 0-cell frame delta, the draft untouched) — but by the time this was
+    #: decided the list ALREADY had a keyboard mode (`f9`, `/sidebar focus`)
+    #: and text typed into it was already swallowed (measured: `f9` then `A`
+    #: left `editor.text` empty, with the keys still on the list). The safety
+    #: property therefore moved to the widget: :meth:`on_key` and
+    #: :meth:`on_paste` hand the first printable character (or paste) to the
+    #: composer, and the composer takes the keyboard back — **however the
+    #: list's keyboard mode was entered** (press, `f9`, `/sidebar focus`).
+    #: One exception: while a hard claimant holds the keyboard the key stays
+    #: with the claimant (the refusal in :meth:`on_key`) — reachable by `f9`
+    #: alone, since a press is refused at the walk — and the key there is
+    #: inert rather than typed. That corner is pre-existing and frozen by the
+    #: decision, not part of this contract.
     #:
-    #: Accepted trade-off, stated so it is not discovered later: with the click no
-    #: longer changing the composer's state, ``enter`` right after a row click
-    #: still means "send the draft" (``editor.py`` ``_submit``) rather than "open
-    #: the row". A frame that did not visibly change is the price; the alternative
-    #: was text that vanished with no frame change at all.
-    #:
-    #: Do NOT pair this with forwarding printable keys from ``on_key`` to the
-    #: composer (the mechanism the UX diagnosis floated): under this rule the list
-    #: is only ever entered deliberately, so there is nothing to repair, and the
-    #: forwarding would contradict itself the day the list grows the filter field
-    #: a click on it implies.
-    FOCUS_ON_CLICK = False
+    #: ``can_focus`` stays ``True`` and the list keeps its arrows/``enter``/
+    #: cursor tint unchanged; `escape`/`f9` still leave the mode. The one
+    #: shipped behaviour this decision changes is called out on its PR: pressing
+    #: the already-attached session's row keeps the keyboard on the list rather
+    #: than returning it to the composer — every row press behaves alike — and
+    #: typing-home makes the cost brief, because the first keystroke is typed
+    #: rather than discarded.
+    FOCUS_ON_CLICK = True
+
+    def focus_on_click(self) -> bool:
+        """Textual's click-to-focus walk for this widget, gated by the claims.
+
+        ``Screen._forward_event`` consults this on every ``MouseDown`` before
+        any handler here runs, and focuses the widget when it answers ``True``.
+        The base answer is :data:`FOCUS_ON_CLICK` minus two exceptions:
+
+        * a hard claimant keeps its keys: the ONE hard-claim predicate
+          (``composer_focus.focus_is_claimed``) refuses the focus move for a
+          live approval/ask, the aside, a pushed screen, a full-page mode or a
+          read-only composer (issue #1357 decision, G7), so the press may act
+          on the row while the keyboard does not move;
+        * the footer chip is EXEMPT — the reconciliation with the chip slice
+          (#1841). The chip is a control with its OWN action (toggle the ⌥
+          layer), so a press on its cells must not also run the panel's
+          behaviour; that slice's test pins that a chip press moves no
+          keyboard. A press one cell OFF the chip is a normal press on the
+          panel and does focus the list.
+
+        The walk is handed no event coordinates, so the chip test reads
+        ``App.mouse_position`` — the press position set by every route before
+        forwarding: ``App.on_event`` for terminal input, the pilot's
+        ``_post_mouse_events``, and the chip slice's own footer gesture. The
+        cells come from :meth:`_chip_hit`, the chip's one hit zone, never a
+        copy of it — so the exemption covers exactly what the chip's press
+        covers, and nothing widens silently. The hit is resolved HERE, under
+        the ladder as painted when the press lands, and stashed for
+        ``on_mouse_down`` (``_press_chip_hit``): the walk's own focus move
+        repaints the footer — the focused rungs are shorter, so the chip's
+        cells move with them — and a handler that re-tested the cells
+        afterwards would reinterpret the gesture against cells the user never
+        saw.
+
+        Soft on the other side, deliberately: this gate protects claims that
+        need their keys, not a claim on who presses where. The list's own claim
+        in ``_focus_is_claimed`` stays SOFT (design round D2), which is what
+        lets the composer's own chrome take the keyboard back from it.
+        """
+        position = getattr(self.app, "mouse_position", None)
+        if position is None:
+            # No press position to resolve against (a stripped harness): the
+            # chip cannot be claimed, so the stash is cleared and the focus
+            # decision stands — the pre-reconciliation behaviour.
+            self._press_chip_hit = False
+            return super().focus_on_click() and not focus_is_claimed(self.app)
+        self._press_chip_hit = self._chip_hit(
+            position.x - self.region.x, position.y - self.region.y
+        )
+        if self._press_chip_hit:
+            return False
+        return super().focus_on_click() and not focus_is_claimed(self.app)
 
     #: Textual re-renders a widget on every pointer move to look for link
     #: spans (``Widget.watch_hover_style``, whose own comment notes it fires
@@ -389,7 +453,7 @@ class SessionSidebar(Widget, can_focus=True):
         pass
 
     class SubagentLayerToggled(Message):
-        """``ctrl+a`` flipped the ⌥ layer for this session.
+        """``ctrl+a`` — or a press on the footer chip — flipped the ⌥ layer.
 
         Carries the new value so the app can re-poll the catalog with the flag.
         The widget cannot load the catalog itself — that is worker-thread work
@@ -439,6 +503,27 @@ class SessionSidebar(Widget, can_focus=True):
         #: gesture freeze covers both) — `on_click` branches on it to toggle
         #: the pin instead of opening the row.
         self._pressed_pin = False
+        #: Whether the press in flight started on the footer chip instead. The
+        #: chip names no row, so `_pressed_id` stays empty for it — `on_click`
+        #: reads this alone to run the layer flip and nothing else.
+        self._pressed_chip = False
+        #: The chip hit resolved at PRESS time by `focus_on_click` and consumed
+        #: by `on_mouse_down`. The walk runs before any handler, and its focus
+        #: move repaints this footer (the focused rungs are shorter, so the
+        #: chip's cells move with them); re-testing the cells in the handler
+        #: would reinterpret a dead-space press against cells the user never
+        #: saw — measured during the click-to-focus reconciliation: a press one
+        #: cell left of the unfocused chip flipped the layer.
+        #:
+        #: Deliberately NOT cleared where `_pressed_chip` is (`on_mouse_up`,
+        #: `on_click`, `set_open`): no route to a stale read was found — the
+        #: walk rewrites it on every MouseDown this widget receives, before any
+        #: handler can read it, and Textual synthesizes a Click only when down
+        #: and up resolve to the SAME widget (which re-armed the stash for that
+        #: widget's own press), while a release outside the region cancels
+        #: `_pressed_chip`. The asymmetry is recorded so the next reader does
+        #: not have to rebuild that analysis.
+        self._press_chip_hit = False
         self._deferred: tuple[CatalogEntry, ...] | None = None
         #: Row under the pointer, by identity rather than by row index: a
         #: catalog refresh reorders rows beneath a stationary pointer, and a
@@ -467,6 +552,17 @@ class SessionSidebar(Widget, can_focus=True):
         self.show_subagents: bool = False
         #: Hidden-population size for the footer chip, from `subagent_population`.
         self._subagent_total: int = 0
+        #: Whether the pointer rests on that chip. The chip is a CONTROL (issue
+        #: #1357 principle 5): the underline this lights is its affordance,
+        #: shown on the same hover event that reveals the pin cell's `☆`, and
+        #: the press that flips the layer fires from the same hit-test. It is
+        #: painted as a STYLE on the chip's cells — never new text — so the
+        #: count keeps its place in the ladder.
+        self._chip_hover: bool = False
+        #: The pointer's last position, kept so `set_entries` can re-derive
+        #: `_chip_hover` under a RESTING pointer: the ladder can move the
+        #: chip's cells when the count, the paging facts or focus change.
+        self._hover_x: int | None = None
         #: Monotonic deadline for a `ctrl+o` jump armed before its rows
         #: existed, or 0.0 for none. See `_land_pending_jump`.
         self._pending_jump_until: float = 0.0
@@ -1023,6 +1119,13 @@ class SessionSidebar(Widget, can_focus=True):
         # instead left the affordance and description dark until the user
         # jiggled the mouse.
         self._set_hover(self._hover_y)
+        # The footer chip re-resolves the same way: the ladder under a resting
+        # pointer can move the chip's cells (the count, the paging facts, the
+        # focus just changed). No repaint is forced here — the span moving is
+        # itself what repaints (a count change refreshes, a focus change
+        # refreshes, and the paint-state check below carries the flag) — but
+        # the flag must tell the truth about the NEXT painted frame.
+        self._set_chip_hover(self._hover_x, self._hover_y)
         self._sync_animation()
         # Polling must still adopt fresh summaries (including tooltip-only
         # status), but an unchanged frame must not invalidate Rich's content
@@ -1109,10 +1212,17 @@ class SessionSidebar(Widget, can_focus=True):
         self.refresh()
 
     def set_open(self, opened: bool) -> None:
-        if not opened and self._pressed_id is not None:
+        if not opened and (self._pressed_id is not None or self._pressed_chip):
+            # A gesture interrupted by the close is cancelled, not left primed:
+            # the pin cell is protected by its row id being cleared here, but
+            # the chip has no row id, so its own flag is cleared too — the next
+            # press anywhere (even dead space, whose press records nothing)
+            # must not inherit the interrupted gesture and flip the layer on a
+            # click that never touched the chip.
             self.release_mouse()
             self._pressed_id = None
             self._pressed_pin = False
+            self._pressed_chip = False
             if self._deferred is not None:
                 deferred, self._deferred = self._deferred, None
                 self.set_entries(deferred)
@@ -1194,10 +1304,13 @@ class SessionSidebar(Widget, can_focus=True):
             # in `entries`. Omit them and either the ctrl+a toggle does not
             # repaint, or `set_entries`' equality check passes on a frame whose
             # pins changed and the lift is invisible until something else
-            # invalidates.
+            # invalidates. `_chip_hover` rides the same rule: the chip's
+            # underline is paint, and a re-derive under a resting pointer must
+            # reach the frame.
             self._pins,
             self.show_subagents,
             self._subagent_total,
+            self._chip_hover,
         )
 
     def refresh(
@@ -1497,9 +1610,12 @@ class SessionSidebar(Widget, can_focus=True):
     def action_toggle_subagents(self) -> None:
         """Flip the ⌥ layer for THIS session. Never writes the setting.
 
-        A `write_setting` here would fan out through `ConfigWatcher` to every
-        running `lop` process and flip another terminal's sidebar. The same
-        rule `ctrl+g` follows for dock density.
+        The ONE flip both routes share: the `ctrl+a` chord and a pointer press
+        on the footer chip (`on_click`), which is the route that needs no F9.
+        Neither writes the setting: a `write_setting` here would fan out
+        through `ConfigWatcher` to every running `lop` process and flip
+        another terminal's sidebar. The same rule `ctrl+g` follows for dock
+        density.
         """
         self.show_subagents = not self.show_subagents
         self.refresh()
@@ -1611,11 +1727,57 @@ class SessionSidebar(Widget, can_focus=True):
         column = event.x - self.styles.padding.left
         return 0 <= column < PIN_CELL_WIDTH
 
+    def _chip_hit(self, x: int, y: int) -> bool:
+        """Whether a widget-relative pointer position lands on the footer chip.
+
+        The footer is the widget's LAST content line (`render` pads to it),
+        and the chip's cells come back from the same fitted ladder the paint
+        uses (`_footer_line`), so the press target can never drift from the
+        thing the user sees — the same reason `_entry_at` reads render's own
+        header rule. False whenever no chip is painted: the error/loading/
+        opening states, and any width where the ladder kept a chip-less
+        fallback.
+
+        Like `_pin_cell_pressed`, the column is resolved against the widget's
+        LEFT padding (events arrive relative to the outer box; the chip's
+        columns belong to the content box), which is the only thing the column
+        arithmetic may depend on — the gutter swaps sides with the dock and
+        the overlay keeps the base left pad, so the resolved pad is what keeps
+        this true in all three placements.
+
+        The row test carries the same vertical invariant `_entry_at` already
+        relies on: an event's y arrives relative to the outer box while
+        `size.height` counts the content box, so the last content line IS
+        `y == size.height - 1` only while `padding.top == 0` — true in every
+        placement today (the base tcss and `_sync_sidebar_layout` both keep
+        the top pad at 0); a top pad would make both resolve y first.
+        """
+        if y != self.size.height - 1:
+            return False
+        _text, span = self._footer_line(max(1, self.size.width))
+        if span is None:
+            return False
+        column = x - self.styles.padding.left
+        return span[0] <= column < span[1]
+
     def on_mouse_down(self, event: events.MouseDown) -> None:
         entry = self._entry_at(event.y)
         if entry is not None and event.button == 1:
             self._pressed_id = entry.id
             self._pressed_pin = self._pin_cell_pressed(event)
+            self._pressed_chip = False
+            self.capture_mouse()
+        elif event.button == 1 and self._press_chip_hit:
+            # A press on the footer chip — the hit as resolved by the walk at
+            # PRESS time (`_press_chip_hit`; re-testing here would read the
+            # focused ladder the press itself may have just painted). The
+            # flip fires on the CLICK, like the pin cell's, so a press dragged
+            # off the list is cancelled by `on_mouse_up` instead of toggling
+            # on the way out; and no row id is recorded — the chip belongs to
+            # no row, which is what keeps the click from opening, switching or
+            # pinning anything.
+            self._pressed_pin = False
+            self._pressed_chip = True
             self.capture_mouse()
         event.stop()
 
@@ -1624,6 +1786,7 @@ class SessionSidebar(Widget, can_focus=True):
         if not self.region.contains(event.screen_x, event.screen_y):
             self._pressed_id = None
             self._pressed_pin = False
+            self._pressed_chip = False
             if self._deferred is not None:
                 deferred, self._deferred = self._deferred, None
                 self.set_entries(deferred)
@@ -1637,9 +1800,21 @@ class SessionSidebar(Widget, can_focus=True):
         )
         target = (self._pressed_id or (entry.id if entry else "")) if entry is not None else ""
         pin_press = self._pressed_pin
+        chip_press = self._pressed_chip
         self._pressed_id = None
         self._pressed_pin = False
-        if target and pin_press:
+        self._pressed_chip = False
+        if chip_press:
+            # The chip's press runs the ONE flip `ctrl+a` runs, on the same
+            # per-session discipline: never a config write, because a write
+            # would fan out through the config watcher to every running `lop`
+            # process and flip another terminal's sidebar (`action_toggle_
+            # subagents` carries the rest). No `Selected` is posted and no
+            # cursor moves, so a press meant for the count can never open,
+            # switch or pin the row it was never aimed at (issue #1357
+            # principle 5).
+            self.action_toggle_subagents()
+        elif target and pin_press:
             # A press on the pin cell toggles the pin and NOTHING else: the
             # cursor does not move and no `Selected` is posted, so a click
             # meant for the star can never open or switch the row under it
@@ -1652,6 +1827,110 @@ class SessionSidebar(Widget, can_focus=True):
         if self._deferred is not None:
             deferred, self._deferred = self._deferred, None
             self.set_entries(deferred)
+        event.stop()
+
+    @classmethod
+    def _bound_keys(cls) -> frozenset[str]:
+        """The keys this widget answers itself — never candidates for typing-home.
+
+        Read at call time from ``_merged_bindings`` rather than derived in the
+        class body, for the reason ``TranscriptView._bound_keys`` records:
+        ``DOMNode.__init_subclass__`` assigns that map AFTER the body runs, so
+        a body-time read would see the parent's map.
+        """
+        merged = cls._merged_bindings
+        return frozenset() if merged is None else frozenset(merged.key_to_bindings)
+
+    def on_key(self, event: events.Key) -> None:
+        """TYPING-HOME: text pressed on the list is typed, not swallowed.
+
+        Issue #1357 decision, T12/G1 (the `### lopdev — design decision:
+        click-to-focus` comment on the issue): the list's keyboard mode —
+        entered by a press, by `f9` or by `/sidebar focus` — is for this
+        widget's OWN bindings (arrows, enter, escape, ctrl+a/ctrl+o). Any
+        printable character it does not bind is handed to the composer, which
+        takes the keyboard back — so "typed input going nowhere" cannot
+        happen while the list owns the keys, with ONE exception: a hard
+        claimant keeps its keys, and in that state (reachable by `f9`, never
+        by a press — the walk refuses) a key is left to the claimant and is
+        inert on the list. Pre-existing, frozen by the decision. Measured on
+        main before this existed: `f9` then `A` left `editor.text == ""` with
+        focus still on the list — the failure mode the old
+        `FOCUS_ON_CLICK = False` rule was written to stop, reachable all
+        along on the deliberate path (F3).
+
+        A FRESH ``Key`` is posted to the editor rather than the original, and
+        the editor is focused first, matching ``TranscriptView.on_key``: this
+        event is already part-way through Textual's dispatch, and the
+        composer's own ``_on_key`` must see a key that behaves exactly as if
+        the composer had held focus all along (draft, caret, shell mode and
+        the live-answer hold all live there — the decision forbids a parallel
+        text path).
+
+        Keys this widget binds itself are excluded via :meth:`_bound_keys`, so
+        a future PRINTABLE binding (a filter field, say) is not shadowed by
+        this handler. Today's chords are kept by ``event.is_printable``
+        instead: it admits a printable character only, so every control key —
+        ctrl+a and ctrl+o included — and every arrow stays with this widget's
+        own bindings and can never be mistaken for text (G9).
+
+        Refusal mirrors the guard the composer's own routes use: while the
+        composer is read-only or a hard claimant holds the keyboard, the key
+        is left UNSTOPPED so whatever owns it still receives it — a key is
+        not ours to take (``composer_focus.composer_may_take_focus``).
+        """
+        if not self.has_focus:
+            # Mirrors ``TranscriptView.on_key``: a key can reach a container by
+            # bubbling from a focused child. This widget mounts none today —
+            # the guard is what keeps a future focusable descendant (the
+            # filter field the decision names) owning its own printable keys.
+            return
+        if event.key in self._bound_keys() or not event.is_printable:
+            return
+        from local_operator.tui.widgets.editor import Editor
+
+        try:
+            editor = self.app.query_one(Editor)
+        except Exception:  # noqa: BLE001 — a harness that hosts a list and no composer
+            return
+        if not composer_may_take_focus(self.app, editor):
+            return
+        editor.focus()
+        editor.post_message(events.Key(event.key, event.character))
+        event.stop()
+        event.prevent_default()
+
+    def on_paste(self, event: events.Paste) -> None:
+        """TYPING-HOME for a paste: it is delivered to the composer, never dropped.
+
+        The same rule as :meth:`on_key` (issue #1357 decision, T12/G1). A
+        bracketed paste arrives as ONE event rather than as keystrokes, and
+        with the list owning the keyboard it must not vanish with nothing on
+        the frame to say it did: the composer takes the keyboard and receives
+        a fresh ``Paste``, so its own ``_on_paste`` (credential capture, image
+        attachment, collapse) and ``TextArea``'s insert run exactly as if the
+        composer had held focus. A paste has no bindings of its own, so the
+        only refusal is the same claimed/read-only guard the key path uses.
+        """
+        from local_operator.tui.widgets.editor import Editor
+
+        try:
+            editor = self.app.query_one(Editor)
+        except Exception:  # noqa: BLE001 — a harness that hosts a list and no composer
+            return
+        if not composer_may_take_focus(self.app, editor):
+            return
+        editor.focus()
+        paste = events.Paste(event.text)
+        # Stopped BEFORE it is posted, and that is load-bearing: ``Paste``
+        # bubbles, the bubble reaches ``App.on_event``, and its Paste route
+        # re-forwards anything not already marked forwarded to
+        # ``self.focused`` — the editor we just focused — so the payload would
+        # land twice (measured: "pasted textpasted text"). Pre-stopping keeps
+        # the delivery to the ONE handler chain a focused composer runs
+        # (``Editor._on_paste`` plus ``TextArea``'s insert).
+        paste.stop()
+        editor.post_message(paste)
         event.stop()
 
     def _describe(self, entry: CatalogEntry | None) -> str | None:
@@ -1737,6 +2016,19 @@ class SessionSidebar(Widget, can_focus=True):
             self.tooltip = description
         return changed
 
+    def _set_chip_hover(self, x: int | None, y: int | None) -> bool:
+        """Point the chip affordance at the pointer, reporting any change.
+
+        A separate state from the row hover — the chip names no row — and
+        repainted the same byte-scoped way: the caller refreshes the footer
+        line alone, not the widget.
+        """
+        hovered = x is not None and y is not None and self._chip_hit(x, y)
+        if hovered == self._chip_hover:
+            return False
+        self._chip_hover = hovered
+        return True
+
     def _refresh_rows(self, *rows: int | None) -> None:
         """Repaint just these row lines, skipping any outside the widget.
 
@@ -1752,7 +2044,14 @@ class SessionSidebar(Widget, can_focus=True):
     def on_mouse_move(self, event: events.MouseMove) -> None:
         # The row being LEFT, captured before `_set_hover` overwrites it.
         left = self._hover_y
-        if self._set_hover(event.y):
+        self._hover_x = event.x
+        row_changed = self._set_hover(event.y)
+        # The chip lights under the pointer the way the pin cell's `☆` does:
+        # painted on the hover event, so it is seen before it is pressed — and
+        # only its own line is repainted, not the list.
+        if self._set_chip_hover(event.x, event.y):
+            self._refresh_rows(self.size.height - 1)
+        if row_changed:
             # Only the two rows whose ground changes, not all 38: a hover move
             # wrote 9,092 bytes of escape sequences to the terminal and now
             # writes 924. That output is CPU burned in the terminal emulator
@@ -1827,10 +2126,12 @@ class SessionSidebar(Widget, can_focus=True):
     def on_leave(self, event: events.Leave) -> None:
         # The pointer left the list: drop both the affordance and the
         # description rather than leaving a row lit under an absent cursor.
-        if self._hover_id or self._hover_y is not None:
+        if self._hover_id or self._hover_y is not None or self._chip_hover:
             self._hover_id = ""
             self._hover_y = None
+            self._hover_x = None
             self._hover_since = None
+            self._chip_hover = False
             self.tooltip = None
             self.refresh()
 
@@ -2088,6 +2389,37 @@ class SessionSidebar(Widget, can_focus=True):
             result.append("\n" + truncate_cells(text, width), style=theme_mod.semantic_color("dim"))
         while result.plain.count("\n") < self.size.height - 2:
             result.append("\n")
+        footer, chip_span = self._footer_line(width)
+        footer_style = theme_mod.semantic_color("warning" if self.error else "dim")
+        if chip_span is not None and self._chip_hover:
+            # The chip's affordance is a STYLE on its own cells, never new
+            # text: the count stays on the frame in every state — a hover must
+            # not steal it — and the ladder's arithmetic is untouched (`f9
+            # focus · ctrl+b hide · ⌥1k+` still measures 29). Underline rather
+            # than an ink step: the accent already means "a turn is live" and
+            # the focus ground sits at near-iso-luminance, so neither ink is
+            # the pointer's to spend. The resting path appends the SAME single
+            # span it always did, so an un-hovered frame's bytes are unchanged.
+            start, end = chip_span
+            result.append("\n" + footer[:start], style=footer_style)
+            result.append(
+                footer[start:end], style=Style(color=footer_style) + Style(underline=True)
+            )
+        else:
+            result.append("\n" + footer, style=footer_style)
+        return result
+
+    def _footer_line(self, width: int) -> tuple[str, tuple[int, int] | None]:
+        """The footer as painted, plus the `⌥N` chip's span within it, if any.
+
+        ONE implementation, shared by `render` (which paints the line) and
+        `_chip_hit` (which resolves the chip's press target) — for the same
+        reason `_entry_at` reads render's own header rule: a second copy of
+        this ladder would drift from the painted bytes, and the press target
+        would stop matching what the user sees. A `None` span means no chip is
+        on the line — the error/loading/opening states, or a width where the
+        ladder kept a chip-less fallback — so nothing is pressable.
+        """
         # TWO rules, one helper, and they are the same rule applied to the
         # two ends of the list's keyboard mode. D4: the counter may never be
         # the reason the EXIT hint disappears — it used to REPLACE the hint
@@ -2196,8 +2528,14 @@ class SessionSidebar(Widget, can_focus=True):
             base,
         )
         footer = "Refresh failed" if self.error else "Opening…" if self.requested_id else hint
-        result.append(
-            "\n" + truncate_cells(footer, width),
-            style=theme_mod.semantic_color("warning" if self.error else "dim"),
-        )
-        return result
+        painted = truncate_cells(footer, width)
+        # The chip is the ladder's SUFFIX whenever it is painted — every
+        # chip-carrying candidate ends with ` · ⌥N` — so its span is the last
+        # `len(chip)` characters of the truncated line; `None` otherwise.
+        # `len` is the cell count for every glyph this ladder can emit (`⌥`,
+        # `·`, digits, ASCII) — the single-cell property the width comments
+        # above already rest on.
+        span: tuple[int, int] | None = None
+        if chip and painted.endswith(chip):
+            span = (len(painted) - len(chip), len(painted))
+        return painted, span

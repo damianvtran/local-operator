@@ -387,6 +387,14 @@ class TuiSessionHandle(SessionHandle):
     def subscribe(self, on_projection: Callable[[], None]) -> Callable[[], None]:
         self._on_projection = on_projection
         session = self._session()
+        # The queue's own change path publishes through the session, and the
+        # phone projection is this host's to repaint -- so the sink is installed
+        # HERE, beside the projection subscription it feeds, rather than inside
+        # any one publish method: a host that installed it lazily would miss the
+        # asks that arrived before its first real gate (design §4).
+        install_sink = getattr(session, "set_ask_state_sink", None)
+        if callable(install_sink):
+            install_sink(self._ask_state_changed)
 
         def handler(event: Any) -> None:
             # Events fire on the Textual loop; the fold is synchronous and
@@ -1271,6 +1279,17 @@ class TuiSessionHandle(SessionHandle):
         """
 
         def resolve() -> str:
+            # THE LEGACY MIRROR, FIRST (design §4): a queued ask is also
+            # projected as today's per-question card for one release, and an old
+            # client answers it with THIS op under the synthetic id
+            # ``"<ask_id>.<qidx>"``. The TUI mounts no picker for a queued ask
+            # -- the queue returns a receipt -- so a mirrored id resolves onto
+            # the queue rather than onto the (empty) ``_ask_pending`` map.
+            # ``None`` is "not a mirrored id" and everything below runs
+            # unchanged.
+            mirrored = self._mirror_ask_answer(request_id, value)
+            if mirrored is not None:
+                return mirrored
             card = self._ask_pending.get(request_id)
             if card is None:
                 raise ValueError("that question was already answered on the terminal")
@@ -1305,6 +1324,57 @@ class TuiSessionHandle(SessionHandle):
             return "answered"
 
         return await self._on_app(resolve)
+
+    def _mirror_ask_answer(self, request_id: str, value: str) -> str | None:
+        """Answer a queued ask through the legacy mirrored card id, or ``None``.
+
+        ``None`` is "not a mirrored id" — the ordinary case, where the caller
+        falls through to the live picker exactly as before. An EMPTY value is
+        today's Esc, so it declines the ask rather than recording a blank
+        answer; the same tap must mean the same thing on both paths.
+
+        Called from inside ``ask_answer``'s ``_on_app`` hop, so the queue's
+        answer and the repaint it implies (``_publish_pending_gate`` reads the
+        fold) happen on the one loop that also settles the widget's state --
+        the same reason the picker half runs there, and the reason a mirrored
+        answer cannot interleave with a real card settling.
+        """
+        from local_operator.asks import store as ask_store
+
+        parsed = ask_store.parse_mirror_request_id(request_id)
+        if parsed is None:
+            return None
+        ask_id, question_index = parsed
+        session = self._session()
+        queue = session.ask_queue() if hasattr(session, "ask_queue") else None
+        if queue is None:
+            raise ValueError("this session's runtime predates queued asks")
+        record = queue.find(ask_id)
+        if record is None:
+            raise ValueError("that question was already answered on the terminal")
+        if not value:
+            # An EMPTY value is today's Esc and settles the WHOLE ask: a decline
+            # is not a step of the multi-step flow.
+            outcome = session.decline_ask(ask_id, by="mirror")
+            if not outcome.get("ok"):
+                raise ValueError(str(outcome.get("error") or "the decline was refused"))
+            return "declined"
+        questions = list(record.get("questions") or ())
+        if not 0 <= question_index < len(questions):
+            raise ValueError("that question was already answered on the terminal")
+        key = str(questions[question_index].get("id") or "")
+        # THE LEGACY PATH IS INCREMENTAL (design §4, A2 addendum), and it is the
+        # same bridge the runtime uses so a mirror answered through the terminal's
+        # registrant settles exactly as one answered through the runtime: one
+        # question per tap into the queue's draft, one atomic write on the last.
+        outcome = session.answer_ask_question(ask_id, key, [value], by="mirror")
+        if not outcome.get("ok"):
+            raise ValueError(str(outcome.get("error") or "the answer was refused"))
+        if not outcome.get("settled"):
+            total = len(questions)
+            waiting = len(outcome.get("waiting") or ())
+            return f"answered {total - waiting} of {total}; the next question is on the card"
+        return "answered"
 
     async def refresh(self) -> None:
         """Re-seed identity fields after /new, /resume, /model, /rename."""
@@ -1475,12 +1545,38 @@ class TuiSessionHandle(SessionHandle):
         if self._on_projection is not None:
             self._on_projection()
 
+    def _ask_state_changed(self, rows: Any, open_count: Any) -> None:
+        """The session's ask fold moved: re-front the mirror and repaint.
+
+        The session-side twin of the runtime handle's sink. Installing the fold
+        ends in ``_sync_pending``, so the mirrored card (design §4) is refreshed
+        by the same call that changed the ask list, and the repaint the phone
+        sees is the one carrying it.
+        """
+        try:
+            self._fold.set_asks(list(rows) if rows is not None else None, open_count)
+        except Exception:  # noqa: BLE001 -- a repaint is never worth a turn
+            logger.debug("ask: could not install the wire fold", exc_info=True)
+        self._publish_pending_gate(self._fold.projection.pending)
+        if self._on_projection is not None:
+            self._on_projection()
+
     def _publish_pending_gate(self, pending: PendingRequest | None) -> None:
-        """Publish the host gate into the canonical full-TUI contract."""
+        """Publish the host gate into the canonical full-TUI contract.
+
+        ``None`` means "no REAL gate is waiting", which is not the same as "no
+        card": while a queued ask is open the fold's projection still fronts its
+        mirrored per-question card (design §4), and clearing it here would take
+        the ask away from exactly the old desktop clients the mirror exists for.
+        Reading the fold rather than the argument is what keeps the two
+        publishers' cards identical.
+        """
         session = self._session()
         store = getattr(session, "_frontend_state_store", None)
         if store is None:
             return
+        if pending is None:
+            pending = self._fold.projection.pending
         payload = pending.to_json() if pending is not None else None
         store.mutate(pending_gate=payload)
 

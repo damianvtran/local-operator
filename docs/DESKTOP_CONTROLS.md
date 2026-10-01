@@ -549,9 +549,15 @@ read that tells a page mid-run "a run is live" without attempting a create (the
 - GET `.../sessions/{id}/failovers`: selected and effective runtime models plus the
   configured **default** chains. Defaults are labelled, not represented as a live
   provider's private cooldown/account routing state.
-- GET `/v1/desktop/skills?session_id=...&name=...`: session-cwd discovery and optional
-  known-name body via the shared internal-URL resolver. This is discoverable scope,
-  not a claim that every skill was selected into the current model prompt.
+- GET `/v1/desktop/skills?cwd=...&name=...`: folder discovery with NO session — an
+  explicit `cwd` (the literal `"~"` the desktop stores expands; absolute and
+  existing, else `422 invalid_cwd`), the user's home when omitted. `session_id`
+  keeps the session-cwd form (the `/skills` panel and released clients); `cwd`
+  WINS when both are sent. Every answer carries `version`, a 16-hex digest of the
+  runtime's skill-tree fingerprint, so a client can cache the vocabulary per
+  folder and refetch exactly when the tree changes. Optional known-name body via
+  the shared internal-URL resolver. This is discoverable scope, not a claim that
+  every skill was selected into the current model prompt.
 
 ## MCP controls
 

@@ -1414,6 +1414,20 @@ class ToolContext(BaseModel):
     # was never shown the question. ``None`` means the tool is not advertised
     # at all (createIf), for the same reason ``wake_scheduler`` is.
     ask_user: AskUserFn | None = None
+    #: THE QUEUED-ASK DOOR (design §2.1). Set by the session ONLY while
+    #: ``asks.policy.NONBLOCKING_ASK`` is on and a host has installed
+    #: :attr:`ask_user` — i.e. exactly the sessions where ``ask`` exists at all.
+    #: When it is set, ``execute_ask`` ENQUEUES and returns a receipt instead of
+    #: awaiting :attr:`ask_user`; when it is absent the blocking path runs
+    #: unchanged, which is what keeps the flag-off behaviour byte-for-byte
+    #: today's (§5 invariant).
+    #:
+    #: It is a plain callable rather than a protocol: the session resolves it,
+    #: and a second typed surface for one call site would be more contract than
+    #: the thing it describes. It returns a mapping — ``{"ok": True, "text":…,
+    #: "details":…}`` or ``{"ok": False, "error":…}`` — so the tool can report
+    #: a cap or a bound without knowing anything about the queue.
+    enqueue_ask: Callable[..., Mapping[str, Any]] | None = None
     #: Live read of "an interface is attached to the SESSION this tool is running
     #: in" — ``RuntimeServer.attached_surfaces`` seen through the session's own
     #: goal-state probe, so it is re-read per call rather than snapshotted per
@@ -2063,6 +2077,42 @@ class MonitorDeltaEvent(AgentEvent[Literal["monitor_delta"]]):
     name: str = ""
     changes: int = 0
     skipped: int = 0
+
+
+class AskResponseDeliveredEvent(AgentEvent[Literal["ask_response_delivered"]]):
+    """A queued ask's answer (or decline, or late answer) was handed to the
+    session for delivery.
+
+    Modelled on :class:`WakeDeliveredEvent`, and emitted BEFORE the turn spawn
+    so a front end paints the response card ahead of the work it triggers — the
+    ask's whole value is that the answer arrives as a TURN, and a surface that
+    only learned of it from the transcript would paint it a turn late.
+
+    ``status`` is one of ``answered``/``late``/``declined``; a decline rides
+    this type deliberately (design §2.3), because a decline is a
+    response-shaped fact and a second type would be a second thing to register,
+    render and drop silently.
+    """
+
+    type: Literal["ask_response_delivered"] = "ask_response_delivered"
+    text: str
+    ask_id: str = ""
+    status: str = ""
+
+
+class AskTimeoutDeliveredEvent(AgentEvent[Literal["ask_timeout_delivered"]]):
+    """A queued ask's deadline passed and its notice was handed to the session.
+
+    The receipt exists so a surface can mark the ask *timed out* the moment the
+    notice is injected rather than waiting for a transcript replay — the ask
+    stays answerable, and the state the human needs to see is "the agent moved
+    on", which is exactly the moment this fires.
+    """
+
+    type: Literal["ask_timeout_delivered"] = "ask_timeout_delivered"
+    text: str
+    ask_id: str = ""
+    urgent: bool = False
 
 
 class PeerMessageDeliveredEvent(AgentEvent[Literal["peer_message_delivered"]]):

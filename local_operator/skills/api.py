@@ -11,8 +11,11 @@ Root precedence: project-local beats global, native beats ecosystem.
 ``~/.local-operator/skills``, then the wider ecosystem roots
 (``~/.omp/agent/skills``, ``~/.claude/skills``, ``~/.codex/skills``,
 ``~/.agents/skills``) last — only the ones that exist, so a clean machine
-scans nothing extra. ``LOCAL_OPERATOR_SKILL_EXTRA_ROOTS`` replaces that
-ecosystem set (colon-separated absolute paths; an empty value disables it).
+scans nothing extra. Each root is scanned to a bounded depth
+(``LOCAL_OPERATOR_SKILL_MAX_DEPTH``, default 3) so grouped skill libraries
+are found; a directory holding a ``SKILL.md`` is never descended into.
+``LOCAL_OPERATOR_SKILL_EXTRA_ROOTS`` replaces that ecosystem set
+(colon-separated absolute paths; an empty value disables it).
 Earlier roots win name collisions in :func:`discover_skills`, which is what
 makes native roots authoritative over imported ones.
 """
@@ -76,6 +79,12 @@ _ECOSYSTEM_SKILL_SUBDIRS: tuple[Path, ...] = (
 #: an empty value disables ecosystem scanning entirely (a user who wants
 #: ONLY native roots gets exactly that).
 _EXTRA_ROOTS_ENV = "LOCAL_OPERATOR_SKILL_EXTRA_ROOTS"
+
+# Sibling knob, owned by discovery.py: ``LOCAL_OPERATOR_SKILL_MAX_DEPTH`` (default
+# 3, clamped to [1, 5]) caps how many path segments below a root a skill
+# directory may sit, so grouped libraries (``<root>/<group>/<skill>/SKILL.md``)
+# are discovered. ``1`` restores the flat one-level layout. It is an env var
+# rather than a /settings key for the same reason as the roots override above.
 
 
 def _ecosystem_roots(home: Path) -> list[Path]:
@@ -309,9 +318,10 @@ def make_skill_resolver(
                 # skill name is its NETLOC, so ``skill://..`` and
                 # ``skill://%2fetc`` arrive as a perfectly ordinary
                 # "Unknown skill" and used to drive a full fingerprint probe.
-                # A name no one-level root scan could produce is never made
-                # resolvable by rescanning, so the work is pure waste on
-                # attacker-chosen input.
+                # A name no bounded-depth root scan could produce (a skill name
+                # is a frontmatter name or a leaf directory name, never a path,
+                # at any depth) is never made resolvable by rescanning, so the
+                # work is pure waste on attacker-chosen input.
                 return message
             _refresh_if_changed(refresh_target, refresh_roots, state)
             # ALWAYS re-resolve, whatever the refresh did or did not do. The

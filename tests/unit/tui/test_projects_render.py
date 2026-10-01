@@ -421,6 +421,158 @@ def test_the_footer_rows_and_tool_share_one_local_day_on_an_evening_clock(
     assert projects_mod._today_iso() == "2026-09-29"
 
 
+def test_update_day_label_says_today_yesterday_and_a_dated_day(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The day-group header: relative for the reader's own days, dated beyond."""
+    import datetime as dt
+
+    from local_operator import projects as projects_mod
+    from local_operator.tui.projects_render import update_day_label
+
+    class FakeDatetime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return (
+                dt.datetime(2026, 9, 30, 9, 0)
+                if tz is None
+                else dt.datetime(2026, 9, 30, 13, 0, tzinfo=dt.timezone.utc)
+            )
+
+    monkeypatch.setattr(projects_mod, "datetime", FakeDatetime)
+    # Midday UTC, so the LOCAL day is the same one in any westward zone: the
+    # 02:00Z stamps of an evening-written entry belong to the day before.
+    assert update_day_label("2026-09-30T12:00:00Z") == "today"
+    assert update_day_label("2026-09-29T12:00:00Z") == "yesterday"
+    assert update_day_label("2026-09-25T12:00:00Z") == "25 Sep"
+    # Another year carries the year, or "25 Sep" reads as the next one.
+    assert update_day_label("2025-09-25T12:00:00Z") == "25 Sep 2025"
+    assert update_day_label("not a date") == "not a date"
+
+
+def test_update_stamp_names_the_reporter_on_the_footers_vocabulary() -> None:
+    """Spec §7.3: ``HH:MM · {reporter}``, one vocabulary with the footer."""
+    from local_operator.tui.projects_render import (
+        update_day_label,
+        update_reporter_text,
+        update_stamp_text,
+    )
+
+    assert update_reporter_text("ab12cd34ef56") == "session ab12cd34ef56"
+    assert update_reporter_text("operator") == "the operator"
+    assert update_reporter_text("scout") == "scout"
+    assert update_reporter_text("") == ""
+    assert update_day_label("bad") == "bad"
+    entry = {"at": "2026-09-27T17:52:00Z", "by": "ab12cd34ef56"}
+    compact = update_stamp_text(entry).plain
+    assert compact.endswith("· session ab12cd34ef56")
+    # The clock is the READER's, so the expected hour comes from the same
+    # conversion rather than a hard-coded string that only passes in one zone.
+    from local_operator.tui.projects_render import update_local_moment
+
+    moment = update_local_moment("2026-09-27T17:52:00Z")
+    assert moment is not None
+    assert compact.startswith(moment.strftime("%H:%M"))
+    assert "2026-09-27" in update_stamp_text(entry, selected=True).plain
+    # No reporter at all: the stamp is the time alone.
+    assert " · " not in update_stamp_text({"at": "2026-09-27T17:52:00Z"}).plain
+
+
+def test_attachment_rows_carry_kind_size_path_and_the_missing_marker() -> None:
+    """Spec §7.4: the honest fallback — kind, name, size, path, or the marker."""
+    from local_operator.tui.projects_render import (
+        attachment_path_text,
+        attachment_row_text,
+    )
+
+    image = {"kind": "image", "name": "board-60x20.png", "bytes": 83904}
+    assert attachment_row_text(image).plain == "[img] board-60x20.png · 81.9 KB"
+    data = {"kind": "data", "name": "notes.md", "bytes": 12288}
+    assert attachment_row_text(data).plain == "[file] notes.md · 12.0 KB"
+    # An unknown kind reads the store's own default word rather than a blank.
+    assert attachment_row_text({"name": "x"}).plain.startswith("[file] x")
+    # A size the store never recorded is omitted, never printed as "0 B".
+    assert "·" not in attachment_row_text({"name": "x"}).plain
+    path = attachment_path_text({"path": "/tmp/a/b.png"}).plain
+    assert path.strip() == "→ /tmp/a/b.png"
+    assert (
+        "[missing on disk]" in attachment_path_text({"path": "/tmp/a/b.png", "missing": True}).plain
+    )
+    assert "(no path recorded)" in attachment_path_text({}).plain
+
+
+def test_the_clamp_marker_names_the_key_that_actually_toggles_it() -> None:
+    """A hinted key must do what it says — nowhere more than on this marker."""
+    from local_operator.tui.projects_render import (
+        UPDATE_BODY_LINES,
+        older_updates_text,
+        update_body_is_clamped,
+        update_body_lines,
+        update_more_lines_text,
+    )
+
+    assert update_more_lines_text(4, expanded=False).plain == "[4 more lines — ↵ expand]"
+    assert update_more_lines_text(4, expanded=True).plain == "[4 more lines — ↵ collapse]"
+    # Inflected: `1 more line` (agent review round 1, NIT-1).
+    assert update_more_lines_text(1, expanded=False).plain == "[1 more line — ↵ expand]"
+    assert older_updates_text(7).plain == "… 7 older updates"
+    body = "\n".join(f"line {n}" for n in range(1, UPDATE_BODY_LINES + 3))
+    assert len(update_body_lines(body)) == UPDATE_BODY_LINES + 2
+    assert update_body_lines("a\r\nb") == ["a", "b"]
+    # The predicate behind the row's verb (design D1): fits == no tail.
+    assert update_body_is_clamped("a\nb") is False
+    assert update_body_is_clamped("\n".join(str(n) for n in range(UPDATE_BODY_LINES))) is False
+    assert update_body_is_clamped(body) is True
+
+
+def test_the_marker_wears_muted_not_dim() -> None:
+    """Design review round 1, D4: the feed's one affordance must read as one.
+
+    `dim` is the quiet layer (paths, day headers) and sits at 3.77:1 on the
+    light ground; `muted` is 8.62 dark / 7.18 light.
+    """
+    from rich.style import Style
+
+    from local_operator.tui.projects_render import update_more_lines_text
+
+    seen: list[str] = []
+
+    def resolver(key: str) -> Style:
+        seen.append(key)
+        return Style()
+
+    update_more_lines_text(2, expanded=False, style_for=resolver)
+    assert seen == ["muted"], seen
+
+
+def test_the_path_row_abbreviates_home_and_keeps_the_file_tail() -> None:
+    """Design review round 1, D2: the tail is what tells one row from another.
+
+    At 100 columns the stored path is 126 cells against a 95-cell box, so a
+    right-truncation cut it inside the unique hex and every attachment row read
+    ``…/attachments/<cut>…``.
+    """
+    from pathlib import Path
+
+    from local_operator.tui.projects_render import attachment_path_text
+
+    home = str(Path.home())
+    attachment = {"path": f"{home}/.local-operator/projects/attachments/6870f1/eb904c99aa.png"}
+    unmeasured = attachment_path_text(attachment).plain
+    assert unmeasured.startswith("    → ~/.local-operator/")
+    fitted = attachment_path_text(attachment, width=60).plain
+    assert "…" in fitted
+    assert fitted.endswith(".png"), fitted
+    assert cell_len(fitted) <= 60
+    # The missing marker is reserved BEFORE the path is cut, so the caveat
+    # survives at the width the page has.
+    with_marker = attachment_path_text({**attachment, "missing": True}, width=60).plain
+    assert with_marker.endswith("[missing on disk]"), with_marker
+    assert cell_len(with_marker) <= 60
+    # A path that already fits is untouched.
+    assert "…" not in attachment_path_text({"path": "~/a/b.png"}, width=95).plain
+
+
 def test_detail_footer_names_progress_reporter_and_staleness() -> None:
     view = _view(
         progress="cutover done",

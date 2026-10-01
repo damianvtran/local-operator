@@ -589,6 +589,21 @@ SECTIONS: tuple[Section, ...] = (
         "A per-command RAM ceiling, so one oversized command is killed instead of "
         "taking the whole device down.",
     ),
+    # Its own section for the reason ``memory_guard`` has one, and LIVE for the
+    # same reason: the reader is a fresh ``ConfigManager`` per ``bash`` call. It is
+    # NOT in ``memory_guard`` because scope is uniform within a section and these
+    # are a different policy — a memory ceiling protects the DEVICE, a query
+    # budget protects the TURN, and the two have different failure stories (the
+    # one kills a command that was too big; the other kills one that was merely
+    # too wide).
+    Section(
+        "query_budget",
+        "Shell query budget",
+        Scope.LIVE,
+        "Time budget for a shell query — a grep/find/du walk rather than a build or "
+        "an install: an advisory at 10 s, and a stop at the budget so one search "
+        "cannot spend minutes of a turn.",
+    ),
     # Split out of ``tools`` (review round 1, M2), for the reason the module's
     # own history gives for ``providers`` and ``web_tools``: scope is uniform
     # within a section by construction, and these three keys are the one part of
@@ -2029,6 +2044,26 @@ SETTINGS: tuple[Setting, ...] = (
         help="Hide lop send traffic and inbound peer messages from transcripts.",
         choices=_bool_choices("hide new; reopen to re-read", "show new; reopen to re-read"),
     ),
+    # The desktop transcript's answer mark: a thin rule to the left of the row
+    # that CLOSES a turn (the `display.rail` idea, for the desktop app). Only
+    # `local-operator-ui` draws it; the TUI has no such element, so the TUI
+    # reader is settings-only (this key is in the test allow-list of keys with
+    # no single-value consumer, like every registry-derived `display.*` flag).
+    #
+    # Default OFF, deliberately: the operator reported the rail looked heavy
+    # next to the answer text, so it ships opt-in rather than as the new look.
+    # "Unset" must therefore mean the transcript as it renders today. Flat-dotted
+    # like every `display.*` key (see the block comment at `display.shimmer`).
+    Setting(
+        key="display.turn_answer_rail",
+        path=("display.turn_answer_rail",),
+        section="appearance",
+        label="Mark the turn answer",
+        kind=Kind.BOOL,
+        default=False,  # opt-in: the rail looked heavy; see tui/settings.py _DEFAULT_NOTES
+        help="Draw a thin rule beside the answer that closes a turn (desktop app).",
+        choices=_bool_choices("rule beside the closing answer", "no rule beside the answer"),
+    ),
     # -- the composer widget-visibility family (operator request, 2026-09-27) --
     #
     # One BOOL per composable piece of the composer: the status band and the
@@ -3383,6 +3418,57 @@ SETTINGS: tuple[Setting, ...] = (
             "Fraction of the ceiling at which one advisory line is emitted. It is "
             "only an advisory — userspace cannot slow an allocation — so it warns "
             "before the kill, it does not prevent it."
+        ),
+    ),
+    # -- query_budget -------------------------------------------------------
+    # ``path`` mirrors ``query_budget.QUERY_BUDGET_*_PATH`` in
+    # ``tools/query_budget.py``; the three are pinned together by
+    # ``test_query_budget_rows_share_the_consumer_paths`` rather than imported,
+    # for the same reason the rows above are not (this module must stay cheap for
+    # the CLI, ``tools.builtin``/``tools.query_budget`` must not be pulled in).
+    #
+    # Three rows rather than one, mirroring the search-interception trio: a guard
+    # that KILLS a command the model wrote deserves a master switch, a warn-only
+    # arm so an operator can watch before enforcing, and the number itself.
+    Setting(
+        key="bash.query_budget.enabled",
+        path=("bash", "query_budget", "enabled"),
+        section="query_budget",
+        label="Shell query budget",
+        kind=Kind.BOOL,
+        default=True,
+        help=(
+            "Time-box a shell `grep`/`find`/`du` walk that reads the filesystem rather "
+            "than a scoped file: one advisory at 10 s, then a stop at the budget "
+            "below. Builds, installs and test runs are never affected."
+        ),
+        choices=_bool_choices("time-box shell queries", "no budget"),
+    ),
+    Setting(
+        key="bash.query_budget.stop",
+        path=("bash", "query_budget", "stop"),
+        section="query_budget",
+        label="...stop rather than warn",
+        kind=Kind.BOOL,
+        default=True,
+        help=(
+            "On: a query that crosses the budget is killed and told why. Off: it runs "
+            "to completion and only the advisory is shown, so an operator can watch "
+            "before enforcing."
+        ),
+        choices=_bool_choices("stop the query", "advisory only"),
+    ),
+    Setting(
+        key="bash.query_budget.seconds",
+        path=("bash", "query_budget", "seconds"),
+        section="query_budget",
+        label="Budget (seconds)",
+        kind=Kind.INT,
+        default=60,
+        help=(
+            "Wall-clock budget for one shell query. The advisory fires at 10 s "
+            "whatever this says; this is the stop. A per-command prefix of "
+            "LOCAL_OPERATOR_ALLOW_SLOW_QUERY=1 skips the stop for a justified run."
         ),
     ),
     # -- shell_environment ----------------------------------------------

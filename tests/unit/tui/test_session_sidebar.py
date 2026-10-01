@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import os
+import re
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -38,6 +39,7 @@ from local_operator.tui.widgets.session_sidebar import (
     SIDEBAR_MAX_WIDTH,
     SIDEBAR_SPINNER_INTERVAL_S,
     SIDEBAR_WIDTH,
+    SessionSidebar,
     sidebar_content_width,
 )
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
@@ -711,10 +713,10 @@ async def test_sidebar_escape_restores_settings_and_current_narrow_selection_clo
         await pilot.pause()
         settings_focus = app.focused
         assert settings_focus is not None and settings_focus is not app._editor()
-        # Entered the list the way its own footer names (f9), not by clicking it:
-        # a pointer press on the list no longer moves the keyboard (design round
-        # D1, `SessionSidebar.FOCUS_ON_CLICK = False`), so a click could not put
-        # the sidebar in the state this test is about any more.
+        # Entered the list the way its own footer names (f9). The premise is the
+        # keyboard route, not the pointer: a press also enters this state now
+        # (issue #1357 click-to-focus), but this test's subject is the f9 entry
+        # whose Escape must restore the surface the list replaced.
         app.action_focus_sidebar()
         await pilot.pause()
         assert app._session_sidebar.has_focus, "premise: f9 focused the list"
@@ -3105,6 +3107,86 @@ async def _sidebar_with(pilot, app, entries, *, pins=(), show_subagents=False, t
     return sidebar
 
 
+def _chip_span(sidebar: Any) -> tuple[int, int]:
+    """The painted footer's chip, as ``(start, end)`` content columns.
+
+    Read from the FRAME rather than through any helper the hit-test itself
+    uses: the assertions below are about the cells a user can see and press,
+    so they must not be able to agree with a bug in the code that computes
+    them.
+    """
+    footer = sidebar.render().plain.splitlines()[-1]
+    match = re.search(r"⌥(?:1k\+|\d+)$", footer)
+    assert match is not None, f"no chip on the painted footer: {footer!r}"
+    return match.start(), match.end()
+
+
+async def _footer_gesture(
+    pilot: Any,
+    app: Any,
+    sidebar: Any,
+    kinds: tuple[type, ...],
+    x: int,
+    y: int,
+    button: int = 1,
+) -> None:
+    """Deliver pilot-shaped mouse events at a REGION-RELATIVE ``(x, y)``.
+
+    FOR THE FULL-HEIGHT (DOCKED) SIDEBAR THE PILOT CANNOT REACH THE FOOTER.
+    ``pilot.hover``/``pilot.click`` refuse any target outside
+    ``screen.size.region`` — a region that starts at the screen's ORIGIN — and
+    the app's one-cell screen inset leaves the docked sidebar's footer (the
+    widget's last content line) exactly one row below that region. The chip is
+    therefore unreachable through the pilot there even though a real terminal
+    clicks it fine; the overlay drawer is height-clamped above the input
+    dock, so its footer sits INSIDE the region and the plain pilot does reach
+    it. The seam is used uniformly anyway: these are the same events pilot
+    builds and the same delivery it performs (``app.mouse_position`` +
+    ``screen._forward_event``, pilot.py ``_post_mouse_events``); only the
+    bounds pre-check is skipped — a pre-check the terminal never makes.
+    """
+    from textual import events
+    from textual.geometry import Offset
+
+    x_abs = sidebar.region.x + x
+    y_abs = sidebar.region.y + y
+    app.mouse_position = Offset(x_abs, y_abs)
+    for kind in kinds:
+        kwargs: dict[str, Any] = {"chain": 1} if kind is events.Click else {}
+        event = kind(
+            widget=sidebar,
+            x=x_abs,
+            y=y_abs,
+            delta_x=0,
+            delta_y=0,
+            button=0 if kind is events.MouseMove else button,
+            shift=False,
+            meta=False,
+            ctrl=False,
+            screen_x=x_abs,
+            screen_y=y_abs,
+            **kwargs,
+        )
+        app.screen._forward_event(event)
+        await pilot.pause()
+
+
+async def _click_footer_cell(pilot: Any, app: Any, sidebar: Any, column: int) -> None:
+    """A full press→release→click on a footer CONTENT column of the sidebar.
+
+    The column is translated through the widget's LEFT padding — the same
+    resolution the hit-test must do — so a placement whose gutter sits
+    on the left (the right dock) clicks the cell it names.
+    """
+    from textual import events
+
+    x = int(sidebar.styles.padding.left) + column
+    y = sidebar.size.height - 1
+    await _footer_gesture(
+        pilot, app, sidebar, (events.MouseDown, events.MouseUp, events.Click), x, y
+    )
+
+
 @pytest.mark.asyncio
 async def test_a_pinned_row_leaves_its_old_section():
     """A pin LIFTS a row out of the tier it ranked into; it never reorders the
@@ -4530,6 +4612,346 @@ async def test_at_the_24_cell_floor_the_position_yields_and_the_chip_survives():
         footer = sidebar.render().plain.splitlines()[-1]
         assert footer.strip() == "f9 focus · ⌥1k+", f"{footer!r} ({context})"
         assert "…" not in footer, f"the chip cropped instead of the position yielding: {footer!r}"
+
+
+@pytest.mark.asyncio
+async def test_a_click_on_the_footer_chip_toggles_the_layer_without_f9():
+    """Issue #1357 principle 5: the hidden count is a real pointer control.
+
+    No F9 first, and no keyboard movement for it: the press runs the SAME
+    per-session flip the chord runs (message + app re-poll), moves no cursor
+    and posts nothing else — a press meant for the count can never open,
+    switch or pin a row.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        entries = [_plain("a", active=True), _sub("run1", label="one", agent="scout")]
+        sidebar = await _sidebar_with(pilot, app, entries, total=4)
+        assert not sidebar.has_focus, "premise: the click must work unfocused"
+        repolls: list[str] = []
+        app._refresh_sidebar = lambda: repolls.append("refresh")  # type: ignore[method-assign]
+        first, _end = _chip_span(sidebar)
+        with patch.object(sidebar, "post_message", wraps=sidebar.post_message) as sent:
+            await _click_footer_cell(pilot, app, sidebar, first)
+            await pilot.pause()
+        messages = [
+            call.args[0]
+            for call in sent.call_args_list
+            # Textual forwards the mouse INPUT events through this same seam
+            # (and posts pump callbacks through it too); keep the widget's own
+            # message traffic, which is what this assertion is about.
+            if type(call.args[0]).__qualname__.startswith("SessionSidebar.")
+        ]
+        assert [type(message).__name__ for message in messages] == [
+            "SubagentLayerToggled"
+        ], messages
+        assert isinstance(messages[0], SessionSidebar.SubagentLayerToggled)
+        assert messages[0].show_subagents is True
+        assert sidebar.show_subagents is True, "the chip press did not flip the layer"
+        assert repolls, "the flip must ask the app to re-poll with the flag"
+        assert sidebar.cursor_id == "a", "the press moved the cursor"
+        assert sidebar.requested_id == "", "the press asked to open a row"
+        assert not sidebar.has_focus, "the press took the keyboard"
+
+        await _click_footer_cell(pilot, app, sidebar, first)
+        await pilot.pause()
+        assert sidebar.show_subagents is False, "a second press must flip it back"
+        assert sidebar.cursor_id == "a"
+
+
+@pytest.mark.asyncio
+async def test_a_press_on_footer_cells_outside_the_chip_is_inert():
+    """Only the chip's own cells toggle; neighbouring footer cells stay no-ops.
+
+    A footer press has always done nothing, and that must stay true one cell
+    off the chip and of a footer that paints NO chip — "nothing hidden,
+    nothing said" cuts both ways: nothing is pressable either.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True), _sub("r1")], total=4)
+        repolls: list[str] = []
+        app._refresh_sidebar = lambda: repolls.append("refresh")  # type: ignore[method-assign]
+        first, end = _chip_span(sidebar)
+        for column in (first - 1, 0, end):
+            await _click_footer_cell(pilot, app, sidebar, column)
+            await pilot.pause()
+            assert sidebar.show_subagents is False, f"column {column} flipped the layer"
+            assert sidebar.cursor_id == "a", f"column {column} moved the cursor"
+
+        sidebar.set_subagent_total(0)
+        await pilot.pause()
+        footer = sidebar.render().plain.splitlines()[-1]
+        assert "⌥" not in footer, f"premise: no chip should be painted: {footer!r}"
+        await _click_footer_cell(pilot, app, sidebar, len(footer) - 1)
+        await pilot.pause()
+        assert sidebar.show_subagents is False, "a chip-less footer flipped the layer"
+        assert not repolls
+
+
+@pytest.mark.asyncio
+async def test_a_chip_press_interrupted_by_a_close_is_cancelled():
+    """A press in flight when the list closes must not stay primed.
+
+    The pin cell is protected by its row id being cleared with the close; the
+    chip has no row id, so the flag itself is cleared — otherwise the next
+    press anywhere (even dead space, whose own press records nothing) would
+    inherit the interrupted gesture and flip the layer on a click that never
+    touched the chip.
+    """
+    from textual import events
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True)], total=4)
+        app._refresh_sidebar = lambda: None  # type: ignore[method-assign]
+        first, _end = _chip_span(sidebar)
+        x = int(sidebar.styles.padding.left) + first
+        y = sidebar.size.height - 1
+        await _footer_gesture(pilot, app, sidebar, (events.MouseDown,), x, y)
+        assert sidebar._pressed_chip, "premise: the press is armed"
+        sidebar.set_open(False)
+        assert sidebar._pressed_chip is False, "the interrupted press stayed primed"
+        sidebar.set_open(True)
+        await pilot.pause()
+        # A click on the footer's dead space must not inherit the gesture.
+        await _click_footer_cell(pilot, app, sidebar, 0)
+        await pilot.pause()
+        assert sidebar.show_subagents is False
+
+
+@pytest.mark.asyncio
+async def test_the_chip_press_works_while_the_list_is_focused():
+    """The pointer route is an ADDITION to the chord, never a replacement.
+
+    With the list focused (F9 mode) the same press flips the same flag, and
+    the keyboard does not move: the chip's cells are exempt from the
+    click-to-focus walk (the reconciliation with that slice), so the chord and
+    the pointer stay independent ways to the same flip. That exemption is what
+    keeps this true now — the retired `FOCUS_ON_CLICK = False` no longer does,
+    since a row or dead-space press does take the keyboard.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True), _sub("r1")], total=4)
+        await _focus_settled(pilot, sidebar)
+        assert sidebar.has_focus, "premise: the list holds the keyboard"
+        app._refresh_sidebar = lambda: None  # type: ignore[method-assign]
+        first, _end = _chip_span(sidebar)
+        await _click_footer_cell(pilot, app, sidebar, first)
+        await pilot.pause()
+        assert sidebar.show_subagents is True
+        assert sidebar.has_focus, "the chip press handed the keyboard away"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("size", "position", "expected_left_pad", "overlay"),
+    [
+        ((120, 40), "left", 1, False),
+        ((120, 40), "right", SIDEBAR_GUTTER, False),
+        ((80, 24), "left", 1, True),
+        ((30, 30), "left", 1, True),
+    ],
+)
+async def test_the_chip_press_resolves_the_same_cells_in_every_placement(
+    size, position, expected_left_pad, overlay
+):
+    """One hit-test, three placements: it resolves the LEFT padding.
+
+    The gutter swaps sides with the dock, so the left pad is 1 docked left and
+    ``SIDEBAR_GUTTER`` docked right; the overlay drawer keeps the base pad.
+    A hit-test hardcoding either one misses the chip in the other placement by
+    exactly the gutter — this test aims the press with the widget's OWN
+    resolved pad at the chip read off the frame, so it cannot pass that way.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        app._sidebar_settings = SidebarSettings(False, position)
+        await pilot.press("ctrl+b")
+        await pilot.pause()
+        sidebar = app._session_sidebar
+        if app._sidebar_timer is not None:
+            app._sidebar_timer.pause()
+        app._sidebar_refresh_generation += 1
+        sidebar.set_subagent_total(4)
+        sidebar.set_entries([_plain("a", active=True)])
+        await pilot.pause()
+        workspace = app.query_one("#session-workspace")
+        assert workspace.has_class("sidebar-overlay") is overlay, "premise: placement"
+        assert int(sidebar.styles.padding.left) == expected_left_pad, "premise: pad"
+        app._refresh_sidebar = lambda: None  # type: ignore[method-assign]
+        first, _end = _chip_span(sidebar)
+        await _click_footer_cell(pilot, app, sidebar, first)
+        await pilot.pause()
+        assert sidebar.show_subagents is True, "the chip press missed"
+
+
+@pytest.mark.asyncio
+async def test_neither_the_chord_nor_the_chip_press_writes_the_setting():
+    """The documented discipline, held for BOTH routes: no config write.
+
+    `docs/SESSION_SIDEBAR.md` (The ⌥ subagent layer): `Ctrl+A` never writes
+    `tui.sidebar_show_subagents` because a write fans out through the config
+    watcher to every running `lop` process. The chip press runs the same flip
+    and is held to the same rule — asserted against the one writer every
+    settings path funnels through (`settings_io.write_setting`) and the one
+    writer `ConfigManager` has (`set_config_value`).
+    """
+    from local_operator.config import ConfigManager
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True), _sub("r1")], total=4)
+        app._refresh_sidebar = lambda: None  # type: ignore[method-assign]
+        with (
+            patch("local_operator.settings_io.write_setting") as write,
+            patch.object(ConfigManager, "set_config_value") as store,
+        ):
+            await _focus_settled(pilot, sidebar)
+            await pilot.press("ctrl+a")
+            await pilot.pause()
+            assert sidebar.show_subagents is True, "premise: the chord flipped it"
+            first, _end = _chip_span(sidebar)
+            await _click_footer_cell(pilot, app, sidebar, first)
+            await pilot.pause()
+            assert sidebar.show_subagents is False, "premise: the chip flipped it back"
+        write.assert_not_called()
+        store.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("size", "total"), [((100, 30), 4), ((30, 30), 1520)])
+async def test_the_chip_hover_underlines_only_the_chip_and_changes_no_text(size, total):
+    """The affordance is a STYLE on the chip's cells — never swapped text.
+
+    The count keeps every glyph (a hover must not steal the number) and the
+    resting line and the hovered line are byte-identical as TEXT: the ladder
+    never moves, so the fit arithmetic cannot be disturbed by a pointer. Only
+    the chip's span gains the underline; moving off the chip drops it.
+    """
+    from textual import events
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, [_plain("a")], total=total)
+        resting = sidebar.render()
+        first, end = _chip_span(sidebar)
+        chip = resting.plain.splitlines()[-1][first:end]
+        pad = int(sidebar.styles.padding.left)
+        await _footer_gesture(
+            pilot, app, sidebar, (events.MouseMove,), pad + first, sidebar.size.height - 1, button=0
+        )
+        hovered = sidebar.render()
+        assert hovered.plain == resting.plain, "the hover changed the text"
+        underlined = [
+            span for span in hovered.spans if getattr(span.style, "underline", None) is True
+        ]
+        assert len(underlined) == 1, f"expected exactly the chip underlined: {hovered.spans!r}"
+        span = underlined[0]
+        start = hovered.plain.rfind(chip)
+        assert (span.start, span.end) == (start, start + len(chip)), span
+
+        await _footer_gesture(
+            pilot, app, sidebar, (events.MouseMove,), pad, sidebar.size.height - 2, button=0
+        )
+        after = sidebar.render()
+        assert after.plain == resting.plain
+        assert not [
+            s for s in after.spans if getattr(s.style, "underline", None) is True
+        ], "the underline followed the pointer off the chip"
+
+
+@pytest.mark.asyncio
+async def test_a_flip_that_lands_mid_poll_is_served_when_the_poll_completes(monkeypatch):
+    """UX round 1, U2: a press must not wait out the poll it collided with.
+
+    The in-flight poll read the store BEFORE the flip, so its answer cannot
+    carry the layer's rows; without the re-arm the ask was swallowed by the
+    `_sidebar_refresh_pending` guard and the rows waited for the 2 s timer.
+    Here the poll is parked mid-read, the press lands, and the completion
+    must serve the ask on its own — the timer stays paused throughout, so
+    the second read can only have come from the re-arm.
+    """
+    from local_operator.tui import session_catalog
+
+    entered = threading.Event()
+    release = threading.Event()
+    reads: list[bool] = []
+
+    def parked_load(root, *, include_subagents=False, pinned_hidden_ids=()):
+        reads.append(include_subagents)
+        entered.set()
+        release.wait(timeout=15)
+        rows = [_plain("mine")]
+        if include_subagents:
+            rows.append(_sub("run1", label="ship it", agent="coder"))
+        return rows
+
+    monkeypatch.setattr(session_catalog, "load_catalog", parked_load)
+    monkeypatch.setattr(session_catalog, "subagent_population", lambda root: 1)
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, [_plain("mine")], show_subagents=False, total=4)
+        base = app._sidebar_refresh_generation
+        app._refresh_sidebar()
+        assert app._sidebar_refresh_pending is True
+        await _pump_until(pilot, entered.is_set, what="the parked catalog read")
+        assert reads == [False], "premise: the parked poll read before the flip"
+
+        first, _end = _chip_span(sidebar)
+        await _click_footer_cell(pilot, app, sidebar, first)
+        await pilot.pause()
+        assert sidebar.show_subagents is True, "premise: the press flipped the layer"
+        assert app._sidebar_refresh_again is True, "the dropped ask was not remembered"
+        assert app._sidebar_refresh_generation == base + 1, "a poll started while one was in flight"
+
+        release.set()
+        await _pump_until(
+            pilot,
+            lambda: app._sidebar_refresh_generation >= base + 2
+            and not app._sidebar_refresh_pending,
+            what="the re-armed poll",
+        )
+        assert reads == [False, True], "the re-run did not re-read with the flip applied"
+        assert "⌥ Subagent Runs" in sidebar.render().plain, "the flip's rows never arrived"
+        # The re-arm serves ONE read — it settles rather than polling on.
+        for _ in range(30):
+            await pilot.pause()
+        assert app._sidebar_refresh_generation == base + 2
+        assert reads == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_routine_poll_stays_dropped():
+    """The re-arm is scoped to the toggle; routine asks must not stack up.
+
+    If a dropped poll re-armed itself, a catalog slower than the 2 s timer
+    would run back-to-back with no gap between a completion and the next
+    read; only the layer flip's ask is remembered (see
+    `_sidebar_refresh_again`).
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        await _sidebar_with(pilot, app, [_plain("a")], total=4)
+        app._sidebar_refresh_pending = True
+        try:
+            base = app._sidebar_refresh_generation
+            app._refresh_sidebar()
+            assert app._sidebar_refresh_generation == base, "a poll started while one was in flight"
+            assert app._sidebar_refresh_again is False
+        finally:
+            app._sidebar_refresh_pending = False
 
 
 @pytest.mark.asyncio

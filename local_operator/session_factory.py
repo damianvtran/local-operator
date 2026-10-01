@@ -2220,11 +2220,13 @@ def _skills_fingerprint(hooks: _KnowledgeHooks) -> tuple[object, ...] | None:
     without discovery) must behave exactly as it did before this existed.
 
     Cost is the reason this is affordable on a per-message path at all:
-    ``roots_fingerprint`` stats one level (per-file ``(mtime_ns, size)``, because
-    editing a ``SKILL.md`` in place bumps no directory's mtime) and measured
-    ~0.29 ms across 8 roots / 57 skills, against 17-25 ms for the full scan it
-    decides whether to run. Never raises: a filesystem fault reads as "no
-    fingerprint", which costs a refresh rather than a turn.
+    ``roots_fingerprint`` stats every skill directory the bounded-depth scan
+    would register (per-file ``(mtime_ns, size)``, because editing a ``SKILL.md``
+    in place bumps no directory's mtime) and measured ~0.29 ms across 8 flat
+    roots / 57 skills (grouped libraries add one ``scandir`` per grouping
+    folder), against 17-25 ms for the full scan it decides whether to run. Never
+    raises: a filesystem fault reads as "no fingerprint", which costs a refresh
+    rather than a turn.
     """
     roots = list(getattr(hooks, "skill_roots", ()) or ())
     if not roots:

@@ -205,6 +205,22 @@ class ProjectsViewJumpRequested(Message):
         self.sessions = sessions
 
 
+class ProjectsViewAttachmentOpened(Message):
+    """``↵`` on an attachment row: hand the copied file to the OS (spec §7.4).
+
+    Carries the path and the display name so the host can open it and say what
+    happened — the page never spawns a process, exactly as it never touches
+    session machinery. A path that is gone is answered by the host with the
+    honest sentence rather than a silent no-op.
+    """
+
+    def __init__(self, *, path: str, name: str, project_name: str) -> None:
+        super().__init__()
+        self.path = path
+        self.name = name
+        self.project_name = project_name
+
+
 class ProjectsView(Vertical):
     """The page: a title, a rule, the scrollable canvas, the detail footer, hints.
 
@@ -315,7 +331,12 @@ class ProjectsView(Vertical):
         self._canvas = Static(classes="projects-view-canvas")
         self._body = ScrollableContainer(self._canvas, classes="projects-view-body")
         self._detail_page = ProjectDetailPage(
-            self._detail_row_action, _style_resolver(), on_nav=self._detail_nav
+            self._detail_row_action,
+            _style_resolver(),
+            on_nav=self._detail_nav,
+            # A toggle changes the selected row's verb, which is the hint row's
+            # own input (UX review round 1, U2).
+            on_state_change=self._detail_state_changed,
         )
         self._detail_page.display = False
         # The pinned footer: the highlighted project's detail in the list view,
@@ -760,6 +781,16 @@ class ProjectsView(Vertical):
             return
         self._paint_rule()
 
+    def _detail_state_changed(self) -> None:
+        """The detail page changed a row's own verb: re-arm the chrome.
+
+        Without this the footer kept offering `↵ expand` on the row the reader
+        had just opened (UX review round 1, U2). Deferred like every other
+        chrome paint here — the toggled page settles first, so the hint is
+        measured against the row it will act on.
+        """
+        self.call_after_refresh(self._paint_detail_chrome)
+
     def _detail_scroll_changed(self, *_args: Any) -> None:
         """The detail's ruler tracks ITS viewport (design §6).
 
@@ -962,11 +993,24 @@ class ProjectsView(Vertical):
         verb = self._detail_page.selected_action_verb()
         move = (self._move_hint, " move", False)
         page = (self._page_hint, " page", True)
-        open_hint = (self._open_hint, f" {context}" if context else " open", True)
+        # The `↵` hint exists only while the selected row HAS a verb: its old
+        # `" open"` fallback was unreachable until design D1 and UX U3 made
+        # verb-less rows real (a one-line entry, a missing copy), and a dimmed
+        # `↵ open` on a row that cannot act is the same wrong promise in a
+        # quieter ink (UX review round 2, U6). No verb, no rung.
+        named = context or verb
+        open_hint = (self._open_hint, f" {named}", True)
         # The bare verb is a LOW rung: a long target name sheds before the key
         # does (UX round 1, U3 — the name informs, the key acts).
-        open_bare = (self._open_hint, f" {verb}" if verb else " open", True)
+        open_bare = (self._open_hint, f" {verb or context}", True)
         refresh = (self._refresh_hint, " refresh", True)
+        if named is None:
+            return [
+                rung([move, page, refresh], "back"),
+                rung([move, page], "back"),
+                rung([move], ""),
+                rung([], ""),
+            ]
         return [
             rung([move, page, open_hint, refresh], "back"),
             rung([move, page, open_hint], "back"),
@@ -1606,6 +1650,10 @@ class ProjectsView(Vertical):
         # hint arming reads the settled scroll geometry — the same deferred
         # pair every repaint schedules.
         self.call_after_refresh(self._paint_chrome)
+        # And the row cursor's reveal, again: `show` revealed while the page
+        # was still hidden (its rows had no regions), so at narrow widths the
+        # selection landed a row below the fold (measured at 60x24).
+        self.call_after_refresh(self._detail_page.reveal_selected)
         try:
             self._detail_page.focus()
         except Exception:
@@ -1710,6 +1758,18 @@ class ProjectsView(Vertical):
                     project_id=project_id,
                     name=name,
                     completed=not bool(row.get("completed_at")),
+                    project_name=self._detail_page.project_name,
+                )
+            )
+            return
+        if kind == "attachment":
+            # The attachment's own row, not the page's provenance: the file is
+            # the thing being opened, and the message carries it by path.
+            path = str(row.get("path") or "")
+            self.post_message(
+                ProjectsViewAttachmentOpened(
+                    path=path,
+                    name=str(row.get("name") or "(unnamed)"),
                     project_name=self._detail_page.project_name,
                 )
             )
