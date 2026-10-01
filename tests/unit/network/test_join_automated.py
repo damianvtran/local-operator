@@ -175,6 +175,46 @@ def test_an_automated_join_nobody_confirms_admits_nothing(
     assert "pairing_confirmed" not in _events(server_a)
 
 
+def test_a_doctored_transcription_is_refused_through_the_automated_path(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M4's no-bless property, pinned FOR ``--automated`` (agent review round 1,
+    Finding 4).
+
+    The automated path's transcription is this device's own derivation, so the
+    only way to doctor it is to swap the value the join SENDS — done here by
+    wrapping ``_finish_pairing``, i.e. the framed ``net_pair_ready`` value, with
+    a wrong-but-well-formed code. The relay's compare runs on what crossed the
+    wire, before any decision is read, so the ceremony must refuse and nothing
+    may be admitted; the invite records the spent attempt. If anyone ever adds
+    an automated shortcut that treats "automated" as locally trusted, or moves
+    the compare behind the decision gate, this cell fails.
+    """
+    server_a, server_b, host, port = devices
+    record, minted = _minted(server_a)
+
+    real = net_cli._finish_pairing  # noqa: SLF001 — the frame-building seam itself
+
+    def _doctored(*args: Any, **kwargs: Any) -> Any:
+        kwargs["typed"] = "000001" if kwargs.get("typed") != "000001" else "000002"
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(net_cli, "_finish_pairing", _doctored)
+
+    with pytest.raises(types.MeshRefusal) as refused:
+        _automated_join(server_b, host=host, port=port, minted=minted)
+
+    assert refused.value.code == "sas_mismatch"
+    refreshed = store.load(record.network_id, server_a.root)
+    assert refreshed.member(server_b.identity.device_id) is None
+    assert store.list_networks(server_b.root) == []
+    # The refusal is audited, the admission is not, and the attempt is spent.
+    _await_event(server_a, "pairing_refused")
+    assert "pairing_confirmed" not in _events(server_a)
+    assert refreshed.invites[0].attempts >= 1
+
+
 def test_the_cli_parses_the_automated_flag() -> None:
     """The flag exists on the REAL parser, so the guide's command line is a command."""
     parser = argparse.ArgumentParser(prog="lop")

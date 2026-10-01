@@ -1766,6 +1766,8 @@ def execute_approval(
             transport.close()
         except Exception:  # noqa: BLE001 — teardown must never mask a result
             pass
+        if state != "connected":
+            _release_invite_decision(run)
     latest = approvals_adapter.load(approval_id)
     return {
         "ok": state == "connected",
@@ -1777,6 +1779,30 @@ def execute_approval(
         "error": error,
         "record_state": latest.state if latest else state,
     }
+
+
+def _release_invite_decision(run: OnboardRun) -> None:
+    """Clear the pre-answered admit for the invite a run ends WITHOUT consuming.
+
+    The decision IS the operator's gesture for ONE ceremony — slice (b)
+    pre-answers the relay's parked confirm. The relay clears it in its own
+    ``finally`` when a ceremony consumes it; a run that ends earlier (install
+    failed, a deny observed, expiry, a crash mid-run) has no ceremony to do that,
+    and a stale admit decision would otherwise sit waiting for any later parking
+    of the same invite until the TTL sweep (agent review round 1, Finding 1's
+    secondary note). ONE WRITER, ONE OWNER: the run that wrote it clears it —
+    and only for outcomes where nothing consumed it (a successful run's
+    ceremony already did, and the cleanup is skipped so the success path stays
+    byte-for-byte what the relay left).
+    """
+    if not run.invite_id:
+        return
+    from local_operator.network import store as network_store
+
+    try:
+        network_store.clear_pair_decision(run.invite_id)
+    except MeshRefusal:
+        pass
 
 
 def _port_from(host: str) -> int:

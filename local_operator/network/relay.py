@@ -10782,10 +10782,14 @@ def service_action(action: str) -> dict[str, Any]:
     return {
         "ok": False,
         "reason": "no_supervisor",
+        # §2.9: the sentence names the STATE and the product's own fallback, never
+        # a terminal command — ``step_relay`` interpolates this message verbatim
+        # into an onboarding receipt, so it can be read on a machine whose
+        # onboarding agent must not have to run anything by hand.
         "error": (
             f"`lop network {action}` needs a user service supervisor (launchctl on "
-            "macOS, systemctl --user on Linux). Run the relay in the foreground "
-            "with `lop network serve` instead."
+            "macOS, systemctl --user on Linux). The relay can run in the foreground "
+            "instead."
         ),
     }
 
@@ -10826,8 +10830,8 @@ def _service_action_systemd(action: str) -> dict[str, Any]:
             "error": (
                 f"`lop network {action}` drives systemd --user, and this run's HOME is "
                 "not the home the user manager supervises, so there is no unit to "
-                "drive. Run the relay in the foreground with `lop network serve`, or "
-                "run this from a normal login where the unit exists."
+                "drive. The relay can run in the foreground instead, or this can be "
+                "run from a normal login where the unit exists."
             ),
         }
     if action in ("start", "restart") and not systemd_path().exists():
