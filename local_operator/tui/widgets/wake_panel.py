@@ -72,6 +72,21 @@ def _overflow_line(label: str, dim: Style) -> Text:
     return line
 
 
+#: Where the band's copy of a shared health SENTENCE stops. The sentence is
+#: written once (``monitors.store.health_hint``) and the CLI, the agent tool and
+#: the desktop route all print it whole — but the band is a two-row glance
+#: surface, and the explanation half of "tool unavailable since 12:56 — retrying"
+#: is what pushed the monitor's NAME out of the row at 100 columns. Splitting on
+#: the sentence's own clause separator keeps ONE spelling: the band shows the
+#: state, the surfaces with room show the state and its consequence.
+_BAND_HEALTH_SEPARATOR = " — "
+
+
+def _band_health_clause(sentence: str) -> str:
+    """The state clause of a shared health sentence (see above)."""
+    return sentence.split(_BAND_HEALTH_SEPARATOR, 1)[0].strip()
+
+
 class WakePanel(Container):
     """The session's scheduled wakes, rendered in the dock band above todos.
 
@@ -256,56 +271,88 @@ class WakePanel(Container):
     def _monitor_fingerprint(cls, spec: Any, counters: dict[str, Any]) -> tuple[str, ...]:
         """One monitor as a paint-relevant tuple; the wake fingerprint's shape.
 
-        The due label carries the same minute-level rounding the wake label
-        gets (a sub-minute clock drift must not repaint the 1 Hz poll). A
-        disabled monitor's due slot becomes the state word, and the ink turns
-        warning for a disabled monitor or one mid-ladder on the failure count
-        (§11.3) — the same two-fact split the wake row makes, because the band
-        cannot afford a health column of its own.
+        ``(id, due_or_state, every, name, ink, health, rank)``. Two rules here
+        are the whole reason the band can be read at a glance:
+
+        - **The state word takes the DUE slot** for every state a reader must
+          not miss (``disabled`` / ``stalled`` / ``idle``), the way the wake row
+          already does for an owed fire. The band has no health column, and the
+          clock it replaces is the least informative thing in the row (design
+          review round 1, D1/D2 — at 60 columns the sentence after the name was
+          the first thing truncation took, and `idle` was invisible entirely).
+        - **The health sentence sits BEFORE the name and the interval**, so a
+          narrow row loses `every 1m` and the label rather than the hint.
+
+        ``rank`` orders the section worst-first (D5): the cap is two rows, and a
+        hidden row must never be the one carrying the news.
         """
+        from local_operator.monitors import store as monitor_store
+
+        now_ms = int(time.time() * 1000)
+        row = {
+            **counters,
+            "id": getattr(spec, "id", ""),
+            "tool": getattr(spec, "tool", ""),
+            "created_at": getattr(spec, "created_at", 0) or 0,
+            "every_ms": getattr(spec, "every_ms", None),
+        }
         disabled = bool(counters.get("disabled"))
+        since = counters.get("unavailable_since")
+        unavailable = isinstance(since, int) and not isinstance(since, bool) and since > 0
         failures = counters.get("consecutive_failures")
         fail_count = failures if isinstance(failures, int) and not isinstance(failures, bool) else 0
         failing = fail_count > 0
+        idle = (not disabled) and (not unavailable) and monitor_store.is_idle(row, now_ms)
+        hint = monitor_store.health_hint(row, now_ms)
+
         due = counters.get("next_due_at")
         if disabled:
             label = "disabled"
+        elif unavailable:
+            label = "stalled"
+        elif idle:
+            label = "idle"
         elif isinstance(due, int) and not isinstance(due, bool):
             label = format_wake_time(due)
         else:
             label = "waiting"
-        ink = "warning" if (disabled or failing) else "dim"
+
+        ink = "dim"
+        rank = 6
         health = ""
         if disabled:
             health = " ".join(str(counters.get("disabled_reason") or "").split())
+            ink, rank = "warning", 0
+        elif unavailable:
+            # AN UNAVAILABLE EPISODE OUTRANKS A STALE FAILURE COUNT (D3): the
+            # count froze when the tool went out of reach, because unavailable
+            # ticks charge no strike — and "3 failed" where the CLI says
+            # "retrying" is the cross-surface disagreement §D6 exists to stop.
+            health = _band_health_clause(hint or "tool unavailable — retrying")
+            ink, rank = "warning", 1
+        elif idle:
+            # The state word is the whole message here; the CLI carries the
+            # "overdue by 3h" tail for readers who go looking.
+            health = ""
+            ink, rank = "warning", 2
+        elif hint is not None and hint.startswith("never checked"):
+            health = _band_health_clause(hint)
+            ink, rank = "warning", 3
         elif failing:
             health = f"{fail_count} failed"
-        else:
-            # The shared §D6 hint: never-checked and stalled watches are the
-            # two states the band could not show at all, and both are ones the
-            # operator would otherwise read as a healthy row. Warning ink only
-            # for those two — a quiet watch with 0 deliveries is NEUTRAL by
-            # design, because a watch that sees nothing may simply be watching
-            # something quiet.
-            from local_operator.monitors import store as monitor_store
+            ink, rank = "warning", 5
+        elif hint:
+            # NEUTRAL by design — a quiet watch may be watching something quiet
+            # — but painted in MUTED rather than DIM: the dim token measures
+            # 4.18:1 on the band panel, below the AA floor, which made the new
+            # hint the least legible text in the frame (D8).
+            health = _band_health_clause(hint)
+            ink, rank = "muted", 4
 
-            now_ms = int(time.time() * 1000)
-            hint = monitor_store.health_hint(
-                {
-                    **counters,
-                    "created_at": getattr(spec, "created_at", 0) or 0,
-                    "every_ms": getattr(spec, "every_ms", None),
-                },
-                now_ms,
-            )
-            if hint:
-                health = hint
-                if hint.startswith(("tool unavailable", "never checked")):
-                    ink = "warning"
         every_ms = getattr(spec, "every_ms", None)
         every = f"every {format_duration(every_ms)}" if every_ms else "once"
         name = " ".join(str(getattr(spec, "name", "")).split())
-        return (str(spec.id), label, every, name, ink, health)
+        return (str(spec.id), label, every, name, ink, health, str(rank))
 
     # -- rendering ------------------------------------------------------------
     def _build(
@@ -423,22 +470,37 @@ class WakePanel(Container):
         header = Text(no_wrap=True, overflow="ellipsis")
         header.append("Monitors", style=muted)
         header.append(" · ", style=dim)
-        header.append(f"{len(rows)} watching" if len(rows) != 1 else "1 watching", style=muted)
+        # The count names what is ARMED, and calls out the broken rows: a header
+        # reading "1 watching" directly above a row reading "disabled" says
+        # something the row itself contradicts (design review round 1, D7).
+        broken = sum(1 for row in rows if row[4] == "warning")
+        count = f"{len(rows)} monitor" if len(rows) == 1 else f"{len(rows)} monitors"
+        if broken:
+            attention = "1 needs attention" if broken == 1 else f"{broken} need attention"
+            header.append(f"{count} · {attention}", style=muted)
+        else:
+            header.append(f"{count} armed", style=muted)
 
+        # WORST FIRST, then the cap: with two visible rows the ones behind the
+        # marker may not be the ones carrying the news (D5).
+        ordered = sorted(rows, key=lambda row: int(row[6]))
         cap, marker = self._row_window(len(rows), max(1, room) - 1, MAX_MONITOR_ROWS)
-        visible = rows[:cap]
+        visible = ordered[:cap]
         lines = [header]
-        for monitor_id, label, every, name, ink, health in visible:
+        for monitor_id, label, every, name, ink, health, _rank in visible:
             row = Text(no_wrap=True, overflow="ellipsis")
             row.append("- ", style=dim)
             row.append(monitor_id, style=muted)
             row.append(" ", style=dim)
-            row.append(label, style=warning if ink == "warning" else dim)
-            row.append(f" · {every}", style=dim)
+            tone = warning if ink == "warning" else muted if ink == "muted" else dim
+            row.append(label, style=tone)
+            # HEALTH BEFORE THE BOILERPLATE (D1): a narrow row then loses the
+            # interval and the name, never the sentence that says what is wrong.
+            if health:
+                row.append(f" · {health}", style=tone)
             if name:
                 row.append(f" — {name}", style=dim)
-            if health:
-                row.append(f" · {health}", style=warning if ink == "warning" else dim)
+            row.append(f" · {every}", style=dim)
             lines.append(row)
         if marker:
             lines.append(_overflow_line(f"… {len(rows) - len(visible)} more monitors", dim))

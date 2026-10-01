@@ -121,7 +121,8 @@ async def test_create_list_cancel_round_trip(tmp_path: Any) -> None:
         )
         assert created.is_error is False
         assert created.text is not None and created.text.startswith(
-            "Armed monitor 'date-watch' (m1): bash `date -u` every 1m30s, durable."
+            "Armed monitor 'date-watch' (m1) — ticks run only while this session is open. "
+            "bash `date -u` every 1m30s, durable."
         )
         assert "you'll be told only what changes" in created.text
         assert len(scheduler.monitors) == 1
@@ -267,11 +268,17 @@ async def test_the_arm_receipt_states_the_hosting_caveat(tmp_path: Any) -> None:
             context,
         )
         text = created.text or ""
-        assert "Ticks run only while this session is open" in text
+        # Design review round 1, D9: the hosting caveat is a FIRST-CLAUSE fact
+        # now — a receipt is one card whose collapsed row shows ~90 cells, and
+        # at the end of the paragraph it never reached them.
+        assert (
+            "Armed monitor 'date-watch' (m1) — ticks run only while this session is open." in text
+        )
         assert "with one consolidated delta, when it reopens" in text
+        assert text.index("ticks run only") < text.index("bash `date -u`")
         # No MCP clause on a non-MCP tool: it would name a failure mode the
         # monitor cannot have.
-        assert "MCP tool:" not in text
+        assert "server reconnects" not in text
     finally:
         scheduler.dispose()
 
@@ -297,9 +304,7 @@ async def test_an_mcp_arm_receipt_adds_the_reconnect_clause(tmp_path: Any) -> No
             context,
         )
         text = created.text or ""
-        assert (
-            "MCP tool: if its server reconnects the monitor waits without counting failures" in text
-        )
+        assert "If its server reconnects the monitor waits (no failed checks)." in text
         assert "30 minutes" in text
     finally:
         scheduler.dispose()

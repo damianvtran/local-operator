@@ -117,6 +117,13 @@ class MonitorNotice:
     #: The failure that caused a disable, or the reason a stall is not
     #: self-healing (auth-required names its own fix).
     detail: str = ""
+    #: WHAT the failure count counts, because the two are not the same fact and
+    #: saying "failed" for a check that never ran is a false claim (QA round 1
+    #: Q2): ``checks`` is the strike ladder's consecutive failed checks,
+    #: ``unreachable`` is the 24-hour unavailable episode, during which no
+    #: strike was charged at all, and ``fatal`` is the deterministic failure
+    #: that disables on the first occurrence.
+    failure_kind: str = "checks"
     #: §14.4, the delivery's control parameter: only the disable notice
     #: defaults it on, because a disabled watch is the one notice that needs
     #: the operator's attention.
@@ -124,15 +131,41 @@ class MonitorNotice:
 
 
 def format_monitor_notice_text(notice: MonitorNotice) -> str:
-    """The complete model-facing text of one lifecycle notice."""
+    """The complete model-facing text of one lifecycle notice.
+
+    SHAPE: every kind leads with the NEWS and carries the source note at the
+    END of that first line. The collapsed transcript card shows one line, so a
+    leading ``(via mcp__datadog_search_datadog_hosts)`` clause spent 36 cells
+    before the reader reached "was DISABLED" and cut both facts that matter
+    (design review round 1, D4).
+    """
+    if notice.kind not in NOTICE_KINDS:
+        # ``NOTICE_KINDS`` is the dispatch's own vocabulary, so an unknown kind
+        # is a programming error rather than a rendering question: falling
+        # through to the "restored" wording (what this used to do) would tell
+        # the operator a watch is running again because a producer misspelled
+        # its kind.
+        raise ValueError(f"unknown monitor notice kind {notice.kind!r}")
     clock = datetime.fromtimestamp(notice.at_ms / 1000).strftime(CLOCK_FORMAT)
     source_note = "" if notice.tool.lower() in notice.name.lower() else f" (via {notice.tool})"
-    who = f"'{notice.name}' {notice.monitor_id}{source_note}"
+    who = f"'{notice.name}' {notice.monitor_id}"
 
     if notice.kind == "disabled":
+        if notice.failure_kind == "unreachable":
+            cause = "because its tool stayed unreachable for 24 hours"
+        elif notice.failure_kind == "fatal":
+            cause = "after a check that cannot succeed"
+        elif notice.failures:
+            plural = "" if notice.failures == 1 else "s"
+            cause = f"after {notice.failures} consecutive failed check{plural}"
+        else:
+            # A legacy counters file that lost the count: state the fact without
+            # a number rather than printing "after 0 consecutive failed checks"
+            # (review round 1, R3).
+            cause = "after repeated failed checks"
         lines = [
-            f"(monitor) {who} was DISABLED at {clock} after {notice.failures} consecutive "
-            "failed checks — it is no longer watching."
+            f"(monitor) {who} was DISABLED at {clock} {cause} — it is no longer "
+            f"watching{source_note}."
         ]
         if notice.detail:
             lines.append(f"Last error: {_clip(notice.detail)}")
@@ -142,8 +175,7 @@ def format_monitor_notice_text(notice: MonitorNotice) -> str:
                 "The call may not observe what you expected."
             )
         else:
-            plural = "" if notice.deliveries == 1 else "s"
-            lines.append(f"{notice.deliveries} deliver{plural} of change so far.")
+            lines.append(f"{notice.deliveries} {_deliveries_word(notice.deliveries)} so far.")
         lines.append(
             'To restore: re-create the same call with monitor({op:"create",…}) '
             f'(reactivates it) or cancel it with monitor({{op:"cancel",id:"{notice.monitor_id}"}}).'
@@ -152,22 +184,33 @@ def format_monitor_notice_text(notice: MonitorNotice) -> str:
         return _bounded("\n".join(lines))
 
     if notice.kind == "stalled":
-        detail = f" ({_clip(notice.detail)})" if notice.detail else ""
-        return _bounded(
-            f"(monitor) {who} could not run its check at {clock}{detail} — it is retrying, "
-            "without counting failures.\n"
+        lines = [
+            f"(monitor) {who} could not run its check at {clock} — it is retrying, "
+            f"without counting failures{source_note}."
+        ]
+        if notice.detail:
+            lines.append(f"Reason: {_clip(notice.detail)}")
+        lines.append(
             "Its baseline is unchanged, so the next successful check reports everything "
-            "it missed as one delta. Cancel with "
-            f'monitor({{op:"cancel",id:"{notice.monitor_id}"}}) if unwanted.'
+            "it missed as one delta."
         )
+        lines.append(f'Cancel with monitor({{op:"cancel",id:"{notice.monitor_id}"}}) if unwanted.')
+        return _bounded("\n".join(lines))
 
     # restored
     return _bounded(
-        f"(monitor) {who} is running again as of {clock} — the earlier interruption has ended.\n"
-        f"The next check diffs against the old baseline, so changes during the gap arrive as "
-        f'one delta. Cancel with monitor({{op:"cancel",id:"{notice.monitor_id}"}}) once its '
-        "goal is met."
+        f"(monitor) {who} is running again as of {clock} — the earlier interruption "
+        f"has ended{source_note}.\n"
+        "The next check diffs against the old baseline, so changes during the gap arrive "
+        f'as one delta. Cancel with monitor({{op:"cancel",id:"{notice.monitor_id}"}}) once '
+        "its goal is met."
     )
+
+
+def _deliveries_word(count: int) -> str:
+    """``1 delivery`` / ``2 deliveries`` — the plan's own wording for the line
+    (QA round 1, Q1: the shipped text said ``1 deliver``)."""
+    return "delivery of change" if count == 1 else "deliveries of change"
 
 
 def _clip(text: str) -> str:

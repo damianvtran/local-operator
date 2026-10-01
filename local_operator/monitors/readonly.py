@@ -438,6 +438,17 @@ def external_monitor_verdict(tool_name: str, arguments: Mapping[str, Any]) -> st
             "it is not available without a running session — ask that "
             "conversation's agent to arm the monitor."
         )
+    # THE SAME SCHEMA TRANSFORM A SESSION APPLIES, and it is load-bearing for
+    # the parity this function exists to keep: ``registry.create_tools`` runs
+    # ``apply_intent_schema`` over every tool it builds, so a real session's
+    # schema advertises the injected ``i`` and the tick lifts it. A raw builder
+    # has not been through that transform, so without this line the external
+    # arm sees ``intent_is_injected(...) is False``, keeps the ``i`` and refuses
+    # a call the session arm accepts and the tick runs (review round 1, MAJOR
+    # R1 — reproduced with ``glob``).
+    from local_operator.harness.intent import apply_intent_schema
+
+    tool.parameters = apply_intent_schema(tool.parameters)
     # The shape check is shared with the in-session path so an arm from the CLI or
     # the desktop route refuses exactly what the agent's own arm would.
     return monitor_call_verdict(tool, arguments)
@@ -1177,7 +1188,11 @@ def _kubectl_output_value(token: str, tokens: list[str], index: int) -> str | No
         if ch == "o":
             glued = body[position + 1 :]
             if glued:
-                return glued
+                # ``-o=json`` is a spelling kubectl accepts, so the glued value
+                # may carry the separator: judge the VALUE, not the remainder
+                # (review round 1, R5 — the raw remainder was refused as
+                # "-o =json").
+                return glued[1:] if glued.startswith("=") else glued
             return tokens[index + 1] if index + 1 < len(tokens) else None
         if ch in _KUBECTL_SUBCOMMAND_FLAGS["get"]["short_valued"]:
             # A value-taking letter before ``o`` means the rest of the token

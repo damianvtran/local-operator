@@ -12350,21 +12350,23 @@ async def _monitor_create(
     # watch, closed the conversation and never learned that nothing would run
     # until it was open again. The MCP clause is the other half of the same
     # lesson: a server that reconnects must not read as a failing monitor.
-    hosting_caveat = (
-        " Ticks run only while this session is open (a terminal or runtime hosting it); "
-        "a closed session's monitors resume, with one consolidated delta, when it reopens."
-    )
+    #
+    # It goes in the FIRST clause, right after the identity, rather than at the
+    # end of the paragraph (design review round 1, D9): a receipt is one card
+    # whose collapsed row shows ~90 cells, and at the end of a 505-character
+    # paragraph the one condition that changes what the operator does was never
+    # in it. Two sentences, one line each, so the expansion stays readable.
+    caveat = "ticks run only while this session is open."
     if spec.tool.startswith("mcp__"):
-        hosting_caveat += (
-            " MCP tool: if its server reconnects the monitor waits without counting "
-            "failures, and you will be told if it stays unavailable for 30 minutes."
-        )
+        caveat += " If its server reconnects the monitor waits (no failed checks)."
     return _text(
         tool_call_id,
         "monitor",
-        f"Armed monitor '{spec.name}' ({spec.id}): {spec.tool} {call} every "
+        f"Armed monitor '{spec.name}' ({spec.id}) — {caveat} {spec.tool} {call} every "
         f"{format_duration(spec.every_ms)}, {bound}. First check in ~2s captures the "
-        "baseline; you'll be told only what changes." + hosting_caveat,
+        "baseline; you'll be told only what changes.\n"
+        "A closed session's monitors resume, with one consolidated delta, when it "
+        "reopens; a watch whose tool stays unreachable for 30 minutes says so.",
         details=facts,
     )
 

@@ -77,6 +77,14 @@ FIRST_CHECK_MIN_MS = 1_000
 FIRST_CHECK_MAX_MS = 3_000
 #: The failure ladder's ceiling (§11.3).
 RETRY_CAP_MS = 900_000
+#: Which counters key latches each notice kind once it has actually been SENT.
+#: One table rather than two branches, because the rule is the same for both:
+#: the latch records a DELIVERY, never an intention (review round 1, R2).
+_NOTICE_LATCH: dict[str, str] = {
+    "disabled": "disable_notified",
+    "stalled": "unavailable_notified",
+}
+
 #: The delivery rate window (§9.4).
 DELIVERY_WINDOW_MS = 3_600_000
 #: How long a monitor's tool may stay out of reach before the operator is told
@@ -181,6 +189,12 @@ def fresh_counters(monitor_id: str, next_due_at: int | None) -> dict[str, Any]:
         "consecutive_failures": 0,
         "disabled": False,
         "disabled_reason": "",
+        #: WHICH ladder produced the disable — ``checks`` (the strike ladder),
+        #: ``fatal`` (a deterministic failure, first occurrence) or
+        #: ``unreachable`` (24 hours out of reach, no strike charged). The
+        #: notice's wording depends on it, and a retro-announce reads it off an
+        #: older file that has no key, hence the empty default.
+        "disabled_kind": "",
         "last_error": "",
         "last_note": "",
         "skipped_overlap": 0,
@@ -650,10 +664,12 @@ class MonitorScheduler:
         """Hand one notice to the sink and settle its exactly-once latch.
 
         The latch is set only after the sink returned, so a notice that never
-        reached a session is re-announced on the next open — and the settle is
-        re-checked under the lock against the entry's GENERATION, so a notice
-        for a monitor cancelled while the sink was working cannot resurrect a
-        latch on a replacement.
+        reached a session is re-announced rather than lost — for the disable it
+        happens on the next open, for a stall on the next tick (the episode is
+        still open, so the notice is earned again). The settle is re-checked
+        under the lock against the entry's GENERATION, so a notice for a monitor
+        cancelled while the sink was working cannot resurrect a latch on a
+        replacement.
         """
         if self._announce is None:
             return
@@ -662,13 +678,14 @@ class MonitorScheduler:
         except Exception:  # noqa: BLE001 — a notice must not break the ladder
             logger.warning("monitor notice failed for %s", notice.monitor_id, exc_info=True)
             return
-        if notice.kind != "disabled":
+        latch = _NOTICE_LATCH.get(notice.kind)
+        if latch is None:
             return
         async with self._write_lock:
             entry = self._entries.get(notice.monitor_id)
             if entry is None or entry.generation != generation:
                 return
-            entry.counters["disable_notified"] = True
+            entry.counters[latch] = True
             self._write_counters(entry)
 
     async def announce_unannounced_disables(self) -> int:
@@ -918,7 +935,7 @@ class MonitorScheduler:
             counters["last_note"] = "tool unavailable — retrying"
             ticks = int(counters["unavailable_ticks"])
             if now - int(counters["unavailable_since"]) >= UNAVAILABLE_GONE_MS:
-                self._disable(entry, "tool unavailable for 24h", now)
+                self._disable(entry, "tool unavailable for 24h", now, kind="unreachable")
                 return self._disable_notice(entry, now, failures=ticks)
             counters["next_due_at"] = now + min(
                 RETRY_CAP_MS, entry.spec.every_ms * (2 ** max(0, ticks - 1))
@@ -927,7 +944,11 @@ class MonitorScheduler:
                 not counters.get("unavailable_notified")
                 and now - int(counters["unavailable_since"]) >= UNAVAILABLE_STALL_MS
             ):
-                counters["unavailable_notified"] = True
+                # The LATCH IS NOT SET HERE: ``_send_notice`` settles it after
+                # the sink returned, exactly as the disable latch is settled, so
+                # a stall notice that never reached a session is retried on the
+                # next tick instead of leaving a silent episode and a phantom
+                # "running again" (review round 1, R2).
                 return MonitorNotice(
                     monitor_id=entry.spec.id,
                     name=entry.spec.name,
@@ -951,7 +972,7 @@ class MonitorScheduler:
         counters["consecutive_failures"] = int(counters.get("consecutive_failures") or 0) + 1
         failures = counters["consecutive_failures"]
         if kind == "fatal":
-            self._disable(entry, counters["last_error"], now)
+            self._disable(entry, counters["last_error"], now, kind="fatal")
             logger.warning(
                 "monitor %s disabled on a fatal failure: %s", entry.spec.id, counters["last_error"]
             )
@@ -969,10 +990,19 @@ class MonitorScheduler:
         counters["next_due_at"] = now + backoff
         return None
 
-    def _disable(self, entry: _Entry, reason: str, now: int) -> None:
-        """Mark one monitor disabled; the counters file is the durable record."""
+    def _disable(self, entry: _Entry, reason: str, now: int, *, kind: str = "checks") -> None:
+        """Mark one monitor disabled; the counters file is the durable record.
+
+        ``kind`` is stored BESIDE the reason because the notice's wording has to
+        outlive the process that wrote it: a retro-announce on the next hosted
+        open reads the counters file alone, and telling the operator "after 5
+        consecutive failed checks" for a 24-hour unreachable episode — which
+        charged no strikes at all — is a false claim in text they are meant to
+        trust (review round 1, R3; QA round 1, Q2).
+        """
         counters = entry.counters
         counters["disabled"] = True
+        counters["disabled_kind"] = kind
         counters["disabled_reason"] = str(reason)[:500]
         # No next check is due for a disabled monitor (§10.3): the counters
         # file states that instead of keeping a stale instant that every tick
@@ -992,12 +1022,17 @@ class MonitorScheduler:
         counters = entry.counters
         if counters.get("disable_notified"):
             return None
+        failure_kind = str(counters.get("disabled_kind") or "checks")
         return MonitorNotice(
             monitor_id=entry.spec.id,
             name=entry.spec.name,
             tool=entry.spec.tool,
             kind="disabled",
-            at_ms=now,
+            # The instant the monitor last RAN is the closest honest answer to
+            # "when did this stop", and it is what a retro-announce has; a
+            # counter with no check yet falls back to the caller's clock.
+            at_ms=int(counters.get("last_check_at") or 0) or now,
+            failure_kind=failure_kind,
             checks=int(counters.get("checks") or 0),
             deliveries=int(counters.get("deliveries") or 0),
             failures=failures,
