@@ -329,6 +329,16 @@ _AMBIENT_VARS = (
     # feature, and the zero-footprint cells would pass for the wrong reason.
     # The aida conftest clears it for its own package; this scrubs it everywhere.
     "LOCAL_OPERATOR_NO_AIDA",
+    # The startup shortcut's inheritance marker (``helpers.PATH_PRIMED_ENV``,
+    # the bulk-resume lane's C1 cut): set by
+    # ``setup_cross_platform_environment`` once a lineage has captured the
+    # login shell's PATH, and read back so every descendant SKIPS that
+    # round-trip. Inherited, it is the escape-hatch class this list exists for,
+    # one level down from the guards above: a cell that asserts the PATH PRIME
+    # itself — that the shell capture ran and its PATH was adopted — would take
+    # the skip arm while looking like it tested the prime. Cells that want a
+    # primed lineage set it explicitly (the helpers tests do).
+    "LOCAL_OPERATOR_PATH_PRIMED",
 )
 
 #: The two escape hatches that keep a test from reaching the developer's real
