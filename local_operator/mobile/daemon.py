@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 if TYPE_CHECKING:
     from local_operator.mobile.attach_client import AttachClient
+    from local_operator.mobile.push_worker import PushWorker
 
 from local_operator.harness.approval import (
     frame_authority,
@@ -2335,10 +2336,21 @@ class MobileDaemon:
         port: int = DEFAULT_PORT,
         password: str | None = None,
         dial_registrants: bool = True,
+        push_worker: PushWorker | None = None,
     ) -> None:
         self.port = port
         self.password = password
         self.table = SessionTable()
+        self.port = port
+        self.password = password
+        self.table = SessionTable()
+        # Push/ack-sync S5: the emit loop's host, and ``None`` on every machine
+        # that has not armed one. The worker is INJECTED rather than built here
+        # because its transport is the cloud's (S7), and the transport is the
+        # one thing this process cannot mint: until it exists, nothing in the
+        # product constructs a worker, and the seam is how a deployment — or a
+        # test — arms one. ``_scan_once`` ticks it when it is set.
+        self.push_worker = push_worker
         # Stamp the build THIS process loaded, before any lazy import can meet a
         # replaced tree: every later comparison in ``_log_import_failure`` is
         # against this value.
@@ -2944,6 +2956,17 @@ class MobileDaemon:
             # durable listing itself may have moved.
             self.table.invalidate_summaries_cache()
             self.table.notify_list_changed()
+        # Push/ack-sync S5: the emit loop, on the polling loop that already
+        # exists. Off the loop (its store reads and its wire call block), LAST in
+        # this pass, and caught locally: the scan loop's own guard would log it
+        # too, but only after the exception unwound out of this pass, and a push
+        # fault is not a reason to skip anything else the scan does.
+        push_worker = self.push_worker
+        if push_worker is not None:
+            try:
+                await asyncio.to_thread(push_worker.tick)
+            except Exception:  # noqa: BLE001 — a push fault must not cost the tick
+                logger.warning("push worker tick failed", exc_info=True)
 
     async def _refresh_pins_if_changed(self) -> None:
         """Wake the list stream when ANOTHER surface changed the shared pins.
