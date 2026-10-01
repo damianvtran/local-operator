@@ -970,6 +970,43 @@ def _foreign_ask_projection() -> SessionProjection:
     return projection
 
 
+def _ended_ask_projection() -> SessionProjection:
+    """A conversation whose runtime is GONE, with an ask still outstanding.
+
+    WHY IT IS ITS OWN SESSION (QA round 3, Q-1). The ended state needs a session
+    the frames do not otherwise OPEN — the `-foreign` frame photographs the sheet
+    as seen FROM a conversation, so making that conversation ended turned its own
+    route into a durable row with no asks and the frame stopped showing a sheet
+    at all. A dedicated session keeps both frames true: this one exists only to be
+    somebody else's foreign row.
+    """
+    projection = SessionProjection(
+        session_id="asks-ended",
+        pid=900014,
+        kind="tui",
+        conversation_name="Ended elsewhere",
+        streaming=False,
+        transcript=[TranscriptEntry(id="e-1", kind="user", text="Ask me about the ended one.")],
+        version=3,
+    )
+    projection.asks = [
+        _ask(
+            "en-mine",
+            created_s=-45,
+            expires_in_s=855,
+            questions=[
+                _question(
+                    "em1",
+                    "Answer this one for a conversation that has ended?",
+                    options=[("yes", "the runtime is gone; answering may need it back")],
+                )
+            ],
+        )
+    ]
+    projection.asks_open = 1
+    return projection
+
+
 def _asks_stacked_projection() -> SessionProjection:
     """Queued asks in the BUSIEST column: todos, a running subagent roster, a
     pending approval card AND the minimized ask chip in one stack.
@@ -1023,7 +1060,7 @@ def _asks_stacked_projection() -> SessionProjection:
 #: it carries ``transcript.jsonl``. Marking the entry ended WITHOUT the transcript
 #: removes the row altogether (measured: 13 rows -> 12), so the sentence D8 asked
 #: for cannot be framed with the flag alone.
-ENDED_SESSIONS = {"asks-foreign"}
+ENDED_SESSIONS = {"asks-ended"}
 
 
 def _write_opening_turn(session_dir: Path, text: str) -> None:
@@ -1096,6 +1133,9 @@ async def main() -> None:
         # the chip shares its slot with todos, a roster and an approval card.
         _foreign_ask_projection(),
         _asks_stacked_projection(),
+        # The ENDED conversation (D6/D8): a session nobody opens, so the frames
+        # that show the sheet FROM a conversation keep working (Q-1, round 3).
+        _ended_ask_projection(),
     ]
     # The ANSWERABLE queued-ask session is not in that list: it is served by a
     # real runtime below, so its projection arrives over the relay's own dial

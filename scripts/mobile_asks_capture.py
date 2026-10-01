@@ -133,7 +133,7 @@ SHEET_PROBE = """
     // rather than argued from the component's source. No whitespace collapsing —
     // a regex here would have to escape a backslash inside this Python string,
     // and reading the raw text is closer to the truth anyway.
-    text: dialog ? dialog.textContent.trim().slice(0, 600) : null,
+    text: dialog ? dialog.textContent.trim().slice(0, 2000) : null,
   });
 })()
 """
@@ -193,7 +193,7 @@ SUBMIT_HEAD = """
 #: row's header, above its card, so it is found from the card outwards.
 OPEN_FOREIGN = """
 (() => {
-  const card = document.querySelector('[data-testid="ask-card"][data-ask-id="fa-mine"]');
+  const card = document.querySelector('[data-testid="ask-card"][data-ask-id="en-mine"]');
   if (!card) return "no card";
   const row = card.parentElement;
   const link = row ? [...row.querySelectorAll('button')]
@@ -305,7 +305,11 @@ def scroll_to_card(page: Page, ask_id: str) -> dict[str, Any] | None:
     if raw is None:
         return None
     geo = json.loads(raw)
-    for _ in range(6):
+    # Ten steps, not six: a row's HEADER is taller than the 8 px tolerance this
+    # aims for (a foreign row carries a name line and, when the conversation has
+    # ended, its sentence), and a swipe moves the panel by a bounded amount — the
+    # Q-1 frame this loop exists for came up 159 px short at six.
+    for _ in range(10):
         if abs(geo["dy"]) < 12:
             break
         page.swipe(geo["x"], geo["y"], geo["dy"])
@@ -385,7 +389,8 @@ def main() -> None:
             time.sleep(1.5)
             page.js(TAP_ROW)
             time.sleep(1.2)
-            report[f"{vp}-ended"] = {"drag": scroll_to_card(page, "fa-mine")}
+            hash_at_drag = page.js("location.hash")
+            report[f"{vp}-ended"] = {"drag": scroll_to_card(page, "en-mine")}
             time.sleep(0.6)
             page.shot(outdir / f"{label}-{vp}-ended.png")
             report[f"{vp}-ended"].update(json.loads(page.js(SHEET_PROBE)))
@@ -394,10 +399,14 @@ def main() -> None:
             # about (the old order navigated and then popped itself back).
             tapped = page.js(OPEN_FOREIGN)
             time.sleep(1.5)
-            report[f"{vp}-ended"]["open"] = {
+            # NOT keyed `open`: that is the sheet's own field in SHEET_PROBE, and
+            # overwriting it hid whether the panel was even mounted when the drag
+            # came up empty.
+            report[f"{vp}-ended"]["openTap"] = {
                 "tap": tapped,
                 "hash": page.js("location.hash"),
             }
+            report[f"{vp}-ended"]["hashAtDrag"] = hash_at_drag
             page.shot(outdir / f"{label}-{vp}-opened.png")
 
             # 2c. The BUSIEST STACK (design round 1, D6): todos, a running roster,
