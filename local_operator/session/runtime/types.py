@@ -110,6 +110,22 @@ EXCLUSIVE_MOVE_CAPABILITY = "exclusive-move-v1"
 #: not advertise it (fold the queue, name ``/reload``).
 QUEUED_MOVE_CAPABILITY = "queued-move-v1"
 
+#: The runtime's refusal sentence for an EXCLUSIVE move while another attach
+#: client is present. A CONSTANT because two layers read it and neither may
+#: re-spell it: the runtime writes it (``server.py``'s ``retire_now`` exclusive
+#: branch, where the refusal is checked-and-reserved under the admission fence)
+#: and the mesh's producer CLASSIFIES the reply with it
+#: (``mobility._retire_local_runtime`` maps it to the ``viewed`` outcome, which
+#: the wire carries as ``viewed_elsewhere`` — §5.4's Queue-vs-Wait split, so a
+#: front end does not read this blocker as a turn it could wait out). The
+#: SENTENCE itself is unchanged: it is what a person reads, and pinning it in
+#: one place is what keeps the classification from silently reverting to
+#: ``busy`` the day someone edits the wording.
+VIEWED_MOVE_REFUSAL = (
+    "This session is open in another terminal or attached client. "
+    "Disconnect that client, then move again."
+)
+
 #: Additive attach capability: this owner accepts ``event_mute``/``event_unmute``
 #: ops, which stop and resume DELTA-GRADE frames on an attach connection that
 #: already subscribed to the raw event relay (``"events": true``).
