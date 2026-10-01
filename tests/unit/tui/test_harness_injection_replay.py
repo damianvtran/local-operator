@@ -311,8 +311,13 @@ async def test_an_opt_in_send_notice_replays_as_a_warning_row() -> None:
             attribution="system",
             details={
                 "text": (
-                    "delivery to release-owner (pid 1) is mailbox (id peer-99…) — "
-                    'check with sessions(op="peek") and retry only if it is absent'
+                    # The row's SHIPPED copy, with the shared state word and the
+                    # reader-neutral next step (design round 2 D5 = UX round 2 U8
+                    # = QA round 2 Q1): the fixture carried the old model-facing
+                    # spelling, which is also why nothing pinned the new one.
+                    "delivery to release-owner: wake unconfirmed (id peer-99…); "
+                    "do not resend it — check the target's transcript first, and "
+                    "retry only if it is absent"
                 )
             },
         )
@@ -332,7 +337,11 @@ async def test_an_opt_in_send_notice_replays_as_a_warning_row() -> None:
     assert notice._token == "warning" and notice._glyph == NOTICE_GLYPHS["warning"]
     assert "delivery to release-owner" in shown
     # The instruction survives the fold: it is the whole reason the row exists.
-    assert "retry only if it is absent" in " ".join(shown.split())
+    flat = " ".join(shown.split())
+    assert "retry only if it is absent" in flat
+    assert "wake unconfirmed" in flat, "the row speaks the card's word, not the raw token"
+    assert "is mailbox" not in flat
+    assert "sessions(op=" not in flat, "no model-facing tool syntax on a human row"
 
 
 @pytest.mark.asyncio

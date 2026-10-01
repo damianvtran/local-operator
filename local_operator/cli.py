@@ -3990,10 +3990,13 @@ def send_command(args: argparse.Namespace) -> int:
         target = f"{cold_session_id} (not running)"
     clause = skipped_clause(skipped)
     if outcome.state == DELIVERY_MAILBOX:
-        # THE RECEIPT ONCE, the advisory once (UX round 1, N1): stdout carries
-        # the full receipt -- id included, so it is not a prefix of the stderr
-        # sentence -- and stderr carries only what to do about the wake.
-        print(f"→ {target}: {outcome.detail}{clause}")
+        # EACH STREAM CARRIES ITS OWN HALF (UX round 1 N1, corrected in round 2:
+        # printing the WHOLE receipt on stdout and the advisory on stderr still
+        # recited the advisory twice in a terminal that shows both streams, since
+        # the advisory is a suffix of the receipt). stdout takes the receipt's
+        # first half -- the id-bearing clause a script wants -- and stderr takes
+        # the advisory the person acts on, so neither line repeats the other.
+        print(f"→ {target}: {outcome.detail.partition(' — ')[0]}{clause}")
         if outcome.advisory:
             _peer_note(outcome.advisory)
         return 0

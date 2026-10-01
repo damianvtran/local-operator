@@ -13253,10 +13253,18 @@ async def execute_send(
             # awaitable), and ``callable`` narrowing would otherwise pin it to
             # ``object`` and make the await unverifiable.
             await cast(Any, journal)(
+                # THE ROW IS READ BY A PERSON (design round 2 D5 = UX round 2 U8 =
+                # QA round 2 Q1). It is the one surface this change made visible,
+                # and it used to speak the raw state token ("is mailbox") and the
+                # model's own tool syntax -- a `sessions` call with `op=…` kwargs a
+                # reader at a terminal cannot run. It now uses the shared state
+                # WORD (``DeliveryOutcome.state_word``, the same table the TUI
+                # row paints) and the neutral next step every other surface
+                # already used.
                 text=(
-                    f"delivery to {outcome.target} is {outcome.state} "
-                    f"(id {outcome.message_id}); do not resend — check with "
-                    'sessions(op="peek") and retry only if it is absent'
+                    f"delivery to {outcome.target}: {outcome.state_word} "
+                    f"(id {outcome.message_id}); do not resend it — check the "
+                    "target's transcript first, and retry only if it is absent"
                 ),
                 message_id=outcome.message_id,
                 state=outcome.state,

@@ -897,7 +897,9 @@ def _failed_delivery_reason(details: object) -> str:
     return reason if isinstance(reason, str) else ""
 
 
-def _delivery_word_run(summary: str, *, partial: bool, is_send: bool) -> tuple[str, str, str]:
+def _delivery_word_run(
+    summary: str, *, partial: bool, is_send: bool, marker: str
+) -> tuple[str, str, str]:
     """Split a settled send summary into its delivery word and the rest.
 
     The word is the state's carrier on the collapsed row, and it was painted in
@@ -915,11 +917,16 @@ def _delivery_word_run(summary: str, *, partial: bool, is_send: bool) -> tuple[s
         prefix = f"{word} · "
         if summary.startswith(prefix):
             return "", prefix, summary[len(prefix) :]
-        # The QUIET form: the mode marker leads and the state word follows it
-        # (design round 1, N2), so the word is the middle run.
-        quiet_prefix = f"quiet · {prefix}"
-        if summary.startswith(quiet_prefix):
-            return "quiet · ", prefix, summary[len(quiet_prefix) :]
+        # The PREFIXED form: the mode marker leads and the state word follows it
+        # (design round 1, N2), so the word is the middle run. The marker is
+        # THIS row's, asked of the same function that built the summary -- the
+        # first version enumerated ``quiet`` and therefore missed the ``now``
+        # marker a steer with ``wake=false`` carries, which painted the word in
+        # the summary's ink AND the ``Partial`` fallback beside it (agent review
+        # round 2, MINOR-1).
+        marker_prefix = f"{marker} · {prefix}" if marker else ""
+        if marker_prefix and summary.startswith(marker_prefix):
+            return f"{marker} · ", prefix, summary[len(marker_prefix) :]
     return "", "", summary
 
 
@@ -1642,6 +1649,9 @@ class ToolCard(ExpandableActionBlock):
         #: paint, and reset with the rest of the per-result state in
         #: :meth:`_absorb_result`.
         self._is_send = False
+        #: The mode marker this row's summary leads with (``now`` / ``quiet`` /
+        #: ``wake``), bound per result for the readers of the prefixed form.
+        self._send_mode_marker = ""
         #: The cause clause of a FAILED send's delivery (``details.delivery
         #: ["reason"]``), and empty for every other row. The collapsed row's cap
         #: leads with :data:`SEND_NOT_DELIVERED_WORD` and then this (D3); reading
@@ -2612,6 +2622,16 @@ class ToolCard(ExpandableActionBlock):
         # be inherited from a previous body.
         self._is_send = self.tool_name.lower() == "send"
         self._delivery_failed_reason = _failed_delivery_reason(details) if self._is_send else ""
+        # THE MODE MARKER this row's summary was built with, read from the same
+        # function that built it: the two readers of the ``<marker> · <word> · ``
+        # form (the double-word guard and the amber ink run) must ask about the
+        # marker this row actually has, not about a list of the ones we thought
+        # of (agent review round 2, MINOR-1).
+        self._send_mode_marker = ""
+        if self._is_send:
+            from local_operator.tools.builtin import peer_send_mode_label
+
+            self._send_mode_marker = _scalar_text(peer_send_mode_label(self._args))
         if self._is_send:
             # Re-derived from the arguments every time, so a card that settles
             # twice (a replay over a live row) never stacks outcome words. The
@@ -3223,12 +3243,18 @@ class ToolCard(ExpandableActionBlock):
             return False
         words = (*SWITCH_OUTCOME_WORDS.values(), *DELIVERY_OUTCOME_WORDS.values())
         prefixes = [f"{word} · " for word in words]
-        # A QUIET send's residual carries its mode marker IN FRONT of the word
-        # (``_delivery_outcome_summary``, design round 1 N2), and that form must
-        # still count as naming the outcome: the partial arm would otherwise
+        # A send that asked for no turn carries its mode marker IN FRONT of the
+        # word (``_delivery_outcome_summary``, design round 1 N2), and that form
+        # must still count as naming the outcome: the partial arm would otherwise
         # append ``Partial`` under a row that already states the state -- the
         # double word this guard exists to prevent, reintroduced by the marker.
-        prefixes += [f"quiet · {word} · " for word in DELIVERY_OUTCOME_WORDS.values()]
+        # The marker is THIS row's, not a hard-coded ``quiet``: a steer with
+        # ``wake=false`` reads ``now · delivery unconfirmed · …`` (agent review
+        # round 2, MINOR-1).
+        if self._send_mode_marker:
+            prefixes += [
+                f"{self._send_mode_marker} · {word} · " for word in DELIVERY_OUTCOME_WORDS.values()
+            ]
         return self._summary.startswith(tuple(prefixes))
 
     def _partial_reason(self) -> str:
@@ -3998,7 +4024,10 @@ class ToolCard(ExpandableActionBlock):
         # The state word leads the summary and takes the amber ink on its own run
         # (design round 1, D4); every other summary is one run.
         before, word_run, rest = _delivery_word_run(
-            summary, partial=self._partial, is_send=self._is_send
+            summary,
+            partial=self._partial,
+            is_send=self._is_send,
+            marker=self._send_mode_marker,
         )
         if word_run:
             if before:

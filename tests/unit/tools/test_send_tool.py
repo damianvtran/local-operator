@@ -846,7 +846,16 @@ async def test_an_amber_send_offers_the_notice_hook_and_a_clean_one_does_not(mon
         assert call["message_id"].startswith("peer-")
         assert "peer-target" in call["target"]
         assert call["force"] is False
-        assert "do not resend" in call["text"] and call["message_id"] in call["text"]
+        assert "do not resend it" in call["text"] and call["message_id"] in call["text"]
+        # THE ROW SPEAKS THE SHARED WORD, not the raw state token, and its next
+        # step is the reader-neutral one every other surface now uses (design
+        # round 2 D5 = UX round 2 U8 = QA round 2 Q1).
+        from local_operator.mobile.peer_send import DELIVERY_STATE_WORDS
+
+        assert DELIVERY_STATE_WORDS[call["state"]] in call["text"], call["text"]
+        assert "is unconfirmed" not in call["text"], "the token, not the word"
+        assert "sessions(op=" not in call["text"], call["text"]
+        assert "check the target's transcript first" in call["text"], call["text"]
 
         # THE ABORTED CALL IS FILED REGARDLESS OF THE SETTING (round 1, MINOR-3,
         # now EXERCISED rather than described): the loop appends a COMPLETED

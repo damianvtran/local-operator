@@ -4226,6 +4226,22 @@ def test_settled_send_rows_lead_with_their_delivery_state() -> None:
     assert _style_at(quiet_text, "delivery unconfirmed") == amber
     assert _style_at(quiet_text, "quiet") != amber
 
+    # AND EVERY OTHER MARKER the label function can return, not just ``quiet``:
+    # a steer with ``wake=false`` (``send(now=true, wake=false)``, the pair the
+    # CLI's plain ``--now`` builds) reads ``now · delivery unconfirmed · …``, and
+    # enumerating ``quiet`` missed it -- shipping the doubled state mark and the
+    # dim word on that row (agent review round 2, MINOR-1).
+    steer = ToolCard(
+        "t", "send", {"target": "release-owner", "message": "hi", "now": True, "wake": False}
+    )
+    steer.mark_done(
+        "receipt", {"wake": False, "delivery": {"state": "unconfirmed"}, "partial_result": True}
+    )
+    steer_text = steer._build_row(100)
+    assert "now · delivery unconfirmed · release-owner" in steer_text.plain
+    assert "Partial" not in steer_text.plain, steer_text.plain
+    assert _style_at(steer_text, "delivery unconfirmed") == amber
+
     # A delivered send keeps the mode marker: that is the sender's own
     # instruction, and "delivered" is what the row already implies.
     card = ToolCard("t", "send", {"target": "peer", "message": "hi"})
@@ -4254,6 +4270,26 @@ def test_the_amber_states_do_not_stack_a_second_outcome_word() -> None:
     # Settling twice (a replay over a live row) does not stack the word either.
     card.mark_done("receipt", {"delivery": {"state": "mailbox"}, "partial_result": True})
     assert card._build_row(100).plain.count("wake unconfirmed") == 1
+
+
+def test_the_two_painters_of_the_state_words_agree() -> None:
+    """One vocabulary, two surfaces (design round 1 D2; round 2's finding was one
+    string speaking the raw token where the others had a word).
+
+    The TUI paints ``DELIVERY_OUTCOME_WORDS`` on the collapsed row and
+    ``SEND_NOT_DELIVERED_WORD`` in the failed row's cap; the notice row is written
+    by ``tools/builtin`` from ``peer_send.DELIVERY_STATE_WORDS``. Neither table is
+    derived from the other, so this cell is what stops them drifting apart.
+    """
+    from local_operator.mobile.peer_send import DELIVERY_STATE_WORDS
+    from local_operator.tui.widgets.tool_card import (
+        DELIVERY_OUTCOME_WORDS,
+        SEND_NOT_DELIVERED_WORD,
+    )
+
+    for state, word in DELIVERY_OUTCOME_WORDS.items():
+        assert DELIVERY_STATE_WORDS[state] == word, state
+    assert DELIVERY_STATE_WORDS["failed"] == SEND_NOT_DELIVERED_WORD
 
 
 def test_the_amber_state_word_carries_the_amber_ink() -> None:

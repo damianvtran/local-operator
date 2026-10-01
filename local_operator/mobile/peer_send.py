@@ -225,6 +225,15 @@ class DeliveryOutcome:
         return f"→ {self.target}: {self.detail}"
 
     @property
+    def state_word(self) -> str:
+        """The shared word for this state (:data:`DELIVERY_STATE_WORDS`).
+
+        Falls back to the raw state for an unknown value, which is what a future
+        state would want until both surfaces learn it.
+        """
+        return DELIVERY_STATE_WORDS.get(self.state, self.state)
+
+    @property
     def advisory(self) -> str:
         """What follows the receipt's ``—`` separator: the part to ACT on.
 
@@ -273,14 +282,35 @@ class DeliveryOutcome:
             "attempts": self.attempts,
             "cause": self.cause,
             "route": self.route,
-            #: The CAUSE as a reader's clause (``detail``) beside the machine
-            #: token above: the TUI paints the failed row's status as
-            #: ``not delivered: <this>`` so the collapsed row names what went
-            #: wrong instead of restating the target the summary already
-            #: carries. Structured rather than parsed out of ``text``, which is
-            #: the renderers' one rule (design round 1, D3).
+            #: ``detail`` as this state wrote it, structured rather than
+            #: parsed out of ``text`` (the renderers' one rule, design round 1
+            #: D3). WHAT it holds depends on the state, and the two consumers
+            #: want different halves (agent review round 2, NIT-2): on
+            #: ``failed`` it IS the cause clause -- the TUI paints the status as
+            #: ``not delivered: <this>`` -- while on the amber states it is the
+            #: whole receipt sentence, whose first clause the card prints as the
+            #: delivered line. The desktop row reads the same object, so the key
+            #: keeps its value on every state and this comment is what says
+            #: which.
             "reason": self.detail,
         }
+
+
+#: The word each settled state prints where a human reads it. ONE vocabulary with
+#: two painters: the durable notice row this module's tool writes
+#: (``tools/builtin.execute_send``) and the TUI's collapsed row
+#: (``tui.widgets.tool_card.DELIVERY_OUTCOME_WORDS``, which renders the two amber
+#: words and puts ``not delivered`` in the failed row's status cap).
+#: ``tests/unit/tools/test_send_tool.py`` pins the two tables together, so a word
+#: cannot change on one surface alone -- the round-2 finding was exactly one
+#: string speaking the raw state TOKEN (``is mailbox``) where every other surface
+#: had a word.
+DELIVERY_STATE_WORDS: dict[str, str] = {
+    DELIVERY_DELIVERED: "delivered",
+    DELIVERY_MAILBOX: "wake unconfirmed",
+    DELIVERY_UNCONFIRMED: "delivery unconfirmed",
+    DELIVERY_FAILED: "not delivered",
+}
 
 
 def _mailbox_detail(message_id: str, attempts: int) -> str:
@@ -326,8 +356,9 @@ def _unconfirmed_detail(message_id: str, attempts: int, *, observed: str = PROBE
     on every route, which on the engaged route was a claim the code could not
     make at all (round 1, MAJOR). Sentence case for the state word, and a
     reader-neutral next step: this one string is printed by the tool result, the
-    journal notice and `lop send` stderr alike, and `sessions(op="peek", …)` is
-    not a thing a person at a terminal can run (design N1, UX U4).
+    journal notice and `lop send` stderr alike, and a `sessions` call with
+    `op=…` kwargs is not a thing a person at a terminal can run (design N1,
+    UX U4).
     """
     if observed == PROBE_ABSENT:
         clause = " and the message is not yet in its transcript"
@@ -352,8 +383,16 @@ def _queued_detail(message_id: str, receipt: str, attempts: int) -> str:
     the reason. The state is still unconfirmed (nothing durable exists yet, and
     the wake did not run), which is why the sentence says so first.
     """
+    receipt = receipt.rstrip(".")
+    # The receiver's receipt already OPENS with ``queued — …``, so the composer's
+    # own em dash doubled it (``… — queued — the terminal is busy…``, agent review
+    # round 2 NIT-1 / UX round 2 U-N3): a comma separates the same two halves
+    # without the collision. Decided on the receipt's own punctuation rather than
+    # on its text, so a receiver that words its receipt differently still reads
+    # with one dash.
+    joiner = ", " if " — " in receipt else " — "
     return (
-        f"delivery unconfirmed (id {message_id}) — {receipt.rstrip('.')}, after "
+        f"delivery unconfirmed (id {message_id}){joiner}{receipt}, after "
         f"{_attempts_phrase(attempts)}. Check the target's transcript before "
         "resending; sending again may deliver it twice."
     )

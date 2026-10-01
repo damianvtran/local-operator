@@ -961,6 +961,52 @@ def test_a_partly_delivered_broadcast_reports_the_skipped_matches(monkeypatch, c
     assert "2 matches skipped (not engaged yet)" in out, out
 
 
+def test_the_mailbox_arm_gives_each_stream_its_own_half(monkeypatch, capsys) -> None:
+    """UX round 1 N1, corrected in round 2: printing the WHOLE receipt on stdout
+    and the advisory on stderr still recited the advisory twice in a terminal that
+    shows both streams -- the stderr sentence was a verbatim suffix of the stdout
+    line. Each stream now carries its own half, and neither repeats the other."""
+    import local_operator.mobile.peer_send as peer_send_mod
+
+    message_id = "peer-" + "b" * 32
+    detail = peer_send_mod._mailbox_detail(message_id, 1)
+
+    async def _deliver(record, **kwargs):
+        return peer_send_mod.DeliveryOutcome(
+            state=peer_send_mod.DELIVERY_MAILBOX,
+            detail=detail,
+            message_id=message_id,
+            wake=peer_send_mod.WAKE_UNCONFIRMED,
+            attempts=1,
+            cause="no_answer",
+            route="live",
+            target="release-owner (pid 48213)",
+        )
+
+    monkeypatch.setattr(peer_send_mod, "deliver_peer_message_outcome", _deliver)
+    monkeypatch.setattr(
+        "local_operator.cli._resolve_peer_target",
+        lambda *args, **kwargs: (_Record(os.getppid() + 7), [], ""),
+    )
+    monkeypatch.setattr("local_operator.cli._peer_sender_identity", lambda: {"pid": 1})
+
+    rc = send_command(_send_args(target="release-owner"))
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    # stdout: the id-bearing receipt, and NOT the advisory.
+    assert message_id in captured.out
+    assert "do not send it again" not in captured.out, captured.out
+    # stderr: the advisory, and NOT the receipt.
+    assert "do not send it again" in captured.err, captured.err
+    assert message_id not in captured.err, captured.err
+    # The two lines are complementary, not nested: the one property the round-1
+    # fix missed.
+    out_line = captured.out.strip().splitlines()[-1]
+    err_line = captured.err.strip().splitlines()[-1]
+    assert err_line not in out_line and out_line not in err_line
+
+
 def test_an_exact_session_naming_a_live_composer_is_refused_live_not_cold(
     monkeypatch, tmp_path, capsys
 ) -> None:
