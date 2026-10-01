@@ -4059,6 +4059,13 @@ def build_app(daemon: MobileDaemon):
         token = body.get("completion_token") if isinstance(body, dict) else None
         if not isinstance(token, str):
             return JSONResponse({"error": "completion_token is required"}, status_code=422)
+        # §3.1's ADDITIVE field: the device that acted, when the caller is one.
+        # It is advisory in the strict sense — it decides only who is SKIPPED by
+        # the badge correction the worker emits for this ack — so a body that
+        # omits it, or sends something that is not an id, acks exactly as it
+        # always did. Refusing here would fail a read over a field the read does
+        # not need.
+        device_id = body.get("device_id") if isinstance(body, dict) else None
         try:
             state = await asyncio.to_thread(
                 AttentionStore().acknowledge, f"session/{session_id}", token
@@ -4083,6 +4090,17 @@ def build_app(daemon: MobileDaemon):
         # The next list paint must already show the authoritative verdict.
         daemon.table.invalidate_summaries_cache()
         daemon.table.notify_list_changed()
+        # S6's nudge (ADR §3.1, step 2), and it is a NUDGE and nothing more: the
+        # receipt was written above, so the worker is told WHICH DEVICE acted
+        # and no more than that. It writes no receipt, acks nothing and touches
+        # no ``deliveries`` row — the attention emit is a consequence of the
+        # read state that moved here, never a second acknowledgement path, and
+        # the pass that emits it reads the store for itself. ``None`` on the
+        # in-process worker (a daemon with push not armed) is not a failure: the
+        # ack has already happened and the endpoint's job is done.
+        worker = daemon.push_worker
+        if worker is not None and isinstance(device_id, str) and device_id:
+            worker.note_ack(device_id=device_id)
         return JSONResponse({"ok": True, "attention": state})
 
     async def api_session_pin(request: Request) -> Response:
