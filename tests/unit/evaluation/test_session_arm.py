@@ -34,7 +34,7 @@ import shutil
 import sys
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -1981,7 +1981,10 @@ class TestAgentStopTerminalReason:
         would pin this test's own guess of it.
         """
 
-        async def _no_stream(*_args: Any, **_kwargs: Any) -> Any:
+        # The declared return is load-bearing: pyright infers a coroutine (not
+        # a generator) for this body under ``-> Any``, and ``stream_fn``'s
+        # annotation only accepts an async-iterator function.
+        async def _no_stream(*_args: Any, **_kwargs: Any) -> AsyncIterator[Any]:
             return
             yield  # pragma: no cover - the yield is what makes this a generator
 
