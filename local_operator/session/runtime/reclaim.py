@@ -1416,8 +1416,7 @@ def _attest_before_signal(item: Verdict, record: _ReclaimAttestation) -> None:
         )
     except Exception:  # noqa: BLE001 — the sweep outranks the paperwork
         logger.warning(
-            "runtime residency: attesting pid %d raised; its ending will read "
-            "unattributed",
+            "runtime residency: attesting pid %d raised; its ending will read unattributed",
             item.process.pid,
             exc_info=True,
         )
