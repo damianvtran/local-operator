@@ -969,7 +969,60 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: ~37,701 billed against the 37,756 ceiling — ~55 billed of headroom, +0.4
 #: of it this change — while the tiers-configured reading sits above by the
 #: same documented 762-char config gap, not by anything here.
-BUDGET_BILLED_TOKENS = 37_756
+#:
+#: LOWERED 37,756 -> 34,713 for the slimming wave (audit items 2+3,
+#: ``feat/tool-slimming-1001``): the JSON schema descriptions of the eight
+#: top-offender tools (project, console, browser, ask, hub, agent, network,
+#: task) and the ``## Tools`` section of ``system.md`` gave up detail that now
+#: lives in the ``read tool://<name>`` docs — which cost nothing until read —
+#: and in the existing guides (browser/console/system-tools/peer-messaging/
+#: network/sessions). The move is pinned, not asserted: one representative cut
+#: phrase per tool is asserted BOTH ways in
+#: ``tests/unit/tools/test_tool_docs.py::test_cut_wire_prose_moved_into_the_tool_doc``
+#: (absent from the wire bytes AND present in the doc render), and every
+#: cue/boundary the audit named as keep-here stayed put (C1, C4, the
+#: ``tool://`` cue, the query-discipline bullet, the send/console/browser
+#: prohibitions). The arithmetic, THIS script, this machine, BOTH arms,
+#: deterministic char counts on each side (the clean arm — isolated config —
+#: is what CI renders and the binding reading):
+#:
+#:   clean arm        before 104,809 chars = ~37,701   after 96,388 = ~34,672
+#:   configured arm   before 105,571 chars = ~37,975   after 97,150 = ~34,946
+#:
+#: (The configured arm still sits exactly the +762-char subagents-tiers delta
+#: above the clean arm that the entries above document; the gap is expected
+#: and not this change's.)
+#:
+#: The saving is 8,421 clean-arm chars = 3,029 billed, split:
+#:
+#:   + tool_schemas    68,826 -> 63,475 = -5,351 chars = -1,925 billed
+#:     (project -622, browser -1,136, console -708, ask -697, hub -988,
+#:      agent -823, task -329, network -58; the bash `eval` boundary clause
+#:      ADDS +38 back; every other tool byte-identical. Components come from
+#:      a compact-JSON ruler; the total is this script's own ``tool_schemas``
+#:      counter, so the parts close to 5,323 — 28 chars of JSON/escape
+#:      skeleton apart, the same floor-vs-total convention the console entry
+#:      above records.)
+#:   + instructions    34,971 -> 31,901 = -3,070 chars = -1,104 billed
+#:     (the ``## Tools`` section; the content pins in
+#:      ``tests/unit/test_prompts_api.py``, ``test_prompts_console_flags.py``
+#:      and ``tests/unit/guides`` are what floor this number)
+#:
+#: Target was ~-3.7k billed (the audit's -15% of the tool schemas); the
+#: actual is -3,029, and the gap is the pins rather than the effort: the
+#: ask-tool and browser/console description phrases are asserted at the
+#: PHRASE level by their own suites, the effort-tier mappings are
+#: config-bound (their tests pin the rendered bytes in both arms), and the
+#: ``i`` field's pointer is documented in ``harness/intent.py`` as a
+#: deliberate trade. The next ~700 billed needs one of those decisions
+#: revisited, not another copy edit.
+#:
+#: The ceiling is the measured clean head plus the 55-token band this file
+#: keeps = 34,713. A local configured run reads 233 over (34,946 vs 34,713)
+#: — the recorded gap minus the band — as every configured local run has
+#: since the tiers delta existed; CI renders the clean arm and is the binding
+#: reading. If any reading disagrees, the script wins.
+BUDGET_BILLED_TOKENS = 34_713
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
