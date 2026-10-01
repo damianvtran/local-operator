@@ -87,8 +87,11 @@ RESUME_READY_FOLLOWUP_S = 30.0
 #: The launcher's receipt line ("Background job <id>: <status> …"). The same
 #: spelling the sessions tool parses; kept here rather than imported from the
 #: tool because this module runs in both the CLI and the tool and neither may
-#: depend on the other's module (the tool region is ``builtin``'s).
-_JOB_LINE_RE = re.compile(r"^Background job ([^:\s]+):\s*(\S+)", re.MULTILINE)
+#: depend on the other's module (the tool region is ``builtin``'s). Group 3
+#: is the line's REMAINDER — where a fast worker failure carries its reason
+#: ("… failed (execution receipt) — worker died: boom"), which review round
+#: 1's m1 requires the child reader to surface.
+_JOB_LINE_RE = re.compile(r"^Background job ([^:\s]+):\s*(\S+)(.*)$", re.MULTILINE)
 
 #: ANSI SGR sequences, stripped from failure details so a one-line report
 #: stays one readable line whatever colour the child painted (``lop exec``'s
@@ -188,9 +191,11 @@ def select_resume_candidates(
     ``{interrupted, retired}``): ``paused`` and ``failed`` union when both are
     given, and either one alone is a complete request (it implies the store
     scope, mirroring the ``lop sessions --paused/--failed`` listing flags).
-    ``all_sessions`` selects every stored, non-live session — the blunt form,
-    kept behind an explicit flag and a cap because "resume everything" is a
-    decision, not a default.
+    ``all_sessions`` WINS over the kind selectors: it selects every stored,
+    non-live session, and ``--paused --all`` is all — the widest reading,
+    which is the one the CLI header and the tool approval name (review round
+    1, m3). It stays behind an explicit flag and a cap because "resume
+    everything" is a decision, not a default.
 
     ``limit`` caps the ANSWER (newest first); ``None`` means
     :data:`RESUME_DEFAULT_LIMIT` — an action with no bound is a footgun, so
@@ -212,17 +217,24 @@ def select_resume_candidates(
         kinds |= PAUSED_OUTCOME_KINDS
     if failed:
         kinds |= FAILED_OUTCOME_KINDS
-    if kinds:
+    if all_sessions:
+        # ALL WINS over the kind selectors — `--paused --all` reads as "the
+        # widest of these", and review round 1's m3 was exactly a claim and a
+        # behaviour telling two stories (the header said "paused+all" while
+        # the selector intersected to paused). One story now: `all` takes the
+        # whole store, the header and the approval name `all` alone, and the
+        # kind sets are not recorded as a filter that was not applied.
+        kinds = frozenset()
+        candidates = recent_sessions(root, None)
+        if exclude_ids:
+            candidates = [row for row in candidates if row[0] not in exclude_ids]
+        matched = candidates
+    elif kinds:
         # ``limit=None`` here is the acting-on-a-set spelling the selector's
         # docstring names; the slice below is the same operation its own
         # ``limit`` arm performs, moved here only so ``matched`` can report
         # what the cap hid.
         matched = stored_sessions_by_outcome(root, kinds, exclude_ids=exclude_ids, limit=None)
-    elif all_sessions:
-        candidates = recent_sessions(root, None)
-        if exclude_ids:
-            candidates = [row for row in candidates if row[0] not in exclude_ids]
-        matched = candidates
     else:
         return ResumeSelection((), 0, kinds)
     return ResumeSelection(tuple(matched[:effective_limit]), len(matched), kinds)
@@ -286,17 +298,27 @@ def _kill_group(process: "asyncio.subprocess.Process") -> None:
     """Kill the child and its whole process group, by exact pid.
 
     ``start_new_session=True`` on the spawn makes the child a group leader, so
-    the group kill reaps the child's own descendants (a launcher mid-spawn of
-    a worker) — and never anything else, because the group is pid-scoped to a
-    tree this module created.
+    its PID IS ITS PGID and is signalled DIRECTLY — never through
+    ``os.getpgid(process.pid)``: once the child has exited and been reaped
+    that lookup raises, and the old spelling then degraded to a
+    single-process kill that never reached a pipe-holding grandchild
+    (review round 1, m4 — reproduced as a survivor after the batch;
+    ``clipboard._kill_tree`` records the same failure mode and the same
+    remembered-pgid fix). The group is pid-scoped to a tree this module
+    created, so the kill can never reach anything else.
     """
     try:
-        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
-        try:
-            process.kill()
-        except (ProcessLookupError, OSError):
-            pass
+        os.killpg(process.pid, signal.SIGKILL)
+        return
+    except (OSError, AttributeError):
+        # Already reaped, the group vanished between the check and the signal,
+        # or the platform has no groups at all (Windows: no ``os.killpg``).
+        # The direct kill below is the remaining option.
+        pass
+    try:
+        process.kill()
+    except (ProcessLookupError, OSError):
+        pass
 
 
 async def _run_child(
@@ -360,17 +382,45 @@ async def _run_child(
         job_id = match.group(1) if match else ""
         status = match.group(2) if match else ""
         if process.returncode != 0:
-            last = ""
-            for line in reversed(text.splitlines()):
-                if line.strip():
-                    last = line
-                    break
+            # rc != 0 is the launcher's own failure, and the receipt it just
+            # printed carries the reason. The reason must SURVIVE (review
+            # round 1, m1): the old shape took the last stderr line, which is
+            # receipt chrome (``Log: <path>``), and the workspace reason was
+            # dropped from the only line the operator reads. Parse the shape
+            # the launcher actually prints: the job line's em-dash suffix for
+            # a run that died, and any non-chrome line as the fallback for a
+            # refusal that never created a job. The log path stays attached.
+            reason = ""
+            if match is not None:
+                dashed = re.search("\u2014\\s*(.+)$", match.group(3))
+                if dashed:
+                    reason = dashed.group(1).strip()
+            if not reason:
+                for line in reversed(text.splitlines()):
+                    stripped = line.strip()
+                    if stripped and not stripped.startswith(("Log: ", "Status: ")):
+                        reason = stripped
+                        break
+            log_match = re.search(r"^Log: (.+)$", text, re.MULTILINE)
+            log_path = log_match.group(1).strip() if log_match else ""
+            detail = (
+                _collapse(reason)
+                if reason
+                else f"`lop exec` exited {process.returncode} without a reason"
+            )
+            if log_path and log_path not in detail:
+                detail = f"{detail} — log: {log_path}"
             return ResumeOutcome(
                 session_id=session_id,
                 name=name,
                 ok=False,
-                status="refused",
-                detail=_collapse(last) or f"`lop exec` exited {process.returncode} without output",
+                # A parsed job line means a run existed and died (the
+                # launcher's own word for it); no job line means the refusal
+                # happened before anything was created, which the loud
+                # lease/preflight messages already distinguish.
+                status=status if status else "refused",
+                job_id=job_id,
+                detail=detail,
                 wall_s=wall,
             )
         if not job_id:
@@ -433,6 +483,16 @@ async def _follow_up(
         states = {outcome.job_id: {} for outcome in pending}
     deadline = time.monotonic() + RESUME_READY_FOLLOWUP_S
     remaining = list(pending)
+    # THE INITIAL READ IS APPLIED BEFORE WAITING (review round 1, m2). A child
+    # whose job already went live — or already died — while its launcher
+    # receipt still read `starting` must resolve NOW; the bound below is only
+    # for jobs that genuinely still are starting. The old shape folded the
+    # initial states only inside the delta branch, so a child whose ledger row
+    # predated the window waited the full bound against a row it was already
+    # holding.
+    remaining = _apply_states(remaining, states, progress)
+    if not remaining:
+        return
     while remaining and time.monotonic() < deadline:
         await asyncio.sleep(0.1)
         try:
@@ -519,17 +579,17 @@ async def resume_sessions(
 ) -> list[ResumeOutcome]:
     """Resume ``(session_id, name)`` pairs as bounded concurrent children.
 
-    Returns one :class:`ResumeOutcome` per input pair, in input order (the
-    ``progress`` callback, when given, fires per outcome the moment it
-    resolves — completion order — which is what the CLI's live lines render);
-    the caller renders the final summary and decides exit codes. A child whose
-    receipt read ``starting`` is resolved by one shared follow-up pass before
-    this returns, so every returned outcome carries a terminal reading.
+    Returns one :class:`ResumeOutcome` per input pair, in COMPLETION order
+    (``progress``, when given, fires per outcome the moment it resolves — the
+    streaming contract the CLI's live lines print, review round 1 MAJOR-1:
+    a line must appear as its child resolves, not once after the batch). A
+    child whose receipt read ``starting`` is held for one shared follow-up
+    pass, which fires its progress when it resolves — so every returned
+    outcome carries a terminal reading and no line is printed twice.
     """
     if not sessions:
         return []
     semaphore = asyncio.Semaphore(max(1, concurrency))
-    results: list[ResumeOutcome] = []
 
     async def one(session_id: str, name: str) -> ResumeOutcome:
         outcome = await _run_child(
@@ -543,36 +603,35 @@ async def resume_sessions(
         return outcome
 
     tasks = [asyncio.create_task(one(sid, name)) for sid, name in sessions]
+    results: list[ResumeOutcome] = []
     try:
-        gathered = await asyncio.gather(*tasks, return_exceptions=True)
-    except BaseException:
-        for task in tasks:
-            task.cancel()
-        raise
-    for item in gathered:
-        if isinstance(item, BaseException):
-            # A crash inside one child's bookkeeping must not cost the batch
-            # its report; name it as a failure of the session it belonged to
-            # is impossible here (the exception lost its session), so it is
-            # surfaced as a synthetic row the caller can see.
-            results.append(
-                ResumeOutcome(
+        for completed in asyncio.as_completed(tasks):
+            try:
+                item = await completed
+            except Exception as exc:  # noqa: BLE001 — one child's bookkeeping
+                # A crash inside one child must not cost the batch its report;
+                # the exception lost its session, so the row is synthetic.
+                synthetic = ResumeOutcome(
                     session_id="?",
                     name="",
                     ok=False,
                     status="failed",
-                    detail=f"internal error while resuming a child: {item!r}",
+                    detail=f"internal error while resuming a child: {exc!r}",
                 )
-            )
-            continue
-        if item.status == "starting" and not item.ok:
-            # Hold it for the shared follow-up pass; progress fires when the
-            # follow-up resolves it, so no line is printed twice.
+                results.append(synthetic)
+                if progress is not None:
+                    progress(synthetic)
+                continue
             results.append(item)
-        else:
+            if item.status == "starting" and not item.ok:
+                # Held for the shared follow-up pass; its line fires there.
+                continue
             if progress is not None:
                 progress(item)
-            results.append(item)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        raise
     pending = [o for o in results if o.status == "starting" and not o.ok]
     if pending:
         await _follow_up(pending, progress=progress)

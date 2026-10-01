@@ -16,8 +16,12 @@ follow-up is driven against a real ledger under a tmp config root.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import os
+import signal
+import subprocess
 import time
 import uuid
 from pathlib import Path
@@ -318,9 +322,17 @@ async def test_a_starting_receipt_is_resolved_by_the_shared_follow_up(
     )
 
     _stub(monkeypatch, _ok_stub(job_id=job, status="starting"))
+    started = time.monotonic()
     outcomes = await resume_sessions([("s1", "one")], message="go", env=dict(os.environ))
+    elapsed = time.monotonic() - started
     assert outcomes[0].ok is True
     assert outcomes[0].status == "running"
+    # m2 (review round 1): the initial ledger read must be APPLIED before the
+    # poll loop. The old shape folded it only inside the delta branch, so a
+    # job whose `running` row predated the window waited the full bound
+    # (~30 s here) before the final reconciled read resolved it. The 10 s
+    # bound sits far below that failure and far above a healthy run.
+    assert elapsed < 10, f"resolved via the bound, not the initial read ({elapsed:.1f}s)"
 
 
 async def test_a_starting_receipt_that_never_goes_live_is_unresolved_not_a_hang(
@@ -340,3 +352,163 @@ async def test_a_starting_receipt_that_never_goes_live_is_unresolved_not_a_hang(
     assert outcomes[0].ok is False
     assert outcomes[0].status == "unresolved"
     assert "--status" in outcomes[0].detail
+
+
+# --- review round 1 regressions ---------------------------------------------
+
+
+def test_all_wins_over_the_kind_selectors(store: Path) -> None:
+    """m3 (review round 1): the header, the approval and the selector agree.
+
+    ``--paused --all`` is defined as ALL — the widest reading — so the answer
+    is the whole non-live store and ``kinds`` records no filter that was not
+    applied. The CLI header and the tool approval name `all` alone for the
+    same combination (asserted in their own test files).
+    """
+    _session(store, "s-paused", kind="interrupted")
+    _session(store, "s-complete", kind="complete")
+    _session(store, "s-none")
+    selection = select_resume_candidates(store, paused=True, all_sessions=True)
+    assert {sid for sid, _ in selection.sessions} == {"s-paused", "s-complete", "s-none"}
+    assert selection.kinds == frozenset()
+
+
+async def test_a_fast_worker_failure_keeps_its_reason_and_log(
+    store: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """m1 (review round 1): rc != 0 must surface the receipt's reason.
+
+    When a worker dies fast the launcher prints ``Background job <id>: failed
+    (execution receipt) - <reason>`` and exits 1. The old child reader took
+    the LAST stderr line, which is receipt chrome (``Log: <path>``), and
+    dropped the reason from the only line the operator reads; the reason and
+    the log path must both survive.
+    """
+    log_path = store / "logs" / "exec-20261001-x.log"
+
+    def build(session_id: str, message: str) -> list[str]:
+        code = (
+            "import sys\n"
+            "print('Background job ffff11112222: failed (execution receipt) \u2014 "
+            "worker died: boom', file=sys.stderr)\n"
+            "print('Status: lop exec --status ffff11112222', file=sys.stderr)\n"
+            f"print('Log: {log_path}', file=sys.stderr)\n"
+            "sys.exit(1)\n"
+        )
+        return ["-c", code]
+
+    _stub(monkeypatch, build)
+    outcomes = await resume_sessions([("s1", "one")], message="go", env=dict(os.environ))
+    assert outcomes[0].ok is False
+    assert outcomes[0].status == "failed"
+    assert "worker died: boom" in outcomes[0].detail
+    assert str(log_path) in outcomes[0].detail
+
+
+async def test_progress_streams_as_each_child_resolves(
+    store: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """MAJOR-1 (review round 1): a line per child AS IT RESOLVES.
+
+    Deterministic, not a timing bet: one fast child exits immediately; one
+    slow child polls for a flag file and exits when it appears. The flag is
+    created by the progress callback for the FAST child's line. If progress
+    only fired after the whole batch, the callback could not run until the
+    slow child finished -- and the slow child caps its wait and records
+    whether it ever saw the flag, so a late callback fails the test with
+    ``timed-out`` instead of hanging.
+    """
+    flag = tmp_path / "release.slow"
+    verdict = tmp_path / "slow-verdict.txt"
+
+    fast_code = "import sys\n" "print('Background job aaaa11112222: running', file=sys.stderr)\n"
+    slow_code = (
+        "import os, sys, time\n"
+        f"flag = {str(flag)!r}\n"
+        f"verdict = {str(verdict)!r}\n"
+        "deadline = time.monotonic() + 8.0\n"
+        "saw = False\n"
+        "while time.monotonic() < deadline:\n"
+        "    if os.path.exists(flag):\n"
+        "        saw = True\n"
+        "        break\n"
+        "    time.sleep(0.05)\n"
+        "open(verdict, 'w').write('saw-flag' if saw else 'timed-out')\n"
+        "print('Background job bbbb11112222: running', file=sys.stderr)\n"
+    )
+
+    def build(session_id: str, message: str) -> list[str]:
+        return ["-c", fast_code if session_id == "fast" else slow_code]
+
+    _stub(monkeypatch, build)
+    events: list[str] = []
+
+    def progress(outcome: Any) -> None:
+        events.append(outcome.session_id)
+        if outcome.session_id == "fast":
+            flag.write_text("go")
+
+    outcomes = await resume_sessions(
+        [("fast", "f"), ("slow", "s")],
+        message="go",
+        env=dict(os.environ),
+        progress=progress,
+    )
+    assert verdict.read_text() == "saw-flag"
+    assert events[0] == "fast"
+    assert all(outcome.ok for outcome in outcomes)
+
+
+async def test_a_killed_child_leaves_no_live_grandchild_behind(
+    store: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """m4 (review round 1): the group kill must reach a grandchild.
+
+    The reviewer's repro: the leader spawns a grandchild that INHERITS the
+    pipes, then exits immediately. The batch's pipe read stays open, the
+    launcher bound fires with the leader already dead and reaped -- and
+    ``os.getpgid(process.pid)`` raises in exactly that window, so the old
+    spelling degraded to a single-process kill and the grandchild survived
+    the batch (``alive-after-batch=True``). ``start_new_session`` makes the
+    leader's pid its pgid, so it is signalled directly instead.
+    """
+    pidfile = tmp_path / "grandchild.pid"
+
+    def build(session_id: str, message: str) -> list[str]:
+        code = (
+            "import subprocess, sys\n"
+            f"pidfile = {str(pidfile)!r}\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            "open(pidfile, 'w').write(str(child.pid))\n"
+            "sys.exit(0)\n"
+        )
+        return ["-c", code]
+
+    monkeypatch.setattr(bulk_resume, "RESUME_CHILD_TIMEOUT_S", 0.8)
+    _stub(monkeypatch, build)
+    outcomes = await resume_sessions([("slow", "slow")], message="go", env=dict(os.environ))
+    assert outcomes[0].status == "timeout"
+
+    grandchild = int(pidfile.read_text())
+
+    def state_of(pid: int) -> str:
+        result = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True
+        )
+        return result.stdout.strip()
+
+    try:
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            state = state_of(grandchild)
+            if not state or state.startswith("Z"):
+                break  # gone, or dead-and-not-yet-reaped
+            await asyncio.sleep(0.1)
+        else:
+            raise AssertionError(
+                f"grandchild {grandchild} survived the group kill (state={state_of(grandchild)!r})"
+            )
+    finally:
+        # Never leave the rig behind even when the assertion fails: exact pid.
+        with contextlib.suppress(ProcessLookupError, OSError):
+            os.kill(grandchild, signal.SIGKILL)
