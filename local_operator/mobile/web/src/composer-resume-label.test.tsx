@@ -144,7 +144,7 @@ describe("the phone's resume button", () => {
 
 		await waitFor(() =>
 			expect(screen.getByRole("alert").textContent).toContain(
-				"This session has ended — tap resume to continue.",
+				"This session has ended and couldn’t be woken just now. Send again, or tap resume to reopen it.",
 			),
 		);
 		expect(screen.queryByText(/Couldn’t continue this conversation/)).toBeNull();
