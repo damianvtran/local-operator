@@ -1718,6 +1718,146 @@ async def test_evaluate_returns_raw_when_the_judge_is_quiet() -> None:
 
 
 # ---------------------------------------------------------------------------
+# evaluate: a tab getter that matched a target it could not read is UNSCORED
+# ---------------------------------------------------------------------------
+
+# The upstream getter module and logger, pinned. ``get_activate_tab_json``
+# takes the FIRST page whose URL starts with the task's prefix, so a bare
+# directory prefix can select Chrome's own directory listing -- which runs no
+# scripts and cannot answer the page helper the getter needs.
+_GETTER_CHROME = "/site-packages/desktop_env/evaluators/getters/chrome.py"
+_GETTER_LOGGER = "desktopenv.getters.chrome"
+
+# Upstream's own terminal lines for that getter, verbatim from the pinned
+# checkout. The first is the one an arm already paid for (task_009, r1 arm
+# 1830); the rest are the same getter's other "we selected a target and could
+# not read it" outcomes, which the guard covers for the same reason.
+_UNREADABLE_TARGET = "[ACTIVATE_TAB_JSON] getJSON is not defined in target page"
+_GETTER_FAILURES = (
+    _UNREADABLE_TARGET,
+    "[ACTIVATE_TAB_JSON] Failed to execute getJSON: Page crashed",
+    "[ACTIVATE_TAB_JSON] Unexpected error: connect_over_cdp failed",
+    "[ACTIVATE_TAB_JSON] Missing required config 'tab_prefix'",
+)
+
+# The one terminal outcome that IS the agent's to own: no page matched at all,
+# so the artifact the evaluator asked for is absent from the guest.
+_NO_TAB = "[ACTIVATE_TAB_JSON] No tab url starts with 'file:///home/user/Desktop/HKU-RIMS-System/'"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message", _GETTER_FAILURES)
+async def test_a_getter_that_could_not_read_its_target_raises_scoring_unavailable(
+    message: str,
+) -> None:
+    """The arm-1830 zero, at its source: the evaluator's getter selected a page
+    it could not interrogate, logged that, and returned None -- which the task
+    read as "no result" and the adapter sealed as a SCORED 0.0 the agent never
+    earned. It is now an unscored episode whose reason names the getter."""
+
+    class _UnreadableTargetEnv(_FakeEnv):
+        def evaluate(self) -> Any:
+            _log_from(_GETTER_LOGGER, _GETTER_CHROME, message)
+            return 0.0
+
+    with _Stubs() as stubs:
+        provider = AwsProvider(CREDS, region=REGION, lease_ref="lop-ttl-x", clients=stubs.clients)
+        provider._env = _UnreadableTargetEnv()
+        with pytest.raises(scoring.ScoringUnavailable, match="getter could not read"):
+            await provider.evaluate()
+
+
+@pytest.mark.asyncio
+async def test_a_getter_that_matched_no_tab_stays_scored() -> None:
+    """The exempt direction, and deliberately so: when NOTHING matches the
+    prefix, the artifact the evaluator asked for is absent from the guest, and
+    0.0 is the honest reading of an absent artifact. Exempting it is the
+    conservative choice -- this guard must never inflate a score."""
+
+    class _NoTabEnv(_FakeEnv):
+        def evaluate(self) -> Any:
+            _log_from(_GETTER_LOGGER, _GETTER_CHROME, _NO_TAB)
+            return 0.0
+
+    with _Stubs() as stubs:
+        provider = AwsProvider(CREDS, region=REGION, lease_ref="lop-ttl-x", clients=stubs.clients)
+        provider._env = _NoTabEnv()
+        assert await provider.evaluate() == 0.0
+
+
+@pytest.mark.asyncio
+async def test_another_getters_error_in_the_same_file_stays_scored() -> None:
+    """``chrome.py`` holds ~a dozen page getters emitting ERRORs from the same
+    file and logger, most of them legitimate readings an evaluator may score.
+    Only the tagged getter is captured, so a different getter's error leaves a
+    good score alone."""
+
+    class _OtherGetterErrorEnv(_FakeEnv):
+        def evaluate(self) -> Any:
+            _log_from(_GETTER_LOGGER, _GETTER_CHROME, "[PAGE_INFO] Attempt 1 failed: timeout")
+            _log_from(_GETTER_LOGGER, _GETTER_CHROME, "[OPEN_TABS_INFO] Error: boom")
+            return 0.75
+
+    with _Stubs() as stubs:
+        provider = AwsProvider(CREDS, region=REGION, lease_ref="lop-ttl-x", clients=stubs.clients)
+        provider._env = _OtherGetterErrorEnv()
+        assert await provider.evaluate() == 0.75
+
+
+@pytest.mark.asyncio
+async def test_the_tags_message_from_another_file_is_not_captured() -> None:
+    """Neither half of the match is enough on its own, the same property the
+    screenshot capture pins: a record reraised from elsewhere must not raise."""
+
+    class _ElsewhereEnv(_FakeEnv):
+        def evaluate(self) -> Any:
+            _log_from(
+                _GETTER_LOGGER,
+                "/site-packages/desktop_env/desktop_env.py",
+                _UNREADABLE_TARGET,
+            )
+            return 0.4
+
+    with _Stubs() as stubs:
+        provider = AwsProvider(CREDS, region=REGION, lease_ref="lop-ttl-x", clients=stubs.clients)
+        provider._env = _ElsewhereEnv()
+        assert await provider.evaluate() == 0.4
+
+
+@pytest.mark.asyncio
+async def test_the_getter_capture_is_removed_after_a_quiet_evaluate() -> None:
+    with _Stubs() as stubs:
+        provider = AwsProvider(CREDS, region=REGION, lease_ref="lop-ttl-x", clients=stubs.clients)
+        provider._env = _FakeEnv()
+        assert await provider.evaluate() == 0.5
+        assert not any(
+            isinstance(h, aws_mod._UnreadGetterTargetCapture)
+            for h in logging.getLogger(_GETTER_LOGGER).handlers
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_getter_capture_is_removed_when_it_raises() -> None:
+    """The ``finally`` that removes it must also run on the raising path, or the
+    worker's next score would inherit a handler holding this episode's errors."""
+
+    class _UnreadableTargetEnv(_FakeEnv):
+        def evaluate(self) -> Any:
+            _log_from(_GETTER_LOGGER, _GETTER_CHROME, _UNREADABLE_TARGET)
+            return 0.0
+
+    with _Stubs() as stubs:
+        provider = AwsProvider(CREDS, region=REGION, lease_ref="lop-ttl-x", clients=stubs.clients)
+        provider._env = _UnreadableTargetEnv()
+        with pytest.raises(scoring.ScoringUnavailable):
+            await provider.evaluate()
+        assert not any(
+            isinstance(h, aws_mod._UnreadGetterTargetCapture)
+            for h in logging.getLogger(_GETTER_LOGGER).handlers
+        )
+
+
+# ---------------------------------------------------------------------------
 # observe: upstream's SWALLOWED capture failure becomes a bounded cause
 # ---------------------------------------------------------------------------
 

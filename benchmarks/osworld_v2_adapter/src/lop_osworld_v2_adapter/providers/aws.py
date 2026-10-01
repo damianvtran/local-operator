@@ -369,6 +369,80 @@ class _JudgeErrorCapture(logging.Handler):
             self.messages.append(record.msg if isinstance(record.msg, str) else "judge error")
 
 
+# The tab getter's own namespace and module, both pinned (OSWorld-V2 @ d578d2d,
+# ``desktop_env/evaluators/getters/chrome.py`` -- logger at line 32,
+# ``get_activate_tab_json`` at 2054-2148). Both halves are checked, for the
+# reason recorded at ``_SCREENSHOT_LOGGER``: attachment alone would accept any
+# record routed to that logger, and a bare ``chrome.py`` basename is not unique
+# in a package this size. An upstream rename disarms the capture, and it then
+# degrades to no catch rather than to a wrong one.
+_GETTER_LOGGER = "desktopenv.getters.chrome"
+_GETTER_SOURCE_FILE = "chrome.py"
+
+#: The tagged getter this guard is about. ``chrome.py`` holds ~a dozen page
+#: getters emitting ERRORs from the same file and logger, most of them
+#: legitimate readings an evaluator may score (an empty tab list, a page that
+#: would not load). The tag names the ONE getter whose matched-but-unreadable
+#: outcome is an apparatus failure rather than a reading.
+_GETTER_TAG = "[ACTIVATE_TAB_JSON]"
+
+#: The tag's one terminal outcome that is the AGENT's to own: no page matched
+#: at all, so the artifact the evaluator asked for is absent from the guest and
+#: a 0.0 is the honest reading of an absent artifact. Every OTHER terminal
+#: failure of this getter means it selected a target it could not interrogate,
+#: so its ``None`` says nothing about the agent's work.
+_GETTER_NO_TARGET = "No tab url starts with"
+
+
+class _UnreadGetterTargetCapture(logging.Handler):
+    """Records the tab getter's "matched a target, could not read it" errors.
+
+    THE DEFECT THIS EXISTS FOR (arm 1830 r1, task_009; record:
+    ``scripts/logs/ZERO-CLASSIFICATION-1830-009-013.md``). ``tab_prefix`` for
+    that task is the bare directory ``file:///home/user/Desktop/HKU-RIMS-System/``
+    and the getter takes the FIRST page whose URL starts with it -- which can be
+    Chrome's own directory listing for that folder. A listing runs no scripts,
+    so the page helper the getter needs (``common.js:87``, loaded by every app
+    page) is absent there. The getter logs an ERROR and returns ``None``, the
+    task reads that ``None`` as "no result", and the episode is archived as a
+    SCORED 0.0 -- a failure the agent did not commit, since the evaluator never
+    read the page holding its work.
+
+    WHAT THIS DOES AND DOES NOT CLAIM. It does not claim the agent's answers
+    were right; nothing here reads them. It claims only that the evaluation
+    could not be performed as intended, which is exactly what must not be
+    reported as a miss.
+
+    WHY THE SELECTION ITSELF IS NOT FIXED HERE. The first-match loop, the
+    prefix, and the getter are all upstream OSWorld source installed from the
+    pinned git dependency, and this tree does not rewrite upstream task,
+    evaluator or framework source (docs/benchmarks/osworld_2/dependency-policy.md).
+    The durable fix -- prefer a prefix-matching tab whose page defines the
+    helper, falling back to the current rule -- belongs upstream; this guard is
+    the legibility boundary that holds on our side until it lands, and until
+    then it covers EVERY task using this getter and every prefix, not one task.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.ERROR)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if os.path.basename(record.pathname) != _GETTER_SOURCE_FILE:
+            return
+        try:
+            message = record.getMessage()
+        except Exception:  # pragma: no cover - a broken format must not mask the error
+            # Still an ERROR raised from inside this getter, so still a target
+            # this episode could not be scored against. Kept legible without
+            # copying a half-formatted record.
+            self.messages.append("tab getter failed without a readable message")
+            return
+        if _GETTER_TAG not in message or _GETTER_NO_TARGET in message:
+            return
+        self.messages.append(message)
+
+
 # The upstream frame path, pinned: ``desktop_env/controllers/python.py``
 # (OSWorld-V2 @ d578d2d, ``get_screenshot`` at 455-481). The handler is attached
 # to the one logger those records are written on, and each record is
@@ -1263,16 +1337,33 @@ class AwsProvider:
             loggers = [logging.getLogger(name) for name in _JUDGE_LOGGERS]
             for logger in loggers:
                 logger.addHandler(capture)
+            # A second handler, on the getter's own logger: a page the getter
+            # selected but could not interrogate is the same class of failure as
+            # a judge that never answered -- upstream logs it, swallows it into
+            # a falsy return, and the task scores 0.0. See
+            # ``_UnreadGetterTargetCapture``.
+            getter_logger = logging.getLogger(_GETTER_LOGGER)
+            getter_capture = _UnreadGetterTargetCapture()
+            getter_logger.addHandler(getter_capture)
             try:
                 raw = env.evaluate()
             finally:
                 for logger in loggers:
                     logger.removeHandler(capture)
+                getter_logger.removeHandler(getter_capture)
             if capture.messages:
                 # A recorded ERROR means upstream swallowed an exception into
                 # a score. Returning that score would seal a silent zero.
                 raise scoring.ScoringUnavailable(
                     "judge/evaluator backend failed: " + "; ".join(capture.messages[:3])
+                )
+            if getter_capture.messages:
+                # Same reasoning, different instrument: the getter read a page
+                # it could not interrogate, so the score it fed says nothing
+                # about the agent's work and must not be sealed as a miss.
+                raise scoring.ScoringUnavailable(
+                    "page getter could not read the target it selected: "
+                    + "; ".join(getter_capture.messages[:3])
                 )
             return raw
 
