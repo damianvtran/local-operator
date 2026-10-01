@@ -46,6 +46,16 @@ DOMAIN = b"lop-operator-v1\x00"
 #: signature over an action.
 DEVICE_CERT_DOMAIN = b"lop-operator-device-v1\x00"
 
+#: The domain tag for an APPROVAL DECISION (remote-onboarding §2.4, F4). A third
+#: tag beside the two above, for the same reason they are separate from each
+#: other: a signature harvested over an operator action or a device certificate
+#: can never be replayed as an approval decision, and the reverse. The payload's
+#: ONE builder lives with the approval store (``network/approvals.signed_payload``
+#: — it needs this module's length-prefix framing without importing the operator
+#: package at read paths); the TAG lives here so every domain this key signs is
+#: declared in one module.
+APPROVAL_DOMAIN = b"lop-approval-v1\x00"
+
 #: A signature is DER-encoded ECDSA over a P-256 key: 8 (sequence) + up to 2*33
 #: of integers. Bounded rather than exact, because DER length varies with the
 #: leading byte of each integer; the bound exists so a megabyte of junk cannot

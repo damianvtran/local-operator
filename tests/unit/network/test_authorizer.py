@@ -109,7 +109,13 @@ def test_a_local_op_in_the_peer_table_is_a_bug_not_a_gap(
 
 
 def test_the_vocabulary_is_the_one_agreed_set() -> None:
-    """Convergence: nine names, and the rejected draft names are absent."""
+    """The agreed set, and the rejected draft names are absent.
+
+    ``approve`` and ``unattended`` joined in the remote-onboarding slice (a);
+    this pin is deliberately a full-set equality so a THIRTEENTH name cannot
+    appear without moving it, and so the two shipped additions are visible in
+    the diff rather than implied.
+    """
     assert types.CAPABILITIES == frozenset(
         {
             "broker_credential",
@@ -122,6 +128,8 @@ def test_the_vocabulary_is_the_one_agreed_set() -> None:
             "slash",
             "delete",
             "move",
+            "approve",
+            "unattended",
         }
     )
     for rejected in ("broker:request", "broker:grant", "member:admin", "trust"):

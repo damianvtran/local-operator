@@ -532,6 +532,64 @@ def test_an_offload_to_a_peer_that_cannot_move_is_refused_before_the_invite(
     assert (server_b.root / "sessions" / SESSION).is_dir()
 
 
+def test_an_offload_carries_the_sessions_unattended_authority_on_the_invite(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defect 2, the MOVE half: the invite carries the session's auto authority.
+
+    The step that would APPLY it — the destination's runtime construction — runs
+    on the other device, so the bit must travel WITH the invite, exactly like
+    ``wait_s`` and ``engage_on_arrival`` beside it. Read from THIS device's stamp
+    (the session's own record of the authority it was created or re-stamped with)
+    and sent on EVERY invite so the key's presence does not depend on a boolean:
+    an older destination ignores it and a MISSING key reads as off.
+
+    Two halves in one cell, because a field that reads True whatever the session
+    says is a field that carries nothing: the carried session sends True and the
+    destination STAMPS it (the construction reads the stamp, not the invite); a
+    session that never set the bit sends False. Nothing here asserts the
+    destination's runtime — the stamp write and the construction's re-check have
+    their own cells — this one pins the WIRE hop, which is the one a refactor
+    deletes most quietly.
+    """
+    from dataclasses import replace
+
+    from local_operator.session.placement import read_stamp, write_stamp
+
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin", settings=server_b.settings)
+    _owned_session(server_a)
+    carried = read_stamp(server_a.root, SESSION)
+    assert carried is not None
+    write_stamp(server_a.root, replace(carried, unattended=True))
+
+    frames: list[dict[str, Any]] = []
+    real = mobility.LinkTransport.ask
+
+    def capture(self: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        frames.append(dict(frame))
+        return real(self, frame)
+
+    monkeypatch.setattr(mobility.LinkTransport, "ask", capture)
+
+    result = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
+    assert result["ok"] is True, result
+    invites = [frame for frame in frames if frame.get("phase") == "invite"]
+    assert invites, frames
+    assert invites[0].get("unattended") is True, invites[0]
+    arrived = read_stamp(server_b.root, SESSION)
+    assert arrived is not None and arrived.unattended is True, arrived
+
+    # The other direction, on a second session in the same rig.
+    second_id = "9f3ac1e0b7d3"
+    _owned_session(server_a, second_id)
+    frames.clear()
+    moved = _move(server_a, second_id, to=server_b.identity.device_id, monkeypatch=monkeypatch)
+    assert moved["ok"] is True, moved
+    second = [frame for frame in frames if frame.get("phase") == "invite"]
+    assert second and second[0].get("unattended") is False, second[0]
+
+
 def test_a_second_offload_after_a_round_trip_is_a_real_move_not_a_stale_signal(
     pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:

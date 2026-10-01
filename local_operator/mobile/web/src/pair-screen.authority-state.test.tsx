@@ -51,12 +51,11 @@ describe("the pairing screen and the machine's own state", () => {
 			authority_ready: false,
 		});
 		await pairAway();
-		// Found by the SENTENCE rather than by the `<code>` inside it: the default
-		// matcher returns the innermost element whose text matches, so a query on
-		// "lop operator install" answers with the code element and would leave the
-		// paragraph's own wording unasserted.
+		// Found by the SENTENCE rather than by a prominent inner element: a phrase
+		// query would answer with the innermost match and would leave the paragraph's
+		// own wording unasserted.
 		const said = await screen.findByText(/can sign already/, undefined, { timeout: 5000 });
-		expect(said.textContent).toContain("lop operator install");
+		expect(said.textContent).toContain("Ask Local Operator on that machine to set up operator authority");
 		expect(said.textContent).toContain("cannot check it yet");
 		expect(screen.queryByText(/can now approve parked tool calls/)).toBeNull();
 	});
@@ -75,7 +74,7 @@ describe("the pairing screen and the machine's own state", () => {
 			timeout: 5000,
 		});
 		expect(said.textContent).toContain("loosen");
-		expect(screen.queryByText(/lop operator install/)).toBeNull();
+		expect(screen.queryByText(/set up operator authority on that machine/)).toBeNull();
 	});
 
 	it("treats an older relay's missing field as ready, not as unready", async () => {
@@ -95,15 +94,15 @@ describe("the pairing screen and the machine's own state", () => {
 });
 
 describe("the pairing screen's failure copy", () => {
-	it("routes a revoked device back to the machine with an operand it can act on (U1)", async () => {
-		/* The route, in the three states it has been through: "Pair it again from
+	it("routes a revoked device back to the machine through the agent route (U1, D9)", async () => {
+		/* The route, in the states it has been through: "Pair it again from
 		   `lop pair`" (the step the machine refuses for ever — UX round 8, U8-1), then
 		   `lop operator init` + `install` (which the local revocation record defeated —
-		   round 9's Q9-1/R9-2, measured 403 either way), now the inverse verb — with
-		   THIS PHONE'S OWN ID in it rather than a `<this phone's device id>`
-		   placeholder (UX and design round 10, U1: the id is derived from this phone's
-		   key a few lines above and was discarded, so the command on screen could not be
-		   run by the person reading it). */
+		   round 9's Q9-1/R9-2, measured 403 either way), then the inverse verb carrying
+		   this phone's own id (U1). Design round 2 (D9) then removed the terminal
+		   COMMAND from it: a phone reader cannot run one, so the sentence now names the
+		   AGENT route the rest of the product names for the same step (§2.9), keeping
+		   the id so the reader can hand it over. */
 		mocks.claimPairingCode.mockRejectedValueOnce(
 			new Error("this device has been revoked"),
 		);
@@ -111,19 +110,16 @@ describe("the pairing screen's failure copy", () => {
 		const said = await screen.findByText(/revoked on the machine/, undefined, { timeout: 5000 });
 		expect(said.textContent).toContain("only there");
 
-		/* The command is a COMMAND: `<code>`, like the neighbouring paragraph's
-		   `lop pair`, and it carries the real 32-hex id (D1). */
-		const command = await screen.findByText(/lop operator devices --authorise/);
-		expect(command.tagName.toLowerCase()).toBe("code");
-		expect(command.textContent).toMatch(/^lop operator devices --authorise [0-9a-f]{32}$/);
+		/* D9: no command on a phone surface — the remedy names the action and the id. */
+		expect(screen.queryByText(/lop operator devices --authorise/)).toBeNull();
+		expect(screen.getByText(/allow this phone again/)).toBeTruthy();
+		expect(screen.getByText(/the device id is/)).toBeTruthy();
 		expect(screen.queryByText(/this phone's device id/)).toBeNull();
 		expect(screen.queryByText(/Pair it again/)).toBeNull();
 		expect(screen.queryByText(/create a new operator anchor/)).toBeNull();
 
-		/* D2: the machine-side condition the old parenthetical asked a phone reader to
-		   evaluate is now its own sentence, gated on a check they can run. */
-		expect(screen.getByText(/lop operator status/)).toBeTruthy();
-		expect(screen.getByText(/lop operator install/)).toBeTruthy();
+		/* D2/D9: the machine-side condition stays its own sentence. */
+		expect(screen.getByText(/ask it to set that up first/)).toBeTruthy();
 	});
 
 	it("turns a relay fault into a sentence rather than a status code (U8-4)", async () => {
