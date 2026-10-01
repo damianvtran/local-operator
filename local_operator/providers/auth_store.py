@@ -3559,18 +3559,22 @@ class AuthStore:
         model_id: str = "",
         exclude_keys: Collection[str] | None = None,
         exclude_credential_ids: Collection[int] | None = None,
-        persisted_only: bool = False,
+        persisted_kinds: frozenset[str] | None = None,
     ) -> tuple[str | None, StoredCredential | None]:
         """The 7-step cascade; returns ``(key, winning row or None)``.
 
-        ``persisted_only`` runs ONLY the tiers that read stored rows (3 OAuth,
-        4 login api_key, 6 stored api_key) and skips the four that do not: the
-        runtime override (1), the config override (2), the env tier (5) and the
-        fallback resolver (7). It exists for one question -- "is this provider
-        LOGGED IN" -- which :meth:`has_persisted_credential` answers; an
-        availability probe that let an ambient ``OPENAI_API_KEY`` or a ``--api-key``
-        flag answer it would advertise a speech rung the user never signed in to.
-        Every other caller leaves it ``False`` and sees the cascade unchanged.
+        ``persisted_kinds`` (``None`` = the ordinary cascade) runs ONLY the tiers
+        that read stored rows -- 3 OAuth, 4 login api_key, 6 stored api_key -- and
+        skips the four that do not: the runtime override (1), the config override
+        (2), the env tier (5) and the fallback resolver (7). The set names which
+        ROW KINDS may answer (``{"oauth", "api_key"}``): a caller that needs an API
+        key (the OpenAI speech rung, whose audio endpoint rejects a ChatGPT OAuth
+        token) passes ``{"api_key"}`` and tier 3 is skipped. It exists for one
+        question -- "is this provider LOGGED IN" -- which
+        :meth:`has_persisted_credential` answers; an availability probe that let
+        an ambient ``OPENAI_API_KEY`` or a ``--api-key`` flag answer it would
+        advertise a speech rung the user never signed in to. Every other caller
+        leaves it ``None`` and sees the cascade unchanged.
 
         ``ignore_demotions`` runs the cascade as if no credential were demoted.
         It is set only by this method's own second pass (see the tail), where
@@ -3607,24 +3611,28 @@ class AuthStore:
 
         # 1. Runtime override
         runtime = self._runtime_overrides.get(provider)
-        if runtime and not persisted_only:
+        if runtime and persisted_kinds is None:
             return runtime, None
 
         # 2. Config override
         config = self._config_overrides.get(provider)
-        if config and not persisted_only:
+        if config and persisted_kinds is None:
             return config, None
 
-        # 3. OAuth credential
-        oauth_rows = self._usable_key_rows(
-            provider,
-            "oauth",
-            source=None,
-            ignore_demotions=ignore_demotions,
-            model_id=model_id,
-            session_id=session_id,
-            exclude_keys=exclude_keys,
-            exclude_credential_ids=exclude_credential_ids,
+        # 3. OAuth credential (skipped when the caller wants API-key rows only)
+        oauth_rows = (
+            []
+            if persisted_kinds is not None and "oauth" not in persisted_kinds
+            else self._usable_key_rows(
+                provider,
+                "oauth",
+                source=None,
+                ignore_demotions=ignore_demotions,
+                model_id=model_id,
+                session_id=session_id,
+                exclude_keys=exclude_keys,
+                exclude_credential_ids=exclude_credential_ids,
+            )
         )
         for row in self._selection_order(
             oauth_rows, provider, session_id, read_only=read_only, model_id=model_id
@@ -3648,15 +3656,20 @@ class AuthStore:
         # PR-15: with NO oauth rows, force_refresh falls through to tiers 4-7.
 
         # 4. API key persisted by interactive login
-        login_rows = self._usable_key_rows(
-            provider,
-            "api_key",
-            source="login",
-            ignore_demotions=ignore_demotions,
-            model_id=model_id,
-            session_id=session_id,
-            exclude_keys=exclude_keys,
-            exclude_credential_ids=exclude_credential_ids,
+        api_key_tiers = persisted_kinds is None or "api_key" in persisted_kinds
+        login_rows = (
+            self._usable_key_rows(
+                provider,
+                "api_key",
+                source="login",
+                ignore_demotions=ignore_demotions,
+                model_id=model_id,
+                session_id=session_id,
+                exclude_keys=exclude_keys,
+                exclude_credential_ids=exclude_credential_ids,
+            )
+            if api_key_tiers
+            else []
         )
         for row in self._selection_order(
             login_rows, provider, session_id, read_only=read_only, model_id=model_id
@@ -3673,22 +3686,26 @@ class AuthStore:
 
         # 5. Env var tier (the process environment; the plaintext credentials.env
         # file is no longer read here, PR2a).
-        env_key = None if persisted_only else self._env_api_key(provider)
+        env_key = self._env_api_key(provider) if persisted_kinds is None else None
         if env_key:
             return env_key, None
 
         # 6. Stored api_key without source="login" (e.g. broker migration)
         stored_rows = [
             row
-            for row in self._usable_key_rows(
-                provider,
-                "api_key",
-                source=None,
-                ignore_demotions=ignore_demotions,
-                model_id=model_id,
-                session_id=session_id,
-                exclude_keys=exclude_keys,
-                exclude_credential_ids=exclude_credential_ids,
+            for row in (
+                self._usable_key_rows(
+                    provider,
+                    "api_key",
+                    source=None,
+                    ignore_demotions=ignore_demotions,
+                    model_id=model_id,
+                    session_id=session_id,
+                    exclude_keys=exclude_keys,
+                    exclude_credential_ids=exclude_credential_ids,
+                )
+                if api_key_tiers
+                else []
             )
             if row.data.get("source") != "login"
         ]
@@ -3700,7 +3717,7 @@ class AuthStore:
                 pin(row.id)
                 return key, row
         # 7. Fallback resolver
-        resolver = None if persisted_only else self._fallback_resolvers.get(provider)
+        resolver = self._fallback_resolvers.get(provider) if persisted_kinds is None else None
         if resolver is not None:
             return resolver(provider), None
 
@@ -3732,12 +3749,81 @@ class AuthStore:
                 model_id=model_id,
                 exclude_keys=exclude_keys,
                 exclude_credential_ids=exclude_credential_ids,
-                persisted_only=persisted_only,
+                persisted_kinds=persisted_kinds,
             )
 
         return None, None
 
-    async def has_persisted_credential(self, provider: str, session_id: str | None = None) -> bool:
+    async def get_persisted_api_key(
+        self,
+        provider: str,
+        session_id: str | None = None,
+        *,
+        kinds: Collection[str] | None = None,
+    ) -> str | None:
+        """The bearer a PERSISTED row of ``provider`` would authenticate with, or ``None``.
+
+        The value behind :meth:`has_persisted_credential`, exposed so a caller
+        whose AVAILABILITY and CALL-TIME key must agree on one credential class
+        can ask the same question twice instead of two different ones (the OpenAI
+        speech rung: the probe and the request both want an API key, and a probe
+        that counted a ChatGPT OAuth row while the request sent it to the audio
+        endpoint is the defect this shape prevents). Same rules as the probe,
+        same failure contract: never raises, ``None`` on any failure.
+
+        Reads stored rows only -- never the runtime/config override, the process
+        environment or the fallback resolver -- so unlike :meth:`get_api_key` it
+        is NOT the right call for "what should this request authenticate with"
+        in general; callers use it where "stored login" is the whole requirement.
+
+        ``kinds`` narrows which ROW KINDS may answer (``{"api_key"}`` skips OAuth
+        rows); ``None`` lets either. After the credential rows, the provider-class
+        STORE row (the encrypted ``lop credential`` namespace) is tried under the
+        names derived from the STORAGE id's registry entry: its ``env_keys`` and,
+        for a row that declares none on purpose (``openai-key``), its
+        ``legacy_store_keys``. That row is an encrypted persisted secret, not the
+        process environment, and counts as an ``api_key`` -- so it only answers
+        when ``kinds`` allows one.
+        """
+        wanted = frozenset(kinds) if kinds is not None else frozenset({"oauth", "api_key"})
+        try:
+            key, _row = await self._resolve(
+                provider, session_id, read_only=True, persisted_kinds=wanted
+            )
+            if key:
+                return key
+            if "api_key" not in wanted:
+                return None
+            from local_operator.providers.registry import (
+                credential_provider_id,
+                env_key_names,
+                get_provider_definition,
+                provider_secret_value,
+            )
+
+            storage = credential_provider_id(provider)
+            definition = get_provider_definition(storage)
+            names = (
+                env_key_names(provider)
+                or env_key_names(storage)
+                or (definition.legacy_store_keys if definition is not None else ())
+            )
+            for name in names:
+                value = provider_secret_value(name, base=self._config_dir)
+                if value:
+                    return value
+            return None
+        except Exception:  # noqa: BLE001 - a probe must never take its caller down
+            logger.warning("persisted-credential read for %s failed; reporting none", provider)
+            return None
+
+    async def has_persisted_credential(
+        self,
+        provider: str,
+        session_id: str | None = None,
+        *,
+        kinds: Collection[str] | None = None,
+    ) -> bool:
         """Whether ``provider`` is LOGGED IN, judged from persisted rows alone.
 
         The ONE availability probe for features that must advertise a rung only
@@ -3749,7 +3835,7 @@ class AuthStore:
         ``credentials.env`` the env tier once read), and not the fallback
         resolver. An exported ``OPENAI_API_KEY`` therefore never lights
         a rung, which is the mobile contract's "never advertised from ambient
-        state" rule.
+        state" rule. ``kinds`` is documented on :meth:`get_persisted_api_key`.
 
         Why this is a separate method and not ``bool(await get_api_key(...))``:
         ``get_api_key`` is the CALL-time resolver, and its tiers 1, 2 and 5 are
@@ -3758,8 +3844,21 @@ class AuthStore:
         call-time fetch keeps the full cascade; only the question "is this a
         login" is narrowed.
 
-        ``read_only`` is fixed on: a probe must not move session stickiness, block
-        a row whose refresh it could not confirm, or otherwise decide routing.
+        MESH BORROW-ONLY DEVICES read UNAVAILABLE here, deliberately. A grant
+        borrowed from an owner device (``MeshAwareAuthStore``'s last rung) is not a
+        persisted row on THIS device: the wrapper forwards this method to the
+        local store, which has none. That follows the rule as written ("persisted
+        rows only"), and the call-time path is untouched -- the borrow still
+        works wherever a call runs. It is a user-visible difference on a device
+        whose only Radient credential is borrowed (its rung is not advertised);
+        whether brokered logins should advertise is a decision for the mesh
+        owners, pinned by ``test_a_borrow_only_device_reads_unavailable``.
+
+        ``read_only`` is fixed on: a probe must not move session stickiness or
+        block a row whose refresh it could not confirm. It is NOT side-effect-free:
+        an EXPIRED OAuth row still gets its refresh attempted, and a successful
+        refresh persists the rotated token (single-use refresh tokens must not be
+        thrown away), so a probe can make one network round trip and one write.
 
         FAIL-CLOSED and NEVER RAISES. A locked or unreadable store, a refresh the
         row cannot complete, or any other failure is "not available right now",
@@ -3767,32 +3866,8 @@ class AuthStore:
         would take the mic or the voice picker down with it. Logged at WARNING
         without the exception text (a store error can quote row data).
         """
-        try:
-            key, _row = await self._resolve(
-                provider, session_id, read_only=True, persisted_only=True
-            )
-            if key:
-                return True
-            # The STORE half of the env tier: the encrypted provider-class row
-            # (``LOP_PROVIDER_<ENV_NAME>``, what ``lop credential`` writes). It is a
-            # persisted store row -- the mobile availability filter
-            # (``mobile/stt.py::_stored_byo_credential``) already counts it as one,
-            # and the legacy-gateway Radient branch is defined as exactly this --
-            # while ``provider_env_key``'s second leg, ``os.environ``, is NOT read
-            # here. Only that process-environment leg is "ambient".
-            from local_operator.providers.registry import (
-                credential_provider_id,
-                env_key_names,
-                provider_secret_value,
-            )
-
-            names = env_key_names(provider) or env_key_names(credential_provider_id(provider))
-            return any(provider_secret_value(name, base=self._config_dir) for name in names)
-        except Exception:  # noqa: BLE001 - a probe must never take its caller down
-            logger.warning(
-                "persisted-credential probe for %s failed; reporting not logged in", provider
-            )
-            return False
+        key = await self.get_persisted_api_key(provider, session_id, kinds=kinds)
+        return bool(key)
 
     def _env_api_key(self, provider: str) -> str | None:
         # The env leg resolves through the SHARED store-first reader

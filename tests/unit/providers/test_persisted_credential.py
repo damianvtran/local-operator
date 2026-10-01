@@ -200,3 +200,59 @@ async def test_radient_probe_never_raises(tmp_path: Path) -> None:
 
     broken: Any = Broken()
     assert await has_persisted_radient_credential(tmp_path, CANONICAL, store=broken) is False
+
+
+# ---------------------------------------------------------------------------
+# Row KINDS and the namespace-derived store-row leg (review round 1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_kinds_api_key_skips_an_oauth_row(store: AuthStore) -> None:
+    """``kinds={"api_key"}``: a ChatGPT-style OAuth row alone is not a login."""
+    store.upsert_credential("openai", _oauth_payload())
+    assert await store.has_persisted_credential("openai") is True
+    assert await store.has_persisted_credential("openai", kinds={"api_key"}) is False
+    assert await store.get_persisted_api_key("openai", kinds={"api_key"}) is None
+
+
+@pytest.mark.asyncio
+async def test_kinds_api_key_still_counts_both_api_key_tiers(store: AuthStore) -> None:
+    store.upsert_credential("elevenlabs", {"type": "api_key", "source": "login", "key": "k1"})
+    assert await store.has_persisted_credential("elevenlabs", kinds={"api_key"}) is True
+    store.delete_credentials_for_provider("elevenlabs")
+    store.upsert_credential("elevenlabs", {"type": "api_key", "key": "k2"})
+    assert await store.get_persisted_api_key("elevenlabs", kinds={"api_key"}) == "k2"
+
+
+@pytest.mark.asyncio
+async def test_the_store_row_leg_is_derived_from_the_namespace_not_env_keys(
+    store: AuthStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``openai-key`` declares no ``env_keys``; its legacy store row still counts.
+
+    The leg used to read ``env_key_names`` and was therefore EMPTY for exactly the
+    row S2's TTS probe asks about. ``legacy_store_keys`` names the store row; the
+    process environment is still never read.
+    """
+    monkeypatch.setenv("OPENAI_API_KEY", "ambient")
+    assert await store.has_persisted_credential("openai-key") is False
+    store_provider_key("OPENAI_API_KEY", "stored", base=tmp_path / "config")
+    assert await store.has_persisted_credential("openai-key") is True
+    assert await store.get_persisted_api_key("openai-key") == "stored"
+    # An OAuth-only ask never reads the store row (it is an api_key).
+    assert await store.has_persisted_credential("openai-key", kinds={"oauth"}) is False
+
+
+@pytest.mark.asyncio
+async def test_the_store_row_leg_works_for_a_callable_env_keys_row(
+    store: AuthStore, tmp_path: Path
+) -> None:
+    """``anthropic`` has callable ``env_keys`` (no plain name): documented, pinned.
+
+    ``env_key_names`` is empty for it, so the leg cannot name a store row and
+    answers from credential rows alone -- the honest behaviour, written down so a
+    later probe of ``anthropic`` does not assume otherwise.
+    """
+    store_provider_key("ANTHROPIC_API_KEY", "stored", base=tmp_path / "config")
+    assert await store.has_persisted_credential("anthropic") is False

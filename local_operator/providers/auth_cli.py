@@ -317,11 +317,13 @@ def run_login(
     :func:`list_logins` but plays no part in a login: new credentials land in
     ``auth_store`` only. It used to be a ``CredentialManager``, deleted in PR2b.
     """
-    if provider_id == LOGIN_STATUS_WORD:
+    if provider_id is not None and provider_id.strip().lower() == LOGIN_STATUS_WORD:
         # `lop login status` / `/login status`: the same listing as
         # `login-status`. "status" can never be a provider id (the registry has
         # no such row), so claiming the word costs nothing and spares the user
-        # an "Unknown provider: status" for the command the docs name.
+        # an "Unknown provider: status" for the command the docs name. Matched
+        # case-insensitively, as the TUI's `/login STATUS` is (it lowercases its
+        # argument first), so the two surfaces answer one spelling one way.
         return list_logins(auth_store, _config_dir)
     if provider_id is None:
         print("Available login providers:")

@@ -178,7 +178,7 @@ class ProviderDefinition:
     #:
     #: ElevenLabs is the case this exists for: the row is login-capable ON
     #: PURPOSE (a bring-your-own key has to be storable for the mobile voice
-    #: path, ``clients/stt.py``) while its wire answers speech-to-text only, so
+    #: path, ``clients/stt.py``) while its wire answers no chat completion, so
     #: a session could never run a turn on it. Same shape as ``decision_only``
     #: above and enforced at the same doors — every surface that offers or
     #: resolves a CHAT model asks :func:`is_speech_only` beside
@@ -191,7 +191,8 @@ class ProviderDefinition:
     #: The default ``{"chat"}`` is today's truth for every entry whose wire
     #: answers chat completions -- every row that predates this field. A row
     #: declares its own set when that stops being true: ``elevenlabs`` carries
-    #: ``{"stt"}`` because its wire is speech-to-text only, and a future TTS
+    #: ``{"stt", "tts"}`` because its wire is speech in both directions and never
+    #: chat, ``openai-key`` carries ``{"tts"}``, and a future TTS
     #: provider sets ``{"tts"}``. Nothing consumes it yet (the speech lane's
     #: cascade reads its own rung list), so declaring it changes no behaviour;
     #: it is the fact the surfaces WILL gate on, kept next to the wire it
@@ -203,6 +204,19 @@ class ProviderDefinition:
     #: sites pinned by their own tests and the derivation would be a behaviour
     #: change dressed as a refactor.
     capabilities: frozenset[str] = frozenset({"chat"})
+    #: Provider-class STORE-row names (the encrypted ``lop credential`` namespace,
+    #: e.g. ``OPENAI_API_KEY``) a persisted-credential probe may read for this row
+    #: when it has no ``env_keys`` of its own.
+    #:
+    #: Exists for ``openai-key`` alone. That row declares NO ``env_keys`` so an
+    #: ambient ``OPENAI_API_KEY`` can never surface on a view of it, which also
+    #: leaves the probe with no name to look up the legacy store row under -- the
+    #: row ``lop credential update OPENAI_API_KEY`` wrote before this login
+    #: existed, and which the OpenAI speech rung must keep honouring so nobody
+    #: loses a rung they had. This field names that STORE row and nothing else:
+    #: it is never read from the process environment, never shown by a view and
+    #: never consulted by the call-time cascade (``resolve_env_key`` ignores it).
+    legacy_store_keys: tuple[str, ...] = ()
     #: The clean title a surface shows for this provider: the name MINUS the
     #: trailing parenthetical that distinguishes login flavours (``"OpenAI"``
     #: for ``"OpenAI (ChatGPT Plus/Pro)"``).
@@ -244,6 +258,19 @@ class ProviderDefinition:
                 f"{'y' if len(unknown) == 1 else 'ies'}: {sorted(unknown)!r}"
                 f" (vocabulary: {sorted(CAPABILITY_VOCABULARY)!r})"
             )
+
+    @property
+    def accepts_api_key(self) -> bool:
+        """Whether a pasted/saved API key is a valid credential for this row.
+
+        The ONE answer behind the census's ``accepts_api_key`` field and the
+        ``PUT /v1/auth/providers/{id}/key`` route, which used to each read
+        ``env_keys is not None`` -- true for every provider with a key variable
+        and FALSE for ``openai-key``, a paste-a-key login that declares no
+        variable on purpose. Reading the login's own kind as well keeps the two
+        consistent: a row whose login IS "paste an API key" accepts one.
+        """
+        return self.env_keys is not None or self.login_kind == "api_key"
 
     @property
     def login_kind(self) -> str | None:
@@ -683,6 +710,9 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         # the enforcement flag and in the wire fact.
         speech_only=True,
         capabilities=frozenset({"tts"}),
+        # The legacy provider-class store row the OpenAI speech rung keeps
+        # honouring (see ``legacy_store_keys``); a store row, never the env.
+        legacy_store_keys=("OPENAI_API_KEY",),
     ),
     ProviderDefinition(
         id="radient",
@@ -947,7 +977,7 @@ def decision_only_message(provider_id: str) -> str:
 
 
 def is_speech_only(provider_id: str | None) -> bool:
-    """Whether ``provider_id`` serves speech-to-text and never chat completions.
+    """Whether ``provider_id`` serves speech (STT and/or TTS) and never chat completions.
 
     The sibling of :func:`is_decision_only`, with the same contract: ONE
     exported predicate (alias-aware, case/padding-normalised, tolerant of
@@ -964,6 +994,28 @@ def is_speech_only(provider_id: str | None) -> bool:
     return bool(definition is not None and definition.speech_only)
 
 
+def speech_wire_noun(provider_id: str) -> str:
+    """What a speech-only provider's wire serves, as a noun phrase for a sentence.
+
+    ONE derivation for every door that refuses a speech-only hosting
+    (:func:`speech_only_message` and ``model/configure.py``'s selection refusal),
+    read off ``capabilities`` rather than spelled per door: a TTS-only row
+    (``openai-key``) is not "speech-to-text", and a hand-written sentence in a
+    second place is how that stayed wrong for one door. ``stt`` is tested FIRST
+    and by membership, so ElevenLabs (``{stt, tts}``) keeps the sentence its
+    pinned tests and users know, and any set that is not exactly one of the two
+    -- empty, unknown id, a future member -- says the honest generic "speech"
+    rather than a wrong specific one.
+    """
+    definition = get_provider_definition(provider_id)
+    capabilities = definition.capabilities if definition is not None else frozenset()
+    if "stt" in capabilities:
+        return "speech-to-text"
+    if "tts" in capabilities:
+        return "text-to-speech"
+    return "speech"
+
+
 def speech_only_message(provider_id: str) -> str:
     """The ONE sentence for a speech-only provider, refused as a chat hosting.
 
@@ -975,16 +1027,9 @@ def speech_only_message(provider_id: str) -> str:
     backend, this one is a voice provider — and collapsing them into one
     sentence would tell the reader something false about whichever it is not.
     """
-    # The sentence names what the wire ACTUALLY serves: a TTS-only row
-    # (``openai-key``) must not be described as speech-to-text. A provider that
-    # serves STT (ElevenLabs, which also serves TTS) keeps the sentence its
-    # pinned tests and users already know.
-    definition = get_provider_definition(provider_id)
-    capabilities = definition.capabilities if definition is not None else frozenset()
-    serves = "text-to-speech" if capabilities == frozenset({"tts"}) else "speech-to-text"
     return (
-        f"Hosting '{provider_id}' serves {serves}, not chat completions, "
-        "so no session can run on it."
+        f"Hosting '{provider_id}' serves {speech_wire_noun(provider_id)}, not chat "
+        "completions, so no session can run on it."
     )
 
 
