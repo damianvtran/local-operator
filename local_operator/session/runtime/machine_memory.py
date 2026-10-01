@@ -395,11 +395,10 @@ def machine_memory_pass(
         verdict.reason,
         _fragment_line(top),
     )
-    candidate = next(
-        (fragment for fragment in ranked if fragment.mb >= memory_guard.MACHINE_FRAGMENT_MIN_MB),
-        None,
-    )
-    if candidate is None:
+    eligible = [
+        fragment for fragment in ranked if fragment.mb >= memory_guard.MACHINE_FRAGMENT_MIN_MB
+    ]
+    if not eligible:
         return MemoryPassReport(
             state="act",
             fleet_mb=fleet_mb,
@@ -422,10 +421,28 @@ def machine_memory_pass(
             measured=len(closure) - unmeasured,
             unmeasured=unmeasured,
             top=top,
-            reason=verdict.reason + f"; this pass does not apply (would end pid {candidate.pid})",
+            reason=verdict.reason + f"; this pass does not apply (would end pid {eligible[0].pid})",
         )
-    lineage = lineage_keys(candidate, rows_by_pid, roots)
-    if not kill_allowed or (in_cooldown is not None and in_cooldown(lineage)):
+
+    # **THE LARGEST UNHELD FRAGMENT, NOT THE LARGEST FRAGMENT.** The cooldown holds
+    # a respawn of what was just ended; it must not also hold an UNRELATED runaway
+    # that happens to rank second (the 02:41/02:43 shape of 2026-09-30, one rank
+    # down). Held fragments are passed over and NAMED, so the log reads "skipped
+    # held pid X; ended pid Y" rather than silently choosing a smaller target.
+    # ``kill_allowed=False`` is the whole-pass rung and holds everything.
+    lineages = {fragment.pid: lineage_keys(fragment, rows_by_pid, roots) for fragment in eligible}
+    held: list[memory_guard.Fragment] = []
+    candidate = None
+    if kill_allowed:
+        for fragment in eligible:
+            if in_cooldown is not None and in_cooldown(lineages[fragment.pid]):
+                held.append(fragment)
+                continue
+            candidate = fragment
+            break
+    else:
+        held = list(eligible)
+    if candidate is None:
         return MemoryPassReport(
             state="act",
             fleet_mb=fleet_mb,
@@ -436,8 +453,16 @@ def machine_memory_pass(
             kill_withheld=True,
             withheld_cause="cooldown",
             reason=verdict.reason
-            + f"; would end the largest fragment (pid {candidate.pid}), kill withheld",
+            + f"; would end the largest fragment (pid {eligible[0].pid}), kill withheld",
         )
+    if held:
+        logger.warning(
+            "machine memory: skipped held (cooldown) %s; ending pid %s (%s MB) instead",
+            _fragment_line(held),
+            candidate.pid,
+            candidate.mb,
+        )
+    lineage = lineages[candidate.pid]
 
     cause, message = _fragment_refusal(candidate, runner=base, identity_probe=identity_probe)
     if cause:
