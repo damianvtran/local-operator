@@ -117,15 +117,12 @@ logger = logging.getLogger(__name__)
 class AgentParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    # Per-op semantics moved to the tool:// doc's ops table (slimming wave,
+    # audit item 2): this description rode every request while being read once,
+    # and `read tool://agent` renders the same blurbs on demand. The enum
+    # literals stay, so the op set is still learnable from the wire.
     op: Literal["list", "show", "search", "install", "reset", "create", "update", "sync"] = Field(
-        description=(
-            "search: find a role by meaning; list/show: what exists and what it "
-            "says (show also prints the packaged text when an installed role "
-            "has diverged from it); install: add a packaged starter; reset: "
-            "restore it over an edited role, reporting what it replaced; sync: "
-            "pull the latest for installed roles (merges hub updates with local edits); "
-            "create/update: author or fix a role or a specialist profile."
-        )
+        description="The op to run."
     )
     # The no-spaces guidance is a modularity contract, not registry law: the
     # registry itself accepts any string, but a role/specialist name is also a
@@ -134,8 +131,8 @@ class AgentParams(BaseModel):
     name: str | None = Field(
         default=None,
         description=(
-            "Role or specialist name (all ops but search). No spaces — the "
-            "name doubles as the /agent slash-command argument."
+            "Role or specialist name (all ops but search); no spaces — it doubles "
+            "as the /agent slash-command argument."
         ),
     )
     query: str | None = Field(default=None, description="search: the task, in a sentence.")
@@ -151,8 +148,7 @@ class AgentParams(BaseModel):
         description=(
             "create/update: standing guidance prepended to every run of the "
             "profile. Imperative and short — it is billed on each of that "
-            "profile's turns. This is the BASE behaviour; a team layers "
-            "collaboration and project briefs on top without rewriting it."
+            "profile's turns. Teams layer briefs on top without rewriting it."
         ),
     )
     tools: list[str] | None = Field(
@@ -217,20 +213,17 @@ class AgentParams(BaseModel):
     action_class: Literal["reactive", "proactive"] | None = Field(
         default=None,
         description=(
-            "create/update: the agent's class. 'reactive' (default) is ordinary "
-            "behaviour. 'proactive' lets it attach hidden patience waits and run "
-            "proactive deliveries — set it ONLY when the user clearly asked for a "
-            "proactive use case (companion agents are the canonical one); it can "
+            "create/update: 'reactive' (default) or 'proactive'. Set proactive "
+            "ONLY when the user clearly asked for a proactive use case: it can "
             "message them unprompted, so it is sparing by default."
         ),
     )
     kind: Literal["role", "specialist"] | None = Field(
         default=None,
         description=(
-            "create: 'role' (default) is a reusable delegation target tagged "
-            "for task(agent=...). 'specialist' is a durable named agent with "
-            "its own instruction set, and can sit on a team roster without "
-            "being a role. Ignored on update: a profile cannot change kind."
+            "create: 'role' (default; a reusable task(agent=...) target) or "
+            "'specialist' (a durable named agent, may sit on a team roster). "
+            "Ignored on update: kind cannot change."
         ),
     )
     # A plain string with an empty-string "unset", NOT ``Literal["", ...]`` and not
@@ -1503,13 +1496,16 @@ def build_agent_tool(context: ToolContext) -> AgentTool | None:
     return AgentTool(
         name="agent",
         label="Agent roles",
+        # The op roster used to be spelled in the description ("Find, install,
+        # author, or reset one to its packaged version") plus the op field's
+        # per-op exegesis. Both moved to the tool:// doc's ops table in the
+        # slimming wave (audit item 2) — the enum literals and the Ops section
+        # still carry every op. The specialist sentence moved to the doc's
+        # notes for the same reason.
         description=(
             "Reusable agent profiles: delegation roles (reviewer, coder, "
             "architect, manager, designer, scout) and specialists with their "
-            "own instruction sets. Find, install, author, or reset one to its "
-            "packaged version; launch a role with task(agent='<name>'). A "
-            "specialist is the reusable base a team layers collaboration and "
-            "project briefs on top of."
+            "own instruction sets; launch a role with task(agent='<name>')."
         ),
         parameters=parameters,
         # Writes land in the user's own configuration directory, never in the
