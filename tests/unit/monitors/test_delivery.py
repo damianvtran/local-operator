@@ -5,8 +5,12 @@ from __future__ import annotations
 from typing import Any
 
 from local_operator.monitors.delivery import (
+    NOTICE_KINDS,
+    NOTICE_MAX_CHARS,
     MonitorDelivery,
+    MonitorNotice,
     format_monitor_delivery_text,
+    format_monitor_notice_text,
 )
 
 
@@ -70,3 +74,88 @@ def test_singular_counts_and_the_no_clock_dependency() -> None:
         delivery(changes=1, delta_text="+1/-0 changed lines\n+ x", at_ms=0)
     )
     assert "1 change at" in text
+
+
+# ---------------------------------------------------------------------------
+# §D4: lifecycle notices — bounded, and never mistakable for a delivery
+# ---------------------------------------------------------------------------
+
+
+def notice(kind: str = "disabled", **overrides: Any) -> MonitorNotice:
+    fields: dict[str, Any] = {
+        "monitor_id": "m1",
+        "name": "watch",
+        "tool": "bash",
+        "kind": kind,
+        "at_ms": 1_756_000_000_000,
+        "checks": 7,
+        "deliveries": 0,
+        "failures": 5,
+        "detail": "check timed out after 120s",
+    }
+    fields.update(overrides)
+    return MonitorNotice(**fields)
+
+
+def test_the_disable_notice_names_the_id_the_cause_and_the_restore_path() -> None:
+    text = format_monitor_notice_text(notice())
+    assert "was DISABLED" in text
+    assert "5 consecutive failed checks" in text
+    assert "Last error: check timed out after 120s" in text
+    assert 'monitor({op:"cancel",id:"m1"})' in text
+    # The hosting caveat rides the notice as well as the arm receipt (§D8):
+    # this is the message an operator reads when a watch stops silently.
+    assert "Monitors tick only while this session is open." in text
+
+
+def test_the_zero_delivery_clause_appears_only_at_zero() -> None:
+    never = format_monitor_notice_text(notice(deliveries=0))
+    assert "It never delivered a change since arming (7 checks)." in never
+    with_deliveries = format_monitor_notice_text(notice(deliveries=3))
+    assert "never delivered" not in with_deliveries
+    assert "3 delivers of change so far." in with_deliveries
+    assert "1 deliver of change so far." in format_monitor_notice_text(notice(deliveries=1))
+
+
+def test_the_stalled_notice_names_the_remedy_and_the_baseline() -> None:
+    text = format_monitor_notice_text(
+        notice(
+            kind="stalled",
+            detail='MCP server "datadog" needs re-authentication — run /mcp reauth',
+        )
+    )
+    assert "could not run its check" in text
+    assert "/mcp reauth" in text
+    assert "without counting failures" in text
+    assert "one delta" in text
+
+
+def test_the_restored_notice_closes_the_episode() -> None:
+    text = format_monitor_notice_text(notice(kind="restored"))
+    assert "is running again" in text
+    assert "old baseline" in text
+
+
+def test_every_notice_kind_is_bounded_and_one_block() -> None:
+    """A notice is a PUSH into the conversation, so its size is a contract: a
+    long failure reason is clipped rather than allowed to turn a disable into a
+    wall of text.
+    """
+    for kind in NOTICE_KINDS:
+        text = format_monitor_notice_text(
+            notice(
+                kind,
+                name="x" * 200,
+                tool="mcp__" + "y" * 200,
+                detail="boom " * 500,
+            )
+        )
+        assert len(text) <= NOTICE_MAX_CHARS, (kind, len(text))
+        assert text.count("\n") <= 6, kind
+
+
+def test_the_notice_error_is_clipped_to_one_line() -> None:
+    text = format_monitor_notice_text(notice(detail="first line\nsecond line\t" + "z" * 400))
+    assert "\n" not in text.split("Last error: ")[1].split("\n")[0]
+    assert "second line" in text  # whitespace-collapsed, not dropped
+    assert len(text) <= NOTICE_MAX_CHARS

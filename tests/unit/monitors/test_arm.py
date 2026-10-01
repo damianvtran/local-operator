@@ -200,6 +200,36 @@ async def test_an_unknown_id_is_refused_without_writing(root: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_arming_glob_with_an_unknown_argument_is_refused_without_a_write(root: Path) -> None:
+    """The external half of the ``glob({path: ...})`` report: the arm is the
+    loud failure (§6.1), so it must refuse a call the tick would refuse rather
+    than write a monitor that dies five times and disables itself.
+    """
+    _session(root, "shape01", [])
+
+    with pytest.raises(MonitorWriteError) as refused:
+        await arm_monitor(
+            root,
+            "shape01",
+            {"tool": "glob", "arguments": {"pattern": "*.py", "path": "/tmp"}, "every": "60s"},
+        )
+
+    assert refused.value.status == STATUS_CONFLICT
+    assert 'unknown argument(s) "path"' in str(refused.value)
+    # Nothing was written: no transcript entry, no index entry.
+    assert _latest(root, "shape01")["monitors"] == []
+    assert read_entry(root, "shape01") is None
+
+    # And the SAME call with the argument the tool declares arms cleanly.
+    outcome = await arm_monitor(
+        root, "shape01", {"tool": "glob", "arguments": {"pattern": "*.py"}, "every": "60s"}
+    )
+    # ``m3`` because the fixture's transcript carries ``next_seq: 3`` (the
+    # high-water mark), not because anything was issued by the refusal above.
+    assert outcome.monitor_id == "m3"
+
+
+@pytest.mark.asyncio
 async def test_an_unknown_session_is_refused(root: Path) -> None:
     """A monitor keyed on a session with no transcript would be written into
     nothing a resume could ever read."""
@@ -227,6 +257,22 @@ async def test_the_cancelled_monitors_state_files_are_removed(root: Path) -> Non
     assert not counters.exists()
     assert not snapshot.exists()
     assert keep.exists()  # a sibling's derived files are untouched
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_last_monitor_reclaims_its_state_directory(root: Path) -> None:
+    """§D5: the files went, the container stayed, and 16 of them accumulated in
+    the live store. A sibling monitor keeps the directory (asserted above).
+    """
+    from local_operator.monitors import state as monitor_state
+
+    _session(root, "solo01", [_row("m1")])
+    _index(root, "solo01", [_row("m1")])
+    monitor_state.write_counters(root, "solo01", "m1", {"schema": 1, "monitor_id": "m1"})
+
+    await cancel_monitor(root, "solo01", "m1")
+
+    assert not monitor_state.state_dir(root, "solo01").exists()
 
 
 @pytest.mark.asyncio

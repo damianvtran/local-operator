@@ -244,3 +244,84 @@ def test_cancel_refuses_an_unknown_session(
 
     assert monitor_command(_args(monitor_command="cancel", session="nosuch", monitor_id="m1")) == 1
     assert "no session 'nosuch'" in capsys.readouterr().err
+
+
+def test_an_overdue_monitor_on_a_closed_session_reads_idle(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """§D6: "next due now" on a watch nothing is hosting reads as a stuck
+    check; the row has to say which of the two it is.
+    """
+    from local_operator.cli import monitor_command
+    from local_operator.monitors.store import write_entry
+
+    now = int(time.time() * 1000)
+    write_entry(
+        tmp_path,
+        "msess01",
+        cwd="/w",
+        monitors=[_row("m1", checks=4, next_due_at=now - 3_600_000)],
+    )
+
+    assert monitor_command(_args()) == 0
+
+    out = capsys.readouterr().out
+    assert "idle" in out
+    assert "overdue by" in out
+    # And the legend earns its place only when the word is present.
+    assert "no session is hosting it" in out
+
+
+def test_the_idle_legend_is_absent_when_nothing_is_idle(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from local_operator.cli import monitor_command
+    from local_operator.monitors.store import write_entry
+
+    now = int(time.time() * 1000)
+    write_entry(tmp_path, "msess01", cwd="/w", monitors=[_row("m1", next_due_at=now + 150_000)])
+
+    assert monitor_command(_args()) == 0
+    assert "no session is hosting it" not in capsys.readouterr().out
+
+
+def test_zero_deliveries_after_several_checks_is_named(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The live store's second silent failure: a monitor that ran and delivered
+    nothing, with no way for the operator to tell that from a broken watch.
+    """
+    from local_operator.cli import monitor_command
+    from local_operator.monitors.store import write_entry
+
+    now = int(time.time() * 1000)
+    write_entry(
+        tmp_path,
+        "msess01",
+        cwd="/w",
+        monitors=[_row("m1", checks=9, deliveries=0, next_due_at=now + 150_000)],
+    )
+
+    assert monitor_command(_args()) == 0
+
+    out = capsys.readouterr().out
+    assert "9 checks, 0 deliveries" in out
+    assert "confirm the call observes what you expect" in out
+
+
+def test_an_unavailable_episode_is_named_in_the_tail(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from local_operator.cli import monitor_command
+    from local_operator.monitors.store import write_entry
+
+    now = int(time.time() * 1000)
+    write_entry(
+        tmp_path,
+        "msess01",
+        cwd="/w",
+        monitors=[_row("m1", checks=4, unavailable_since=now - 600_000, next_due_at=now + 60_000)],
+    )
+
+    assert monitor_command(_args()) == 0
+    assert "tool unavailable since" in capsys.readouterr().out

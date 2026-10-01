@@ -893,3 +893,51 @@ class TestWakePanelOwedState:
             await pilot.pause()
             assert panel.display is True
             assert "w1" in str(panel._body.content)
+
+
+class TestMonitorBandHealth:
+    """§D6 in the band: the two states the band could not show at all."""
+
+    @pytest.mark.asyncio
+    async def test_a_never_checked_monitor_is_flagged(self) -> None:
+        spec, counters = _monitor("m1", "watch the queue")
+        counters.update({"checks": 0, "deliveries": 0})
+        spec.created_at = int(time.time() * 1000) - 3_600_000
+
+        _, out = await _paint([], [(spec, counters)])
+
+        assert "never checked" in out
+        assert "session was not open" in out
+
+    @pytest.mark.asyncio
+    async def test_an_unavailable_episode_is_flagged(self) -> None:
+        spec, counters = _monitor("m1", "watch the queue")
+        counters.update({"unavailable_since": int(time.time() * 1000) - 600_000})
+
+        _, out = await _paint([], [(spec, counters)])
+
+        assert "tool unavailable since" in out
+
+    @pytest.mark.asyncio
+    async def test_a_quiet_watch_with_no_deliveries_stays_neutral(self) -> None:
+        """A watch that has seen nothing may simply be watching something
+        quiet, so its hint is NEUTRAL: present, but not the warning ink a
+        stalled or disabled row earns.
+        """
+        spec, counters = _monitor("m1", "watch the queue")
+        counters.update({"checks": 9, "deliveries": 0})
+
+        _, out = await _paint([], [(spec, counters)])
+
+        assert "9 checks, 0 deliveries" in out
+        assert "never checked" not in out
+
+    @pytest.mark.asyncio
+    async def test_a_healthy_monitor_shows_no_hint(self) -> None:
+        spec, counters = _monitor("m1", "watch the queue")
+        counters.update({"checks": 5, "deliveries": 2})
+
+        _, out = await _paint([], [(spec, counters)])
+
+        assert "checks, 0 deliveries" not in out
+        assert "unavailable" not in out

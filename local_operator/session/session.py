@@ -131,6 +131,8 @@ from local_operator.harness.subagent import (
     run_subagent,
 )
 from local_operator.harness.types import (
+    FAULT_INVALID_ARGUMENTS,
+    FAULT_KEY,
     AbortSignal,
     AgentEndEvent,
     AgentEvent,
@@ -199,9 +201,11 @@ from local_operator.model.effort import cheapest_real_rung
 from local_operator.monitors.classify import MonitorClassify
 from local_operator.monitors.delivery import (
     MonitorDelivery,
+    MonitorNotice,
     format_monitor_delivery_text,
+    format_monitor_notice_text,
 )
-from local_operator.monitors.readonly import readonly_verdict
+from local_operator.monitors.readonly import monitor_call_verdict
 from local_operator.monitors.scheduler import CheckOutcome, MonitorScheduler
 from local_operator.monitors.settings import read_monitor_settings
 from local_operator.monitors.spec import (
@@ -3793,6 +3797,7 @@ class Session:
             on_change=self._on_monitor_change,
             index_writable=lambda: not self._monitor_index_write_failed,
             classify=monitor_classify,
+            announce=self._announce_monitor_notice,
         )
         #: Stored, not merely consumed: the naming OWNERS (the TUI's naming
         #: workers and the runtime's) reach the fit check through the session
@@ -4951,6 +4956,10 @@ class Session:
         # The same re-arm for monitors: adopted rows whose first check lands
         # inside the grace window start here rather than waiting for a turn.
         await self._monitors.pump()
+        # And the one retro-active duty an open owes: a monitor disabled before
+        # this build (or by a crash between the disable and its notice) tells
+        # the operator exactly once here, instead of staying silently stopped.
+        await self._monitors.announce_unannounced_disables()
         # Narrate a cut-off this boot repaired BEFORE anything can open a turn,
         # so the notice is in the live context the first turn reads. Deduped on
         # the token, so a second open of the same session is silent.
@@ -12255,6 +12264,11 @@ class Session:
             # re-armed by the first turn's pump (a separate condition — one
             # scheduler being armed says nothing about the other).
             await self._monitors.pump()
+            # The re-arm path can also be the FIRST place a hosted session sees
+            # an adopted disable (a session built without a running loop skips
+            # the async_init announcement), so it is announced here too. The
+            # latch makes the second call a no-op in the common case.
+            await self._monitors.announce_unannounced_disables()
         self._is_streaming = True
         self._generation += 1  # monotonic; stamped on start AND end events
         self._last_activity_ms = int(time.time() * 1000)
@@ -18987,6 +19001,40 @@ class Session:
         cold reader (cleanup guard, picker, ``lop monitor status``) sees.
         """
         self._write_monitor_index_entry(list(self._monitors.monitors), clear=("stopped_at",))
+        self._prune_monitor_store()
+
+    def _prune_monitor_store(self) -> None:
+        """Reclaim what a cancel and a dead session leave behind (§D5).
+
+        Runs on every open beside the index rebuild and is deliberately NOT
+        behind ``session.cleanup.enabled`` (default False): both halves are one
+        directory listing plus a stat per monitor-carrying session, and the
+        alternative is the orphan state the live store carried — 16 empty
+        ``state/<session_id>/`` directories and one ghost index row for a
+        session that no longer exists on disk.
+
+        Both halves are conservative by construction: the sweep can only
+        ``rmdir`` an EMPTY directory, and the ghost pass needs all three of "no
+        transcript", "older than an hour" and "not held" before it deletes
+        anything. Best-effort: store maintenance may never fail a boot.
+        """
+        try:
+            from local_operator.monitors import state as monitor_state
+            from local_operator.monitors import store as monitor_store
+            from local_operator.paths import config_dir
+            from local_operator.wakes.supervisor import _session_exists
+
+            root = config_dir()
+            monitor_store.prune_ghost_entries(
+                root,
+                int(time.time() * 1000),
+                # The supervisor's own ghost guard, so a monitor entry and a
+                # wake row agree on what "this session exists" means.
+                session_exists=lambda session_id: _session_exists(root, session_id),
+            )
+            monitor_state.prune_empty_state_dirs(root)
+        except Exception:  # noqa: BLE001 — derived state; never fail a boot over it
+            logger.debug("monitor store prune failed", exc_info=True)
 
     def _write_monitor_index_entry(
         self, schedules: list[MonitorSpec], *, clear: tuple[str, ...] = ()
@@ -19736,26 +19784,149 @@ class Session:
     # -- monitor checks and delivery ----------------------------------------
 
     def _resolve_monitor_tool(self, name: str) -> AgentTool | None:
-        """One tool from this session's LIVE inventory, by name.
+        """One tool for a monitor, by name: this session's set, then the MCP manager.
 
-        The inventory is read at call time (not latched) so a tool a
-        settings flip or a prune removed is seen as gone — which is exactly
-        what the run-time re-check must detect (§6.8).
+        The session inventory is read first and at call time (not latched) so
+        a settings flip or a prune removed tool is still seen as gone (§6.8).
+
+        An MCP name that is NOT in ``self._tools`` falls back to the manager's
+        REGISTRY, and that fallback is load-bearing rather than convenient:
+        ``self._tools`` holds only the ACTIVATED subset, and the activation set
+        is process-lifetime state rebuilt on every ``tools_changed``. One
+        reconnect, one failed connect or one ``_rebuild_agent_names`` therefore
+        drops an armed monitor's tool out of the inventory for good — which is
+        how the Datadog monitor read "it is not in this session's tool set" on
+        every tick until it was disabled. The registry is the stable source: it
+        keeps a server's tools across a disconnect and carries deferred ones
+        before a connect.
+
+        The returned object is the same ``AgentTool``, so ``mcp_annotations``
+        still rides it and :func:`readonly_verdict` still gates on
+        ``readOnlyHint is True`` every tick: the fallback widens WHICH names
+        resolve, never what may run. ``_declared_tools`` is honoured exactly as
+        the loop's own out-of-inventory resolver honours it — a host that
+        declared its inventory must not have a monitor reach past it.
         """
         for tool in self._tools:
             if tool.name == name:
                 return tool
+        if not name.startswith("mcp__"):
+            return None
+        declared = self._declared_tools
+        if declared is not None and name not in declared:
+            return None
+        manager = self.mcp_manager
+        if manager is None:
+            return None
+        for tool in manager.get_tools():
+            if tool.name == name:
+                return tool
+        return None
+
+    def _monitor_availability(self, name: str) -> tuple[str, str]:
+        """Why a monitor's tool cannot run right now: ``(state, detail)``.
+
+        ``("ok", "")`` when :meth:`_resolve_monitor_tool` answers. Otherwise
+        the manager is asked WHY, because the two answers have opposite
+        policies downstream: a tool that is temporarily out of reach (its
+        server is connecting, or needs a re-auth) must NOT burn a strike —
+        five ticks of "not in this session's tool set" is how a monitor is
+        silently disabled while its server was merely reconnecting — while a
+        name that is genuinely gone keeps today's strike behaviour.
+
+        The states, and why each is unavailable rather than gone:
+
+        - the server is still settling at startup, or reports ``connecting``:
+          it may hand the tool over on its own;
+        - the server needs a re-auth, or its reconnect is suspended: it will
+          NOT heal by itself, but the fix is a one-line operator action, so
+          this stalls immediately (a notice naming ``/mcp reauth``) rather
+          than striking;
+        - the server is connected but no longer lists the tool, or is
+          disconnected: not reachable now, retried on the ladder.
+
+        Fail-closed for a manager that cannot answer (a fake or a snapshot
+        without the status APIs): the tool is treated as gone, which is
+        exactly the behaviour before this method existed.
+        """
+        if self._resolve_monitor_tool(name) is not None:
+            return ("ok", "")
+        if not name.startswith("mcp__"):
+            # A builtin/session tool: its absence is a real change (a settings
+            # flip, a disabled tool), so it keeps the strike path.
+            return ("gone", "")
+        manager = self.mcp_manager
+        if manager is None:
+            return ("gone", "")
+        server = self._monitor_server_for(name)
+        if server is None:
+            return ("gone", "")
+        detail = f'"{server}"'
+        try:
+            if manager.startup_settling() and manager.get_connection_status(server) != "connected":
+                return ("unavailable", f"MCP server {detail} is still connecting")
+            status = manager.get_connection_status(server)
+            if status == "auth-required":
+                return (
+                    "unavailable",
+                    f"MCP server {detail} needs re-authentication — run /mcp reauth {server}",
+                )
+            if manager.reconnect_suspended(server):
+                return (
+                    "unavailable",
+                    f"MCP server {detail} stopped reconnecting — run /mcp reauth {server}",
+                )
+            if status == "connecting":
+                return ("unavailable", f"MCP server {detail} is still connecting")
+            if status == "connected":
+                return (
+                    "unavailable",
+                    f'MCP server {detail} is connected but no longer lists "{name}"',
+                )
+            return ("unavailable", f"MCP server {detail} is disconnected")
+        except Exception:  # noqa: BLE001 — a manager that cannot answer is not proof of absence
+            logger.debug("monitor availability probe failed for %s", name, exc_info=True)
+            return ("gone", "")
+
+    def _monitor_server_for(self, name: str) -> str | None:
+        """The MCP server that mints ``name``, by registry meta then by prefix.
+
+        ``get_tool_meta`` is the precise answer while the tool is registered.
+        The prefix scan is the fallback for a server whose tools were dropped
+        from the registry entirely: ``create_mcp_tool_name`` is
+        ``mcp__<server>_<tool>``, so a configured server name that prefixes
+        the minted name (plus its separator) names the owner.
+        """
+        manager = self.mcp_manager
+        if manager is None:
+            return None
+        try:
+            meta = manager.get_tool_meta(name)
+            if isinstance(meta, Mapping):
+                server = meta.get("server_name")
+                if isinstance(server, str) and server:
+                    return server
+            from local_operator.mcp.tool_bridge import create_mcp_tool_name
+
+            for server in manager.get_all_server_names():
+                if name.startswith(create_mcp_tool_name(server, "x")[:-1]):
+                    return server
+        except Exception:  # noqa: BLE001 — origin metadata is best-effort
+            logger.debug("monitor server lookup failed for %s", name, exc_info=True)
         return None
 
     def _validate_monitor_call(self, tool_name: str, arguments: Mapping[str, Any]) -> str | None:
-        """The read-only gate, shared by arm-time validation and the
-        run-time re-check (§6.1/§6.8): tool present in this session's set and
-        the harness's effective tier still ``read``.
+        """The gate, shared by arm-time validation and the run-time re-check
+        (§6.1/§6.8): tool present, the harness's effective tier still ``read``,
+        and the call's SHAPE one the tool would accept (``monitor_call_verdict``).
+
+        The shape half is why a monitor armed as ``glob({path: ...})`` no
+        longer dies on every tick: the arm refuses exactly what a tick would.
         """
         tool = self._resolve_monitor_tool(tool_name)
         if tool is None:
             return f"monitor can't watch \"{tool_name}\": it is not in this session's tool set."
-        return readonly_verdict(
+        return monitor_call_verdict(
             tool,
             arguments,
             mcp_annotations=getattr(tool, "mcp_annotations", None),
@@ -19772,6 +19943,14 @@ class Session:
         the reason. A timeout aborts the call's own signal so a wedged
         subprocess is reaped by the tool's normal paths (§5.4).
         """
+        # Availability FIRST, because the absent-tool sentence that
+        # ``_validate_monitor_call`` would return is the same string for a
+        # server that is reconnecting and for a tool that is gone — and the
+        # scheduler must tell them apart: one is a wait, the other a strike
+        # (see ``_monitor_availability``).
+        state, detail = self._monitor_availability(spec.tool)
+        if state == "unavailable":
+            return {"error": detail, "kind": "unavailable"}
         reason = self._validate_monitor_call(spec.tool, spec.arguments)
         if reason is not None:
             return {"error": reason}
@@ -19797,8 +19976,48 @@ class Session:
             return {"error": f"{type(exc).__name__}: {exc}"}
         if result.is_error:
             text = (result.text or "").strip()
+            fault = None
+            details = getattr(result, "details", None)
+            if isinstance(details, Mapping):
+                fault = details.get(FAULT_KEY)
+            if fault == FAULT_INVALID_ARGUMENTS:
+                # Deterministic and never self-healing: the tool's own schema
+                # rejected these arguments, so every future tick fails
+                # identically. One strike-free retry ladder would spend the
+                # whole ladder reaching the same answer.
+                return {
+                    "error": text or "the tool rejected the monitor's arguments",
+                    "kind": "fatal",
+                }
+            if spec.tool.startswith("mcp__") and self._mcp_call_lost_its_server(spec.tool):
+                # A transport failure, not the tool's opinion: the call never
+                # reached the server. Counting it as a failed check is how one
+                # reconnect window disables an MCP monitor.
+                return {
+                    "error": text or "the MCP call did not reach its server",
+                    "kind": "unavailable",
+                }
             return {"error": text or "the tool returned an error"}
         return {"text": result.text, "error": None}
+
+    def _mcp_call_lost_its_server(self, name: str) -> bool:
+        """Whether an MCP error result happened while the server was not up.
+
+        Read AFTER the failure, so ``get_connection_status`` reports the state
+        the call actually met (a server we just lost reads ``disconnected``, a
+        retriable error that already reconnected reads ``connected`` — and that
+        second case keeps its strike, because the retry policy inside the
+        manager already spent it).
+        """
+        server = self._monitor_server_for(name)
+        if server is None:
+            return False
+        try:
+            return self.mcp_manager is not None and (
+                self.mcp_manager.get_connection_status(server) != "connected"
+            )
+        except Exception:  # noqa: BLE001 — an unanswerable manager proves nothing
+            return False
 
     async def _deliver_monitor(self, delivery: MonitorDelivery) -> None:
         """Deliver one material monitor delta as a user-attributed
@@ -19836,15 +20055,64 @@ class Session:
                 skipped=delivery.skipped,
             )
         )
-        if busy:
+        self._send_monitor_message(message)
+
+    def _send_monitor_message(self, message: CustomMessage) -> None:
+        """Hand one ``monitor_prompt`` to the session: busy rides the boundary,
+        idle opens a turn.
+
+        The tail both a delivery and a lifecycle notice share. It is one method
+        rather than two copies because the busy path's marks are load-bearing
+        and easy to drop in a copy: a message parked on the steering queue must
+        ride the COURTESY lane (an immediate-interrupt poll would otherwise
+        cancel the tool it landed inside), and ``_peer_arrival`` must be marked
+        AFTER the put so the woken tool's drain finds it.
+        """
+        if self._is_streaming:
             self._courtesy_wake_count += 1
             self._steering_queue.put_nowait(message)
-            # AFTER the put, for the lost-wakeup reason the wake path records:
-            # the woken tool returns into a drain, and the drain must find the
-            # message already queued.
             self._peer_arrival.mark(MONITOR_PROMPT_MESSAGE_TYPE)
             return
         self._spawn_background(self._prompt_messages([message]))
+
+    async def _announce_monitor_notice(self, notice: MonitorNotice) -> None:
+        """Deliver one lifecycle notice (§D4): disabled, stalled or restored.
+
+        Rides the delivery's own custom type, which buys four things at once:
+        the renderer's allow-list entry (so the model reads it), the run
+        trigger accounting, the TUI's live and replay rows, and the mobile
+        fallback notice row. It is NOT a delivery: ``deliveries`` is untouched
+        and the rate window is never consulted, because notices are bounded by
+        state transitions (a disable happens once; a stall at most once per
+        30-minute episode) rather than by the change rate the window exists to
+        cap.
+        """
+        text = format_monitor_notice_text(notice)
+        message = CustomMessage(
+            custom_type=MONITOR_PROMPT_MESSAGE_TYPE,
+            attribution="user",
+            details={
+                "monitor_id": notice.monitor_id,
+                "name": notice.name,
+                "text": text,
+                # A notice answers no diff, so the delivery counters ride at
+                # their latest known values and ``skipped`` is always 0.
+                "checks": notice.checks,
+                "skipped": 0,
+                "notify": bool(notice.notify),
+                "kind": notice.kind,
+            },
+        )
+        await self._emit(
+            MonitorDeltaEvent(
+                text=text,
+                monitor_id=notice.monitor_id,
+                name=notice.name,
+                changes=0,
+                skipped=0,
+            )
+        )
+        self._send_monitor_message(message)
 
     async def _deliver_patience_wake(self, due: DueWake) -> None:
         """Deliver one fired patience wait: hidden, watermark-checked, bounded.

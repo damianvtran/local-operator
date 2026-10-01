@@ -15,7 +15,7 @@ from local_operator.monitors.delivery import MonitorDelivery
 from local_operator.monitors.spec import MonitorSpec
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
-from tests.unit.session.test_session import ScriptedStream
+from tests.unit.session.test_session import ScriptedStream, wait_for
 
 MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
 
@@ -269,5 +269,175 @@ async def test_an_idle_delivery_spawns_a_turn(tmp_path: Path, config_dir: Path) 
             coro.close()  # type: ignore[attr-defined]
         assert session._steering_queue.empty()
         assert session._courtesy_wake_count == 0
+    finally:
+        await session.dispose()
+
+
+# ---------------------------------------------------------------------------
+# §D4: the session half of a lifecycle notice
+# ---------------------------------------------------------------------------
+
+
+def _session_with_stream(tmp_path: Path, session_id: str = "notif"):
+    """A session plus the scripted stream, so a test can wait on the TURN.
+
+    ``_open`` hides its stream, and the notice tests must know when the turn a
+    notice opened has finished: the transcript row a resumed session replays is
+    written by the turn pipeline, so asserting before the turn ran would assert
+    on nothing.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    session = Session(
+        model=MODEL,
+        stream_fn=stream,
+        tools=[],
+        transcript=Transcript(tmp_path / session_id),
+        system_blocks_provider=lambda: [],
+        cwd="/work/here",
+    )
+    return session, stream
+
+
+def _notice(kind: str = "disabled", **overrides: object):
+    from local_operator.monitors.delivery import MonitorNotice
+
+    fields: dict[str, object] = {
+        "monitor_id": "m1",
+        "name": "watch",
+        "tool": "mcp__datadog_search_datadog_hosts",
+        "kind": kind,
+        "at_ms": 1_756_000_000_000,
+        "checks": 7,
+        "deliveries": 0,
+        "failures": 5,
+        "detail": 'monitor can\'t watch "mcp__datadog_search_datadog_hosts": not in this tool set',
+    }
+    fields.update(overrides)
+    return MonitorNotice(**fields)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_an_auto_disable_notice_reaches_the_session(tmp_path: Path, config_dir: Path) -> None:
+    """The disable is durable state, and before this notice nothing ever told
+    anyone: the live store carried monitors that had quietly stopped.
+    """
+    session, stream = _session_with_stream(tmp_path)
+    try:
+        events: list[object] = []
+
+        async def record(event: object) -> None:
+            events.append(event)
+
+        session._emit = record  # type: ignore[method-assign]
+
+        # The REAL turn runs (the scripted stream carries one), because the
+        # transcript row a resumed session replays is written by the turn
+        # pipeline, not by the notice path.
+        await session._announce_monitor_notice(_notice())
+        await wait_for(lambda: bool(stream.requests))
+        await wait_for(lambda: not session._is_streaming)
+
+        # The receipt event carries the text for a front end, exactly like a
+        # delta's does (with no changes — a notice answers no diff). The turn
+        # emits its own events too, so the type is what is asserted.
+        receipts = [e for e in events if getattr(e, "type", "") == "monitor_delta"]
+        assert len(receipts) == 1
+        assert getattr(receipts[0], "changes", None) == 0
+        assert getattr(receipts[0], "monitor_id", "") == "m1"
+        assert "(monitor)" in getattr(receipts[0], "text", "")
+        rows = [
+            entry
+            for entry in session._transcript.entries()
+            if entry.type == "message"
+            and entry.payload.get("kind") == "custom"
+            and entry.payload.get("custom_type") == "monitor_prompt"
+        ]
+        assert len(rows) == 1
+        details = rows[0].payload["details"]
+        assert details["kind"] == "disabled"
+        assert details["monitor_id"] == "m1"
+        assert "was DISABLED" in details["text"]
+        assert "It never delivered a change since arming (7 checks)." in details["text"]
+        assert len(details["text"]) <= 700
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_busy_session_courtesy_queues_a_notice(tmp_path: Path, config_dir: Path) -> None:
+    """A notice lands in a busy session the way a delivery does, and it must
+    take the same COURTESY lane: an immediate-interrupt poll would otherwise
+    cancel the tool it arrived inside.
+    """
+    session = _open(tmp_path)
+    try:
+        events: list[object] = []
+
+        async def record(event: object) -> None:
+            events.append(event)
+
+        session._emit = record  # type: ignore[method-assign]
+        session._is_streaming = True
+
+        await session._announce_monitor_notice(_notice("stalled"))
+
+        assert len(events) == 1
+        message = session._steering_queue.get_nowait()
+        assert isinstance(message, CustomMessage)
+        assert message.details["kind"] == "stalled"
+        assert session._courtesy_wake_count == 1
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_delivered_count_clause_tracks_the_counters(
+    tmp_path: Path, config_dir: Path
+) -> None:
+    session, stream = _session_with_stream(tmp_path)
+    try:
+        await session._announce_monitor_notice(_notice(deliveries=3))
+        await wait_for(lambda: bool(stream.requests))
+        await wait_for(lambda: not session._is_streaming)
+        rows = [
+            entry
+            for entry in session._transcript.entries()
+            if entry.type == "message" and entry.payload.get("custom_type") == "monitor_prompt"
+        ]
+        text = rows[-1].payload["details"]["text"]
+        assert "3 delivers of change so far." in text
+        assert "never delivered" not in text
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_real_disable_from_the_scheduler_reaches_the_session(
+    tmp_path: Path, config_dir: Path
+) -> None:
+    """The wiring, end to end inside the session: the scheduler's announced
+    disable is the session's notice, and the latch is set on the counters file
+    only after the session took it.
+    """
+    from local_operator.monitors import state as monitor_state
+
+    session, stream = _session_with_stream(tmp_path)
+    try:
+        await session.set_monitor_schedules([_spec()])
+
+        notice = _notice()
+        await session._monitors._send_notice(notice, generation=0)
+        await wait_for(lambda: bool(stream.requests))
+        await wait_for(lambda: not session._is_streaming)
+
+        row_texts = [
+            entry.payload["details"]["text"]
+            for entry in session._transcript.entries()
+            if entry.type == "message" and entry.payload.get("custom_type") == "monitor_prompt"
+        ]
+        assert row_texts and "was DISABLED" in row_texts[-1]
+        # The latch: the notice went out, so a later sweep is a no-op.
+        assert await session._monitors.announce_unannounced_disables() == 0
+        assert monitor_state.read_counters(config_dir, session.session_id, "m1") is not None
     finally:
         await session.dispose()

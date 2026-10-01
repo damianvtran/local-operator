@@ -39,7 +39,7 @@ import os
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,14 @@ MONITORS_DIRNAME = "monitors"
 #: session rewrites the entry on its next open, so a bump heals like a
 #: deleted file.
 INDEX_SCHEMA = 1
+
+#: How long an entry with no transcript must sit before the ghost sweep
+#: removes it. The floor exists for one race: a session is being CREATED (its
+#: directory is not written yet, or its transcript not yet appended) while its
+#: index entry lands, and deleting that entry would lose a live arm. An hour
+#: is far longer than any creation path takes and far shorter than the time an
+#: operator waits to notice a ghost row.
+GHOST_MIN_AGE_MS = 3_600_000
 
 
 def monitors_dir(config_dir: Path) -> Path:
@@ -228,6 +236,176 @@ def write_entry(
             pass
         raise
     return path
+
+
+#: The floor under every staleness threshold below: an interval-derived bound
+#: can be seconds long, and "overdue" on a 5 s monitor is not a hint.
+HEALTH_MIN_STALE_MS = 300_000
+
+
+def _stale_threshold_ms(row: Mapping[str, Any]) -> int:
+    """``max(2 × every, 5 min)`` — when a monitor counts as not running."""
+    every = row.get("every_ms")
+    if isinstance(every, int) and not isinstance(every, bool) and every > 0:
+        return max(2 * every, HEALTH_MIN_STALE_MS)
+    return HEALTH_MIN_STALE_MS
+
+
+def _clock(ms: int) -> str:
+    return time.strftime("%H:%M", time.localtime(ms / 1000))
+
+
+def health_hint(row: Mapping[str, Any], now_ms: int) -> str | None:
+    """One line explaining a monitor that is not doing what the reader assumes.
+
+    THE shared helper for every listing surface (the agent tool's rows, the
+    CLI, the desktop route, the TUI band), because the failure this closes was
+    a DISCOVERABILITY one: the live store held monitors that had never checked
+    (their session was never open), monitors with 0 deliveries after many
+    checks, and one disabled by a flapping MCP tool — and every surface
+    rendered all four as healthy rows.
+
+    Returns ``None`` when there is nothing to say (a normal, working monitor),
+    which is the common case and must stay silent. ``format_age`` is
+    deliberately NOT used here: this module is stdlib-only and the reading
+    surfaces own their own durations.
+    """
+    if isinstance(row, Mapping) and row.get("disabled"):
+        # A disabled row already renders its own reason and count; the shared
+        # hint would only restate it.
+        return None
+    since = row.get("unavailable_since") if isinstance(row, Mapping) else None
+    if isinstance(since, int) and not isinstance(since, bool) and since > 0:
+        return f"tool unavailable since {_clock(since)} — retrying"
+    if not isinstance(row, Mapping):
+        return None
+    threshold = _stale_threshold_ms(row)
+    checks = row.get("checks")
+    checks_n = int(checks) if isinstance(checks, int) and not isinstance(checks, bool) else 0
+    if checks_n == 0:
+        created = row.get("created_at")
+        if not isinstance(created, int) or isinstance(created, bool):
+            return None
+        if now_ms - created > threshold:
+            return "never checked — its session was not open since arming"
+        return None
+    deliveries = row.get("deliveries")
+    deliveries_n = (
+        int(deliveries) if isinstance(deliveries, int) and not isinstance(deliveries, bool) else 0
+    )
+    if checks_n >= 3 and deliveries_n == 0:
+        # Neutral, not a warning: a watch that has seen nothing may simply be
+        # watching something quiet — or watching the wrong thing.
+        return (
+            f"{checks_n} checks, 0 deliveries — nothing has changed "
+            "(confirm the call observes what you expect)"
+        )
+    return None
+
+
+def unavailable_since_of(row: Mapping[str, Any]) -> int:
+    """The epoch-ms an unavailable episode began, or 0 (the wire's own reader)."""
+    value = row.get("unavailable_since") if isinstance(row, Mapping) else None
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return 0
+
+
+def is_idle(row: Mapping[str, Any], now_ms: int) -> bool:
+    """Whether a monitor is overdue because nothing is hosting it (§D6).
+
+    Overdue beyond ``max(2 × every, 5 min)`` and NOT held: a monitor ticks
+    only while its session is open, so a dormant row is normal — but a reader
+    looking at "next due 4 hours ago" needs to be told which of the two it is.
+    """
+    if not isinstance(row, Mapping) or row.get("disabled") or is_held(row):
+        return False
+    due = row.get("next_due_at")
+    if not isinstance(due, int) or isinstance(due, bool):
+        return False
+    return now_ms - due > _stale_threshold_ms(row)
+
+
+def idle_detail(row: Mapping[str, Any], now_ms: int) -> str:
+    """``overdue by 3h — session not open`` for an idle row (see :func:`is_idle`)."""
+    due = row.get("next_due_at")
+    overdue_ms = now_ms - int(due) if isinstance(due, int) and not isinstance(due, bool) else 0
+    return f"overdue by {format_age_ms(overdue_ms)} — session not open"
+
+
+def format_age_ms(ms: int) -> str:
+    """A compact age: ``45s``, ``12m``, ``3h``, ``2d``.
+
+    Local rather than imported: the reading surfaces that call the helpers
+    above have their own formatters (``wakes.display.format_age`` lives behind
+    a heavier import), and this module's whole contract is that nothing outside
+    the stdlib is on its path.
+    """
+    seconds = max(0, int(ms // 1000))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours}h"
+    return f"{hours // 24}d"
+
+
+def prune_ghost_entries(
+    config_dir: Path,
+    now_ms: int,
+    *,
+    session_exists: Callable[[str], bool],
+) -> list[str]:
+    """Remove index entries whose session no longer exists; returns the ids.
+
+    A GHOST is an entry that can never be engaged: the session directory is
+    gone (a reap, a hand-deleted directory, a QA scratch home), so the row
+    still lists monitors that cannot fire and each engage burns a whole
+    deadline proving it. The live store carried one (``9a7c31e40b22.json``,
+    whose ``cwd`` pointed into a scratch home).
+
+    THREE conditions, all required:
+
+    - the session has no transcript. The predicate is INJECTED rather than
+      imported so this module stays stdlib-only (``tests/unit/test_import_graph.py``
+      pins that, and the supervisor's own guard is the caller's); a caller that
+      cannot prove absence must pass a predicate that answers ``True``;
+    - ``updated_at`` is older than :data:`GHOST_MIN_AGE_MS` (the creation race
+      above);
+    - the entry is not HELD (``stopped_at``) — a parked entry belongs to a
+      session someone stopped on purpose, and archive is a hide flag rather
+      than destruction (design monitor-tool.md §D5).
+
+    Plus its ``state/<session_id>`` directory, through
+    :func:`local_operator.monitors.state.remove_session_state`, which unlinks
+    files and rmdirs. Callers treat this as maintenance: an unreadable index
+    directory prunes nothing rather than raising.
+    """
+    from local_operator.monitors import state as monitor_state
+
+    index, read_error = read_index_report(config_dir)
+    if read_error:
+        return []
+    removed: list[str] = []
+    for session_id, entry in index.items():
+        if is_held(entry):
+            continue
+        updated_at = entry.get("updated_at")
+        if not isinstance(updated_at, int) or isinstance(updated_at, bool):
+            continue
+        if now_ms - updated_at < GHOST_MIN_AGE_MS:
+            continue
+        if session_exists(session_id):
+            continue
+        if not remove_entry(config_dir, session_id):
+            continue
+        monitor_state.remove_session_state(config_dir, session_id)
+        removed.append(session_id)
+        logger.info("monitor index: pruned the ghost entry for %s", session_id)
+    return removed
 
 
 def remove_entry(config_dir: Path, session_id: str) -> bool:

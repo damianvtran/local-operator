@@ -12230,6 +12230,7 @@ def _monitor_row_text(row: dict[str, Any], now: int) -> str:
     receipts use (QA round-1 observation 1): two monitors of one tool are
     told apart by what they watch, not only by their names.
     """
+    from local_operator.monitors import store as monitor_store
     from local_operator.wakes.display import format_age
 
     mid = str(row.get("id") or "?")
@@ -12259,9 +12260,22 @@ def _monitor_row_text(row: dict[str, Any], now: int) -> str:
     if isinstance(due, int) and not isinstance(due, bool):
         if due > now:
             bits.append(f"next due in {format_age((due - now) / 1000)}")
+        elif monitor_store.is_idle(row, now):
+            # A monitor ticks only while its session is open, so a row that is
+            # hours overdue is not lateness — it is a dormant watch, and the
+            # reader (often the agent itself deciding whether to wait) has to
+            # see that rather than a bare "next due now".
+            bits.append(monitor_store.idle_detail(row, now))
         else:
             bits.append("next due now")
-    return f"{mid}: '{name}' {tool} {call}{every_txt} — " + ", ".join(bits) + "."
+    row_text = f"{mid}: '{name}' {tool} {call}{every_txt} — " + ", ".join(bits)
+    hint = monitor_store.health_hint(row, now)
+    if hint:
+        # The §D6 discoverability line: a monitor with 0 deliveries after many
+        # checks, one that never checked, or one stalled on an absent tool,
+        # otherwise reads exactly like a healthy watch.
+        row_text = f"{row_text} [{hint}]"
+    return row_text + "."
 
 
 async def _monitor_list(tool_call_id: str, scheduler: MonitorSchedulerProtocol) -> ToolResult:
@@ -12331,12 +12345,26 @@ async def _monitor_create(
 
     bound = f"until {format_wake_time(spec.until_at)}" if spec.until_at is not None else "durable"
     call = _monitor_call_repr(spec.tool, spec.arguments)
+    # §D8: the hosting caveat belongs on the RECEIPT, not only in the guide.
+    # The live store carried arms with ``checks=0`` — the operator armed a
+    # watch, closed the conversation and never learned that nothing would run
+    # until it was open again. The MCP clause is the other half of the same
+    # lesson: a server that reconnects must not read as a failing monitor.
+    hosting_caveat = (
+        " Ticks run only while this session is open (a terminal or runtime hosting it); "
+        "a closed session's monitors resume, with one consolidated delta, when it reopens."
+    )
+    if spec.tool.startswith("mcp__"):
+        hosting_caveat += (
+            " MCP tool: if its server reconnects the monitor waits without counting "
+            "failures, and you will be told if it stays unavailable for 30 minutes."
+        )
     return _text(
         tool_call_id,
         "monitor",
         f"Armed monitor '{spec.name}' ({spec.id}): {spec.tool} {call} every "
         f"{format_duration(spec.every_ms)}, {bound}. First check in ~2s captures the "
-        "baseline; you'll be told only what changes.",
+        "baseline; you'll be told only what changes." + hosting_caveat,
         details=facts,
     )
 

@@ -66,6 +66,9 @@ class Harness:
         self.results: list[dict[str, Any]] = []
         self.calls: list[MonitorSpec] = []
         self.deliveries: list[Any] = []
+        # The lifecycle-notice sink (§D4): a notice is not a delivery, and the
+        # two are recorded separately so a test can assert exactly that.
+        self.notices: list[Any] = []
         self.persisted: list[list[dict[str, Any]]] = []
         self.changes = 0
         self.config_dir = tmp_path / "cfg"
@@ -80,6 +83,7 @@ class Harness:
             persist=self._persist,
             on_change=self._on_change,
             index_writable=index_writable,
+            announce=self._announce,
             uniform=uniform or (lambda low, high: low),
         )
 
@@ -94,6 +98,9 @@ class Harness:
 
     async def _deliver(self, delivery: Any) -> None:
         self.deliveries.append(delivery)
+
+    async def _announce(self, notice: Any) -> None:
+        self.notices.append(notice)
 
     async def _persist(self, monitors: list[MonitorSpec]) -> None:
         self.persisted.append([monitor.model_dump() for monitor in monitors])
@@ -115,6 +122,21 @@ class Harness:
         found = monitor_state.read_counters(self.config_dir, "sess", monitor_id)
         assert found is not None, f"no counters for {monitor_id}"
         return found
+
+
+async def rill(harness: Harness, advance_ms: int) -> None:
+    """Advance the clock by EXACTLY ``advance_ms`` and run the due tick.
+
+    ``Harness.pump_ripen`` deliberately jumps ~11.6 days, which is the right
+    move for "any due time has passed" and the wrong one for anything measured
+    in minutes: an unavailable episode's 30-minute stall notice and its
+    24-hour disable both fall inside a single such jump, so those tests step
+    the clock themselves. Kept beside the harness so the next test that
+    measures an episode does not have to rediscover this.
+    """
+    harness.now_ms += advance_ms
+    await harness.scheduler.pump()
+    await harness.settle()
 
 
 @pytest.fixture
@@ -814,6 +836,240 @@ async def test_a_disabled_monitor_loaded_from_counters_stays_disabled(tmp_path: 
             assert reopened.scheduler.next_monitor_due_at() is None
             row = reopened.scheduler.index_rows()[0]
             assert row["disabled"] is True
+        finally:
+            reopened.scheduler.dispose()
+    finally:
+        harness.scheduler.dispose()
+
+
+# ---------------------------------------------------------------------------
+# §D3: transient-versus-gone, and the notices both produce
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_unavailable_ticks_take_no_strike_and_resume_silently(tmp_path: Any) -> None:
+    """A tool that is temporarily out of reach must not walk the failure
+    ladder: five ticks of "not in this session's tool set" is how an armed
+    monitor was silently disabled while its MCP server was merely reconnecting.
+    """
+    settings = dataclasses.replace(MonitorSettings(), max_consecutive_failures=2)
+    harness = Harness(tmp_path, settings=settings)
+    try:
+        harness.scheduler.load([spec()])
+        # Three ticks, each past the ladder's current backoff (the first check
+        # of a 60 s monitor is due 60 s after the arm), and all of them inside
+        # 30 minutes so the stall notice is not part of this test.
+        for advance in (60_000, 60_000, 120_000):
+            harness.results.append({"error": '"datadog" is disconnected', "kind": "unavailable"})
+            await rill(harness, advance)
+        counters = harness.counters()
+        assert counters["disabled"] is False
+        assert counters["consecutive_failures"] == 0
+        # The diff accounting is untouched too: nothing was learned about the
+        # watched thing, so it is not a check that happened.
+        assert counters["checks"] == 0
+        assert counters["unavailable_ticks"] == 3
+        assert counters["last_note"] == "tool unavailable — retrying"
+        # It keeps retrying on the capped ladder rather than leaving the timer idle.
+        assert counters["next_due_at"] is not None
+        # Under the stall window, so nobody was told.
+        assert harness.notices == []
+
+        harness.results.append({"text": "A", "error": None})
+        await rill(harness, 240_000)
+        resumed = harness.counters()
+        assert resumed["unavailable_ticks"] == 0 and resumed["unavailable_since"] == 0
+        assert resumed["checks"] == 1
+        # Silent: the episode never announced itself, so there is nothing to
+        # match with a "running again".
+        assert harness.notices == []
+    finally:
+        harness.scheduler.dispose()
+
+
+@pytest.mark.asyncio
+async def test_resume_after_unavailability_yields_the_consolidated_delta(tmp_path: Any) -> None:
+    """The baseline is NOT advanced while the tool is unreachable, so the first
+    successful check after the gap diffs against the pre-gap state and reports
+    everything missed as one delta with the gap counted as skipped.
+    """
+    harness = Harness(tmp_path)
+    try:
+        harness.scheduler.load([spec(every_ms=60_000)])
+        harness.results.append({"text": "A", "error": None})
+        await harness.pump_ripen()
+        assert harness.deliveries == []
+        hash_before = harness.counters()["content_hash"]
+        assert hash_before
+
+        for advance in (60_000, 60_000, 120_000):
+            harness.results.append({"error": "server still connecting", "kind": "unavailable"})
+            await rill(harness, advance)
+        assert harness.counters()["content_hash"] == hash_before
+
+        harness.results.append({"text": "B", "error": None})
+        await rill(harness, 240_000)
+        assert len(harness.deliveries) == 1
+        delivery = harness.deliveries[0]
+        # One line replaced, so the renderer counts the removal and the addition.
+        assert delivery.changes == 2
+        assert "- A" in delivery.delta_text and "+ B" in delivery.delta_text
+        # The due instants that passed while the tool was unreachable are a gap
+        # in the WATCH, not a change to the watched thing, and the delivery says
+        # so instead of letting the reader read the gap as churn.
+        assert delivery.skipped >= 1
+        assert harness.counters()["content_hash"] != hash_before
+    finally:
+        harness.scheduler.dispose()
+
+
+@pytest.mark.asyncio
+async def test_stalled_notice_once_then_restored_notice(tmp_path: Any) -> None:
+    """One notice per episode: a watch that is quietly waiting must not become
+    a source of noise, but a long wait must not stay invisible either.
+    """
+    from local_operator.monitors.scheduler import UNAVAILABLE_STALL_MS
+
+    harness = Harness(tmp_path)
+    try:
+        harness.scheduler.load([spec()])
+        harness.results.append({"error": "server disconnected", "kind": "unavailable"})
+        await rill(harness, 60_000)
+        assert harness.notices == []
+
+        harness.results.append({"error": "server disconnected", "kind": "unavailable"})
+        await rill(harness, UNAVAILABLE_STALL_MS + 1)
+        assert [notice.kind for notice in harness.notices] == ["stalled"]
+        # No delivery: a notice answers no diff.
+        assert harness.deliveries == []
+
+        # Still stalled, well past the window: no second notice.
+        harness.results.append({"error": "server disconnected", "kind": "unavailable"})
+        await rill(harness, UNAVAILABLE_STALL_MS * 2)
+        assert [notice.kind for notice in harness.notices] == ["stalled"]
+
+        harness.results.append({"text": "same", "error": None})
+        await rill(harness, 240_000)
+        assert [notice.kind for notice in harness.notices] == ["stalled", "restored"]
+        counters = harness.counters()
+        assert counters["unavailable_notified"] is False
+        assert counters["unavailable_since"] == 0
+    finally:
+        harness.scheduler.dispose()
+
+
+@pytest.mark.asyncio
+async def test_unavailable_past_24h_disables(tmp_path: Any) -> None:
+    """ "Genuinely gone" is settled by time, not by a strike count: a server
+    that reconnects comes back; one that was uninstalled does not.
+    """
+    from local_operator.monitors.scheduler import UNAVAILABLE_GONE_MS
+
+    harness = Harness(tmp_path)
+    try:
+        harness.scheduler.load([spec()])
+        harness.results.append({"error": "server disconnected", "kind": "unavailable"})
+        await rill(harness, 60_000)
+        assert harness.counters()["disabled"] is False
+
+        harness.results.append({"error": "server disconnected", "kind": "unavailable"})
+        await rill(harness, UNAVAILABLE_GONE_MS + 1)
+        counters = harness.counters()
+        assert counters["disabled"] is True
+        assert counters["disabled_reason"] == "tool unavailable for 24h"
+        assert counters["next_due_at"] is None
+        assert [notice.kind for notice in harness.notices] == ["disabled"]
+    finally:
+        harness.scheduler.dispose()
+
+
+@pytest.mark.asyncio
+async def test_fatal_kind_disables_on_first_occurrence(tmp_path: Any) -> None:
+    """A deterministic failure (the tool's own schema rejected the arguments)
+    cannot self-heal, so five identical ticks are four wasted checks.
+    """
+    harness = Harness(tmp_path)
+    try:
+        harness.scheduler.load([spec()])
+        harness.results.append(
+            {"error": "invalid arguments:\n- path: Extra inputs are not permitted", "kind": "fatal"}
+        )
+        await harness.pump_ripen()
+        counters = harness.counters()
+        assert counters["disabled"] is True
+        assert counters["consecutive_failures"] == 1
+        assert "Extra inputs" in counters["disabled_reason"]
+        assert [notice.kind for notice in harness.notices] == ["disabled"]
+
+        # And no further checks run.
+        harness.results.append({"text": "later", "error": None})
+        await harness.pump_ripen()
+        assert len(harness.calls) == 1
+    finally:
+        harness.scheduler.dispose()
+
+
+@pytest.mark.asyncio
+async def test_disable_announces_once_and_is_not_a_delivery(tmp_path: Any) -> None:
+    settings = dataclasses.replace(MonitorSettings(), max_consecutive_failures=2)
+    harness = Harness(tmp_path, settings=settings)
+    try:
+        harness.scheduler.load([spec()])
+        for _ in range(2):
+            harness.results.append({"error": "boom", "text": None})
+            await harness.pump_ripen()
+        counters = harness.counters()
+        assert counters["disabled"] is True
+        assert [notice.kind for notice in harness.notices] == ["disabled"]
+        notice = harness.notices[0]
+        assert notice.monitor_id == "m1" and notice.failures == 2
+        assert "boom" in notice.detail
+        # NOT a delivery: the rate window and the delivery counters are for
+        # material changes.
+        assert harness.deliveries == []
+        assert counters["deliveries"] == 0
+        assert counters["disable_notified"] is True
+
+        # A second sweep finds nothing left to announce (the latch).
+        assert await harness.scheduler.announce_unannounced_disables() == 0
+        assert len(harness.notices) == 1
+    finally:
+        harness.scheduler.dispose()
+
+
+@pytest.mark.asyncio
+async def test_unannounced_disable_is_announced_after_reload(tmp_path: Any) -> None:
+    """A disable written by an older build (or lost to a crash between the
+    disable and its notice) is told exactly once on the next open.
+    """
+    harness = Harness(tmp_path)
+    try:
+        harness.scheduler.load([spec()])
+        assert monitor_state.read_counters(harness.config_dir, "sess", "m1") is None
+        monitor_state.write_counters(
+            harness.config_dir,
+            "sess",
+            "m1",
+            {
+                "schema": 1,
+                "monitor_id": "m1",
+                "disabled": True,
+                "disabled_reason": 'monitor can\'t watch "mcp__x": not in this tool set',
+                "consecutive_failures": 5,
+                "checks": 7,
+                "deliveries": 0,
+                "next_due_at": None,
+            },
+        )
+        reopened = Harness(tmp_path)
+        try:
+            reopened.scheduler.load([spec()])
+            assert await reopened.scheduler.announce_unannounced_disables() == 1
+            assert [notice.kind for notice in reopened.notices] == ["disabled"]
+            # Exactly once: the latch is now set on disk.
+            assert await reopened.scheduler.announce_unannounced_disables() == 0
+            assert reopened.counters()["disable_notified"] is True
         finally:
             reopened.scheduler.dispose()
     finally:
