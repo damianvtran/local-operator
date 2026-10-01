@@ -3746,6 +3746,11 @@ class Session:
             on_change=lambda: (
                 self.refresh_frontend_state() if hasattr(self, "_frontend_state_store") else None
             ),
+            # The one site that sees EVERY removal (tool cancel, desktop route,
+            # ask-deadline retire, patience sweep, switch cleanup), so the purge
+            # of what a cancelled schedule already spooled/queued lives here
+            # rather than on the tool's own path — see `_purge_removed_wakes`.
+            on_removed=self._purge_removed_wakes,
         )
         self._wake_deliver_hook: Callable[[DueWake], Awaitable[None]] = self._deliver_wake
         #: The queued-ask engine (design docs/design/ask-nonblocking.md). Built
@@ -8163,7 +8168,11 @@ class Session:
         # Imported in-function: the runtime inbox lives behind the mobile
         # package's config-path machinery, and this module does not carry a
         # module-level dependency on it for a once-per-session path.
-        from local_operator.session.runtime.inbox import SOURCE_USER, drain_inbox
+        from local_operator.session.runtime.inbox import (
+            SOURCE_USER,
+            coalesce_wake_rows,
+            drain_inbox,
+        )
 
         directory = getattr(self._transcript, "directory", None)
         if directory is None:
@@ -8173,6 +8182,11 @@ class Session:
         except Exception:  # noqa: BLE001 — a bad spool must not fail the turn
             logger.warning("peer inbox drain failed", exc_info=True)
             return
+        # BEFORE anything is delivered: a long handover spools one row per fired
+        # occurrence, and every row would otherwise be its own wake and its own
+        # turn (the reported 52-alarm flood). Coalescing first is also what keeps
+        # this drain's own steer arm from queueing N copies of one reminder.
+        lines = coalesce_wake_rows(lines)
         # Rows of ONE batch carrying the same owner ``command_id``: ``drain_inbox``
         # empties the file, so a crash between the read and its receipt can
         # re-deliver the whole batch, and the steer arm's identity does not
@@ -18453,6 +18467,94 @@ class Session:
         self._wake_fired_since_persist = True
         await self._wake_deliver_hook(due)
 
+    async def _purge_removed_wakes(self, removed: Sequence[WakeSchedule]) -> None:
+        """Take a cancelled schedule's ALREADY-QUEUED work out of circulation.
+
+        Cancelling a wake stops two things at the store/index layer — the row and
+        the supervisor's errand — and neither is what the user was still being
+        hit by: a draining runtime had already spooled one inbox row per fired
+        occurrence (the flood), and a live busy stretch may have a courtesy
+        delivery sitting on the steering queue. Both would go off AFTER the
+        cancel, which reads as "the cancel did not work".
+
+        TWO SINKS, both best-effort, both keyed on ``wake_id``:
+
+        * the steering queue's queued wake deliveries for these ids, dropped
+          whole (a queued delivery that was never read is not a delivery);
+        * the spool's pending rows, through ``inbox.remove_wake_rows``.
+
+        The steering queue is drained FIRST, before the first ``await``: this runs
+        from inside ``WakeScheduler.update`` on the loop, and a ``to_thread`` spool
+        purge is exactly the window in which a turn boundary could otherwise pick
+        a cancelled delivery up. The spool purge is file I/O and is awaited off
+        the loop, like every other spool writer here.
+
+        Never raises: ``WakeScheduler.update`` already wraps this, but a failure
+        must not also cost the OTHER ids their purge, so each is its own attempt.
+        """
+        ids = {str(schedule.id) for schedule in removed}
+        if not ids:
+            return
+        self._drop_queued_wake_deliveries(ids)
+        directory = getattr(self._transcript, "directory", None)
+        if directory is None:
+            return
+        # Imported in-function for the reason the drains do: the runtime inbox
+        # sits behind the mobile package's config-path machinery and this module
+        # does not carry a module-level dependency on it for a rare path.
+        from local_operator.session.runtime.inbox import remove_wake_rows
+
+        for wake_id in sorted(ids):
+            try:
+                dropped = await asyncio.to_thread(remove_wake_rows, Path(directory), wake_id)
+            except Exception:  # noqa: BLE001 — a purge must never break scheduling
+                logger.warning("could not purge spooled wake rows for %s", wake_id, exc_info=True)
+                continue
+            if dropped:
+                logger.info(
+                    "cancelled wake %s purged %d spooled row(s) it had left behind",
+                    wake_id,
+                    dropped,
+                )
+
+    def _drop_queued_wake_deliveries(self, wake_ids: set[str]) -> None:
+        """Remove queued WAKE deliveries for ``wake_ids`` from the steering queue.
+
+        Matched on the wake id the delivery carries (``details["wake_id"]``, set
+        by every wake build path) AND the wake custom type, so a queued peer note,
+        monitor delta or producer steer keeps its place even if some future
+        message type also carries a ``wake_id`` detail. The rebuild goes through
+        the public get/put API, exactly as ``_drop_queued_steering`` does, and for
+        the same reason: the queue's private deque is not this method's contract.
+
+        ``_courtesy_wake_count`` is decremented for each dropped courtesy item.
+        That counter is what ``_has_urgent_steering`` subtracts from the queue
+        size, so leaving it inflated after a drop would make a genuinely urgent
+        steer look like a courtesy wake and cost it its tool interrupt.
+        """
+        remaining: list[AgentMessage] = []
+        dropped_courtesy = 0
+        while not self._steering_queue.empty():
+            item = self._steering_queue.get_nowait()
+            details = getattr(item, "details", None)
+            wake_id = str(details.get("wake_id", "")) if isinstance(details, dict) else ""
+            if (
+                wake_id
+                and wake_id in wake_ids
+                and getattr(item, "custom_type", "") == WAKE_PROMPT_MESSAGE_TYPE
+            ):
+                dropped_courtesy += 1
+                continue
+            remaining.append(item)
+        for item in remaining:
+            self._steering_queue.put_nowait(item)
+        if dropped_courtesy:
+            self._courtesy_wake_count = max(0, self._courtesy_wake_count - dropped_courtesy)
+            logger.info(
+                "dropped %d queued wake deliver(ies) for a cancelled schedule", dropped_courtesy
+            )
+            self.refresh_frontend_state()
+
     def retire_wakes_to_inbox(self) -> None:
         """From now on, a fired wake is SPOOLED for whoever opens next.
 
@@ -18532,7 +18634,20 @@ class Session:
             written = await asyncio.to_thread(
                 append_inbox,
                 Path(directory),
-                InboxLine(text=text, sender={}, mode="mailbox", written_at=time.time(), wake=True),
+                InboxLine(
+                    text=text,
+                    sender={},
+                    mode="mailbox",
+                    written_at=time.time(),
+                    wake=True,
+                    # WHICH wake this fire belongs to, so the successor's drain can
+                    # fold a long handover's repeated fires into one delivery
+                    # (`inbox.coalesce_wake_rows`) and so cancelling the schedule
+                    # can purge the rows it left behind (`inbox.remove_wake_rows`).
+                    # The text is what the user reads; this is what the plumbing
+                    # needs, and the two must not be re-derived from each other.
+                    wake_id=due.schedule.id,
+                ),
             )
         except Exception:  # noqa: BLE001 — a drain must not die on a spool write
             logger.warning(

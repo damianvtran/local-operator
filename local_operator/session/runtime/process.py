@@ -3886,6 +3886,7 @@ async def _drain_inbox_into(handle: object) -> int:
     from local_operator.session.runtime.inbox import (
         SOURCE_USER,
         append_inbox,
+        coalesce_wake_rows,
         drain_inbox,
         drop_owed_turn,
     )
@@ -3896,6 +3897,13 @@ async def _drain_inbox_into(handle: object) -> int:
     except Exception:  # noqa: BLE001 — a bad spool must not block the runtime
         logger.warning("inbox drain failed", exc_info=True)
         return 0
+    # BEFORE the deferral split below, which re-spools what it will not deliver:
+    # a draining runtime spools one row per fired occurrence, so a schedule that
+    # repeats across a long handover arrives here as dozens of identical wake rows
+    # and each would be delivered as its own turn. Coalescing first means the
+    # deferral writes back ONE row per wake (carrying its fire count), which is
+    # also what keeps a later drain's merge from double-counting.
+    lines = coalesce_wake_rows(lines)
     if requires_engagement:
         keep = [line for line in lines if getattr(line, "source", "") != SOURCE_USER]
         lines = [line for line in lines if getattr(line, "source", "") == SOURCE_USER]
