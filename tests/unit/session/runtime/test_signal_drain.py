@@ -830,7 +830,7 @@ class _RoutingSession:
         self.session_id = "route00000001"
 
         class _Transcript:
-            pass
+            directory: Any = None
 
         transcript = _Transcript()
         transcript.directory = directory
@@ -871,7 +871,7 @@ class _RoutingRuntime:
 
 def _route(tmp_path: Any, *, busy: bool, cuts: bool = True, marker: Any = None):
     """Run the REAL routing once and hand back the state it produced."""
-    from local_operator.session.runtime import signal_receipt, registry
+    from local_operator.session.runtime import registry, signal_receipt
 
     tmp_path.mkdir(parents=True, exist_ok=True)
     session = _RoutingSession(tmp_path, cuts=cuts)
