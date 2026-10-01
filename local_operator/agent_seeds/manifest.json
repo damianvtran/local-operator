@@ -1,16 +1,16 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-09-30T11:17:41Z",
-  "generator_version": "0.64.8",
+  "generated_at": "2026-09-30T15:39:00Z",
+  "generator_version": "0.64.9",
   "source": "https://github.com/damianvtran/local-operator",
   "seeds": [
     {
       "name": "aida",
       "description": "Your chief of staff: orchestrates agents and teams on your behalf, keeps an eye on everything in flight, and reports back.",
       "when_to_use": "Handing a request to a team or specialist, starting parallel work across agents, or asking for a status roll-up of everything in flight.",
-      "version": "1.3.0",
-      "instructions_sha256": "eb5e2e0da923f7b2695f3d6029ed4334717b98da5119a9d989fe8be43d151833",
-      "instructions_chars": 7974,
+      "version": "1.3.1",
+      "instructions_sha256": "c37c5f78a84d00fa17f990c209f3a742c0c19b4f0a139633182ca5deadaf660a",
+      "instructions_chars": 7998,
       "tools": null,
       "effort": null,
       "delegate": true,
@@ -47,7 +47,8 @@
       "delegate": false,
       "tags": [
         "role",
-        "tools:read,glob,grep,list_variables,read_variable,bash,todo,write,web_search,web_fetch"
+        "tools:read,glob,grep,list_variables,read_variable,bash,todo,write,web_search,web_fetch",
+        "class:reactive"
       ],
       "categories": [
         "role"
@@ -65,7 +66,8 @@
       "effort": null,
       "delegate": false,
       "tags": [
-        "role"
+        "role",
+        "class:reactive"
       ],
       "categories": [
         "role"
@@ -83,7 +85,8 @@
       "effort": null,
       "delegate": false,
       "tags": [
-        "role"
+        "role",
+        "class:reactive"
       ],
       "categories": [
         "role"
@@ -101,7 +104,8 @@
       "effort": null,
       "delegate": false,
       "tags": [
-        "role"
+        "role",
+        "class:reactive"
       ],
       "categories": [
         "role"
@@ -112,9 +116,9 @@
       "name": "manager",
       "description": "Coordinates delegated work and reports honest status: what is done, what is in flight, what is blocked and on whom.",
       "when_to_use": "Coordinating and tracking multi-part work across several agents or repositories, chasing what is blocked, or producing a status roll-up or progress report.",
-      "version": "1.4.0",
-      "instructions_sha256": "881f8208ca68eedc487171c20d4b50bafd10234cd48df79a8b46fd9f12018b1d",
-      "instructions_chars": 2478,
+      "version": "1.5.0",
+      "instructions_sha256": "2a9576c31337cd34693e395caec6a7797b783d860ae2db88422731979e191602",
+      "instructions_chars": 2545,
       "tools": [
         "read",
         "glob",
@@ -132,7 +136,8 @@
       "tags": [
         "role",
         "tools:read,glob,grep,list_variables,read_variable,bash,todo,project,web_search,web_fetch",
-        "delegate:yes"
+        "delegate:yes",
+        "class:reactive"
       ],
       "categories": [
         "role"
@@ -161,7 +166,8 @@
       "delegate": false,
       "tags": [
         "role",
-        "tools:read,glob,grep,list_variables,read_variable,bash,todo,web_search,web_fetch"
+        "tools:read,glob,grep,list_variables,read_variable,bash,todo,web_search,web_fetch",
+        "class:reactive"
       ],
       "categories": [
         "role"
@@ -188,7 +194,8 @@
       "delegate": false,
       "tags": [
         "role",
-        "tools:read,glob,grep,list_variables,read_variable,web_search,web_fetch"
+        "tools:read,glob,grep,list_variables,read_variable,web_search,web_fetch",
+        "class:reactive"
       ],
       "categories": [
         "role"
@@ -206,7 +213,8 @@
       "effort": null,
       "delegate": false,
       "tags": [
-        "role"
+        "role",
+        "class:reactive"
       ],
       "categories": [
         "role"
@@ -224,7 +232,8 @@
       "effort": null,
       "delegate": false,
       "tags": [
-        "role"
+        "role",
+        "class:reactive"
       ],
       "categories": [
         "role"

@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import time
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -257,19 +258,22 @@ ORIGIN_CACHE_VERSION = 2
 #: deleted by hand to un-hide a session is not silently written back**. The
 #: codebase therefore treats deleting ``origin.json`` as a supported gesture,
 #: and a permanent skip would answer that gesture with a session that stays
-#: invisible forever. Three independent repairs bound it: this epoch, a cold
-#: start (the counter begins at 0, so ``0 % REVALIDATE_EVERY == 0`` and a fresh
-#: process always revalidates on its first scan), and the cache being derived
-#: data under ``cache/`` that a user may delete at any time.
+#: invisible forever. Three independent repairs bound it: this epoch, the
+#: revalidation stamp (:data:`REVALIDATE_WINDOW_S` — a scan whose store was
+#: last fully re-derived more than the window ago revalidates it itself), and
+#: the cache being derived data under ``cache/`` that a user may delete at any
+#: time.
 #:
-#: THE COUNTER ADVANCES PER POLL, NOT PER SECOND, so the "~5 minutes" ceiling
-#: holds only for a sidebar that is actually polling. A closed sidebar pauses
-#: its timer (``_sidebar_timer.pause()``), which freezes the counter: wall-clock
-#: staleness is UNBOUNDED while the sidebar is shut, and reopening it does not
-#: force a revalidation — the first poll after reopening serves the armed fast
-#: path and the epoch resumes from wherever it stopped. A cold start still
-#: revalidates, so this is bounded per PROCESS, never per wall-clock. The
-#: variable-poll-rate case below is the same hazard in continuous form.
+#: THE COUNTER ADVANCES PER POLL, NOT PER SECOND, so within any one polling
+#: process the "~5 minutes" ceiling holds only while that process is actually
+#: polling (a closed sidebar pauses its timer, ``_sidebar_timer.pause()``, and
+#: freezes the counter). The stamp closes that gap ACROSS processes: it is
+#: written whenever a full revalidation completes and read by any later
+#: process's first scan, so staleness is bounded per WALL-CLOCK as well. That
+#: conversion costs one deliberate behaviour change, recorded at
+#: :data:`REVALIDATE_WINDOW_S`: a restart INSIDE the window serves the armed
+#: fast path rather than repairing a just-deleted marker on the spot — the
+#: hand-edit is noticed when the window next expires instead of immediately.
 #:
 #: One caller opts out of all of this rather than living with the window:
 #: ``session.cleanup`` passes ``revalidate=True`` through
@@ -297,14 +301,67 @@ ORIGIN_CACHE_VERSION = 2
 #: poll — same structure and ratio, wrong surface (QA round 1, Q2).
 REVALIDATE_EVERY = 150
 
+#: How stale a completed revalidation may be before a fresh process's first
+#: scan revalidates the store rather than arming the hidden-skip fast path.
+#:
+#: WHY THIS EXISTS — the ONE-SHOT caller. The epoch above is counted in POLLS
+#: of a single process, and its "first scan of a fresh process revalidates"
+#: rule was written for long-lived pollers restarting: a sidebar that rescans
+#: on open. But ``lop sessions`` — and every other one-shot caller: the CLI's
+#: recovery listing, search, a script — issues exactly ONE scan per process,
+#: so under poll-counted terms EVERY invocation is a cold start and pays the
+#: revalidating pass. Measured on a 15k-directory pad (1,400 user sessions):
+#: 17,820 syscalls and ~121 ms warm per invocation, against the 4,220
+#: syscalls / ~39 ms the armed scan it can never reach would pay.
+#:
+#: THE STAMP, not a persisted counter: a scan that completes a revalidation
+#: writes ``revalidated_at`` into the verdict cache, and a first scan that
+#: finds it fresh arms the fast path instead of re-deriving. Consecutive CLI
+#: invocations inside the window then cost the armed number, and the store
+#: still gets a full revalidation at most once per window — from whichever
+#: scan first runs after it expires. The window is the epoch's own ~5 minutes
+#: at the sidebar's 2 s cadence, so a polling sidebar's cadence is unchanged:
+#: it revalidates every 150 polls (each one stamping) and its restarts merely
+#: stop re-paying a scan some process already paid inside the window.
+#:
+#: WHY A WALL-CLOCK BOUND AT ALL: the repair gesture above ("delete the
+#: marker to un-hide the session") needs a ceiling, and a count of polls
+#: cannot bound a process that never polls again. The ceiling therefore has to
+#: be a fact about the store that outlives the process — the same shape as
+#: ``model.catalogue.REVALIDATE_BACKOFF_S``, except PERSISTED, because the
+#: question ("were these verdicts fully re-derived lately?") is about the
+#: cache file and must be answerable by the NEXT process, not only by the one
+#: that asked. The counter (:data:`_SCAN_COUNT`) therefore stays process-local
+#: — it is policy — while the stamp lives beside the verdicts it describes.
+#: The epoch's in-process scans are untouched: scan #150 of a live process
+#: revalidates on schedule whatever the stamp says.
+#:
+#: FAILURE MODES — every one degrades to "revalidate", the conservative
+#: direction (a redundant scan; never a wrong row, never a raise):
+#: * cache absent, unreadable, corrupt, torn, or written by an older build:
+#:   no stamp is read, so the scan revalidates and re-stamps; the save itself
+#:   is best-effort and swallows its ``OSError``, so an unwritable cache just
+#:   means the next process revalidates again;
+#: * clock jump forward: the stamp looks old, costing one redundant
+#:   revalidation; clock jump backward: the stamp looks FUTURE and
+#:   ``_revalidation_is_due`` deliberately distrusted a negative age (see its
+#:   docstring), so skew can cost scans but cannot freeze a stale verdict;
+#: * two processes whose clocks disagree can flap a scan between them —
+#:   bounded by the window, costs one redundant scan per flap, recorded here
+#:   rather than defended against because a monotonic clock cannot be
+#:   persisted across restarts, which is exactly the property the stamp needs.
+REVALIDATE_WINDOW_S = 5 * 60
+
 #: Scans issued so far, per store, driving :data:`REVALIDATE_EVERY`.
 #:
-#: Process-local on purpose: it is a POLICY counter, not a fact about the store,
-#: and persisting it would let one of the dozen ``lop`` processes on this machine
-#: decide another's staleness window — and would cost a write on a path whose
-#: whole point is to stop touching the disk. In production this holds exactly one
-#: key, the running session's config dir. Keyed by path string rather than
-#: ``Path`` so a test's ``tmp_path`` cannot collide with a live store.
+#: Process-local on purpose: it is a POLICY counter — "how long has THIS
+#: process been serving the skip" — and the store-side question ("when were
+#: these verdicts last fully re-derived?") is answered by the stamp in the
+#: cache file instead (:data:`REVALIDATE_WINDOW_S`), a fact about the verdicts
+#: rather than a count of one process's polls. In production this holds
+#: exactly one key, the running session's config dir. Keyed by path string
+#: rather than ``Path`` so a test's ``tmp_path`` cannot collide with a live
+#: store.
 _SCAN_COUNT: dict[str, int] = {}
 
 #: Journals the session's title (and every name it has ever borne) beside the
@@ -1571,42 +1628,117 @@ def origin_cache_path(config_dir: Path) -> Path:
     return config_dir / "cache" / ORIGIN_CACHE_NAME
 
 
-def _load_origin_cache(path: Path) -> dict[str, Any]:
-    """The cached verdicts, or an empty mapping when absent, stale or corrupt.
+def _load_origin_cache(path: Path) -> tuple[dict[str, Any], float | None]:
+    """The cached verdicts AND their revalidation stamp; empties when unusable.
 
-    Every failure yields an empty mapping rather than raising, mirroring
+    Every failure yields ``({}, None)`` rather than raising, mirroring
     ``search_index._load``: this is a cache whose worst cost must be a rebuild
     (today's full-read behaviour), never a wrong verdict and never the picker.
+
+    The second term is when the verdicts were last FULLY re-derived
+    (:data:`REVALIDATE_WINDOW_S`), or ``None`` when no trustworthy one exists —
+    no cache, an unreadable or corrupt one, a document written before the stamp
+    existed, or a stamp of the wrong type. ``None`` is the conservative answer
+    every caller treats as "revalidate": see :func:`_revalidation_is_due`.
     """
     try:
         raw = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return {}
+        return {}, None
     try:
         loaded = json.loads(raw)
     except ValueError:
-        return {}
+        return {}, None
     if not isinstance(loaded, dict) or loaded.get("version") != ORIGIN_CACHE_VERSION:
-        return {}
+        return {}, None
     entries = loaded.get("entries")
-    return entries if isinstance(entries, dict) else {}
+    stamp = loaded.get("revalidated_at")
+    if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+        stamp = None
+    return (
+        entries if isinstance(entries, dict) else {},
+        float(stamp) if stamp is not None else None,
+    )
 
 
-def _save_origin_cache(path: Path, entries: dict[str, Any]) -> None:
-    """Persist the verdicts, best-effort and atomically.
+def _revalidation_is_due(stamp: float | None, *, now: float | None = None) -> bool:
+    """Whether a fresh process's first scan must revalidate the store.
+
+    ``stamp`` is :func:`_load_origin_cache`'s second term. DUE is the
+    conservative direction, and every failure takes it:
+
+    * ``None`` — no cache, an unreadable, corrupt or older-format one, or a
+      save that never landed — revalidates, exactly as every cold start did
+      before the stamp existed;
+    * an age OUTSIDE ``[0, window)`` revalidates: older than the window is the
+      ordinary expiry, and a NEGATIVE age (a stamp in the future, i.e. a clock
+      that moved backward between writer and reader) is deliberately
+      distrusted rather than served — otherwise a skewed clock could freeze a
+      stale verdict for as long as the skew lasted. The cost of distrusting it
+      is one redundant scan, the direction that can never show a wrong row.
+
+    Only an age inside the window, in the past, arms the fast path. ``now`` is
+    injectable so the boundary is testable without touching the clock.
+    """
+    if stamp is None:
+        return True
+    age = (time.time() if now is None else now) - stamp
+    return not (0.0 <= age < REVALIDATE_WINDOW_S)
+
+
+def _save_origin_cache(
+    path: Path,
+    entries: dict[str, Any],
+    *,
+    revalidated_at: float | None = None,
+    create: bool = False,
+) -> None:
+    """Persist the verdicts AND the revalidation stamp, best-effort and atomically.
 
     Atomic with a PID-suffixed temp for the reason ``search_index._save``
     documents: several sessions open a picker at once, and a fixed temp name
     lets one process ``replace`` a document another is still filling. A torn
     document is discarded by the loader, so the bound is a needless rebuild.
+
+    ``revalidated_at`` rides in the SAME document as the verdicts because it is
+    a fact ABOUT them — one file must tell a reader both what the verdicts are
+    and how stale they are. An armed caller that found its entries changed
+    passes the stamp it loaded so the write preserves it; ``None`` records
+    "no revalidation is claimed" and reads exactly like a pre-stamp file.
+
+    ``create`` GATES THE ONE THING A READ PATH MAY NOT DO, and the default is
+    the strict answer. The desktop's read routes must leave the tree exactly as
+    they found it — ``tests/unit/server/test_desktop_reads_create_nothing.py``
+    snapshots an isolated root before and after EVERY route and asserts the
+    listings are equal — and the verdict cache lives inside that tree. A scan
+    that merely REFRESHED a stamp used to create ``cache/`` and
+    ``cache/origin-verdicts.json`` on a store that had neither, which is a
+    creation no read may make (CI, the ``desktop-reads-create-nothing`` job).
+    So with ``create=False`` this function writes ONLY when the file already
+    exists: it can refresh a stamp in place, and it can NEVER bring the file or
+    its directory into being (no ``mkdir``, no ``O_CREAT``). The single caller
+    that passes ``create=True`` is the entries-changed write — the write this
+    cache has always made, and the one that legitimately brings the file into
+    existence; keeping it is what preserves the pre-change behaviour on a store
+    that has no cache yet.
     """
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        if create:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        elif not path.exists():
+            # A STAMP-ONLY REFRESH NEVER CREATES ANYTHING. On a store with no
+            # cache yet this is the pre-stamp behaviour: the read writes
+            # nothing, and the next process revalidates (the conservative
+            # direction). The one-shot perf win applies where the cache
+            # exists, which is the common case — a populated store, the file
+            # brought into being by the entries-changed write above or by a
+            # long-lived polling path.
+            return
         tmp = path.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(
-            json.dumps({"version": ORIGIN_CACHE_VERSION, "entries": entries}),
-            encoding="utf-8",
-        )
+        document: dict[str, Any] = {"version": ORIGIN_CACHE_VERSION, "entries": entries}
+        if revalidated_at is not None:
+            document["revalidated_at"] = revalidated_at
+        tmp.write_text(json.dumps(document), encoding="utf-8")
         tmp.replace(path)
     except OSError:
         return
@@ -1856,6 +1988,15 @@ def _scan_sessions(
     ``session.cleanup._picker_rows``, which is a deletion authority and must
     never decide from a speculatively-stale answer.
 
+    A caller that does NOT pass ``revalidate`` still gets a first scan whose
+    cost follows the STORE rather than this process merely being new: a
+    process-first scan arms the fast path when the store's verdicts were fully
+    re-derived — by anyone — within :data:`REVALIDATE_WINDOW_S`, and
+    revalidates when they were not. That is the window that keeps a one-shot
+    caller (``lop sessions``, a script) from paying the revalidating pass on
+    every invocation; in-process epoch scans and ``revalidate=True`` are
+    unchanged.
+
     ``strict=True`` makes a store that exists but cannot be WALKED an error
     (:class:`~local_operator.session.errors.SessionStoreUnavailable`) instead
     of an empty listing, and the caller declaring it is one whose answer a UI
@@ -1924,6 +2065,7 @@ def _scan_sessions(
     # still advances the counter — otherwise a session started before its
     # config dir exists would sit at 0 and revalidate on every poll forever.
     scans_so_far = _SCAN_COUNT.get(str(config_dir), 0)
+    cold_start = False
     if revalidate:
         # A FORCED revalidation is the epoch's expensive scan, merely arriving
         # early, so it RESTARTS the epoch rather than counting as one more
@@ -1936,7 +2078,17 @@ def _scan_sessions(
         _SCAN_COUNT[str(config_dir)] = 1
     else:
         _SCAN_COUNT[str(config_dir)] = scans_so_far + 1
-        revalidate = scans_so_far % REVALIDATE_EVERY == 0
+        if scans_so_far == 0:
+            # A PROCESS-FIRST scan's decision is DEFERRED past the cache load
+            # below, where the store's revalidation stamp answers it: a
+            # one-shot caller (``lop sessions``, a script) must arm the skip
+            # when some process already revalidated inside the window, and it
+            # has no next poll in which its own epoch could. The counter still
+            # advances here, before any I/O can fail, so the deferral cannot
+            # starve it (see the read-before-scandir note above).
+            cold_start = True
+        else:
+            revalidate = scans_so_far % REVALIDATE_EVERY == 0
 
     rows: list[tuple[str, float, str, bool]] = []
     # THE ARCHIVE INDEX, READ LAZILY AND MEMOISED, on the first candidate that
@@ -1981,7 +2133,14 @@ def _scan_sessions(
             raise SessionStoreUnavailable(_store_error_detail(error)) from error
         return [], set()
     cache_path = origin_cache_path(config_dir)
-    cached = _load_origin_cache(cache_path)
+    cached, revalidated_at = _load_origin_cache(cache_path)
+    if cold_start:
+        # THE WINDOW, asked of the STORE rather than of this process: arm the
+        # skip when the verdicts were fully re-derived within
+        # ``REVALIDATE_WINDOW_S`` by whoever scanned last. Every failure of the
+        # stamp (absent, corrupt, unwritable, clock-skewed) is answered by
+        # ``_revalidation_is_due`` in the conservative direction — revalidate.
+        revalidate = _revalidation_is_due(revalidated_at)
     fresh: dict[str, Any] = {}
     # Every name that carried a marker in THIS scan. The cache is rewritten to
     # exactly this set, which is what drops entries for disposed sessions and
@@ -2186,11 +2345,26 @@ def _scan_sessions(
         name: entry for name, entry in cached.items() if name in seen and isinstance(entry, dict)
     }
     merged.update(fresh)
-    # Written only when it would actually change, so a steady store's picker
-    # open stays read-only: an unconditional save would rewrite a multi-megabyte
-    # file on every open to persist nothing.
-    if merged != cached:
-        _save_origin_cache(cache_path, merged)
+    entries_changed = merged != cached
+    # Written when the entries changed, and ALSO when this scan completed a
+    # revalidation: the stamp is what lets the NEXT process's first scan arm
+    # the skip, and refreshing it is the one write a steady store pays — once
+    # per revalidation, not per poll. An armed scan whose entries are unchanged
+    # still writes nothing, so a steady store's picker open stays read-only as
+    # before. The stamp passed through on an armed write is the one loaded; on
+    # a revalidating write it is this scan's own completion moment.
+    #
+    # ONLY THE ENTRIES WRITE MAY CREATE THE FILE (``create=entries_changed``):
+    # the stamp-only refresh is non-creating, so a read route on a store with
+    # no cache leaves the tree as it found it (see ``_save_origin_cache`` and
+    # ``tests/unit/server/test_desktop_reads_create_nothing.py``).
+    if entries_changed or revalidate:
+        _save_origin_cache(
+            cache_path,
+            merged,
+            revalidated_at=time.time() if revalidate else revalidated_at,
+            create=entries_changed,
+        )
     # Newest first; EQUAL stamps break on the id, ascending, so the order is
     # a property of the store rather than of ``scandir`` on this filesystem.
     # The cleanup policy sorts on the same key: with an unstable tie order
@@ -3202,6 +3376,134 @@ def fork_haystack(row: SessionRow) -> str:
     return f"{FORK_HAYSTACK} {row.name}" if row.forked else row.name
 
 
+#: One file's stat key: ``(st_ino, st_mtime_ns, st_size, st_mode)``; ``None``
+#: for a file that is genuinely ABSENT (a stable fact — see :func:`_stat_key`).
+_StatKey = tuple[int, int, int, int]
+
+#: ``str(sessions root) -> {session id: entry}`` for :data:`_TITLE_MEMO` and
+#: :data:`_OPENER_MEMO`, the two stat-keyed memos :func:`stored_session_title`
+#: and :func:`_opening_message` answer through.
+#:
+#: WHY A MEMO. ``recent_session_rows`` runs on the desktop chat search and on
+#: every sidebar listing, and asks :func:`session_name` once per row; each call
+#: opened the row's title sidecar and its transcript — twice, for the opener —
+#: for files a previous call had already read and nothing had touched since.
+#: Measured on a 15,441-directory store: 24,293 ``open()`` calls per call
+#: (~3/row), 2.0 s of a 2.5 s scan, all of it re-reads. The memo answers the
+#: same question from one or two ``stat`` calls while the files are unchanged.
+#:
+#: STAT BEFORE READ, keyed on the file's own ``(st_ino, st_mtime_ns, st_size,
+#: st_mode)``: the same discipline as ``session.catalog``'s birth memo, with the
+#: mode carried too because READABILITY IS PART OF THE ANSWER this memo caches:
+#: an entry read while the file was readable must miss once it is not, or the
+#: hit path would serve a name an uncached call would fall back from. A file
+#: rewritten between its stat and its read lands its NEW content under the OLD
+#: key, so the next call's stat misses and re-reads — the race resolves toward
+#: a re-read, never toward serving a stale answer. The accepted blind spot is
+#: the same one that memo takes, one term wider: a rewrite that keeps the
+#: inode, the size, the mode AND restores the nanosecond mtime.
+#:
+#: ABSENT IS CACHEABLE; UNREADABLE IS NOT. :func:`session_origin` draws this
+#: module's line: a genuinely absent file is a fact about CONTENT, and its
+#: ``None`` key is stable (the moment the file appears, the stat misses); a
+#: read that failed for any other reason is a fact about the MOMENT — ``EMFILE``
+#: under the descriptor pressure a 30,000-directory scan creates, a permissions
+#: blip — and memoising it would pin a wrong verdict for the process's life. So
+#: a stat that raises anything but ``FileNotFoundError``, and a read that fails
+#: while its file exists, both decline to store; the answer is still returned.
+#:
+#: BOUNDED in two directions, mirroring ``session.catalog``'s birth memo: at
+#: most :data:`_SESSION_MEMO_ROOTS` stores are remembered (oldest evicted
+#: first), so a process that lists many stores — the test suite — cannot grow
+#: these without limit; and a FULL scan (:func:`recent_session_rows` with
+#: ``limit=None``, the one call that sees the whole store) prunes each map to
+#: the sessions it just saw, so entries for deleted sessions drop out and a
+#: long-lived backend is bounded by the store it HAS, not by every session it
+#: has ever listed.
+_SESSION_MEMO_ROOTS = 4
+
+_TITLE_MEMO: dict[str, dict[str, tuple[_StatKey | None, bool, _StatKey | None, str]]] = {}
+_OPENER_MEMO: dict[str, dict[str, tuple[_StatKey | None, str]]] = {}
+
+
+def _session_memo_for(memo: dict[str, dict[str, Any]], session_dir: Path) -> dict[str, Any]:
+    """This store's map in ``memo``, created (oldest root evicted) on first use.
+
+    One map per sessions ROOT — the session directory's parent — so a full
+    scan and a single session's boot path reach the same map, and at most
+    :data:`_SESSION_MEMO_ROOTS` stores are remembered, exactly as
+    ``session.catalog``'s memos bound themselves and for the same reason.
+    """
+    root = memo.get(str(session_dir.parent))
+    if root is None:
+        # SNAPSHOT, AND GUARDED. The desktop lists from worker threads, so a
+        # second caller can evict or insert between an iterator and its first
+        # read, and CPython raises ``RuntimeError("dictionary changed size
+        # during iteration")`` for exactly that — which would escape
+        # ``session_name`` into a listing or a search. Standing down is safe
+        # because the root count is only a bound: a lost race costs one call
+        # with an extra store remembered, and the next call re-checks and
+        # evicts it, while raising would cost the caller its scan.
+        while len(memo) >= _SESSION_MEMO_ROOTS:
+            try:
+                oldest = next(iter(list(memo)))
+            except (StopIteration, RuntimeError):
+                break
+            memo.pop(oldest, None)
+        root = memo.setdefault(str(session_dir.parent), {})
+    return root
+
+
+def _prune_session_scan_memos(sessions_root: Path, keep: set[str]) -> None:
+    """Drop memo entries for sessions a FULL scan did not see.
+
+    Called only by :func:`recent_session_rows`' untruncated scan: a bounded
+    listing sees a subset of the store, and pruning to THAT would evict entries
+    the next call needs, while the full scan is the one call that knows the
+    store as it is now. ``keep`` may hold ids ``session_name`` was never called
+    on, which only makes the sweep conservative — it can never evict a live
+    entry, because every session the scan saw keeps its entry.
+
+    ``keep`` comes from the scan's OWN filters, and one of them is worth
+    naming: a full scan with ``include_archived=False`` (the desktop search's
+    default) never emits archived ids, so an archived session's entry is evicted
+    with the rest. That is accepted — the cost is one re-read the next time a
+    listing touches that session, and threading the archive predicate through
+    the prune would cost more than the re-read it saves. Wrongness is not on
+    the table: a pruned entry only ever means a re-read.
+    """
+    key = str(sessions_root)
+    for memo in (_TITLE_MEMO, _OPENER_MEMO):
+        root = memo.get(key)
+        if root is None:
+            continue
+        for stale in root.keys() - keep:
+            root.pop(stale, None)
+
+
+def _stat_key(path: Path) -> tuple[_StatKey | None, bool]:
+    """``((ino, mtime_ns, size, mode) | None, cacheable)`` for one file.
+
+    ``None`` is the ABSENT key, and it is stable: a file that is not there is a
+    fact about content, and the moment it appears its stat yields a key that
+    misses. The mode rides in the key because a permission change is a change
+    of what a reader would see (a mode-0 sidecar falls back to the transcript),
+    and it is free here — the stat that supplies the rest supplies it too.
+    Anything else that keeps the key from being trusted — an ``EACCES``, an
+    ``EMFILE``, a path that is not a plain file — clears the second element,
+    and callers decline to memoise on it: see :data:`_TITLE_MEMO` for why the
+    two states must not be conflated, and :func:`session_origin` for the same
+    distinction pressed into a bool.
+    """
+    try:
+        info = os.stat(path)
+    except FileNotFoundError:
+        return None, True
+    except OSError:
+        return None, False
+    return (info.st_ino, info.st_mtime_ns, info.st_size, info.st_mode), True
+
+
 def stored_session_title(session_dir: Path) -> str:
     """The title this session was last named, or ``""`` when it has none.
 
@@ -3236,11 +3538,45 @@ def stored_session_title(session_dir: Path) -> str:
     is invisible to the two windows but sits in the sidecar. The scan below
     remains the fallback for sessions written before the sidecar existed and
     not yet reached by :func:`backfill_session_titles`.
+
+    THE ANSWER IS MEMOISED, keyed on the two files' stats — see
+    :data:`_TITLE_MEMO`. Every repeat call on an unchanged session is one
+    ``stat`` of the sidecar, plus one of the transcript only when the cached
+    answer came from the transcript scan; the scan itself reruns only when one
+    of the files that produced the answer has moved. The answer is unchanged:
+    the sidecar still wins when it has text and the window scan is still the
+    fallback, and an answer read from a file that exists but could not be
+    opened is never memoised.
     """
+    memo = _session_memo_for(_TITLE_MEMO, session_dir)
+    name = session_dir.name
+    sidecar_key, sidecar_stable = _stat_key(session_dir / TITLE_SIDECAR_NAME)
+    if sidecar_stable:
+        cached = memo.get(name)
+        if cached is not None:
+            cached_sidecar, from_sidecar, cached_transcript, cached_title = cached
+            if cached_sidecar == sidecar_key:
+                if from_sidecar:
+                    # The sidecar answered; the transcript was never consulted,
+                    # so its stat cannot invalidate this.
+                    return cached_title
+                transcript_key, transcript_stable = _stat_key(session_dir / TRANSCRIPT_NAME)
+                if transcript_stable and transcript_key == cached_transcript:
+                    return cached_title
     sidecar = _read_title_sidecar(session_dir)
+    # A sidecar that EXISTS but did not parse — or could not be opened — is
+    # left un-memoised: malformed content and a transient unreadable look the
+    # same from here, and re-reading a file of a few hundred bytes is cheaper
+    # than pinning either. A sidecar that appeared between the stat and the
+    # read (``sidecar_key`` None while the parse succeeded) is a third such
+    # case: the disagreement itself says the file moved under this call.
+    sidecar_memoizable = sidecar_stable and ((sidecar_key is None) == (sidecar is None))
     if sidecar is not None and sidecar.text:
+        if sidecar_memoizable:
+            memo[name] = (sidecar_key, True, None, sidecar.text)
         return sidecar.text
     transcript = session_dir / TRANSCRIPT_NAME
+    transcript_key, transcript_stable = _stat_key(transcript)
     try:
         with transcript.open("rb") as handle:
             handle.seek(0, os.SEEK_END)
@@ -3264,7 +3600,15 @@ def stored_session_title(session_dir: Path) -> str:
                 # exists to prevent.
                 handle.seek(0)
                 head = tail = handle.read()
+    except FileNotFoundError:
+        # Genuinely absent, which is stable: a file that is not there holds no
+        # window, so "" is the same answer every scan gives.
+        if sidecar_memoizable and transcript_key is None:
+            memo[name] = (sidecar_key, False, None, "")
+        return ""
     except OSError:
+        # A file that exists but could not be READ is a fact about this moment,
+        # not about the transcript; answer, never memoise.
         return ""
     # The tail is searched FIRST and wins: a rename made late in a long session
     # is the newest title, and the head can only hold older ones.
@@ -3272,16 +3616,20 @@ def stored_session_title(session_dir: Path) -> str:
         matches = _TITLE_ROW_RE.findall(window.decode("utf-8", errors="replace"))
         if matches:
             break
-    if not matches:
-        return ""
-    try:
-        # Through the JSON decoder rather than a manual unescape, so a title
-        # holding a quote, a backslash or a \uXXXX escape reads back as the
-        # characters the user actually saw.
-        title = json.loads(f'"{matches[-1]}"')
-    except ValueError:
-        return ""
-    return " ".join(str(title).split())
+    value = ""
+    if matches:
+        try:
+            # Through the JSON decoder rather than a manual unescape, so a title
+            # holding a quote, a backslash or a \uXXXX escape reads back as the
+            # characters the user actually saw.
+            title = json.loads(f'"{matches[-1]}"')
+        except ValueError:
+            title = None
+        if title is not None:
+            value = " ".join(str(title).split())
+    if sidecar_memoizable and transcript_stable and transcript_key is not None:
+        memo[name] = (sidecar_key, False, transcript_key, value)
+    return value
 
 
 def session_name(
@@ -3301,12 +3649,50 @@ def session_name(
     running, or corrupt yields ``""`` and a nameless row rather than taking
     the picker down. The scan also stops at the first user message and at
     :data:`NAME_SCAN_CHARS`, so it costs one short read per session instead of
-    a full parse of a file that can be hundreds of kilobytes.
+    a full parse of a file that can be hundreds of kilobytes. Both reads are
+    memoised on the stats of the files that produced them (see
+    :data:`_TITLE_MEMO` and :func:`_opening_message`), so a repeated scan of an
+    unchanged store pays a stat, not a read.
     """
     stored = stored_session_title(session_dir)
     if stored:
         return _condense(stored, max_chars) if condense else stored
+    opening = _opening_message(session_dir)
+    if not opening:
+        return ""
+    # ``condense=False`` returns the opening text with its line breaks intact,
+    # which the backfill needs: the role preamble it matches is
+    # ``[role: <name>]\n``, and condensing flattens that newline into a space
+    # before the pattern could ever see it.
+    return _condense(opening, max_chars) if condense else opening
+
+
+def _opening_message(session_dir: Path) -> str:
+    """The opening user message's raw text — ``session_name``'s fallback, memoised.
+
+    Split out of :func:`session_name` so the fallback half can carry its own
+    memo (:data:`_OPENER_MEMO`): it is consulted for every session whose stored
+    title is empty — most of a real store — and it re-reads the transcript head
+    on every scan. The memo is stat-keyed like :func:`stored_session_title`'s,
+    and it returns the SAME text the scan would, BEFORE :func:`_condense`:
+    ``max_chars`` and ``condense`` are the caller's arguments, not facts about
+    the file, so condensing stays :func:`session_name`'s per-call step.
+
+    Tolerance is unchanged, and so is its rationale: a transcript that is
+    truncated, half-written by a session still running, or unreadable yields
+    ``""`` and a nameless row rather than taking the picker down, and the scan
+    is bounded exactly as this module documents (one short read, stopping at
+    the first user message and at :data:`NAME_SCAN_CHARS`). Absent memoises,
+    unreadable does not — see :data:`_TITLE_MEMO`.
+    """
+    memo = _session_memo_for(_OPENER_MEMO, session_dir)
+    name = session_dir.name
     transcript = session_dir / TRANSCRIPT_NAME
+    transcript_key, transcript_stable = _stat_key(transcript)
+    if transcript_stable:
+        cached = memo.get(name)
+        if cached is not None and cached[0] == transcript_key:
+            return cached[1]
     try:
         with transcript.open("r", encoding="utf-8", errors="replace") as handle:
             # ONE bounded read, not `for line in handle`. Iterating the file
@@ -3318,6 +3704,10 @@ def session_name(
             # first makes the bound real.
             head = handle.read(NAME_SCAN_CHARS)
     except OSError:
+        # Absent is stable and "" is the answer every scan gives; a file that
+        # exists but could not be opened is not stable, and is not memoised.
+        if transcript_stable and transcript_key is None:
+            memo[name] = (None, "")
         return ""
     # A final line with no newline after it is HELD BACK from the strict parse
     # only when the window was actually filled — i.e. the read stopped because
@@ -3354,18 +3744,19 @@ def session_name(
             continue
         text = _first_text(payload.get("content"))
         if text:
-            # ``condense=False`` returns the opening text with its line
-            # breaks intact, which the backfill needs: the role preamble it
-            # matches is ``[role: <name>]\n``, and condensing flattens that
-            # newline into a space before the pattern could ever see it.
-            return _condense(text, max_chars) if condense else text
+            if transcript_stable and transcript_key is not None:
+                memo[name] = (transcript_key, text)
+            return text
     # The window held no COMPLETE line, so the opener is a fragment. Dropping
     # it (which is all this used to do) left every session that begins with a
     # pasted screenshot permanently nameless: one base64 image puts the first
     # line past the cap, and the picker then showed `(unnamed session)` for the
     # rest of that conversation's life. Measured on two real sessions whose
     # first lines were 115,289 and 733,034 chars.
-    return _condense(_text_from_fragment(fragment), max_chars) if fragment else ""
+    value = _text_from_fragment(fragment) if fragment else ""
+    if transcript_stable and transcript_key is not None:
+        memo[name] = (transcript_key, value)
+    return value
 
 
 def _text_from_fragment(fragment: str) -> str:
@@ -3626,9 +4017,11 @@ def recent_session_rows(
     archived conversation at all.
     """
     rows: list[SessionRow] = []
+    seen_ids: set[str] = set()
     for session_id, mtime, origin, archived in _recent_sessions_with_origin(
         config_dir, limit, strict=strict, include_archived=include_archived
     ):
+        seen_ids.add(session_id)
         session_dir = config_dir / "sessions" / session_id
         rows.append(
             SessionRow(
@@ -3652,6 +4045,12 @@ def recent_session_rows(
                 ),
             )
         )
+    if limit is None:
+        # A full scan is the one call that sees the store as it is, so it is
+        # the call that prunes the title/opener memos to it (see
+        # _SESSION_MEMO_ROOTS). A bounded listing sees a subset, and pruning to
+        # THAT would evict entries the next call needs.
+        _prune_session_scan_memos(config_dir / "sessions", seen_ids)
     return rows
 
 

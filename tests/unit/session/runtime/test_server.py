@@ -6046,3 +6046,127 @@ async def test_the_un_imaged_slash_op_carries_the_connections_authority() -> Non
             "capabilities": frozenset({"list", "view", "prompt", "steer", "stop", "slash"}),
         }
     ], seen
+
+
+# -- the peer ack's delivery state (design note A.2/D) -------------------------
+
+
+class DeliveryHandle(FakeHandle):
+    """An owner that CARRIES the sender's message id and reports what it owns.
+
+    The two halves are one capability: the dispatch only puts ``message_id`` on
+    the op when the handle's signature takes it, and the record only advertises
+    ``peer-message-id-v1`` on the same probe -- so a handle that cannot hold the
+    id must not be told it may dedupe on it.
+    """
+
+    async def receive_peer_message(  # noqa: ANN001, ANN202
+        self, text, *, mode="mailbox", wake=False, sender=None, message_id=None
+    ) -> Any:
+        from local_operator.session.runtime.server import AckDetail
+
+        self.calls.append(
+            (
+                "receive_peer_message",
+                (text,),
+                {"mode": mode, "wake": wake, "sender": sender, "message_id": message_id},
+            )
+        )
+        return AckDetail(
+            "delivered to the mailbox (will be read on the next turn)",
+            {},
+            {
+                "delivery": {
+                    "message_id": message_id or "",
+                    "committed": True,
+                    "queued": False,
+                    "duplicate": False,
+                }
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_peer_ack_frame_carries_the_receivers_delivery_state() -> None:
+    """``AckDetail.fields`` rides the ack: the sender classifies from the frame,
+    never by parsing the sentence."""
+    handle = DeliveryHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    runtime.set_record_started(True)
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record)
+        writer.write(
+            json.dumps(
+                {
+                    "op": "peer_message",
+                    "req": 7,
+                    "text": "hi",
+                    "mode": "mailbox",
+                    "message_id": "peer-" + "f" * 32,
+                }
+            ).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        ack = await _until(reader, "ack", 7)
+        assert ack["detail"] == "delivered to the mailbox (will be read on the next turn)"
+        assert ack["delivery"] == {
+            "message_id": "peer-" + "f" * 32,
+            "committed": True,
+            "queued": False,
+            "duplicate": False,
+        }
+        # The keyword reached the handle with the frame's own value.
+        _name, _args, kwargs = handle.calls[-1]
+        assert kwargs["message_id"] == "peer-" + "f" * 32
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_handle_from_before_the_carriage_still_acks_plainly() -> None:
+    """The additive contract: a handle that does not take ``message_id`` never
+    receives it, and its ack carries no ``delivery`` -- which the sender reads as
+    the pre-field contract (commit before ack), not as a failure."""
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    runtime.set_record_started(True)
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record)
+        writer.write(
+            json.dumps({"op": "peer_message", "req": 8, "text": "hi", "mode": "mailbox"}).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        ack = await _until(reader, "ack", 8)
+        assert ack["detail"] == "delivered to the mailbox (will be read on the next turn)"
+        assert "delivery" not in ack
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_the_record_advertises_the_message_id_capability_only_when_held() -> None:
+    """The capability is a PROMISE about dedupe, so it is gated on the same
+    signature probe the dispatch uses -- a handle that would silently drop the id
+    must not advertise it."""
+    capable = RuntimeServer(DeliveryHandle(), kind="tui")
+    capable.start()
+    plain = RuntimeServer(FakeHandle(), kind="tui")
+    plain.start()
+    try:
+        assert "peer-message-id-v1" in capable._record.capabilities
+        assert "peer-message-id-v1" not in plain._record.capabilities
+    finally:
+        capable.close()
+        plain.close()

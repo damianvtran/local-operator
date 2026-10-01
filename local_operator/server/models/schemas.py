@@ -5,12 +5,13 @@ This module contains all the Pydantic models used for request and response valid
 in the Local Operator API.
 """
 
+import re
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, Generic, List, Optional, TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # AgentEditFields will be used in the routes module
 from local_operator.jobs import JobResult, JobStatus
@@ -1018,6 +1019,34 @@ class ExecutionVariablesResponse(BaseModel):
     )
 
 
+#: ISO 639-1 codes are exactly two lowercase ASCII letters; the hub validates
+#: the same shape (``omitempty,len=2,lowercase``), so this is what keeps a code
+#: the daemon accepts from being one the hub refuses downstream. The same shape
+#: rides on the field itself as a JSON-schema ``pattern`` so a client generated
+#: from the OpenAPI snapshot learns the constraint too (QA round 2, NIT 1).
+_ISO_639_1_CODE = re.compile(r"\A[a-z]{2}\Z")
+
+
+def _validate_language_code(value: Any) -> Any:
+    """Validate an optional ISO 639-1 language code (two lowercase letters).
+
+    Runs as a ``mode="before"`` field validator so the designed sentence below
+    answers an invalid value before the field's schema-level pattern can reply
+    with pydantic's generic "String should match pattern ..." -- without the
+    ordering, the clear message the constraint exists for is lost.
+    """
+    if value is None or not isinstance(value, str):
+        # None and non-strings are the core schema's questions; returning them
+        # unchanged keeps its standard answers (the Optional null branch,
+        # "Input should be a valid string") rather than pre-empting them.
+        return value
+    if not _ISO_639_1_CODE.match(value):
+        raise ValueError(
+            'language_code must be a two-letter ISO 639-1 code in lowercase (e.g. "en").'
+        )
+    return value
+
+
 class SpeechRequest(BaseModel):
     """Request body for speech generation endpoint.
 
@@ -1029,6 +1058,7 @@ class SpeechRequest(BaseModel):
         response_format: The format of the audio response. Default: "mp3".
         speed: The speed of the speech. Default: 1.0.
         provider: The provider to use for generation. Default: "openai".
+        language_code: Optional ISO 639-1 language code for the synthesis.
     """
 
     input: str = Field(..., description="The text to generate speech from.")
@@ -1044,6 +1074,19 @@ class SpeechRequest(BaseModel):
     provider: str = Field(
         "openai", description='The provider to use for generation. Default: "openai".'
     )
+    language_code: Optional[str] = Field(
+        None,
+        pattern=r"^[a-z]{2}$",
+        description=(
+            'Optional ISO 639-1 language code (e.g. "es") for the speech synthesis. '
+            "Omitted when unset so the provider can auto-detect."
+        ),
+    )
+
+    @field_validator("language_code", mode="before")
+    @classmethod
+    def _check_language_code(cls, value: Any) -> Any:
+        return _validate_language_code(value)
 
 
 class AgentSpeechRequest(BaseModel):
@@ -1052,12 +1095,26 @@ class AgentSpeechRequest(BaseModel):
     Attributes:
         input_text: The text to generate speech from.
         response_format: The format of the audio response. Default: "mp3".
+        language_code: Optional ISO 639-1 language code for the synthesis.
     """
 
     input_text: str = Field(..., description="The text to generate speech from.")
     response_format: str = Field(
         "mp3", description='The format of the audio response. Default: "mp3".'
     )
+    language_code: Optional[str] = Field(
+        None,
+        pattern=r"^[a-z]{2}$",
+        description=(
+            'Optional ISO 639-1 language code (e.g. "es") for the speech synthesis. '
+            "Omitted when unset so the provider can auto-detect."
+        ),
+    )
+
+    @field_validator("language_code", mode="before")
+    @classmethod
+    def _check_language_code(cls, value: Any) -> Any:
+        return _validate_language_code(value)
 
 
 class AgentEditFileRequest(BaseModel):

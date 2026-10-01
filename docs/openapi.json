@@ -3,7 +3,7 @@
   "info": {
     "title": "Local Operator API",
     "description": "REST API interface for Local Operator agent",
-    "version": "0.64.1"
+    "version": "0.64.10"
   },
   "paths": {
     "/v1/capabilities": {
@@ -1174,6 +1174,59 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/CRUDResponse_CheckpointManifest_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/desktop/sessions/{session_id}/checkpoints/warm": {
+      "post": {
+        "tags": [
+          "Desktop sessions"
+        ],
+        "summary": "Checkpoints Warm",
+        "description": "Buy names for this conversation's checkpoint ticks (D2/D9), lazily.\n\nThe rail calls this when it opens (no ids: the backend selects the most\nrecent names still missing, bounded) and on hover of one tick\n(``ids: [id]``). The call only ADMITS work: the owner schedules the\ngeneration as background tasks and answers at once, so this route never\nwaits on a provider \u2014 a name arrives on a later manifest poll.\n\nA WRITE only in that it spends a model call per accepted checkpoint. The\nconversation, its runtime and its transcript are untouched, so this rides\nthe READ envelope \u2014 the bounded attach whose failure is a cold answer\nrather than a refusal, the same reading ``/watch`` takes \u2014 and a draft\nanswers the empty receipt exactly as the manifest beside it answers\nempty.\n\nThe work runs on the OWNER (provider credentials and the errand tier are\nsession state; see ``Bridge.checkpoints_warm``): a cold conversation's\nempty acceptance is the honest answer, and the rail's fallback text\nstands until a warm lands on a live runtime.\n\nDeclared beside the manifest it feeds. A nested fixed suffix, so the\nroute-order rule (``search`` before ``{session_id}``) is untouched: no\nearlier route can shadow ``.../checkpoints/warm``, and this cannot shadow\na later one.",
+        "operationId": "checkpoints_warm_v1_desktop_sessions__session_id__checkpoints_warm_post",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheckpointsWarm"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_CheckpointWarmReceipt_"
                 }
               }
             }
@@ -4830,6 +4883,155 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/CRUDResponse_WakeWriteReceipt_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/desktop/monitors": {
+      "get": {
+        "tags": [
+          "Desktop monitors"
+        ],
+        "summary": "List Monitors",
+        "description": "Every conversation on this machine that has monitors.\n\nEvery disk read for the whole listing happens in ONE worker thread \u2014 an\nindex read, a bounded name scan and a transcript existence check per entry,\nnone of which may run on the event loop (a sidebar poll here must not be\nable to stall the loop that serves every other request).",
+        "operationId": "list_monitors_v1_desktop_monitors_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 200,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "include_dormant",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": true,
+              "title": "Include Dormant"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_MonitorListing_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Desktop monitors"
+        ],
+        "summary": "Create Monitor",
+        "description": "Arm a monitor on an existing conversation (see ``MonitorCreate``).\n\nNot receipted: the dedupe identity makes a retry idempotent (see the module\ndocstring), so the refusal IS the response.",
+        "operationId": "create_monitor_v1_desktop_monitors_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MonitorCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_MonitorWriteReceipt_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/desktop/monitors/{session_id}/{monitor_id}": {
+      "delete": {
+        "tags": [
+          "Desktop monitors"
+        ],
+        "summary": "Delete Monitor Route",
+        "description": "Cancel one monitor.\n\nCancelling the LAST monitor removes the index entry rather than writing an\nempty one, which is also what releases the cleanup reap guard the session\nheld while it had something scheduled (\u00a711.5).",
+        "operationId": "delete_monitor_route_v1_desktop_monitors__session_id___monitor_id__delete",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "monitor_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^m\\d{1,4}$",
+              "title": "Monitor Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_MonitorWriteReceipt_"
                 }
               }
             }
@@ -8980,6 +9182,156 @@
         }
       }
     },
+    "/v1/stt/paths": {
+      "get": {
+        "tags": [
+          "Transcription"
+        ],
+        "summary": "Resolve the speech-to-text path",
+        "description": "Report the cascade's rungs for this daemon, and the chosen path.\n\nAvailability answers \"a credential exists\" for rungs 1-3 \u2014 a probe, not a\npromise. The per-submit truth (a refused key, an empty balance) surfaces at\ntranscription time and falls forward.",
+        "operationId": "stt_paths_endpoint_v1_stt_paths_get",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Model provider to probe for audio input",
+              "title": "Provider"
+            },
+            "description": "Model provider to probe for audio input"
+          },
+          {
+            "name": "model",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Model id to probe for audio input",
+              "title": "Model"
+            },
+            "description": "Model id to probe for audio input"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_AudioPathResolution_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/stt/transcriptions": {
+      "post": {
+        "tags": [
+          "Transcription"
+        ],
+        "summary": "Transcribe Audio File With The Cascade",
+        "description": "Transcribe one upload through the provider cascade (Radient \u2192 EL \u2192 OpenAI).",
+        "operationId": "create_stt_transcription_endpoint_v1_stt_transcriptions_post",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional; with model, decides the 409's model_audio flag for the caller's own model rather than leaving it false",
+              "title": "Provider"
+            },
+            "description": "Optional; with model, decides the 409's model_audio flag for the caller's own model rather than leaving it false"
+          },
+          {
+            "name": "model",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional; see provider",
+              "title": "Model"
+            },
+            "description": "Optional; see provider"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_create_stt_transcription_endpoint_v1_stt_transcriptions_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_SttTranscriptionPayload_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/tools/speech": {
       "post": {
         "tags": [
@@ -9038,7 +9390,7 @@
           "Tools"
         ],
         "summary": "Generate speech from an agent's last message",
-        "description": "Generates speech from an agent's last message, automatically determining the voice and instructions based on the agent's profile.",
+        "description": "Generates speech from an agent's last message, automatically determining the voice based on the agent's profile.",
         "operationId": "create_agent_speech_v1_agents__agent_id__speech_post",
         "parameters": [
           {
@@ -9904,6 +10256,19 @@
             "title": "Response Format",
             "description": "The format of the audio response. Default: \"mp3\".",
             "default": "mp3"
+          },
+          "language_code": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-z]{2}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Language Code",
+            "description": "Optional ISO 639-1 language code (e.g. \"es\") for the speech synthesis. Omitted when unset so the provider can auto-detect."
           }
         },
         "type": "object",
@@ -9911,7 +10276,7 @@
           "input_text"
         ],
         "title": "AgentSpeechRequest",
-        "description": "Request body for agent-based speech generation endpoint.\n\nAttributes:\n    input_text: The text to generate speech from.\n    response_format: The format of the audio response. Default: \"mp3\"."
+        "description": "Request body for agent-based speech generation endpoint.\n\nAttributes:\n    input_text: The text to generate speech from.\n    response_format: The format of the audio response. Default: \"mp3\".\n    language_code: Optional ISO 639-1 language code for the synthesis."
       },
       "AgentUpdate": {
         "properties": {
@@ -10198,13 +10563,18 @@
           "greeted": {
             "type": "boolean",
             "title": "Greeted"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
           }
         },
         "type": "object",
         "required": [
           "enabled",
           "paused",
-          "greeted"
+          "greeted",
+          "name"
         ],
         "title": "AidaState",
         "description": "GET's answer: the full state, including the enable bit the discovery\nloop reads to decide whether to render anything at all."
@@ -10395,7 +10765,9 @@
                 "enum": [
                   "complete",
                   "error",
-                  "interrupted"
+                  "interrupted",
+                  "closed",
+                  "retired"
                 ]
               },
               {
@@ -10438,6 +10810,148 @@
         ],
         "title": "AttentionState",
         "description": "The shared read watermark, mirrored by the UI's `CompletionAttention`.\n\nTyped rather than `dict[str, Any]` so the renderer's hand-written copy of\nthis shape cannot drift from the authority silently: the field set is the\ncontract both sides agree on."
+      },
+      "Audio": {
+        "properties": {
+          "data_b64": {
+            "type": "string",
+            "maxLength": 1000000,
+            "title": "Data B64"
+          },
+          "mime_type": {
+            "type": "string",
+            "enum": [
+              "audio/wav",
+              "audio/mpeg",
+              "audio/mp4",
+              "audio/webm",
+              "audio/ogg"
+            ],
+            "title": "Mime Type"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "data_b64",
+          "mime_type"
+        ],
+        "title": "Audio",
+        "description": "One recorded-audio block on the wire (see ``harness.types.AudioContent``).\n\nThe mime allowlist is the CAPTURE contract the sibling surfaces build to\n(wav / mp3 / m4a / webm / ogg \u2014 the browser's own recorder produces webm),\nenforced here so a typo'd container is refused by name before anything is\nadmitted. The declared value is still never TRUSTED downstream: the owner's\ningest sniffs the bytes (``media.sniff_audio``) and the block carries the\nsniffed container, because the model wire keys its ``input_audio.format``\ntoken on it. The size cap matches the image block's \u2014 the whole-body\n900_000-byte budget below is the binding one, and base64 inflates 4/3 \u2014\nand v1 allows at most ONE block per send (``Prompt.audio``'s max_length)."
+      },
+      "AudioContent": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "audio",
+            "title": "Type",
+            "default": "audio"
+          },
+          "data": {
+            "type": "string",
+            "title": "Data",
+            "default": ""
+          },
+          "mime_type": {
+            "type": "string",
+            "title": "Mime Type",
+            "default": "audio/wav"
+          },
+          "duration_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Ms"
+          }
+        },
+        "type": "object",
+        "title": "AudioContent",
+        "description": "A recorded-audio block. ``data`` is base64-encoded bytes of ``mime_type``.\n\nMirrors :class:`ImageContent`, including ``marker`` (the composer chip the\nrecording cites, if a surface ever numbers one) and its ``exclude=True``\nrule: a presentation fact must not reach a provider, a transcript row or a\ncontext hash. Unlike an image there is at most ONE block per message in\nv1 (the desktop ``Prompt`` bounds the list), which is why the sidecar\nbelow can assume a single recording per forked record.\n\n``mime_type`` is the SNIFFED container, never the client's declaration\n(``media.sniff_audio`` decides it at ingest): the OpenAI-compatible chat\nwire keys its ``input_audio.format`` token on this field, and a mislabeled\ncapture would otherwise select the wrong token for the bytes \u2014 a provider\n400 in the middle of a paid turn.\n\n``duration_ms`` is capture-side information for caps and later UX; no\nwriter computes it today (the daemon has no decoder) and no provider is\never sent it \u2014 every wire renderer builds its audio part from ``data`` and\n``mime_type`` explicitly. It is deliberately NOT excluded from\n``model_dump``: unlike ``marker`` it is a property of the recording, so a\ndurable row keeping it is how a future surface can show a duration\nwithout re-measuring."
+      },
+      "AudioPath": {
+        "type": "string",
+        "enum": [
+          "provider_stt_radient",
+          "provider_stt_elevenlabs",
+          "provider_stt_openai",
+          "provider_stt_superwhisper",
+          "model_audio_sidecar",
+          "none"
+        ],
+        "title": "AudioPath",
+        "description": "The closed vocabulary of speech/input paths.\n\nValues are the wire spellings: they travel in the resolver's payloads and\n(phase 1) in a message's ``input_path`` annotation, so they are pinned with\nthe carriage work (OQ-6) rather than re-derived here."
+      },
+      "AudioPathResolution": {
+        "properties": {
+          "path": {
+            "$ref": "#/components/schemas/AudioPath"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "rungs": {
+            "items": {
+              "$ref": "#/components/schemas/RungAvailability"
+            },
+            "type": "array",
+            "title": "Rungs"
+          },
+          "model_audio_capable": {
+            "type": "boolean",
+            "title": "Model Audio Capable"
+          }
+        },
+        "type": "object",
+        "required": [
+          "path",
+          "reason",
+          "rungs",
+          "model_audio_capable"
+        ],
+        "title": "AudioPathResolution",
+        "description": "The resolver's report: the chosen path, why, and every rung's state."
+      },
+      "Body_create_stt_transcription_endpoint_v1_stt_transcriptions_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File"
+          },
+          "language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Language"
+          },
+          "prompt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prompt"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_create_stt_transcription_endpoint_v1_stt_transcriptions_post"
       },
       "Body_create_transcription_endpoint_v1_transcriptions_post": {
         "properties": {
@@ -10865,6 +11379,34 @@
         ],
         "title": "CRUDResponse[AttentionState]"
       },
+      "CRUDResponse_AudioPathResolution_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AudioPathResolution"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[AudioPathResolution]"
+      },
       "CRUDResponse_Catalogue_": {
         "properties": {
           "status": {
@@ -10948,6 +11490,34 @@
           "message"
         ],
         "title": "CRUDResponse[CheckpointManifest]"
+      },
+      "CRUDResponse_CheckpointWarmReceipt_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CheckpointWarmReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[CheckpointWarmReceipt]"
       },
       "CRUDResponse_ChildTrajectoryRelease_": {
         "properties": {
@@ -11565,6 +12135,62 @@
         ],
         "title": "CRUDResponse[ModelListResponse]"
       },
+      "CRUDResponse_MonitorListing_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MonitorListing"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[MonitorListing]"
+      },
+      "CRUDResponse_MonitorWriteReceipt_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MonitorWriteReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[MonitorWriteReceipt]"
+      },
       "CRUDResponse_MoveReceipt_": {
         "properties": {
           "status": {
@@ -12124,6 +12750,34 @@
           "message"
         ],
         "title": "CRUDResponse[SettingsView]"
+      },
+      "CRUDResponse_SttTranscriptionPayload_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SttTranscriptionPayload"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[SttTranscriptionPayload]"
       },
       "CRUDResponse_SystemPromptResponse_": {
         "properties": {
@@ -12968,6 +13622,67 @@
         "title": "CheckpointNaming",
         "description": "The naming overlay for one completion checkpoint (D2/D9).\n\n``ready`` carries a generated name and summary; ``pending`` is the\npre-generation state the rail polls on; ``unavailable`` is the failure /\ncooldown state. Non-ready states carry null ``name``/``summary`` rather\nthan omitting the keys \u2014 this surface's nullable fields are all plain\nnulls (``cold_reason``, ``replayed``), and the UI contract ships in\nlockstep."
       },
+      "CheckpointWarmReceipt": {
+        "properties": {
+          "accepted": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Accepted"
+          },
+          "pending": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Pending"
+          }
+        },
+        "type": "object",
+        "required": [
+          "accepted",
+          "pending"
+        ],
+        "title": "CheckpointWarmReceipt",
+        "description": "``POST /v1/desktop/sessions/{session_id}/checkpoints/warm`` (D9).\n\n``accepted`` are the ids the call took ownership of \u2014 the request's ids\nechoed back, or the ids the rail-open default selection chose \u2014 so a\ncaller that sent none learns which ticks to watch. ``pending`` are the\nsubset still waiting for a name (queued, in flight, or named-but-stale\nand regenerating); an id already named, or one inside its failure\ncooldown, is accepted but NOT pending, and the rail's poll stops on it."
+      },
+      "CheckpointsWarm": {
+        "properties": {
+          "ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array",
+                "maxItems": 16
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ids"
+          },
+          "limit": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 16.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Limit"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "CheckpointsWarm",
+        "description": "Which checkpoints to buy names for (``sessions.checkpoints.warm``, D9).\n\nBoth fields are optional: ``ids`` names specific ticks (a hover) and\n``limit`` bounds the rail-open default selection \u2014 \"the most recent <= 8\ncheckpoints missing names\" when neither is sent. Sending neither is the\ncommon case, not an omission to correct, which is what makes the op\nusable from a rail before the client has classified anything.\n\n``ids`` entries are journal entry ids (a tick's own id, D1); the cap is\nthe module's own :data:`~local_operator.session.checkpoint_naming.MAX_WARM_IDS`\nso an over-cap request is a 422 naming the field rather than a silently\ntruncated batch."
+      },
       "ChildTrajectoryRelease": {
         "properties": {
           "watching": {
@@ -13718,6 +14433,18 @@
               }
             ],
             "title": "Draft Id"
+          },
+          "purpose": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "agents-config"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Purpose"
           }
         },
         "additionalProperties": false,
@@ -14460,6 +15187,11 @@
             "title": "Supports Images",
             "default": true
           },
+          "supports_audio_input": {
+            "type": "boolean",
+            "title": "Supports Audio Input",
+            "default": false
+          },
           "supports_prompt_cache": {
             "type": "boolean",
             "title": "Supports Prompt Cache",
@@ -15027,6 +15759,17 @@
             ],
             "title": "Renamed From",
             "description": "The published name the import was renamed FROM because the local registry already held it. None when the published name was free."
+          },
+          "model_notice": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelSuggestionNotice"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Non-blocking report for a hub model suggestion this machine could not honour; always present, null when nothing was suggested or it applied."
           }
         },
         "type": "object",
@@ -15608,6 +16351,9 @@
                 },
                 {
                   "$ref": "#/components/schemas/ImageContent"
+                },
+                {
+                  "$ref": "#/components/schemas/AudioContent"
                 }
               ]
             },
@@ -15890,6 +16636,17 @@
             ],
             "title": "Supports Images"
           },
+          "supports_audio_input": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supports Audio Input"
+          },
           "supports_tools": {
             "anyOf": [
               {
@@ -16024,7 +16781,7 @@
           "name"
         ],
         "title": "ModelInfo",
-        "description": "Represents the pricing information for a given model.\n\nAttributes:\n    input_price (float): Cost per million input tokens.\n    output_price (float): Cost per million output tokens.\n    max_tokens (Optional[int]): Maximum number of tokens supported by the model.\n    context_window (Optional[int]): Context window size of the model.\n    supports_images (Optional[bool]): Whether the model supports images.\n    supports_prompt_cache (bool): Whether the model supports prompt caching.\n    supports_responses_api (bool): Whether the model supports OpenAI's\n        Responses API.\n    cache_writes_price (Optional[float]): Cost per million tokens for cache writes.\n    cache_reads_price (Optional[float]): Cost per million tokens for cache reads.\n    time_of_use (Optional[str]): Name of the time-of-use tariff schedule whose\n        peak/off-peak ratio this row's prices are quoted at; the price fields\n        hold the PEAK rates and the schedule supplies the off-peak scale. None\n        means the row does not vary by time of day.\n    description (Optional[str]): Description of the model.\n    limits_from_listing (bool): The window and max_tokens on this row were\n    transcribed from the provider's own live listing on a date, so a live\n    listing supersedes them.\n    recommended (Optional[bool]): Whether the model is recommended for use in Local\n    Operator.  This is determined based on community usage and feedback."
+        "description": "Represents the pricing information for a given model.\n\nAttributes:\n    input_price (float): Cost per million input tokens.\n    output_price (float): Cost per million output tokens.\n    max_tokens (Optional[int]): Maximum number of tokens supported by the model.\n    context_window (Optional[int]): Context window size of the model.\n    supports_images (Optional[bool]): Whether the model supports images.\n    supports_audio_input (Optional[bool]): Whether the model accepts audio input;\n        ``None`` means no source has stated it (silence is not a denial).\n    supports_prompt_cache (bool): Whether the model supports prompt caching.\n    supports_responses_api (bool): Whether the model supports OpenAI's\n        Responses API.\n    cache_writes_price (Optional[float]): Cost per million tokens for cache writes.\n    cache_reads_price (Optional[float]): Cost per million tokens for cache reads.\n    time_of_use (Optional[str]): Name of the time-of-use tariff schedule whose\n        peak/off-peak ratio this row's prices are quoted at; the price fields\n        hold the PEAK rates and the schedule supplies the off-peak scale. None\n        means the row does not vary by time of day.\n    description (Optional[str]): Description of the model.\n    limits_from_listing (bool): The window and max_tokens on this row were\n    transcribed from the provider's own live listing on a date, so a live\n    listing supersedes them.\n    recommended (Optional[bool]): Whether the model is recommended for use in Local\n    Operator.  This is determined based on community usage and feedback."
       },
       "ModelListQuerySort": {
         "type": "string",
@@ -16085,6 +16842,574 @@
             }
           ]
         }
+      },
+      "ModelSuggestionNotice": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "title": "Reason",
+            "description": "Why the suggestion was skipped: unknown_provider, provider_unavailable, local_not_configured, unknown_model, or invalid."
+          },
+          "requested": {
+            "$ref": "#/components/schemas/ModelSuggestionRequested",
+            "description": "The suggested pair this machine declined to apply."
+          }
+        },
+        "type": "object",
+        "required": [
+          "reason",
+          "requested"
+        ],
+        "title": "ModelSuggestionNotice",
+        "description": "Why a hub model suggestion was not applied on THIS machine.\n\nNon-blocking by construction: the import this rides on already succeeded.\nThe key is always present on an importing result -- ``None`` when nothing\nwas suggested, or when the suggestion was available and consumed into the\nrow's own ``hosting``/``model`` -- so a client can tell \"nothing to say\"\nfrom \"this backend never reports suggestions\", exactly like\n``renamed_from`` (cross-repo contract \u00a73.6). ``requested`` names the pair\nthe hub carried; ``reason`` is the machine-side verdict (see\n``local_operator.model.suggestion``)."
+      },
+      "ModelSuggestionRequested": {
+        "properties": {
+          "hosting": {
+            "type": "string",
+            "title": "Hosting",
+            "description": "The suggested provider id.",
+            "default": ""
+          },
+          "model": {
+            "type": "string",
+            "title": "Model",
+            "description": "The suggested model id.",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "ModelSuggestionRequested",
+        "description": "The ``{hosting, model}`` pair a hub model suggestion asked for.\n\nEchoed inside :class:`ModelSuggestionNotice` so a caller can render what\nwas declined without re-deriving it from the listing."
+      },
+      "MonitorCreate": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Session Id"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "tool": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool"
+          },
+          "arguments": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Arguments"
+          },
+          "every": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Every"
+          },
+          "until": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Until"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "notify": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notify"
+          },
+          "sort_lines": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sort Lines"
+          },
+          "ignore": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ignore"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "session_id"
+        ],
+        "title": "MonitorCreate",
+        "description": "``POST /v1/desktop/monitors``.\n\nONE shape, deliberately: the wake create's ``cwd``+``target`` variant\nexists because a wake must have a conversation to fire in. A monitor never\nengages a cold session (\u00a710.4), so arming one against a conversation that\ndoes not exist yet would mint a phantom row that cannot tick until a person\nopens it \u2014 a session the user did not ask for. Arm-an-existing only; a\ncreate shape can grow later if a UI needs one, under its own review.\n\nThe create fields are deliberately not bounded to the harness's own caps\n(``build_monitor_spec`` produces the sentences that own those numbers \u2014 a\nsecond bound here would answer the same mistake with pydantic's wording).\nThe generous ceilings are only there so a body cannot be arbitrarily large."
+      },
+      "MonitorEntry": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "cwd": {
+            "type": "string",
+            "title": "Cwd",
+            "default": ""
+          },
+          "origin": {
+            "type": "string",
+            "title": "Origin",
+            "default": ""
+          },
+          "updated_at": {
+            "type": "integer",
+            "title": "Updated At",
+            "default": 0
+          },
+          "dormant": {
+            "type": "boolean",
+            "title": "Dormant",
+            "default": false
+          },
+          "ghost": {
+            "type": "boolean",
+            "title": "Ghost",
+            "default": false
+          },
+          "next_due_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Due At"
+          },
+          "monitors": {
+            "items": {
+              "$ref": "#/components/schemas/MonitorRow"
+            },
+            "type": "array",
+            "title": "Monitors"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "session_id",
+          "name"
+        ],
+        "title": "MonitorEntry",
+        "description": "One monitor-carrying conversation, with its watches beneath it.\n\nOne entry per SESSION rather than per monitor: the object a user opens,\nthe one a cancel targets, and the one the desktop just armed against."
+      },
+      "MonitorListing": {
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/MonitorEntry"
+            },
+            "type": "array",
+            "title": "Entries"
+          },
+          "generated_at": {
+            "type": "integer",
+            "title": "Generated At",
+            "default": 0
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total",
+            "default": 0
+          },
+          "truncated": {
+            "type": "boolean",
+            "title": "Truncated",
+            "default": false
+          },
+          "read_error": {
+            "type": "boolean",
+            "title": "Read Error",
+            "default": false
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "MonitorListing",
+        "description": "``monitors.list``'s payload: every monitor-carrying session on this machine."
+      },
+      "MonitorRow": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "default": ""
+          },
+          "tool": {
+            "type": "string",
+            "title": "Tool",
+            "default": ""
+          },
+          "arguments": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Arguments"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description",
+            "default": ""
+          },
+          "every_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Every Ms"
+          },
+          "until_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Until At"
+          },
+          "notify": {
+            "type": "boolean",
+            "title": "Notify",
+            "default": false
+          },
+          "sort_lines": {
+            "type": "boolean",
+            "title": "Sort Lines",
+            "default": false
+          },
+          "ignore": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Ignore"
+          },
+          "cwd": {
+            "type": "string",
+            "title": "Cwd",
+            "default": ""
+          },
+          "created_at": {
+            "type": "integer",
+            "title": "Created At",
+            "default": 0
+          },
+          "next_due_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Due At"
+          },
+          "last_check_at": {
+            "type": "integer",
+            "title": "Last Check At",
+            "default": 0
+          },
+          "checks": {
+            "type": "integer",
+            "title": "Checks",
+            "default": 0
+          },
+          "deliveries": {
+            "type": "integer",
+            "title": "Deliveries",
+            "default": 0
+          },
+          "consecutive_failures": {
+            "type": "integer",
+            "title": "Consecutive Failures",
+            "default": 0
+          },
+          "disabled": {
+            "type": "boolean",
+            "title": "Disabled",
+            "default": false
+          },
+          "disabled_reason": {
+            "type": "string",
+            "title": "Disabled Reason",
+            "default": ""
+          },
+          "due_in_s": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Due In S"
+          },
+          "last_check_age_s": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Check Age S"
+          },
+          "state": {
+            "type": "string",
+            "title": "State",
+            "default": "armed"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "title": "MonitorRow",
+        "description": "One standing watch, as the index stores it plus the derived clock fields."
+      },
+      "MonitorState": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "tool": {
+            "type": "string",
+            "title": "Tool",
+            "default": ""
+          },
+          "every_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Every Ms"
+          },
+          "until_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Until At"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description",
+            "default": ""
+          },
+          "next_due_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Due At"
+          },
+          "last_check_at": {
+            "type": "integer",
+            "title": "Last Check At",
+            "default": 0
+          },
+          "checks": {
+            "type": "integer",
+            "title": "Checks",
+            "default": 0
+          },
+          "deliveries": {
+            "type": "integer",
+            "title": "Deliveries",
+            "default": 0
+          },
+          "consecutive_failures": {
+            "type": "integer",
+            "title": "Consecutive Failures",
+            "default": 0
+          },
+          "disabled": {
+            "type": "boolean",
+            "title": "Disabled",
+            "default": false
+          },
+          "disabled_reason": {
+            "type": "string",
+            "title": "Disabled Reason",
+            "default": ""
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "title": "MonitorState",
+        "description": "One armed monitor as the wire carries it (design \u00a712, \u201cSession\nfrontend state\u201d): the spec's identity plus the row's health counters, the\nsame field set the derived index row carries (\u00a710.2).\n\n``extra=\"allow\"`` matches :class:`WakeState`: a viewer that predates a\nfield still parses a newer row, and a consumer that knows the whole spec\n(``arguments``, ``ignore``, \u2026) reads it from the same payload without a\nsecond model."
+      },
+      "MonitorWriteReceipt": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "monitor_id": {
+            "type": "string",
+            "title": "Monitor Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "default": ""
+          },
+          "next_due_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Due At"
+          },
+          "remaining": {
+            "type": "integer",
+            "title": "Remaining",
+            "default": 0
+          },
+          "already_armed": {
+            "type": "boolean",
+            "title": "Already Armed",
+            "default": false
+          },
+          "reactivated": {
+            "type": "boolean",
+            "title": "Reactivated",
+            "default": false
+          },
+          "receipt": {
+            "type": "string",
+            "title": "Receipt",
+            "default": "applied"
+          },
+          "index_written": {
+            "type": "boolean",
+            "title": "Index Written",
+            "default": false
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "session_id",
+          "monitor_id"
+        ],
+        "title": "MonitorWriteReceipt",
+        "description": "The outcome of arming or cancelling one monitor.\n\nShared by both writes because the facts a client needs are the same:\nwhich row changed, when it is next due (null after a cancel), how many\nremain, and whether the derived index agrees. ``already_armed`` and\n``reactivated`` are only meaningful on an arm; on a cancel they are false\nrather than absent, so a client reads one shape.\n\nThere is no ``replayed`` state to report, unlike the wake receipt: monitor\nwrites carry no request journal because they do not need one \u2014 a retried\narm is answered by the dedupe identity (``already_armed``) and a retried\ncancel by an honest ``no monitor with id`` refusal about a watch that is\nalready gone, so neither can make a second durable thing."
       },
       "MoveReceipt": {
         "properties": {
@@ -16853,6 +18178,21 @@
               }
             ],
             "title": "Delegate"
+          },
+          "action_class": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "reactive",
+                  "proactive"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Action Class"
           }
         },
         "additionalProperties": false,
@@ -16946,6 +18286,21 @@
               }
             ],
             "title": "Delegate"
+          },
+          "action_class": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "reactive",
+                  "proactive"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Action Class"
           }
         },
         "additionalProperties": false,
@@ -17260,6 +18615,14 @@
             "type": "array",
             "maxItems": 8,
             "title": "Images"
+          },
+          "audio": {
+            "items": {
+              "$ref": "#/components/schemas/Audio"
+            },
+            "type": "array",
+            "maxItems": 1,
+            "title": "Audio"
           },
           "mode": {
             "type": "string",
@@ -17670,6 +19033,29 @@
           "data"
         ],
         "title": "Result"
+      },
+      "RungAvailability": {
+        "properties": {
+          "path": {
+            "$ref": "#/components/schemas/AudioPath"
+          },
+          "available": {
+            "type": "boolean",
+            "title": "Available"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "path",
+          "available",
+          "reason"
+        ],
+        "title": "RungAvailability",
+        "description": "One rung's availability, with the reason a user would be shown.\n\nAvailability answers \"is there a credential/model for this rung\", NOT \"will\nthe call succeed\" \u2014 see :func:`local_operator.stt.cascade.resolve_audio_path`."
       },
       "RuntimeEntry": {
         "properties": {
@@ -18948,6 +20334,11 @@
               }
             ],
             "title": "Gated By"
+          },
+          "hotkey_scope": {
+            "type": "string",
+            "title": "Hotkey Scope",
+            "default": ""
           }
         },
         "type": "object",
@@ -19129,6 +20520,19 @@
             "title": "Provider",
             "description": "The provider to use for generation. Default: \"openai\".",
             "default": "openai"
+          },
+          "language_code": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-z]{2}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Language Code",
+            "description": "Optional ISO 639-1 language code (e.g. \"es\") for the speech synthesis. Omitted when unset so the provider can auto-detect."
           }
         },
         "type": "object",
@@ -19138,7 +20542,7 @@
           "voice"
         ],
         "title": "SpeechRequest",
-        "description": "Request body for speech generation endpoint.\n\nAttributes:\n    input: The text to generate speech from.\n    instructions: Additional prompt with instructions for the speech generation.\n    model: The model to use for generation.\n    voice: The voice to use for generation.\n    response_format: The format of the audio response. Default: \"mp3\".\n    speed: The speed of the speech. Default: 1.0.\n    provider: The provider to use for generation. Default: \"openai\"."
+        "description": "Request body for speech generation endpoint.\n\nAttributes:\n    input: The text to generate speech from.\n    instructions: Additional prompt with instructions for the speech generation.\n    model: The model to use for generation.\n    voice: The voice to use for generation.\n    response_format: The format of the audio response. Default: \"mp3\".\n    speed: The speed of the speech. Default: 1.0.\n    provider: The provider to use for generation. Default: \"openai\".\n    language_code: Optional ISO 639-1 language code for the synthesis."
       },
       "Stop": {
         "properties": {
@@ -19170,6 +20574,60 @@
           "confirmed"
         ],
         "title": "Stop"
+      },
+      "SttAttemptPayload": {
+        "properties": {
+          "path": {
+            "$ref": "#/components/schemas/AudioPath"
+          },
+          "outcome": {
+            "type": "string",
+            "title": "Outcome"
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "path",
+          "outcome"
+        ],
+        "title": "SttAttemptPayload",
+        "description": "One rung's attempt, as the wire reports it."
+      },
+      "SttTranscriptionPayload": {
+        "properties": {
+          "text": {
+            "type": "string",
+            "title": "Text"
+          },
+          "path": {
+            "$ref": "#/components/schemas/AudioPath"
+          },
+          "attempts": {
+            "items": {
+              "$ref": "#/components/schemas/SttAttemptPayload"
+            },
+            "type": "array",
+            "title": "Attempts"
+          },
+          "duration_s": {
+            "type": "number",
+            "title": "Duration S"
+          }
+        },
+        "type": "object",
+        "required": [
+          "text",
+          "path",
+          "attempts",
+          "duration_s"
+        ],
+        "title": "SttTranscriptionPayload",
+        "description": "The 200 body: the text, the rung that produced it, and the walk."
       },
       "SupervisorInfo": {
         "properties": {

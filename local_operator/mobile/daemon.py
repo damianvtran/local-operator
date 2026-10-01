@@ -57,9 +57,11 @@ from local_operator.harness.approval import (
 )
 from local_operator.mobile import projects as mobile_projects
 from local_operator.mobile import push_devices as mobile_push_devices
+from local_operator.mobile import push_handles
 from local_operator.mobile.auth import (
     COOKIE_NAME,
     check_password,
+    cookie_expiry,
     sign_cookie,
     verify_cookie,
 )
@@ -852,7 +854,7 @@ class SessionTable:
             # published by the caller in ONE assignment (review round 1,
             # MINOR-1): a caller that resumes late must never publish build A's
             # rows beside build B's aggregate.
-            return out, self._unread_aggregate(out, revision)
+            return out, await self._unread_aggregate(out, revision)
 
         task = self._summaries_task
         if task is None or task.done():
@@ -877,7 +879,7 @@ class SessionTable:
         self._summaries_at = time.monotonic()
         return out
 
-    def _unread_aggregate(
+    async def _unread_aggregate(
         self,
         rows: list[dict[str, Any]],
         revision: tuple[int, int, int] | None,
@@ -918,6 +920,12 @@ class SessionTable:
         absent for the same reason -- this shape claims nothing it could not
         read, and every client's remedy for "unknown" is the one §1.4 states:
         do not touch the badge.
+
+        Each included row also carries push/ack-sync S2's ``push_handle``
+        (ADR §4), minted in ONE batched key read per build -- the one I/O
+        this method does, which is why it is async. See
+        :mod:`local_operator.mobile.push_handles` for the mint, the key
+        refusal, and the documented rotation.
         """
         verdict = list(self.listing_degraded())
         if verdict or revision is None:
@@ -947,6 +955,38 @@ class SessionTable:
                     "revision": list(state.get("revision") or (0, 0)),
                 }
             )
+        if conversations:
+            # Push/ack-sync S2 [ADR 0006 §4 @22e2cce2]: each served row carries
+            # its conversation handle, minted in ONE key read for the whole
+            # build, off the loop (the first build CREATES the key file). The
+            # mint is deterministic and the key persists under the
+            # config root, so a later completion -- or a daemon restart --
+            # serves the SAME handle for the same conversation; nothing here
+            # remints (push_handles states the refusal and the documented
+            # rotation). The failure stays additive like the field itself: a
+            # key this build cannot use leaves the rows without handles rather
+            # than failing S1's read.
+            from local_operator.paths import config_dir
+
+            try:
+                handles = await asyncio.to_thread(
+                    push_handles.conversation_handles,
+                    config_dir(),
+                    [conversation["session_id"] for conversation in conversations],
+                )
+            except (push_handles.PushHandleKeyCorrupt, OSError) as exc:
+                # One bounded line, no ``exc_info`` (the log hygiene the
+                # device registry states at `_push_call`): a phone polling
+                # the badge must not write a traceback per attempt while the
+                # key stands unreadable -- the sentence IS the diagnosis.
+                logger.warning(
+                    "push handles unavailable at %s: %s",
+                    push_handles.key_path(config_dir()),
+                    exc,
+                )
+            else:
+                for conversation, handle in zip(conversations, handles, strict=True):
+                    conversation["push_handle"] = handle
         return {
             "count": len(conversations),
             "revision": list(revision),
@@ -3805,6 +3845,45 @@ def build_app(daemon: MobileDaemon):
         await daemon.table.summaries()
         return JSONResponse(daemon.table.unread_snapshot())
 
+    async def api_push_conversation(request: Request) -> Response:
+        """Resolve a push deep-link handle to its conversation.
+
+        Push/ack-sync S2 [ADR 0006 §3.1/§4 @22e2cce2]: a push carries only the
+        opaque handle, so the cold tap -- the conversation is not in the unread
+        set any more, or never was on this client -- lands through here. The
+        handle is deliberately NOT checked against the unread aggregate:
+        resolving an already-acknowledged conversation is the whole point.
+
+        A handle this machine cannot mint for a conversation it still offers
+        -- unknown, stale after a key rotation, or naming a conversation that
+        no longer exists -- is a clean 404 (never a 500), shaped like the
+        other ``unknown session`` refusals. The gate is the SAME one predicate
+        the listing and the aggregate already share
+        (``_live_generation_is_user_facing`` -> ``is_user_session_origin``),
+        deliberately NOT the transcript-detail check: a mail-spool
+        conversation with no transcript yet IS a row the aggregate mints a
+        handle for, and a second, stricter predicate here would 404 it [S1
+        remediation, review round 1 MAJOR-1]. Auth-gated exactly like
+        ``/api/sessions``.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.paths import config_dir
+
+        handle = str(request.path_params["handle"])
+
+        def resolve() -> str | None:
+            session_id = push_handles.resolve_conversation(config_dir(), handle)
+            if session_id is None or not _live_generation_is_user_facing(session_id):
+                return None
+            return session_id
+
+        session_id = await asyncio.to_thread(resolve)
+        if session_id is None:
+            return JSONResponse({"error": "unknown conversation handle"}, status_code=404)
+        return JSONResponse({"session_id": session_id})
+
     async def api_session_events(request: Request) -> Response:
         """SSE repaint stream for one session — the phone's only realtime
         channel. Opens with the current projection so a reconnecting phone
@@ -4972,16 +5051,26 @@ def build_app(daemon: MobileDaemon):
 
     # -- push device registry (push/ack-sync S4, ADR 0006 §3.1) -----------------
 
-    async def _push_call(fn: Callable[..., dict[str, Any]], *args: Any) -> Response:
+    async def _push_call(fn: Callable[..., dict[str, Any]], *args: Any, **kwargs: Any) -> Response:
         """Run one registry call off-loop; a refusal answers its JSON body.
 
-        ``mobile_push_devices``' refusals are typed: a register payload this
-        build cannot accept is the 422 the sibling routes answer, and a store
-        that cannot be read or written is an internal fault (500) whose
-        sentence names it — never a silent empty registry.
+        ``mobile_push_devices``' refusals are typed, and the ORDER below is the
+        contract: a state refusal (revoked/unpaired/absent) carries its own
+        status and a machine-readable ``code``, the plain payload refusal is the
+        422 the sibling routes answer, and a store that cannot be read or written
+        is an internal fault (500) whose sentence names it — never a silent empty
+        registry.
+
+        ``**kwargs`` exists for the credential facts a route reads off the request
+        rather than out of the body (``register``'s ``credential_expires_at``):
+        they are per-call evidence, so they cannot live in the stored body shape.
         """
         try:
-            payload = await asyncio.to_thread(fn, *args)
+            payload = await asyncio.to_thread(fn, *args, **kwargs)
+        except mobile_push_devices.PushDeviceStateRefusal as exc:
+            return JSONResponse(
+                {"code": exc.code, "error": exc.message}, status_code=exc.status_code
+            )
         except mobile_push_devices.PushDeviceRefusal as exc:
             return JSONResponse({"error": exc.message}, status_code=422)
         except (mobile_push_devices.PushRegistryCorrupt, OSError) as exc:
@@ -4992,9 +5081,130 @@ def build_app(daemon: MobileDaemon):
             # the diagnosis, and a retrying phone must not add a traceback per
             # attempt.
             store = mobile_push_devices.store_path(args[0]) if args else "unknown store"
-            logger.warning("push device registry refused an operation at %s: %s", store, exc)
-            return JSONResponse({"error": str(exc)[:300]}, status_code=500)
+            return _push_fault(store, exc)
         return JSONResponse(payload)
+
+    def _push_fault(store: Path | str, exc: Exception) -> Response:
+        """The one 500 every unreadable-store refusal answers, and the one log line.
+
+        Shared because two paths reach it: a registry call (``_push_call``) and
+        the operators-only gate (``_push_operator_gate``), which reads the same
+        store to check the key.
+        """
+        logger.warning("push device registry refused an operation at %s: %s", store, exc)
+        return JSONResponse({"error": str(exc)[:300]}, status_code=500)
+
+    async def _push_operator_gate(request: Request, config_dir: Path) -> Response | None:
+        """None = this caller is the machine's own operator surface.
+
+        THE ONLY PLACE THE OPERATOR DISTINCTION IS MADE, and the reason is the
+        way a phone's request can reach this daemon at all (ADR 0006 §4 round 4
+        B1). The daemon is loopback-only, so a device cannot address it directly:
+        every device request arrives through the tunnel gateway, which REBUILDS
+        the request headers from a fixed allowlist of presentation headers
+        (``local_operator/tunnels/gateway.py``), so a header of our choosing
+        cannot survive that hop — and a device that somehow managed to send one
+        still would not have the value, because the key is minted on this machine
+        and is never given to a device.
+
+        Neither half is trusted alone: the transport property is what makes the
+        header unforgeable from outside, and the key is what keeps the route
+        honest if a future gateway ever forwards more than it does today. The
+        limit this does NOT close is stated in ``push_devices``' module docstring:
+        another process on THIS machine can read the key. It could also rewrite
+        the store file, so the key is not a boundary against it, and the direction
+        that matters — a device restoring its own revoked state — is closed.
+        """
+        try:
+            allowed = await asyncio.to_thread(
+                mobile_push_devices.verify_operator_key,
+                config_dir,
+                request.headers.get(mobile_push_devices.OPERATOR_KEY_HEADER),
+            )
+        except (mobile_push_devices.PushRegistryCorrupt, OSError) as exc:
+            # NOT the machine_only refusal: a store this process cannot read is a
+            # fault, and "a device cannot restore itself" would be a false
+            # sentence for it.
+            return _push_fault(mobile_push_devices.store_path(config_dir), exc)
+        if allowed:
+            return None
+        return JSONResponse(
+            {
+                "code": mobile_push_devices.MACHINE_ONLY_CODE,
+                "error": mobile_push_devices.MACHINE_ONLY_MESSAGE,
+            },
+            status_code=403,
+        )
+
+    def presented_cookie_expiry(request: Request) -> int | None:
+        """The expiry the request's own cookie carries, or ``None`` when it has none.
+
+        ``None`` covers three cases that a caller must not distinguish between: no
+        cookie at all, a daemon with no password configured (nothing can verify a
+        cookie then), and a cookie that does not verify. None of them is evidence
+        of a lapse, and none of them may be read as one.
+        """
+        if not daemon.password:
+            return None
+        return cookie_expiry(request.cookies.get(COOKIE_NAME), daemon.password)
+
+    async def _note_device_credential(request: Request, config: Path) -> dict[str, Any] | None:
+        """Apply ONE authenticated request's credential evidence to ITS device.
+
+        ADR §4 rule 2's evaluation, and the relay is where it lives because the
+        relay is the only component that sees the ``lop_mobile`` cookie. The two
+        headers are the proof and the claim (``X-Lop-Device`` names the
+        ``install_id``; ``X-Lop-Device-Key`` carries the key minted for that device
+        at registration), and ``push_devices.note_credential`` is the rule.
+
+        WHY THE EARLY RETURN IS LOAD-BEARING, and the reason this is not simply a
+        call: a request WITHOUT the key moves no device's state, so this returns
+        before reading the cookie or the store at all. The registry is a file on
+        the request path of the three push routes, and a key-less caller (the desktop
+        app, the CLI, a paired harness — all of which hold the computer's cookie
+        and none of which is a device) must not pay a disk read for evidence it
+        cannot supply. It is also what makes the discrimination testable at all:
+        the key-less branch has no write to reach.
+
+        Blocking file IO goes through ``asyncio.to_thread`` for the same reason
+        ``_push_call`` does: this daemon serves a 2 s SSE repaint loop, and a
+        registry write on the event loop is a stall every streamed session feels.
+
+        Returns what moved, or ``None`` — the return is not used by the routes
+        (a credential evaluation never fails a request: a device whose report
+        cannot be recorded still gets its sessions), it exists so the caller and
+        the loopback drive can tell an evaluation apart from a no-op.
+        """
+        install_id = request.headers.get(mobile_push_devices.DEVICE_HEADER)
+        device_key = request.headers.get(mobile_push_devices.DEVICE_KEY_HEADER)
+        if not install_id or not device_key:
+            return None
+        presented = presented_cookie_expiry(request)
+        if presented is None:
+            # Nothing a request can present: it is authenticated off something
+            # other than a cookie (a test client with a stubbed gate), and an
+            # absent presented expiry is not evidence of a lapse.
+            return None
+        try:
+            return await asyncio.to_thread(
+                mobile_push_devices.note_credential,
+                config,
+                install_id=install_id,
+                device_key=device_key,
+                credential_expires_at=presented,
+            )
+        except (mobile_push_devices.PushRegistryCorrupt, OSError) as exc:
+            # Logged and swallowed, deliberately, and it is NOT the refusal path:
+            # delivery state is a side effect of a request that is otherwise
+            # entitled to succeed, so a store this process cannot read must not
+            # cost a phone its session list. The lapse keeps standing in the store
+            # until the next request that can write it.
+            logger.warning(
+                "push credential not recorded at %s: %s",
+                mobile_push_devices.store_path(config),
+                exc,
+            )
+            return None
 
     async def api_push_register(request: Request) -> Response:
         """Record this phone's registration; idempotent on (install_id, platform).
@@ -5003,7 +5213,29 @@ def build_app(daemon: MobileDaemon):
         validated and deliberately dropped: the machine stores no push token
         (§4 — the cloud's registry is where tokens live), and the forward step
         that would hand it to the cloud is future work (S7); the store module
-        carries the full citation.
+        carries the full citation. The response also mints and returns this
+        device's ``device_key``, once per call — see ``push_devices.register``.
+
+        TWO WRITES, IN THIS ORDER, and the order is the design:
+
+        1. ``_note_device_credential`` — the credential evidence, evaluated
+           BEFORE the registration overwrites the key. A re-registering app
+           presents the key it still holds, which is the one on the row at this
+           moment; evaluating afterwards would compare the NEW key against an
+           OLD header and silently move nothing.
+        2. ``register``, with the expiry the request PRESENTED (ADR §4 rule 2,
+           round 7 Q-F15 / R8-m1: the registering row is the device that held the
+           cookie, and ``/login`` knows no device). Register is also the act that
+           clears a lapse, so a row that step 1 marked ``expired`` does not stay
+           marked: the marker goes, and what is left is the honest answer about
+           the expiry that was presented — which is NOT automatically "live"
+           (review round 1, AR-6, against an earlier sentence here that claimed
+           it was). A cookie accepted inside ``auth._SKEW_S`` is already past its
+           own expiry, so register stores that past instant and
+           ``credential_live_at`` answers not-live for it. That is the correct
+           reading rather than a wart: the phone's credential really is dead, it
+           simply has not noticed, and the next register after a fresh login
+           writes a live expiry.
         """
         denied = gate(request)
         if denied is not None:
@@ -5014,7 +5246,14 @@ def build_app(daemon: MobileDaemon):
             body = None
         from local_operator.paths import config_dir
 
-        return await _push_call(mobile_push_devices.register, config_dir(), body)
+        config = config_dir()
+        await _note_device_credential(request, config)
+        return await _push_call(
+            mobile_push_devices.register,
+            config,
+            body,
+            credential_expires_at=presented_cookie_expiry(request),
+        )
 
     async def api_push_devices(request: Request) -> Response:
         """The devices registered for this computer — what Settings renders."""
@@ -5023,25 +5262,64 @@ def build_app(daemon: MobileDaemon):
             return denied
         from local_operator.paths import config_dir
 
-        return await _push_call(mobile_push_devices.list_devices, config_dir())
+        config = config_dir()
+        await _note_device_credential(request, config)
+        return await _push_call(mobile_push_devices.list_devices, config)
 
     async def api_push_device_delete(request: Request) -> Response:
-        """Deregister one device by id — any device in this registry, not just ours.
+        """REVOKE one device by id — any device in this registry, not just ours.
 
-        There is no per-device caller identity to scope by (the cookie is the
-        operator's, one for the whole computer), and the stolen-phone case
-        (ADR §4) needs one device able to revoke another. An id the registry
-        does not hold stays ``{"ok": true}``: the app retries this on sign-out,
-        and a retry after a successful delete must not read as a failure.
+        A tombstone, not a removal (``push_devices.revoke`` carries the ADR §4
+        citation): the row stays with ``revoked_at`` so the register route can
+        refuse it, which is what makes the revoke stick for the same
+        ``install_id``. There is no per-device caller identity to scope by (the
+        cookie is the operator's, one for the whole computer), and the
+        stolen-phone case (ADR §4) needs one device able to revoke another. An id
+        the registry does not hold stays ``{"ok": true}``: the app retries this on
+        sign-out, and a retry after a successful revoke must not read as a
+        failure.
         """
         denied = gate(request)
         if denied is not None:
             return denied
         from local_operator.paths import config_dir
 
+        config = config_dir()
+        await _note_device_credential(request, config)
         return await _push_call(
-            mobile_push_devices.deregister,
-            config_dir(),
+            mobile_push_devices.revoke,
+            config,
+            str(request.path_params["device_id"]),
+        )
+
+    async def api_push_device_unrevoke(request: Request) -> Response:
+        """Clear a revoke or unpair marker — THE MACHINE'S OPERATOR ONLY (ADR §4).
+
+        THE WAY BACK IS NOT A DEVICE OPERATION (round 4 B1). A phone's requests
+        travel through the machine's relay, so a revoked phone holding a live
+        cookie could otherwise clear its own tombstone and be Live again without
+        the password — the ADR's own named worst failure, undone by the device it
+        exists to refuse. ``_push_operator_gate`` is what makes this route the
+        machine's; a device session gets the refusal the app renders.
+
+        Clears EVERY marker the row carries — ``revoked_at`` and/or
+        ``unpaired_at``, different states with different refusals — and restores
+        no token: the device must register again, which needs a live credential.
+        ``push_devices.unrevoke`` carries the full reasoning, including why the
+        operator's result line names only the strongest marker it cleared.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.paths import config_dir
+
+        config = config_dir()
+        machine_only = await _push_operator_gate(request, config)
+        if machine_only is not None:
+            return machine_only
+        return await _push_call(
+            mobile_push_devices.unrevoke,
+            config,
             str(request.path_params["device_id"]),
         )
 
@@ -5055,6 +5333,10 @@ def build_app(daemon: MobileDaemon):
         # carries as its top-level ``unread`` block, served on its own so a
         # client can refresh the number without pulling the rows.
         Route("/api/attention/unread", api_attention_unread),
+        # The handle resolver (push/ack-sync S2): a push deep link carries only
+        # the opaque handle, so the cold-tap case -- the conversation is no
+        # longer unread -- needs one route to name its session again.
+        Route("/api/push/conversation/{handle:str}", api_push_conversation),
         Route("/api/sessions/start", api_start_session, methods=["POST"]),
         Route("/api/sessions/events", api_list_events),
         Route("/api/directories", api_directories),
@@ -5103,6 +5385,11 @@ def build_app(daemon: MobileDaemon):
         Route("/api/push/register", api_push_register, methods=["POST"]),
         Route("/api/push/devices", api_push_devices),
         Route("/api/push/devices/{device_id:str}", api_push_device_delete, methods=["DELETE"]),
+        Route(
+            "/api/push/devices/{device_id:str}/unrevoke",
+            api_push_device_unrevoke,
+            methods=["POST"],
+        ),
         Route("/mark.png", mark_png),
         Route("/", index),
     ]

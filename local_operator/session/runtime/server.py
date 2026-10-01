@@ -102,6 +102,7 @@ from local_operator.session.runtime.types import (
     HEARTBEAT_INTERVAL_S,
     INPUT_MODE_CAPABILITY,
     OPERATOR_SIGNATURE_CAPABILITY,
+    PEER_MESSAGE_ID_CAPABILITY,
     RUNTIME_RECORD_KIND,
     ClientKind,
     ClientLocality,
@@ -1203,6 +1204,59 @@ def _takes_input_mode(handle: Any) -> bool:
     return True
 
 
+def receives_message_id(target: Any) -> bool:
+    """Whether ``target``'s ``receive_peer_message`` takes a ``message_id``.
+
+    ONE helper for every site that must agree on this question, which is more
+    than one object: the dispatch asks it of the HANDLE (it only passes the
+    keyword when the literal parameter is present) and the record's capability
+    advertisement asks it of the same handle (it claims the receiver can name
+    its row with that id and dedupe a re-send), while BOTH hosts ask it of the
+    SESSION OBJECT their handle wraps before handing the keyword on. That last
+    site is why the name no longer says ``handle``: the handle's signature is
+    what the wire sees, and a handle can outlive a session object that predates
+    the carriage (a reduced double, a session built by an older build), where
+    passing the keyword blind raised a ``TypeError`` INSIDE the hop callback —
+    which surfaced as an empty card list rather than as an error (QA round 1,
+    Q2). It takes the OBJECT, not the bound method, so every caller spells the
+    same question. A ``**kwargs``-only method answers no here for
+    ``_takes_input_mode``'s reason -- VAR_KEYWORD would silently swallow the
+    id, and a sender that believed the capability would duplicate its retry.
+
+    A target with no ``receive_peer_message`` at all answers no; the dispatch
+    refuses that session with its own sentence before this matters.
+    """
+    method = getattr(target, "receive_peer_message", None)
+    if method is None:
+        return False
+    try:
+        parameters = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return False
+    return "message_id" in parameters
+
+
+def _ack_frame_parts(outcome: Any) -> tuple[str, dict[str, Any]]:
+    """The ``(detail, extra)`` an op's answer contributes to its ack frame.
+
+    ``AckDetail`` is the wrapper for state the caller must verify; a bare
+    ``str`` means "no extra state". The third shape is the one worth naming: the
+    session's own ``PeerReceiveDetail`` is ALREADY a ``str`` subclass carrying
+    ``.delivery``, so a handle that returns it instead of wrapping it in
+    ``AckDetail`` looks correct at every call site and used to lose the carriage
+    SILENTLY -- the frame went out without ``delivery`` and the sender then
+    classified a duplicate as an ordinary delivery (measured in QA round 1,
+    observation 2). The wrong thing was one keystroke from the right one, so the
+    frame reads the ATTRIBUTE rather than the type.
+    """
+    if isinstance(outcome, AckDetail):
+        return outcome.detail, {"attention": outcome.attention, **outcome.fields}
+    delivery = getattr(outcome, "delivery", None)
+    if isinstance(delivery, dict):
+        return str(outcome), {"delivery": delivery}
+    return outcome, {}
+
+
 @dataclass(frozen=True)
 class _ConnectionAuthority:
     """The two connection FACTS a dispatch may need, without the connection.
@@ -1282,6 +1336,20 @@ class AckDetail:
 
     detail: str
     attention: dict[str, Any]
+    #: Extra keys merged into the ack FRAME beside ``detail`` (design note A.2).
+    #:
+    #: ``attention`` is the receipt op's one state today; this is the general slot
+    #: for the next caller that has to verify something the ack itself must
+    #: report. It is ADDITIVE and defaulted, so every existing ``AckDetail``
+    #: construction and every handle that returns a bare ``str`` keeps working
+    #: byte-identically -- the peer-message rail is the first user, carrying
+    #: ``{"delivery": {...}}`` for the sender's outcome classification.
+    #:
+    #: A handle from before this field answers with a plain string, which the
+    #: dispatch treats as "no extra state" rather than as a failure: the sender's
+    #: contract with such a receiver is unchanged (it commits the row before it
+    #: acks), so an absent ``delivery`` object still proves delivery.
+    fields: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -1909,6 +1977,12 @@ class RuntimeServer:
                 # asks both methods — see ``_takes_input_mode``, which mirrors
                 # the dispatch's own check exactly.
                 + ([INPUT_MODE_CAPABILITY] if _takes_input_mode(handle) else [])
+                # SENDER-MINTED MESSAGE IDENTITY, on the same fail-closed
+                # argument as the carriage above: the string is the sender's
+                # licence to RETRY a send, and a receiver that would silently
+                # drop the id cannot dedupe that retry -- so an owner that does
+                # not take the keyword must not advertise it.
+                + ([PEER_MESSAGE_ID_CAPABILITY] if receives_message_id(handle) else [])
                 # ADVERTISED UNCONDITIONALLY (revision 2, §2.3). The runtime can
                 # always VERIFY an operator or device signature: the anchor is a
                 # file it reads, and the public half is all verification needs.
@@ -5883,12 +5957,10 @@ class RuntimeServer:
                     # (``AckDetail``): the extra fields ride THIS frame rather
                     # than a follow-up push, because the caller of the receipt op
                     # has to verify what that op did and its own projection is
-                    # delivered by a different writer.
-                    detail, extra = (
-                        (outcome.detail, {"attention": outcome.attention})
-                        if isinstance(outcome, AckDetail)
-                        else (outcome, {})
-                    )
+                    # delivered by a different writer. A ``str`` subclass that
+                    # carries the state itself is read the same way rather than
+                    # dropped -- see ``_ack_frame_parts``.
+                    detail, extra = _ack_frame_parts(outcome)
                 ack_frame = {
                     "op": "ack",
                     "req": req,
@@ -6662,13 +6734,21 @@ class RuntimeServer:
             receive = getattr(h, "receive_peer_message", None)
             if not callable(receive):
                 raise ValueError("this session cannot receive peer messages")
-            typed_receive = cast(Callable[..., Awaitable[str]], receive)
-            return await typed_receive(
-                frame["text"],
-                mode=str(frame.get("mode", "mailbox")),
-                wake=bool(frame.get("wake", False)),
-                sender=frame.get("sender") or {},
-            )
+            typed_receive = cast(Callable[..., Awaitable[Any]], receive)
+            fields = {
+                "text": frame["text"],
+                "mode": str(frame.get("mode", "mailbox")),
+                "wake": bool(frame.get("wake", False)),
+                "sender": frame.get("sender") or {},
+            }
+            # SENDER-MINTED MESSAGE IDENTITY, probed exactly like ``command_id``
+            # above: a handle from before the carriage never receives a keyword
+            # it would drop (which would silently lose the receiver's ability to
+            # dedupe a re-send), and a frame from an older sender omits the key
+            # entirely, leaving this op byte-identical.
+            if receives_message_id(h):
+                fields["message_id"] = frame.get("message_id")
+            return await typed_receive(**fields)
         if op == "peer_set_model":
             # Another local session switching THIS one's model (design D1). The
             # same two gates as ``peer_message`` directly above, for the same

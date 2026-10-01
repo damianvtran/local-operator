@@ -314,19 +314,73 @@ def test_progress_writes_stamp_the_reporter_and_a_no_op_writes_nothing(
 def test_an_identical_line_on_a_stale_record_refreshes_instead_of_suppressing(
     store: ProjectRegistry, tmp_path: Path
 ) -> None:
+    """Refresh ≠ update: the identical line re-checks, it does not re-date.
+
+    The content clock is the one the badge reads, so a refresh must NOT move
+    it (the operator's "must not clear it"); the assertion pair is what moves,
+    and the checker is attributed separately from the author because the line's
+    authorship did not change.
+    """
     project = create(store)
     store.update_project(project.id, ProjectEdit(progress="still true"), reporter=SESSION_A)
     path = tmp_path / "projects" / f"{project.id}.json"
     payload = json.loads(path.read_text())
-    payload["progress_updated_at"] = time.time() - PROJECT_PROGRESS_STALE_S - 60
+    old_stamp = time.time() - PROJECT_PROGRESS_STALE_S - 60
+    payload["progress_updated_at"] = old_stamp
     path.write_text(json.dumps(payload))
 
     outcome = store.update_project(
         project.id, ProjectEdit(progress="still true"), reporter=SESSION_B
     )
     assert outcome.changed and outcome.refreshed
-    assert outcome.project.progress == "still true"  # the text is untouched
-    assert outcome.project.progress_reported_by == SESSION_B  # the refresh is attributed
+    refreshed = outcome.project
+    assert refreshed.progress == "still true"  # the text is untouched
+    assert refreshed.progress_updated_at == old_stamp  # and the CONTENT clock is unmoved
+    assert refreshed.progress_reported_by == SESSION_A  # authorship is untouched
+    assert refreshed.progress_refreshed_by == SESSION_B  # the CHECK is attributed
+    assert refreshed.progress_refreshed_at is not None
+
+    # A whitespace-only variant of the stored line is the same line: refresh,
+    # never an append (the dedupe rule is normalized equality).
+    path.write_text(json.dumps({**json.loads(path.read_text()), "progress_updated_at": old_stamp}))
+    again = store.update_project(
+        project.id, ProjectEdit(progress="  still   true\n"), reporter=SESSION_B
+    )
+    assert again.refreshed and again.project.updates == refreshed.updates
+    assert again.project.progress == "still true"  # the stored text is not re-spaced
+
+    # And the next NEW line CLEARS the assertion: it described superseded text.
+    moved = store.update_project(project.id, ProjectEdit(progress="now moved"), reporter=SESSION_A)
+    assert moved.project.progress_refreshed_at is None
+    assert moved.project.progress_refreshed_by == ""
+    assert moved.project.progress_updated_at != old_stamp
+
+
+@pytest.mark.parametrize(
+    ("stored", "resent"),
+    [
+        ("QA 7/7", "QA 0/7"),
+        ("merged as c9326d8", "merged as 0b2dc18"),
+        ("P&S/DC cut done", "P&SD cut done"),
+    ],
+)
+def test_a_near_identical_resend_is_an_update_not_a_refresh(
+    store: ProjectRegistry, stored: str, resent: str
+) -> None:
+    """No similarity heuristic: tiny edits flip meaning (7/7 vs 0/7; one SHA
+    vs another; a typo flip), so anything but exact-normalized equality
+    appends and moves the content clock."""
+    project = create(store, progress=stored)
+    path = store.projects_dir / f"{project.id}.json"
+    payload = json.loads(path.read_text())
+    payload["progress_updated_at"] = time.time() - PROJECT_PROGRESS_STALE_S - 60
+    path.write_text(json.dumps(payload))
+
+    outcome = store.update_project(project.id, ProjectEdit(progress=resent), reporter=SESSION_A)
+    assert outcome.changed and not outcome.refreshed
+    assert outcome.project.progress == resent
+    assert outcome.project.updates[-1].text == resent
+    assert outcome.project.progress_refreshed_at is None
 
 
 def test_clearing_progress_clears_the_freshness_pair(store: ProjectRegistry) -> None:
@@ -1210,3 +1264,222 @@ def test_a_row_with_an_unknown_status_loads_with_a_warning(store, caplog) -> Non
     # the kwargs form is the deliberate type violation this test pins.)
     with pytest.raises(ValueError):
         ProjectEdit.model_validate({"status": "shipped"})
+
+
+# -- schema 2: the role split (P1) -------------------------------------------
+
+# The extra imports for the acceptance block live here (the module's top block
+# predates the split); pytest imports the module once, so the placement is
+# cosmetic.
+from local_operator.projects import (  # noqa: E402
+    SESSIONS_MAX,
+    refreshed_age_text,
+    refreshed_note,
+    stale_projects_fingerprint,
+    stale_projects_for_session,
+)
+
+
+def _age_row(store: ProjectRegistry, project: Project, age_s: float) -> float:
+    """Backdate a row's content clock on disk; returns the stamp written.
+
+    In-place content writes leave the directory mtime alone, and the store's
+    refresh is directory-gated — so a reader that must SEE the backdate (the
+    production shape: a fresh registry, like a new process) goes through
+    :func:`_reloaded` after this call. Writers reload under the store lock and
+    see it without help.
+    """
+    path = store.projects_dir / f"{project.id}.json"
+    payload = json.loads(path.read_text())
+    payload["progress_updated_at"] = time.time() - age_s
+    path.write_text(json.dumps(payload))
+    return float(payload["progress_updated_at"])
+
+
+def _reloaded(store: ProjectRegistry) -> ProjectRegistry:
+    return ProjectRegistry(store.config_dir)
+
+
+def test_coordination_links_are_a_separate_list_with_the_same_caps(store) -> None:
+    # The one representation rule: an id sits in at most one list, because a
+    # reader of `sessions` must never have to filter a filing out by hand.
+    with pytest.raises(ValueError):
+        store.create_project(
+            ProjectEdit(name="dup"), sessions=[SESSION_A], coordination_sessions=[SESSION_A]
+        )
+    # The union is capped by the single-list discipline (moves never grow it).
+    ids = [f"{index:012x}" for index in range(SESSIONS_MAX + 1)]
+    with pytest.raises(ValueError):
+        store.create_project(
+            ProjectEdit(name="over"), sessions=ids[:40], coordination_sessions=ids[40:]
+        )
+    with pytest.raises(ValueError):
+        store.create_project(ProjectEdit(name="bad-id"), coordination_sessions=["not-hex"])
+
+
+def test_link_role_moves_between_lists_and_unlink_targets_either(store) -> None:
+    project = create(store)  # SESSION_A working
+    updated, changed = store.link_session(project.id, SESSION_B, role="coordination")
+    assert changed
+    assert updated.sessions == [SESSION_A] and updated.coordination_sessions == [SESSION_B]
+    # Same role again: a no-op that reports so.
+    _, again = store.link_session(project.id, SESSION_B, role="coordination")
+    assert not again
+    # The other role MOVES the id — the one-op re-kind a wrong migration
+    # demotion is repaired with.
+    moved, changed = store.link_session(project.id, SESSION_B, role="work")
+    assert changed
+    assert moved.sessions == [SESSION_A, SESSION_B] and moved.coordination_sessions == []
+    # Unlink targets the id across EITHER list.
+    cleaned, removed = store.unlink_session(project.id, SESSION_A)
+    assert removed and cleaned.sessions == [SESSION_B]
+    _, removed = store.unlink_session(project.id, SESSION_B)
+    assert removed
+    _, removed = store.unlink_session(project.id, "ffffffffffff")
+    assert not removed
+    # A bad role is refused, never silently treated as work.
+    with pytest.raises(ValueError):
+        store.link_session(project.id, SESSION_A, role="boss")  # type: ignore[arg-type]
+
+
+def test_projects_for_session_is_membership_of_either_list(store) -> None:
+    store.create_project(ProjectEdit(name="filed"), coordination_sessions=[SESSION_B])
+    create(store, name="working")
+    assert [p.name for p in store.projects_for_session(SESSION_B)] == ["filed"]
+    assert [p.name for p in store.projects_for_session(SESSION_A)] == ["working"]
+
+
+def test_the_completion_check_never_fires_through_a_coordination_link(store) -> None:
+    store.create_project(
+        ProjectEdit(name="filed", progress="old"), coordination_sessions=[SESSION_B]
+    )
+    assert stale_projects_for_session(store, SESSION_B) == []
+    create(store, name="worked")  # no progress: stale by construction
+    assert [p.name for p in stale_projects_for_session(store, SESSION_A)] == ["worked"]
+
+
+def test_a_refresh_quiets_the_completion_check_for_one_window(store) -> None:
+    project = create(store, progress="still true")
+    stamp = _age_row(store, project, PROJECT_PROGRESS_STALE_S + 60)
+    store = _reloaded(store)
+    moment = stamp + PROJECT_PROGRESS_STALE_S + 120
+    assert [p.name for p in stale_projects_for_session(store, SESSION_A, now=moment)] == [
+        "payments-migration"
+    ]
+
+    outcome = store.refresh_project(project.id, reporter=SESSION_A)
+    assert outcome.changed and outcome.refreshed
+    refreshed = outcome.project
+    checked_at = refreshed.progress_refreshed_at
+    assert checked_at is not None
+    # Inside the window: quiet. The BADGE, however, still reads stale — two
+    # clocks under one name, the operator's "must not clear it".
+    assert stale_projects_for_session(store, SESSION_A, now=checked_at + 60) == []
+    assert progress_is_stale(refreshed, now=checked_at + 60) is True
+    # Past the window the reminder is back (the record is still content-stale).
+    assert [
+        p.name
+        for p in stale_projects_for_session(
+            store, SESSION_A, now=checked_at + PROJECT_PROGRESS_STALE_S + 60
+        )
+    ] == ["payments-migration"]
+
+
+def test_the_fingerprint_carries_the_assertion_and_moves_on_a_refresh(store) -> None:
+    project = create(store, progress="x")
+    _age_row(store, project, PROJECT_PROGRESS_STALE_S + 60)
+    store = _reloaded(store)
+    row = store.get_project(project.id)
+    before = stale_projects_fingerprint([row])
+    assert before == ((row.id, "active", int(row.progress_updated_at or 0), 0),)
+    outcome = store.refresh_project(project.id, reporter=SESSION_A)
+    after = stale_projects_fingerprint([outcome.project])
+    assert after != before
+    assert after[0][3] == int(outcome.project.progress_refreshed_at or 0)
+
+
+def test_refresh_project_no_ops_without_content_or_on_a_settled_record(store) -> None:
+    project = create(store)  # no progress: nothing to assert about
+    quiet = store.refresh_project(project.id, reporter=SESSION_A)
+    assert not quiet.changed and not quiet.refreshed
+    closed = store.create_project(
+        ProjectEdit(name="closed", status="done", progress="wrapped"), force_done=True
+    )
+    settled = store.refresh_project(closed.id, reporter=SESSION_A)
+    assert not settled.changed  # settled rows are never stale, so never refreshable
+
+
+def test_the_view_tags_roles_and_strips_liveness_from_filings(store, tmp_path) -> None:
+    project = store.create_project(
+        ProjectEdit(name="alpha"), sessions=[SESSION_A], coordination_sessions=[SESSION_B]
+    )
+    view = build_project_view(store.get_project(project.id), config_dir=tmp_path)
+    rows = {row["session_id"]: row for row in view["sessions"]}
+    work_row = rows[SESSION_A]
+    assert work_row["role"] == "work"
+    assert {"runtime", "subagents", "todos"} <= set(work_row)
+    filed = rows[SESSION_B]
+    assert filed["role"] == "coordination"
+    # No liveness fact exists on a filing for a renderer to misread.
+    assert set(filed) == {"session_id", "role", "exists", "title", "created_at", "archived"}
+
+
+def test_a_hand_edited_window_degrades_to_the_default(store, tmp_path) -> None:
+    """The registry enforces bounds at WRITE time; a hand-edited config.yml
+    reaches no validation, so the resolver repeats the shape check and the
+    default is always the honest fallback (ruling §3's one-reader rule)."""
+    config = tmp_path / "config.yml"
+    config.write_text("values:\n  projects:\n    stale_after_hours: 2\n")
+    assert stale_after_s(tmp_path) == 2 * 3600.0
+    for bad in ("-5", "0", "bogus", "true"):
+        config.write_text(f"values:\n  projects:\n    stale_after_hours: {bad}\n")
+        assert stale_after_s(tmp_path) == PROJECT_PROGRESS_STALE_S
+    config.unlink()
+    assert stale_after_s(tmp_path) == PROJECT_PROGRESS_STALE_S
+
+
+def test_the_derivations_honour_the_configured_window(store, tmp_path) -> None:
+    (tmp_path / "config.yml").write_text("values:\n  projects:\n    stale_after_hours: 1\n")
+    project = create(store, progress="now")
+    stamp = _age_row(store, project, 3601)
+    store = _reloaded(store)
+    row = store.get_project(project.id)
+    moment = stamp + 3601
+    # The same row, two verdicts: the shipped window fresh, the configured
+    # window stale — resolved once from the config dir the surface holds.
+    assert not progress_is_stale(row, now=moment, window=PROJECT_PROGRESS_STALE_S)
+    assert progress_is_stale(row, now=moment, window=stale_after_s(tmp_path))
+    assert [p.name for p in stale_projects_for_session(store, SESSION_A, now=moment)] == [
+        "payments-migration"
+    ]
+    view = build_project_view(row, config_dir=tmp_path)
+    assert view["progress_stale"] is True
+
+
+def test_the_refreshed_note_shows_only_while_newer_than_the_content() -> None:
+    now = 1_800_000_000.0
+    updated = now - 5 * 3600
+    checked = now - 2 * 3600
+    row = Project(
+        id="a" * 12,
+        name="alpha",
+        status="active",
+        progress="a line",
+        progress_updated_at=updated,
+        progress_refreshed_at=checked,
+        progress_refreshed_by=SESSION_A,
+    )
+    day = datetime.datetime.fromtimestamp(updated).date().isoformat()
+    assert refreshed_note(row, now=now) == (
+        f"refreshed 2h ago by session {SESSION_A} — no new content since {day}"
+    )
+    assert refreshed_age_text(row, now=now) == "2h"
+    # A superseded assertion (hand-edit) paints nothing, and neither does an
+    # assertion about no content at all.
+    assert (
+        refreshed_note(row.model_copy(update={"progress_refreshed_at": updated - 10}), now=now)
+        is None
+    )
+    assert refreshed_note(row.model_copy(update={"progress_updated_at": None}), now=now) is None
+    bare = row.model_copy(update={"progress_refreshed_by": ""})
+    assert refreshed_note(bare, now=now) == f"refreshed 2h ago — no new content since {day}"

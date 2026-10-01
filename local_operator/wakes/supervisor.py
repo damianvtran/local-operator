@@ -190,7 +190,10 @@ TRIGGER_EVAL_INTERVAL_S = 300.0
 #: minutes.
 MACHINE_MEMORY_INTERVAL_S = 60.0
 
-#: After this pass ends one fragment, how long before it may end another.
+#: After this pass ends one fragment, how long it will not end ANOTHER ONE OF THE
+#: SAME LINEAGE (same root pid, or the same process group / parent as the fragment
+#: it ended — never a session runtime's own pid or group, which every command of
+#: that session shares; see ``machine_memory.lineage_keys``).
 #:
 #: The case this bounds: a fragment that regrows (a supervisor respawn) would be
 #: ended on every pass, and a minute apart the log would read as a war against
@@ -198,6 +201,13 @@ MACHINE_MEMORY_INTERVAL_S = 60.0
 #: cost and well inside the hour-scale harm window; while the cooldown holds, the
 #: pass still warns and still NAMES the fragment it would have ended, so the
 #: operator is never left guessing why nothing happened.
+#:
+#: **IT IS SCOPED, NOT GLOBAL, because the global form let runaways through.** On
+#: 2026-09-30 a kill at 02:39 put the whole seat on cooldown and two DIFFERENT
+#: runaways (52 GB at 02:41, 350 GB at 02:43) were withheld as "a fragment was
+#: ended within the cooldown". A regrowing respawn shares a parent (or a root pid)
+#: with what was just ended; an unrelated runaway does not, and must be killable on
+#: the very next pass — INCLUDING another one under the same session runtime.
 MACHINE_MEMORY_KILL_COOLDOWN_S = 600.0
 
 #: How long a WAKE engage may take before the supervisor gives up on it.
@@ -1232,9 +1242,10 @@ class _MachineMemorySweep:
         #: ``None`` until the first pass, so the first pass is always due: a
         #: supervisor START is the moment the fleet most needs looking at.
         self.next_at: float | None = None
-        #: When this seat last ended a fragment (monotonic seconds), gating
-        #: :data:`MACHINE_MEMORY_KILL_COOLDOWN_S`.
-        self.last_kill_at: float | None = None
+        #: The lineage keys of every fragment this seat ended inside
+        #: :data:`MACHINE_MEMORY_KILL_COOLDOWN_S`, each with the monotonic time it
+        #: was ended. See :meth:`in_cooldown`.
+        self._ended: list[tuple[float, frozenset[tuple[str, int]]]] = []
         #: The last pass's STRUCTURAL key — ``(state, killed pid or None)`` —
         #: so the seat can tell a CHANGE (worth INFO: a warn rung crossed, a
         #: kill, an unmeasurable host appearing) from the same reading again
@@ -1327,14 +1338,28 @@ class _MachineMemorySweep:
         """
         from local_operator.session.runtime.machine_memory import machine_memory_pass
 
-        now = time.monotonic()
-        kill_allowed = (
-            self.last_kill_at is None or (now - self.last_kill_at) >= MACHINE_MEMORY_KILL_COOLDOWN_S
-        )
-        report = machine_memory_pass(self.config_dir, apply=apply, kill_allowed=kill_allowed)
+        report = machine_memory_pass(self.config_dir, apply=apply, in_cooldown=self.in_cooldown)
         if getattr(report, "killed", None) is not None:
-            self.last_kill_at = now
+            self._ended.append(
+                (time.monotonic(), frozenset(getattr(report, "killed_lineage", frozenset())))
+            )
         return report
+
+    def in_cooldown(self, lineage: "frozenset[tuple[str, int]]", now: float | None = None) -> bool:
+        """Whether ending a fragment of this ``lineage`` would be a second stop of
+        one just ended.
+
+        ``lineage`` is the candidate's key set from ``machine_memory.lineage_keys``;
+        it is kin to an earlier stop when ANY key matches one ended inside
+        :data:`MACHINE_MEMORY_KILL_COOLDOWN_S`. Anything else is a different runaway
+        and is NOT held: the cooldown exists to stop a war on one respawning
+        process, not to rate-limit a guard whose job is to end whatever is eating
+        the machine. Entries age out here rather than on a timer, so the seat stays
+        a plain object with no clock of its own.
+        """
+        moment = time.monotonic() if now is None else now
+        self._ended = [e for e in self._ended if moment - e[0] < MACHINE_MEMORY_KILL_COOLDOWN_S]
+        return any(lineage & keys for _at, keys in self._ended)
 
 
 class _Sweeper:

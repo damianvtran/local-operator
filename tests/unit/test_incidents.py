@@ -16,6 +16,7 @@ from local_operator.incidents import (
     format_mcp_recovery_message,
     format_mcp_unavailable_message,
     format_model_switch_message,
+    render_involuntary_attribution,
 )
 
 
@@ -536,6 +537,31 @@ def test_runtime_killed_says_no_stop_was_asked_for() -> None:
     assert "no stop was asked for" in sentence
     # The inverse still recovers the token from the longer sentence.
     assert cause_from_reason(sentence) == "runtime-killed"
+
+
+def test_a_reclaimed_death_names_the_mechanism_the_actor_and_the_pid() -> None:
+    """The 2026-09-28 wave, as a sentence: a sweep's signal narrates itself.
+
+    Before this label existed, every victim of a reclaim sweep read
+    "unattributed" — the reason line could not name the act or its actor. This
+    is the exact string a reader now gets, rendered through the same function
+    the surfaces use, with the constants the sweep actually writes (imported
+    from the module rather than respelled, so a rename cannot drift them apart).
+    """
+    from local_operator.session.runtime.reclaim import (
+        RECLAIM_ATTEST_ACTOR,
+        RECLAIM_MECHANISM,
+    )
+
+    rendered = render_involuntary_attribution(
+        mechanism=RECLAIM_MECHANISM,
+        actor=RECLAIM_ATTEST_ACTOR,
+        killer_pid=4242,
+    )
+    assert rendered == (
+        " (it was reclaimed as an unreachable runtime by runtime residency"
+        " sweep, killer pid 4242)"
+    )
 
 
 def test_a_detail_is_separated_from_the_sentence_it_rides_with() -> None:

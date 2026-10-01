@@ -1730,17 +1730,24 @@ SETTINGS: tuple[Setting, ...] = (
         # The literal is deliberate, like every default in this file; the code
         # constant is `DEFAULT_PINNED_FALLBACK` in providers/failover.py, and
         # `_consumer_defaults()` in tests/unit/test_settings_io.py pins the
-        # pair to each other.
-        default="same-family",
-        # NOTE ON THE COPY (review round 1, D1/D3): the row's two choice
-        # descriptions render ONLY on the expanded rows, where the painted
-        # field — truncation ellipsis included — is 17/26 cells at 60x20 and
-        # 23/32 at 100x30 (captured frames), and every enum description in
-        # this registry is a short phrase for exactly that reason. So each
-        # description IS a micro-hint (the discriminating words lead), and the
-        # help — which is the sentence, read on the detail line's 93 cells at
-        # 100x30 — keeps `same-family hops only, or any vendor (announced)`,
-        # the clause the overlong predecessor clipped at every size.
+        # pair to each other. "cross-family" has been the shipped default
+        # since the 2026-09-30 incident: a pinned child whose credential is
+        # unusable must still reach a configured hop, cross-vendor included
+        # as the announced last resort, rather than fail on a chain it was
+        # forbidden to walk. "same-family" remains the strict opt-in.
+        default="cross-family",
+        # NOTE ON THE COPY (review round 1, D1/D3; hint shortened and bounds
+        # re-derived in the design review round 1 remediation, D1): the row's
+        # two choice descriptions render ONLY on the expanded rows, where the
+        # painted field — truncation ellipsis included — is 17/26 cells at
+        # 60x20 and 23/32 at 100x30 (captured frames), and each description
+        # IS a micro-hint (the discriminating words lead). The `(default)`
+        # marker now sits on `cross-family` and costs its row ~9 of those
+        # cells — the frame showed the old 22-cell `any vendor (announced)`
+        # clipped to `(announce…` — so that hint is the 10-cell `any vendor`;
+        # `(announced)` lives in the help below, which paints in full on the
+        # detail line's 93 cells at 100x30, and is the clause the overlong
+        # predecessor clipped at every size.
         help=(
             "What a pinned child may fall back to: same-family hops only, or "
             "any vendor (announced)."
@@ -1754,7 +1761,7 @@ SETTINGS: tuple[Setting, ...] = (
             Choice(
                 "cross-family",
                 "allow cross-vendor",
-                "any vendor (announced)",
+                "any vendor",
             ),
         ),
     ),
@@ -3307,6 +3314,35 @@ SETTINGS: tuple[Setting, ...] = (
         default="",
         help=_BASH_SHELL_HELP,
         empty_unsets=True,
+    ),
+    # Cross-session SENDS. A `send` row rather than a `tools.send.*` one because
+    # that is the key the design named and what an operator will look for in
+    # ``config.yml``; it lives in this SECTION because "how a tool behaves" is
+    # what the section already means and its Scope is uniform (LIVE) — the gate
+    # is read per send, so an edit lands on the next one.
+    #
+    # OFF is the shipped behaviour and the designed default: the tool result
+    # already carries the cause, the message id and the retry advice, so this is
+    # the operator's opt-in SECOND copy of a fact the model has already been
+    # told (design note B). The default constant the reader uses is
+    # ``peer_send.JOURNAL_UNCONFIRMED_DEFAULT``, pinned to this row by
+    # ``tests/unit/test_settings_io.py``.
+    Setting(
+        key="send.journal_unconfirmed",
+        path=("send", "journal_unconfirmed"),
+        section="tools",
+        # Named for what it DOES, not for one of its two states (UX round 1,
+        # U7): the hook fires for BOTH amber states -- ``mailbox`` and
+        # ``unconfirmed`` -- and mailbox is the common one (the incident shape at
+        # ~5 s), so a label that said "unconfirmed" sent an operator who wanted
+        # the wake-failed notice looking in the wrong place.
+        label="Journal unacknowledged sends",
+        kind=Kind.BOOL,
+        default=False,
+        help=(
+            "Write a transcript notice when a `send` is not acknowledged. "
+            "The tool result always reports it; this keeps a durable row too."
+        ),
     ),
     # -- search_interception ------------------------------------------------
     # ``path`` mirrors ``tools.builtin.SEARCH_INTERCEPTION_*_PATH`` (pinned

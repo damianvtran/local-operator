@@ -1455,6 +1455,14 @@ class ToolContext(BaseModel):
     # ``None`` (bare tool tests, hosts without a session) degrades to a
     # silent store: the credential still works through bash injection.
     journal_credential: Any | None = None
+    # Optional host hook that records ONE durable notice when a ``send`` settles
+    # in an amber state (``Session.journal_send_notice``). The tool RESULT
+    # already carries the same facts, so this is the configurable second copy
+    # (``send.journal_unconfirmed``, default off) an operator asks for when they
+    # want the transcript itself to remember that a message was never
+    # acknowledged. ``None`` (bare tool tests, hosts without a session) degrades
+    # to exactly the shipped behaviour: the result is the notice.
+    journal_send_notice: Any | None = None
 
 
 ToolExecuteFn = Callable[
@@ -3208,18 +3216,30 @@ class ChatRequest(BaseModel):
     #:
     #: So an isolated request gets at most TWO AUTH attempts on the model it
     #: names, and the second only in one case: the bearer it was handed was
-    #: rejected outright (401/403) and a read-only re-resolve that hides that
-    #: rejected ROW produces a different bearer. (Auth attempts, because the
-    #: pre-existing fast-mode-refusal re-ask is not gated on the retry budget
-    #: and can add one same-key attempt at standard speed ahead of this one.)
+    #: refused on the class the TURN beside it rotates on
+    #: (``is_rotation_eligible``: retryable, an auth error, or a bare 401/403)
+    #: and a read-only re-resolve produced a different bearer. That re-resolve
+    #: asks for a SIBLING first, and — when the pool has no sibling to offer —
+    #: re-reads the SAME account with a forced refresh, which is the turn's own
+    #: first rotation leg. (Auth attempts, because the pre-existing
+    #: fast-mode-refusal re-ask is not gated on the retry budget and can add
+    #: one same-key attempt at standard speed ahead of this one.)
     #: Deployment reality widened the original
-    #: one-attempt rule: pools contain stale keys, the pick is a hash of the
-    #: session id, and the turn beside the errand rotates past the dead row on
-    #: its own — so without the re-resolve, every naming call for such a
+    #: one-attempt rule: pools contain stale keys, a session can be sticky to an
+    #: account the provider is currently throttling, and a stored bearer can be
+    #: fresh by the store's reckoning while the provider has revoked it out of
+    #: band — the pick is a hash of the session id, so an errand re-fires on the
+    #: same row, while the turn beside it rotates (or force-refreshes) past the
+    #: problem on its own. Without the re-resolve, every naming call for such a
     #: session would fail forever while the conversation itself stayed healthy.
-    #: The errand spends one extra request only in that auth case. Everything
+    #: The errand spends one extra request only on that class — never on a
+    #: deterministic request defect, which is the same answer on every account.
+    #: Everything
     #: else holds: no fallback chain, no sticky route read or written, no
-    #: credential rotation, no backoff sleep, no preflight, no boundary
+    #: credential ROTATION — no block, no demotion clear, no move of the
+    #: session's sticky pointer; a forced refresh of the account already in hand
+    #: is that account's own bookkeeping — no backoff sleep (the store's own
+    #: refresh lease may wait ~50 ms once), no preflight, no boundary
     #: classification, no routing decision taken by its credential resolve,
     #: and not the session's cache key. It still resolves credentials under
     #: the session id, so that READ lands on the same account the turn is on

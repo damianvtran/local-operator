@@ -1410,8 +1410,9 @@ def _legible_input_refusal(
         tail = f"A degraded retry ({steps}) was also refused, so it was not re-sent unchanged."
     elif policy_declined:
         # M1 / Q-3: this is NOT "unavailable" -- the ladder existed and the
-        # call's retry policy declined it (an isolated errand's one-attempt
-        # contract, or retries disabled outright). A future reader must be
+        # call's retry policy declined it (retries disabled outright: an
+        # isolated errand, or a caller that turned them off). A future reader
+        # must be
         # able to tell the two states apart from the message alone.
         tail = (
             "This call's retry policy declined a degraded retry, so it was not re-sent unchanged."
@@ -2083,6 +2084,25 @@ def is_invalidated_credential_error(error: BaseException) -> bool:
     # anthropic surfaces revocation as invalid_request_error + "revoked";
     # "revoked" alone is the generic marker both shapes share.
     return "revoked" in lowered
+
+
+def is_rotation_eligible(error: BaseException) -> bool:
+    """Whether credential rotation may act on this failure at all.
+
+    ONE definition, because two callers MUST agree on it: the ordinary turn's
+    rotation, and the isolated errand's single permitted extra attempt — an
+    errand has to recover exactly where its turn does, and nowhere else.
+
+    The set is the turn's own: a retryable failure (5xx/429/transport — the
+    account may simply not be the one that should serve this), an outright
+    auth error, or a bare 401/403. A request the provider READ and refused
+    (``kind == "request"``: a 4xx that is not auth/quota/timeout) is
+    DETERMINISTIC in its bytes — the same request fails identically on every
+    other account — so it is not here, and nothing rotates on it.
+    """
+    if not isinstance(error, ProviderError):
+        return False
+    return error.retryable or error.auth_error or error.status in (401, 403)
 
 
 def is_direct_credential_rotation_error(error: BaseException) -> bool:
@@ -2799,16 +2819,21 @@ PINNED_FALLBACK_CROSS_FAMILY = "cross-family"
 PINNED_FALLBACK_VALUES = (PINNED_FALLBACK_SAME_FAMILY, PINNED_FALLBACK_CROSS_FAMILY)
 
 #: ``retry.pinnedFallback`` — what a pinned child's cascade may descend onto
-#: when no same-family route can serve it. The shipped default refuses the
-#: cross-vendor hop, trading a silent vendor substitution for a VISIBLE
-#: pinned-child failure; ``cross-family`` is the opt-in that restores the old
-#: reach (targets are still ordered same-family first, and the descent still
-#: announces itself). A module-level constant rather than a literal at the
-#: reader, because ``tests/unit/test_settings_io.py::_consumer_defaults``
+#: when no same-family route can serve it. The shipped default WALKS THE
+#: CONFIGURED CHAIN: targets are still ordered same-family first and a
+#: cross-vendor hop remains the last resort, and any descent announces itself
+#: (settle reason, parent-stream notice, job badge, completion row), so the
+#: substitution the older default refused outright is instead DISCLOSED.
+#: The refusal existed because a same-family-only walk made a pinned child
+#: whose credential is unusable fail instantly even with a working hop
+#: (2026-09-30 fleet incident: pinned sonnet roles died during the Anthropic
+#: quota outage); ``same-family`` remains as the explicit strict opt-in that
+#: keeps the visible pinned-child refusal. A module-level constant rather
+#: than a literal at the reader, because ``tests/unit/test_settings_io.py::_consumer_defaults``
 #: pins the ``/settings`` registry row to exactly this value; it IS the
-#: ``PINNED_FALLBACK_SAME_FAMILY`` member above rather than a second literal
+#: ``PINNED_FALLBACK_CROSS_FAMILY`` member above rather than a second literal
 #: for the same word (review round 1, nit F4).
-DEFAULT_PINNED_FALLBACK = PINNED_FALLBACK_SAME_FAMILY
+DEFAULT_PINNED_FALLBACK = PINNED_FALLBACK_CROSS_FAMILY
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2843,8 +2868,10 @@ class RetrySettings:
     usage_aware_account_pick: bool = True
     fallback_chains: Mapping[str, Sequence[Any]] = dataclasses.field(default_factory=dict)
     #: What a PINNED child may descend onto when no same-family route can
-    #: serve — ``DEFAULT_PINNED_FALLBACK`` (refuse the cross-vendor hop) or
-    #: ``PINNED_FALLBACK_CROSS_FAMILY`` (allow it, loudly). Read per call like
+    #: serve — ``DEFAULT_PINNED_FALLBACK`` (walk the chain family-first with
+    #: the cross-vendor hop as the announced last resort) or
+    #: ``PINNED_FALLBACK_SAME_FAMILY`` (the explicit strict opt-in: refuse the
+    #: cross-vendor hop and fail visibly instead). Read per call like
     #: every other retry field, so a config edit reaches running sessions with
     #: no ``/reload``.
     pinned_fallback: str = DEFAULT_PINNED_FALLBACK
@@ -3206,11 +3233,11 @@ def order_pinned_targets(
     """Order fallback targets for a pinned route; ``strict`` also filters.
 
     Pin-preserving first, then same-vendor, then cross-vendor; the sort is
-    stable, so targets of one rank keep their configured order. ``strict``
-    (``retry.pinnedFallback: same-family``, the default) drops cross-vendor
-    targets entirely — a pinned child must not silently land on another
-    vendor's model — while the opt-in keeps them, last, so a cross-vendor hop
-    is the last resort and still proceeds loudly.
+    stable, so targets of one rank keep their configured order. ``strict`` is
+    the explicit ``retry.pinnedFallback: same-family`` opt-in and drops
+    cross-vendor targets entirely — a pinned child must not silently land on
+    another vendor's model — while the default keeps them, last, so a
+    cross-vendor hop is the last resort and still proceeds loudly.
     """
     if strict:
         targets = [target for target in targets if is_same_family(pin_selector, target.selector)]
@@ -3253,14 +3280,26 @@ def _pinned_exhaustion_error(
     reported: ProviderError | None,
     blocked: Sequence[str],
     same_family_available: bool,
+    *,
+    strict: bool,
+    hops_tried: Sequence[str],
+    fallback_off: str | None,
 ) -> ProviderError:
-    """The legible refusal a STRICT pinned route raises when it is exhausted.
+    """The legible failure a pinned route raises when the walk ends unserved.
 
-    Names the pin, the cause and BOTH remedies, because the default
-    ``retry.pinnedFallback: same-family`` deliberately converts a silent
-    model substitution into a VISIBLE pinned-child failure — and a bare
-    provider error would leave the operator to guess that the failure is the
-    policy working as designed rather than a misconfiguration. ``kind="unknown"``
+    Names the pin, the state and the remedies, because a bare provider error
+    would leave the operator to guess that the failure is the policy working
+    as designed rather than a misconfiguration. The copy is policy-aware,
+    because the policies fail for different reasons: under the strict
+    ``retry.pinnedFallback: same-family`` opt-in a silent model substitution
+    is deliberately converted into a VISIBLE pinned-child refusal (and the
+    refusal names the cross-vendor hops it declined), while under the default
+    the walk served nothing because every configured hop was tried and could
+    not — so the message names those hops, or says that none is configured,
+    or that fallback is switched off. The non-strict arms label the quoted
+    error ``Last failure:`` rather than ``Cause:``: the walk's most
+    diagnostic error can come from a HOP, so the strict copy's attribution
+    would misstate the default's (design review round 1, D4). ``kind="unknown"``
     is explicit: the text quotes a provider message, and letting the
     classifier re-derive a kind from that quote could dress the refusal as the
     provider's own quota error.
@@ -3269,41 +3308,117 @@ def _pinned_exhaustion_error(
     constraint rather than a style choice: the failed child's dock row paints
     only its leading cells — the span is ``77 - len(label) - len(role)``,
     ~48-58 for typical child labels (design rounds 1-2, D4) — so the pin, the
-    state and both ways out LEAD, and the diagnostics follow. Wording speaks
+    state and the ways out LEAD, and the diagnostics follow. Wording speaks
     the vocabulary of the ``/settings`` page that owns these terms — "hop",
     "allow cross-vendor" — never "target" and never the raw stored value
-    (design round 1, D5).
+    (design round 1, D5); the disabled arm names its switch by the row's
+    LABEL, looked up from the registry with the stored key only as a
+    fallback, for the same reason (design review round 1, D2). Each arm's
+    remedy phrase is asserted to land within those leading cells for a
+    typical pin.
 
-    ``same_family_available`` distinguishes the three exhaustion shapes so
-    the note never lies about what was configured: same-family hops tried
-    and spent, cross-vendor hops refused by policy, or neither configured —
-    the last one reachable in its natural no-chain shape (review round 1,
-    F3).
+    The STRICT branch's ``same_family_available`` distinguishes its three
+    exhaustion shapes so the note never lies about what was configured:
+    same-family hops tried and spent, cross-vendor hops refused by policy,
+    or neither configured — the last one reachable in its natural no-chain
+    shape (review round 1, F3). The default branch reads ``hops_tried``
+    (selectors, deduped, in walk order) and ``fallback_off`` — the tail's
+    facts, passed in rather than re-derived here. The retry-disabled fast
+    paths in the walk raise this same error with ``fallback_off="retry.enabled"``
+    for a pinned child, because with the cascade switched off the tail is
+    never reached (agent review round 1, F1; QA round 1, Q-1).
     """
     if reported is None:
         cause = "every route that could serve it failed"
     else:
         status = f" HTTP {reported.status}" if reported.status else ""
         cause = f"{reported.kind or 'failure'}{status}: {reported.message}"
-    notes: list[str] = []
-    if same_family_available:
-        notes.append("Every configured same-family hop was tried and could not serve it.")
-    if blocked:
-        notes.append(
-            f"A cross-vendor hop ({', '.join(blocked)})"
-            " is configured but refused by retry.pinnedFallback (same family only)."
+    if strict:
+        notes: list[str] = []
+        if same_family_available:
+            notes.append("Every configured same-family hop was tried and could not serve it.")
+        if blocked:
+            notes.append(
+                f"A cross-vendor hop ({', '.join(blocked)})"
+                " is configured but refused by retry.pinnedFallback (same family only)."
+            )
+        if not notes:
+            notes.append("No same-family hop is configured.")
+        return ProviderError(
+            None,
+            f"Pin {pin_selector} failed; allow cross-vendor or add a same-family hop."
+            f" Cause: {cause}."
+            f" {' '.join(notes)}"
+            " Fix: add a same-family hop to retry.fallbackChains, or set"
+            " retry.pinnedFallback to allow cross-vendor.",
+            retryable=False,
+            kind="unknown",
         )
-    if not notes:
-        notes.append("No same-family hop is configured.")
+    if fallback_off is not None:
+        # Name the switch by the LABEL its /settings row wears, not the raw
+        # stored key: the page's vocabulary is what the operator acts on
+        # (design review round 1, D2). Function-local import, in the idiom of
+        # `model.effort`'s ladder read, so this provider module does not drag
+        # the settings facade onto the routing stack's import graph; any
+        # failure leaves the key standing in.
+        switch = fallback_off
+        try:
+            from local_operator import settings_io
+
+            setting = settings_io.resolve_key(fallback_off)
+            if setting is not None:
+                switch = setting.label
+        except Exception:  # noqa: BLE001 — the copy degrades to the raw key
+            switch = fallback_off
+        return ProviderError(
+            None,
+            f"Pin {pin_selector} failed; turn fallback on in /settings ({switch}),"
+            " or fix the pinned model."
+            f" Last failure: {cause}.",
+            retryable=False,
+            kind="unknown",
+        )
+    if not hops_tried:
+        return ProviderError(
+            None,
+            f"Pin {pin_selector} failed; add a hop to retry.fallbackChains."
+            f" Last failure: {cause}."
+            " No fallback hop is configured.",
+            retryable=False,
+            kind="unknown",
+        )
     return ProviderError(
         None,
-        f"Pin {pin_selector} failed; allow cross-vendor or add a same-family hop."
-        f" Cause: {cause}."
-        f" {' '.join(notes)}"
-        " Fix: add a same-family hop to retry.fallbackChains, or set"
-        " retry.pinnedFallback to allow cross-vendor.",
+        f"Pin {pin_selector} failed; add another hop or fix credentials."
+        f" Last failure: {cause}."
+        " Every configured hop was tried and could not serve it:"
+        f" {', '.join(hops_tried)}."
+        " Fix: check the hops' credentials, or add another hop to retry.fallbackChains.",
         retryable=False,
         kind="unknown",
+    )
+
+
+def _pinned_fallback_disabled_error(pin_selector: str, error: ProviderError) -> ProviderError:
+    """The legible failure for a pinned child with the cascade switched OFF.
+
+    ``retry.enabled: false`` raises from the retry-disabled fast paths INSIDE
+    the attempt loop, before the walk's tail — so the tail's ``fallback_off``
+    argument alone could never serve a pinned child there, and the raw
+    provider error surfaced instead of the copy this module promises (agent
+    review round 1, F1; QA round 1, Q-1). Both fast-path raises call this for
+    a pinned route; unpinned routes keep their exact pre-existing raises. The
+    chain was never expanded — that expansion is gated on ``retry.enabled`` —
+    so the policy flags passed here are the constants by construction.
+    """
+    return _pinned_exhaustion_error(
+        pin_selector,
+        error,
+        (),
+        False,
+        strict=False,
+        hops_tried=(),
+        fallback_off="retry.enabled",
     )
 
 
@@ -3733,11 +3848,13 @@ async def stream_with_failover(
         retry = dataclasses.replace(retry, enabled=False)
         route_state = None
 
-    # The isolated errand's ONE auth-class re-resolve has been spent. Latched
-    # per REQUEST so a pool of dead keys cannot turn a decorative call into a
-    # walk: the errand makes at most TWO AUTH attempts, and the second only
-    # when the read-only re-resolve produced a bearer that differs from the one
-    # the provider just rejected.
+    # The isolated errand's ONE rotation-class re-resolve has been spent.
+    # Latched per REQUEST so a pool of dead keys cannot turn a decorative call
+    # into a walk: the errand makes at most TWO AUTH attempts, and the second
+    # only when the failure is on the class the TURN's own rotation acts on
+    # (`is_rotation_eligible`) AND the read-only re-resolve produced a bearer
+    # that differs from the one the provider just rejected — a sibling if the
+    # pool has one, otherwise the same account force-refreshed.
     #
     # "Two auth attempts", not "two wire attempts": the pre-existing fast-mode
     # refusal re-ask (below, and deliberately NOT gated on `retry.enabled`)
@@ -3755,14 +3872,15 @@ async def stream_with_failover(
     pinned = pin_selector is not None
 
     targets = [primary_target]
-    # Strict pin policy state; the tail of the walk reads it to raise a
-    # legible refusal instead of dressing a policy-forced failure as a bare
-    # provider error. STRICTNESS is a property of the (pin, policy) pair, NOT
-    # of whether a chain happens to expand: with fallbacks on, a pinned child
-    # with NO chain still fails VISIBLY, with the no-candidates note naming
-    # why (review round 1, F3). The two flags stay empty when no chain
-    # contributed candidates, which is exactly the shape
-    # `_pinned_exhaustion_error` reads.
+    # Pin policy state; the tail of the walk reads it to raise a legible
+    # failure — policy-aware copy — instead of dressing a policy-forced
+    # refusal as a bare provider error. STRICTNESS is a property of the (pin,
+    # policy) pair, NOT of whether a chain happens to expand: with fallbacks
+    # on, a pinned child with NO chain still fails VISIBLY with copy that
+    # names the policy in force (review round 1, F3). The two flags stay
+    # empty when no chain contributed candidates, which is exactly the shape
+    # the strict branch of `_pinned_exhaustion_error` reads; the default
+    # branch reads `full_targets` and the retry switches instead.
     pinned_strict = False
     pinned_blocked: list[str] = []
     pinned_family_available = False
@@ -3775,13 +3893,14 @@ async def stream_with_failover(
                 primary_selector, chain, primary_effort=request.model.reasoning_effort
             )
             if pinned and pin_selector is not None:
-                # A PINNED child descends in same-family order and, under the
-                # default policy, never enters a cross-vendor target at all.
-                # ORDER and FILTER both go through the one predicate in
-                # `pinned_family_rank`, shared with the quota preflight
-                # (`model.configure._first_available_fallback`), so the walk
-                # and the message boundary cannot form two opinions about
-                # which targets may serve a pinned child.
+                # A PINNED child descends in same-family order; under the
+                # explicit strict opt-in it never enters a cross-vendor
+                # target at all, while the default keeps them — last,
+                # announced. ORDER and FILTER both go through the one
+                # predicate in `pinned_family_rank`, shared with the quota
+                # preflight (`model.configure._first_available_fallback`), so
+                # the walk and the message boundary cannot form two opinions
+                # about which targets may serve a pinned child.
                 pinned_family_available = any(
                     is_same_family(pin_selector, candidate.selector) for candidate in candidates
                 )
@@ -4497,26 +4616,44 @@ async def stream_with_failover(
                     if (
                         request.isolated
                         and not isolated_auth_resolved
-                        and (exc.auth_error or exc.status in (401, 403))
+                        and is_rotation_eligible(exc)
                     ):
                         # The one widening of the isolated budget, and it is
-                        # auth-shaped only. Deployment reality: a pool can
-                        # hold a stale key while the TURN beside us rotates
-                        # past it and stays healthy, so the errand's read-only
-                        # resolve keeps landing on the dead row (the pick is a
-                        # hash of the session id — re-firing the errand later
-                        # picks the same row) and every naming call for such a
-                        # session fails forever. One extra request, and only
-                        # here, buys the title back: a READ-ONLY re-resolve
-                        # with the rejected bearer hidden may serve the errand
-                        # from a sibling — the resolve's own sanctioned move
-                        # (see `_resolve_access_for_provider`) — while the
-                        # sticky pointer, the block list and the demotion set
-                        # stay exactly as they were, so the turn beside us
-                        # keeps resolving to precisely what it did before.
-                        # Non-auth failures (5xx, 429, request-kind, transport)
-                        # keep the exactly-one-attempt behaviour: a rate limit
-                        # says wait, and an errand must not.
+                        # shaped exactly like the TURN's rotation — the same
+                        # class of failure, on the same predicate the ordinary
+                        # arm above delegates on. Deployment reality: a pool can
+                        # hold a stale key, or a session can be sticky to an
+                        # account the provider is currently refusing for a
+                        # reason unrelated to its bytes, while the TURN beside
+                        # us rotates past it and stays healthy. The errand's
+                        # read-only resolve keeps landing on that row (the pick
+                        # is a hash of the session id — re-firing the errand
+                        # later picks the same row) and every naming call for
+                        # such a session fails forever. One extra request, and
+                        # only here, buys the title back: a READ-ONLY re-resolve
+                        # hides the rejected bearer and may serve the errand
+                        # from a sibling, and — when the pool has no sibling to
+                        # offer — re-reads the SAME account the way the turn's
+                        # first rotation leg would (see
+                        # `_resolve_access_for_provider`). Both legs are the
+                        # resolve's own sanctioned moves: the sticky pointer,
+                        # the block list and the demotion set stay exactly as
+                        # they were, so the turn beside us keeps resolving to
+                        # precisely what it did before.
+                        #
+                        # A request the provider READ and refused (a 4xx that
+                        # is not auth/quota/timeout) is still exactly-one-
+                        # attempt: the same bytes fail identically on every
+                        # other account, so there is nothing to rotate to and
+                        # nothing for an errand to ask. Nor does the errand ever
+                        # take a BACKOFF sleep — a rate limit says wait, and an
+                        # errand must not (the sibling ask is a different
+                        # account, not a second try at a throttled one). The
+                        # store's own refresh bookkeeping is the one wait left:
+                        # a forced refresh that finds the cross-process refresh
+                        # lease held waits ~50 ms once before serving or
+                        # giving up (`AuthStore._ensure_oauth_fresh`), which is
+                        # bookkeeping rather than backoff, and it is bounded.
                         isolated_auth_resolved = True
                         sibling = await _resolve_access_for_provider(
                             auth,
@@ -4546,6 +4683,15 @@ async def stream_with_failover(
                     # re-raises the ORIGINAL exception object, silently
                     # dropping that diagnosis on the one path where the retry
                     # policy (not the ladder) declined the recovery.
+                    #
+                    # PINNED children get the legible failure instead: "never
+                    # a bare provider error for a pinned child" holds even
+                    # with the cascade switched off, and this fast path is
+                    # where that shape raises (the walk tail is unreachable
+                    # once `retry.enabled` is false — agent review round 1,
+                    # F1).
+                    if pinned and pin_selector is not None:
+                        raise _pinned_fallback_disabled_error(pin_selector, exc) from exc
                     raise exc
                 if _same_credential_retry_allowed(
                     exc,
@@ -4589,9 +4735,11 @@ async def stream_with_failover(
                     # over to the fallback chain (a DIFFERENT provider) instead,
                     # which is the thing left that might actually succeed.
                     break
-                if exc.retryable or exc.auth_error or exc.status in (401, 403):
+                if is_rotation_eligible(exc):
                     # Delegate: (b) refresh same account, then (c) rotate —
-                    # resolve_next_key owns the decision (PR-04/05).
+                    # resolve_next_key owns the decision (PR-04/05). The same
+                    # predicate gates the isolated errand's one extra attempt,
+                    # so the two recovery classes cannot drift apart.
                     error = exc
                     continue
                 # A request the provider READ and refused (kind=="request": a
@@ -4676,6 +4824,11 @@ async def stream_with_failover(
                     server_fault_requests += 1
                     server_faults_by_target[route_key] = server_fault_requests
                 if not retry.enabled:
+                    # Same pinned-child contract as the ProviderError arm's
+                    # fast path above: the legible failure, never the bare
+                    # transport error (agent review round 1, F1).
+                    if pinned and pin_selector is not None:
+                        raise _pinned_fallback_disabled_error(pin_selector, wrapped) from wrapped
                     raise wrapped from exc
                 # Same budget rule as the ProviderError arm above, asked the same
                 # way. This branch used to test `retry.max_retries` directly,
@@ -4759,13 +4912,27 @@ async def stream_with_failover(
         await _abortable_sleep(delay_ms, signal)
         pending = revisit
 
-    if pinned and pinned_strict and pin_selector is not None:
-        # A strict pinned route exhausted without ever entering a cross-vendor
-        # target: the child fails VISIBLY on its pin instead of silently
-        # running on another vendor's model. The refusal names the pin, the
-        # cause and both remedies (see `_pinned_exhaustion_error`).
+    if pinned and pin_selector is not None:
+        # A pinned child that ends the walk without serving fails LEGIBLY,
+        # never with a bare provider error: under strict the refusal says the
+        # cross-vendor hop was declined by policy; under the default the
+        # message names the configured hops that were tried and could not
+        # serve (or that none is configured / fallback is off). See
+        # `_pinned_exhaustion_error` for the copy and its layout constraint.
         error = _pinned_exhaustion_error(
-            pin_selector, reported, pinned_blocked, pinned_family_available
+            pin_selector,
+            reported,
+            pinned_blocked,
+            pinned_family_available,
+            strict=pinned_strict,
+            hops_tried=tuple(
+                dict.fromkeys(t.selector for t in full_targets if t != primary_target)
+            ),
+            fallback_off=(
+                "retry.enabled"
+                if not retry.enabled
+                else "retry.modelFallback" if not retry.model_fallback else None
+            ),
         )
         if reported is not None:
             raise error from reported
@@ -4939,27 +5106,43 @@ async def _resolve_access_for_provider(
     the turn is already on and decides nothing.
 
     The one thing ``read_only`` DOES allow is answering a caller that comes
-    back with the bearer it was just handed rejected outright (``error`` set):
-    the resolve then asks for a SIBLING by hiding the rejected row from that
-    single resolve instead of rotating onto it — see the resolver's
-    ``read_only`` branch. That is the isolated errand's one sanctioned second
-    attempt (deployment reality: pools contain stale keys, and one stale row
-    must not permanently silence a decorative call), and it still decides
-    nothing about routing.
+    back with the bearer it was just handed rejected (``error`` set), because a
+    decorative call must be able to serve ITSELF from where the turn already is
+    without taking any routing decision of its own. The re-resolve makes the
+    turn's two rotation legs, read-only, in the turn's own order of preference:
+
+    - a SIBLING, by hiding the rejected row from that single resolve instead of
+      rotating onto it — see the resolver's ``read_only`` branch. This is tried
+      FIRST (the turn's own ``resolve_next_key`` force-refreshes the same
+      account first, deliberately inverted here: a fresh token on the row the
+      provider just rejected is the candidate least likely to work while a
+      healthy sibling is never asked at all);
+    - when the pool has no sibling to offer, the SAME account force-refreshed —
+      the turn's leg (b), and the only repair a revoked-out-of-band bearer has.
+      Without it a single-account pool failed naming forever while the turn
+      beside it rotated the same token and stayed healthy (issue #1814).
+
+    Both are one sanctioned extra attempt in total, and neither decides
+    anything about routing.
 
     ``rejected_credential_id`` names the ROW whose bearer was just rejected, and
-    it is what makes that sibling leg correct for OAuth. Two reasons it cannot
+    it is what makes the sibling leg correct for OAuth. Two reasons it cannot
     be left to the bearer string alone:
 
     - A forced refresh of the SAME row returns a new bearer, which
       ``resolve_next_key``'s ``_accept`` treats as a fresh candidate. Under
-      ``read_only`` the refresh-same-account leg is therefore SKIPPED entirely
-      (see below): re-presenting the account the provider just rejected, with a
-      fresh token, spends the errand's one extra attempt on the credential least
-      likely to work while the healthy sibling is never asked. An expired token
-      is the turn's problem to fix, on the turn's own rotation.
+      ``read_only`` the sibling leg therefore SKIPS the refresh-same-account
+      ordering the ordinary path uses, so that a pool WITH a sibling does not
+      spend the errand's one extra attempt re-presenting the credential least
+      likely to work — and, when there is no sibling, the same
+      force-refresh is taken on its own (``_same_account_refresh``), which is
+      exactly the leg the ordinary path would have spent its turn on. An
+      expired token is the turn's problem to fix, on the turn's own rotation.
     - A row's bearer can rotate underneath us (the concurrent turn refreshing
-      it), so a key-only exclusion would let the rejected row back in.
+      it), so a key-only exclusion would let the rejected row back in. The same
+      ID is why the sibling leg passes it on EVERY resolve it makes — which is
+      also why the same-account leg cannot go through ``_access`` and has to ask
+      the store without exclusions.
     """
     # Presence test, not a nominal one: stores exposing only get_api_key take
     # the bare-bearer path and get wrapped at the bottom of this function.
@@ -5005,6 +5188,32 @@ async def _resolve_access_for_provider(
         flags.update(_exclusion_flags(exclude))
         return await oauth_store.get_oauth_access(provider, session_id, **flags)
 
+    async def _same_account_refresh() -> str | None:
+        """The account we were just handed, asked again with a FORCED refresh.
+
+        The turn's first rotation leg (``resolve_next_key``'s (b)), taken
+        read-only, and it deliberately carries NO exclusion: the whole point is
+        to re-read the row the errand was just refused on, so hiding it — which
+        is what ``_exclusion_flags`` does to every other resolve in this errand,
+        on the row's ID as well as its bearer — would leave the leg with nothing
+        to ask. A store whose token endpoint cannot mint a new bearer answers
+        with the same string, which the retry latch rejects, so this can never
+        become a second attempt on a throttled account.
+
+        The only wait this leg can incur is the store's own: ``AuthStore`` waits
+        ~50 ms once on a contended cross-process refresh lease before it serves
+        or gives up — bookkeeping, not backoff, and it is bounded.
+        """
+        flags = _model_flags(True)  # force_refresh + read_only (+ model_id)
+        if oauth_store is not None:
+            record = await oauth_store.get_oauth_access(provider, session_id, **flags)
+            if record is not None:
+                records[record.access_token] = record
+                return record.access_token
+        # A store exposing only ``get_api_key`` has nothing to refresh: the
+        # bearer comes back unchanged and the latch above rejects it.
+        return await auth.get_api_key(provider, session_id, **flags)
+
     async def _key(*, force_refresh: bool = False, exclude: str | None = None) -> str | None:
         flags = _model_flags(force_refresh)
         flags.update(_exclusion_flags(exclude))
@@ -5026,7 +5235,10 @@ async def _resolve_access_for_provider(
                 # the errand's single extra attempt there means the healthy
                 # sibling is never asked at all (an OAuth pool whose refresh
                 # SUCCEEDS therefore stayed permanently unnamed). Re-authing a
-                # stale account is the turn's job, on the turn's own rotation.
+                # stale account while a healthy sibling is on offer is the
+                # turn's job, on the turn's own rotation; with no sibling to
+                # offer, the same account IS the turn's own move and is taken
+                # below.
                 #
                 # ``_rotate_sibling`` blocks or demotes the failing row and
                 # moves session stickiness — routing decisions that belong to
@@ -5044,7 +5256,46 @@ async def _resolve_access_for_provider(
                 # ``test_a_store_on_the_protocols_exact_signature_keeps_one_attempt``.
                 record = await _access(exclude=ctx.previous_key)
                 if record is None:
-                    return await _key(exclude=ctx.previous_key)
+                    key = await _key(exclude=ctx.previous_key)
+                    if key is not None:
+                        return key
+                    # NO SIBLING. The turn's rotation has two legs — refresh the
+                    # account it is on, then move to another — and the errand
+                    # inverts them on purpose (sibling FIRST), because a
+                    # refreshed token on the row the provider just rejected is
+                    # the candidate least likely to work while a healthy sibling
+                    # is sitting right there. When the pool has no sibling the
+                    # inversion has nothing to buy, and the leg the turn would
+                    # actually take is the one that repairs the failure this
+                    # class is made of: a bearer the STORE believes is current
+                    # and the WIRE refuses (revoked or rotated out of band, so
+                    # the row's ``expires`` says nothing about it). Without this
+                    # the errand had no move at all, and a single-account pool
+                    # failed naming forever while the turn beside it
+                    # force-refreshed the same row and was served — issue #1814.
+                    #
+                    # ``read_only`` still holds: the refresh is the account's own
+                    # bookkeeping (a rotated token is persisted, as
+                    # ``AuthStore._resolve`` documents), and no block, demotion or
+                    # sticky write rides along. Stores without a refresh
+                    # capability answer with the same bearer, which the retry
+                    # latch rejects — so this cannot become a second attempt on a
+                    # throttled account.
+                    if is_direct_credential_rotation_error(ctx.error):
+                        # The same rule the ordinary rotation applies: a
+                        # valid-but-denied token (402/403/quota) and a provider-
+                        # side fault are not the CREDENTIAL's problem, so
+                        # refreshing it cannot help and the turn skips this leg
+                        # too. The sibling ask above is the errand's whole
+                        # answer on that class.
+                        return None
+                    logger.debug(
+                        "isolated errand: no sibling for %s, re-reading the same "
+                        "account after %s",
+                        provider,
+                        type(ctx.error).__name__,
+                    )
+                    return await _same_account_refresh()
             elif ctx.last_chance:
                 # Family-scoped rotation blocks ride only with usage-aware
                 # routing: on the opt-out path no preflight probe exists to

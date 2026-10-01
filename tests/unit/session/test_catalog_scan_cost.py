@@ -161,6 +161,22 @@ def _counting(names: tuple[str, ...] = ("stat", "lstat", "scandir")) -> Any:
     return Counter()
 
 
+def _expire_window(root: Path) -> None:
+    """Move a store's revalidation stamp past the window, as a wait would.
+
+    The window arithmetic is the subject of several cells; actually sleeping
+    ``REVALIDATE_WINDOW_S`` would make the suite slower than the code, so the
+    stamp is rewritten instead — same effect on the next scan's decision, no
+    wall-clock bet.
+    """
+    from local_operator import resume as resume_mod
+
+    cache = resume_mod.origin_cache_path(root)
+    document = json.loads(cache.read_text(encoding="utf-8"))
+    document["revalidated_at"] = time.time() - resume_mod.REVALIDATE_WINDOW_S - 1
+    cache.write_text(json.dumps(document), encoding="utf-8")
+
+
 # ---------------------------------------------------------------------------
 # The clock stays single-sourced
 # ---------------------------------------------------------------------------
@@ -795,13 +811,17 @@ class TestTheHiddenSkipCannotHideRealWork:
         resume_mod._SCAN_COUNT[str(tmp_path)] = resume_mod.REVALIDATE_EVERY
         assert [row[0] for row in _recent_sessions_with_origin(tmp_path)] == ["a" * 12]
 
-    def test_a_cold_start_always_revalidates(self, tmp_path: Path) -> None:
-        """Restarting ``lop`` repairs a stale verdict immediately.
+    def test_a_cold_start_repairs_a_stale_verdict_once_the_window_expires(
+        self, tmp_path: Path
+    ) -> None:
+        """A fresh process revalidates when the store's stamp is older than
+        ``REVALIDATE_WINDOW_S`` — the repair the epoch was the only owner of,
+        now shared with a bound counted in WALL-CLOCK rather than in one
+        process's polls, so it also covers a store whose only callers are
+        one-shot CLIs (which never reach the epoch at all).
 
-        The counter starts at 0 for a fresh process, so ``0 % REVALIDATE_EVERY``
-        is 0 and the first scan of every process is a revalidating one. That is
-        the second of the three independent repairs, and the one an operator
-        reaches for without being told about epochs.
+        ``REVALIDATE_WINDOW_S`` is set stale by rewriting the stamp rather than
+        waiting it out; see :func:`_expire_window`.
         """
         from local_operator import resume as resume_mod
 
@@ -811,8 +831,31 @@ class TestTheHiddenSkipCannotHideRealWork:
         (directory / "origin.json").unlink()
         assert _recent_sessions_with_origin(tmp_path) == []
 
+        _expire_window(tmp_path)
         resume_mod._SCAN_COUNT.pop(str(tmp_path), None)  # a fresh process
         assert [row[0] for row in _recent_sessions_with_origin(tmp_path)] == ["a" * 12]
+
+    def test_a_cold_start_arms_while_the_revalidation_window_is_fresh(self, tmp_path: Path) -> None:
+        """THE DELIBERATE BEHAVIOUR CHANGE, pinned so nobody "fixes" it back
+        silently: a fresh process INSIDE the window serves the armed fast path
+        rather than repairing a just-deleted marker on the spot.
+
+        That is what makes a one-shot caller cheap — ``lop sessions`` pays the
+        armed scan, not the revalidating one, whenever some process revalidated
+        within the window — and the price is stated where the window is: the
+        hand-edit is noticed when the window expires instead of when the
+        process starts. The companion test above is the other half; together
+        they pin the bound the old "cold start always revalidates" rule is
+        replaced by (per wall-clock, where it used to be per process).
+        """
+        from local_operator import resume as resume_mod
+
+        directory = _session(tmp_path, "a" * 12, origin="subagent", stamp=1000.0)
+        _recent_sessions_with_origin(tmp_path)  # cold start: revalidates AND stamps
+        (directory / "origin.json").unlink()
+
+        resume_mod._SCAN_COUNT.pop(str(tmp_path), None)  # a fresh process
+        assert _recent_sessions_with_origin(tmp_path) == [], "fresh stamp: armed, by design"
 
     def test_a_corrupt_marker_stays_visible_on_every_poll(self, tmp_path: Path) -> None:
         """The fail-safe the fast path must not invert.
@@ -988,6 +1031,243 @@ class TestTheHiddenSkipCannotHideRealWork:
         sidebar = {entry.id for entry in load_catalog(tmp_path)}
         assert sidebar == picker
         assert len(picker) == 20, "every subagent session must stay hidden from both"
+
+
+class TestTheRevalidationWindow:
+    """``REVALIDATE_WINDOW_S``: the store-side bound that makes a one-shot
+    caller's FIRST scan cheap without giving up the repair.
+
+    The epoch bounds staleness per PROCESS — its counter only moves when that
+    process polls, which is right for a sidebar and impossible for a one-shot
+    CLI, whose single scan is always a cold start under that rule and so is
+    always revalidating (measured on a 15k-directory store: 17,820 syscalls per
+    invocation against the 4,220 an armed scan pays). The stamp converts the
+    SAME bound to wall-clock: a completed revalidation writes
+    ``revalidated_at`` beside the verdicts it describes, and a first scan arms
+    when that stamp is fresh and revalidates when it is not. These cells pin
+    both answers, both sides of the boundary, and every failure mode's fallback
+    to the conservative one.
+    """
+
+    def test_a_fresh_stamp_arms_where_an_expired_one_revalidates(self, tmp_path: Path) -> None:
+        """The one-shot caller's cost, counted on ONE store: only the stamp moves.
+
+        Six hidden directories and one user session, so the two answers differ
+        by exactly the marker stats the skip suppresses — the number a CLI
+        invocation pays per hidden directory today and stops paying inside the
+        window. The base four are the one user session's own checks: its own
+        marker probe, the archived-index probe, and its two activity files
+        (transcript, inbox). The final +1 is the save's own ``is_dir`` probe on
+        an existing cache directory, paid by any scan that writes.
+        """
+        from local_operator import resume as resume_mod
+
+        for index in range(6):
+            _session(tmp_path, f"h{index:011x}", origin="subagent", stamp=1000.0)
+        _session(tmp_path, "a" * 12, stamp=2000.0)
+        _recent_sessions_with_origin(tmp_path)  # cold start: revalidates AND stamps
+
+        resume_mod._SCAN_COUNT.pop(str(tmp_path), None)
+        with _counting() as armed:
+            _recent_sessions_with_origin(tmp_path)
+
+        _expire_window(tmp_path)
+        resume_mod._SCAN_COUNT.pop(str(tmp_path), None)
+        with _counting() as revalidating:
+            _recent_sessions_with_origin(tmp_path)
+
+        assert armed.counts["scandir"] == revalidating.counts["scandir"] == 1
+        assert armed.counts["stat"] == 4
+        assert revalidating.counts["stat"] == 4 + 6 + 1
+
+    def test_the_boundary_is_the_window_and_future_stamps_are_distrusted(
+        self, tmp_path: Path
+    ) -> None:
+        """The window's arithmetic, both sides, without a filesystem or a clock.
+
+        ``now`` is injectable for exactly this: the boundary is the subject.
+        "Inside the window, in the past" is the ONLY answer that arms; the
+        boundary instant itself is already expired, and a NEGATIVE age (a stamp
+        in the future, i.e. the clock moved backward) is distrusted rather than
+        served so a skew costs one redundant scan instead of freezing a stale
+        verdict for as long as the skew lasts.
+        """
+        from local_operator import resume as resume_mod
+
+        stamp = 1_000_000.0
+        window = resume_mod.REVALIDATE_WINDOW_S
+        assert not resume_mod._revalidation_is_due(stamp, now=stamp)
+        assert not resume_mod._revalidation_is_due(stamp, now=stamp + window - 0.5)
+        assert resume_mod._revalidation_is_due(stamp, now=stamp + window)
+        assert resume_mod._revalidation_is_due(stamp, now=stamp + window + 60)
+        assert resume_mod._revalidation_is_due(stamp, now=stamp - 1)
+        assert resume_mod._revalidation_is_due(None)
+
+    def test_a_stamp_less_or_corrupt_cache_reads_as_absent(self, tmp_path: Path) -> None:
+        """Every unreadable shape degrades to ``({}, None)`` — never a raise,
+        never a fabricated freshness. ``None`` then means revalidate, which is
+        exactly the pre-stamp cold-start behaviour a cache like this got
+        before the window existed.
+        """
+        from local_operator import resume as resume_mod
+
+        cache = resume_mod.origin_cache_path(tmp_path)
+        cache.parent.mkdir(parents=True, exist_ok=True)
+
+        assert resume_mod._load_origin_cache(cache) == ({}, None)  # absent
+
+        cache.write_text("{ not json", encoding="utf-8")
+        assert resume_mod._load_origin_cache(cache) == ({}, None)  # corrupt
+
+        cache.write_text(
+            json.dumps(
+                {
+                    "version": resume_mod.ORIGIN_CACHE_VERSION,
+                    "entries": {"x": {}},
+                    "revalidated_at": "soon",
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert resume_mod._load_origin_cache(cache) == ({"x": {}}, None)  # wrong type
+
+        cache.write_text(
+            json.dumps({"version": resume_mod.ORIGIN_CACHE_VERSION, "entries": {"x": {}}}),
+            encoding="utf-8",
+        )
+        entries, stamp = resume_mod._load_origin_cache(cache)
+        assert entries == {"x": {}} and stamp is None, "an older-format file is stamp-less"
+
+    def test_a_cache_that_cannot_be_written_degrades_to_revalidating(self, tmp_path: Path) -> None:
+        """The unwritable-cache failure mode, end to end: a FILE sits where the
+        cache DIRECTORY belongs, so the save swallows its ``OSError`` and the
+        listing still answers — and the next process is conservative, because
+        no stamp ever landed. (The save must also never raise here: it swallows
+        ``OSError`` for exactly this shape.)
+        """
+        from local_operator import resume as resume_mod
+
+        for index in range(3):
+            _session(tmp_path, f"h{index:011x}", origin="subagent", stamp=1000.0)
+        _session(tmp_path, "a" * 12, stamp=2000.0)
+        (tmp_path / "cache").write_text("a file where the cache dir belongs", encoding="utf-8")
+
+        assert [row[0] for row in _recent_sessions_with_origin(tmp_path)] == ["a" * 12]
+        assert resume_mod._load_origin_cache(tmp_path / "cache" / "origin-verdicts.json") == (
+            {},
+            None,
+        )
+
+    def test_a_forced_revalidation_ignores_a_fresh_stamp_and_refreshes_it(
+        self, tmp_path: Path
+    ) -> None:
+        """The forced callers (``session.cleanup``) are unchanged by the
+        window: ``revalidate=True`` takes the slow path even though a fresh
+        stamp would have armed the skip, and completing it moves the stamp
+        forward (visible here because the stamp starts inside the window but
+        not at "now").
+        """
+        from local_operator import resume as resume_mod
+
+        for index in range(6):
+            _session(tmp_path, f"h{index:011x}", origin="subagent", stamp=1000.0)
+        _session(tmp_path, "a" * 12, stamp=2000.0)
+        _recent_sessions_with_origin(tmp_path)
+
+        cache = resume_mod.origin_cache_path(tmp_path)
+        document = json.loads(cache.read_text(encoding="utf-8"))
+        document["revalidated_at"] = time.time() - 200  # fresh, but not "just now"
+        cache.write_text(json.dumps(document), encoding="utf-8")
+
+        resume_mod._SCAN_COUNT.pop(str(tmp_path), None)
+        with _counting() as armed:
+            _recent_sessions_with_origin(tmp_path)
+        assert armed.counts["stat"] == 4, "the window is honoured: the skip stays armed"
+
+        resume_mod._SCAN_COUNT.pop(str(tmp_path), None)
+        with _counting() as forced:
+            _recent_sessions_with_origin(tmp_path, None, revalidate=True)
+        assert forced.counts["stat"] == 4 + 6 + 1, "forced: the slow path regardless"
+
+        refreshed = json.loads(cache.read_text(encoding="utf-8"))["revalidated_at"]
+        assert time.time() - refreshed < 5, "a completed revalidation moves the stamp"
+
+    def test_the_in_process_epoch_revalidates_regardless_of_a_fresh_stamp(
+        self, tmp_path: Path
+    ) -> None:
+        """The window answers only the PROCESS-FIRST scan; the epoch keeps its
+        own schedule. Scan #150 of a live process revalidates whatever the
+        stamp says — the in-process bound and the wall-clock one are
+        independent repairs, and neither may be dropped.
+        """
+        from local_operator import resume as resume_mod
+
+        for index in range(6):
+            _session(tmp_path, f"h{index:011x}", origin="subagent", stamp=1000.0)
+        _session(tmp_path, "a" * 12, stamp=2000.0)
+        _recent_sessions_with_origin(tmp_path)  # stamp: fresh
+
+        resume_mod._SCAN_COUNT[str(tmp_path)] = resume_mod.REVALIDATE_EVERY
+        with _counting() as epoch:
+            _recent_sessions_with_origin(tmp_path)
+        assert epoch.counts["stat"] == 4 + 6 + 1
+
+    def test_an_armed_write_preserves_the_stamp(self, tmp_path: Path) -> None:
+        """A write an ARMED scan makes — the entry set moved, a new session
+        appeared — must not refresh the stamp: only a completed revalidation
+        may claim fresher verdicts. Otherwise a busy store's churn would
+        postpone the revalidation forever, and the repair bound would stop
+        being a bound.
+        """
+        from local_operator import resume as resume_mod
+
+        _session(tmp_path, "a" * 12, origin="subagent", stamp=1000.0)
+        _recent_sessions_with_origin(tmp_path)
+        cache = resume_mod.origin_cache_path(tmp_path)
+        before = json.loads(cache.read_text(encoding="utf-8"))["revalidated_at"]
+
+        _session(tmp_path, "b" * 12, stamp=3000.0)  # the entry set changed
+        resume_mod._SCAN_COUNT.pop(str(tmp_path), None)
+        assert [row[0] for row in _recent_sessions_with_origin(tmp_path)] == ["b" * 12]
+
+        after = json.loads(cache.read_text(encoding="utf-8"))["revalidated_at"]
+        assert after == before, "an armed write must carry the loaded stamp through"
+
+    def test_the_stamp_write_never_creates_the_cache(self, tmp_path: Path) -> None:
+        """A READ PATH MAY NOT CREATE THE VERDICT CACHE, and the stamp write is
+        the write that could: on a store with no cache and nothing to persist
+        the pre-stamp scan wrote nothing, and a stamp refresh must not change
+        that (CI, the ``desktop-reads-create-nothing`` job: a mere stamp
+        refresh created ``cache/`` and ``cache/origin-verdicts.json`` on a
+        fresh root, and the desktop's read-route guard caught it).
+
+        Both halves are pinned: a scan with no entries creates NOTHING, and a
+        stamp-only refresh leaves the cache directory's NAME SET unchanged
+        (the refresh is an in-place rewrite, never a new file).
+        """
+        from local_operator import resume as resume_mod
+
+        # No session directories at all: no entries to persist, so the
+        # entries-changed write cannot fire and the read must write nothing.
+        (tmp_path / "sessions").mkdir()
+        resume_mod._SCAN_COUNT.pop(str(tmp_path), None)
+        _recent_sessions_with_origin(tmp_path)
+        assert not (tmp_path / "cache").exists(), "a read created the cache plane"
+
+        # With entries the cache legitimately comes into being (the write the
+        # cache has always made); a later STAMP-ONLY refresh must add no names.
+        _session(tmp_path, "a" * 12, origin="subagent", stamp=1000.0)
+        resume_mod._SCAN_COUNT.pop(str(tmp_path), None)
+        _recent_sessions_with_origin(tmp_path)
+        cache_dir = resume_mod.origin_cache_path(tmp_path).parent
+        assert sorted(path.name for path in cache_dir.iterdir()) == [resume_mod.ORIGIN_CACHE_NAME]
+
+        _expire_window(tmp_path)
+        resume_mod._SCAN_COUNT.pop(str(tmp_path), None)
+        _recent_sessions_with_origin(tmp_path)  # stamp-only refresh, in place
+        assert sorted(path.name for path in cache_dir.iterdir()) == [
+            resume_mod.ORIGIN_CACHE_NAME
+        ], "a stamp refresh added a name"
 
 
 def test_a_live_exec_record_labels_its_row_as_an_exec_run(tmp_path) -> None:

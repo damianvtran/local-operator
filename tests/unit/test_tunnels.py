@@ -159,6 +159,113 @@ async def test_real_proof_authenticates_relay_without_leaking_cloud_headers(
         assert name not in request.headers
 
 
+# ---------------------------------------------------------------------------
+# push/ack-sync S4c part 1 — the gateway allowlist, as a guard cell
+#
+# ADR 0006 §4 rule 2 puts the per-device credential proof in two headers the phone
+# sends (``X-Lop-Device``, ``X-Lop-Device-Key``), and the tunnel gateway forwards
+# only its allowlist — so whether those headers reach the relay at all is decided
+# HERE, in a set, by a reviewer who has no idea a security boundary is riding on
+# it. The two cells below are the cells that lane asked for: the operator key must
+# never join that set, and the set's matching is CASE-SENSITIVE while its inputs
+# are lowercased, so an entry spelled the way the header is actually written
+# matches nothing at all.
+#
+# This module is read-only in this slice: the additive change §4 rule 2 names (add
+# the two device headers) is its own row in the ADR's §7 with its own QA cell, so
+# nothing here edits `gateway.py`.
+# ---------------------------------------------------------------------------
+
+
+def _gateway_headers(connection: dict[str, Any], incoming: Any) -> dict[str, str]:
+    """Run one request's headers through the gateway's real rebuild.
+
+    The real ``Gateway.headers`` — not a copy of its comprehension — so the cell
+    fails if the rebuild grows a second rule, and the connection fixture so the
+    harness and the loopback port are the ones every other cell here uses.
+    """
+    gateway = Gateway(connection, Mock(), mobile_password="private-local-password")
+    harness = connection["tunnel"]["harnesses"][0]
+    return gateway.headers(incoming, HOST, harness)
+
+
+def test_the_gateway_allowlist_never_carries_the_operators_key(connection) -> None:
+    """``X-Lop-Operator-Key`` is the machine's own authority and stops at the edge.
+
+    It is the header ``/api/push/devices/{id}/unrevoke`` checks (ADR §3.1: the way
+    back is not a device operation), so a gateway that forwarded it would hand
+    whatever can reach the tunnel — including a phone the machine has revoked —
+    the machine's operator credential. Two assertions, because the set and the
+    rebuild are different failures: the entry must not be in the allowlist, and a
+    request carrying it must arrive without it.
+    """
+    from starlette.datastructures import Headers
+
+    from local_operator.mobile import push_devices
+    from local_operator.tunnels import gateway as gateway_module
+
+    operator_header = push_devices.OPERATOR_KEY_HEADER
+    assert operator_header.lower() not in {
+        entry.lower() for entry in gateway_module._REQUEST_HEADERS
+    }, "the operator key is not a presentation header and must never be forwarded"
+
+    rebuilt = _gateway_headers(
+        connection,
+        Headers(
+            {
+                operator_header: "operator-key-sentinel-9c1f",
+                "x-lop-device": "9f5d1d6e-6b1a-4c6e-9b3a-7a1c2f3d4e5f",
+                "accept": "application/json",
+            }
+        ),
+    )
+
+    assert "accept" in rebuilt, "the allowlist still forwards what it always did"
+    assert operator_header.lower() not in {name.lower() for name in rebuilt}
+    assert "operator-key-sentinel-9c1f" not in rebuilt.values()
+
+
+def test_the_gateway_allowlist_matches_lowercase_and_only_lowercase(
+    connection, monkeypatch
+) -> None:
+    """The trap this cell exists to pin: a correct-looking entry matches NOTHING.
+
+    The gateway's inputs are Starlette's ``Headers``, whose keys are lowercased on
+    construction, and the rebuild is a plain ``k in _REQUEST_HEADERS`` — so an
+    entry spelled ``X-Lop-Device`` (the way the header is written on the wire, and
+    the way the ADR names it) is silently dead: no error, no warning, the header
+    simply never crosses. The cell drives the real rebuild twice with the SAME
+    incoming request, changing only the case of one allowlist entry, so the two
+    halves are the same experiment and the difference is the case alone. That is
+    what makes it a pin rather than a screenshot: the mixed-case entry is shown
+    failing to match, not asserted absent.
+    """
+    from starlette.datastructures import Headers
+
+    from local_operator.tunnels import gateway as gateway_module
+
+    # The shipped set, captured once: ``monkeypatch.setattr`` below mutates the
+    # module attribute, so a second union written against it would carry the
+    # first patch's lowercase entry and the two halves would stop being the same
+    # experiment with one difference.
+    shipped = gateway_module._REQUEST_HEADERS
+    incoming = Headers({"X-Lop-Device": "9f5d1d6e-6b1a-4c6e-9b3a-7a1c2f3d4e5f"})
+
+    monkeypatch.setattr(gateway_module, "_REQUEST_HEADERS", shipped | {"x-lop-device"})
+    assert "x-lop-device" in _gateway_headers(connection, incoming), "the lowercase spelling works"
+
+    monkeypatch.setattr(gateway_module, "_REQUEST_HEADERS", shipped | {"X-Lop-Device"})
+    assert "x-lop-device" not in _gateway_headers(
+        connection, incoming
+    ), "an entry spelled the way the header is written on the wire matches nothing at all"
+
+    # And the invariant behind all of it: every shipped entry is lowercase, so the
+    # allowlist and its inputs are in the same alphabet.
+    assert all(
+        entry == entry.lower() for entry in shipped
+    ), "an allowlist entry in any other case is dead code that reads as a boundary"
+
+
 @pytest.mark.asyncio
 async def test_verified_phone_can_start_and_steer_through_real_relay_gate(
     connection, signing_key, tmp_path

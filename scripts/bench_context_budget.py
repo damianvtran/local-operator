@@ -846,7 +846,50 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: the ceiling), which is that config dependence, not an unfixable platform
 #: offset. The tighten band below (1,200) is not in play.
 #:
-#: RAISED 37,378 -> 37,665 for the ``team`` tool's ``label``/``aliases``
+#: RAISED 37,378 -> 37,491 for the PROJECTS-SEMANTICS backend slice (PR #1831:
+#: coordination links, content-age staleness, refresh ≠ update), stated with
+#: the arithmetic because the guard exists to make copy growth an explicit
+#: decision. The slice's own delta is +187 chars = +67 billed, entirely in
+#: ``tool_schemas`` (67,903 -> 68,090 on the clean arm: a main-only tree at
+#: this fold's base vs the folded head) and NOTHING else — the ``project``
+#: tool's description and its ``progress`` field description teach the link
+#: roles and the refresh-vs-update split, and ``refresh`` joins the verb
+#: enum — while the other counters are byte-identical. A first pass cost
+#: +347 chars (+125 billed: CI run
+#: 36714584926 failed the gate by 82), and the review round's remediation
+#: trimmed the genuinely redundant halves — the "re-sending the identical
+#: line refreshes too" clause and "rather than a working link" — before this
+#: raise was written.
+#:
+#: This entry has survived TWO folds, and it now records both arithmetic
+#: lessons in its own numbers. The first push measured 103,419 = ~37,201
+#: against a 103,385/~37,189 branch-tree prediction: the +34 was MAIN's
+#: growth entering through the CI merge ref (the agent tool's schema, +36 on
+#: the tool itself), present because CI tests the merge with current main
+#: while any branch-tree prediction misses it. So this entry states the
+#: MERGE-REF numbers, BOTH arms, re-measured at the folded head with this
+#: script on this machine — the clean arm in ``env -i`` is the arm CI
+#: renders (same comparison as the tool:// entry above):
+#:
+#:   clean arm (CI), folded head      104,073 chars = ~37,436 billed
+#:   tiers-configured arm, same head  104,835 chars = ~37,710 billed
+#:                                    (104,835 - 104,073 = 762, the exact
+#:                                    config delta the tool:// entry
+#:                                    explains)
+#:
+#: A local run under that config therefore reads above this ceiling by the
+#: same 762 chars; the clean arm is what CI renders and the binding reading.
+#:
+#: Of the +314 clean-arm growth since the tool:// entry (103,759 -> 104,073,
+#: main kept moving between that merge and this fold), +187 is this slice's
+#: project-tool copy and the remaining ~127 is main-side merges, none of them
+#: here. The ceiling is the measured clean head + 55 (the band this file
+#: keeps): 37,491. That is ~152 further chars of main-side growth before this
+#: branch's CI run would eat the band, and CI's own reading then prints the
+#: number that replaces this one. The peel-off a future reduction can act
+#: on: moving the role wording into ``guide://projects`` (read on demand)
+#: takes this back toward the base.
+#: RAISED 37,491 -> 37,732 for the ``team`` tool's ``label``/``aliases``
 #: fields (the teams-label lane's core half: teams gain a local display label
 #: and extra addressing keys), stated with the arithmetic because the guard
 #: exists to make schema growth an explicit decision. Both are ADDITIONS to
@@ -854,28 +897,20 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: and they are create/update fields only: no new tool, no new op, nothing on
 #: the list/show path, nothing on any other tool.
 #:
-#: FOLDED ONTO THE HEAD ABOVE (the ask and ``tool://`` raises landed on
-#: ``origin/main`` while this branch was open), re-derived against the folded
-#: tree: the clean head measures 104,556 chars = ~37,610 billed, so the
-#: ceiling is that + the 55-token band this file keeps = 37,665. The sum of
-#: the recorded entries predicted 104,429 (base 103,232 + 310 + 217 + this
-#: diff's 670); the 127-char residue is post-``tool://`` upstream text that
-#: never carried an entry of its own (the search-guard/query-budget and
-#: tool-docs landings), and the ceiling follows the MEASUREMENT rather than
-#: the sum, as this file's rule says CI's own reading decides.
-#:
-#: The base/head pair for THIS diff, and the folded head, were measured with
-#: THIS script under an ISOLATED empty config (``env -i HOME=$ISO
-#: LOCAL_OPERATOR_CONFIG_DIR=$ISO/.local-operator``), which is what CI
-#: renders:
-#:
-#:   base, this machine   103,232 chars = ~37,134 billed
-#:   head, this machine   103,902 chars = ~37,375 billed
-#:
-#: and the delta is the two fields and nothing else:
+#: FOLDED ONTO THE HEAD ABOVE (a third fold for this branch: the projects
+#: raise and the main-side merges landed while it was open), re-derived
+#: against the merge-ref tree CI tests: the clean head measures 104,743
+#: chars = ~37,677 billed, so the ceiling is that + the 55-token band this
+#: file keeps = 37,732. The composition is exact, measured rather than
+#: summed: this branch's reading was 104,556 at the previous fold, the
+#: projects slice above adds its own +187 chars (68,573 -> 68,760 in
+#: ``tool_schemas``; every other counter byte-identical), and the new main's
+#: merges between the two folds add nothing net. This branch's own delta
+#: underneath remains +670 chars = +241 billed against its base (103,232 ->
+#: 103,902, measured ISOLATED with this script; the two fields and nothing
+#: else):
 #:
 #:   + tool_schemas    68,333 vs 67,663 = +670 chars = +241
-#:   total                                  +670 chars = +241
 #:
 #: A NON-isolated local run reads the 762-char subagents-tiers config delta
 #: larger (see the ``tool://`` entry), so CI remains the binding reading and
@@ -886,7 +921,7 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: (the empty-string reset; the whole-list replacement; the collision rule).
 #: The peel-off a future reduction can act on: dropping the two fields from
 #: the schema should take this ceiling back down ~241 billed.
-BUDGET_BILLED_TOKENS = 37_665
+BUDGET_BILLED_TOKENS = 37_732
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

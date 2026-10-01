@@ -153,6 +153,23 @@ def feature_flags() -> dict[str, Any]:
         # field, and a pick that silently did nothing would be worse than
         # a chip that never offered itself).
         "draft_selection": 1,
+        # The provider registry VIEW: `brand` / `capabilities` / `state` /
+        # `identity` / `account_count` on the rows of
+        # `GET /v1/auth/providers` (a.k.a. the census), AND the licence
+        # for the composer's provider inline lists (`/login` and
+        # `/logout` arguments). Its own key, not a bump of `auth`, by the
+        # rule `session_search` states above: a renderer that does not
+        # see it keeps rendering the census exactly as today (it already
+        # ignores unknown row fields) and keeps opening the
+        # LoginPicker/LogoutPicker dialogs on a pick — both are working
+        # surfaces over a backend without this key, and gating them on
+        # the newer LIST shape would hide them. With the key, the
+        # optional row fields (`brand`, `capabilities`, `identity`) may
+        # still be MISSING (an older backend that answers the census but
+        # not the view) — every reader falls back to its local
+        # derivation, so the key's presence never licenses a field that
+        # is not on the row.
+        "provider_catalogue": 1,
         # The new-chat pane's DRAFT PRE-ENGAGE: `POST
         # /v1/desktop/sessions/draft` mints an id the pane may subscribe,
         # watch and warm before any session exists, and `create` accepts
@@ -200,7 +217,19 @@ def feature_flags() -> dict[str, Any]:
         # plus per-row `actions`). Its own key because a renderer that
         # does not see it must keep using the session route, which still
         # works — "update the backend" would be false there.
-        "mcp_catalog": 1,
+        #
+        # 2 adds the document's `verbs` array (verb/description/
+        # destructive/offers per `/mcp` subcommand) AND licences the
+        # composer's MCP inline lists. A BUMP rather than a new key, by
+        # the rule `commands` states above: the same route and the same
+        # document gained a contract element, and a client reading >= 1
+        # that ignores `verbs` loses nothing — Settings > Integrations
+        # keeps working unchanged. Below 2 (an older backend) the
+        # composer draws NO MCP list and the pick of `/mcp` runs the
+        # existing McpPicker, which is today's path; it must not send a
+        # `/mcp ` argument list against a document with no verbs, where
+        # every row would be invented client-side.
+        "mcp_catalog": 2,
         "radient": 1,
         # The organization surfaces on the Radient proxy (design §4.7):
         # the four closed operations `memberships.list`, `org_agents.list`,

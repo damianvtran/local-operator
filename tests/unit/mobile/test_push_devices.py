@@ -65,6 +65,9 @@ def test_register_writes_the_record_and_answers_the_shape() -> None:
     assert payload["ok"] is True
     assert isinstance(payload["device_id"], str) and payload["device_id"]
     assert isinstance(payload["registered_at"], int) and payload["registered_at"] > 0
+    # The per-device key is minted here and returned exactly once (ADR §4 rule 2's
+    # ``m3``): it is what lets a later request move only its own device's state.
+    assert isinstance(payload["device_key"], str) and len(payload["device_key"]) >= 32
 
     # The file side effect: one record, 0600, and the fields the ADR §2.2
     # record carries (minus the token — asserted in its own cell).
@@ -74,7 +77,9 @@ def test_register_writes_the_record_and_answers_the_shape() -> None:
     record = records[0]
     assert sorted(record) == [
         "app_version",
+        "credential_expires_at",
         "device_id",
+        "device_key",
         "environment",
         "install_id",
         "last_seen_at",
@@ -90,6 +95,30 @@ def test_register_writes_the_record_and_answers_the_shape() -> None:
     assert record["name"] == "Damian's iPhone"
     assert record["registered_at"] == payload["registered_at"]
     assert record["last_seen_at"] == record["registered_at"]
+    # The expiry is READ OFF THE COOKIE the request presented (ADR §4 rule 2,
+    # round 7 Q-F15 / R8-m1), so it is the cookie's TTL past the register
+    # instant and NOT the register instant itself: a value equal to
+    # ``registered_at`` would be this route inventing a fact, and one past the
+    # TTL would be it guessing. ``_client`` logged in with the same password, so
+    # the cookie it holds is the one the route reads.
+    from local_operator.mobile.auth import COOKIE_TTL_S
+
+    assert record["credential_expires_at"] == pytest.approx(
+        record["registered_at"] + COOKIE_TTL_S, abs=5
+    )
+    # The key is stored machine-side — that is its whole purpose — and the two
+    # PER-DEVICE readings stay unwritten here (review round 1, R4):
+    # ``credential_live`` and ``last_authenticated_at`` are claims about ONE
+    # device, and this route cannot attribute the request to one (the cookie is
+    # the machine's, and on the Radient route the gateway injects it for every
+    # request and "cannot tell device A from device B"). That is what separates
+    # them from ``credential_expires_at`` above, which is a fact about the
+    # COOKIE and is exactly why the ADR puts it at register time. They are
+    # written by ``note_credential``, on a request that names its device with the
+    # key minted here.
+    assert record["device_key"] == payload["device_key"]
+    assert "credential_live" not in record
+    assert "last_authenticated_at" not in record
     # The atomic write leaves no temp file behind.
     assert not list(config_dir().glob(f".{PUSH_DEVICES_STORE_NAME}.*"))
 
@@ -318,15 +347,32 @@ def test_a_variant_spelling_written_by_an_older_build_does_not_fork() -> None:
     assert [device["device_id"] for device in listed] == [legacy_device_id]
 
 
-def test_deregister_removes_and_repeating_it_stays_ok() -> None:
-    """The app retries the delete on sign-out; a retry must not read as failure."""
+def test_revoke_tombstones_and_repeating_it_stays_ok() -> None:
+    """ADR §4 rule 1: the ROW STAYS with ``revoked_at`` — that is what makes it stick.
+
+    A removal would let the app's next launch register straight back in under the
+    same ``install_id``, which is the one thing a revoke exists to prevent. The
+    retry contract is unchanged: the app repeats this on sign-out, so a repeat
+    must stay ``{"ok": true}`` — and it must not move the tombstone.
+    """
     client = _client()
     device_id = client.post("/api/push/register", json=PAYLOAD).json()["device_id"]
     first = client.delete(f"/api/push/devices/{device_id}")
     assert first.status_code == 200 and first.json() == {"ok": True}
-    assert _stored_records() == []
+
+    records = _stored_records()
+    assert [record["device_id"] for record in records] == [
+        device_id
+    ], "a revoke tombstones the row; it must not delete it"
+    tombstone = records[0]["revoked_at"]
+    assert isinstance(tombstone, int) and tombstone > 0
+    # The metadata survives — it is what the operator reads while deciding.
+    assert records[0]["platform"] == "ios"
+
     second = client.delete(f"/api/push/devices/{device_id}")
     assert second.status_code == 200 and second.json() == {"ok": True}
+    assert _stored_records()[0]["revoked_at"] == tombstone, "the revoke happened once"
+
     unknown = client.delete("/api/push/devices/never-existed")
     assert unknown.status_code == 200 and unknown.json() == {"ok": True}
 
@@ -348,8 +394,10 @@ def test_delete_works_for_any_device_in_the_registry() -> None:
     ).json()["device_id"]
     response = client.delete(f"/api/push/devices/{stolen}")
     assert response.status_code == 200 and response.json() == {"ok": True}
-    remaining = [record["device_id"] for record in _stored_records()]
-    assert remaining == [keep]
+    states = {
+        record["device_id"]: push_devices.device_state(record) for record in _stored_records()
+    }
+    assert states == {keep: push_devices.STATE_LIVE, stolen: push_devices.STATE_REVOKED}
 
 
 def test_list_serves_the_settings_shape_and_omits_unknown_name() -> None:
@@ -369,23 +417,38 @@ def test_list_serves_the_settings_shape_and_omits_unknown_name() -> None:
     listed = client.get("/api/push/devices")
     assert listed.status_code == 200
     devices = listed.json()["devices"]
+    # The vocabulary rides with the list, rendered from the resolver's own table
+    # (ADR §3.1's ``precedence``) — a client must not have to be told separately.
+    assert listed.json()["precedence"] == "revoked > unpaired > expired"
+    assert listed.json()["precedence"] == push_devices.PRECEDENCE
     # Registration order, and a re-register updates in place, so the order is
     # stable under a rotation.
     assert [device["device_id"] for device in devices] == [first, second]
 
     entry = devices[0]
-    # Absence, not null, when the app never provided a label: the six-field
-    # Settings shape, name omitted (the repo's absence rule).
+    # Absence, not null, when the app never provided a label: the Settings shape
+    # (ADR §3.1) minus the fields this device has none of, name omitted (the
+    # repo's absence rule). ``credential_live`` IS here — and that is S4c's change
+    # to this shape rather than a regression of the rule beside it: register now
+    # records the expiry the request presented, so the row holds a credential fact
+    # and the list reports the derived flag. ``last_authenticated_at`` is still
+    # ABSENT, because that one needs a request that NAMES its device with the key,
+    # which a register cannot do (review round 1, R4) — and the presence guard is
+    # what keeps both fields off a row an earlier build wrote, which has neither.
     assert sorted(entry) == [
         "app_version",
+        "credential_live",
         "device_id",
         "last_seen_at",
         "platform",
         "registered_at",
+        "state",
     ]
+    assert entry["credential_live"] is True, "the cookie it presented is alive"
     assert "name" not in entry
     assert devices[1]["name"] == "Pixel"
     assert entry["platform"] == "ios" and devices[1]["platform"] == "android"
+    assert entry["state"] == push_devices.STATE_LIVE
     # Reading is read-only: the list walk writes nothing, so a phone opening
     # Settings cannot bump anything.
     assert _store_path().read_bytes() == before
@@ -421,6 +484,7 @@ def test_the_gate_holds_like_the_rest_of_the_api() -> None:
         client.post("/api/push/register", json=PAYLOAD),
         client.get("/api/push/devices"),
         client.delete("/api/push/devices/whatever"),
+        client.post("/api/push/devices/whatever/unrevoke"),
     ):
         assert response.status_code == 401
         assert response.json() == sessions.json(), "same refusal shape as /api/sessions"
@@ -547,6 +611,27 @@ _CORRUPT_STORES = [
         "record-install-id-not-a-uuid",
         json.dumps({"devices": [{**_VALID_RECORD, "install_id": "legacy-caller-id"}]}).encode(),
     ),
+    # The state markers and the credential fields are optional (an earlier
+    # build's record has none) but validated when present: a marker that is not
+    # a positive integer cannot be a timestamp this build wrote, and
+    # ``True`` is an ``int`` to Python while being nobody's timestamp.
+    (
+        "marker-not-a-timestamp",
+        json.dumps({"devices": [{**_VALID_RECORD, "revoked_at": "soon"}]}).encode(),
+    ),
+    (
+        "marker-is-a-bool",
+        json.dumps({"devices": [{**_VALID_RECORD, "unpaired_at": True}]}).encode(),
+    ),
+    (
+        "credential-live-not-a-bool",
+        json.dumps({"devices": [{**_VALID_RECORD, "credential_live": "yes"}]}).encode(),
+    ),
+    # The machine's operator key: present-but-invalid refuses rather than
+    # degrading to "no key", which would silently disable the operators-only
+    # route's check on a file somebody hand-edited.
+    ("operator-key-not-a-string", json.dumps({"devices": [], "operator_key": 5}).encode()),
+    ("operator-key-empty", json.dumps({"devices": [], "operator_key": ""}).encode()),
 ]
 
 
@@ -565,6 +650,14 @@ def test_a_corrupt_store_is_refused_and_left_byte_identical(label: str, stored: 
         client.post("/api/push/register", json=PAYLOAD),
         client.get("/api/push/devices"),
         client.delete("/api/push/devices/whatever"),
+        # The operators-only route reads the same store to check the key, so a
+        # store it cannot read is that route's fault too — a 500, deliberately
+        # NOT the ``machine_only`` refusal (which would be a false sentence for
+        # an unreadable registry).
+        client.post(
+            "/api/push/devices/whatever/unrevoke",
+            headers={push_devices.OPERATOR_KEY_HEADER: "whatever"},
+        ),
     ):
         assert response.status_code == 500, response.text
         assert "refusing" in response.json()["error"]
@@ -616,3 +709,899 @@ def test_file_mode_is_private_even_when_the_root_is_shared(tmp_path: Path) -> No
         os.umask(old_umask)
     mode = stat.S_IMODE(os.stat(root / PUSH_DEVICES_STORE_NAME).st_mode)
     assert mode == 0o600
+
+
+# ---------------------------------------------------------------------------
+# S4a: the lifecycle states, the one resolver, and the way back
+# ---------------------------------------------------------------------------
+
+#: A plausible timestamp for a marker a test plants. Fixed rather than ``now``
+#: so an assertion can name the exact value a rewrite must not have moved.
+STAMP = 1_759_000_000
+
+
+def _plant(records: list[dict[str, Any]], **store: Any) -> None:
+    """Write a registry file directly — the marker combination under test.
+
+    Directly, not through the routes: the routes can no longer *produce* a
+    lapsed credential or an unpaired computer (the rotation and unpair paths are
+    later slices), and planting the row is what makes these cells about the
+    RESOLVER's behaviour rather than about how a marker got there.
+    """
+    _store_path().parent.mkdir(parents=True, exist_ok=True)
+    _store_path().write_text(json.dumps({"devices": records, **store}), encoding="utf-8")
+
+
+def _record(**overrides: Any) -> dict[str, Any]:
+    return {**_VALID_RECORD, **overrides}
+
+
+#: Every combination of markers that decides a state, with the state ADR §4's
+#: precedence says wins. The three-marker row is the one that matters: two
+#: consumers reading it differently is the defect the single resolver exists to
+#: prevent.
+_PRECEDENCE_CASES = [
+    (
+        "all-three-markers",
+        {"revoked_at": STAMP, "unpaired_at": STAMP, "expired_at": STAMP},
+        push_devices.STATE_REVOKED,
+    ),
+    (
+        "revoked-and-expired",
+        {"revoked_at": STAMP, "expired_at": STAMP},
+        push_devices.STATE_REVOKED,
+    ),
+    (
+        "unpaired-and-expired",
+        {"unpaired_at": STAMP, "expired_at": STAMP},
+        push_devices.STATE_UNPAIRED,
+    ),
+    ("expired-only", {"expired_at": STAMP}, push_devices.STATE_EXPIRED),
+    ("no-marker", {}, push_devices.STATE_LIVE),
+]
+
+
+@pytest.mark.parametrize(
+    ("label", "markers", "expected"),
+    _PRECEDENCE_CASES,
+    ids=[label for label, _markers, _expected in _PRECEDENCE_CASES],
+)
+def test_the_precedence_resolves_identically_in_the_resolver_list_and_register(
+    label: str, markers: dict[str, int], expected: str
+) -> None:
+    """ONE resolver: the register route, ``list`` and the emit path agree.
+
+    The three consumers are asserted against the SAME planted row in one cell,
+    because the claim is not that each resolves correctly in isolation — it is
+    that no two of them can read one row as two different states (ADR §4). The
+    emit path is the resolver itself: ``device_state`` is what S5/S4c will call,
+    and it is the only thing this cell needs to pin for it.
+    """
+    _plant([_record(**markers)])
+    _client()  # log in; the register call below reuses one
+
+    # 1. The resolver, as the future emit path reads it.
+    assert push_devices.device_state(_stored_records()[0]) == expected
+
+    # 2. The list the phone's Settings renders.
+    listed = _client().get("/api/push/devices").json()
+    assert listed["precedence"] == push_devices.PRECEDENCE
+    assert listed["devices"][0]["state"] == expected
+
+    # 3. The register route's answer for that same row.
+    response = _client().post("/api/push/register", json=PAYLOAD)
+    if expected in (push_devices.STATE_REVOKED, push_devices.STATE_UNPAIRED):
+        assert response.status_code == 403, (label, response.text)
+        assert response.json()["code"] == f"device_{expected}"
+    else:
+        assert response.status_code == 200, (label, response.text)
+        assert response.json()["device_id"] == _VALID_RECORD["device_id"]
+        assert push_devices.device_state(_stored_records()[0]) == push_devices.STATE_LIVE
+
+
+def test_register_refusals_are_the_adrs_exact_codes_and_sentences() -> None:
+    """ADR §3.1 spells both refusals verbatim; the app renders these strings.
+
+    A paraphrase is a defect here for the same reason a wrong status code is:
+    the phone branches on ``code`` and shows ``error``, and the sentence is the
+    only thing standing between the user and "registered, but nothing arrives".
+    """
+    for marker, code, sentence in (
+        ("revoked_at", "device_revoked", "this device was revoked on this computer"),
+        ("unpaired_at", "device_unpaired", "this computer is no longer paired"),
+    ):
+        _plant([_record(**{marker: STAMP})])
+        before = _store_path().read_bytes()
+        response = _client().post("/api/push/register", json=PAYLOAD)
+        assert response.status_code == 403, (marker, response.text)
+        assert response.json() == {"code": code, "error": sentence}
+        assert _store_path().read_bytes() == before, (
+            f"{marker}: a refused register must not write — not the marker, not "
+            "the key, not last_seen_at"
+        )
+        # The refusal is about THIS row: the same computer's other device is
+        # untouched, and a fresh install_id is refused on nothing.
+        fresh = _client().post(
+            "/api/push/register",
+            json={**PAYLOAD, "install_id": "00000000-1111-2222-3333-444444444444"},
+        )
+        assert fresh.status_code == 200, (marker, fresh.text)
+        assert len(_stored_records()) == 2
+        assert _stored_records()[0][marker] == STAMP, "the refused row did not move"
+
+
+def test_a_re_register_clears_expired_at_and_mints_a_fresh_key() -> None:
+    """``expired_at`` does NOT refuse: authenticating and registering IS the clearing.
+
+    This is the state the two "sign in again" paths produce (a password rotation,
+    the cookie's own TTL), and ADR §3.1 is explicit that a successful
+    re-register clears it — silence would be worse than any of the three, because
+    the app could show a registered device that never receives anything.
+    """
+    _plant([_record(expired_at=STAMP, credential_live=False, last_authenticated_at=STAMP)])
+    first = _client().post("/api/push/register", json=PAYLOAD)
+    assert first.status_code == 200, first.text
+    key = first.json()["device_key"]
+    record = _stored_records()[0]
+    assert "expired_at" not in record, "the re-register IS the act that clears it"
+    assert record["registered_at"] == _VALID_RECORD["registered_at"], "identity is stable"
+    # The re-register reports NO credential reading of its own (review round 1,
+    # R4): the planted row's reading is not refreshed, not cleared, and not
+    # invented — it is left exactly as the last per-device route wrote it.
+    assert record["credential_live"] is False
+    assert record["last_authenticated_at"] == STAMP
+
+    # Returned once per call, and a rotation is a rotation: the previous key is
+    # superseded, which is what makes a leaked key's window a single call wide.
+    second = _client().post("/api/push/register", json=PAYLOAD)
+    assert second.json()["device_key"] != key
+    assert _stored_records()[0]["device_key"] == second.json()["device_key"]
+
+
+def test_the_device_key_is_returned_once_never_listed_and_never_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A secret that rides the wire once, lives in one file, and reaches no log."""
+    client = _client()
+    with caplog.at_level(logging.DEBUG):
+        key = client.post("/api/push/register", json=PAYLOAD).json()["device_key"]
+    listed = client.get("/api/push/devices")
+    assert "device_key" not in listed.text
+    assert key not in listed.text
+    assert PAYLOAD["token"] not in listed.text
+    assert key not in caplog.text, "the key must not reach a log line"
+
+    # It IS on disk: that is what makes it a machine-side credential the routes
+    # can check later (S4c), rather than something the app must send back.
+    assert _stored_records()[0]["device_key"] == key
+    # And the presentation comparison is the only thing that reads it.
+    record = _stored_records()[0]
+    assert push_devices.device_key_matches(record, key) is True
+    assert push_devices.device_key_matches(record, key + "x") is False
+    assert push_devices.device_key_matches(record, "") is False
+    assert push_devices.device_key_matches(record, None) is False
+    assert push_devices.device_key_matches({}, key) is False
+
+
+def test_a_record_from_an_earlier_build_loads_and_reads_as_live() -> None:
+    """The upgrade path: the previous build wrote no markers and no credential.
+
+    Refusing such a store would brick every existing install on upgrade, and
+    inventing ``credential_live: False`` for it would be a claim nobody made.
+    Absence is the truth (the repo's rule): the row is ``live`` — nothing marked
+    it — and the credential fields are OMITTED from the list rather than
+    defaulted.
+    """
+    legacy = {
+        "device_id": "b" * 32,
+        # The identity is ``(install_id, platform)``: this row must be the SAME
+        # device the payload registers as, or the cell would be proving that a
+        # second device is created — which is the opposite of what it claims.
+        "platform": "ios",
+        "environment": "sandbox",
+        "app_version": "0.9.0 (3)",
+        "install_id": _VALID_RECORD["install_id"],
+        "registered_at": STAMP,
+        "last_seen_at": STAMP,
+    }
+    _plant([legacy])
+    entry = _client().get("/api/push/devices").json()["devices"][0]
+    assert entry["state"] == push_devices.STATE_LIVE
+    assert "credential_live" not in entry
+    assert "last_authenticated_at" not in entry
+    assert "device_key" not in entry
+    # The next register fills in the key — and, deliberately, NOT the two
+    # credential fields (review round 1, R4): those are per-device readings
+    # the register route cannot make, so they stay absent rather than being
+    # guessed at.
+    refreshed = _client().post("/api/push/register", json=PAYLOAD).json()
+    assert refreshed["device_id"] == legacy["device_id"], "an upgrade must not fork the device"
+    upgraded = _stored_records()[0]
+    assert upgraded["device_key"] == refreshed["device_key"]
+    assert "credential_live" not in upgraded
+    assert "last_authenticated_at" not in upgraded
+
+
+def test_unrevoke_is_operators_only_and_clears_the_markers() -> None:
+    """The way back is the machine's act, never the device's (ADR §4 round 4 B1).
+
+    A device session is a cookie and nothing else — which is exactly what a
+    revoked phone still holds — so the route must refuse it, and refuse a wrong
+    key the same way (the refusal says nothing about the key). What the operator
+    gets instead is the marker cleared and NOTHING restored: no token, no
+    credential, so the device must register again and registering needs a live
+    credential.
+    """
+    client = _client()
+    registered = client.post("/api/push/register", json=PAYLOAD).json()
+    device_id = registered["device_id"]
+    key = push_devices.operator_key(config_dir())
+    assert isinstance(key, str) and key, "the daemon minted it with the registration"
+    client.delete(f"/api/push/devices/{device_id}")
+    # The lapse case: a credential that is not live, and a key that IS this
+    # device's, so both "nothing was restored" and "the key survives" are
+    # assertions about values that could have moved rather than tautologies.
+    # The planted store carries the machine's operator key — a store written by
+    # the daemon would, and one without it could not reach this route at all.
+    planted = _record(
+        device_id=device_id,
+        revoked_at=STAMP,
+        credential_live=False,
+        last_authenticated_at=STAMP,
+        device_key=registered["device_key"],
+    )
+    _plant([planted], **{push_devices.OPERATOR_KEY_FIELD: key})
+    before = _store_path().read_bytes()
+
+    machine_only = {
+        "code": "machine_only",
+        "error": "a device cannot restore itself — use the computer or your account",
+    }
+    refused = client.post(f"/api/push/devices/{device_id}/unrevoke")
+    assert refused.status_code == 403, refused.text
+    assert refused.json() == machine_only
+    wrong_key = client.post(
+        f"/api/push/devices/{device_id}/unrevoke",
+        headers={push_devices.OPERATOR_KEY_HEADER: "not-the-key"},
+    )
+    assert wrong_key.status_code == 403
+    assert wrong_key.json() == machine_only, "a wrong key is refused like no key at all"
+    assert _store_path().read_bytes() == before, "a refused unrevoke must not write"
+
+    restored = client.post(
+        f"/api/push/devices/{device_id}/unrevoke",
+        headers={push_devices.OPERATOR_KEY_HEADER: key},
+    )
+    assert restored.status_code == 200, restored.text
+    assert restored.json() == {"ok": True, "device_id": device_id}
+    record = _stored_records()[0]
+    assert "revoked_at" not in record
+    assert push_devices.device_state(record) == push_devices.STATE_LIVE
+    assert record["credential_live"] is False, "no credential is restored with the marker"
+    assert record["last_authenticated_at"] == STAMP, "no authentication is invented"
+    assert record["device_key"] == registered["device_key"], "the key survives the round trip"
+
+    # An UNPAIRED row is the other state this clears, and a row carrying both
+    # markers is restored in one act — the operator asked for this device back,
+    # and leaving ``unpaired_at`` behind would refuse it again for a reason
+    # nobody chose.
+    _plant(
+        [_record(device_id=device_id, unpaired_at=STAMP, revoked_at=STAMP, credential_live=False)],
+        **{push_devices.OPERATOR_KEY_FIELD: key},
+    )
+    again = client.post(
+        f"/api/push/devices/{device_id}/unrevoke",
+        headers={push_devices.OPERATOR_KEY_HEADER: key},
+    )
+    assert again.status_code == 200, again.text
+    assert push_devices.device_state(_stored_records()[0]) == push_devices.STATE_LIVE
+
+
+def test_unrevoke_clears_every_marker_the_row_carries() -> None:
+    """EVERY marker, not just the strongest (the mobile lane's follow-up, option (a)).
+
+    A row can carry both — a device revoked, and then its computer unpaired — and
+    ADR 0006 §3.1/§4 (that record lives in the mobile repository,
+    ``damianvtran/local-operator-mobile``) says the verb clears "the marker that
+    is set", which names the two STATES a row can be in rather than a licence to
+    leave the weaker one behind. Restoring a device and leaving it unpaired would
+    refuse its next registration for a reason nobody chose, and would make one
+    operator intent take two commands.
+
+    Pinned here because the claim is about the ARTIFACT, not about a projection of
+    it. A state assertion does redden under the one-marker shape — the row then
+    resolves to ``unpaired`` — but the state can only say the row is in no marked
+    state; it cannot name what was cleared. This cell reads the STORE, so the
+    absence asserted is both KEYS, and it then asserts the consequence the weaker
+    marker would have: the device can register again (200, where a surviving
+    ``unpaired_at`` is 403 ``device_unpaired``).
+    """
+    client = _client()
+    registered = client.post("/api/push/register", json=PAYLOAD).json()
+    device_id = registered["device_id"]
+    key = push_devices.operator_key(config_dir())
+    assert isinstance(key, str) and key
+    _plant(
+        [_record(device_id=device_id, revoked_at=STAMP, unpaired_at=STAMP + 10)],
+        **{push_devices.OPERATOR_KEY_FIELD: key},
+    )
+    assert push_devices.device_state(_stored_records()[0]) == push_devices.STATE_REVOKED
+
+    restored = client.post(
+        f"/api/push/devices/{device_id}/unrevoke",
+        headers={push_devices.OPERATOR_KEY_HEADER: key},
+    )
+    assert restored.status_code == 200, restored.text
+    assert restored.json() == {"ok": True, "device_id": device_id}
+    record = _stored_records()[0]
+    assert "revoked_at" not in record, "the stronger marker went"
+    assert "unpaired_at" not in record, "…and so did the weaker one, in the same act"
+    assert push_devices.device_state(record) == push_devices.STATE_LIVE
+    # The consequence, stated as the device would experience it: it may register
+    # again. Left unpaired, this would be a 403 ``device_unpaired``.
+    assert client.post("/api/push/register", json=PAYLOAD).status_code == 200
+    listed = client.get("/api/push/devices").json()["devices"]
+    assert [entry["state"] for entry in listed] == [push_devices.STATE_LIVE]
+
+
+def test_unrevoke_of_an_id_this_computer_never_registered_is_a_404() -> None:
+    """Absent is a different answer from revoked, and the operator is told which.
+
+    ``revoke`` is idempotent by contract (the app retries it on sign-out), so it
+    answers ``{"ok": true}`` for an id it does not hold. ``unrevoke`` is a
+    human's command and the opposite: "no such device" is information, and a
+    silent ``ok`` would report a restore that never happened.
+    """
+    client = _client()
+    client.post("/api/push/register", json=PAYLOAD)  # so an operator key exists
+    key = push_devices.operator_key(config_dir())
+    assert isinstance(key, str) and key
+    response = client.post(
+        "/api/push/devices/never-registered/unrevoke",
+        headers={push_devices.OPERATOR_KEY_HEADER: key},
+    )
+    assert response.status_code == 404, response.text
+    assert response.json()["code"] == push_devices.DEVICE_ABSENT_CODE
+    assert "never-registered" in response.json()["error"]
+
+
+def test_the_operator_key_is_minted_with_the_first_device_and_never_listed() -> None:
+    """It belongs to the machine, not to a device, and no route renders it.
+
+    Read-only by design (review round 1, R5): the daemon is the store's only
+    writer, so this function answers ``None`` for a store that has no key yet
+    rather than minting one as a second writer.
+    """
+    client = _client()
+    assert not _store_path().exists(), "nothing is minted before a device exists"
+    assert push_devices.operator_key(config_dir()) is None, "no key yet, and no write"
+    assert not _store_path().exists(), "a read must not create the store"
+
+    client.post("/api/push/register", json=PAYLOAD)
+    key = push_devices.operator_key(config_dir())
+    assert isinstance(key, str) and len(key) >= 32
+    assert push_devices.operator_key(config_dir()) == key, "minted once"
+    assert push_devices.verify_operator_key(config_dir(), key) is True
+    assert push_devices.verify_operator_key(config_dir(), key + "x") is False
+    assert push_devices.verify_operator_key(config_dir(), None) is False
+    assert push_devices.verify_operator_key(config_dir(), "") is False
+    listed = client.get("/api/push/devices")
+    assert key not in listed.text
+    assert push_devices.OPERATOR_KEY_FIELD not in listed.text
+    # …and the key survives a later registration, including its own write path.
+    client.post(
+        "/api/push/register",
+        json={**PAYLOAD, "install_id": "00000000-1111-2222-3333-444444444444"},
+    )
+    assert push_devices.operator_key(config_dir()) == key
+
+
+def test_the_state_descriptions_are_the_modules_own_copy() -> None:
+    """The vocabulary's sentences live beside the names, not in a renderer.
+
+    Design round 1, D2: the legend rendered the four descriptions inline, so "one
+    vocabulary" covered the state NAMES but not the copy the app's Settings will
+    mirror. One description per state, plus ``absent`` — the fifth state of the
+    ADR's table, which no row can hold but a ``list`` can report (D4).
+    """
+    assert set(push_devices.STATE_DESCRIPTIONS) == set(push_devices.DESCRIBED_STATES)
+    assert set(push_devices.DEVICE_STATES) <= set(push_devices.DESCRIBED_STATES)
+    assert push_devices.STATE_ABSENT not in push_devices.DEVICE_STATES
+    for state, description in push_devices.STATE_DESCRIPTIONS.items():
+        assert description and description == description.strip(), state
+    # The precedence sentence is rendered FROM the table, so the explanation and
+    # the rule cannot drift (the same shape as ``PRECEDENCE`` itself).
+    assert push_devices.PRECEDENCE in push_devices.PRECEDENCE_SENTENCE
+    assert push_devices.PRECEDENCE == "revoked > unpaired > expired"
+
+
+# ---------------------------------------------------------------------------
+# push/ack-sync S4c part 1 — the credential facts, the lapse, and the markers
+#
+# ADR 0006 §4 rule 2. What is asserted here is the DISCRIMINATION, not just the
+# happy path: a request without the key moves nothing, a key that belongs to
+# another device moves nothing, a valid key on a tombstoned row moves nothing,
+# and a lapse is written from the cookie's own death rather than from the clock
+# that observed it. Each of those is a cell that a mutation of the rule can be
+# shown to break.
+# ---------------------------------------------------------------------------
+
+#: A fixed instant every cell below reasons at, so nothing here depends on how
+#: long the suite took to reach it.
+NOW = 1_780_000_000
+
+
+def _register(client: TestClient, **overrides: Any) -> dict[str, Any]:
+    """Register one device over the wire and return the response (the only
+    place the ``device_key`` is ever handed out)."""
+    response = client.post("/api/push/register", json={**PAYLOAD, **overrides})
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _stored(install_id: str) -> dict[str, Any]:
+    """The store's row for one install_id — the wire answer is not enough."""
+    return next(row for row in _stored_records() if row["install_id"] == install_id)
+
+
+def test_a_key_presented_request_records_its_own_devices_credential() -> None:
+    """The evaluation itself: the flag and the stamp, for the device that asked."""
+    client = _client()
+    registered = _register(client)
+    install_id = PAYLOAD["install_id"]
+    expiry = NOW + 600
+
+    moved = push_devices.note_credential(
+        config_dir(),
+        install_id=install_id,
+        device_key=registered["device_key"],
+        credential_expires_at=expiry,
+        now=NOW,
+    )
+
+    assert moved is not None, "the key is the proof, and it was presented"
+    assert moved["device_id"] == registered["device_id"]
+    assert moved["credential_live"] is True
+    assert moved["last_authenticated_at"] == NOW
+    assert moved["credential_expires_at"] == expiry
+    record = _stored(install_id)
+    assert record["credential_live"] is True
+    assert record["last_authenticated_at"] == NOW
+    assert record["credential_expires_at"] == expiry
+    # A live credential writes NO marker: the lapse is the only marker this path
+    # can set (it may pause a delivery, never restore one), and a healthy request
+    # writing one would put every registered device in the expired state.
+    assert "expired_at" not in record
+
+
+def test_a_request_without_the_key_moves_no_device_state() -> None:
+    """``X-Lop-Device`` alone is a CLAIM (ADR §4 rule 2's ``m3``).
+
+    Both absences are the same case: the header missing entirely, and the header
+    present with an empty value. Neither may reach a write.
+    """
+    client = _client()
+    registered = _register(client)
+    install_id = PAYLOAD["install_id"]
+    before = _store_path().read_bytes()
+
+    for absent in (None, ""):
+        moved = push_devices.note_credential(
+            config_dir(),
+            install_id=install_id,
+            device_key=absent,
+            credential_expires_at=NOW + 600,
+            now=NOW,
+        )
+        assert moved is None, f"presented={absent!r} must not move state"
+
+    assert _store_path().read_bytes() == before
+    record = _stored(install_id)
+    assert "credential_live" not in record and "last_authenticated_at" not in record
+    assert registered["device_key"]  # the row does carry one, so this is a refusal
+
+
+def test_a_key_that_belongs_to_another_device_moves_nothing() -> None:
+    """The stolen-cookie case: a device's key cannot vouch for a sibling.
+
+    Two devices on one computer share its cookie, so the KEY is the only thing
+    that tells them apart — and this is the cell that fails if the comparison is
+    ever relaxed to \"any key in the registry\".
+    """
+    client = _client()
+    first = _register(client, install_id=str(uuid.uuid4()))
+    second = _register(client, install_id=str(uuid.uuid4()))
+    before = _store_path().read_bytes()
+
+    moved = push_devices.note_credential(
+        config_dir(),
+        install_id=str(uuid.uuid4()),  # an install_id nobody registered
+        device_key=first["device_key"],
+        credential_expires_at=NOW + 600,
+        now=NOW,
+    )
+    assert moved is None
+    # ...and the real cross-presentation: device B's install_id with A's key.
+    # The key must be checked against the row it NAMES, not against the registry
+    # at large, or one device's registration would vouch for its siblings.
+    moved = push_devices.note_credential(
+        config_dir(),
+        install_id=_stored_by_id(second["device_id"])["install_id"],
+        device_key=first["device_key"],
+        credential_expires_at=NOW + 600,
+        now=NOW,
+    )
+    assert moved is None
+    assert _store_path().read_bytes() == before
+
+
+def test_a_valid_key_for_a_tombstoned_device_moves_nothing() -> None:
+    """The key proves IDENTITY, never PERMISSION (ADR §4 rule 2).
+
+    A revoked row refuses the write even with its own key in hand, because the
+    marker is the machine's answer and a credential fact underneath it would be a
+    second one. The refusal is checked BEFORE the recompute, so no intermediate
+    live state is ever observable.
+    """
+    client = _client()
+    registered = _register(client)
+    assert client.delete(f"/api/push/devices/{registered['device_id']}").status_code == 200
+    before = _store_path().read_bytes()
+
+    moved = push_devices.note_credential(
+        config_dir(),
+        install_id=PAYLOAD["install_id"],
+        device_key=registered["device_key"],
+        credential_expires_at=NOW + 600,
+        now=NOW,
+    )
+
+    assert moved is None
+    assert _store_path().read_bytes() == before
+    assert push_devices.device_state(_stored(PAYLOAD["install_id"])) == "revoked"
+
+
+def test_a_lapsed_cookie_writes_expired_at_from_the_cookie_itself() -> None:
+    """The marker carries the COOKIE's death, not the clock that noticed it.
+
+    The observation window is real: ``verify_cookie`` accepts a cookie up to
+    ``_SKEW_S`` past its expiry (a drifting phone clock must not bounce a user
+    out), so a request CAN arrive authenticated with a credential that has
+    already lapsed — and the instant to record is when it died.
+    """
+    client = _client()
+    registered = _register(client)
+    died = NOW - 30
+
+    moved = push_devices.note_credential(
+        config_dir(),
+        install_id=PAYLOAD["install_id"],
+        device_key=registered["device_key"],
+        credential_expires_at=died,
+        now=NOW,
+    )
+
+    assert moved is not None
+    assert moved["credential_live"] is False
+    assert moved["expired_at"] == died
+    record = _stored(PAYLOAD["install_id"])
+    assert record["expired_at"] == died, "the cookie's instant, not ``now``"
+    assert push_devices.device_state(record) == "expired"
+
+
+def test_a_live_cookie_never_clears_a_rotation_marker() -> None:
+    """A device's own report can only PAUSE its delivery (ADR §4 rule 2).
+
+    So a request arriving with a LIVE cookie after a rotation leaves the rotation's
+    marker standing rather than stamping a future instant into it. The way back is
+    the register that follows a fresh login, which is a cell of its own below.
+    """
+    client = _client()
+    registered = _register(client)
+    rotated_at = NOW - 100
+    assert push_devices.rotate_credentials(config_dir(), now=rotated_at) == [
+        registered["device_id"]
+    ]
+
+    moved = push_devices.note_credential(
+        config_dir(),
+        install_id=PAYLOAD["install_id"],
+        device_key=registered["device_key"],
+        credential_expires_at=NOW + 600,
+        now=NOW,
+    )
+
+    assert moved is not None, "the request was attributable, so it moved the facts"
+    assert moved["credential_live"] is False
+    record = _stored(PAYLOAD["install_id"])
+    assert record["expired_at"] == rotated_at
+    assert record["credential_expires_at"] == NOW + 600
+    assert push_devices.device_state(record) == "expired"
+
+
+def test_registering_again_clears_the_lapse_and_records_the_new_cookie() -> None:
+    """``expired_at`` does NOT refuse, and re-registering IS the act that clears it."""
+    client = _client()
+    registered = _register(client)
+    push_devices.rotate_credentials(config_dir(), now=NOW)
+    assert "expired_at" in _stored(PAYLOAD["install_id"])
+
+    second = _register(client, name="Damian's iPhone")
+
+    record = _stored(PAYLOAD["install_id"])
+    assert "expired_at" not in record
+    assert record["device_id"] == registered["device_id"], "the row was replaced, not added"
+    assert record["credential_expires_at"] > NOW
+    assert second["device_id"] == registered["device_id"]
+
+
+def test_rotating_the_password_marks_every_device_expired_and_never_revoked() -> None:
+    """One action, every row, and the marker is ``expired_at`` (ADR §4 path 3).
+
+    The revoked row is rotated too — its cookie died like every other — and keeps
+    its ``revoked`` answer by precedence, which is what stops one rotation from
+    silently un-revoking a phone.
+    """
+    client = _client()
+    first = _register(client, install_id=str(uuid.uuid4()))
+    second = _register(client, install_id=str(uuid.uuid4()))
+    assert client.delete(f"/api/push/devices/{second['device_id']}").status_code == 200
+
+    rotated = push_devices.rotate_credentials(config_dir(), now=NOW)
+
+    assert sorted(rotated) == sorted([first["device_id"], second["device_id"]])
+    for row in _stored_records():
+        assert row["expired_at"] == NOW, "every cookie died, so every row records it"
+    # The tombstone survives the rotation: precedence resolves the row the same
+    # way it did before, so one rotation cannot silently un-revoke a phone.
+    assert "revoked_at" in _stored_by_id(second["device_id"])
+    assert push_devices.device_state(_stored_by_id(second["device_id"])) == "revoked"
+    assert push_devices.device_state(_stored_by_id(first["device_id"])) == "expired"
+
+
+def _stored_by_id(device_id: str) -> dict[str, Any]:
+    return next(row for row in _stored_records() if row["device_id"] == device_id)
+
+
+def test_a_second_rotation_at_the_same_instant_writes_nothing() -> None:
+    """Idempotent, so the store's bytes are a signal a reader can trust."""
+    client = _client()
+    _register(client)
+    push_devices.rotate_credentials(config_dir(), now=NOW)
+    after_first = _store_path().read_bytes()
+    push_devices.rotate_credentials(config_dir(), now=NOW)
+    assert _store_path().read_bytes() == after_first
+
+
+def test_the_credential_facts_are_a_READ_and_write_nothing() -> None:
+    """ADR §4 rule 2's \"the emit worker writes no marker at all\", made structural.
+
+    The emit side's only input is ``credential_facts``; this cell is what fails if
+    a future edit ever reaches for a write from the read path. mtime is checked
+    alongside the bytes because a rewrite with equal content is still a write.
+    """
+    client = _client()
+    _register(client)
+    before_bytes = _store_path().read_bytes()
+    before_stat = _store_path().stat()
+
+    for _ in range(3):
+        facts = push_devices.credential_facts(config_dir(), now=NOW)
+        assert facts and facts[0]["device_id"]
+
+    assert _store_path().read_bytes() == before_bytes
+    after_stat = _store_path().stat()
+    assert (after_stat.st_mtime_ns, after_stat.st_size) == (
+        before_stat.st_mtime_ns,
+        before_stat.st_size,
+    )
+
+
+def test_the_credential_facts_derive_the_lapse_from_the_stored_expiry() -> None:
+    """The derivation, and the reason the fields exist: no request is needed.
+
+    A phone that has been shut for a week makes no call; the heartbeat asks this
+    function, and it answers from the cookie's expiry the register recorded.
+    """
+    client = _client()
+    _register(client)
+    record = _stored(PAYLOAD["install_id"])
+    expiry = record["credential_expires_at"]
+
+    live = push_devices.credential_facts(config_dir(), now=expiry - 1)
+    lapsed = push_devices.credential_facts(config_dir(), now=expiry + 1)
+
+    assert [fact["credential_live"] for fact in live] == [True]
+    assert [fact["credential_live"] for fact in lapsed] == [False]
+    # ...and the marker a rotation writes outranks that arithmetic, because a
+    # rotation kills cookies whose nominal expiry is days away.
+    push_devices.rotate_credentials(config_dir(), now=expiry - 10_000)
+    assert [
+        fact["credential_live"]
+        for fact in push_devices.credential_facts(config_dir(), now=expiry - 1)
+    ] == [False]
+
+
+def test_an_unread_credential_is_not_live() -> None:
+    """Absence is not evidence (the repo's absence rule, at the rule's own level)."""
+    assert push_devices.credential_live_at({}, NOW) is False
+    assert push_devices.credential_live_at({"credential_live": False}, NOW) is False
+    # An earlier build's row, before ``credential_expires_at`` was recorded.
+    assert push_devices.credential_live_at({"credential_live": True}, NOW) is True
+    # A marker outranks both.
+    assert (
+        push_devices.credential_live_at(
+            {"credential_live": True, "credential_expires_at": NOW + 600, "expired_at": NOW}, NOW
+        )
+        is False
+    )
+
+
+def test_the_settings_list_never_renders_the_expiry_it_stores() -> None:
+    """The wire is a contract, not the store's dump (ADR §3.1's list shape).
+
+    ``credential_expires_at`` is machine-side: the ADR's block for ``list`` names
+    ``credential_live`` and ``last_authenticated_at`` and nothing else, so a row
+    that stores the expiry still hands the phone no expiry.
+    """
+    client = _client()
+    _register(client)
+    assert "credential_expires_at" in _stored(PAYLOAD["install_id"])
+
+    listed = client.get("/api/push/devices").json()["devices"][0]
+
+    assert "credential_expires_at" not in listed
+    assert "device_key" not in listed
+    assert "install_id" not in listed
+
+
+# ---------------------------------------------------------------------------
+# push/ack-sync S4c part 1, remediation round 1
+#
+# AR-1: the Settings list and the credential report must answer "live?" the same
+# way for the same row at the same instant. AR-2: the daemon's WIRING is part of
+# the behaviour, so it gets cells of its own — the reviewer's two glue mutations
+# (swap the register order; delete the evaluation from the list route) left the
+# whole suite green before these existed.
+# ---------------------------------------------------------------------------
+
+
+def test_the_settings_list_and_the_report_answer_live_the_same_way() -> None:
+    """One row, one instant, one answer (review round 1, AR-1; QA Q-F1).
+
+    The reviewer's reproduction: a row the relay last saw holding a live cookie
+    (``credential_live: True``) whose own expiry has since passed, with no keyed
+    request since — exactly what a direct-route device leaves behind when its
+    cookie dies while the app is shut (`expired_at` is never written for a
+    timeout, so `device_state` still reads ``live`` too: §4's markers decide
+    state, not the clock). The stored flag says live and the one rule says
+    not-live, and before this cell the list rendered the stored flag while the
+    report derived — Settings promising delivery the machine had already stopped.
+    """
+    planted = _record(
+        credential_live=True,
+        credential_expires_at=STAMP,
+        last_authenticated_at=STAMP,
+    )
+    _plant([planted])
+    after = STAMP + 10  # past the cookie's expiry; nothing has written since
+
+    listed = push_devices.list_devices(config_dir(), now=after)["devices"][0]
+    facts = push_devices.credential_facts(config_dir(), now=after)
+
+    assert push_devices.credential_live_at(planted, after) is False
+    assert listed["credential_live"] is False, "the list is not a second opinion"
+    assert [fact["credential_live"] for fact in facts] == [False]
+    assert (
+        listed["state"] == push_devices.STATE_LIVE
+    ), "the STATE is still the markers' answer, and this is not that question"
+    # The other direction, so the cell cannot be satisfied by a constant.
+    before = push_devices.list_devices(config_dir(), now=STAMP - 10)["devices"][0]
+    assert before["credential_live"] is True
+
+
+def test_the_list_still_omits_a_credential_it_does_not_hold() -> None:
+    """AR-1's fix must not become an assertion about a row nobody read.
+
+    The presence guard is widened to either credential field, NOT dropped: a row
+    an earlier build wrote carries no credential fact at all, and the list keeps
+    omitting the key rather than reporting the derivation's default for it.
+    """
+    legacy = {
+        "device_id": "c" * 32,
+        "platform": "ios",
+        "environment": "sandbox",
+        "app_version": "0.9.0 (3)",
+        "install_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        "registered_at": STAMP,
+        "last_seen_at": STAMP,
+    }
+    _plant([legacy])
+
+    entry = push_devices.list_devices(config_dir(), now=STAMP)["devices"][0]
+
+    assert "credential_live" not in entry
+    assert "last_authenticated_at" not in entry
+
+
+def _device_headers(device_key: str, install_id: str = PAYLOAD["install_id"]) -> dict[str, str]:
+    """The two headers the phone presents, spelled from the module's constants."""
+    return {
+        push_devices.DEVICE_HEADER: install_id,
+        push_devices.DEVICE_KEY_HEADER: device_key,
+    }
+
+
+def test_the_register_route_evaluates_before_it_re_mints_the_key() -> None:
+    """The glue's ORDER, asserted where it runs (review round 1, AR-2, mutation D1).
+
+    The evaluation must happen before the registration re-mints the device key: a
+    re-registering app presents the key it still holds, so evaluating afterwards
+    compares the NEW key against the OLD header and silently moves nothing. The
+    reviewer swapped the two calls and the whole suite stayed green; this cell is
+    what notices — the stamp can only be written if the evaluation matched a key
+    that the same call has since replaced.
+    """
+    client = _client()
+    first = _register(client)
+    row = _stored(PAYLOAD["install_id"])
+    assert "last_authenticated_at" not in row, "the first register presents no key to prove"
+
+    response = client.post(
+        "/api/push/register", json=PAYLOAD, headers=_device_headers(first["device_key"])
+    )
+
+    assert response.status_code == 200, response.text
+    rotated = response.json()["device_key"]
+    assert rotated != first["device_key"], "every register re-mints the key"
+    row = _stored(PAYLOAD["install_id"])
+    assert row["device_key"] == rotated, "the re-mint replaced the key"
+    assert row.get("last_authenticated_at"), (
+        "only an evaluation that ran BEFORE the re-mint can have matched the key "
+        "this request presented"
+    )
+
+
+def test_the_list_route_evaluates_the_device_that_names_itself() -> None:
+    """The list's call site (review round 1, AR-2, mutation D2).
+
+    Deleting the evaluation from ``api_push_devices`` left the whole suite green.
+    The route is where the app's foreground reads land, so it is the call site
+    most likely to carry the reading — and the row can only gain the stamp if the
+    route ran it.
+    """
+    client = _client()
+    registered = _register(client)
+    assert "credential_live" not in _stored(PAYLOAD["install_id"])
+
+    response = client.get("/api/push/devices", headers=_device_headers(registered["device_key"]))
+
+    assert response.status_code == 200, response.text
+    row = _stored(PAYLOAD["install_id"])
+    assert row["credential_live"] is True
+    assert row.get("last_authenticated_at")
+    # The route's own answer moves with the store rather than being a second
+    # opinion: the row it renders is the row it just evaluated.
+    assert response.json()["devices"][0]["credential_live"] is True
+
+
+def test_the_revoke_route_evaluates_the_device_that_names_itself() -> None:
+    """The third call site, which the reviewer's two mutations did not reach.
+
+    Same glue, same class: if only two of the three routes evaluate, the class of
+    defect AR-2 names is still open on the third. The evaluation runs before the
+    tombstone, so a device that revokes a sibling still records its own reading.
+    """
+    client = _client()
+    registered = _register(client)
+    assert "credential_live" not in _stored(PAYLOAD["install_id"])
+
+    response = client.delete(
+        f"/api/push/devices/{registered['device_id']}",
+        headers=_device_headers(registered["device_key"]),
+    )
+
+    assert response.status_code == 200, response.text
+    row = _stored(PAYLOAD["install_id"])
+    assert row.get("revoked_at") is not None, "the route still revokes"
+    assert row.get("last_authenticated_at"), "and it evaluated on the way"

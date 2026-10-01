@@ -1483,6 +1483,54 @@ def test_the_tool_filter_is_the_managers_own_rule(distinct: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_the_verb_table_is_the_slash_vocabulary_and_the_tui_copy() -> None:
+    """``MCP_VERB_ROWS`` is every verb ``/mcp`` accepts, with the TUI's words.
+
+    Membership is ``session.frontend_state.MCP_SUBCOMMANDS`` — imported here
+    rather than at module scope, because ``catalog`` stays free of the session
+    package. The descriptions moved OUT of the TUI's inline literals so both
+    surfaces read backend data; this pins that copy in one place, where a
+    "quick rewording" fails loudly instead of silently changing a phrase the
+    desktop's tests never see.
+    """
+    from local_operator.mcp.catalog import MCP_VERB_ROWS
+    from local_operator.session.frontend_state import MCP_SUBCOMMANDS
+
+    assert tuple(row.verb for row in MCP_VERB_ROWS) == MCP_SUBCOMMANDS
+    assert [(row.verb, row.description, row.destructive, row.offers) for row in MCP_VERB_ROWS] == [
+        ("list", "Show every configured server and its status", False, None),
+        ("add", "Configure a new server (url, or a stdio command)", False, None),
+        ("remove", "Delete a server from local-operator's config", True, "all"),
+        ("login", "Authorize an OAuth server (opens the browser)", False, "oauth"),
+        ("logout", "Forget a server's stored OAuth credential", True, "signed_in"),
+        ("reauth", "Forget first, then authorize — for an account or scope change", True, "oauth"),
+    ]
+
+
+def test_the_published_sample_carries_the_real_verb_table(distinct: Path) -> None:
+    """The fixture's ``verbs`` is the builder's, verbatim.
+
+    Unlike the sample's server rows — which are the sample's own values — the
+    verb table is a CLOSED vocabulary, and the UI repo tests its renderer
+    against this file: a paraphrase here would make a UI test pass against rows
+    the backend never sends.
+    """
+    from local_operator.mcp.catalog import MCP_VERB_ROWS
+
+    fixture = json.loads(
+        (Path(__file__).resolve().parents[3] / "docs" / "fixtures" / "mcp-catalog.json").read_text()
+    )
+    assert fixture["verbs"] == [
+        {
+            "verb": row.verb,
+            "description": row.description,
+            "destructive": row.destructive,
+            "offers": row.offers,
+        }
+        for row in MCP_VERB_ROWS
+    ]
+
+
 def test_the_overlay_skips_rows_that_would_lie() -> None:
     """A malformed overlay degrades to config; it never fails the read."""
     facts = live_facts_from_snapshot(

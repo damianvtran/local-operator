@@ -469,18 +469,55 @@ def sign_cookie(password: str, now: float | None = None) -> str:
     return f"{expiry}.{sig}"
 
 
-def verify_cookie(value: str | None, password: str, now: float | None = None) -> bool:
+def _parsed_cookie(value: str | None, password: str) -> int | None:
+    """The expiry inside a SIGNATURE-VALID cookie, or ``None``.
+
+    The one place a cookie is split and its HMAC checked, so :func:`verify_cookie`
+    (which adds the time window) and :func:`cookie_expiry` (which reports the
+    instant) cannot disagree about what a valid cookie is.
+    """
     if not value or "." not in value:
-        return False
+        return None
     expiry_text, sig = value.rsplit(".", 1)
     try:
         expiry = int(expiry_text)
     except ValueError:
-        return False
+        return None
     expected = hmac.new(_cookie_key(password), expiry_text.encode(), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(sig, expected):
+        return None
+    return expiry
+
+
+def verify_cookie(value: str | None, password: str, now: float | None = None) -> bool:
+    expiry = _parsed_cookie(value, password)
+    if expiry is None:
         return False
     return expiry > (now or time.time()) - _SKEW_S
+
+
+def cookie_expiry(value: str | None, password: str, now: float | None = None) -> int | None:
+    """The instant a VERIFIED cookie dies, for the per-device credential record.
+
+    The acceptance window is :func:`verify_cookie`'s — signature plus the skew
+    allowance — because only a cookie a request was authenticated with carries
+    any claim worth recording. The returned instant is the COOKIE'S OWN, never
+    ``now``: ADR 0006 §4 rule 2 (round 7 Q-F15) requires the lapse to be derived
+    from when the cookie dies (``sign_cookie`` puts only an expiry in it and
+    nothing ever renews it), so ``last_authenticated_at`` + TTL would over-report.
+
+    The skew is why this is not simply a second :func:`verify_cookie`: a cookie
+    up to ``_SKEW_S`` past its expiry still authenticates (a drifting phone clock
+    must not bounce a user out), and that window is exactly the case in which the
+    relay can observe a lapsed credential on an otherwise valid request — the
+    caller compares the instant it gets back against its own ``now``.
+    """
+    expiry = _parsed_cookie(value, password)
+    if expiry is None:
+        return None
+    if expiry <= (now or time.time()) - _SKEW_S:
+        return None
+    return expiry
 
 
 def basic_auth_header_user() -> str:

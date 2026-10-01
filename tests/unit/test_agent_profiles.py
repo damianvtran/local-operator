@@ -415,9 +415,19 @@ class TestInstall:
 
 
 def test_seed_tags_encode_only_what_is_set() -> None:
-    assert seed_tags(AgentProfile(name="plain")) == ("role",)
+    """Every SET field is encoded — and the class is always one of them.
+
+    The class is the exception to "only what is set" on purpose: an absent tag
+    has to mean "this row was never classified" (it is the state every install
+    from before the class feature is in, and the repair for those rows keys on
+    it), so a profile that is reactive must say so. Leaving it out is how an
+    ordinary role edit — which rebuilds a row's tags from its profile — used to
+    strip a deliberate ``class:reactive`` and let the repair silently re-arm a
+    check-in the operator had switched off (agent review round 1, R1).
+    """
+    assert seed_tags(AgentProfile(name="plain")) == ("role", "class:reactive")
     tags = seed_tags(AgentProfile(name="x", tools=("read",), effort="lo", may_delegate=True))
-    assert set(tags) == {"role", "tools:read", "effort:lo", "delegate:yes"}
+    assert set(tags) == {"role", "class:reactive", "tools:read", "effort:lo", "delegate:yes"}
 
 
 @pytest.mark.parametrize("spelling", ["delegate", "may_delegate"])
@@ -951,7 +961,10 @@ def test_the_class_frontmatter_round_trips_through_seed_tags() -> None:
 
     plain = _profile_from_text("plain", "---\nname: plain\ndescription: d\n---\nhi")
     assert plain.action_class == REACTIVE
-    assert not any(tag.strip().lower().startswith("class:") for tag in seed_tags(plain))
+    # A profile with no ``class:`` frontmatter is reactive, and the encoding SAYS
+    # so rather than implying it: see ``test_seed_tags_encode_only_what_is_set``
+    # for why the absence carries a different meaning now.
+    assert "class:reactive" in seed_tags(plain)
 
 
 def test_profile_from_agent_reads_the_class_tag_back(tmp_path) -> None:

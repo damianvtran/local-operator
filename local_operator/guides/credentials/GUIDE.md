@@ -205,7 +205,9 @@ produced a key. Prefer this store over writing to a plaintext `.env`.
 one command; provider API keys the harness already manages; anything you are not
 sure the user wants persisted — ask instead, with `ask` and `secret=true`
 (add `persist=true` and the answer is saved long-term as well as for the
-session).
+session). A host may QUEUE asks, in which case the call returns a receipt rather
+than the answer: the ask is then pending, so store nothing until the answer
+arrives.
 
 To promote a credential the user already handed to this session, they run
 `/credential --persist NAME`.
