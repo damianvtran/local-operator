@@ -238,6 +238,82 @@ def refusal_copy(record: Mapping[str, Any] | None) -> str:
     return "this ask is no longer open."
 
 
+def mirror_card(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+    """The legacy single-slot card fields for the HEAD open ask (design §4).
+
+    THE LEGACY MIRROR. The desktop app and the native mobile app ship on their
+    own schedules, so for one release a new core must still present a queued ask
+    the way the old clients can see and answer it: as today's per-question
+    ``pending``/``pending_gate`` card, whose ``request_id`` is
+    ``"<ask_id>.<qidx>"`` (``store.mirror_request_id``) and whose answer arrives
+    as the old ``ask_answer`` op.
+
+    ``rows`` are the ``PendingAsk`` dicts the fold produced; the HEAD is the
+    OLDEST still-open ask, chosen here rather than taken from the caller's order
+    because the two callers order differently (the wire view is open-first
+    NEWEST-first; the queue's own ``open_records`` is log order) and a card that
+    changed identity between publishers is a card the user answers twice.
+
+    That choice is deliberately NOT "the list's first row" — the published list
+    leads with the NEWEST open ask, while a mirrored card that jumped to each new
+    arrival would move under a user's finger mid-tap. The eventual fix is to make
+    the list lead with the oldest too (the design's own "head" wording); until
+    then the divergence is named here and in §4's A2 addendum rather than
+    discovered.
+
+    Only an ``open`` ask is mirrored, deliberately: a ``timed_out`` ask is past
+    its deadline, and painting the old "waiting for you" card for it would tell
+    the user their answer still counts as one did before the deadline. It is
+    still answerable — that is the ``ask_timeout`` row's message and the
+    ``late`` fold — but the mirror is the pre-deadline shape and must not lie
+    about the clock.
+
+    ``None`` means "no ask to mirror": the caller publishes its own empty card
+    exactly as it does today.
+    """
+    from local_operator.asks import store
+
+    opens = [row for row in rows if str(row.get("status") or "") == store.STATUS_OPEN]
+    if not opens:
+        return None
+    head = min(
+        opens,
+        key=lambda row: (int(row.get("created_at") or 0), str(row.get("ask_id") or "")),
+    )
+    questions = [dict(q) for q in (head.get("questions") or []) if isinstance(q, Mapping)]
+    # ``answers`` is what the LOG holds; ``draft_question_ids`` is what the old
+    # client has ALREADY TAPPED in this runtime (the incremental legacy path,
+    # §4 addendum). Both mean "do not offer this question again", and the card
+    # has to advance on a draft or the old client would be offered the question
+    # it just answered until the ask settles.
+    answered = {str(key) for key in (head.get("answers") or {})}
+    answered |= {str(key) for key in (head.get("draft_question_ids") or ())}
+    index = 0
+    for position, question in enumerate(questions):
+        if str(question.get("id") or "") not in answered:
+            index = position
+            break
+    question = questions[index] if questions else {}
+    return {
+        "ask_id": str(head.get("ask_id") or ""),
+        "request_id": store.mirror_request_id(str(head.get("ask_id") or ""), index),
+        "question_index": index,
+        "question_total": len(questions) or 1,
+        "title": str(question.get("question") or "the agent is asking"),
+        "options": [
+            {
+                "label": str(option.get("label") or ""),
+                "description": str(option.get("description") or ""),
+            }
+            for option in (question.get("options") or [])
+            if isinstance(option, Mapping)
+        ],
+        "secret": bool(question.get("secret")),
+        "recommended": question.get("recommended"),
+        "persist": bool(question.get("persist")),
+    }
+
+
 def apply_secret_answers(
     questions: Sequence[Mapping[str, Any]],
     answers: Mapping[str, Sequence[str]],
@@ -335,6 +411,7 @@ __all__ = [
     "TIMEOUT_SECRET",
     "TIMEOUT_URGENT",
     "apply_secret_answers",
+    "mirror_card",
     "receipt_text",
     "refusal_copy",
     "response_text",

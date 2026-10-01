@@ -1228,6 +1228,21 @@ class SessionTable:
                     # Shared completion receipts, not transcript activity or
                     # heartbeat freshness, decide whether an outcome is unread.
                     "unseen": self._is_unseen(session_id, row, entry),
+                    # THE OUTSTANDING ASKS (design §4/§5.0), from the live
+                    # projection's own count -- never re-derived here, because
+                    # the projection IS the queue's fold and a second count
+                    # would be a second answer to "how many questions are
+                    # waiting". None while the runtime does not publish asks at
+                    # all (the feature is dark there), and the row then OMITS
+                    # the key rather than sending 0: the client must be able to
+                    # tell "nothing waiting" from "this runtime cannot say",
+                    # which is the same presence rule the projection and the
+                    # frontend state follow.
+                    #
+                    # It is NOT ``needs_attention``/``pending_kind``: those stay
+                    # the APPROVAL signals, and an ask is a question the agent
+                    # can keep working through rather than a run held hostage.
+                    "asks_open": (p.asks_open if p is not None else None),
                 }
             )
         # THE SHARED RANK, straight from ``_rank_row`` — not a key re-derived
@@ -1237,6 +1252,10 @@ class SessionTable:
         # Previous and the two surfaces keep agreeing about the ranking itself.
         # The id tie-break inside ``entry_for``'s key makes the order total, so
         # two rows of equal birth cannot swap places between polls.
+        for summary in out:
+            # Absence, not ``null``/``0``: see the ``asks_open`` comment above.
+            if summary.get("asks_open") is None:
+                summary.pop("asks_open", None)
         out.sort(key=lambda summary: ranks[summary["session_id"]][0])
         return out
 
@@ -4493,6 +4512,23 @@ def build_app(daemon: MobileDaemon):
             }
         )
 
+    async def api_asks(request: Request) -> Response:
+        """Every open/recent queued ask, across conversations (design §4).
+
+        The relay half of ``GET /v1/desktop/asks``, and index-backed for the
+        same reason: an ask outlives the runtime that queued it, so this answer
+        must not need one — it is one directory scan of the derived index, with
+        no session opened and no owner dialled.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.asks.store import index_asks
+        from local_operator.paths import config_dir
+
+        rows = await asyncio.to_thread(index_asks, config_dir())
+        return JSONResponse({"asks": rows})
+
     async def api_commands(request: Request) -> Response:
         denied = gate(request)
         if denied is not None:
@@ -5043,6 +5079,7 @@ def build_app(daemon: MobileDaemon):
         ),
         Route("/api/pair", api_pair, methods=["POST"]),
         Route("/api/pair/{device_id:str}", api_pair_status),
+        Route("/api/asks", api_asks),
         Route("/api/commands", api_commands),
         Route("/api/models", api_models),
         Route("/api/transcribe", api_transcribe, methods=["POST"]),

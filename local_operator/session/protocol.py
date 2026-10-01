@@ -15,7 +15,7 @@ superseded — UIs must handle that (see docs/REWRITE.md, stream D).
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol, runtime_checkable
 
@@ -635,7 +635,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 135 public members and a POSITIVE
+    than stylistic. This protocol carries 136 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -682,7 +682,10 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     once the proactive class needed ``cleanup_after_class_switch`` so a viewer's
     class switch answers honestly instead of dying on a duck-probe, 135 once a
     dropped refusal notice needed ``forget_gate_refusal`` so its retry could
-    still deliver), so
+    still deliver, 136 once the queued-ask answer rung needed ``ask_respond`` —
+    an ask outlives the runtime that queued it, so answering one from a front end
+    must be able to BIND an owner that is not running, and only the facade owns a
+    dial), so
     recompute it rather
     than adjusting it by the size of your own change.
 
@@ -1234,6 +1237,29 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
 
         Same declaration reasoning as :meth:`bind_runtime`: a HARD access from
         ``desktop_sessions.py``.
+        """
+        ...
+
+    async def ask_respond(
+        self,
+        ask_id: str,
+        answers: Mapping[str, Sequence[str]] | None = None,
+        *,
+        decline: bool = False,
+    ) -> str:
+        """Answer or decline a QUEUED ask; returns the owner's receipt.
+
+        Viewer-only by construction and not a decoration: a queued ask outlives
+        the runtime that queued it, so a viewer answering one may have to reach
+        an owner that is not running -- ``AttachedSession`` is the object that
+        owns the dial, and an owner ``Session`` answers its own queue in-process
+        with no wire to send on (``Session.respond_ask``). It addresses an
+        ``ask_id`` rather than an epoch for the same reason: the epoch the ask
+        was queued under may belong to a retired owner.
+
+        Declared here because ``server/routes/desktop_sessions.py`` reaches it
+        through a duck-typed ``bridge.remote`` binding, where a rename would be
+        a 500 on the phone portal rather than a pyright error.
         """
         ...
 

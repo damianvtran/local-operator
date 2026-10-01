@@ -102,12 +102,14 @@ from local_operator.harness.types import (
 from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
 from local_operator.mobile.types import (
     PROJECTION_TRANSCRIPT_LIMIT,
+    PendingAskWire,
     PendingRequest,
     SessionProjection,
     SubagentRow,
     TodoItem,
     TodoPhase,
     TranscriptEntry,
+    ask_mirror_request,
 )
 
 # The PHASE WORDS the working line is dated by, imported rather than restated:
@@ -627,6 +629,13 @@ def _frame_skips_measurement(projection: SessionProjection) -> bool:
     conversation with no children and nothing waiting on the user.
     """
     if projection.subagents or projection.pending is not None:
+        return False
+    if projection.asks:
+        # The ask list is one more part that GROWS with use — a question carries
+        # its full option text, and the fold caps it at PROJECTION_CAP rather
+        # than at a wire size — so its mere presence means "measure it", exactly
+        # like the roster and the pending card above. Failing closed is what
+        # keeps a future field on those rows covered without an edit here.
         return False
     if len(projection.transcript) > _FRAME_CHEAP_PROXY_MAX_ROWS:
         return False
@@ -1300,40 +1309,59 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
                 continue
             if message.custom_type == ASK_TIMEOUT_CUSTOM_TYPE:
                 # A queued ask's deadline (design docs/design/ask-nonblocking.md
-                # §2.5). Its text comes prewritten because the SAME string reaches
-                # the model: the notice quotes the questions, or names a secret
-                # ask's key and never its prompt, and a phone that paraphrased it
-                # would be a second author of the only account of what expired.
-                # The row also carries the ask id so A2's card can address it.
-                text, severity = ask_timeout_notice(message.details or {})
+                # §2.5/§4). Its text comes prewritten because the SAME string
+                # reaches the model: the notice quotes the questions, or names a
+                # secret ask's key and never its prompt, and a phone that
+                # paraphrased it would be a second author of the only account of
+                # what expired.
+                #
+                # The kind is ``ask_timeout`` rather than a generic notice so a
+                # client can key the one affordance that distinguishes this row:
+                # the ask is still ANSWERABLE (a late answer is attributed with
+                # the same ``ask_id``), which is invisible in a notice's words.
+                details = message.details or {}
+                text, severity = ask_timeout_notice(details)
                 entries.append(
                     TranscriptEntry(
                         id=message.id,
-                        kind="notice",
-                        text=_compact(text, 400),
+                        kind="ask_timeout",
+                        text=_compact(text, _NOTICE_CHARS),
                         details={
+                            "ask_id": str(details.get("ask_id") or ""),
+                            "status": "timed_out",
+                            "waited_s": int(details.get("waited_s") or 0),
+                            "urgent": bool(details.get("urgent")),
+                            "text": str(details.get("text") or ""),
                             "severity": severity,
-                            "ask_id": str((message.details or {}).get("ask_id") or ""),
-                            "ask_status": "timed_out",
                         },
                     )
                 )
                 continue
             if message.custom_type == ASK_RESPONSE_CUSTOM_TYPE:
-                # A queued ask's answer, late answer or decline — one type, three
-                # human readings, which is exactly the distinction the shared row
-                # copy makes (``harness/rows.py``). The model's text rides beside
-                # it so the phone never re-derives Q&A from a sentence.
-                text, severity = ask_response_notice(message.details or {})
+                # A queued ask's answer, late answer or decline — one message
+                # type, three human readings, which is exactly the distinction
+                # the shared row copy makes (``harness/rows.py``). The model's
+                # text rides beside it as ``text`` so the phone never re-derives
+                # Q&A from a sentence, and the Q&A itself rides structured for
+                # the same reason (design §4's entry contract).
+                details = message.details or {}
+                text, severity = ask_response_notice(details)
                 entries.append(
                     TranscriptEntry(
                         id=message.id,
-                        kind="notice",
-                        text=_compact(text, 400),
+                        kind="ask_response",
+                        text=_compact(text, _NOTICE_CHARS),
                         details={
+                            "ask_id": str(details.get("ask_id") or ""),
+                            "status": str(details.get("status") or "answered"),
+                            "questions": [dict(q) for q in (details.get("questions") or [])],
+                            "answers": {
+                                str(key): [str(item) for item in (value or [])]
+                                for key, value in (details.get("answers") or {}).items()
+                            },
+                            "at": int(details.get("at") or 0),
+                            "text": str(details.get("text") or ""),
                             "severity": severity,
-                            "ask_id": str((message.details or {}).get("ask_id") or ""),
-                            "ask_status": str((message.details or {}).get("status") or "answered"),
                         },
                     )
                 )
@@ -2924,10 +2952,65 @@ class ProjectionFold:
     def _sync_pending(self) -> None:
         """Project the queue onto the wire fields the phone renders: the front
         request as ``pending`` plus the total ``pending_count`` for the "1 of
-        N" badge."""
-        self.projection.pending = self._pending_queue[0] if self._pending_queue else None
+        N" badge.
+
+        THE LEGACY MIRROR lives here (design §4) and that placement is the
+        point: this is the ONE sync every fold shares — the runtime's, the TUI
+        host's and the daemon's — so a queued ask reaches an OLD client as
+        today's per-question card on all three surfaces without a second
+        implementation to drift. ``pending_count`` stays the APPROVAL queue's
+        length: a mirrored ask is not a blocking gate, and a badge that counted
+        it would report an approval nobody is waiting on.
+        """
+        if self._pending_queue:
+            front: PendingRequest | None = self._pending_queue[0]
+        else:
+            front = self._mirror_pending()
+        self.projection.pending = front
         self.projection.pending_count = len(self._pending_queue)
         self._bump()
+
+    def set_asks(self, rows: list[dict[str, Any]] | None, open_count: int | None) -> None:
+        """Install the runtime's ask fold and re-front the legacy mirror.
+
+        ``None`` is ABSENCE, not "no asks": it is what a runtime that does not
+        publish the field sends (the feature is dark there), and this fold keeps
+        the distinction because the whole client-side capability proxy rests on
+        it — an old/new client deciding whether to render the ask surfaces reads
+        presence, never the length.
+
+        Ends in ``_sync_pending`` so the mirrored card is refreshed from the
+        SAME call that changed the ask list: a host that forgot the second step
+        would keep showing a settled ask to exactly the clients the mirror
+        exists for.
+        """
+        if rows is None:
+            self.projection.asks = None
+            self.projection.asks_open = None
+        else:
+            known = {name for name in PendingAskWire.__dataclass_fields__}
+            self.projection.asks = [
+                PendingAskWire(**{k: v for k, v in row.items() if k in known}) for row in rows
+            ]
+            self.projection.asks_open = int(open_count or 0)
+        self._sync_pending()
+
+    def _mirror_pending(self) -> PendingRequest | None:
+        """The head OPEN ask as today's per-question card, or ``None`` (§4).
+
+        The DECISION (which ask is the head, which question is unanswered) is
+        ``asks.render.mirror_card``'s, shared with the server-side gate mirror,
+        so the desktop's legacy card and the phone's cannot name different asks.
+        No asks, or none still open, means no card — which is also the state an
+        old client is in today, so absence renders exactly as it always did.
+        """
+        rows = self.projection.asks
+        if not rows:
+            return None
+        from local_operator.asks.render import mirror_card
+
+        card = mirror_card([row.to_json() for row in rows])
+        return ask_mirror_request(card) if card else None
 
     def reconcile_streaming(self, is_streaming: bool) -> None:
         """Align ``streaming`` with the session's own ``is_streaming`` flag at

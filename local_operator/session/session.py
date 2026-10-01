@@ -3663,6 +3663,12 @@ class Session:
         # is what this lock is for (review round 1, MAJOR 4).
         self._ask_wake_lock = asyncio.Lock()
         self._ask_reach: Callable[[], Any] | None = None
+        #: The host's wire publisher for the ask fold (design §4, N2). A
+        #: runtime/terminal host registers one so the queue's own change path
+        #: (``AskQueue._refresh`` -> ``publish_ask_state``) can push the asks
+        #: onto the MOBILE projection as well as the frontend state; a headless
+        #: session leaves it ``None`` and only the frontend state carries them.
+        self._ask_state_sink: Callable[[Any, Any], None] | None = None
         # The monitor scheduler is the wake scheduler's twin (design
         # monitor-tool.md §5.1): in-process, one timer, a persist callback and
         # a deliver callback — plus the check runner, which executes the
@@ -8396,6 +8402,47 @@ class Session:
         except Exception:  # noqa: BLE001 — best-effort, like every wake-index writer
             logger.warning("ask: could not retire the deadline wake row", exc_info=True)
 
+    def set_ask_state_sink(self, sink: "Callable[[Any, Any], None] | None") -> None:
+        """Register the host's publisher for the ask fold (design §4, N2).
+
+        The sibling of :meth:`set_ask_reach`, and it exists for the same reason:
+        a Session owns the queue and the frontend state, but the MOBILE
+        projection and the legacy single-slot card are built by whichever host
+        is attached, and only that host can repaint them. The sink receives
+        ``(rows, open_count)`` — the frozen wire shape and its open tally — so a
+        host never re-derives the fold.
+        """
+        self._ask_state_sink = sink
+
+    def publish_ask_state(self) -> None:
+        """Push the queue's fold to every wired surface (design §4, N2).
+
+        The ONE publication seam: the queue calls it on every change (see
+        ``AskQueue._publish_state``), and ``refresh_from_session`` folds the same
+        values into the periodic snapshot, so the two can never disagree about
+        which asks are open.
+
+        PRESENCE IS THE CAPABILITY PROXY, so this publishes ABSENCE — ``None``,
+        not an empty list — whenever the queue is not there (the flag is off, or
+        this host has no ask surface). A client keys "this runtime has queued
+        asks" on the field's presence, which is the design's own rule for the
+        whole A2→F window: while the server default is still blocking, a field
+        that shipped anyway would take a new client down the queued path against
+        a blocking backend.
+        """
+        from local_operator.session.frontend_state import ask_wire
+
+        rows, open_count = ask_wire(self)
+        store = getattr(self, "_frontend_state_store", None)
+        if store is not None:
+            store.mutate(asks=rows, asks_open=open_count)
+        sink = self._ask_state_sink
+        if sink is not None:
+            try:
+                sink(rows, open_count)
+            except Exception:  # noqa: BLE001 — a repaint is never worth a turn
+                logger.debug("ask: the host's state sink failed", exc_info=True)
+
     def set_ask_handler(self, handler: AskUserFn | None) -> None:
         """Install the host's interactive-question surface (see SessionProtocol).
 
@@ -8561,6 +8608,65 @@ class Session:
                 )
             )
         return queue.respond(ask_id, merged, by=by)
+
+    def answer_ask_question(
+        self,
+        ask_id: str,
+        question_id: str,
+        values: "Sequence[str]",
+        *,
+        by: str = "unknown",
+    ) -> dict[str, Any]:
+        """THE LEGACY INCREMENTAL ANSWER (design §4, A2 addendum).
+
+        The mirror exists for clients that can only answer ONE question at a
+        time — today's single-slot card, whose flow advanced question by question
+        because the blocking gate held one future per question. The NEW ops
+        (``ask_respond``) are atomic per ask and refuse a partial map, which is
+        right for a client that can hold the whole ask. This method is the bridge:
+        it merges one cell into the queue's in-flight draft and lets
+        :meth:`AskQueue.answer_one` settle the ask in one atomic write once every
+        question has an entry.
+
+        The SECRET hop is the same one and in the same order as
+        :meth:`respond_ask`, per question rather than per ask: the value reaches
+        the session's memory-only store and the draft carries the KEY NAME, so a
+        partial never puts a value anywhere durable.
+        """
+        queue = self.ask_queue()
+        if queue is None:
+            return {"ok": False, "error": "this session's runtime predates queued asks"}
+        record = queue.find(ask_id)
+        if record is None:
+            return {"ok": False, "error": _ask_refusal_copy(None)}
+        refusal = _ask_refusal_copy(record)
+        if refusal:
+            return {"ok": False, "error": refusal}
+        key = str(question_id)
+        question = next(
+            (item for item in (record.get("questions") or ()) if str(item.get("id") or "") == key),
+            None,
+        )
+        if question is None:
+            refusals = ", ".join(
+                f"{str(item.get('id') or '')!r}" for item in (record.get("questions") or ())
+            )
+            return {
+                "ok": False,
+                "error": f"{key!r} is not a question on ask {ask_id}; it asks {refusals}.",
+            }
+        cell = [str(item) for item in (values or ())]
+        if question.get("secret") and cell:
+            from local_operator.asks.render import apply_secret_answers
+
+            substituted = apply_secret_answers(
+                [question],
+                {key: cell},
+                variables=self._variables,
+                journal_credential=self.journal_credential_change,
+            )
+            cell = [str(item) for item in substituted.get(key, ())]
+        return queue.answer_one(ask_id, key, cell, by=by)
 
     def decline_ask(self, ask_id: str, *, by: str = "unknown") -> dict[str, Any]:
         """Decline a queued ask — today's Esc, made explicit (design D5)."""
