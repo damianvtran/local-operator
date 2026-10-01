@@ -100,8 +100,8 @@ def _confirm(row: dict[str, object]) -> bool:
         # Same wording as the receipt's qualification, because a reader who sees
         # both should not have to reconcile two sentences about one host.
         sys.stdout.write(
-            "  ...once this machine's operator authority is installed: run "
-            "`lop operator install` here (one privileged step).\n"
+            "  ...once this machine's operator authority is set up: one approval\n"
+            "  and one admin prompt.\n"
         )
     sys.stdout.flush()
     try:
@@ -230,8 +230,8 @@ def _pair(args: argparse.Namespace) -> int:
 
     if operator_authority_unusable():
         promise = (
-            "It can act once this machine's operator authority is installed: run\n"
-            "  `lop operator install` here (one privileged step). Until then the runtime has\n"
+            "It can act once this machine's operator authority is set up here: one\n"
+            "  approval and one admin prompt. Until then the runtime has\n"
             "  no key to verify this device's signatures against, and refuses every one of\n"
             "  them. Revoke it with `lop operator devices --revoke <device id>`.\n"
         )
@@ -296,9 +296,9 @@ def describe_devices(args: argparse.Namespace) -> int:
     if revoke:
         if not _stage_anchor_revocation(root, revoke, revoked=True):
             print(
-                "no installed operator anchor to record a revocation in — run "
-                "`lop operator install` on this machine first (the anchor `lop operator "
-                "init` staged is not trusted until it is installed)",
+                "no installed operator anchor to record a revocation in — set up operator "
+                "authority on this machine first (the anchor staged earlier is not "
+                "trusted until the install step lands it)",
                 file=sys.stderr,
             )
             return 1
@@ -388,14 +388,14 @@ def describe_devices(args: argparse.Namespace) -> int:
                 print(
                     "no installed operator anchor to lift a revocation from, and the local "
                     "record could not be cleared either, so this device is STILL refused — "
-                    "run `lop operator install` on this machine and fix the permissions on "
+                    "set up operator authority on this machine and fix the permissions on "
                     "the operator directory, then run this again",
                     file=sys.stderr,
                 )
             else:
                 print(
                     "no installed operator anchor to lift a revocation from, so only the "
-                    "local record was cleared — run `lop operator install` on this machine "
+                    "local record was cleared — set up operator authority on this machine "
                     "if you expected an anchor here",
                     file=sys.stderr,
                 )
@@ -456,7 +456,7 @@ def describe_devices(args: argparse.Namespace) -> int:
                 f"{authorise} could pair again — and do nothing else: there is no usable "
                 "installed operator anchor on this machine, so no anchor statement would "
                 f"be written and no privileged step would be needed. Run `{command}` "
-                "without --print-only to do exactly that, and run `lop operator install` "
+                "without --print-only to do exactly that, and set up operator authority "
                 "if you expected an anchor here."
             )
         else:

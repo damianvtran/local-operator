@@ -557,7 +557,7 @@ def test_ready_flips_a_blocked_peer_to_ready_as_each_condition_is_fixed(
         False,
         readiness.CODE_NOT_INSTALLED,
     )
-    assert "lop operator install" in " ".join(operator_row["remedies"])
+    assert "approve setup for" in " ".join(operator_row["remedies"])
     git_row = _capability(payload, readiness.CAPABILITY_GIT)
     assert (git_row["ok"], git_row["code"]) == (False, readiness.CODE_NO_GIT_IDENTITY)
     assert "git config --global user.name" in " ".join(git_row["remedies"])

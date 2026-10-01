@@ -160,7 +160,16 @@ def _open_store(root: Path) -> Any | None:
 
 
 def operator_fact() -> dict[str, Any]:
-    """The operator-authority level and what it rests on. Never raises."""
+    """The operator-authority level and what it rests on. Never raises.
+
+    ``verify_only`` (remote-onboarding §2.5, OQ6): an anchor this host can
+    VERIFY with but cannot SIGN with — the node-side case, where authority was
+    installed as public data and the private half lives on the operator's own
+    devices. The level is what the anchor CLAIMS; ``verify_only`` is the extra
+    fact that stops the claim from being read as "signs here": a host can be
+    ``operator-presence`` and still hold no key, because the anchor says which
+    backend the OPERATOR's machine uses, not what this machine has.
+    """
     try:
         from local_operator.operator import operator_authority_report
 
@@ -172,9 +181,13 @@ def operator_fact() -> dict[str, Any]:
             "anchor_installed": False,
             "anchor_root_owned": False,
             "presence": False,
+            "verify_only": False,
         }
+    level = _bounded(report.get("level") or "unreported", 60)
+    installed_levels = ("operator-presence", "operator-file-only")
+    verify_only = level in installed_levels and not _can_sign_here()
     return {
-        "level": _bounded(report.get("level") or "unreported", 60),
+        "level": level,
         # EVERY carried string goes through the shape guard, reasons included:
         # the module's rule is "any text that merely LOOKS like a credential is
         # withheld rather than sent", and a reason is text this device did not
@@ -183,7 +196,38 @@ def operator_fact() -> dict[str, Any]:
         "anchor_installed": bool(report.get("anchor_installed")),
         "anchor_root_owned": bool(report.get("anchor_root_owned")),
         "presence": bool(report.get("presence")),
+        "verify_only": verify_only,
     }
+
+
+def _can_sign_here() -> bool:
+    """Whether THIS host holds the private half, probed without prompting.
+
+    The probe is the operator module's own signer lookup (the anchor names the
+    backend), and it is the ONLY sound question to ask: a keychain query from
+    an unsigned process cannot see a ``secure-enclave`` item (the -25300 trap),
+    so anything cheaper than the real loader would answer "no key" for a host
+    that has one. ``False`` on every failure — a broken agent is "cannot sign
+    NOW", which is the fact this answer is for — and the signer is closed
+    immediately, because a probe must leave nothing running.
+    """
+    try:
+        from local_operator.operator.keychain import choose_backend
+        from local_operator.operator.trust import load_anchor
+        from local_operator.paths import config_dir
+
+        loaded = load_anchor()
+        backend_name = loaded.anchor.backend if loaded.usable and loaded.anchor else "auto"
+        signer: Any = choose_backend(backend_name, config_root=config_dir()).load()
+        if signer is None:
+            return False
+        try:
+            signer.close()
+        except Exception:  # noqa: BLE001 — closing a probe is best-effort
+            pass
+        return True
+    except Exception:  # noqa: BLE001 — see above: "cannot sign", not a crash
+        return False
 
 
 def git_identity_fact(home: Path | None = None) -> dict[str, Any]:
@@ -759,6 +803,22 @@ def operator_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> d
         )
     level = str(fact.get("level") or "")
     reason = _bounded(fact.get("reason") or "", 200)
+    # THE VERIFY-ONLY HOST (OQ6): an anchor is installed — public data — but the
+    # private half is not on this host, so nothing can be SIGNED there. The row
+    # stays ok (the authority exists and approvals can be answered) while saying
+    # where the signing actually happens; the level values are unchanged.
+    if fact.get("verify_only") and level in ("operator-presence", "operator-file-only"):
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_OPERATOR_AUTHORITY,
+            ok=True,
+            detail=(
+                f"operator authority is installed on {peer_label}: approvals for "
+                "offloaded work can be signed from your devices"
+            ),
+            source=SOURCE_PEER,
+        )
     if level == "operator-presence":
         return _capability_row(
             device_id=member.device_id,
@@ -804,9 +864,9 @@ def operator_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> d
         code=code,
         detail=sentence,
         remedies=[
-            f"run `lop operator install` on {peer_label} (one privileged step), then "
-            "approvals for offloaded work can be answered from this device or your "
-            "paired phone"
+            # §2.9: a remedy names a PRODUCT action, never a terminal command.
+            f"approve setup for {peer_label} in the Mesh tab, then approvals for "
+            "offloaded work can be answered from your devices"
         ],
         source=SOURCE_PEER,
     )

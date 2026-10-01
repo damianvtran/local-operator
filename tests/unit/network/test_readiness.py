@@ -118,7 +118,7 @@ def test_operator_levels_map_to_codes(fact: dict[str, Any], ok: bool, code: str)
     assert row.get("code", "") == code, row
     assert row["capability"] == readiness.CAPABILITY_OPERATOR_AUTHORITY
     if not ok:
-        assert any("lop operator install" in remedy for remedy in row["remedies"]), row
+        assert any("approve setup for" in remedy for remedy in row["remedies"]), row
         assert "parks" in row["detail"], row
     if ok:
         assert row["remedies"] == []

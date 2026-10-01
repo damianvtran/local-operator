@@ -633,6 +633,19 @@ _WINDOW_REMEDIES = (
     "reopen the session here",
 )
 
+#: THE RETIRED TERMINAL-COMMAND REMEDY SHAPE (remote-onboarding §2.9): no failure,
+#: refusal, remedy or readiness sentence may instruct its reader to run a terminal
+#: command — remedies name PRODUCT actions ("set up operator authority", "approve
+#: setup for <device> in the Mesh tab"). This is the exact sentence shape slice (a)
+#: repaved out of the product, in each markup the surfaces ship, added to the sweep
+#: DELIBERATELY: a revert, or a new sentence copying the old one, goes red here
+#: rather than needing another review round to catch it.
+_RETIRED_REMEDY_SHAPES = (
+    "run `lop operator install`",
+    "Run <code>lop operator install</code>",
+    "run <code>lop operator install</code>",
+)
+
 
 def _shipped_notices() -> dict[str, str]:
     """Every notice CONSTANT the product ships, by name.
@@ -713,6 +726,65 @@ def test_no_shipped_notice_names_a_window_remedy() -> None:
                         f"{module.relative_to(_REPO_ROOT).as_posix()}:{node.lineno}"
                     )
     assert not offenders, f"shipped copy still promises a window remedy: {offenders}"
+
+
+def test_no_shipped_copy_instructs_the_retired_install_command() -> None:
+    """§2.9 as a class: no shipped copy tells a reader to run the retired command.
+
+    WHY ITS OWN CELL rather than a second phrase in the window list: the two
+    invariants judge different claims ("a WINDOW is where you act" versus "a
+    TERMINAL COMMAND is how you act") and carry different exceptions policies —
+    the window list keeps the design record's documentation exemption, which this
+    one must not have, because a doc repeating the retired sentence as CURRENT
+    guidance is exactly the leak this cell exists to catch.
+
+    Subjects mirror the window sweep, for its reason (a hand-picked list is how a
+    fourth sentence slips past): every shipped notice constant, every Python string
+    constant — docstrings excluded, so the code that records WHY the sentence was
+    retired can quote it — the portal sources with comments stripped, and every
+    shipped doc.
+    """
+    offenders: dict[str, list[str]] = {}
+    for name, copy in sorted(_shipped_notices().items()):
+        for phrase in _RETIRED_REMEDY_SHAPES:
+            if phrase in copy:
+                offenders.setdefault(phrase, []).append(f"harness/approval.py::{name}")
+
+    for module in sorted((_REPO_ROOT / "local_operator").rglob("*.py")):
+        tree = ast.parse(module.read_text(encoding="utf-8"))
+        docstrings = {
+            id(node.body[0].value)
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and node.body
+            and isinstance(node.body[0], ast.Expr)
+            and isinstance(node.body[0].value, ast.Constant)
+            and isinstance(node.body[0].value.value, str)
+        }
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                continue
+            if id(node) in docstrings:
+                continue
+            for phrase in _RETIRED_REMEDY_SHAPES:
+                if phrase in node.value:
+                    offenders.setdefault(phrase, []).append(
+                        f"{module.relative_to(_REPO_ROOT).as_posix()}:{node.lineno}"
+                    )
+
+    for source in sorted((_REPO_ROOT / "local_operator" / "mobile" / "web" / "src").rglob("*.ts*")):
+        normalised = _js_copy(source)
+        for phrase in _RETIRED_REMEDY_SHAPES:
+            if phrase in normalised:
+                offenders.setdefault(phrase, []).append(source.relative_to(_REPO_ROOT).as_posix())
+
+    for doc in sorted((_REPO_ROOT / "docs").rglob("*.md")):
+        normalised = " ".join(doc.read_text(encoding="utf-8").split())
+        for phrase in _RETIRED_REMEDY_SHAPES:
+            if phrase in normalised:
+                offenders.setdefault(phrase, []).append(doc.relative_to(_REPO_ROOT).as_posix())
+
+    assert not offenders, f"shipped copy still instructs a retired terminal command: {offenders}"
 
 
 def _js_copy(path: Path) -> str:

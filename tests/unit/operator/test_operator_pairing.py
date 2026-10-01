@@ -330,7 +330,10 @@ def test_the_pairing_receipt_does_not_promise_authority_this_host_lacks(
     assert operator_authority_unusable() is True
     assert dispatch(_args(device=device_id)) == 0
     captured = capsys.readouterr().out
-    assert "lop operator install" in captured, captured
+    # The receipt WRAPS its paragraph (hanging indent), so the phrase is matched
+    # against the joined text: a pin on the unwrapped string would fail on where
+    # the line broke, which is not the fact under test.
+    assert "one approval and one admin prompt" in " ".join(captured.split()), captured
     assert "The phone can now approve parked cards" not in captured, captured
     # The certificate is still installed: the receipt is about what the phone can
     # DO, not about whether the machine recorded it (which the refusal's copy and
@@ -353,7 +356,7 @@ def test_the_pairing_receipt_does_not_promise_authority_this_host_lacks(
     assert dispatch(_args(device=second_id)) == 0
     captured = capsys.readouterr().out
     assert "The phone can now approve parked cards" in captured, captured
-    assert "lop operator install" not in captured, captured
+    assert "one approval and one admin prompt" not in captured, captured
 
 
 def _installed_anchor(trust: Any, root: Path, uid: Any) -> Any:
@@ -435,7 +438,7 @@ def test_the_revoke_receipt_states_the_window_it_actually_honours(
     monkeypatch.setattr(operator_pkg, "load_anchor", lambda uid=None: _absent_anchor(trust, uid))
     assert describe_devices(_args(revoke=device_id, print_only=True)) == 1
     refusal = capsys.readouterr().err
-    assert "lop operator install" in refusal, refusal
+    assert "set up operator authority" in refusal, refusal
     assert "no installed operator anchor" in refusal, refusal
 
 
@@ -469,7 +472,7 @@ def test_the_pairing_prompt_qualifies_its_promise_on_this_host(
     monkeypatch.setattr(operator_pkg, "load_anchor", installed)
     assert _confirm(row) is False
     qualified = capsys.readouterr().out
-    assert "lop operator install" not in qualified, qualified
+    assert "one approval and one admin prompt" not in qualified, qualified
     assert "This lets that device APPROVE" in qualified, qualified
 
     absent = lambda uid=None: _absent_anchor(trust, uid)  # noqa: E731 - a seam, not a style
@@ -477,8 +480,11 @@ def test_the_pairing_prompt_qualifies_its_promise_on_this_host(
     monkeypatch.setattr(operator_pkg, "load_anchor", absent)
     assert _confirm(row) is False
     unready = capsys.readouterr().out
-    assert "once this machine's operator authority is installed" in unready, unready
-    assert "lop operator install" in unready, unready
+    assert "once this machine's operator authority is set up" in unready, unready
+    # The PROMPT wraps at the terminal width (the block prints through the same
+    # hanging-indent writer the receipt uses), so the phrase is matched against
+    # the joined text rather than against where the line happened to break.
+    assert "one approval and one admin prompt" in " ".join(unready.split()), unready
 
 
 def test_authorising_a_device_lifts_both_halves_of_its_revocation(
@@ -958,7 +964,7 @@ def test_the_authorise_preview_promises_exactly_what_its_own_run_does(
     assert preview["record_gone"] is False and preview["staged_changed"] is False
     assert preview["stepped"] is False, "the preview took the privileged step"
     assert preview["prints_command"] is False, preview["out"]
-    assert "no usable" in preview["out"] and "lop operator install" in preview["out"]
+    assert "no usable" in preview["out"] and "set up operator authority" in preview["out"]
     real = observe(preview=False, anchor_usable=False)
     assert preview["claims_local_clear"] == real["record_gone"] is True
     _agree(preview, real)

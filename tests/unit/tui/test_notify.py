@@ -962,10 +962,10 @@ def test_the_remote_park_copy_is_pinned() -> None:
     assert remote_park_card("demo-laptop", "approval") == (
         "Waiting for approval on demo-laptop\n"
         "Open the session here to deny it. Allowing it happens on demo-laptop (Touch ID) or "
-        "on a phone paired with it. If nothing there can check a signature: run "
-        "`lop operator install` on demo-laptop (one privileged step) — `lop network ready "
-        "--peer demo-laptop` shows the operator_authority row (a peer too old to report "
-        "that row answers `peer_too_old`, and needs `lop-update` first)."
+        "on a phone paired with it. If nothing there can check a signature: approve "
+        "setup for demo-laptop in the Mesh tab (one approval and one admin prompt) — "
+        "`lop network ready --peer demo-laptop` shows the operator_authority row (a peer "
+        "too old to report that row answers `peer_too_old`, and needs `lop-update` first)."
     )
     # The attached reader (the F-A shape): the lead swaps so the card does not
     # send this reader to open the session it is looking at (design round 1,
@@ -974,8 +974,9 @@ def test_the_remote_park_copy_is_pinned() -> None:
         "Waiting for approval on demo-laptop\n"
         "Its gate card has not reached this view — deny it here once it does. "
         "Allowing it happens on demo-laptop (Touch ID) or on a phone paired with it. "
-        "If nothing there can check a signature: run `lop operator install` on "
-        "demo-laptop (one privileged step) — `lop network ready --peer demo-laptop` "
+        "If nothing there can check a signature: approve setup for "
+        "demo-laptop in the Mesh tab (one approval and one admin prompt) — "
+        "`lop network ready --peer demo-laptop` "
         "shows the operator_authority row (a peer too old to report that row answers "
         "`peer_too_old`, and needs `lop-update` first)."
     )
