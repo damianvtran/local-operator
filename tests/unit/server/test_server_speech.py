@@ -141,9 +141,7 @@ async def test_create_speech_without_a_credential_answers_401(mock_radient_clien
         await create_speech(speech_request, mock_radient_client)
 
     assert exc_info.value.status_code == 401
-    assert (
-        exc_info.value.detail == "Sign in to Radient in the settings page to enable text to speech."
-    )
+    assert exc_info.value.detail == "Sign in to Radient in Settings to enable speaking aloud."
     mock_radient_client.create_speech.assert_not_called()
 
 
@@ -156,7 +154,7 @@ async def test_create_speech_without_a_credential_answers_401(mock_radient_clien
         # no-credential tests.
         (
             401,
-            "Your Radient sign-in has stopped working. Sign in again in the settings page.",
+            "Your Radient sign-in has stopped working. Sign in again in Settings.",
         ),
         (
             402,
@@ -361,9 +359,7 @@ async def test_create_agent_speech_requires_a_credential_before_any_work():
             )
 
     assert exc_info.value.status_code == 401
-    assert (
-        exc_info.value.detail == "Sign in to Radient in the settings page to enable text to speech."
-    )
+    assert exc_info.value.detail == "Sign in to Radient in Settings to enable speaking aloud."
     configure_call.assert_not_called()
     voice_call.assert_not_called()
     radient_client.create_speech.assert_not_called()
