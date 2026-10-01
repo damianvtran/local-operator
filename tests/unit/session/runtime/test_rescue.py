@@ -483,12 +483,20 @@ def test_a_host_only_death_is_seen(tmp_path: Path, alive: set[int]) -> None:
 
     report = rescue.rescue_scan(tmp_path, now=NOW, apply=False)
     assert [d.session_id for d in report.fire()] == [sid]
+    assert report.decisions[0].pid == DEAD_PID
 
-    # The two namespaces agree: the same session under run/mobile fires as well.
-    _record(tmp_path, "abab12121213", pid=DEAD_PID + 1, started_at=STARTED, heartbeat_at=HEARTBEAT)
-    _completions(tmp_path, [(f"session/{sid}", "error", "disposed", "x")])
+    # AND THE TWO NAMESPACES FEED ONE DECISION. The same session gains a
+    # run/mobile record for a LATER run (a respawn that also died): the mobile
+    # record is now the most recent death, so the pass must decide on THAT pid —
+    # which it can only do if both namespaces are in the same census.
+    mobile_pid = DEAD_PID + 100
+    _record(tmp_path, sid, pid=mobile_pid, started_at=STARTED + 600.0, heartbeat_at=HEARTBEAT)
+
     both = rescue.rescue_scan(tmp_path, now=NOW, apply=False)
-    assert sid in {d.session_id for d in both.fire()}
+    fired = [d for d in both.fire() if d.session_id == sid]
+    assert len(fired) == 1
+    assert fired[0].pid == mobile_pid, "the newer run/mobile death must win the census"
+    assert mobile_pid in {d.pid for d in both.decisions}
 
 
 # --- B. bounds, idempotency, the ledger ------------------------------------

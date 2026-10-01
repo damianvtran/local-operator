@@ -1086,6 +1086,28 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "wakes/deliveries/<id>.json FILE",
     ),
+    # The RESCUE ledger is the same shape one directory over
+    # (`local_operator/session/runtime/rescue.py`), and deliberately a local copy
+    # of the staged write rather than a call to ``registry._staged_write`` for the
+    # reason `network/identity.py`'s writer states: the helper is private to the
+    # run-directory's module, and this one keeps the supervisor's rescue module on
+    # its stdlib + leaf-module import contract. Every path in it is
+    # `<config>/rescue/<session-id>.json`, built from a fixed dirname plus the
+    # session id as a FILENAME — the id reaches it from a run record's own
+    # ``session_id`` field or from the ledger directory's own listing, so it can
+    # contain no separator — and nothing in the module walks, renames or removes a
+    # directory, under `sessions/` or anywhere else. The unlink is the staging
+    # file this call just wrote, never a record.
+    (
+        "local_operator/session/runtime/rescue.py::write_ledger",
+        "os.replace",
+        "temp FILE -> rescue/<id>.json",
+    ),
+    (
+        "local_operator/session/runtime/rescue.py::write_ledger",
+        "os.unlink",
+        "the rescue/<id>.json staging FILE this call just wrote",
+    ),
     # The serving plane's publication latch. `wait_until_published` takes its own
     # waiter back OUT of `_publication_gates` when its bound expires, so a
     # runtime whose boot prologue never settles cannot leave a dead
@@ -2500,6 +2522,7 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/attached.py::AttachedSession._apply_frontend_facades",  # facade
         "local_operator/session/runtime/inbox.py::_replace_remainder",  # tmp -> inbox FILE
         "local_operator/session/runtime/registry.py::_staged_write",  # tmp -> record FILE
+        "local_operator/session/runtime/rescue.py::write_ledger",  # tmp -> rescue/<id>.json
         "local_operator/session/runtime/registry.py::_reap_dead_record",  # -> reaped/ FILE
         "local_operator/session/runtime/viewers.py::publish_viewer",  # tmp -> viewer FILE
         "local_operator/session/search_index.py::_save",  # tmp -> index FILE

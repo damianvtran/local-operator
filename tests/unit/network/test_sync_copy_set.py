@@ -429,6 +429,19 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/tools/builtin.py": (1, "the ripgrep excludes file under the agent home"),
     "local_operator/wakes/store.py": (1, "``wakes`` under the store root"),
     "local_operator/wakes/deliveries.py": (1, "``deliveries`` under ``wakes/``"),
+    # The rescue ledger (`session/runtime/rescue.py`) is the supervisor's own
+    # state at the CONFIG ROOT — `<config>/rescue/<session-id>.json`, a sibling of
+    # `wakes/` rather than a child of it, because the wake index globs *.json in
+    # its own directory and must never pick a rescue record up. It is this
+    # INSTALL's record of a recovery episode (attempts, backoff, breaker
+    # history), not an entry of a session directory: a session travelling to
+    # another device carries none of it, and the destination's own supervisor
+    # builds its own.
+    "local_operator/session/runtime/rescue.py": (
+        1,
+        "``RESCUE_LEDGER_DIRNAME``: the rescue ledger under the store root, beside "
+        "``sessions/`` and never inside one",
+    ),
     "local_operator/wakes/spooled.py": (1, "``spooled`` under ``wakes/``"),
     "local_operator/wakes/triggers/__init__.py": (
         4,
