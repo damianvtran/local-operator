@@ -105,48 +105,67 @@ _WALK_DEPTH_CAP = 2
 #: ``help`` op's enum value) and the eval failure notice — and they were
 #: re-measured through this file's own renderer, not pasted from another
 #: machine. Every other entry is byte-identical to #1862's table.
+#:
+#: RE-MEASURED 2026-10-01 by the slimming wave (audit items 2+3): the EIGHT
+#: worked tools moved — ``project`` 967 -> 1067, ``browser`` 1050 -> 1069,
+#: ``console`` 1006 -> 1141, ``ask`` 837 -> 948, ``hub`` 638 -> 675,
+#: ``agent`` 687 -> 826, ``network`` 697 -> 742, ``task`` 422 -> 505 — and
+#: the item-7 failure-semantics notes added ``bash`` 271 -> 313, ``eval``
+#: 348 -> 379, ``grep`` 237 -> 346, ``jobs`` 339 -> 365, ``monitor`` 369 ->
+#: 420, ``read`` 312 -> 358, ``todo`` 463 -> 498 and ``write`` 100 -> 144.
+#: Every other entry is byte-identical. These
+#: docs grew ON PURPOSE: prose cut from the always-loaded wire (descriptions
+#: and parameter schemas, the
+#: ledger the context-budget guard measures) moved HERE, where it costs
+#: nothing until ``read tool://<name>`` asks for it. The pairing is pinned by
+#: :func:`test_cut_wire_prose_moved_into_the_tool_doc`: a doc growing without
+#: a wire shrinking (or a wire shrinking with the detail deleted outright)
+#: fails there by phrase.
 MEASURED_TOKENS: dict[str, int] = {
-    "agent": 687,
-    "ask": 837,
-    "bash": 271,
-    "browser": 1050,
-    "console": 1006,
+    "agent": 826,
+    "ask": 948,
+    "bash": 313,
+    "browser": 1069,
+    "console": 1141,
     "edit": 372,
-    "eval": 348,
+    "eval": 379,
     "glob": 94,
-    "grep": 237,
-    "hub": 638,
-    "jobs": 339,
+    "grep": 346,
+    "hub": 675,
+    "jobs": 365,
     "list_variables": 61,
     "lsp": 303,
-    "monitor": 369,
-    "network": 697,
+    "monitor": 420,
+    "network": 742,
     "patience": 361,
-    "project": 968,
+    "project": 1067,
     "project_delete": 98,
-    "read": 312,
+    "read": 358,
     "read_variable": 74,
     "secret": 209,
     "send": 614,
     "sessions": 738,
-    "task": 422,
+    "task": 505,
     "team": 540,
     "team_delete": 93,
-    "todo": 463,
+    "todo": 498,
     "wait": 275,
     "wake": 357,
     "web_fetch": 367,
     "web_read": 234,
     "web_search": 202,
-    "write": 100,
+    "write": 144,
 }
 
 #: The SAME ledger's other arm: ``agent``/``task`` rendered against a
 #: tiers-configured ``values.subagents`` (the synthetic selectors the effort
 #: tests already use, so the config shape lives in one place). Recorded so a
 #: change to the config-sensitive branch is a visible edit here rather than a
-#: machine-dependent surprise.
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 716, "task": 585}
+#: machine-dependent surprise. RE-MEASURED 2026-10-01 by the slimming wave:
+#: 716 -> 855 and 585 -> 668, the same moved-here-on-purpose growth the clean
+#: arm documents (the per-op tables and notes now carry what the wire used
+#: to).
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 855, "task": 668}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:
@@ -482,6 +501,60 @@ def test_the_tier_configured_arm_is_pinned_too(tmp_path, monkeypatch: pytest.Mon
     # The branch is real: both docs differ from the clean arm's bytes.
     assert measured["agent"] != MEASURED_TOKENS["agent"]
     assert measured["task"] != MEASURED_TOKENS["task"]
+
+
+#: The slimming wave's no-loss map (audit items 2+3): prose CUT from the
+#: always-loaded wire must be reachable in ``read tool://<name>`` — that
+#: pairing is what makes the cut a MOVE rather than a deletion. Each phrase
+#: below was removed from the tool's own wire bytes (description + parameter
+#: schema, the bytes ``scripts/bench_context_budget.py``'s ``tool_schemas``
+#: counter measures) by the wave, and each must render in the doc's ops table
+#: or notes section.
+#:
+#: Asserted BOTH ways on purpose. ``in doc`` alone would pass while the
+#: phrase still rode every request (no saving, no move); ``not in wire``
+#: alone would pass with the detail deleted outright. The pair is the
+#: contract, and it is why the wave's per-tool PR mapping table can say
+#: "moved" rather than "cut".
+MOVED_WIRE_DETAIL: dict[str, tuple[str, ...]] = {
+    "agent": ("companion agents are the canonical one",),
+    "ask": ("Every question also offers the user a free-text answer",),
+    "browser": ("a redacted handle is not yours to drive",),
+    "console": ("a terminal in another window has none",),
+    "hub": (
+        "the fast way to check on a running child",
+        "Several ids address several subagents",
+    ),
+    "network": ("required by create/engage/stop/delete",),
+    "project": (
+        "derived, not stored",
+        "multiple paragraphs, headings, lists and code",
+    ),
+    "task": ("a registered profile or a packaged starter",),
+}
+
+
+@pytest.mark.parametrize("name", sorted(MOVED_WIRE_DETAIL))
+def test_cut_wire_prose_moved_into_the_tool_doc(
+    default_surface: list[AgentTool], name: str
+) -> None:
+    """Wave-1 cut phrases, pinned both ways: in the doc, gone from the wire.
+
+    A failure of the first assertion means the doc lost detail the wire gave
+    up; a failure of the second means the phrase never left the wire (the
+    "move" saved nothing) or a later edit re-inlined it — move it back out
+    of the schema or the description, or pick a different representative
+    phrase for this tool.
+    """
+    tool = next(tool for tool in default_surface if tool.name == name)
+    doc = render_tool_doc(tool)
+    wire = (tool.description or "") + json.dumps(tool.parameters or {})
+    for phrase in MOVED_WIRE_DETAIL[name]:
+        assert phrase in doc, f"{name}: cut phrase not reachable in tool://{name}: {phrase!r}"
+        assert phrase not in wire, (
+            f"{name}: phrase still on the always-loaded wire — the move saved "
+            f"nothing, so either cut it or drop it from MOVED_WIRE_DETAIL: {phrase!r}"
+        )
 
 
 def test_authored_notes_and_renderers_name_real_tools(
