@@ -198,6 +198,7 @@ from local_operator.tools.spill import (
     get_store,
     parse_handle,
 )
+from local_operator.tools.tool_docs import register_tool_doc_renderer
 
 logger = logging.getLogger(__name__)
 
@@ -13770,6 +13771,16 @@ def render_sessions_reference(tool: AgentTool | None = None) -> str:
             f"{name} — {description}\n\n"
             "reference unavailable: this build could not render the per-op reference."
         )
+
+
+# ``read tool://sessions`` must serve THIS function's bytes — the same call
+# the ``help`` op returns (the two-entry-point contract above) — instead of
+# the generic schema render. Module-level so the registration is import-time:
+# every startup path that can build or read the sessions tool has already run
+# it. The edge is one-way (``tool_docs`` imports no tools module), so no import
+# cycle rides on it, and ``tool_docs`` consults the registry at RESOLVE time,
+# so import order cannot matter.
+register_tool_doc_renderer("sessions", render_sessions_reference)
 
 
 def _sessions_peek_validation_error(params: SessionsParams, given: set[str]) -> str | None:
