@@ -548,16 +548,17 @@ async def test_the_two_new_reads_run_off_the_event_loop(api, monkeypatch) -> Non
     await client.post("/v1/desktop/projects", json={"name": "alpha", "description": "keyword"})
 
     loop_thread = threading.get_ident()
-    seen: list[int] = []
+    search_threads: list[int] = []
+    timeline_threads: list[int] = []
     real_search = desktop_projects.search_projects
     real_entry = desktop_projects.project_timeline_entry
 
     def spy_search(rows, query, *, limit=None):
-        seen.append(threading.get_ident())
+        search_threads.append(threading.get_ident())
         return real_search(rows, query, limit=limit)
 
     def spy_entry(project):
-        seen.append(threading.get_ident())
+        timeline_threads.append(threading.get_ident())
         return real_entry(project)
 
     monkeypatch.setattr(desktop_projects, "search_projects", spy_search)
@@ -566,5 +567,9 @@ async def test_the_two_new_reads_run_off_the_event_loop(api, monkeypatch) -> Non
     search = await client.get("/v1/desktop/projects/search", params={"q": "keyword"})
     timeline = await client.get("/v1/desktop/projects/timeline")
     assert search.status_code == 200 and timeline.status_code == 200
-    assert seen, "the spies never ran — the routes stopped calling them"
-    assert all(ident != loop_thread for ident in seen)
+    # Per route: each spy must have run, and each must have run off the loop —
+    # a bare ``assert seen`` would let one route carry the other.
+    assert search_threads, "the search route stopped calling search_projects"
+    assert timeline_threads, "the timeline route stopped calling project_timeline_entry"
+    assert all(ident != loop_thread for ident in search_threads)
+    assert all(ident != loop_thread for ident in timeline_threads)
