@@ -226,6 +226,14 @@ def begin_run(approval_id: str, *, now: float | None = None) -> ApprovalView:
     view = load(approval_id)
     if view is None:
         raise _refuse_missing(approval_id)
+    # F4'S "BEFORE EVERY STEP" INCLUDES THE FIRST ONE (agent review round 1,
+    # Finding 1). The invite edge runs before any gate — ``execute_approval``
+    # gates every step after it — and it has REAL effects: it mints a live
+    # invite and writes the admit pre-answer. A tampered record must be refused
+    # here, before either; ``verify_signature`` re-derives the request digest and
+    # its refusal propagates to the caller as-is (same class as a terminal
+    # state's refusal).
+    _call("verify_signature", view.record)
     # EXPIRY IS CHECKED HERE TOO, not only at the per-step gates: the first step
     # (the invite) runs on the approval's own edge, BEFORE any gate, and an
     # expired window must not mint a token or write a confirmation for it. A

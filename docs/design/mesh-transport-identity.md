@@ -2301,12 +2301,12 @@ What exists **now** so metered on-demand capacity is an extension:
   pairing path assumes a human at the far end (§4.2). `--automated` is now
   IMPLEMENTED (remote-onboarding slice (b)), and its meaning is frozen there:
   "no human at the JOINING end". The joining device supplies its OWN derived code
-  as the transcription — exactly the value a person would read off the other
-  screen — and the inviting device still compares it against its own derivation,
-  so a mismatch refuses, spends the attempt and audits `sas_mismatch`; the
-  operator's confirm at the inviting device is the pairing's only human act. The
-  admitted row stays `kind: "device"`; when pools arrive they will pass
-  `--kind pool` — the flag is about the human, not the kind.
+  as the transcription — the value a person at this end would have typed from
+  their own screen (§5.2) — and the inviting device still compares it against
+  its own derivation, so a mismatch refuses, spends the attempt and audits
+  `sas_mismatch`; the operator's confirm at the inviting device is the pairing's
+  only human act. The admitted row stays `kind: "device"`; when pools arrive
+  they will pass `--kind pool` — the flag is about the human, not the kind.
 - `net_sync` is a **reserved op name** with a reserved capability (`view`), so
   R22's cadence sync and its pre-spin-down sync are an implementation of a named
   op rather than a change to the envelope (§6.4).

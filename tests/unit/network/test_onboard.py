@@ -27,6 +27,7 @@ from typing import Any, Sequence
 import pytest
 
 from local_operator.network import onboard, onboard_approvals
+from local_operator.network import store as network_store
 from local_operator.network.types import MeshRefusal
 from local_operator.operator import OperatorAnchor
 from local_operator.operator.trust import statement_digest
@@ -45,11 +46,14 @@ class FakeApprovals:
         self.appended: list[tuple[str, str, dict[str, Any]]] = []
         self.finished: list[tuple[str, str, str]] = []
         self.refiled: list[dict[str, Any]] = []
+        self.verify_refusal: MeshRefusal | None = None
 
     def load(self, approval_id: str) -> Any:
         return self.record if approval_id == self.record["approval_id"] else None
 
     def verify_signature(self, record: Any) -> None:
+        if self.verify_refusal is not None:
+            raise self.verify_refusal
         return None
 
     def begin_run(self, approval_id: str, run_id: str) -> Any:
@@ -529,6 +533,10 @@ def test_a_join_mismatch_is_a_failed_receipt_naming_the_step(
     commands = " | ".join(" ".join(c[1]) for c in transport.calls if c[0] == "run")
     assert "member grant" not in commands
     assert "operator install" not in commands
+    # A DEAD RUN'S PRE-ANSWER DOES NOT OUTLIVE IT (round-1 Finding 1's secondary
+    # note): the run wrote the admit decision at the invite and died at the
+    # join; the runner that wrote it — and only it — clears it.
+    assert network_store.pair_decision("inv_1", isolated) is None
 
 
 def test_a_retry_reuses_the_record_with_a_new_run_id(
@@ -572,6 +580,39 @@ def test_a_retry_reuses_the_record_with_a_new_run_id(
     run_ids = {run_id for _, run_id, _ in fake.appended}
     assert len(run_ids) == 2, "receipts from both runs must be on the ONE record"
     assert "ap_aaaa1111" == record["approval_id"]
+
+
+def test_a_tampered_record_cannot_mint_an_invite_or_pre_answer_a_join(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F4 AT THE FIRST EDGE (agent review round 1, Finding 1).
+
+    The invite step runs before any gate and writes real things — a live invite
+    token and the admit pre-answer. The reviewer's repro showed a tampered record
+    doing both and only meeting the refusal at the pre_read gate; with the
+    verification inside ``begin_run`` the refusal is the ONLY event: no token is
+    minted, no decision file appears, and no receipt is written.
+    """
+    record = _record()
+    fake = FakeApprovals(record)
+    fake.verify_refusal = MeshRefusal(
+        "approval_record_tampered", "the record's signature does not verify"
+    )
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+    minted: list[list[str]] = []
+
+    def run_local(argv: list[str], *, timeout: float) -> onboard.CommandResult:
+        minted.append([str(part) for part in argv])
+        return _result(tuple(str(part) for part in argv))
+
+    with pytest.raises(MeshRefusal) as excinfo:
+        onboard.execute_approval("ap_aaaa1111", transport=FakeTransport(), run_local=run_local)
+
+    assert excinfo.value.code == "approval_record_tampered"
+    assert minted == [], "an invite must not be minted from an unverified record"
+    assert network_store.pair_decision("inv_1", isolated) is None
+    assert fake.appended == [], "nothing may run, so no receipt may be written"
+    assert fake.finished == []
 
 
 def test_a_terminal_record_is_never_re_run(

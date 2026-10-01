@@ -3481,9 +3481,11 @@ def _autostart() -> str:
     if relay_mod.health() is not None:
         return "the relay is already running"
     if not relay_mod.is_supported():
+        # §2.9: the STATE and the product's fallback, never a terminal command
+        # (agent review round 1, Finding 2 — this line reaches receipts).
         return (
-            "no user service supervisor here: run `lop network serve` in the foreground "
-            f"(log {relay_mod.log_path()})"
+            "no user service supervisor here: the relay can run in the foreground "
+            f"instead (log {relay_mod.log_path()})"
         )
     result = relay_mod.install()
     if result.get("ok"):

@@ -94,7 +94,7 @@ def isolated_network_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     when there is one to do it with, and a test must not install a plist or a
     systemd unit and load it into the operator's real session. Without
     ``launchctl``/``systemctl`` on PATH the child takes its own documented "no
-    user service supervisor here: run `lop network serve` in the foreground"
+    user service supervisor here: the relay can run in the foreground instead"
     branch, which is the same code path with the side effect removed.
     """
     root = tmp_path / "config"

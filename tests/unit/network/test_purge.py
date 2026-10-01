@@ -287,4 +287,4 @@ def test_service_action_names_the_missing_launchd_rather_than_the_home(
     action = relay.service_action("start")
     assert action["ok"] is False
     assert action.get("reason") == "no_supervisor"
-    assert "serve" in str(action["error"])
+    assert "foreground" in str(action["error"])
