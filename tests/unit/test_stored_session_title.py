@@ -745,3 +745,67 @@ def test_the_memo_is_bounded_by_the_root_count(tmp_path: Path) -> None:
     assert len(resume_module._OPENER_MEMO) == resume_module._SESSION_MEMO_ROOTS
     assert str(tmp_path / "store0" / "sessions") not in resume_module._TITLE_MEMO
     assert str(tmp_path / "store5" / "sessions") in resume_module._TITLE_MEMO
+
+
+def test_eviction_stands_down_when_the_memo_moves_under_it(tmp_path: Path, monkeypatch) -> None:
+    """A concurrent caller can move the map mid-eviction; that must not raise.
+
+    Review round 1, R1-1: ``_session_memo_for`` reads the map to evict its
+    oldest root, and CPython raises ``RuntimeError("dictionary changed size
+    during iteration")`` when a dict is mutated between an iterator and its
+    first read — which a desktop listing run from a worker thread can do. The
+    map here raises that exact exception from its own ``__iter__``, so the
+    tolerance is pinned deterministically instead of raced for.
+    """
+    from local_operator import resume as resume_module
+
+    class _RacingDict(dict):
+        def __iter__(self):
+            raise RuntimeError("dictionary changed size during iteration")
+
+    _clear_title_memos()
+    racing = _RacingDict(
+        {f"store{index}/sessions": {} for index in range(resume_module._SESSION_MEMO_ROOTS + 1)}
+    )
+    monkeypatch.setattr(resume_module, "_TITLE_MEMO", racing)
+
+    session = _session(tmp_path, "opening")
+    # The caller still gets its answer and its map: the race skips the
+    # eviction, never the answer.
+    assert session_name(session) == "opening"
+    assert str(tmp_path / "sessions") in racing
+
+
+def test_concurrent_eviction_never_raises(tmp_path: Path) -> None:
+    """Six threads churning stores past the root bound must not raise.
+
+    The hammer is the realistic shape — the desktop lists from worker threads —
+    and it pins that the tolerance holds under real contention, and that the
+    bound heals to its exact value on the next sequential call.
+    """
+    from local_operator import resume as resume_module
+
+    _clear_title_memos()
+    errors: list[BaseException] = []
+
+    def worker(index: int) -> None:
+        try:
+            for step in range(24):
+                opener = f"opening {index}-{step}"
+                session = _session(tmp_path / f"w{index}-{step}", opener)
+                assert session_name(session) == opener
+        except BaseException as exc:  # noqa: BLE001 — collected for the assertion
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(index,)) for index in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    # The bound is best-effort while callers race; one sequential call restores
+    # it exactly (the eviction floor is ROOTS - 1, and the call adds its own).
+    session = _session(tmp_path / "heal", "opening")
+    assert session_name(session) == "opening"
+    assert len(resume_module._TITLE_MEMO) == resume_module._SESSION_MEMO_ROOTS

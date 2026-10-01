@@ -3253,10 +3253,20 @@ def _session_memo_for(memo: dict[str, dict[str, Any]], session_dir: Path) -> dic
     """
     root = memo.get(str(session_dir.parent))
     if root is None:
-        # ``pop(..., None)``: the desktop lists from worker threads, so two
-        # calls can evict the same root; losing a memo only costs a re-read.
+        # SNAPSHOT, AND GUARDED. The desktop lists from worker threads, so a
+        # second caller can evict or insert between an iterator and its first
+        # read, and CPython raises ``RuntimeError("dictionary changed size
+        # during iteration")`` for exactly that — which would escape
+        # ``session_name`` into a listing or a search. Standing down is safe
+        # because the root count is only a bound: a lost race costs one call
+        # with an extra store remembered, and the next call re-checks and
+        # evicts it, while raising would cost the caller its scan.
         while len(memo) >= _SESSION_MEMO_ROOTS:
-            memo.pop(next(iter(memo), ""), None)
+            try:
+                oldest = next(iter(list(memo)))
+            except (StopIteration, RuntimeError):
+                break
+            memo.pop(oldest, None)
         root = memo.setdefault(str(session_dir.parent), {})
     return root
 
@@ -3270,6 +3280,14 @@ def _prune_session_scan_memos(sessions_root: Path, keep: set[str]) -> None:
     store as it is now. ``keep`` may hold ids ``session_name`` was never called
     on, which only makes the sweep conservative — it can never evict a live
     entry, because every session the scan saw keeps its entry.
+
+    ``keep`` comes from the scan's OWN filters, and one of them is worth
+    naming: a full scan with ``include_archived=False`` (the desktop search's
+    default) never emits archived ids, so an archived session's entry is evicted
+    with the rest. That is accepted — the cost is one re-read the next time a
+    listing touches that session, and threading the archive predicate through
+    the prune would cost more than the re-read it saves. Wrongness is not on
+    the table: a pruned entry only ever means a re-read.
     """
     key = str(sessions_root)
     for memo in (_TITLE_MEMO, _OPENER_MEMO):

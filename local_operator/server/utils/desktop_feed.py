@@ -685,13 +685,14 @@ class DesktopFeed:
         #: catalogue probe, which already lists the name set at 1 Hz, so the
         #: usual miss here is a directory created inside the last second.
         self._user_cache: dict[str, bool] = {}
-        #: The name set ``_catalogue_probe`` last saw, and the joined form it
-        #: digested, so a probe whose set did NOT move skips the join, the
-        #: digest input and the user-cache rebuild entirely (see that method).
-        #: ``None`` until the first probe; separate from ``_catalogue_names``,
-        #: which tracks the set the last PUBLISHED token was compared against.
-        self._probe_names: tuple[str, ...] | None = None
-        self._probe_names_joined = ""
+        #: ``(name set, joined form)`` as ONE attribute, read and compared
+        #: whole: ``_catalogue_probe`` runs on the default executor, so two
+        #: connection opens can overlap, and a torn pair — the set of one call
+        #: with the joined form of another — would feed the wrong digest input
+        #: to the token build. A single tuple cannot tear. ``None`` until the
+        #: first probe; separate from ``_catalogue_names``, which tracks the
+        #: set the last PUBLISHED token was compared against.
+        self._probe_state: tuple[tuple[str, ...], str] | None = None
 
     # -- subscribers -------------------------------------------------------
 
@@ -1565,15 +1566,16 @@ class DesktopFeed:
 
         WHAT IT COSTS ONCE RUNNING, after the skip below: the readdir, the
         sort and a tuple compare; the join, the digest input and the user-cache
-        work run only when the name set actually moved (measured 13-14 ms ->
-        10-11 ms warm per probe on a 15,441-name store, of which ~8 ms is the
-        readdir itself — the change detector that has to stay). The COLD first
-        probe additionally reads one marker per directory — ~6-8 s on that
-        store — which is a price paid once per backend process, not once per
-        connection or per probe. The obvious cheat, an ``os.stat`` that skips
-        the read when the marker is absent, measured SLOWER warm (835 ms vs
-        610 ms over 2,500 directories: 84% of directories carry a marker, and
-        for those the stat is pure added cost) and is deliberately not used.
+        work run only when the name set actually moved (measured interleaved
+        warm on a 15,441-name store: base 12.4-14.3 ms -> 9.6-9.8 ms per probe,
+        of which ~8 ms is the readdir itself — the change detector that has to
+        stay). The COLD first probe additionally reads one marker per
+        directory — ~6-8 s on that store — which is a price paid once per
+        backend process, not once per connection or per probe. The obvious
+        cheat, an ``os.stat`` that skips the read when the marker is absent,
+        measured SLOWER warm (835 ms vs 610 ms over 2,500 directories: 84% of
+        directories carry a marker, and for those the stat is pure added cost)
+        and is deliberately not used.
         """
         try:
             # ``os.listdir`` over ``os.scandir``: this probe never needs a
@@ -1587,16 +1589,20 @@ class DesktopFeed:
         names.sort()
         # THE JOIN, THE DIGEST INPUT AND THE CACHE WORK ARE SKIPPED WHEN THE SET
         # DID NOT MOVE, which is the steady state of a 1 Hz probe: a quiet store
-        # then pays the scandir, the sort and one tuple compare instead of
+        # then pays the readdir, the sort and one tuple compare instead of
         # re-joining ~200 KB of names, handing it to crc32 and rebuilding the
-        # whole ``_user_cache`` map — measured 13-14 ms -> 4-5 ms per probe warm
-        # on a 15,441-name store. The tuple compared is the same list the token
-        # would be built from, so an unchanged tuple cannot change the token's
-        # name term, and the cached join is byte-identical to what the join
-        # would return for it.
+        # whole ``_user_cache`` map — measured interleaved warm on a
+        # 15,441-name store: base 12.4-14.3 ms -> 9.6-9.8 ms per probe. The
+        # tuple compared is the same list the token would be built from, so an
+        # unchanged tuple cannot change the token's name term, and the cached
+        # join is byte-identical to what the join would return for it.
         names_tuple = tuple(names)
-        if names_tuple == self._probe_names:
-            joined = self._probe_names_joined
+        # Both halves ride in ONE attribute (see ``_probe_state``), read whole:
+        # an overlapping probe must never pair this call's set with another
+        # call's join.
+        cached = self._probe_state
+        if cached is not None and cached[0] == names_tuple:
+            joined = cached[1]
         else:
             # PRIME THE USER-SESSION CACHE HERE, in the worker thread the caller
             # already put this on, and only for names it has never judged. The
@@ -1616,8 +1622,7 @@ class DesktopFeed:
             for name in names:
                 if name not in self._user_cache:
                     self._user_cache[name] = self._is_user_session(name)
-            self._probe_names = names_tuple
-            self._probe_names_joined = joined
+            self._probe_state = (names_tuple, joined)
         # A STABLE digest, not `hash()`: the token is opaque to the client but it
         # is compared across reconnects, and Python's string hashing is salted
         # per process — so a `hash()` here would report a change to every client
