@@ -223,7 +223,9 @@ def test_the_reminder_text_is_the_designed_template() -> None:
         "dated line with `project op='update' name='<name>' progress='<line>'`; "
         "if its state changed, `project op='update' name='<name>' "
         "status='paused|done'`. If the recorded progress still describes reality, "
-        "re-send the same text to refresh it. If this session no longer belongs "
+        "`project op='refresh' name='<name>'` records that you checked; it does "
+        "not reset the staleness clock, and a reworded re-send is a NEW line, "
+        "not a refresh. If this session no longer belongs "
         "to a project, `project op='unlink' name='<name>'`. If a decision here "
         "is the user's to make, put it to them with the `ask` tool.\n"
         "</system-reminder>"
@@ -300,12 +302,20 @@ def test_renderer_keeps_the_newest_of_each_reminder_type() -> None:
 def test_stamped_project_fingerprint_round_trips_and_expires_garbage() -> None:
     """The stamp arrives from a plain dict, where JSON has turned the nested
     tuples into lists; a stamp that cannot be normalised must compare equal to
-    nothing (and so expire) rather than raise on a render path."""
+    nothing (and so expire) rather than raise on a render path.
+
+    FOUR fields since schema 2 — ``(id, status, content stamp, assertion
+    stamp)`` — and the arity is load-bearing: a 3-field stamp from a reminder
+    built by an older build (or a 5-field one from a newer build) can describe
+    nothing this build can compare against, so it must expire rather than
+    suppress the nudge it cannot vouch for.
+    """
     from local_operator.session.session import _stamped_project_fingerprint
 
-    details = {"fingerprint": [["a" * 12, "active", 123]]}
-    assert _stamped_project_fingerprint(details) == (("a" * 12, "active", 123),)
-    assert _stamped_project_fingerprint({"fingerprint": [["a" * 12, "active", "nope"]]}) == ()
+    details = {"fingerprint": [["a" * 12, "active", 123, 456]]}
+    assert _stamped_project_fingerprint(details) == (("a" * 12, "active", 123, 456),)
+    assert _stamped_project_fingerprint({"fingerprint": [["a" * 12, "active", 123]]}) == ()
+    assert _stamped_project_fingerprint({"fingerprint": [["a" * 12, "active", "nope", 1]]}) == ()
     assert _stamped_project_fingerprint({}) == ()
 
 

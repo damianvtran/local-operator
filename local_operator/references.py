@@ -1539,13 +1539,18 @@ def _compact_age(seconds: float) -> str:
 
 
 def _project_progress_attribution(project: Any) -> str:
-    """`` (reported 2h ago by session <id>)`` — the freshness pair, in the block.
+    """`` (reported 2h ago by session <id>; refreshed 1h ago — no new content since <date>)``.
 
     The attribution is what stops a stale snippet masquerading as live (§11
     item 10), so it names WHO reported the text and WHEN, compactly. A row with
     no timestamp (hand-written, or never reported) says nothing at all rather
     than "reported None ago"; ``operator`` is named as such because it is not a
     session id and a reader must not take it for one.
+
+    The refresh assertion rides the same parenthesis when it is live (newer
+    than the content): "checked recently, text unchanged" is the second fact a
+    reader must not have to guess, and the compact vocabulary is this block's
+    own (the full sentence lives in tool ``show``).
     """
     if project.progress_updated_at is None:
         return ""
@@ -1557,11 +1562,21 @@ def _project_progress_attribution(project: Any) -> str:
         who = f" by session {reporter}"
     else:
         who = ""
-    return f" (reported {age} ago{who})"
+    refreshed = ""
+    refreshed_at = getattr(project, "progress_refreshed_at", None)
+    if refreshed_at is not None and refreshed_at > project.progress_updated_at:
+        from local_operator.projects import progress_date_text
+
+        day = progress_date_text(project.progress_updated_at)
+        refreshed = (
+            f"; refreshed {_compact_age(time.time() - refreshed_at)} ago — no new content"
+            f" since {day}"
+        )
+    return f" (reported {age} ago{who}{refreshed})"
 
 
 def _project_sessions_line(project: Any, states: dict[str, dict[str, Any]]) -> str:
-    """``sessions: 2 linked — 1 live, busy, 1 stopped`` — the settled Q3 line.
+    """``sessions: 2 working — 1 live, busy, 1 stopped · filed by 1`` — the Q3 line.
 
     COUNTS, not ids: the block answers "is someone working on this" without
     spending its budget on 64 session ids, and the fixed category order makes
@@ -1574,10 +1589,12 @@ def _project_sessions_line(project: Any, states: dict[str, dict[str, Any]]) -> s
     folded into ``stopped`` here while the view and the desktop reported it as
     its own state; that divergence is closed.
 
-    ``stopped`` therefore means what it means everywhere else: no runtime
-    record at all. That is the common case, and on this evidence a deleted
-    session directory is indistinguishable from a never-started one, so
-    neither is claimed.
+    The breakdown counts the WORK set only (``sessions``), so a chief-of-staff
+    filing can never read as a worker; a filing is named separately as the
+    filer, never as a runtime state. ``stopped`` therefore means what it means
+    everywhere else: no runtime record at all. That is the common case, and on
+    this evidence a deleted session directory is indistinguishable from a
+    never-started one, so neither is claimed.
     """
     counts = {"live, busy": 0, "live": 0, "wedged": 0, "stale": 0, "stopped": 0}
     for session_id in project.sessions:
@@ -1592,10 +1609,18 @@ def _project_sessions_line(project: Any, states: dict[str, dict[str, Any]]) -> s
         else:
             counts["stopped"] += 1
     linked = len(project.sessions)
-    if not linked:
+    filed = len(getattr(project, "coordination_sessions", None) or [])
+    if not linked and not filed:
         return "sessions: none linked"
-    breakdown = ", ".join(f"{count} {label}" for label, count in counts.items() if count)
-    return f"sessions: {linked} linked — {breakdown}"
+    clauses: list[str] = []
+    if linked:
+        breakdown = ", ".join(f"{count} {label}" for label, count in counts.items() if count)
+        clauses.append(f"sessions: {linked} working — {breakdown}")
+    else:
+        clauses.append("sessions: none working")
+    if filed:
+        clauses.append(f"filed by {filed}")
+    return " · ".join(clauses)
 
 
 def _project_body(project: Any, states: dict[str, dict[str, Any]], budget: int) -> str:

@@ -16,10 +16,13 @@ rows is the smallest honest thing the supervisor can do, and any row it cannot
 parse is skipped (one bad file costs one candidate; the store's own readers are
 the authority for repair).
 
-THE FINGERPRINT is the same ``(id, status, int(progress_updated_at))`` shape
-the completion-time check already latches on, so "what counts as a new stale
-episode" cannot mean two different things: a progress refresh, a status move,
-or a later episode after a refresh all move it; milestone edits and other
+THE FINGERPRINT is the ``(id, status, int(progress_updated_at))`` shape — the
+same first three elements the completion-time check's latch carries (that
+latch adds the refresh assertion as a fourth; this stdlib reader keeps the
+three a published snapshot can see) — so "what counts as a new stale episode"
+cannot mean two different things: a status move or a NEW content line moves
+it, and a refresh deliberately does not (a check-in is not an update — the
+store's own content clock reads the same way); milestone edits and other
 metadata do not.
 
 LIVENESS IS A FLOOR, NOT A VERDICT. The payload annotates each linked session

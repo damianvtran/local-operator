@@ -195,6 +195,13 @@ def run_startup_migrations(config_dir: Path) -> None:
     ships with it, or is handled by ``ConfigManager`` the same way it would
     have been moments later. No state is recorded: the migration's own
     no-op path is the gate (see the module docstring).
+
+    Three arms: the session-cleanup config migration, the action-class
+    backfill for the agent registry, and the projects coordination re-kind
+    (schema 1 -> 2 — the store-side migration lives in
+    :func:`local_operator.projects.migrate_coordination_links` and shares the
+    same doctrine: idempotent predicate, backup-first, abort-if-no-backup).
+    Each arm fails on its own; one skipping never skips the others.
     """
     try:
         migrate_session_cleanup(config_dir)
@@ -220,4 +227,14 @@ def run_startup_migrations(config_dir: Path) -> None:
         backfill_seed_action_class(config_dir)
     except Exception as exc:  # noqa: BLE001 — never a reason not to start
         logger.warning("config migration: action-class backfill skipped: %s", exc)
+        logger.debug("config migration: traceback", exc_info=True)
+    try:
+        # Lazily imported: the store module (pydantic models, the runtime
+        # scan's dependencies) must not ride the import path of every CLI
+        # start just because one migration may touch it.
+        from local_operator.projects import migrate_coordination_links
+
+        migrate_coordination_links(config_dir)
+    except Exception as exc:  # noqa: BLE001 — never a reason not to start
+        logger.warning("config migration: project coordination migration skipped: %s", exc)
         logger.debug("config migration: traceback", exc_info=True)

@@ -1058,10 +1058,10 @@ def _project_reminder_text(stale: list[Project], *, now: float | None = None) ->
     framing and the explicit "injected by the harness" label because the model
     reads it as a user turn (without the label it would answer the user about a
     message the user never sent), the stale rows verbatim, and the honest exits
-    — update progress, update status, refresh an unchanged line, unlink — plus
-    the ``ask`` clause. ``reported_age`` is the same age arithmetic every other
-    project surface composes its sentences from. ``now`` exists for tests, which
-    pin the rendered text against a fixed clock.
+    — update progress, update status, refresh a checked line (op='refresh'),
+    unlink — plus the ``ask`` clause. ``reported_age`` is the same age
+    arithmetic every other project surface composes its sentences from. ``now``
+    exists for tests, which pin the rendered text against a fixed clock.
     """
     rows: list[str] = []
     for project in stale[:_PROJECT_REMINDER_MAX_ROWS]:
@@ -1096,7 +1096,9 @@ def _project_reminder_text(stale: list[Project], *, now: float | None = None) ->
         "dated line with `project op='update' name='<name>' progress='<line>'`; "
         "if its state changed, `project op='update' name='<name>' "
         "status='paused|done'`. If the recorded progress still describes reality, "
-        "re-send the same text to refresh it. If this session no longer belongs "
+        "`project op='refresh' name='<name>'` records that you checked; it does "
+        "not reset the staleness clock, and a reworded re-send is a NEW line, "
+        "not a refresh. If this session no longer belongs "
         "to a project, `project op='unlink' name='<name>'`. If a decision here "
         "is the user's to make, put it to them with the `ask` tool.\n"
         "</system-reminder>"
@@ -1588,25 +1590,36 @@ def _stamped_todo_fingerprint(details: Mapping[str, Any]) -> tuple[tuple[str, st
     )
 
 
-def _stamped_project_fingerprint(details: Mapping[str, Any]) -> tuple[tuple[str, str, int], ...]:
+def _stamped_project_fingerprint(
+    details: Mapping[str, Any],
+) -> tuple[tuple[str, str, int, int], ...]:
     """The stale-set fingerprint a project reminder was built from, normalized.
 
-    The todo normaliser's twin, with one deliberate addition: the third element
-    is an INTEGER (``int(progress_updated_at or 0)``), so a stamp that will not
-    coerce is dropped rather than raised on — a reminder with no usable stamp
-    compares equal to nothing and expires, which is the safe direction (an
-    unverifiable nudge is worth less than one turn without it). The JSON round
-    trip matters identically: ``details`` is a plain dict and any round trip
-    turns the nested tuples into lists, so a raw ``!=`` against the live
-    fingerprint would expire every reminder on sight.
+    The todo normaliser's twin, with two deliberate additions: the tuple is
+    ``(id, status, int(progress_updated_at or 0), int(progress_refreshed_at or
+    0))`` — ARITY MUST MATCH ``stale_projects_fingerprint`` — and the numeric
+    elements are coerced through ``int``, so a stamp that will not coerce is
+    dropped rather than raised on — a reminder with no usable stamp compares
+    equal to nothing and expires, which is the safe direction (an unverifiable
+    nudge is worth less than one turn without it). The JSON round trip matters
+    identically: ``details`` is a plain dict and any round trip turns the
+    nested tuples into lists, so a raw ``!=`` against the live fingerprint
+    would expire every reminder on sight.
+
+    The arity is load-bearing exactly as the todo twin's is: if this stayed at
+    3 while the source grew to 4, every stamped item would be dropped, the
+    stamped side would compare empty against a non-empty current fingerprint,
+    and every project reminder would expire on every render — the latch errs
+    safe (it keeps nudging) so "does it nudge" still passes while the
+    no-second-nudge suppression silently breaks.
     """
     stamped = details.get("fingerprint") or ()
-    out: list[tuple[str, str, int]] = []
+    out: list[tuple[str, str, int, int]] = []
     for item in stamped:
-        if not isinstance(item, (list, tuple)) or len(item) != 3:
+        if not isinstance(item, (list, tuple)) or len(item) != 4:
             continue
         try:
-            out.append((str(item[0]), str(item[1]), int(item[2])))
+            out.append((str(item[0]), str(item[1]), int(item[2]), int(item[3])))
         except (TypeError, ValueError):
             continue
     return tuple(out)
@@ -3555,7 +3568,7 @@ class Session:
         # projects that reminder named — so a model that yields twice with a
         # byte-identical stale set is not nudged a second time. Reset per user
         # turn beside the todo latch; see :meth:`_project_continuation`.
-        self._project_reminder_fingerprint: tuple[tuple[str, str, int], ...] | None = None
+        self._project_reminder_fingerprint: tuple[tuple[str, str, int, int], ...] | None = None
         # Per-turn count of tool-execution events seen this user turn. The
         # project guardrail fires only after a worked turn: a turn that ran no
         # tools cannot have moved a project's record, so nudging it to update
@@ -15049,16 +15062,18 @@ class Session:
         Fires only while the turn is MOVING and the record is quiet: at least
         one tool-execution event landed this turn (``_turn_tool_calls`` — a
         turn that ran no tools cannot have moved a project's state), and the
-        stale set (``stale_projects_for_session``: linked, in-flight
-        (``PROJECT_LIVE_STATUSES``) AND stale) has moved since the last nudge
-        THIS turn. The latch is the
-        stale-set fingerprint ``(id, status, int(progress_updated_at or 0))``:
+        stale set (``stale_projects_for_session``: WORK-linked, in-flight
+        (``PROJECT_LIVE_STATUSES``), content-stale AND not asserted within the
+        window) has moved since the last nudge THIS turn. The latch is the
+        stale-set fingerprint
+        ``(id, status, int(progress_updated_at or 0), int(progress_refreshed_at or 0))``:
         a byte-identical set is never nudged twice (a model yielding twice on
-        it is stuck, and the reminder's own exits — update / refresh /
-        unlink — are what move it), while a refresh or a status change moves
-        the fingerprint and lets the REMAINING stale projects earn another
-        nudge in the same turn (a refresh cannot collide with the floored
-        stamp it replaces — see ``stale_projects_fingerprint``). A fresh user
+        it is stuck, and the reminder's own exits — update / refresh / unlink —
+        are what move it), while a refresh or a status change moves the
+        fingerprint and lets the REMAINING stale projects earn another nudge in
+        the same turn (a refresh lands a stamp newer than the content it
+        asserts about, so it cannot collide with the values it replaces — see
+        ``stale_projects_fingerprint``). A fresh user
         turn re-arms it (see ``_run_turn_pipeline``).
 
         Budget: shares ``max_follow_up_continuations`` with the todo producer

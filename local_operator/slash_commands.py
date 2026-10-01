@@ -294,6 +294,7 @@ def project_listing_rows(
     *,
     states: Mapping[str, dict[str, Any]] | None = None,
     now: float | None = None,
+    window: float | None = None,
 ) -> list[str]:
     """One row per project — the listing receipt both ``/project`` handlers print.
 
@@ -305,11 +306,15 @@ def project_listing_rows(
     surface and the model's cannot disagree about them; the rows themselves
     differ by surface (the tool words its session field differently, this one
     is context-free).
+
+    The session count is the WORKING set (``sessions``); a filing gets its own
+    clause so "1 working session" can never mean a live chief-of-staff link.
     """
     rows: list[str] = []
     from local_operator.projects import (
         display_name,
         progress_is_stale,
+        refreshed_age_text,
         reported_age,
         truncate_row,
     )
@@ -331,21 +336,28 @@ def project_listing_rows(
             done = sum(1 for milestone in project.milestones if milestone.completed_at)
             parts.append(f"M {done}/{len(project.milestones)}")
         sessions = len(project.sessions)
+        wanted = f"{sessions} working session" + ("" if sessions == 1 else "s")
         if states is not None:
             live = sum(
                 1
                 for session_id in project.sessions
                 if (states.get(session_id) or {}).get("state") == "live"
             )
-            parts.append(f"{sessions} session{'' if sessions == 1 else 's'} ({live} live)")
+            parts.append(f"{wanted} ({live} live)")
         else:
-            parts.append(f"{sessions} session{'' if sessions == 1 else 's'}")
+            parts.append(wanted)
+        filed = len(project.coordination_sessions)
+        if filed:
+            parts.append(f"{filed} filed")
         age = reported_age(project, now=now)
         if age is None:
             parts.append("no progress")
         else:
-            stale = " (stale)" if progress_is_stale(project, now=now) else ""
+            stale = " (stale)" if progress_is_stale(project, now=now, window=window) else ""
             parts.append(f"progress {age} ago{stale}")
+            refreshed = refreshed_age_text(project, now=now)
+            if refreshed is not None:
+                parts.append(f"refreshed {refreshed} ago")
         row = " · ".join(parts)
         summary = (project.description or "").strip()
         if summary:
@@ -472,7 +484,11 @@ def project_overview_receipt(
     to the all-projects listing, because NEITHER state is a refusal: a reader
     with no project of their own still gets the overview.
     """
-    from local_operator.projects import scan_runtime_states, store_error_text
+    from local_operator.projects import (
+        scan_runtime_states,
+        stale_after_s,
+        store_error_text,
+    )
 
     associated: list[Any] = []
     if session_id:
@@ -482,7 +498,12 @@ def project_overview_receipt(
             associated = []
     if associated:
         states = scan_runtime_states(config_dir)
-        rows = project_listing_rows(associated, states=states, now=now)
+        rows = project_listing_rows(
+            associated,
+            states=states,
+            now=now,
+            window=stale_after_s(config_dir),
+        )
         return (
             "\n".join([project_associated_heading_text(len(associated)), *rows]),
             "info",
@@ -494,7 +515,7 @@ def project_overview_receipt(
     if not projects:
         return (project_empty_text(), "info")
     states = scan_runtime_states(config_dir)
-    rows = project_listing_rows(projects, states=states, now=now)
+    rows = project_listing_rows(projects, states=states, now=now, window=stale_after_s(config_dir))
     return ("\n".join([*rows, project_listing_hint_text()]), "info")
 
 
@@ -525,7 +546,12 @@ def project_show_receipt(view: Mapping[str, Any], *, now: float | None = None) -
     project: Mapping[str, Any] = raw_project if isinstance(raw_project, dict) else {}
     # ``age_text``: the receipt holds a composed JSON row, not a ``Project``,
     # so it reads the raw-stamp arithmetic the model-side helper layers over.
-    from local_operator.projects import age_text, display_name, history_lines
+    from local_operator.projects import (
+        age_text,
+        display_name,
+        history_lines,
+        refreshed_note,
+    )
 
     key = project.get("name") or ""
     lines = [f"{display_name(project) or '(unnamed)'} [{project.get('status') or 'active'}]"]
@@ -561,6 +587,11 @@ def project_show_receipt(view: Mapping[str, Any], *, now: float | None = None) -
     reporter = project.get("progress_reported_by") or ""
     by = f" by {reporter}" if reporter else ""
     lines.append(f"progress ({freshness}{by}): {project.get('progress') or '—'}")
+    # The refresh assertion, as its own line: "refreshed 1h ago by session Y —
+    # no new content since 2026-09-29" (the one sentence, ``refreshed_note``).
+    note = refreshed_note(project, now=now)
+    if note is not None:
+        lines.append(note)
     # The history section the project tool's `show` prints: one copy of the
     # renderer (``history_lines``), reading the composed row — the same
     # fields rule the tags line above states.
@@ -594,48 +625,66 @@ def project_show_receipt(view: Mapping[str, Any], *, now: float | None = None) -
         lines.append("milestones: (none)")
     rows_value = view.get("sessions")
     rows: list[Any] = rows_value if isinstance(rows_value, list) else []
-    if not rows:
+    working = [row for row in rows if isinstance(row, dict) and row.get("role") != "coordination"]
+    filed = [row for row in rows if isinstance(row, dict) and row.get("role") == "coordination"]
+    if not working and not filed:
         lines.append("linked sessions: (none)")
     else:
-        lines.append(f"linked sessions ({len(rows)}):")
-        for row in rows[:8]:
-            if not isinstance(row, dict):
-                continue
-            session_row: Mapping[str, Any] = row
-            session_id = session_row.get("session_id")
-            title = session_row.get("title") or "(untitled)"
-            if session_row.get("exists") is False:
-                # `missing`, the word the guide promises — not `stopped`, which
-                # would be a wrong statement about a session whose directory is
-                # gone (agent review round 1, finding 5; QA F5).
-                lines.append(f"  - {session_id} [missing] {title}")
-                continue
-            runtime_value = session_row.get("runtime")
-            runtime: Mapping[str, Any] = runtime_value if isinstance(runtime_value, dict) else {}
-            state = str(runtime.get("state") or "stopped")
-            busy = ", busy" if runtime.get("busy") else ""
-            bits = [state + busy]
-            subagents_value = session_row.get("subagents")
-            subagents: Mapping[str, Any] = (
-                subagents_value if isinstance(subagents_value, dict) else {}
-            )
-            if subagents.get("running") is not None and subagents.get("settled") is not None:
-                bits.append(
-                    f"{int(subagents['running'])} running · "
-                    f"{int(subagents['settled'])} settled subagents"
+        if working:
+            lines.append(f"working sessions ({len(working)}):")
+            for row in working[:8]:
+                session_id = row.get("session_id")
+                title = row.get("title") or "(untitled)"
+                if row.get("exists") is False:
+                    # `missing`, the word the guide promises — not `stopped`, which
+                    # would be a wrong statement about a session whose directory is
+                    # gone (agent review round 1, finding 5; QA F5).
+                    lines.append(f"  - {session_id} [missing] {title}")
+                    continue
+                runtime_value = row.get("runtime")
+                runtime: Mapping[str, Any] = (
+                    runtime_value if isinstance(runtime_value, dict) else {}
                 )
-            todos_value = session_row.get("todos")
-            todos: Mapping[str, Any] = todos_value if isinstance(todos_value, dict) else {}
-            # Both counts must exist: a snapshot-less session carries the key
-            # with null counts and `todos None/None` is user-visible junk
-            # (UX round 1, U2).
-            if todos.get("open") is not None and todos.get("total") is not None:
-                bits.append(f"todos {todos['open']}/{todos['total']}")
-            if session_row.get("archived"):
-                bits.append("archived")
-            lines.append(f"  - {session_id} [{' · '.join(bits)}] {title}")
-        if len(rows) > 8:
-            lines.append(f"  … +{len(rows) - 8} more")
+                state = str(runtime.get("state") or "stopped")
+                busy = ", busy" if runtime.get("busy") else ""
+                bits = [state + busy]
+                subagents_value = row.get("subagents")
+                subagents: Mapping[str, Any] = (
+                    subagents_value if isinstance(subagents_value, dict) else {}
+                )
+                if subagents.get("running") is not None and subagents.get("settled") is not None:
+                    bits.append(
+                        f"{int(subagents['running'])} running · "
+                        f"{int(subagents['settled'])} settled subagents"
+                    )
+                todos_value = row.get("todos")
+                todos: Mapping[str, Any] = todos_value if isinstance(todos_value, dict) else {}
+                # Both counts must exist: a snapshot-less session carries the key
+                # with null counts and `todos None/None` is user-visible junk
+                # (UX round 1, U2).
+                if todos.get("open") is not None and todos.get("total") is not None:
+                    bits.append(f"todos {todos['open']}/{todos['total']}")
+                if row.get("archived"):
+                    bits.append("archived")
+                lines.append(f"  - {session_id} [{' · '.join(bits)}] {title}")
+            if len(working) > 8:
+                lines.append(f"  … +{len(working) - 8} more")
+        if filed:
+            # A filing is provenance, never a runtime claim: the row's state
+            # word is `filed`, and it carries no subagents/todos to print.
+            lines.append(f"filed by ({len(filed)}):")
+            for row in filed[:8]:
+                session_id = row.get("session_id")
+                title = row.get("title") or "(untitled)"
+                if row.get("exists") is False:
+                    lines.append(f"  - {session_id} [filed · missing] {title}")
+                    continue
+                bits = ["filed"]
+                if row.get("archived"):
+                    bits.append("archived")
+                lines.append(f"  - {session_id} [{' · '.join(bits)}] {title}")
+            if len(filed) > 8:
+                lines.append(f"  … +{len(filed) - 8} more")
     return "\n".join(lines)
 
 
@@ -676,6 +725,7 @@ def run_project_slash_op(
         build_project_view,
         readable_error,
         scan_runtime_states,
+        stale_after_s,
         store_error_text,
     )
 
@@ -704,7 +754,9 @@ def run_project_slash_op(
         if not projects:
             return (project_empty_text(), "info")
         states = scan_runtime_states(config_dir)
-        rows = project_listing_rows(projects, states=states, now=now)
+        rows = project_listing_rows(
+            projects, states=states, now=now, window=stale_after_s(config_dir)
+        )
         # The listing's footer (S3b): the two page entries, named. A FOOTER —
         # after every row, absent on an empty store.
         return ("\n".join([*rows, project_listing_hint_text()]), "info")
@@ -750,9 +802,19 @@ def run_project_slash_op(
         name = rest.strip()
         if not name:
             return (project_needs_name_text("new"), "warning")
+        # The chief of staff's auto-link is FILED, not working — the same
+        # write-surface decision the tool's create makes (one policy, two
+        # surfaces; the store stays role-agnostic).
+        coordination = False
+        if linkable:
+            from local_operator.aida.state import is_aida_session
+
+            coordination = is_aida_session(config_dir, linkable)
         try:
             project = registry.create_project(
-                ProjectEdit(name=name), sessions=[linkable] if linkable else ()
+                ProjectEdit(name=name),
+                sessions=[] if coordination else ([linkable] if linkable else []),
+                coordination_sessions=[linkable] if (linkable and coordination) else [],
             )
         except ProjectNameConflictError as exc:
             # BARE name in the embedded command: the quoted form was a command
@@ -768,6 +830,12 @@ def run_project_slash_op(
             # stringifies with the absolute path it touched, and a receipt must
             # not leak one (QA round 1, Q4).
             return (f"could not create the project: {store_error_text(exc)}", "warning")
+        if linkable and coordination:
+            return (
+                f"created project {project.name!r} [{project.status}]; filed by this "
+                f"session ({linkable}) — a coordination link, not a working session.",
+                "info",
+            )
         if linkable:
             return (
                 f"created project {project.name!r} [{project.status}] and linked this "
@@ -792,36 +860,69 @@ def run_project_slash_op(
             return (project_show_refusal_text(name), "warning")
         if linkable is None:
             return ("this session has no linkable id — nothing to link.", "warning")
+        # The pre-state decides which receipt is true: a filed id that links
+        # MOVES lists, and the receipt must say its liveness role changed.
+        was_filed = linkable in project.coordination_sessions
+        # SELF-FILING: `/project link` is always a self-link, so a chief of
+        # staff session FILES rather than joins — the tool op's role decision,
+        # one copy each — and an existing work link is never demoted.
+        self_filing = False
+        if word == "link" and linkable not in project.sessions:
+            from local_operator.aida.state import is_aida_session
+
+            self_filing = is_aida_session(config_dir, linkable)
         try:
             if word == "link":
-                project, changed = registry.link_session(project.id, linkable)
+                project, changed = registry.link_session(
+                    project.id, linkable, role="coordination" if self_filing else "work"
+                )
             else:
                 project, changed = registry.unlink_session(project.id, linkable)
         except (ValueError, ValidationError) as exc:
             return (readable_error(exc), "warning")
         except Exception as exc:  # noqa: BLE001
             return (f"could not update the link set: {store_error_text(exc)}", "warning")
+        working = f"{len(project.sessions)} working"
+        if project.coordination_sessions:
+            working += f" + {len(project.coordination_sessions)} filed"
         if word == "link":
+            if self_filing:
+                if changed:
+                    return (
+                        f"filed session {linkable} on {project.name!r} — a coordination "
+                        f"link, not a working session.",
+                        "info",
+                    )
+                return (
+                    f"session {linkable} is already filed on {project.name!r} — a "
+                    f"coordination link, not a working session.",
+                    "info",
+                )
             if not changed:
                 return (
-                    f"session {linkable} was already linked to {project.name!r} "
-                    f"({len(project.sessions)} linked).",
+                    f"session {linkable} was already linked to {project.name!r} as a "
+                    f"working session ({working}).",
+                    "info",
+                )
+            if was_filed:
+                return (
+                    f"moved session {linkable} from filed to working links on "
+                    f"{project.name!r} ({working} now).",
                     "info",
                 )
             return (
-                f"linked session {linkable} to {project.name!r} "
-                f"({len(project.sessions)} linked now).",
+                f"linked session {linkable} to {project.name!r} as a working session "
+                f"({working} now).",
                 "info",
             )
         if not changed:
             return (
                 f"session {linkable} is not linked to {project.name!r}; "
-                f"/project show {name} lists its sessions.",
+                f"/project show {name} lists its sessions and filings.",
                 "warning",
             )
         return (
-            f"unlinked session {linkable} from {project.name!r} "
-            f"({len(project.sessions)} linked now).",
+            f"unlinked session {linkable} from {project.name!r} ({working} now).",
             "info",
         )
 
