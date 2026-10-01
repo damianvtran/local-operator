@@ -860,7 +860,11 @@ async def test_an_amber_send_offers_the_notice_hook_and_a_clean_one_does_not(mon
         aborted = AbortSignal()
         aborted.abort("operator stopped the turn")
         await execute_send(
-            "aborted", {"target": "peer-target", "message": "did this land?"}, aborted, None, context
+            "aborted",
+            {"target": "peer-target", "message": "did this land?"},
+            aborted,
+            None,
+            context,
         )
         assert len(calls) == 1, calls
         assert calls[0]["force"] is True, "an aborted send is filed even with the key off"
