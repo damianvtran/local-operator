@@ -24,7 +24,11 @@ from memory; the note and the PRs are the references.
 1. Baseline (read-only): `lop operator status` → expect `spawn-capability-only`, no anchor.
 2. Agent files the ask / runs the verb (agent-interim path):
    - with the credential prompt: the operator supplies the admin password ONCE via
-     `/credential`, then `lop operator setup --json --sudo-secret <secret-name>`;
+     `/credential` (a masked capture which reports the generated `LOP_SECRET_…`
+     name it is stored under) and PROMOTES that name with `/credential --persist
+     LOP_SECRET_…` — the capture writes session memory only, and `--sudo-secret`
+     resolves through `lop secret get` — then `lop operator setup --json
+     --sudo-secret LOP_SECRET_…`;
    - or a terminal runs `lop operator setup --json` and answers the sudo PROMPT.
 3. Operator raises the one admin gesture (sudo prompt here; the native sheet is slice (c)).
 4. Assert the receipts: `proposed → consent → generated → installed → verified`, all ok,

@@ -581,8 +581,12 @@ Diagnose in this order, and stop at the first answer that explains it:
      host offers a presence store, `operator-file-only` where it does not). The
      one admin prompt can be answered in the terminal it runs in; when there is
      none, the user supplies their admin password ONCE through the credential
-     prompt (`/credential`) and it travels as `--sudo-secret <name>` — never
-     printed, never logged.
+     prompt (a masked capture, `/credential`, which reports the generated
+     `LOP_SECRET_…` name it is stored under) and PROMOTES that name into the
+     encrypted store the flag reads — `/credential --persist LOP_SECRET_…`.
+     Both steps are required: the capture writes session memory only, and
+     `--sudo-secret <name>` resolves through `lop secret get`. The value is
+     never printed or logged.
    - **On a PEER**, file the request — `lop network approvals request --host
      <host> --user <user> --network <name> --json` — show the user the card
      (`lop network approvals list --json`, then `show <id> --json`), let THEM
