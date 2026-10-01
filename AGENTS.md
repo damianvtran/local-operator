@@ -2020,7 +2020,14 @@ clean, fresh, independent agent review round plus green CI is sufficient to
 merge; the agent does not need to find a second human to click approve.
 Green here is the *classified* green: read the `changes` job's summary
 before treating the check list as evidence, because a job this diff skipped
-appears there as a skip rather than as a pass.
+appears there as a skip rather than as a pass. And one trap sits in the check
+list itself: `gh pr checks` rows for sharded jobs (`test (3.12, N)`,
+`tui-e2e (...)`) are tab-separated with their status in a *later* field, so
+`awk '$2=="fail"'`-style filters are vacuous for exactly the rows most likely
+to fail — an all-green verdict built that way proves nothing about the shards.
+Grep whole lines for `fail`/`pending` (or read `--json`). Measured 2026-10-01: a
+merged-red landed 20 s after its shard failed, under a verdict built from
+`awk '{print $2}'`.
 
 **Tier 2 — the PR is anyone else's.** An outside contributor's PR needs **both**
 an approving review **and** a clean agent review round. The approval is the
