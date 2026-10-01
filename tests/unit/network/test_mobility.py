@@ -1094,8 +1094,8 @@ def test_an_offload_returns_the_destinations_refusal_instead_of_waiting_it_out(
     session_id = "ef56ab12cd34"
     invited = server_b.identity.device_id
     sentence = (
-        "This session is open in another terminal or attached client. "
-        "Disconnect that client, then move again."
+        "This conversation is open in another window or app. "
+        "Close that window and try again, or queue the move to run at the next safe point."
     )
     progress = mobility.progress_for(server_a)
     try:
@@ -1327,3 +1327,61 @@ def test_the_cli_envelope_is_the_published_bound_less_its_margin(
         assert seen == [
             mobility.move_client_bound_s(30.0, keep=keep, to=to) - mobility.MOVE_CLIENT_MARGIN_S
         ], (keep, to, seen)
+
+
+class TestViewedIsTheViewerBlocker:
+    """Q1 (QA round 1): the exclusive-observer refusal is ``viewed``, not ``busy``.
+
+    §5.4's whole point is the split a notice offers Queue vs Wait from: a live
+    TURN is ``busy`` (waiting clears it), while another attached client is
+    ``viewed`` (waiting cannot clear it — the queue can). ``_RetireOutcome``'s
+    vocabulary always named the second case ``viewed``, but the producer
+    collapsed every ``kept:`` answer into ``busy``, so the wire never carried
+    ``viewed_elsewhere`` for a viewer. These cells drive the real
+    ``_retire_local_runtime`` with a canned client: the runtime's own sentence
+    (matched through the SHARED constant) classifies as ``viewed``; anything
+    else the runtime keeps itself for stays ``busy``.
+    """
+
+    def _stub(self, monkeypatch: pytest.MonkeyPatch, answer: str) -> None:
+        from types import SimpleNamespace
+
+        from local_operator.mobile import attach_client as attach_mod
+
+        class StubClient:
+            def __init__(self, *_a: Any, **_k: Any) -> None: ...
+
+            async def connect(self, record: Any, session_id: str) -> None: ...
+
+            async def retire_now(self, *, exclusive: bool = False) -> str:
+                assert exclusive is True, "a move must ask under the fence"
+                return answer
+
+            def close(self) -> None: ...
+
+        monkeypatch.setattr(attach_mod, "AttachClient", StubClient)
+        monkeypatch.setattr(
+            attach_mod,
+            "find_runtime_record",
+            lambda root, session_id: (
+                SimpleNamespace(capabilities=["exclusive-move-v1"], session_id=session_id),
+                4321,
+            ),
+        )
+
+    def test_the_viewer_refusal_is_viewed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from local_operator.session.runtime.types import VIEWED_MOVE_REFUSAL
+
+        self._stub(monkeypatch, f"kept: {VIEWED_MOVE_REFUSAL}")
+        outcome = mobility._retire_local_runtime(tmp_path, SESSION)  # noqa: SLF001
+        assert outcome["result"] == "viewed", outcome
+        assert outcome["sentence"] == VIEWED_MOVE_REFUSAL
+
+    def test_a_turn_refusal_stays_busy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._stub(monkeypatch, "kept: busy")
+        outcome = mobility._retire_local_runtime(tmp_path, SESSION)  # noqa: SLF001
+        assert outcome["result"] == "busy", outcome

@@ -120,6 +120,26 @@ STOPPED_REASON = "owner stopped the session"
 #: retires only when idle (``ServingSessionHandle.may_refresh``).
 RETIRING_REASON = "owner retired for a newer build"
 
+#: Disconnect reason for a MOVE: the owner retired because the conversation
+#: is being handed to another device — a queued move's safe point. Distinct
+#: from :data:`RETIRING_REASON` on purpose, and the distinction is load-bearing:
+#: a refresh means "a fresh runtime is owed, engage one NOW, here"; a move means
+#: the conversation is LEAVING, and a viewer that reacted like a refresh would
+#: spawn a local runtime for a session mid-handoff — the second-writer window
+#: INV-1 exists to close. A host that hears this reason goes cold WITHOUT
+#: re-engaging and surfaces the device the retiring frame named (the client
+#: remembers it as :attr:`AttachClient.moved_to`).
+#:
+#: NEVER PRINTED RAW (design delta D5). The constant is a classification token
+#: — consumers compare it by EQUALITY (``attached.py``'s reason switch), so its
+#: bytes stay stable — and it names no destination, while §5.4 requires the
+#: disconnect sentence to say where the conversation now lives. Whoever renders
+#: that sentence (the UI slice; the core only remembers ``moved_to``) builds it
+#: from that name — e.g. "This conversation moved to <name>; it is no longer
+#: running here." — avoiding "owner" (reads as the account owner, i.e. the
+#: reader) and "device" as the object of "moved" (say where it went).
+MOVED_REASON = "owner moved this conversation to another device"
+
 #: Disconnect reason for a connection the owner could not BIND — its canonical
 #: ``frontend_sync`` never arrived and the runtime closed this one connection.
 #:
@@ -900,6 +920,7 @@ class AttachClient:
         on_frontend_sync: Callable[[dict[str, Any]], None] | None = None,
         on_frontend_update: Callable[[dict[str, Any]], None] | None = None,
         on_retiring: Callable[[dict[str, Any]], None] | None = None,
+        on_move_pending: Callable[[dict[str, Any]], None] | None = None,
         surface: str = "terminal",
         on_operator_prompt: Callable[[str], None] | None = None,
     ) -> None:
@@ -971,6 +992,12 @@ class AttachClient:
         self._on_operator_prompt = on_operator_prompt
         self._on_frontend_sync = on_frontend_sync
         self._on_frontend_update = on_frontend_update
+        #: Fired when a ``move_pending`` frame arrives: the owner is about to
+        #: pause and retire for a QUEUED move to the device the frame names
+        #: (design note §5.4). The window for a host to convert to a remote
+        #: viewer or detach cleanly is the owner's to hold, and it has already
+        #: begun when this fires — so a host does work here, not a reply.
+        self._on_move_pending = on_move_pending
         #: Fired the moment a ``retiring`` frame ARRIVES, with the frame itself.
         #: The op also sets the disconnect reason below, and that was the whole
         #: of its original job — but the reason is only read when the socket
@@ -982,6 +1009,11 @@ class AttachClient:
         #: Q-1). Deliberately separate from ``on_disconnected`` for the same
         #: reason: they are the start and the end of a handover, not one event.
         self._on_retiring = on_retiring
+        #: The device a ``retiring`` frame with ``reason == "moved"`` named —
+        #: where the conversation went. Read by the disconnect handler through
+        #: the ``MOVED_REASON`` token (the reason is the only thing
+        #: ``_on_disconnected`` receives) and by a host that wants to say it.
+        self.moved_to = ""
         #: The phrase THIS connection's drain published — ``LEAVING_ON_SIGNAL`` or
         #: ``LEAVING_FOR_BUILD`` — or ``""`` while no draining frame has been
         #: heard on it. Kept because the REFUSAL this connection is about to hand
@@ -1308,6 +1340,19 @@ class AttachClient:
                     self._frontend_sequence = sequence
                     if self._on_frontend_update is not None:
                         self._on_frontend_update(data)
+                elif op == "move_pending":
+                    # THE QUEUED MOVE'S ANNOUNCE (design note §5.4): the owner has
+                    # reached a safe point and is about to pause; the frame names
+                    # the device the conversation is going to. A callback failure
+                    # must not kill the pump (same contract as every callback
+                    # above). An owner older than this frame never sends it, and
+                    # an older CLIENT ignores an unknown op — the additive-read
+                    # contract both directions.
+                    if self._on_move_pending is not None:
+                        try:
+                            self._on_move_pending(frame)
+                        except Exception:  # noqa: BLE001
+                            continue
                 elif op == "stopping":
                     # The owner is ending this session ON PURPOSE (a /stop
                     # anywhere: this viewer, another TUI's /stop all, a shell
@@ -1324,6 +1369,16 @@ class AttachClient:
                     # already reads that string. The host goes cold at once
                     # and re-engages rather than chasing a record for 8 s.
                     reason = RETIRING_REASON
+                    if str(frame.get("reason") or "") == "moved":
+                        # A MOVE'S RETIREMENT, told apart from a build refresh by
+                        # the reason the owner sent (the frame is additive: an
+                        # owner older than the key sends no such reason, and an
+                        # old client reads the frame exactly as before). The
+                        # destination rides on the client so the disconnect
+                        # handler — which sees only the reason token — can send
+                        # a host that wants to say where the conversation went.
+                        self.moved_to = str(frame.get("to") or "")
+                        reason = MOVED_REASON
                     # AND the frame is an event in its own right, straight away:
                     # on the drain rung the EOF is NOT moments away (the runtime
                     # stays until its work is done), and a host that only heard
@@ -2103,6 +2158,35 @@ class AttachClient:
         if exclusive:
             return await self._request("retire_now", exclusive=True)
         return await self._request("retire_now")
+
+    async def queue_move(self, *, to_device: str = "", to_name: str = "") -> dict[str, Any]:
+        """Install (or refresh) a QUEUED MOVE intent on the owner.
+
+        ``network/move_queue.py``'s delivery half. The owner holds the intent —
+        a flag, deliberately NOT the exclusivity fence, which would block
+        attach admission — and watches for the turn boundary itself; at the
+        safe point it announces ``move_pending`` to every attached client, holds
+        the bounded attach window, and retires with ``reason: "moved"`` so
+        attached clients go cold without re-engaging locally. Idempotent:
+        sending it again to the same owner is the same intent, which is what
+        makes the driver's re-delivery after a runtime restart safe.
+
+        The reply's ``stage`` names where the owner is in that sequence:
+        ``queued`` (accepted, boundary not yet reached), ``paused`` (latched;
+        clients announced), ``retiring`` (leaving now), or ``cancelled`` (the
+        queue record ended under it — a cancel or a fold; the intent is gone).
+
+        ``to_device``/``to_name`` travel WITH the intent because the announce
+        (``move_pending``) must name where the conversation is going, and the
+        sender is the one holding the record that says it. They are carried
+        rather than re-read on the owner: the owner's config root is the same
+        one, but a re-read would make the frame's target a second read of a
+        file the sender already parsed, and the wire is where this one lives.
+        """
+        reply = await self._request_frame("queue_move", to_device=to_device, to_name=to_name)
+        self._raise_for_reply_error(reply)
+        detail = reply.get("detail")
+        return dict(detail) if isinstance(detail, dict) else {}
 
     async def job_trajectory(self, job_id: str, offset: int = 0, limit: int = 120) -> Any:
         """Fetch one page of a child job's retained events from the owner.
