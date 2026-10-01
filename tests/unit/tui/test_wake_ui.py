@@ -459,6 +459,8 @@ class _PanelHost(App[None]):
 async def _paint(
     schedules: list[WakeSchedule],
     monitors: list[tuple[SimpleNamespace, dict[str, Any]]] | None = None,
+    *,
+    size: tuple[int, int] = (100, 30),
 ) -> tuple[bool, str]:
     """Sync a mounted panel; return (was_displayed, painted_text).
 
@@ -467,7 +469,7 @@ async def _paint(
     panel after ``run_test`` exits reports False even for a panel that painted.
     """
     app = _PanelHost()
-    async with app.run_test(size=(100, 30)) as pilot:
+    async with app.run_test(size=size) as pilot:
         panel = app.query_one(WakePanel)
         panel.sync(_FakeSession(schedules, monitors))
         await pilot.pause()
@@ -552,6 +554,160 @@ MONITOR_TEXT = (
 )
 
 
+class TestMonitorBandStates:
+    """Remediation round 1, design D1/D2/D3/D5/D8: what the band can say about a
+    monitor in each state, at the widths people actually use."""
+
+    @pytest.mark.asyncio
+    async def test_a_stalled_monitor_shows_the_state_word_and_hides_a_stale_count(self) -> None:
+        """D3: an unavailable episode outranks the failure count it froze."""
+        now = int(time.time() * 1000)
+        spec, counters = _monitor("m1", "ner-gpu-fleet-guard", failures=3)
+        counters["unavailable_since"] = now - 42 * 60 * 1000
+
+        _, out = await _paint([], [(spec, counters)])
+        assert "stalled" in out
+        assert "tool unavailable since" in out
+        assert "3 failed" not in out
+
+    @pytest.mark.asyncio
+    async def test_an_idle_monitor_is_not_drawn_as_a_healthy_one(self) -> None:
+        """D2: the state this change exists for was the one the band could not
+        show — an overdue-by-hours row read exactly like a fresh one."""
+        spec, counters = _monitor("m1", "watch the deploy queue", due_in_ms=-3_600_000)
+        counters["last_check_at"] = int(time.time() * 1000) - 3_600_000
+
+        _, out = await _paint([], [(spec, counters)])
+        # The state word is the band's whole message for a dormant row: the
+        # "overdue by 3h — session not open" tail is the CLI's, and carrying it
+        # here cost the row its name at 100 columns (D1).
+        assert "idle" in out.splitlines()[1]
+        assert "watch the deploy queue" in out
+
+    @pytest.mark.asyncio
+    async def test_the_health_sentence_survives_a_narrow_band(self) -> None:
+        """D1: at 60 columns the sentence after the name was the first thing
+        truncation took, so the state word and the hint now precede it."""
+        spec, counters = _monitor("m1", "watch the deploy queue")
+        counters["checks"], counters["deliveries"] = 12, 0
+
+        _, out = await _paint([], [(spec, counters)], size=(60, 20))
+        assert "0 deliveries" in out.splitlines()[1]
+
+    @pytest.mark.asyncio
+    async def test_the_visible_two_rows_are_the_ones_that_need_reading(self) -> None:
+        """D5: the cap is two rows, so order worst-first."""
+        now = int(time.time() * 1000)
+        healthy_spec, healthy = _monitor("m1", "watch the deploy queue", due_in_ms=30_000)
+        healthy["deliveries"] = 2
+        dead_spec, dead = _monitor("m2", "ner-gpu-fleet-guard", disabled=True, reason="boom")
+        stalled_spec, stalled = _monitor("m3", "ner-gpu-fleet-dd")
+        stalled["unavailable_since"] = now - 42 * 60 * 1000
+        zero_spec, zero = _monitor("m4", "issue-tracker")
+        zero["checks"], zero["deliveries"] = 12, 0
+
+        _, out = await _paint(
+            [],
+            [
+                (healthy_spec, healthy),
+                (zero_spec, zero),
+                (stalled_spec, stalled),
+                (dead_spec, dead),
+            ],
+        )
+        body = out.splitlines()[1:]
+        assert "m2" in body[0]
+        assert "m3" in body[1]
+        assert "… 2 more monitors not shown" in out
+
+    @pytest.mark.asyncio
+    async def test_a_never_checked_watch_is_not_drawn_as_a_dormant_one(self) -> None:
+        """D10: a watch that has never run a check is overdue BY DEFINITION, so
+        an idle-first branch order rendered the one state this PR exists to
+        surface as a plain dormant row. The pair below is the whole finding —
+        same counters apart from the check count."""
+        now = int(time.time() * 1000)
+        spec, counters = _monitor("m1", "watch the deploy queue", due_in_ms=-7_200_000)
+        counters["checks"], counters["deliveries"] = 0, 0
+        spec.created_at = now - 7_200_000
+
+        _, out = await _paint([], [(spec, counters)])
+        assert "never checked" in out
+        assert "idle" not in out
+
+        counters["checks"] = 12
+        _, out = await _paint([], [(spec, counters)])
+        assert "idle" in out and "never checked" not in out
+
+    @pytest.mark.asyncio
+    async def test_a_muted_hint_does_not_repaint_the_due_clock(self) -> None:
+        """D11: one ``tone`` was applied to both the label and the health
+        clause, so the neutral 0-deliveries hint promoted the due clock from
+        ``dim`` to ``muted`` — measured on the frames by sampling the clock
+        cells, where a quiet row's boilerplate outranked a healthy row's."""
+        from rich.style import Style
+
+        from local_operator.tui import theme as theme_mod
+
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        muted = Style(color=theme_mod.semantic_color("muted"))
+        warning = Style(color=theme_mod.semantic_color("warning"))
+
+        spec, counters = _monitor("m1", "watch the deploy queue")
+        counters["checks"], counters["deliveries"] = 12, 0
+        row = WakePanel._monitor_fingerprint(spec, counters)
+        assert row[4] == "muted"
+        # The label is the clock, not a state word.
+        assert row[1] not in ("disabled", "stalled", "idle", "never checked")
+
+        panel = WakePanel.__new__(WakePanel)
+        text = WakePanel._monitor_section(
+            panel, (row,), room=4, dim=dim, muted=muted, warning=warning
+        )[1]
+
+        def style_of(needle: str) -> Any:
+            start = text.plain.index(needle)
+            for span in text.spans:
+                if span.start <= start and span.end >= start + len(needle):
+                    return span.style
+            return None
+
+        assert style_of(row[1]) == dim  # the clock keeps the dim ink
+        assert style_of("12 checks, 0 deliveries") == muted  # the hint keeps its own
+
+    @pytest.mark.asyncio
+    async def test_a_disabled_row_leads_with_a_cause_a_person_can_read(self) -> None:
+        """U4: the health slot carried the tool's raw argument banner, so the
+        one glance surface for a broken watch led with developer text."""
+        spec, counters = _monitor("m1", "watch the error budget", disabled=True)
+        counters["disabled_reason"] = "invalid arguments:\n- path: Extra inputs are not permitted"
+        counters["consecutive_failures"] = 5
+
+        _, out = await _paint([], [(spec, counters)])
+        assert "5 consecutive failed checks" in out
+        assert "invalid arguments" not in out
+
+    @pytest.mark.asyncio
+    async def test_a_disabled_row_keeps_a_reason_that_already_reads_as_a_sentence(self) -> None:
+        """The other half of U4: only a raw banner is replaced — the
+        informative reasons a person can act on stay verbatim."""
+        spec, counters = _monitor("m1", "watch the queue", disabled=True)
+        counters["disabled_reason"] = 'monitor can\'t watch "mcp__x": it is not in this tool set.'
+        counters["consecutive_failures"] = 5
+
+        _, out = await _paint([], [(spec, counters)])
+        assert "it is not in this tool set." in out
+        assert "consecutive failed checks" not in out
+
+    @pytest.mark.asyncio
+    async def test_the_header_never_says_watching_above_a_broken_row(self) -> None:
+        """D7: "1 watching" above "disabled" contradicts the row itself."""
+        spec, counters = _monitor("m1", "x", disabled=True, reason="boom")
+        _, out = await _paint([], [(spec, counters)])
+        assert "Monitors · 1 of 1 needs attention" in out
+        assert "watching" not in out
+
+
 class TestMonitorBand:
     """The monitor section of the same band (design §12)."""
 
@@ -559,7 +715,7 @@ class TestMonitorBand:
     async def test_monitor_rows_join_the_same_band(self) -> None:
         displayed, out = await _paint([], [_monitor("m1", "watch the deploy queue")])
         assert displayed is True
-        assert "Monitors · 1 watching" in out
+        assert "Monitors · 1 monitor armed" in out
         assert "m1" in out and "watch the deploy queue" in out and "every 1m" in out
 
     @pytest.mark.asyncio
@@ -567,7 +723,7 @@ class TestMonitorBand:
         _, out = await _paint(
             [_schedule("w1", "check the backup")], [_monitor("m1", "watch the queue")]
         )
-        assert out.index("Wakes · 1 scheduled") < out.index("Monitors · 1 watching")
+        assert out.index("Wakes · 1 scheduled") < out.index("Monitors · 1 monitor armed")
         assert out.index("w1") < out.index("m1")
 
     @pytest.mark.asyncio
@@ -668,6 +824,151 @@ class TestMonitorDeltaBlock:
         assert "Diff vs the previous check:" in body
         # A text that never carried the prefix is returned unchanged.
         assert monitor_receipt_body("plain text") == "plain text"
+
+    def test_a_delta_and_a_lifecycle_notice_are_told_apart(self) -> None:
+        """D4: the frame drew a disabled watch and a delta identically — same
+        glyph lane, same warm-grey ink — and the one notice with ``notify=True``
+        was the least distinguished row on screen."""
+        from local_operator.harness.rows import monitor_notice_kind
+        from local_operator.monitors.delivery import (
+            MonitorNotice,
+            format_monitor_notice_text,
+        )
+
+        delta = MonitorDeltaBlock(MONITOR_TEXT)
+        assert delta._summary_ink() == "dim"
+        assert monitor_notice_kind(MONITOR_TEXT) is None
+
+        disabled = MonitorDeltaBlock(
+            format_monitor_notice_text(
+                MonitorNotice(
+                    monitor_id="m1",
+                    name="ner-gpu-fleet-dd",
+                    tool="mcp__datadog_search_datadog_hosts",
+                    kind="disabled",
+                    at_ms=1_756_000_000_000,
+                    checks=7,
+                    deliveries=0,
+                    failures=5,
+                    detail="boom",
+                )
+            )
+        )
+        assert disabled._summary_ink() == "warning"
+        assert monitor_notice_kind(disabled._text) == "disabled"
+
+        # Restored is good news and keeps the neutral ink — its distinction is
+        # the headline, which is the notice's own first line.
+        restored = MonitorDeltaBlock(
+            format_monitor_notice_text(
+                MonitorNotice(
+                    monitor_id="m1",
+                    name="w",
+                    tool="bash",
+                    kind="restored",
+                    at_ms=1_756_000_000_000,
+                    checks=7,
+                    deliveries=1,
+                )
+            )
+        )
+        assert restored._summary_ink() == "dim"
+
+    def test_a_notice_row_shows_the_news_and_not_the_whole_notice(self) -> None:
+        from local_operator.monitors.delivery import (
+            MonitorNotice,
+            format_monitor_notice_text,
+        )
+
+        text = format_monitor_notice_text(
+            MonitorNotice(
+                monitor_id="m1",
+                name="ner-gpu-fleet-dd",
+                tool="mcp__datadog_search_datadog_hosts",
+                kind="disabled",
+                at_ms=1_756_000_000_000,
+                checks=7,
+                deliveries=0,
+                failures=5,
+                detail="boom",
+            )
+        )
+        row = MonitorDeltaBlock(text)._build_row(200).plain
+        assert "was DISABLED" in row
+        assert "no longer watching" in row
+        # The collapsed row was the ENTIRE 5-line notice (529 chars) with the
+        # news cut off; the record stays in the expansion.
+        assert "Last error" not in row
+        assert "To restore" not in row
+
+    def test_a_notice_card_tells_the_human_what_they_can_do(self) -> None:
+        """U1: the notice's "what next" was the model's tool syntax. The card
+        body now carries the same remedy in the reader's words, while the
+        model-facing text keeps its own shape."""
+        from local_operator.harness.rows import (
+            MONITOR_HUMAN_REMEDY,
+            monitor_receipt_body,
+        )
+        from local_operator.monitors.delivery import (
+            MonitorNotice,
+            format_monitor_notice_text,
+        )
+
+        text = format_monitor_notice_text(
+            MonitorNotice(
+                monitor_id="m2",
+                name="ner-gpu-fleet-guard",
+                tool="bash",
+                kind="disabled",
+                at_ms=1_756_000_000_000,
+                checks=7,
+                deliveries=0,
+                failures=5,
+                detail="boom",
+            )
+        )
+        body = monitor_receipt_body(text)
+        assert MONITOR_HUMAN_REMEDY in body
+        assert "lop monitor cancel <session> <id>" in body
+        # The wire text the model was handed is untouched: the sentence is added
+        # by the card layer only.
+        assert MONITOR_HUMAN_REMEDY not in text
+
+    def test_the_collapsed_headline_survives_the_consequence(self) -> None:
+        """R12 / QA Q1: the property U5+D13 fixed, pinned at the card's REAL
+        widths (the cited test did not exist, and the nearest one ran at 200
+        where the whole envelope fits and nothing can be cut).
+
+        Boundaries are MEASURED for this name and clock, not hoped for: the
+        whole phrase at 96 cells and up (the card's default box), ``no longer
+        wat…`` at 80, and the news alone at 60. Literal survival at 60/80 is
+        out of reach with this prefix — the point of the finding was which HALF
+        survives a cut, and that is what these assertions pin.
+        """
+        from local_operator.monitors.delivery import (
+            MonitorNotice,
+            format_monitor_notice_text,
+        )
+
+        text = format_monitor_notice_text(
+            MonitorNotice(
+                monitor_id="m2",
+                name="ner-gpu-fleet-dd",
+                tool="mcp__datadog_search_datadog_hosts",
+                kind="disabled",
+                at_ms=1_756_000_000_000,
+                checks=7,
+                deliveries=0,
+                failures=5,
+                detail="boom",
+            )
+        )
+        assert "was DISABLED" in MonitorDeltaBlock(text)._build_row(60).plain
+        narrow = MonitorDeltaBlock(text)._build_row(80).plain
+        assert "no longer wat" in narrow
+        assert "no longer watching" not in narrow
+        for width in (96, 110, 200):
+            assert "no longer watching" in MonitorDeltaBlock(text)._build_row(width).plain, width
 
     def test_the_row_wears_the_monitors_own_name_and_glyph(self) -> None:
         """The name column says ``monitor`` and the glyph table knows it — not
@@ -893,3 +1194,54 @@ class TestWakePanelOwedState:
             await pilot.pause()
             assert panel.display is True
             assert "w1" in str(panel._body.content)
+
+
+class TestMonitorBandHealth:
+    """§D6 in the band: the two states the band could not show at all."""
+
+    @pytest.mark.asyncio
+    async def test_a_never_checked_monitor_is_flagged(self) -> None:
+        spec, counters = _monitor("m1", "watch the queue")
+        counters.update({"checks": 0, "deliveries": 0})
+        spec.created_at = int(time.time() * 1000) - 3_600_000
+
+        _, out = await _paint([], [(spec, counters)])
+
+        # The band shows the hint's STATE clause only (D1): the explanation
+        # pushed the row's own name out at 100 columns and the CLI — which has
+        # the room — pins the whole sentence (test_monitor_cli.py).
+        assert "never checked" in out
+        assert "watch the queue" in out
+
+    @pytest.mark.asyncio
+    async def test_an_unavailable_episode_is_flagged(self) -> None:
+        spec, counters = _monitor("m1", "watch the queue")
+        counters.update({"unavailable_since": int(time.time() * 1000) - 600_000})
+
+        _, out = await _paint([], [(spec, counters)])
+
+        assert "tool unavailable since" in out
+
+    @pytest.mark.asyncio
+    async def test_a_quiet_watch_with_no_deliveries_stays_neutral(self) -> None:
+        """A watch that has seen nothing may simply be watching something
+        quiet, so its hint is NEUTRAL: present, but not the warning ink a
+        stalled or disabled row earns.
+        """
+        spec, counters = _monitor("m1", "watch the queue")
+        counters.update({"checks": 9, "deliveries": 0})
+
+        _, out = await _paint([], [(spec, counters)])
+
+        assert "9 checks, 0 deliveries" in out
+        assert "never checked" not in out
+
+    @pytest.mark.asyncio
+    async def test_a_healthy_monitor_shows_no_hint(self) -> None:
+        spec, counters = _monitor("m1", "watch the queue")
+        counters.update({"checks": 5, "deliveries": 2})
+
+        _, out = await _paint([], [(spec, counters)])
+
+        assert "checks, 0 deliveries" not in out
+        assert "unavailable" not in out

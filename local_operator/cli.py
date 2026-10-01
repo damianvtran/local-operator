@@ -7187,6 +7187,12 @@ def _monitor_rows() -> "list[dict[str, Any]]":
                     "consecutive_failures": raw.get("consecutive_failures") or 0,
                     "disabled": bool(raw.get("disabled")),
                     "disabled_reason": raw.get("disabled_reason") or "",
+                    # §D6's two health facts, carried onto the listing row so
+                    # the CLI reads the same shared hint the tool, the desktop
+                    # route and the TUI band read.
+                    "unavailable_since": raw.get("unavailable_since") or 0,
+                    "last_error": raw.get("last_error") or "",
+                    "created_at": raw.get("created_at") or 0,
                     "dormant": dormant,
                     "due_in_s": None if due is None else (due - now_ms) / 1000.0,
                     "last_check_age_s": None if not last else max((now_ms - last) / 1000.0, 0.0),
@@ -7212,6 +7218,9 @@ def _monitor_state_word(row: "dict[str, Any]") -> str:
     dormant monitor is one nothing is SUPPOSED to run, so a failure word would
     point the reader at the wrong remedy — reopening the session re-arms it.
     Disabled wins over the due time: a disabled monitor does not tick at all.
+    ``idle`` is the last word before a clock: a monitor whose session is not
+    open is overdue by hours, and "next due now" read as a stuck check rather
+    than as a watch nothing is hosting (§D6).
     """
     if row["dormant"]:
         return "dormant"
@@ -7219,29 +7228,72 @@ def _monitor_state_word(row: "dict[str, Any]") -> str:
         return "disabled"
     if row["due_in_s"] is None:
         return "waiting"
+    from local_operator.monitors import store as monitor_store
+
+    if monitor_store.is_idle(row, int(time.time() * 1000)):
+        return "idle"
     return _format_due(row["due_in_s"])
 
 
 def _monitor_detail(row: "dict[str, Any]") -> str:
-    """The monitor row's tail: interval, checks, last check, health, reason."""
+    """The monitor row's tail: health FIRST, then the interval and counters.
+
+    ORDER IS THE DEGRADATION POLICY (design review round 1, D6). The table is
+    clamped to the terminal, and a hint appended last was the first thing cut —
+    measured at ``COLUMNS=80``, every hint was truncated away while the counters
+    beside it survived. Leading with the health means a narrow row loses the
+    boilerplate instead, and the DUE column's state word (``idle``) carries the
+    short form of the same fact.
+    """
     from local_operator.harness.wake import format_duration
+    from local_operator.monitors import store as monitor_store
     from local_operator.wakes.display import format_age
 
+    now = int(time.time() * 1000)
+    # The hint is shared with the agent tool, the desktop route and the TUI band
+    # (§D6) so one monitor cannot read as healthy on one surface and stalled on
+    # another.
+    hint = monitor_store.health_hint(row, now)
+
     parts: list[str] = []
+    clause = ""
+    if row.get("disabled"):
+        # ``disabled_clause``, not the stored string: it folds the reason into
+        # one line (a live disable carries ``invalid arguments:\n- path: …``,
+        # which printed its continuation at column 0 and broke the table — UX
+        # round 1, U3) and prefers the counters' plain cause to a raw tool
+        # banner (U4). The row leads with it, so it has to be readable.
+        clause = monitor_store.disabled_clause(row)
+        if clause:
+            parts.append(clause)
+    if hint:
+        parts.append(hint)
+    if monitor_store.is_idle(row, now) and not (hint and hint.startswith("never checked")):
+        # "overdue by 2h — session not open" and "never checked — its session was
+        # not open since arming" are ONE fact said twice (D7): the idle detail
+        # is the tail the reader needs only when the hint is not already naming
+        # the unhosted session.
+        parts.append(monitor_store.idle_detail(row, now))
     if row.get("every_ms"):
         parts.append(f"every {format_duration(int(row['every_ms']))}")
     else:
         parts.append("once")
     if row.get("checks"):
-        parts.append(f"{int(row['checks'])} checks")
+        # The zero-deliveries hint OPENS with the same count ("12 checks, 0
+        # deliveries"), so the standalone counter would say it twice in one row
+        # — the D7 defect in its other form.
+        counter_clause = f"{int(row['checks'])} checks"
+        if not (hint and hint.startswith(counter_clause)):
+            parts.append(counter_clause)
     age = row.get("last_check_age_s")
     if age is not None:
         parts.append(f"last check {format_age(age)} ago")
     failures = int(row.get("consecutive_failures") or 0)
-    if failures:
+    if failures and not (clause and clause.startswith(f"{failures} ")):
+        # The disabled clause already carries the count when it was derived
+        # from it ("5 consecutive failed checks"), and a row that says both is
+        # the D7 duplication in another form.
         parts.append(f"{failures} failed")
-    if row.get("disabled") and row.get("disabled_reason"):
-        parts.append(str(row["disabled_reason"]))
     return " · ".join(parts)
 
 
@@ -7300,6 +7352,10 @@ def monitor_command(args: argparse.Namespace) -> int:
                 "same watch again to reactivate",
             )
         )
+    if any(_monitor_state_word(row) == "idle" for row in rows):
+        # One clause, because the row above already says "session not open"
+        # (D7): the legend's job is to say what to DO, not to restate the row.
+        legend.append(("idle", "no session is hosting it — reopen it to resume"))
     if legend:
         import textwrap
 

@@ -2411,12 +2411,16 @@ class WakeBlock(ExpandableActionBlock):
         budget = max(0, remaining - slot_cells)
         summary = truncate_cells(identity, budget)
 
+        summary_style = Style(color=theme_mod.semantic_color(self._summary_ink()))
         row = Text(no_wrap=True, overflow="ellipsis")
         if indent:
             row.append(" " * indent, style=dim)
-        row.append(icon + " ", style=dim)
+        # The icon takes the summary's ink too when it is not the default, so a
+        # warning-tier row is one signal rather than a coloured sentence beside
+        # a neutral glyph.
+        row.append(icon + " ", style=summary_style if self._summary_ink() != "dim" else dim)
         row.append(name + " ", style=muted)
-        row.append(summary, style=dim)
+        row.append(summary, style=summary_style)
         if slot:
             used = cell_len(row.plain)
             pad = max(1, width - used - cell_len(slot))
@@ -2463,6 +2467,16 @@ class WakeBlock(ExpandableActionBlock):
                     row.append("\n" + indent, style=dim)
                     row.append(truncate_cells(wrapped, line_width), style=dim)
         return row
+
+    def _summary_ink(self) -> str:
+        """The theme ink a receipt's summary line is painted in.
+
+        ``dim`` for the band's own rows and for a delta; a lifecycle notice
+        overrides it (see :class:`MonitorDeltaBlock`), because a notice and a
+        delta are different events and the frame drew them identically
+        (design review round 1, D4).
+        """
+        return "dim"
 
     def _summary(self) -> tuple[str, str]:
         """(identity, message body) for the card.
@@ -2533,6 +2547,19 @@ class MonitorDeltaBlock(WakeBlock):
 
     #: The name column says ``monitor``, the way the wake row's says ``wake``.
     tool_name = "monitor"
+
+    #: The notice kinds painted on the warning tier. ``restored`` is good news
+    #: and keeps the neutral ink; a stalled or disabled watch is the state the
+    #: operator has to act on, and the band already paints both in amber.
+    WARNING_NOTICE_KINDS = ("disabled", "stalled")
+
+    def _notice_kind(self) -> str:
+        from local_operator.harness.rows import monitor_notice_kind
+
+        return monitor_notice_kind(self._text) or ""
+
+    def _summary_ink(self) -> str:
+        return "warning" if self._notice_kind() in self.WARNING_NOTICE_KINDS else "dim"
 
     def _summary(self) -> tuple[str, str]:
         """(identity, message body) — the monitor twin of ``WakeBlock._summary``.

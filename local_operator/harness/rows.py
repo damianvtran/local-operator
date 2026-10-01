@@ -805,6 +805,20 @@ MONITOR_ENVELOPE_PREFIX = "(monitor) "
 _MONITOR_CANCEL_LINE_PREFIX = "cancel with monitor("
 
 
+#: The human's half of a lifecycle notice's remedy (UX review round 1, U1).
+#:
+#: ``monitors.delivery`` writes the notice for the MODEL: its "what next" is
+#: ``monitor({op:"create",…})``, an agent tool call a person cannot type. The
+#: card is the surface a person reads, so the same remedy is stated there in
+#: their words, and "what next" was in the model's. Two routes, both real: the
+#: CLI's own external-writer path (``lop monitor cancel``) and asking the agent
+#: in the conversation the monitor belongs to.
+MONITOR_HUMAN_REMEDY = (
+    "For you: `lop monitor cancel <session> <id>` stops it (`lop monitor status` "
+    "lists both), or ask the agent in that conversation to re-arm the same call."
+)
+
+
 def monitor_receipt_body(text: str) -> str:
     """A monitor delivery's text minus the model-facing envelope prefix.
 
@@ -813,10 +827,84 @@ def monitor_receipt_body(text: str) -> str:
     ``(monitor) ``; the expansion kept it until design review round 1 (D2),
     which is the inconsistency this closes. Nothing else is rewritten: the
     expansion is what the model was handed (design §12), cancel hint and all.
+
+    A BROKEN WATCH (``disabled`` / ``stalled``) gains
+    :data:`MONITOR_HUMAN_REMEDY` below its own text (UX review round 1, U1).
+    Added HERE rather than in the wire text because the card body is the surface
+    a person reads while the model-facing text must keep the shape the model was
+    handed.
+
+    REACH: this function's one production caller is the TUI's receipt builder
+    (``tui/widgets/transcript.MonitorDeltaBlock``), so the sentence reaches the
+    expanded card there. The phone does NOT show it today: ``mobile/projection``
+    has custom-message branches for hub/peer/wake/ask/gate/compaction/job and
+    none for ``monitor_prompt``, so a monitor notice falls to the generic notice
+    row carrying the wire text. Wiring that fold is deferred (QA round 3, Q2);
+    the claim is narrowed here rather than the mobile path widened in a
+    remediation commit.
+
+    ``restored`` is EXEMPT (design round 3, D14 / UX round 1, U9): a recovery
+    notice reports good news, and a "stop it" remedy on it offers an action the
+    reader did not ask for.
     """
-    if text.startswith(MONITOR_ENVELOPE_PREFIX):
-        return text[len(MONITOR_ENVELOPE_PREFIX) :]
-    return text
+    body = (
+        text[len(MONITOR_ENVELOPE_PREFIX) :] if text.startswith(MONITOR_ENVELOPE_PREFIX) else text
+    )
+    if monitor_notice_kind(text) in ("disabled", "stalled"):
+        return f"{body}\n{MONITOR_HUMAN_REMEDY}"
+    return body
+
+
+#: The phrases ``monitors.delivery`` opens each lifecycle notice with, ON ITS
+#: FIRST LINE. Read from the text rather than from a field because both paths
+#: that build a receipt block — the live ``MonitorDeltaEvent`` and the replayed
+#: ``monitor_prompt`` row — hand the widget the formatted text and nothing else,
+#: so a kind carried on the event would be lost on one of them and the two
+#: would render differently for the same notice.
+_NOTICE_MARKERS: tuple[tuple[str, str], ...] = (
+    (" was DISABLED ", "disabled"),
+    (" could not run its check ", "stalled"),
+    (" is running again ", "restored"),
+)
+
+
+def monitor_notice_kind(text: str) -> str | None:
+    """The lifecycle kind of a monitor delivery, or ``None`` for a delta.
+
+    ONE definition for every reader (the receipt card's ink and its bounded
+    headline today): a monitor delta's first line is its envelope
+    (``… : N changes at …``), which carries none of these phrases, so a delta
+    can never be mistaken for a notice.
+    """
+    if not text.startswith(MONITOR_ENVELOPE_PREFIX):
+        return None
+    first = text.split("\n", 1)[0]
+    for marker, kind in _NOTICE_MARKERS:
+        if marker in first:
+            return kind
+    return None
+
+
+def _strip_source_notes(line: str) -> str:
+    """A notice's first line without its ``(via <tool>)`` notes.
+
+    Every notice names its source right after the clock — ``was DISABLED at
+    10:46 (via mcp__datadog_search_datadog_hosts)`` — which is where the
+    expansion should read it, but not what a one-line collapsed card has room
+    for: 36 cells of MCP tool name is part of what pushed the consequence out of
+    the row (design round 2, D13; UX round 1, U5). The note is dropped WHOLE,
+    parentheses and the spacing they owned included, so the clause around it
+    keeps its own punctuation.
+    """
+    out = line
+    while True:
+        start = out.find("(via ")
+        if start == -1:
+            return out
+        end = out.find(")", start)
+        if end == -1:
+            return out
+        out = " ".join((out[:start].rstrip() + out[end + 1 :]).split())
 
 
 def monitor_receipt_headline(text: str) -> str:
@@ -835,6 +923,21 @@ def monitor_receipt_headline(text: str) -> str:
     review, F1, reproduced at width 160). The inline-clause strip stays as
     shape-closing for a producer that ever moves it onto the identity line.
     """
+    if monitor_notice_kind(text) is not None:
+        # A NOTICE's headline is its FIRST LINE, and only that line: the kinds
+        # are written one sentence per line with no blank separator, so the
+        # paragraph rule below would collapse the whole multi-sentence block
+        # into a row that cannot show it — the collapsed card became the entire
+        # notice, 529 characters of it, with the news cut off (design review
+        # round 1, D4). The source note is dropped WHEREVER it sits in that
+        # line — since D13 it rides behind the clock, not at the end — because
+        # it would spend the row's first cells on the tool name; the expansion
+        # keeps it.
+        head = _strip_source_notes(text.split("\n", 1)[0])
+        if head.startswith(MONITOR_ENVELOPE_PREFIX):
+            head = head[len(MONITOR_ENVELOPE_PREFIX) :]
+        return head.strip()
+
     head, _, _ = text.partition("\n\n")
     lines = [
         line

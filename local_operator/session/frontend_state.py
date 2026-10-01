@@ -1167,6 +1167,11 @@ class MonitorState(BaseModel):
     consecutive_failures: int = 0
     disabled: bool = False
     disabled_reason: str = ""
+    # The two fields the health surfaces derive from (§D6): an unavailable
+    # episode's start, and the last failure text. Carried on the wire so a
+    # viewer never has to open the counters file to explain a stalled watch.
+    unavailable_since: int = 0
+    last_error: str = ""
 
 
 class McpServerState(BaseModel):
