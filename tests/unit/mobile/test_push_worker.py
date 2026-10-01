@@ -430,7 +430,7 @@ def test_the_alert_rides_the_visible_types_and_never_the_silent_one(harness: Har
 
 
 def test_a_restart_mid_window_reuses_the_same_digest_key(tmp_path: Path) -> None:
-    """§3.4 as merged (``cc2569a4``): the window's ``emit_id`` is DURABLE.
+    """§3.4 at the frozen head (``5da35710``): the window's ``emit_id`` is DURABLE.
 
     The daemon dies with a digest in flight and its ``202`` lost, which is the
     case the cloud's dedupe exists for: the retry after the restart must wear

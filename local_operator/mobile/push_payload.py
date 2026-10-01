@@ -330,10 +330,13 @@ def digest_payload(
     ``type: "digest"`` is what tells the cloud to compose an alert: a house
     constant plus the count, never a name, a snippet or an error line.
 
-    ``exclude`` means what it means on the attention form, and it is REQUIRED when
-    the digest follows an ack nudge (the device that just acted must not be told
-    about its own action) — which is a rule about that caller, not about this
-    builder: the tick-detected path has no device to exclude and omits the field,
+    ``exclude`` is permitted here with the attention form's meaning and is NEVER
+    REQUIRED (§3.2 at ``5da35710``): the required case belongs to the attention
+    emit alone, because what makes it required is an ACK, and the nudge an ack
+    produces emits the per-conversation correction, never a catch-up digest. A
+    digest that happens to follow an ack in time is not the same thing as one
+    triggered by it. So this builder treats the field as optional in both
+    directions — the tick-detected path has no device to exclude and omits it,
     which is the one spelling of "exclude nobody".
     """
     payload: dict[str, Any] = {
