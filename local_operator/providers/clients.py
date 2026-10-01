@@ -4642,15 +4642,15 @@ class MockClient:
         # ``[hang]``: a request that NEVER returns. The one shape that leaves a
         # runtime busy with nothing this process can read as a step — the
         # parent's own provider request is not a term of
-        # ``process._step_in_flight`` (its stream counter is CHILD-only) and a
-        # stream that has yielded only its start commits no transcript row — so
-        # a turn parked here reports neither movement nor an executing step.
-        # The 2026-10-01 progress-gated signal drain is why that shape needs a
-        # marker at all: it is the ONLY one the drain's bound still disposes,
-        # so the escalated exit cannot be reached end to end without it.
-        # Scoped to the NEWEST user instruction, like ``[bash:N]`` and for its
-        # reason: a marker that stayed in the transcript would hang every later
-        # request of the session.
+        # ``process._step_in_flight`` (its stream counter is CHILD-only) and
+        # nothing else in the runtime moves while a parent call is the only
+        # activity — so a turn parked here reports neither movement nor an
+        # executing step. The 2026-10-01 progress-gated signal drain is why
+        # that shape needs a marker at all: it is the ONLY one the drain's
+        # bound still disposes, so the escalated exit cannot be reached end to
+        # end without it. Scoped to the NEWEST user instruction, like
+        # ``[bash:N]`` and for its reason: a marker that stayed in the
+        # transcript would hang every later request of the session.
         hangs = (
             last_user is not None
             and request.messages
