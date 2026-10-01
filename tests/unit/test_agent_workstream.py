@@ -143,9 +143,10 @@ def requester(tmp_path: Path, agent_shell: None, monkeypatch: pytest.MonkeyPatch
 def test_the_workstream_origin_is_the_users_own_and_is_a_value_of_its_own() -> None:
     """One registration is the whole visibility change, and it must not be a reuse.
 
-    ``USER_ORIGINS`` is consulted by ``is_user_session`` AND by the scan's
-    ``_is_hidden_origin``, which are the two spellings every listing reaches, so
-    registering the value here is what lists it in all six surfaces at once.
+    ``USER_ORIGINS`` is consulted by ``is_user_session_origin`` -- the ONE
+    predicate every listing reaches (the store scan asks it of the parsed
+    origin; the directory-level ``is_user_session`` delegates) -- so registering
+    the value here is what lists it in all six surfaces at once.
 
     It is a NEW value rather than ``agent-shell`` on purpose: that constant
     answers one question — did a command from an agent's shell open this? — and
@@ -156,9 +157,10 @@ def test_the_workstream_origin_is_the_users_own_and_is_a_value_of_its_own() -> N
     assert ORIGIN_AGENT_WORKSTREAM in resume.USER_ORIGINS
     assert ORIGIN_AGENT_WORKSTREAM != ORIGIN_AGENT_SHELL
     assert ORIGIN_AGENT_SHELL not in resume.USER_ORIGINS
-    # The predicate agrees for both spellings of the decision it makes.
-    assert resume._is_hidden_origin(ORIGIN_AGENT_SHELL) is True
-    assert resume._is_hidden_origin(ORIGIN_AGENT_WORKSTREAM) is False
+    # THE one predicate answers for both values, and every listing reaches it
+    # through this function.
+    assert resume.is_user_session_origin(ORIGIN_AGENT_SHELL) is False
+    assert resume.is_user_session_origin(ORIGIN_AGENT_WORKSTREAM) is True
 
 
 def test_an_unflagged_agent_run_is_hidden_in_every_surface(
