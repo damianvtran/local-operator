@@ -648,3 +648,23 @@ def test_the_lazy_provider_reexports_still_resolve() -> None:
     assert RetrySettings and StoredCredential and WireClient
     with pytest.raises(AttributeError):
         providers.no_such_export  # noqa: B018
+
+
+# --- the wake supervisor's lazily-imported passes ----------------------------
+
+
+def test_the_rescue_pass_is_not_on_the_startup_path(
+    cli_modules: set[str], session_factory_modules: set[str]
+) -> None:
+    """``session.runtime.rescue`` must stay lazily imported.
+
+    ``rescue.py``'s own docstring claims this file pins it, and the wake
+    supervisor imports it from its sweep seat (never at module scope) precisely
+    so the supervisor's cheap, harness-free startup holds. A regression that
+    pulled it in would cost every invocation that reaches the supervisor and
+    every session build that reaches the composition root, and nothing else
+    would notice — so it is pinned in a fresh interpreter, like the rest here.
+    """
+    why = "the rescue pass is stdlib + registry-level and must stay off the startup path"
+    _assert_absent(cli_modules, "local_operator.session.runtime.rescue", why)
+    _assert_absent(session_factory_modules, "local_operator.session.runtime.rescue", why)
