@@ -331,7 +331,20 @@ def record(
             )
         return receipt
     except Exception:  # noqa: BLE001 — an instrument must never delay or fail a signal path
-        logger.debug("signal receipt could not be recorded", exc_info=True)
+        # LOUD, not debug: a receipt that cannot be written is the evidence gap this
+        # module exists to close, and a silent loss here is indistinguishable from a
+        # runtime that never got the signal. The same facts the file would have held.
+        logger.warning(
+            "session runtime: signal receipt could not be written "
+            "(signal %s/%s, pid %s, session %s, started_at %s, directory %s)",
+            name,
+            number,
+            pid,
+            session_id,
+            started_at,
+            directory,
+            exc_info=True,
+        )
         return None
 
 
@@ -375,3 +388,52 @@ def stop_class_of(signal_entry: dict[str, Any] | None) -> str:
     if isinstance(marker, dict) and marker.get("deliberate") is False:
         return CLASS_ATTRIBUTED
     return CLASS_DELIBERATE
+
+
+def cut_off_verdict(signal_entry: dict[str, Any] | None) -> tuple[str, str] | None:
+    """``(cause, detail)`` a turn cut by this signal earns, or ``None`` when it was asked for.
+
+    THE ONE SHARED DISCRIMINATOR for "what does a signal-cut turn say", used by the
+    in-process writer (``exec_worker``'s SIGTERM handler, before it aborts the turn) and
+    by the boot-time reader (``attention._classify_orphaned_run``) so the two cannot
+    tell different stories about one signal. WHY IT EXISTS (wave B, 2026-09-30 20:00):
+    the aborted turn's own end publishes BEFORE any dispose rung can note a cause, and
+    an aborted end with no cause is the taxonomy's default for the USER's stop — so an
+    external SIGTERM nobody staged anything for was recorded ``interrupted/user-stop``
+    eleven times. The receipt's pairing is the evidence that settles it:
+
+    * covering DELIBERATE marker -> ``None`` (a stop somebody asked for; the caller
+      records positive evidence of it and nothing changes from before);
+    * covering involuntary marker -> ``runtime-killed`` naming the recorded actor;
+    * no covering marker -> ``runtime-shutdown`` ("terminated while this turn was
+      running") with the unidentified-sender sentence. The CAUSE TOKENS are the
+      existing ones — a new token would ripple across every surface that switches
+      on the taxonomy — so only the detail carries the new fact.
+    """
+    from local_operator.incidents import (
+        involuntary_kill_detail,
+        render_signal_receipt_detail,
+    )
+
+    entry = signal_entry if isinstance(signal_entry, dict) else {}
+    klass = stop_class_of(entry)
+    if klass == CLASS_DELIBERATE:
+        return None
+    marker = entry.get("stop_marker")
+    if klass == CLASS_ATTRIBUTED and isinstance(marker, dict):
+        return (
+            "runtime-killed",
+            involuntary_kill_detail(
+                mechanism=str(marker.get("mechanism") or ""),
+                actor=str(marker.get("actor") or marker.get("killer_command") or ""),
+                killer_pid=marker.get("killer_pid"),
+            ),
+        )
+    return (
+        "runtime-shutdown",
+        render_signal_receipt_detail(
+            signal_name=str(entry.get("name") or ""),
+            at=entry.get("at"),
+            unsanctioned=True,
+        ),
+    )

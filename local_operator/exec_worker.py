@@ -142,6 +142,35 @@ def _record_arrival(
         logging.getLogger(__name__).debug("exec signal receipt unavailable", exc_info=True)
 
 
+def _note_stop_cause(session: Any, signal_entry: dict[str, Any] | None) -> None:
+    """Say WHY this turn is about to be aborted, BEFORE ``session.abort`` runs.
+
+    The aborted turn's own end event publishes ahead of any dispose rung, and an
+    aborted end carrying no cause is the taxonomy's default for the USER's stop
+    (``interrupted/user-stop``). Left un-noted, every external SIGTERM was recorded as
+    the user's own stop — eleven times in the 2026-09-30 20:00 wave, with no marker
+    and no ladder call. The verdict comes from the shared discriminator
+    (``signal_receipt.cut_off_verdict``): a covering DELIBERATE marker records positive
+    evidence of the stop (so those read exactly as before); anything else records the
+    signal's cut-off cause. Best-effort and non-raising: a handler must never fail on
+    bookkeeping, and a session double without the hooks keeps its old behaviour.
+    """
+    try:
+        from local_operator.session.runtime import signal_receipt
+
+        verdict = signal_receipt.cut_off_verdict(signal_entry)
+        if verdict is None:
+            note_stop = getattr(session, "note_deliberate_stop", None)
+            if callable(note_stop):
+                note_stop()
+            return
+        note = getattr(session, "note_cut_off", None)
+        if callable(note):
+            note(*verdict)
+    except Exception:  # noqa: BLE001 — see the docstring
+        logging.getLogger(__name__).debug("could not note the stop cause", exc_info=True)
+
+
 def _install_sigterm_handler(
     loop: asyncio.AbstractEventLoop,
     session_box: list[SessionProtocol],
@@ -169,6 +198,7 @@ def _install_sigterm_handler(
             _record_arrival(session_box, job_id, facts)
         session = session_box[0] if session_box else None
         if session is not None:
+            _note_stop_cause(session, facts.get("signal"))
             try:
                 session.abort("terminated")
             except Exception:  # noqa: BLE001 — must never raise in a handler
