@@ -1805,3 +1805,149 @@ async def test_the_escape_hatch_reaches_a_runtime_wedged_in_a_c_call(
     finally:
         if pid is not None and registry.pid_alive(pid):
             os.kill(pid, signal_mod.SIGKILL)
+
+
+# -- the sweep record: ONE begin/end pair per stop_all, and a sweep_id on its markers ----
+
+
+def _fake_targets(n: int) -> list[Any]:
+    return [
+        _bare_record(pid=900_000 + i, session_id=f"sweep-target-{i}", conversation_name=f"t{i}")
+        for i in range(n)
+    ]
+
+
+async def _fake_stop_session(record: Any, **kwargs: Any) -> Any:
+    """Stand-in for the ladder that records the sweep id each target was handed."""
+    _SEEN_SWEEP_IDS.append(kwargs.get("_sweep_id", ""))
+    return control.StopOutcome(
+        record.pid, record.session_id, "t", "socket", f'stopped "{record.session_id}"'
+    )
+
+
+_SEEN_SWEEP_IDS: list[str] = []
+
+
+@pytest.mark.asyncio
+async def test_stop_all_writes_exactly_one_sweep_pair_and_threads_its_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from local_operator.session.runtime import stop_ledger
+
+    _SEEN_SWEEP_IDS.clear()
+    targets = _fake_targets(3)
+    monkeypatch.setattr(control.registry, "scan", lambda root=None: [(t, "live") for t in targets])
+    monkeypatch.setattr(control, "_same_uid", lambda rec: True)
+    monkeypatch.setattr(control, "stop_session", _fake_stop_session)
+
+    outcomes = await control.stop_all(_root=tmp_path, _command="lop stop --all")
+
+    assert len(outcomes) == 3
+    rows = stop_ledger.read_sweeps(tmp_path)
+    assert [r["phase"] for r in rows] == ["begin", "end"], rows
+    begin, end = rows
+    assert begin["sweep_id"] == end["sweep_id"]
+    assert begin["mechanism"] == "stop-all" and begin["command"] == "lop stop --all"
+    assert [t["session_id"] for t in begin["targets"]] == [f"sweep-target-{i}" for i in range(3)]
+    assert begin["counts"]["targets"] == 3
+    assert [o["pid"] for o in end["outcomes"]] == [900_000, 900_001, 900_002]
+    # Every target's ladder call carried the SAME id, which is how a victim's marker
+    # joins to this sweep.
+    assert _SEEN_SWEEP_IDS == [begin["sweep_id"]] * 3
+
+
+@pytest.mark.asyncio
+async def test_stop_all_with_no_targets_writes_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from local_operator.session.runtime import stop_ledger
+
+    monkeypatch.setattr(control.registry, "scan", lambda root=None: [])
+    assert await control.stop_all(_root=tmp_path) == []
+    assert stop_ledger.read_sweeps(tmp_path) == []
+    assert not stop_ledger.sweeps_path(tmp_path).exists()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_foreign_target_is_not_a_sweep_target(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Only runtimes this process will ACT on are in the sweep; an all-refused call writes none."""
+    from local_operator.session.runtime import stop_ledger
+
+    targets = _fake_targets(2)
+    monkeypatch.setattr(control.registry, "scan", lambda root=None: [(t, "live") for t in targets])
+    monkeypatch.setattr(control, "_same_uid", lambda rec: False)
+    outcomes = await control.stop_all(_root=tmp_path)
+    assert [o.method for o in outcomes] == ["refused", "refused"]
+    assert stop_ledger.read_sweeps(tmp_path) == []
+
+
+@pytest.mark.asyncio
+async def test_a_single_stop_session_writes_no_sweep_row(no_signals, tmp_path: Path) -> None:
+    from local_operator.session.runtime import stop_ledger
+
+    handle = _StoppingHandle()
+    no_signals[1]["handle"] = handle
+    server, record = await _serve(handle)
+    try:
+        outcome = await control.stop_session(
+            _record_for(record), timeout_s=3.0, _root=config_dir()
+        )
+        assert outcome.method == "socket"
+        assert stop_ledger.read_sweeps(config_dir()) == []
+        marker = control.registry.read_stop_marker(
+            control.session_dir(config_dir(), record.session_id)
+        )
+        # No sweep: the marker keeps its pre-existing shape byte-for-byte.
+        assert marker is None or "sweep_id" not in marker
+    finally:
+        server.close()
+
+
+def test_a_sweeps_markers_carry_its_id_and_a_lone_markers_do_not() -> None:
+    record = _bare_record()
+    with_id = control._stop_marker_payload(record, "sigterm", command="c", sweep_id="abc123abc123")
+    without = control._stop_marker_payload(record, "sigterm", command="c")
+    assert with_id["sweep_id"] == "abc123abc123"
+    assert "sweep_id" not in without
+    involuntary = control._stop_marker_payload(
+        record, "", command="c", deliberate=False, actor="a", mechanism="m", sweep_id="x"
+    )
+    assert involuntary["sweep_id"] == "x"
+
+
+@pytest.mark.asyncio
+async def test_the_sigterm_rung_marker_pairs_to_a_deliberate_receipt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """(c) supervisor/ladder stop: the sigterm-rung marker, staged first, sanctions the signal.
+
+    The marker is written by the REAL rung writer, then the receipt a runtime would write
+    on arrival is built against it — no process is signalled.
+    """
+    from local_operator.session.runtime import signal_receipt
+
+    record = _bare_record(pid=555001, session_id="ladder-pair", started_at=1_760_000_000.0)
+    conversation = tmp_path / "sessions" / "ladder-pair"
+    conversation.mkdir(parents=True)
+    control._write_stop_marker(
+        record, tmp_path, "sigterm", command="lop stop", sweep_id="swp000000001"
+    )
+    receipt = signal_receipt.record(
+        conversation,
+        kind="runtime",
+        session_id="ladder-pair",
+        pid=555001,
+        started_at=1_760_000_000.0,
+        name="SIGTERM",
+        number=15,
+        in_flight=True,
+        action="drain",
+    )
+    assert receipt is not None
+    entry = receipt["signals"][0]
+    assert entry["sanction"] == "marker"
+    assert entry["stop_marker"]["rung"] == "sigterm"
+    assert entry["stop_marker"]["sweep_id"] == "swp000000001"
+    assert signal_receipt.stop_class_of(entry) == "deliberate"

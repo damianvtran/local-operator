@@ -2163,3 +2163,235 @@ def test_the_auto_probe_writes_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert not root.exists()
     assert exec_mode._saved_auto_approval() is False
     assert not root.exists(), "the probe created the config root it read"
+
+
+# -- stop attribution: N workers signalled in a batch (the 2026-09-30 18:14 shape) -----------
+
+_BATCH_WORKER = (
+    "import asyncio, os, sys\n"
+    "from pathlib import Path\n"
+    "import local_operator.exec_worker as ew\n"
+    "from tests.unit.test_exec_mode import FakeSession\n"
+    "SID = os.environ['BATCH_SESSION_ID']\n"
+    "class Slow(FakeSession):\n"
+    "    def __init__(self):\n"
+    "        super().__init__([])\n"
+    "        self._abort = asyncio.Event()\n"
+    "        self.active_team_name = None\n"
+    "        class _T:\n"
+    "            directory = Path(os.environ['BATCH_SESSION_DIR'])\n"
+    "        self._transcript = _T()\n"
+    "    @property\n"
+    "    def session_id(self):\n"
+    "        return SID\n"
+    "    def subscribe(self, handler):\n"
+    "        return lambda: None\n"
+    "    def abort(self, reason):\n"
+    "        self._abort.set()\n"
+    "    async def prompt(self, text, images=None):\n"
+    "        print('READY', flush=True)\n"
+    "        await self._abort.wait()\n"
+    "    async def dispose(self):\n"
+    "        self.disposed = True\n"
+    "ew.run.__defaults__  # the real entry, below\n"
+    "_real_run = ew.run\n"
+    "ew.run = lambda parsed, session_factory=None, stop_facts=None: _real_run(\n"
+    "    parsed, session_factory=Slow, stop_facts=stop_facts)\n"
+    "sys.argv = ['exec_worker', '--prompt', 'sleepy', '--job-id', os.environ['BATCH_JOB_ID']]\n"
+    "sys.exit(ew.main())\n"
+)
+
+
+def _spawn_batch(tmp_path: Path, count: int) -> list[Any]:
+    """N real exec workers on a private config root, each parked inside a live turn.
+
+    Returns ``[(proc, job_id, session_id, session_dir)]`` once every worker has said
+    READY (the only point where the SIGTERM handler is provably installed). The env is
+    rebuilt without any inherited ``CMUX_*`` and nothing outside this test is signalled.
+    """
+    import subprocess as sp
+    import time
+
+    repo_root = Path(exec_worker.__file__).resolve().parent.parent
+    config = tmp_path / "config"
+    workers: list[Any] = []
+    for index in range(count):
+        session_id = f"batch-sess-{index}"
+        session_dir = config / "sessions" / session_id
+        session_dir.mkdir(parents=True)
+        env = {key: value for key, value in os.environ.items() if not key.startswith("CMUX_")}
+        env.update(
+            HOME=str(tmp_path / "home"),
+            LOCAL_OPERATOR_CONFIG_DIR=str(config),
+            BATCH_SESSION_ID=session_id,
+            BATCH_SESSION_DIR=str(session_dir),
+            BATCH_JOB_ID=f"batch-job-{index}",
+            PYTHONPATH=str(repo_root) + os.pathsep + env.get("PYTHONPATH", ""),
+        )
+        proc = sp.Popen(
+            [sys.executable, "-c", _BATCH_WORKER],
+            stdout=sp.PIPE,
+            stderr=sp.PIPE,
+            text=True,
+            cwd=str(tmp_path),
+            env=env,
+        )
+        workers.append((proc, f"batch-job-{index}", session_id, session_dir))
+    deadline = time.monotonic() + 60.0
+    for proc, *_rest in workers:
+        assert proc.stdout is not None
+        ready = False
+        while time.monotonic() < deadline:
+            line = proc.stdout.readline()
+            if not line:
+                break
+            if line.strip() == "READY":
+                ready = True
+                break
+        if not ready:
+            for other, *_ in workers:
+                other.kill()
+            raise AssertionError(f"a batch worker never became ready: {proc.stderr.read()}")  # type: ignore[union-attr]
+    return workers
+
+
+def _reap_batch(workers: list[Any]) -> list[int]:
+    codes = []
+    for proc, *_rest in workers:
+        try:
+            proc.communicate(timeout=30)
+        except Exception:  # noqa: BLE001
+            proc.kill()
+            proc.communicate(timeout=15)
+        codes.append(proc.returncode)
+    return codes
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM semantics are POSIX")
+def test_a_sigterm_batch_with_no_marker_yields_n_unattributed_interrupted_rows(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The 18:14 wave in miniature: three workers, one external sender, nothing staged.
+
+    Each worker leaves an arrival row (no ``status``) and a terminal row that says
+    ``interrupted`` / ``unattributed-signal`` — NOT ``cancelled``, which is what all of
+    the real wave's twelve rows said — with distinct pids and no sweep record.
+    """
+    import signal as signal_module
+
+    from local_operator.session.runtime import stop_ledger
+
+    workers = _spawn_batch(tmp_path, 3)
+    try:
+        for proc, *_rest in workers:
+            os.kill(proc.pid, signal_module.SIGTERM)
+    finally:
+        codes = _reap_batch(workers)
+    assert codes == [130, 130, 130]
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    records = exec_mode.read_job_records()
+    pids = set()
+    for proc, job_id, _sid, _dir in workers:
+        mine = [r for r in records if r["id"] == job_id]
+        arrivals = [r for r in mine if "signal" in r]
+        assert len(arrivals) == 1 and "status" not in arrivals[0], mine
+        assert arrivals[0]["signal"]["number"] == 15
+        assert arrivals[0]["signal"]["sender"]["state"] == "unavailable"
+        final = exec_mode.job_status(job_id, reconcile=False)
+        assert final["status"] == "interrupted", final
+        assert final["stop_class"] == "unattributed-signal", final
+        assert final["exit_code"] == 130
+        assert final["stop"]["signal"]["sanction"] == "none"
+        pids.add(final["pid"])
+    assert len(pids) == 3
+    assert stop_ledger.read_sweeps(tmp_path / "config") == [], "an unsanctioned wave has no sweep"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGTERM semantics are POSIX")
+def test_a_sigterm_batch_with_staged_markers_is_deliberate_and_names_the_sweep(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The sanctioned shape: a marker staged per worker BEFORE the signal, carrying a sweep id."""
+    import signal as signal_module
+    import time
+
+    from local_operator.session.runtime import registry
+
+    workers = _spawn_batch(tmp_path, 3)
+    try:
+        for proc, _job, session_id, session_dir in workers:
+            registry.write_stop_marker(
+                session_dir,
+                {
+                    "session_id": session_id,
+                    "pid": proc.pid,
+                    "started_at": None,
+                    "at": time.time(),
+                    "rung": "sigterm",
+                    "deliberate": True,
+                    "killer": {"pid": 1, "argv0": "lop", "command": "lop stop --all"},
+                    "sweep_id": "swp-batch-0001",
+                },
+            )
+            os.kill(proc.pid, signal_module.SIGTERM)
+    finally:
+        codes = _reap_batch(workers)
+    assert codes == [130, 130, 130]
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    for _proc, job_id, _sid, _dir in workers:
+        final = exec_mode.job_status(job_id, reconcile=False)
+        assert final["status"] == "cancelled", final
+        assert final["stop_class"] == "deliberate", final
+        assert final["sweep_id"] == "swp-batch-0001", final
+        assert final["stop"]["signal"]["sanction"] == "marker"
+
+
+def test_classify_exit_vocabulary_and_the_negative_cases() -> None:
+    """The ledger vocabulary in one table, including what must write NOTHING extra."""
+    sanctioned = {"signal": {"sanction": "marker", "stop_marker": {"deliberate": True}}}
+    involuntary = {"signal": {"sanction": "marker", "stop_marker": {"deliberate": False}}}
+    bare = {"signal": {"sanction": "none", "stop_marker": None}}
+    assert exec_mode.classify_exit(0, None) == ("succeeded", {})
+    assert exec_mode.classify_exit(0, bare) == ("succeeded", {})  # a clean exit carries no stop
+    assert exec_mode.classify_exit(1, None) == ("failed", {})
+    assert exec_mode.classify_exit(130, {"via": "control-stop"})[1]["stop_class"] == "deliberate"
+    assert exec_mode.classify_exit(130, {"via": "control-stop"})[0] == "cancelled"
+    assert exec_mode.classify_exit(130, sanctioned)[0] == "cancelled"
+    assert exec_mode.classify_exit(130, involuntary)[1]["stop_class"] == "attributed-involuntary"
+    assert exec_mode.classify_exit(130, involuntary)[0] == "interrupted"
+    assert exec_mode.classify_exit(130, bare)[0] == "interrupted"
+    assert exec_mode.classify_exit(143, None)[1]["stop_class"] == "unattributed-signal"
+
+
+def test_a_clean_worker_exit_writes_no_stop_keys_and_no_arrival_row(
+    monkeypatch, tmp_path: Path
+) -> None:
+    logs_dir = _redirect_logs_dir(monkeypatch, tmp_path)
+    logs_dir.mkdir(parents=True)
+    monkeypatch.setattr(sys, "argv", ["exec_worker", "--prompt", "x", "--job-id", "clean1"])
+    monkeypatch.setattr(exec_worker, "run", lambda _p, session_factory=None, stop_facts=None: 0)
+    assert exec_worker.main() == 0
+    rows = [r for r in exec_mode.read_job_records() if r["id"] == "clean1"]
+    assert len(rows) == 1 and rows[0]["status"] == "succeeded"
+    assert not {"stop", "stop_class", "signal", "sweep_id"} & set(rows[0])
+
+
+def test_an_unattributed_death_is_classified_on_reconcile(monkeypatch, tmp_path: Path) -> None:
+    """A dead owner with no terminal row is the SIGKILL-class bucket, and says so."""
+    logs_dir = _redirect_logs_dir(monkeypatch, tmp_path)
+    logs_dir.mkdir(parents=True)
+    exec_mode._append_job_update(
+        {
+            "id": "dead1",
+            "status": "running",
+            "pid": 2**22 + 5,
+            "process_generation": "gen-x",
+        }
+    )
+    import local_operator.tools.group_reaper as group_reaper
+
+    monkeypatch.setattr(group_reaper, "_owner_is_dead", lambda pid, gen: True)
+    state = exec_mode.job_status("dead1")
+    assert state["status"] == "interrupted" and state["stop_class"] == "unattributed-death"
