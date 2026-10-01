@@ -73,6 +73,20 @@ def _record(
     (directory / f"{pid}.json").write_text(json.dumps(record.to_json()))
 
 
+def _ledger(root: Path, session_id: str) -> dict[str, Any]:
+    """The session's ledger entry, asserted present.
+
+    A helper rather than a bare ``rescue.read_ledger(...)[...]`` at each site:
+    ``read_ledger`` returns ``dict | None`` because absence is a real state, and
+    every call in this file is about a session whose episode was just opened, so
+    a ``None`` there IS the failure. Asserting once keeps the tests readable and
+    keeps the checker honest.
+    """
+    entry = rescue.read_ledger(root, session_id)
+    assert entry is not None
+    return entry
+
+
 def _session_dir(root: Path, session_id: str) -> Path:
     directory = root / "sessions" / session_id
     directory.mkdir(parents=True, exist_ok=True)
@@ -80,13 +94,22 @@ def _session_dir(root: Path, session_id: str) -> Path:
 
 
 def _completions(root: Path, rows: list[tuple[str, str, str, str]]) -> None:
-    """Write ``attention.db`` completions rows: ``(conversation, kind, cause, reason)``."""
+    """Append ``attention.db`` completions rows: ``(conversation, kind, cause, reason)``.
+
+    Callable more than once against one root (a test may stage a second
+    conversation later), so the table is created only when absent and the new
+    rows continue the sequence from the highest one already stored — a restart
+    at 1 would collide on the primary key and, before that, invert the "latest
+    row" ordering the predicate depends on.
+    """
     connection = sqlite3.connect(root / "attention.db")
     connection.execute(
-        "CREATE TABLE completions (sequence INTEGER PRIMARY KEY, conversation TEXT, token TEXT,"
-        " anchor TEXT, kind TEXT, reason TEXT, cause TEXT, notify INTEGER)"
+        "CREATE TABLE IF NOT EXISTS completions (sequence INTEGER PRIMARY KEY, conversation TEXT,"
+        " token TEXT, anchor TEXT, kind TEXT, reason TEXT, cause TEXT, notify INTEGER)"
     )
-    for index, (conversation, kind, cause, reason) in enumerate(rows, start=1):
+    start = connection.execute("SELECT COALESCE(MAX(sequence), 0) FROM completions").fetchone()[0]
+    for offset, (conversation, kind, cause, reason) in enumerate(rows, start=1):
+        index = int(start) + offset
         connection.execute(
             "INSERT INTO completions (sequence, conversation, token, anchor, kind, reason, cause,"
             " notify) VALUES (?,?,?,?,?,?,?,0)",
@@ -345,7 +368,21 @@ def _build_calibration(tmp_path: Path, fixture: dict[str, Any], alive: set[int])
     for entry in fixture["sessions"]:
         sid = entry["session_id"]
         pid = entry["pid"]
+        started_at = fixture["snapshot_epoch"] - 3600
         _session_dir(tmp_path, sid)
+        # THE FIXTURE'S OWN LEVERS ARE APPLIED, not ignored. Every one of these
+        # fields is false in the recorded wave (no marker, no `stopped_at`, no
+        # surviving open journal row — verified in the design's §1.3), so this
+        # changes nothing about the expected sets; it makes the pin REAL, so a
+        # session the wave DID sanction would drop out of the candidate set
+        # rather than being silently rescued. The discriminating test below
+        # flips one field to prove the builder honours them.
+        if entry.get("journal_open"):
+            _journal(tmp_path, sid, pid)
+        if entry.get("stop_marker"):
+            _marker(tmp_path, sid, pid, started_at)
+        if entry.get("stopped_at"):
+            _wake(tmp_path, sid, stopped_at=entry.get("death_at") or started_at)
         # Every one of these sessions ran real turns earlier in its life, so the
         # attention row BEFORE the wave is a `complete`: that is both faithful
         # and what the young-session rule needs (a session with no completed turn
@@ -362,7 +399,7 @@ def _build_calibration(tmp_path: Path, fixture: dict[str, Any], alive: set[int])
                 tmp_path,
                 sid,
                 pid=pid,
-                started_at=fixture["snapshot_epoch"] - 3600,
+                started_at=started_at,
                 heartbeat_at=time.time(),
                 cwd=entry["cwd"],
             )
@@ -372,7 +409,7 @@ def _build_calibration(tmp_path: Path, fixture: dict[str, Any], alive: set[int])
                 tmp_path,
                 sid,
                 pid=pid,
-                started_at=fixture["snapshot_epoch"] - 3600,
+                started_at=started_at,
                 heartbeat_at=entry["death_at"],
                 cwd=entry["cwd"],
             )
@@ -399,6 +436,59 @@ def test_mass_failure_calibration(tmp_path: Path, alive: set[int]) -> None:
     assert set(fixture["expected_non_candidates"]).isdisjoint(d.session_id for d in report.fire())
     # The per-pass start budget bounds the ENGAGEMENTS, not the verdicts.
     assert len(report.to_engage) == rescue.RESCUE_MAX_STARTS_PER_PASS
+
+
+def test_the_calibration_fixture_pins_the_levers_too(tmp_path: Path, alive: set[int]) -> None:
+    """The builder HONOURS the fixture's lever fields, so the set is really pinned.
+
+    Flips a victim into a sanctioned stop (a covering marker) and asserts it
+    leaves the candidate set — if the builder ignored the field, this would fail
+    and the calibration test above would be pinning less than it claims.
+    """
+    fixture = json.loads(FIXTURE.read_text())
+    victim = fixture["sessions"][0]
+    assert victim["verdict"] == "VICTIM"
+    victim["stop_marker"] = True
+    _build_calibration(tmp_path, fixture, alive)
+    report = rescue.rescue_scan(tmp_path, now=fixture["pass_epoch"], apply=False)
+    fired = {d.session_id for d in report.fire()}
+    assert victim["session_id"] not in fired
+    assert fired == set(fixture["expected_candidates"]) - {victim["session_id"]}
+
+
+def test_a_host_only_death_is_seen(tmp_path: Path, alive: set[int]) -> None:
+    """A death whose only record is its ``run/host`` boot record still fires.
+
+    Round-1 MAJOR: the census parsed ``run/host`` with ``SessionRecord.from_json``,
+    which raises for the four fields a ``journal.BootRecord`` does not carry, and
+    ``registry.scan`` drops what will not parse — so the whole namespace was
+    invisible and a spawn that died at load left no decision at all.
+    """
+    from local_operator.session.runtime.journal import BootRecord
+    from local_operator.session.runtime.types import HOST_RUN_DIRNAME
+
+    sid = "abab12121212"
+    _session_dir(tmp_path, sid)
+    record = BootRecord(
+        pid=DEAD_PID,
+        session_id=sid,
+        cwd="/Users/damian",
+        started_at=STARTED,
+        heartbeat_at=HEARTBEAT,
+    )
+    directory = tmp_path / HOST_RUN_DIRNAME
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / f"{DEAD_PID}.json").write_text(json.dumps(record.to_json()))
+    _completions(tmp_path, [(f"session/{sid}", "error", "disposed", "the session was disposed")])
+
+    report = rescue.rescue_scan(tmp_path, now=NOW, apply=False)
+    assert [d.session_id for d in report.fire()] == [sid]
+
+    # The two namespaces agree: the same session under run/mobile fires as well.
+    _record(tmp_path, "abab12121213", pid=DEAD_PID + 1, started_at=STARTED, heartbeat_at=HEARTBEAT)
+    _completions(tmp_path, [(f"session/{sid}", "error", "disposed", "x")])
+    both = rescue.rescue_scan(tmp_path, now=NOW, apply=False)
+    assert sid in {d.session_id for d in both.fire()}
 
 
 # --- B. bounds, idempotency, the ledger ------------------------------------
@@ -430,7 +520,7 @@ def test_the_backoff_walk_is_30_60_120_300_900(tmp_path: Path, alive: set[int]) 
     rescue.rescue_scan(tmp_path, now=NOW, apply=True)
 
     # The FIRST rung (30 s) is armed when the episode opens, before any attempt.
-    entry = rescue.read_ledger(tmp_path, sid)
+    entry = _ledger(tmp_path, sid)
     assert int(entry["next_at_ms"] - NOW * 1000) == 30_000
 
     # Each subsequent rung is armed by the attempt that failed before it, and the
@@ -438,12 +528,50 @@ def test_the_backoff_walk_is_30_60_120_300_900(tmp_path: Path, alive: set[int]) 
     seen: list[int] = []
     for _ in range(5):
         rescue.note_rescue_attempt(tmp_path, sid, outcome="failed", detail="x", now=NOW)
-        entry = rescue.read_ledger(tmp_path, sid)
+        entry = _ledger(tmp_path, sid)
         if entry["next_at_ms"] is None:
             break
         seen.append(int(entry["next_at_ms"] - NOW * 1000))
     assert seen == [60_000, 120_000, 300_000, 900_000]
     assert entry["state"] == "abandoned"
+
+
+def test_the_started_outcome_advances_the_ladder_too(tmp_path: Path, alive: set[int]) -> None:
+    """The ``started`` path (a runtime asked for, no successor record yet) walks
+    the same ladder as ``failed``.
+
+    This is the path the round-1 MAJOR lived on: a stray second ``next_at_ms``
+    assignment inside the ``started`` branch re-indexed the ladder at
+    ``count - 1``, so 30 s was spent twice and the 900 s rung was never reached —
+    and nothing drove the branch, which is why it shipped.
+    """
+    sid = "121212121212"
+    _bound_fixture(tmp_path, alive, sid)
+    rescue.rescue_scan(tmp_path, now=NOW, apply=True)
+
+    seen: list[int] = []
+    entry = _ledger(tmp_path, sid)
+    for _ in range(5):
+        rescue.note_rescue_attempt(tmp_path, sid, outcome="started", now=NOW)
+        entry = _ledger(tmp_path, sid)
+        if entry["next_at_ms"] is None:
+            break
+        seen.append(int(entry["next_at_ms"] - NOW * 1000))
+    assert seen == [60_000, 120_000, 300_000, 900_000]
+    assert entry["state"] == "abandoned"
+    # ``started`` means a runtime was asked for: the engagement is recorded.
+    assert entry["engaged"] is None
+
+
+def test_a_started_outcome_records_the_engaged_pid(tmp_path: Path, alive: set[int]) -> None:
+    sid = "121212121212"
+    _bound_fixture(tmp_path, alive, sid)
+    rescue.rescue_scan(tmp_path, now=NOW, apply=True)
+
+    rescue.note_rescue_attempt(tmp_path, sid, outcome="started", engaged_pid=4_700_500, now=NOW)
+    entry = _ledger(tmp_path, sid)
+    assert entry["state"] == "engaged"
+    assert entry["engaged"] == {"pid": 4_700_500, "at": NOW}
 
 
 def test_abandon_after_five_attempts(tmp_path: Path, alive: set[int]) -> None:
@@ -455,7 +583,7 @@ def test_abandon_after_five_attempts(tmp_path: Path, alive: set[int]) -> None:
         rescue.note_rescue_attempt(
             tmp_path, sid, outcome="failed", detail="x", now=NOW + index * 1000
         )
-    entry = rescue.read_ledger(tmp_path, sid)
+    entry = _ledger(tmp_path, sid)
     assert entry["state"] == "abandoned"
     assert entry["count"] == rescue.RESCUE_MAX_ATTEMPTS
 
@@ -477,7 +605,7 @@ def test_a_new_run_key_starts_a_fresh_episode(tmp_path: Path, alive: set[int]) -
     _record(tmp_path, sid, pid=new_pid, started_at=NOW + 600.0, heartbeat_at=NOW + 720.0)
     report = rescue.rescue_scan(tmp_path, now=NOW + 800.0, apply=True)
     assert [d.session_id for d in report.to_engage] == [sid]
-    assert rescue.read_ledger(tmp_path, sid)["run_key"]["pid"] == new_pid
+    assert _ledger(tmp_path, sid)["run_key"]["pid"] == new_pid
 
 
 def test_the_episode_cooldown_holds_a_rapid_second_death(tmp_path: Path, alive: set[int]) -> None:
@@ -511,7 +639,7 @@ def test_the_session_breaker_trips_after_three_episodes(tmp_path: Path, alive: s
         assert [d.session_id for d in report.to_engage] == [sid], index
         rescue.note_rescue_attempt(tmp_path, sid, outcome="verified", engaged_pid=pid, now=base)
 
-    entry = rescue.read_ledger(tmp_path, sid)
+    entry = _ledger(tmp_path, sid)
     assert len(entry["episodes"]) > rescue.RESCUE_BREAKER_EPISODES
 
     # A fifth death: enough episodes inside the window (four resolved in the last
@@ -531,7 +659,7 @@ def test_the_ledger_survives_a_restart(tmp_path: Path, alive: set[int]) -> None:
     rescue.note_rescue_attempt(tmp_path, sid, outcome="failed", detail="x", now=NOW)
 
     # A fresh read (as a restarted supervisor would do) sees the same state.
-    entry = rescue.read_ledger(tmp_path, sid)
+    entry = _ledger(tmp_path, sid)
     assert entry["count"] == 1
     assert entry["state"] == "pending"
     assert rescue.ledger_path(tmp_path, sid).is_file()

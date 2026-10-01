@@ -78,12 +78,6 @@ RESCUE_SETTLE_S = 30.0
 #: ancient corpses would be a stampede with no reader.
 RESCUE_RECENT_S = 3600.0
 
-#: The rescue pass's own cadence, and therefore how long the loop may sleep
-#: between passes. Faster than the residency pass (300 s) because a rescue's
-#: latency target is minutes — ``SETTLE + INTERVAL`` ≈ 2.5 min — while reclaim's
-#: population is measured in hours.
-RESCUE_INTERVAL_S = 120.0
-
 #: A dead run younger than this is refused: a write-then-die storm (a boot that
 #: failed at load) belongs to the engage machinery's own retries, not a rescue.
 RESCUE_YOUNG_RUN_S = 120.0
@@ -302,7 +296,11 @@ def note_rescue_attempt(
             )
     else:  # "started": a runtime was asked for but no successor record was seen yet
         entry["state"] = "engaged"
-        entry["engaged"] = {"pid": engaged_pid, "at": moment}
+        if engaged_pid is not None:
+            # ONLY WITH A PID. An ``engaged`` record naming no process is not
+            # evidence of anything, and it would read as a rescued runtime to a
+            # later pass or an operator reading the ledger.
+            entry["engaged"] = {"pid": engaged_pid, "at": moment}
         if entry["count"] >= RESCUE_MAX_ATTEMPTS:
             _resolve_episode(entry, "abandoned", moment)
             entry["next_at_ms"] = None
@@ -310,9 +308,6 @@ def note_rescue_attempt(
             entry["next_at_ms"] = int(
                 (moment + RESCUE_BACKOFF_S[min(entry["count"], len(RESCUE_BACKOFF_S) - 1)]) * 1000
             )
-        entry["next_at_ms"] = int(
-            (moment + RESCUE_BACKOFF_S[min(entry["count"] - 1, len(RESCUE_BACKOFF_S) - 1)]) * 1000
-        )
     write_ledger(config_dir, session_id, entry)
     return entry
 
@@ -538,6 +533,13 @@ def _death_class_receipt(receipt: dict[str, Any]) -> tuple[str, str]:
     """
     signals = receipt.get("signals")
     if not isinstance(signals, list) or not signals:
+        # A receipt with no readable signal is NOT evidence of an unsanctioned
+        # stop, so it does not fire. This differs from the stop-attribution
+        # lane's ``covers_run`` on purpose: that predicate answers "does this
+        # receipt describe THIS run" (an identity question, which an empty
+        # signal list does not affect), while this one answers "what did the
+        # signals say", and an empty list says nothing. The fallback rungs then
+        # decide, exactly as they would for a receipt-less death.
         return UNCLASSIFIED, "receipt-no-signals"
     last = signals[-1] if isinstance(signals[-1], dict) else {}
     sanction = str(last.get("sanction") or "")
@@ -546,7 +548,12 @@ def _death_class_receipt(receipt: dict[str, Any]) -> tuple[str, str]:
         # signal reached this runtime with nothing sanctioning it.
         return FIRE, "receipt-unsanctioned"
     if sanction == "marker":
-        stop_marker = last.get("stop_marker") if isinstance(last.get("stop_marker"), dict) else {}
+        # Bound ONCE to a definite dict: pyright's narrowing of
+        # ``last.get("stop_marker")`` does not survive a second call to ``get``,
+        # so the conditional expression that used to inline both reads reported
+        # ``"get" is not a known attribute of "None"`` on the second one.
+        raw_marker = last.get("stop_marker")
+        stop_marker: dict[str, Any] = raw_marker if isinstance(raw_marker, dict) else {}
         deliberate = stop_marker.get("deliberate")
         if deliberate is True:
             return SKIP, "receipt-deliberate"
@@ -591,7 +598,7 @@ class RescueReport:
 
     decisions: list[RescueDecision] = field(default_factory=list)
     to_engage: list[RescueDecision] = field(default_factory=list)
-    refusals: Counter = field(default_factory=Counter)
+    refusals: Counter[str] = field(default_factory=Counter)
     verified: list[str] = field(default_factory=list)
     abandoned: list[str] = field(default_factory=list)
 
@@ -650,7 +657,7 @@ def _viewer_attached(config_dir: Path, session_id: str) -> bool:
     from local_operator.session.runtime.viewers import scan_viewers
 
     try:
-        for viewer in scan_viewers(config_dir):
+        for viewer in scan_viewers(config_dir, reap=False):
             if viewer.current_session == session_id and viewer.has_window:
                 return True
     except Exception:  # noqa: BLE001 — an unreadable viewer table is not an attach
@@ -706,6 +713,29 @@ def _death_records(records: list[tuple[Any, str]]) -> list[Any]:
     return [record for record, state in records if state == "stale"]
 
 
+def _parse_session_record(data: Any) -> Any:
+    """The ``run/mobile`` namespace's record, which IS a ``SessionRecord``."""
+    from local_operator.session.runtime.types import SessionRecord
+
+    return SessionRecord.from_json(data)
+
+
+def _parse_boot_record(data: Any) -> Any:
+    """The ``run/host`` namespace's record (see the census's own comment).
+
+    Imported lazily because this module stays stdlib + registry-level, and RAISES
+    rather than returning ``None`` when the payload is not a boot record: a
+    ``None`` would reach ``registry.classify`` as a record and crash the pass,
+    while a raise is exactly what ``registry.scan``'s per-entry rescue expects.
+    """
+    from local_operator.session.runtime.journal import BootRecord
+
+    record = BootRecord.from_json(data)
+    if record is None:
+        raise ValueError("not a boot record")
+    return record
+
+
 def rescue_scan(config_dir: Path, *, now: float | None = None, apply: bool = True) -> RescueReport:
     """One rescue pass over the store. Blocking; callers hand it to a worker thread.
 
@@ -725,7 +755,17 @@ def rescue_scan(config_dir: Path, *, now: float | None = None, apply: bool = Tru
     # did this die" — the same rule reclaim.py states for its own census.
     by_session: dict[str, dict[str, Any]] = {}
     for dirname in (RUN_DIRNAME, HOST_RUN_DIRNAME):
-        for record, state in registry.scan(config_dir, dirname, reap=False):
+        # THE PARSE IS PER-NAMESPACE. ``run/host`` holds ``journal.BootRecord``
+        # (pid/session_id/cwd/started_at/heartbeat_at and nothing else), so
+        # parsing it with ``SessionRecord.from_json`` raises for the four fields
+        # that type requires — and ``registry.scan`` drops an entry that will not
+        # parse, per entry, by design. Measured consequence: the ENTIRE
+        # ``run/host`` namespace was invisible to the census, so a death whose
+        # only record was its boot record yielded no decision at all, while the
+        # same session under ``run/mobile`` fired. A host-kind death is exactly
+        # the shape a spawn that died at load leaves behind.
+        parse = _parse_session_record if dirname == RUN_DIRNAME else _parse_boot_record
+        for record, state in registry.scan(config_dir, dirname, parse=parse, reap=False):
             sid = getattr(record, "session_id", "") or ""
             if not sid:
                 continue
@@ -875,7 +915,6 @@ __all__ = [
     "RESCUE_BREAKER_EPISODES",
     "RESCUE_BREAKER_WINDOW_S",
     "RESCUE_EPISODE_COOLDOWN_S",
-    "RESCUE_INTERVAL_S",
     "RESCUE_MAX_ATTEMPTS",
     "RESCUE_MAX_STARTS_PER_PASS",
     "RESCUE_RECENT_S",
