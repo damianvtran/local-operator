@@ -1381,6 +1381,12 @@ stating plainly:
 So a zero from this apparatus can be classified as ran-and-failed more often
 than it can be classified as to cause, and a reader should not expect the
 records to name a failing checkpoint when the evaluator never named one itself.
+Several figures quoted above are not in the committed records at all — the
+provider-reported call counts (49 of 193 on `task_005`, 93 of 166 on `task_016`),
+the `$0.5597` low end of the per-episode range, `task_016`'s `cache_write` 1.69M,
+the judge defect's `18 of the 108` scope and `task_004`'s `agent_stop` ending —
+they come from the sealed episode bundles rather than the in-repo `records/`, so
+a citation that lands on one of those clauses is not backing the number.
 
 ### Known limitations and residual risks
 

@@ -91,10 +91,14 @@ edited to arrive here. sha256 of the copies as committed:
 98f8295e97f13ca242dc2004edbecf8668ebe579aac01de5ddb5e0839853a916  probe_rule4.py.txt
 ```
 
-No operator-home path, hostname, instance id, session id or credential appears in
-any of them, so nothing needed scrubbing. The `/home/user/...` paths in
-`ZERO-CLASSIFICATION-1830-009-013.md` are the **Ubuntu guest's** paths and are
-part of the evidence — they are deliberately left alone.
+No credential, hostname, instance id or session id appears in any of them, so
+nothing needed scrubbing. One operator-home path does appear, and is harmless:
+`probe_rule4.py.txt:11` (and `:4`) builds `Path.home() / ".local-operator" /
+"auth.db"` — an *unexpanded* home construction carrying no username and no
+secret, and resolving on whatever machine reads it — and it is left as-is so the
+file stays byte-identical to the arm's copy. The `/home/user/...`
+paths in `ZERO-CLASSIFICATION-1830-009-013.md` are the **Ubuntu guest's** paths
+and are part of the evidence — they are deliberately left alone.
 
 ### Why the probe is a `.txt`
 
@@ -102,8 +106,9 @@ part of the evidence — they are deliberately left alone.
 lint gate reads every tracked `.py` outside `.venv` (`flake8 .`, `black --check .`
 and `isort --check .` walk the whole tree) and this record fails it in 23 places
 — it is a scratch script, never formatted. Storing it as a `.py` would redden CI's
-lint job; the exclusion that would prevent that belongs in `pyproject.toml`,
-which this change deliberately does not touch. Copying it verbatim and renaming
+lint job; the exclusion that would prevent that belongs in `.flake8` (flake8's
+config, not `pyproject.toml`), which this change deliberately does not touch.
+Copying it verbatim and renaming
 the extension keeps the record unmodified *and* keeps the gate green. It is not
 importable and nothing reads it; it is here to be read.
 
