@@ -337,11 +337,57 @@ A foreground run exits 0 on success and nonzero on failure/cancellation. A
 background launcher exits after readiness (or reports `starting` after a
 bounded wait); its exit code is **not** the eventual execution result. Follow
 `lop exec --status JOB_ID` for `starting`, `running`, `succeeded`, `failed`,
-`cancelled` or `interrupted`, and inspect its log. Worker termination disposes
+`cancelled` or `interrupted` (see below for which stop is which), and inspect its log. Worker termination disposes
 the session before writing the terminal result. Abrupt death cannot truthfully
 report success: status reconciliation compares the PID's process-start identity
 and marks a proven-dead runtime interrupted. It never restarts a loop or cleans
 up a successor's resources.
+
+### Why a worker stopped: `stop_class` and the stop artifacts
+
+Exit code 130 is shared by a stop somebody asked for and a SIGTERM nobody
+explained, so the terminal ledger row says which it was instead of calling both
+`cancelled` (the 2026-09-30 18:14 wave recorded twelve unexplained SIGTERMs as
+twelve cancellations):
+
+| terminal `status` | `stop_class` | when |
+|---|---|---|
+| `cancelled` | `deliberate` | the supervisor's `stop`/`cancel` control op, or a SIGTERM that paired to a covering **deliberate** stop marker (`lop stop`'s ladder) |
+| `interrupted` | `attributed-involuntary` | a SIGTERM paired to a covering marker with `deliberate: false` (a prune/install/reclaim that named itself) — someone is named, nobody asked for the stop |
+| `interrupted` | `unattributed-signal` | a SIGTERM (or interrupt) with **no** covering marker. The sender is not knowable on macOS, and the row says so |
+| `interrupted` | `unattributed-death` | no terminal row at all and the owner is gone (reconciled by `--status`): SIGKILL, crash, OOM or power loss |
+| `succeeded` / `failed` | *(absent)* | a normal exit carries no stop keys |
+
+A stop row also carries a `stop` object (`via`, the `signal` entry, any covering
+`marker`) and, when the marker belonged to a `stop --all` sweep, its `sweep_id`.
+On SIGTERM arrival the worker appends a status-less **arrival row**
+(`{"id", "signal": {...}}`) before it does anything else, so the signal is on
+record even if the worker is SIGKILLed inside its 5 s settle. Scripts that
+branched on `cancelled` to mean "terminated by SIGTERM" should read `stop_class`.
+
+**Artifacts** (all best-effort; a failed write never changes a stop):
+
+* `<session dir>/runtime-signal.json` — a *runtime's* receipt of a termination
+  signal, written at arrival. v1 schema: `{"v":1,"kind":"runtime","session_id",
+  "pid","started_at","signals":[{"name","number","at","in_flight","action":
+  "drain"|"stop"|"repeat-absorbed","sender":{"state":"unavailable",...},
+  "stop_marker":null|{...},"sanction":"none"|"marker"}],"count","receiver":
+  {"uid","euid","gid","ppid","pgid","argv0"},"platform"}`. `sanction` is decided
+  at write time: `marker` iff a `runtime-stop.json` for this exact run, staged no
+  more than `PAIR_WINDOW_S` before the signal and never after, was on disk when it
+  arrived; otherwise `none` — nobody staged a stop. `receiver.ppid` is the
+  receiver's parent (lineage), not the sender. Never removed by a runtime; a new
+  run (different pid/`started_at`) replaces it.
+* `<config>/logs/stop-sweeps.jsonl` — one `begin` and one `end` row per
+  `stop_all` call that acted on at least one target (`lop stop --all`, the TUI's
+  stop-all); each marker the sweep stages carries the same `sweep_id`. Rotated
+  once past 256 KiB. A single `lop stop` is not a sweep and writes nothing.
+
+**Honest limits.** The *sender* is unavailable on macOS (the stdlib exposes no
+siginfo and asyncio discards it); an unsanctioned wave therefore yields one
+receipt per victim and **no** sweep row — never a fabricated one. SIGKILL, a
+crash and power loss leave nothing target-side. The TUI and `serve`/mobile daemons
+are not covered by the receipt.
 
 The job ID identifies the execution receipt; the session ID identifies the
 conversation. They are distinct. Receipts include the log path and, once ready,
