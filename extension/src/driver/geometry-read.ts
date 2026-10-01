@@ -19,10 +19,11 @@
  * 3. ALL caps, truncation and rounding happen INSIDE these functions, because
  *    the result crosses a process boundary (isolated world -> worker -> daemon
  *    -> tool) and the bound must exist at the SOURCE: 5 style matches, 30
- *    computed properties per element, 120-char identity strings, 200-char
- *    values, 30 inline custom properties, 8 hit-test elements, and a 16-entry
- *    ancestor chain (default 12). A page that stuffs a 100 KB custom property
- *    into an inline style must shrink it HERE, not at the model's door.
+ *    computed properties per element, 120-char identity strings and inline
+ *    property names, 200-char values, 30 inline custom properties, 8 hit-test
+ *    elements, and a 16-entry ancestor chain (default 12). A page that stuffs a
+ *    100 KB custom property into an inline style must shrink it HERE, not at the
+ *    model's door.
  *
  * 4. SHARED RESULT-SHAPE DECISIONS, because a second implementation reads this
  *    file as the source of truth:
@@ -42,7 +43,11 @@
  *      the page with the result: the bound must exist before the isolated-world
  *      boundary, not be discovered in `ToolResult.details` where
  *      `BROWSER_TEXT_LIMIT_CHARS` cannot reach it. `tag` is a fixed vocabulary
- *      and needs no cap.
+ *      and needs no cap. The `inline` map's property-name KEYS take that same
+ *      cap: a CSSOM name is page-controlled too (`setProperty` accepts an
+ *      arbitrarily long `--…` ident) and the key crosses the same boundary —
+ *      the raw name still performs the value lookup, only the emitted key is
+ *      clipped, and the value itself stays under the 200-char value cap.
  */
 
 export type GeometryRect = {
@@ -194,12 +199,20 @@ export const readStyles = (
     let inlineCount = 0;
     for (let j = 0; j < declaration.length && inlineCount < MAX_INLINE; j++) {
       const name = declaration.item(j);
-      if (name && name.indexOf("--") === 0 && !(name in inline)) {
-        inline[name] = clip(
-          String(declaration.getPropertyValue(name) || "").trim(),
-          MAX_VALUE,
-        );
-        inlineCount += 1;
+      if (name && name.indexOf("--") === 0) {
+        // The NAME is page-controlled too and becomes a map key in a result
+        // that leaves the page, so the emitted key takes the identity cap —
+        // the raw name still does the value lookup. Guarding on the CLIPPED
+        // key also keeps two long names sharing a cut prefix from writing
+        // the same entry twice.
+        const key = clip(name, MAX_IDENTITY);
+        if (!(key in inline)) {
+          inline[key] = clip(
+            String(declaration.getPropertyValue(name) || "").trim(),
+            MAX_VALUE,
+          );
+          inlineCount += 1;
+        }
       }
     }
     matches.push({

@@ -241,14 +241,20 @@ test("oversized id and role are clipped like className in every reader", async (
   // in all three readers while `className` and the style values were capped. A
   // page can put megabytes in either attribute, and the value would cross
   // isolated world -> worker -> daemon and land in `ToolResult.details`, where
-  // BROWSER_TEXT_LIMIT_CHARS cannot bound it — the cap has to exist here.
+  // BROWSER_TEXT_LIMIT_CHARS cannot bound it — the cap has to exist here. The
+  // inline map's property-name KEY is the same channel one layer in, so it is
+  // covered in the same pass.
   const LONG_ID = "i".repeat(5000);
   const LONG_ROLE = "r".repeat(5000);
+  // A CSSOM property name is page-controlled the same way: whatever
+  // `setProperty` accepted becomes a map key in the result.
+  const LONG_PROPERTY = "--" + "n".repeat(5000);
   const html = element({ tagName: "HTML" });
   const card = element({
     tagName: "SECTION",
     id: LONG_ID,
     role: LONG_ROLE,
+    inline: [[LONG_PROPERTY, "v".repeat(500)]],
     parentElement: html,
   });
   const dom = {
@@ -280,6 +286,20 @@ test("oversized id and role are clipped like className in every reader", async (
       assert.ok(entry.id.endsWith("\u2026"), `${shape}.id cut is visible`);
       assert.ok(entry.role.endsWith("\u2026"), `${shape}.role cut is visible`);
     }
+
+    // The inline map's KEY is the same class of channel as id/role: a page can
+    // `setProperty` an arbitrarily long ident, and the key crosses the same
+    // boundary. The oversized name is still REPORTED (clipped, not dropped),
+    // and its value stays under the value cap.
+    const inlineKeys = Object.keys(styles.matches[0].inline);
+    assert.equal(inlineKeys.length, 1, "the oversized name is still reported");
+    assert.ok(inlineKeys[0].length <= 120, "styles.inline key is bounded");
+    assert.ok(inlineKeys[0].endsWith("\u2026"), "styles.inline key cut is visible");
+    assert.equal(
+      styles.matches[0].inline[inlineKeys[0]].length,
+      200,
+      "inline value still capped at 200",
+    );
   } finally {
     await module.close();
   }
