@@ -93,6 +93,26 @@ _RUSAGE_PHYS_FOOTPRINT_OFFSET = 16 + 7 * 8
 #: wrong number, so this is deliberately generous and never tuned down.
 _RUSAGE_BUFFER_SIZE = 2048
 
+#: ``proc_pidinfo``'s flavor for ``struct proc_bsdinfo`` (``PROC_PIDTBSDINFO``).
+_PROC_PIDTBSDINFO = 3
+
+#: ``sizeof(struct proc_bsdinfo)`` — 136 bytes in ``<sys/proc_info.h>``. The call
+#: returns the number of bytes it filled, which is how a short or refused read is
+#: told from a good one: anything else is "no answer", never a half-parsed struct.
+_PROC_BSDINFO_SIZE = 136
+
+#: Offsets inside ``struct proc_bsdinfo``: twelve leading ``uint32`` fields
+#: (``pbi_flags``, ``pbi_status``, ``pbi_xstatus``, ``pbi_pid``, ``pbi_ppid``,
+#: uid/gid x6) put ``pbi_pid`` at 12 and ``pbi_ppid`` at 16; ``pbi_comm[16]`` and
+#: ``pbi_name[32]`` then take the struct to 96, ``pbi_nfiles`` sits at 96 and
+#: ``pbi_pgid`` at 100. Hardcoded, not a ``ctypes.Structure``, for the reason the
+#: rusage offset is: three fields are read and the kernel ABI is append-only. The
+#: ``pbi_pid`` echo is checked on every read (see :func:`_darwin_ppid_pgid`), so a
+#: layout that ever moved would refuse to answer instead of answering wrongly.
+_PBI_PID_OFFSET = 12
+_PBI_PPID_OFFSET = 16
+_PBI_PGID_OFFSET = 100
+
 #: The dlopen'd libproc, or ``False`` once loading it has failed. Cached because
 #: this is called per pid and ``ctypes.CDLL`` re-resolves on every call; the
 #: False sentinel keeps a host without libproc from retrying per pid.
@@ -211,6 +231,27 @@ def _darwin_libproc() -> Any | None:
         lib = ctypes.CDLL(path, use_errno=True)
         lib.proc_pid_rusage.restype = ctypes.c_int
         lib.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+        # ``proc_pidinfo(pid, flavor, arg, buffer, buffersize)`` — declared here, at
+        # the one place the library is loaded, so :func:`_darwin_ppid_pgid` cannot
+        # call it with ctypes' default ``int`` coercion of a ``void *`` (which
+        # truncates on arm64).
+        # ``proc_listpids(type, typeinfo, buffer, buffersize)`` — same reason; the
+        # buffer is a ``void *`` that is NULL for the size query.
+        lib.proc_listpids.restype = ctypes.c_int
+        lib.proc_listpids.argtypes = [
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_int,
+        ]
+        lib.proc_pidinfo.restype = ctypes.c_int
+        lib.proc_pidinfo.argtypes = [
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_uint64,
+            ctypes.c_void_p,
+            ctypes.c_int,
+        ]
     except Exception:  # noqa: BLE001 — no libproc is just "use the fallback"
         _libproc = False
         return None
@@ -242,6 +283,153 @@ def _darwin_footprint_bytes(pid: int) -> int | None:
         return int.from_bytes(raw[_RUSAGE_PHYS_FOOTPRINT_OFFSET:end], "little")
     except Exception:  # noqa: BLE001 — any probe failure is just missing data
         return None
+
+
+def _darwin_ppid_pgid(pid: int) -> tuple[int, int] | None:
+    """``(ppid, pgid)`` of one pid via ``proc_pidinfo(PROC_PIDTBSDINFO)``, or ``None``.
+
+    The fork-free replacement for ``ps -o ppid=,pgid= -p <pid>``: one syscall, no
+    subprocess. It exists for the machine pass's pre-signal identity re-check,
+    whose ``ps`` was the instrument that failed first under memory pressure (the
+    pass withheld four runaway kills on 2026-09-30 with "the fragment's rows could
+    not be re-read", at 95-309 GB).
+
+    ``None`` for every failure — no libproc, no such pid, a refused read, a short
+    write — and for a struct whose echoed ``pbi_pid`` is not ``pid``: that echo is
+    the layout check, so an ABI this build mis-parses answers "unknown" (which the
+    caller treats as withhold) rather than a wrong number (which could authorise a
+    stop on a recycled pid).
+    """
+    lib = _darwin_libproc()
+    if lib is None:
+        return None
+    try:
+        import ctypes
+
+        buffer = ctypes.create_string_buffer(_PROC_BSDINFO_SIZE)
+        written = lib.proc_pidinfo(pid, _PROC_PIDTBSDINFO, 0, ctypes.byref(buffer), len(buffer))
+        if written != _PROC_BSDINFO_SIZE:
+            return None
+        raw = buffer.raw
+
+        def field(offset: int) -> int:
+            return int.from_bytes(raw[offset : offset + 4], "little")
+
+        if field(_PBI_PID_OFFSET) != pid:
+            return None
+        return field(_PBI_PPID_OFFSET), field(_PBI_PGID_OFFSET)
+    except Exception:  # noqa: BLE001 — any probe failure is just missing data
+        return None
+
+
+def _linux_ppid_pgid(pid: int) -> tuple[int, int] | None:
+    """``(ppid, pgrp)`` from ``/proc/<pid>/stat``, or ``None``.
+
+    The ``comm`` field is parenthesised and may itself contain spaces and
+    parentheses, so the fields after it are split from the LAST ``)`` — the
+    only parse that survives a process named ``a) b``.
+    """
+    try:
+        with open(f"/proc/{pid}/stat", "r", encoding="utf-8", errors="replace") as handle:
+            raw = handle.read()
+        tail = raw[raw.rindex(")") + 1 :].split()
+        # tail[0] is state, [1] ppid, [2] pgrp.
+        return int(tail[1]), int(tail[2])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def direct_ppid_pgid(pid: int) -> tuple[int, int] | None:
+    """``(ppid, pgid)`` for one pid by a FORK-FREE read on this platform, or ``None``.
+
+    ``None`` means "this host cannot answer for this pid", which a caller deciding
+    whether a stop is safe must treat as UNKNOWN (never as "unchanged"). The
+    answer is one syscall (macOS) or one ``/proc`` read (Linux).
+    """
+    if sys.platform == "darwin":
+        return _darwin_ppid_pgid(pid)
+    if sys.platform.startswith("linux"):
+        return _linux_ppid_pgid(pid)
+    return None
+
+
+#: ``proc_listpids``'s selector for "every pid in the process group ``typeinfo``".
+_PROC_PGRP_ONLY = 2
+
+#: Headroom, in pids, added to the size query's answer before the fetch. A group
+#: that forks between the two calls would otherwise have its newest members
+#: truncated away silently; the kernel never writes past the buffer it is given,
+#: so this only widens what one tick can see, it is not a safety margin.
+_PGRP_LIST_SLACK = 64
+
+
+def _darwin_group_pids(pgid: int) -> list[int] | None:
+    """The pids in process group ``pgid`` via ``proc_listpids(PROC_PGRP_ONLY)``.
+
+    ``None`` when the host cannot answer (no libproc, a refused call); an EMPTY
+    list when the kernel answers and the group has no members, which is the
+    command having ended. Two calls — a size query (``NULL, 0``) and a sized
+    fetch — because the call returns BYTES and an undersized buffer silently
+    truncates the list rather than failing. Measured against
+    ``ps -axo pid=,pgid=`` on a ``sh -c "sleep & sleep & wait"`` group: identical
+    sets. No subprocess and no table walk, which is why the per-command guard can
+    use it as its PRIMARY membership source: ``ps`` is the first instrument to
+    time out under the memory pressure the guard exists for (0.42-13.6 s measured).
+    """
+    lib = _darwin_libproc()
+    if lib is None or pgid <= 0:
+        return None
+    try:
+        import ctypes
+
+        needed = lib.proc_listpids(_PROC_PGRP_ONLY, pgid, None, 0)
+        if needed < 0:
+            return None
+        if needed == 0:
+            return []
+        count = needed // ctypes.sizeof(ctypes.c_int) + _PGRP_LIST_SLACK
+        buffer = (ctypes.c_int * count)()
+        written = lib.proc_listpids(_PROC_PGRP_ONLY, pgid, buffer, ctypes.sizeof(buffer))
+        if written < 0:
+            return None
+        return [pid for pid in buffer[: written // ctypes.sizeof(ctypes.c_int)] if pid > 0]
+    except Exception:  # noqa: BLE001 — any probe failure is just missing data
+        return None
+
+
+def _linux_group_pids(pgid: int) -> list[int] | None:
+    """The pids whose ``/proc/<pid>/stat`` ``pgrp`` is ``pgid``, or ``None``.
+
+    A scan of ``/proc`` (one small read per process), the Linux analogue of the
+    call above; ``None`` only when ``/proc`` itself is unreadable. A process that
+    exits mid-scan is simply not listed.
+    """
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return None
+    members: list[int] = []
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        row = _linux_ppid_pgid(int(entry))
+        if row is not None and row[1] == pgid:
+            members.append(int(entry))
+    return members
+
+
+def direct_group_pids(pgid: int) -> list[int] | None:
+    """Members of process group ``pgid`` by a FORK-FREE read, or ``None`` = unknown.
+
+    The guard's membership source that does not depend on ``ps``. ``[]`` is an
+    ANSWER (the group is empty) and ``None`` is not one, and callers must not
+    conflate them: unknown never kills, an empty group has nothing to kill.
+    """
+    if sys.platform == "darwin":
+        return _darwin_group_pids(pgid)
+    if sys.platform.startswith("linux"):
+        return _linux_group_pids(pgid)
+    return None
 
 
 #: The largest pid any supported platform can allocate, used to keep
@@ -306,6 +494,28 @@ def _linux_pss_bytes(pid: int) -> int | None:
                         return int(parts[1]) * 1024
     except (OSError, ValueError):
         return None
+    return None
+
+
+def direct_footprint_bytes(pid: int) -> int | None:
+    """One pid's honest footprint by a FORK-FREE read on this platform, or ``None``.
+
+    The reader the per-command guard (``memory_guard.Guard``) and the machine
+    pass's fallback identity check take on EVERY tick: ``ri_phys_footprint`` via
+    ``proc_pid_rusage`` on macOS, ``smaps_rollup`` Pss on Linux. It exists apart
+    from :func:`session_resource_usage` because that function's contract includes
+    a ``ps`` batch and, for a pid the direct reader cannot answer, a ``top`` dump
+    — both subprocesses, and both the first instruments to time out under the
+    memory pressure a guard exists for (measured 2026-09-30: ``ps`` 0.42-13.6 s
+    under fleet load against a 5 s runner timeout). A guard whose number needs a
+    fork stops seeing exactly when it matters, so its steady-state path must be
+    syscalls only. ``None`` means "this host cannot answer for this pid" and is
+    never a reading of zero.
+    """
+    if sys.platform == "darwin":
+        return _darwin_footprint_bytes(pid)
+    if sys.platform.startswith("linux"):
+        return _linux_pss_bytes(pid)
     return None
 
 
