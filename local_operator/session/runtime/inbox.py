@@ -628,7 +628,13 @@ def coalesce_wake_rows(lines: list[InboxLine]) -> list[InboxLine]:
         # only, never from the leading segment, which is the identity this row's
         # collapse and receipt read.
         envelope, _, remainder = latest.text.partition("\n\n")
-        remainder = _strip_coalesced_note(remainder)
+        # GATED ON THE ROW HAVING ALREADY BEEN COALESCED (review round 2). A merge
+        # is the ONLY writer of a note, and a merge always sets ``wake_fires`` above
+        # one, so a row that stands for a single fire cannot be carrying one — and
+        # stripping an un-coalesced row's remainder would silently eat a wake whose
+        # own first paragraph happens to be the note sentence, on the FIRST merge.
+        if latest.wake_fires > 1:
+            remainder = _strip_coalesced_note(remainder)
         text = (
             f"{envelope}\n\n{_flagged_note(fires)}\n\n{remainder}"
             if remainder
@@ -807,8 +813,10 @@ def remove_wake_rows(session_dir: Path, wake_id: str) -> int:
     touched: it returns 0 with the file left byte-identical to what it found. The
     caller's fallback is the unchanged rows, which part 1 of this fix
     (:func:`coalesce_wake_rows`) still folds to ONE delivery rather than N. A
-    failed open or write returns 0 the same way, leaving the rows to the next
-    drain.
+    failed OPEN also returns 0 before anything has been touched. A failure DURING
+    the rewrite is the case with no such promise, and it is not claimed: the
+    ``ftruncate`` has already happened, so what sits on disk is whatever the write
+    loop managed to put there, and the next drain delivers what survived.
     """
     if not wake_id:
         return 0
