@@ -26,7 +26,7 @@ from starlette.testclient import TestClient
 
 from local_operator.mobile.daemon import MobileDaemon, build_app
 from local_operator.paths import config_dir
-from local_operator.projects import PROJECT_SCHEMA
+from local_operator.projects import DESCRIPTION_MAX, PROJECT_ROW_CAP, PROJECT_SCHEMA
 
 SESSION_A = "4e92693767fa"
 
@@ -328,6 +328,24 @@ def test_an_invalid_value_reads_as_the_stores_own_sentence() -> None:
     assert body["code"] == "project_invalid"
     assert "Value error" not in body["error"]
     assert body["error"].startswith("project name must be")
+
+
+def test_the_listing_clamps_the_description_but_the_detail_does_not() -> None:
+    """QA round 1, Q1 on the phone's surface: the summary model the listing,
+    board and write receipts all serve carries the 160-cell clamp the TUI's list
+    rows use; the DETAIL read is a separate model and keeps the full text."""
+    client = _client()
+    long_description = "d" * DESCRIPTION_MAX
+    created = client.post(
+        "/api/projects", json={"name": "clamped", "description": long_description}
+    )
+    assert created.status_code == 200
+
+    (listed,) = client.get("/api/projects").json()["projects"]
+    assert listed["description"] == "d" * (PROJECT_ROW_CAP - 1) + "\u2026"
+
+    detail = client.get("/api/projects/clamped").json()
+    assert detail["project"]["description"] == long_description
 
 
 def test_the_request_key_tuples_are_the_desktop_models_fields() -> None:

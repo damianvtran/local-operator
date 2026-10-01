@@ -1502,6 +1502,25 @@ _PROJECT_LISTED_BODY = "not included — ask for it with the project tool if you
 #: spelled with the field's name so the marker cannot be mistaken for content.
 _PROJECT_PROGRESS_MARKER = " [progress truncated]"
 
+#: Appended to a description the element cap had to cut — the same contract as
+#: the progress marker above: named, not an ellipsis, so a reader can tell a
+#: truncated description from a short one. Added with the 240 -> 2000 cap raise
+#: (issue #1815): a long description can now be the field that overflows.
+_PROJECT_DESCRIPTION_MARKER = " [description truncated]"
+
+#: The FLOOR under the progress snippet's marked cut: the most content the
+#: element's cap may take from the recency line. Progress is the one field a
+#: referencing session cannot reconstruct and the only RECENT text in the
+#: element, so a long description must not be able to reduce it to its marker.
+#: That is what the 240 -> 2000 description cap (issue #1815) made it do:
+#: with both fields long the snippet collapsed to 21 chars whatever its own
+#: length (measured — 990 chars and 200 chars both landed on the marker),
+#: because the order trims progress FIRST and exhaustion became the first
+#: pass. ~200 is the usable share: a few sentences of the one-line report,
+#: small enough that the description still keeps the bulk of the element
+#: (design review round 1, D1).
+_PROJECT_PROGRESS_FLOOR = 200
+
 
 def _project_head(project: Any, tag: str, typed: str) -> str:
     """The single-line ``<reference|listed type="project" …>`` head.
@@ -1624,24 +1643,34 @@ def _project_sessions_line(project: Any, states: dict[str, dict[str, Any]]) -> s
 
 
 def _project_body(project: Any, states: dict[str, dict[str, Any]], budget: int) -> str:
-    """The element body, clamped to ``budget`` chars by truncating PROGRESS.
+    """The element body, clamped to ``budget`` chars by truncating PROGRESS, then DESCRIPTION.
 
-    Progress is cut first because it is the one unbounded-in-practice field
-    (≤ 1000 chars of tool-authored prose) and the one the design names as the
-    truncation target; the description (≤ 240) and the identity/liveness lines
-    survive wherever the budget allows. Both text fields are defused BEFORE the
-    length decisions: ``_defuse`` can lengthen a string by one cell per marker,
-    so clamping first and defusing after could push the element back over its
-    cap.
+    Progress is cut first because it is the one the design names as the
+    truncation target; the description takes the same one-cut-and-marker
+    treatment once progress has given what it can (issue #1815 raised its cap
+    240 -> 2000, so it can overflow the element on its own), and the
+    identity/liveness lines survive wherever the budget allows. Both text
+    fields are defused BEFORE the length decisions: ``_defuse`` can lengthen a
+    string by one cell per marker, so clamping first and defusing after could
+    push the element back over its cap.
 
-    The final slice is a BOUND OF LAST RESORT: with today's field caps it is
-    unreachable — head plus name/status, a marker-only progress line and the
-    liveness line sit well inside the element budget — and it exists so the
-    cap stays hard if a future field cap grows.
+    Progress gives up at most down to :data:`_PROJECT_PROGRESS_FLOOR` (design
+    review round 1, D1): past the floor the overflow is the DESCRIPTION's to
+    give, so a long description cannot erase the recency line. The cuts still
+    land the element EXACTLY on budget — one cut and one marker per field —
+    because each cut is computed from the overflow the body actually has when
+    the field's turn comes.
+
+    The final slice is a BOUND OF LAST RESORT: reachable only when what the
+    floor leaves in place cannot give the rest (both text fields are already
+    at or under their floor/marker envelope, or the identity lines alone
+    overflow) — it exists so the cap stays hard whatever a future field cap
+    does.
     """
     progress = _defuse(project.progress)
     description = _defuse(project.description)
     marker = _PROJECT_PROGRESS_MARKER
+    description_marker = _PROJECT_DESCRIPTION_MARKER
 
     def render() -> str:
         lines = [f"name: {project.name}", f"status: {project.status}"]
@@ -1658,10 +1687,31 @@ def _project_body(project: Any, states: dict[str, dict[str, Any]], budget: int) 
     if over > 0 and progress:
         # Trim so the marker lands where the content stops: the kept prefix and
         # the marker together come to exactly ``over`` fewer chars than the
-        # full snippet, which is what makes ONE cut land the body on budget.
+        # full snippet, which is what makes ONE cut land the body on budget —
+        # unless that would cut below the FLOOR, which is the most progress
+        # ever gives (D1). A snippet the floor would not actually shorten (its
+        # whole length already within floor + marker) is left WHOLE, and
+        # unmarked: nothing was cut.
         keep = len(progress) - over - len(marker)
-        progress = (progress[:keep] if keep > 0 else "") + marker
-        body = render()
+        if keep < _PROJECT_PROGRESS_FLOOR:
+            keep = (
+                _PROJECT_PROGRESS_FLOOR
+                if _PROJECT_PROGRESS_FLOOR + len(marker) < len(progress)
+                else len(progress)
+            )
+        if keep < len(progress):
+            progress = progress[:keep] + marker
+            body = render()
+    if len(body) > budget and description:
+        # The SECOND truncation target (issue #1815): a long description can
+        # overflow the element on its own; the same one-cut-and-marker idiom
+        # lands the body on budget exactly whenever even a marker-only trim
+        # fits. When it cannot, the last-resort slice below keeps the cap hard.
+        over = len(body) - budget
+        keep = len(description) - over - len(description_marker)
+        if keep >= 0:
+            description = description[:keep] + description_marker
+            body = render()
     if len(body) > budget:
         body = body[: max(0, budget)]
     return body

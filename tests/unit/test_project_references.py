@@ -28,6 +28,7 @@ import pytest
 
 from local_operator.projects import ProjectEdit, ProjectRegistry
 from local_operator.references import (
+    _PROJECT_PROGRESS_FLOOR,
     PROJECT_REFERENCE_LIMIT_CHARS,
     REFERENCE_BLOCK_CLOSE,
     expand_references,
@@ -369,8 +370,10 @@ async def test_progress_is_defused_so_it_cannot_close_the_block(store, tmp_path)
 
 @pytest.mark.asyncio
 async def test_the_element_is_capped_with_a_progress_marker(store, tmp_path) -> None:
-    """The element never exceeds 1500 chars; the cut is marked, nothing is dropped
-    silently: identity, provenance and liveness all survive the trim."""
+    """CASE (b) — progress-only overflow, unchanged. The element never exceeds
+    1500 chars; the cut is marked, nothing is dropped silently: identity,
+    provenance and liveness all survive the trim, the description is not
+    touched at all, and the element lands EXACTLY on its cap."""
     long_name = "capping-example-with-a-quite-long-name-padded-out-0123456789"
     store.create_project(
         ProjectEdit(
@@ -385,14 +388,89 @@ async def test_the_element_is_capped_with_a_progress_marker(store, tmp_path) -> 
 
     assert result.expanded is True
     element = _project_element(result.sent)
-    assert len(element) <= PROJECT_REFERENCE_LIMIT_CHARS
+    assert len(element) == PROJECT_REFERENCE_LIMIT_CHARS  # exact landing, not just under
     assert " [progress truncated]" in element
     assert "ENDMARK" not in element  # the tail of the snippet is what was cut
     assert f"name: {long_name}" in element
     assert "status: active" in element
-    assert "description: " + "D" * 240 in element
+    assert "description: " + "D" * 240 in element  # whole: progress gave enough
+    assert " [description truncated]" not in element
     assert "sessions: none linked" in element
     assert element.endswith("</reference>")
+
+
+@pytest.mark.asyncio
+async def test_a_full_length_description_is_capped_with_a_marker(store, tmp_path) -> None:
+    """CASE (a) — description-only overflow, unchanged. Issue #1815: the
+    description cap moved 240 -> 2000, so a long description can overflow the
+    element on its own; it takes the same marked cut the progress snippet gets,
+    the element lands EXACTLY on its cap, and there is no progress line to cut."""
+    long_name = "capping-example-with-a-quite-long-name-padded-out-0123456789"
+    store.create_project(
+        ProjectEdit(name=long_name, description="D" * 2000),
+        progress_reported_by="operator",
+    )
+
+    result = await expand_references(f"@project:{long_name}", str(tmp_path))
+
+    element = _project_element(result.sent)
+    assert len(element) == PROJECT_REFERENCE_LIMIT_CHARS  # exact landing
+    assert " [description truncated]" in element
+    assert "D" * 2000 not in element  # the trim is real, not a no-op
+    assert "description: D" in element  # ...and a marked prefix survives
+    assert f"name: {long_name}" in element
+    assert " [progress truncated]" not in element
+    assert element.endswith("</reference>")
+
+
+@pytest.mark.asyncio
+async def test_progress_keeps_a_floor_and_the_description_takes_the_rest(store, tmp_path) -> None:
+    """CASE (c) — both fields overflow (design review round 1, D1).
+
+    The cut order is still progress-first, but progress no longer collapses to
+    its marker: it keeps ``_PROJECT_PROGRESS_FLOOR`` chars of itself plus the
+    marker, and the DESCRIPTION gives the remainder — landing the element
+    exactly on its cap. Before the floor, progress landed on the bare marker
+    (21 chars) whatever its own length, because a cap-sized description
+    exhausted the budget on the first pass; the recency line is the one field a
+    referencing session cannot reconstruct, so it must survive.
+    """
+    name = "payments-migration"
+    store.create_project(
+        ProjectEdit(name=name, description="D" * 2000, progress="P" * 990),
+        progress_reported_by="operator",
+    )
+
+    result = await expand_references(f"@project:{name}", str(tmp_path))
+
+    element = _project_element(result.sent)
+    assert len(element) == PROJECT_REFERENCE_LIMIT_CHARS  # exact landing
+    progress_line = next(line for line in element.split("\n") if line.startswith("progress"))
+    assert progress_line.endswith("P" * _PROJECT_PROGRESS_FLOOR + " [progress truncated]")
+    description_text = element.split("description: ", 1)[1].split("\n", 1)[0]
+    assert description_text.endswith(" [description truncated]")
+    kept = len(description_text) - len(" [description truncated]")
+    assert 1000 < kept < 2000  # trimmed, and still the bulk of the element
+    assert f"name: {name}" in element and "sessions: none linked" in element
+
+
+@pytest.mark.asyncio
+async def test_a_progress_snippet_at_the_floor_gives_nothing(store, tmp_path) -> None:
+    """The floor is a floor, not a quota: a snippet already within it is left
+    WHOLE and UNMARKED — a marker would claim a truncation that never happened —
+    and the description alone still lands the element exactly on its cap."""
+    store.create_project(
+        ProjectEdit(name="payments-migration", description="D" * 2000, progress="P" * 200),
+        progress_reported_by="operator",
+    )
+
+    result = await expand_references("@project:payments-migration", str(tmp_path))
+
+    element = _project_element(result.sent)
+    assert len(element) == PROJECT_REFERENCE_LIMIT_CHARS
+    assert "): " + "P" * 200 in element  # the whole snippet, verbatim
+    assert " [progress truncated]" not in element
+    assert " [description truncated]" in element
 
 
 @pytest.mark.asyncio

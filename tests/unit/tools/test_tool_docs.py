@@ -122,7 +122,7 @@ MEASURED_TOKENS: dict[str, int] = {
     "monitor": 369,
     "network": 697,
     "patience": 361,
-    "project": 967,
+    "project": 968,
     "project_delete": 98,
     "read": 312,
     "read_variable": 74,
