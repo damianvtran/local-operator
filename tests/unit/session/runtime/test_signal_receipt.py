@@ -180,3 +180,47 @@ def test_an_unsanctioned_verdict_is_the_signal_story_on_existing_tokens() -> Non
     assert "SIGTERM received" in detail and "unidentified sender" in detail
     assert "no stop was staged" in detail
     assert signal_receipt.describe({"signals": [entry], "count": 1})
+
+
+def test_an_install_shaped_caller_pairs_through_the_real_involuntary_writer(tmp_path: Path) -> None:
+    """Wave C (2026-10-01 01:00Z): runtimes were disposed minutes after an install.
+
+    The install/prune paths stage their marker with ``control.note_involuntary_stop``
+    before they signal. This cell uses that REAL writer (no hand-built payload), then
+    the receipt a runtime writes on arrival, and pins both halves: with the marker the
+    signal is ``attributed-involuntary`` naming the install mechanism and NOT a user
+    stop; the same signal with no marker (an install that did not stage one, or an
+    unrelated sweep) is ``unattributed-signal``. Nothing here signals a process.
+    """
+    from local_operator.session.runtime import control
+
+    root = tmp_path / "cfg"
+    root.mkdir()
+
+    class _Target:
+        session_id = SESSION
+        pid = PID
+        started_at = STARTED
+        version = "0.64.11"
+        source_ref = "abc1234"
+
+    conversation = root / "sessions" / SESSION
+    conversation.mkdir(parents=True, exist_ok=True)
+    assert control.note_involuntary_stop(
+        _Target(), root, mechanism="in-place-install", actor="lop update"
+    )
+    receipt = _record(conversation)
+    assert receipt is not None
+    entry = receipt["signals"][0]
+    assert entry["sanction"] == "marker"
+    assert entry["stop_marker"]["deliberate"] is False
+    assert entry["stop_marker"]["mechanism"] == "in-place-install"
+    assert signal_receipt.stop_class_of(entry) == "attributed-involuntary"
+    cause, detail = signal_receipt.cut_off_verdict(entry)  # type: ignore[misc]
+    assert cause == "runtime-killed" and "lop update" in detail
+
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    unmarked = _record(bare)
+    assert unmarked is not None
+    assert signal_receipt.stop_class_of(unmarked["signals"][0]) == "unattributed-signal"
