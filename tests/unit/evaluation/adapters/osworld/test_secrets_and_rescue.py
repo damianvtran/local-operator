@@ -285,7 +285,7 @@ async def test_the_openrouter_alias_becomes_the_registered_openai_compatible_con
 
 @pytest.mark.asyncio
 async def test_a_judge_provider_differing_only_in_case_or_padding_is_still_the_alias(
-    tmp_path: Path, episode_id: str
+    tmp_path: Path, episode_id: str, _stub_provider_registry: None
 ) -> None:
     """Loud is not enough when the value is a spelling of the one we recommend.
 
