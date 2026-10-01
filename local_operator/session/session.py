@@ -276,6 +276,7 @@ from local_operator.tools.builtin import (
     todo_fingerprint,
     todo_snapshot,
 )
+from local_operator.tools.tool_docs import chain_tool_docs
 
 if TYPE_CHECKING:
     # Type-only: the session must never pull the MCP stack in at import time.
@@ -3115,7 +3116,16 @@ class Session:
         self._output_contract: OutputContract | None = None
         self._has_ui = has_ui
         self._cwd = cwd or "."
-        self._skill_resolver = skill_resolver
+        # ``tool://`` is chained AHEAD of the factory's knowledge resolver in
+        # the ONE place every session must pass through — root or subagent,
+        # because each child constructs its own Session — so each gets a
+        # ``tool://`` link over ITS OWN live inventory. The lambda, not a
+        # snapshot: ``refresh_tools`` rebinds ``self._tools`` mid-session, and
+        # a doc must describe the tools the reader holds at READ time. Every
+        # other scheme reaches ``skill_resolver`` exactly as before, and a
+        # session constructed with no resolver at all still answers
+        # ``tool://``. Mechanism + contract: ``tools/tool_docs.py``.
+        self._skill_resolver = chain_tool_docs(skill_resolver, lambda: self._tools)
         self._request_approval = request_approval
         # No constructor kwarg, unlike ``request_approval``: there is no
         # default ask host to fall back to. Only a front end that owns the

@@ -805,7 +805,47 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: gap has moved for reasons unrelated to this diff, CI's own reading is the
 #: one that decides, and it prints the number to set — and the 55-token band is
 #: the reason the field can grow by its own 111 without the ceiling chasing it.
-BUDGET_BILLED_TOKENS = 37_300
+#:
+#: RAISED 37,300 -> 37,378 for the ``tool://`` on-demand tool reference (PR-A
+#: of the prompt/tool-surface audit; design note in the audit session's
+#: scratchpad, ``audit/mechanism_design.md``). The mechanism's own wire cost is
+#: deliberately ZERO — a doc renders only when ``read tool://<name>`` asks for
+#: it — so the raise is the always-loaded pieces that make it reachable, plus
+#: two cue fixes co-landed with it and one duplication cut:
+#:
+#:   base (origin/main a2dbe29cc)       104,304 chars = ~37,519 billed
+#:   head (this branch)                 104,521 chars = ~37,597 billed
+#:     = +217 chars = +78 billed, across four edits:
+#:       + the ``tool://`` cue in system.md's Tools section, +211 chars
+#:         (already tightened once against the design draft)
+#:       + C1, so listing or inspecting a peer no longer reads as gated
+#:         behind "when the user asked" — only spawning is, +30
+#:       + C4, the restart/update cause in the incident list, +46
+#:       + the read description's one-word scheme list, +9
+#:       - MINUS the console description's restatement of system.md's own
+#:         prose: the "cannot wedge on a prompt" tail and its clause go, the
+#:         boundary and the pinned "`bash` returns output directly"
+#:         consequence stay, -79
+#:
+#: Both sides measured with THIS script on this machine (the base in a
+#: detached checkout of origin/main) under a tiers-CONFIGURED
+#: ``values.subagents``. That config is the one variable the ``agent``/``task``
+#: docs read, and measuring it alone explains the number the entries above
+#: record as a "platform gap": the 762-char difference between this machine's
+#: configured reading and CI's is exactly the config delta in ``tool_schemas``
+#: (68,665 vs 67,903, byte-exact) — with the config equal, the machine and CI
+#: read identically. The ceiling follows the CLEAN arm, because that is what
+#: CI renders and this gate compares: 104,521 - 762 = 103,759 chars = ~37,323
+#: billed, + the 55-token band = 37,378. The remaining cue cost is the price
+#: of making the reference discoverable at all — with no cue, no agent knows
+#: it exists, which is exactly the op-ambiguity failure the audit measured.
+#: The schema-slimming wave (audit fix list item 2) works this surface next
+#: and should ratchet the ceiling back down. A LOCAL run under a clean config
+#: reads 103,759 = ~37,323 and passes with the same 55 headroom; a
+#: tiers-configured box renders the 762-char-larger surface above (219 over
+#: the ceiling), which is that config dependence, not an unfixable platform
+#: offset. The tighten band below (1,200) is not in play.
+BUDGET_BILLED_TOKENS = 37_378
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
