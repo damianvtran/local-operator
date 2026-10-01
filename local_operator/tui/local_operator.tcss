@@ -391,7 +391,7 @@ Screen > .screen--selection {
  * even after the resize rebuilds the row to fit — a ledger of one-line
  * traces silently doubles in height. Pinning makes the worst case a clipped
  * cell for one frame, which is the right failure. */
-ToolCard, WakeBlock, PeerMessageBlock {
+ToolCard, WakeBlock, PeerMessageBlock, AskResponseBlock {
     height: 1;
     background: $lo-surface;
     /* NOTE: the one-cell LEFT inset these cards carry is drawn by the row
@@ -415,7 +415,7 @@ ToolCard, WakeBlock, PeerMessageBlock {
  * PeerMessageBlock and MonitorDeltaBlock use their own class names because
  * they are different widgets; the height contract is the same. */
 ToolCard.tool-expanded, WakeBlock.wake-expanded, PeerMessageBlock.peer-expanded,
-MonitorDeltaBlock.monitor-expanded {
+MonitorDeltaBlock.monitor-expanded, AskResponseBlock.ask-response-expanded {
     height: auto;
 }
 
@@ -494,6 +494,7 @@ MonitorDeltaBlock.monitor-expanded {
 }
 
 .comfortable-rows ToolCard.tool-expanded, .comfortable-rows WakeBlock.wake-expanded,
+.comfortable-rows AskResponseBlock.ask-response-expanded,
 .comfortable-rows PeerMessageBlock.peer-expanded,
 .comfortable-rows MonitorDeltaBlock.monitor-expanded {
     height: auto;
@@ -603,6 +604,47 @@ ToolCard:focus, WakeBlock:focus, PeerMessageBlock:focus, .interactive-notice:foc
 
 #input-row {
     height: auto;
+}
+
+/* The MINIMIZED queued-ask bar (design §5.0/R7): one line directly above the
+ * composer, built from the composer's own vocabulary so it reads as a chip and
+ * not as a modal, a toast or a banner. It lives INSIDE `#input-shell`, which
+ * puts it in the same fill and the same one-cell inset as the input row — the
+ * bar is part of the composer's panel, which is what "attention-calling but
+ * minimal" means here.
+ *
+ * `display: none` in the sheet and `display = True` from Python: the app owns
+ * the toggle (a zero-row dock row when there is no queue), and an inline
+ * `styles.display` set by the widget outranks this rule. Written this way so a
+ * bar that never got its first state cannot paint one row of empty chrome.
+ *
+ * NO ANIMATION, per §5.0: the accent on the glyph is a persistent colour. A
+ * pulse would be the focus-steal this design exists to avoid, expressed in
+ * colour instead of keys. */
+#ask-bar {
+    width: 1fr;
+    height: 1;
+    background: $lo-raised;
+    color: $lo-fg;
+    display: none;
+}
+
+/* Hover brightens the row to say it is clickable — it is a control, not a
+ * status line, and the transcript's expand affordances are the model. */
+#ask-bar:hover {
+    background: $lo-overlay;
+}
+
+/* The open-ask list (design §5.1), mounted in `#prompt-host` beside the picker
+ * and never at the same time as one. Same elevation step as the ask card, and
+ * the same `width: 1fr` — an auto-width list would resize as the questions
+ * changed length, the defect `AskPickerScreen` was already fixed for. */
+AskQueueList {
+    width: 1fr;
+    height: auto;
+    background: $lo-overlay;
+    color: $lo-fg;
+    padding: 1 1;
 }
 
 #prompt-chevron {
