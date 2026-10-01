@@ -1322,6 +1322,142 @@ def _record_roots(view: Fleet, item: Verdict) -> list[Path]:
     return roots
 
 
+#: The involuntary-stop mechanism token this module's signals are attested
+#: under, rendered by ``incidents.INVOLUNTARY_MECHANISM_LABELS``. A token rather
+#: than a sentence because the marker stores facts and every reader renders its
+#: own words from them.
+RECLAIM_MECHANISM = "reclaim"
+
+#: The acting component named on the marker. The ``killer`` block already records
+#: the process (pid + argv0), so this names the PASS — the same pass both front
+#: ends run (cli.py: "the same pass the wake supervisor runs on its own cadence").
+RECLAIM_ATTEST_ACTOR = "runtime residency sweep"
+
+
+@dataclass(frozen=True)
+class _ReclaimAttestation:
+    """The run key one reclaim marker is staged with — all the sweep knows.
+
+    ``control.note_involuntary_stop`` duck-types the record it is handed (its
+    writer reads the session, the pid, the start time and — when present — the
+    build, spelled two ways), so this carries exactly those facts and invents
+    nothing. ``started_at`` is the kernel's own age arithmetic (``ps``'s
+    ``etime``, held on :class:`RuntimeProcess`) subtracted from now: a reclaim
+    candidate is by definition the runtime with NO record to read a start time
+    from, which is the case this sweep exists for.
+    """
+
+    session_id: str
+    pid: int
+    started_at: float
+
+
+def _attestation_record(item: Verdict) -> _ReclaimAttestation | None:
+    """The run key this candidate's marker would be staged with, or ``None``.
+
+    ``None`` is the one class with nowhere to write: a recordless runtime whose
+    spawn contract names no session — the sweep's own log line already names it
+    ``<unknown>``, and inventing a directory for a session that never existed is
+    exactly what ``write_stop_marker`` refuses to do.
+
+    Built ONCE per candidate and reused by the withdrawal below, because the
+    marker's run key must round-trip exactly: ``withdraw_involuntary_stop``
+    re-reads the file it is about to take back and compares ``started_at`` by
+    equality, so a second ``time.time()`` here would refuse its own marker.
+    """
+    if not item.session_id:
+        return None
+    return _ReclaimAttestation(
+        session_id=item.session_id,
+        pid=item.process.pid,
+        started_at=time.time() - item.process.age_s,
+    )
+
+
+def _attest_before_signal(item: Verdict, record: _ReclaimAttestation) -> None:
+    """Stage the involuntary stop marker no later than the SIGTERM.
+
+    WHY EVERY SWEEP SIGNAL CARRIES ONE. The operator's rule for this class of
+    act is stated by the one other writer, ``control.note_involuntary_stop``:
+    "nothing should kill runtimes en masse, ever; and if it does happen, it must
+    be attributable." The ladder (``control.stop_session``) and the update paths
+    (``update._attests``) already stage this marker; this module was the one
+    sanctioned mass-SIGTERM left out, so a sweep's victims could only ever be
+    read as ``unattributed`` — the exact failure measured 2026-09-28, when a
+    ~14-runtime SIGTERM wave left every victim with no actor and no artifact
+    that could separate a sweep from a stray shell. A marker here turns the
+    same act into ``runtime-killed`` with the mechanism and actor on the reason.
+
+    ORDERING IS THE CONTRACT, as it is for every writer of this marker: the
+    file must be visible BEFORE the signal. The target cannot record anything
+    once the signal lands, so the acting process is the only party that can —
+    and this call sits above every signal this module sends, which is what
+    keeps the two from drifting apart.
+
+    Best-effort in the strongest sense: a candidate this sweep has already
+    proven unreachable must still be ended when a sidecar cannot be written.
+    But the failure is SAID OUT LOUD — "could not attest" is a gap in the
+    artifact, and the acting process is the only one that can name it.
+
+    NEITHER THIS NOR THE WITHDRAWAL MAY BECOME THE SWEEP'S EXCEPTION PATH: an
+    escaped error would abort a loop that has already sent signals and lose its
+    report, so both catch everything and say so (the same guard
+    ``update._attests`` keeps). This one returns nothing — the warning is the
+    say-so, and there is no consumer that could branch on it.
+    """
+    from local_operator.session.runtime.control import note_involuntary_stop
+
+    try:
+        attested = note_involuntary_stop(
+            record,
+            Path(item.config_root),
+            mechanism=RECLAIM_MECHANISM,
+            actor=RECLAIM_ATTEST_ACTOR,
+        )
+    except Exception:  # noqa: BLE001 — the sweep outranks the paperwork
+        logger.warning(
+            "runtime residency: attesting pid %d raised; its ending will read unattributed",
+            item.process.pid,
+            exc_info=True,
+        )
+        return
+    if attested:
+        return
+    logger.warning(
+        "runtime residency: could not attest pid %d (session %s, root %s) before "
+        "signalling it — its ending will read unattributed",
+        item.process.pid,
+        item.session_id,
+        item.config_root,
+    )
+
+
+def _withdraw_attestation(item: Verdict, record: _ReclaimAttestation) -> None:
+    """Take back an attestation whose act did not complete.
+
+    ``os.kill`` raising means the signal never landed — the candidate died in
+    the gap between the decision and the signal, or the OS refused us — so the
+    act this marker speaks for was NOT taken, and leaving it on disk would
+    narrate a death this sweep did not cause as this sweep (the same misreading
+    ``update.withdraw_involuntary_stops`` exists to prevent). Best-effort like
+    every other evidence write: the read-back inside
+    ``withdraw_involuntary_stop`` decides what is actually ours, and a failure
+    to clean up must not fail the sweep's own report — nor may it become the
+    sweep's exception path: the same guard ``_attest_before_signal`` keeps, for
+    the same reason (an escaped error would abort a loop mid-signal).
+    """
+    from local_operator.session.runtime.control import withdraw_involuntary_stop
+
+    try:
+        withdraw_involuntary_stop(record, Path(item.config_root), mechanism=RECLAIM_MECHANISM)
+    except Exception:  # noqa: BLE001 — cleanup must not fail the sweep's own report
+        logger.warning(
+            "runtime residency: withdrawing the attestation for pid %d raised",
+            item.process.pid,
+            exc_info=True,
+        )
+
+
 def reclaim_runtimes(
     root: Path | None = None,
     *,
@@ -1450,6 +1586,13 @@ def reclaim_runtimes(
             item.process.cpu_s,
             item.port if item.port is not None else "<none>",
         )
+        # Attest BEFORE the signal (ordering contract; see the helpers): this is
+        # one of the machine's mass-kill paths, and those must be attributable.
+        # The record is built once and reused by the withdrawal below, because
+        # the marker's run key must round-trip exactly.
+        attestation = _attestation_record(item)
+        if attestation is not None:
+            _attest_before_signal(item, attestation)
         try:
             # SIGTERM ONLY, AND NEVER ESCALATED. The runtime's own handler is
             # work-aware: it finishes any turn in flight before leaving, bounded by
@@ -1457,6 +1600,10 @@ def reclaim_runtimes(
             # which is the one thing this module must never do.
             kill(item.process.pid, signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
+            # The act did NOT complete: the signal never landed, so take our
+            # attestation back (see ``_withdraw_attestation``).
+            if attestation is not None:
+                _withdraw_attestation(item, attestation)
             continue
         report.signalled.append(item)
     if apply and wait_s > 0:
