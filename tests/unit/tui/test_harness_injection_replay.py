@@ -281,6 +281,70 @@ async def test_the_mcp_unavailable_row_replays_on_the_warning_tier() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_opt_in_send_notice_replays_as_a_warning_row() -> None:
+    """Design round 1, D1 = UX round 1, U2: the row the setting promises.
+
+    ``send.journal_unconfirmed`` writes a durable ``session_send_notice``
+    ``CustomMessage``, and the key's own help tells the operator it keeps a row.
+    No TUI arm painted it: a ``CustomMessage`` has no ``role``, so the row fell
+    past every ``custom_type`` branch and then past the role-based handling,
+    which drops what it does not recognise — the identical trap the binding
+    notice and the MCP warning were added for. The phone already rendered it
+    through its generic custom-message fallback, so this is the display half the
+    terminal was missing.
+
+    ``warning``, not ``note``: the message may already have landed, and the one
+    thing the reader must not do is send it again.
+    """
+    from local_operator.harness.message_types import SESSION_SEND_NOTICE_MESSAGE_TYPE
+    from local_operator.harness.types import CustomMessage
+    from local_operator.tui.widgets.transcript import (
+        NOTICE_GLYPHS,
+        NoticeBlock,
+        TranscriptView,
+    )
+
+    session = FakeSession()
+    session._history = [
+        CustomMessage(
+            custom_type=SESSION_SEND_NOTICE_MESSAGE_TYPE,
+            attribution="system",
+            details={
+                "text": (
+                    # The row's SHIPPED copy, with the shared state word and the
+                    # reader-neutral next step (design round 2 D5 = UX round 2 U8
+                    # = QA round 2 Q1): the fixture carried the old model-facing
+                    # spelling, which is also why nothing pinned the new one.
+                    "delivery to release-owner: wake unconfirmed (id peer-99…); "
+                    "do not resend it — check the target's transcript first, and "
+                    "retry only if it is absent"
+                )
+            },
+        )
+    ]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        notices = [
+            block
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock)
+        ]
+        shown = _transcript_text(app)
+
+    assert len(notices) == 1, f"the fold dropped the notice row: {shown}"
+    (notice,) = notices
+    assert notice._token == "warning" and notice._glyph == NOTICE_GLYPHS["warning"]
+    assert "delivery to release-owner" in shown
+    # The instruction survives the fold: it is the whole reason the row exists.
+    flat = " ".join(shown.split())
+    assert "retry only if it is absent" in flat
+    assert "wake unconfirmed" in flat, "the row speaks the card's word, not the raw token"
+    assert "is mailbox" not in flat
+    assert "sessions(op=" not in flat, "no model-facing tool syntax on a human row"
+
+
+@pytest.mark.asyncio
 async def test_a_held_child_report_replays_as_a_warning_and_a_delivered_one_does_not() -> None:
     """UX round 1, U1/U2/U6: the held row's ARRIVAL SIGNAL, and only for held rows.
 

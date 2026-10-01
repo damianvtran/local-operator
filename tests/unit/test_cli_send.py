@@ -32,7 +32,12 @@ from unittest.mock import patch
 
 import pytest
 
-from local_operator.cli import _bind_send_positionals, build_cli_parser, send_command
+from local_operator.cli import (
+    SEND_EXIT_UNCONFIRMED,
+    _bind_send_positionals,
+    build_cli_parser,
+    send_command,
+)
 
 
 def _engaged(root: Path, session_id: str) -> None:
@@ -744,11 +749,17 @@ def test_send_to_a_different_pid_is_not_a_self_send(capsys) -> None:
         ),
     ):
         rc = send_command(_send_args())
-    # Delivery was attempted (the guard did not short-circuit) and failed
-    # softly — the exact "could not deliver" path, not the self-send refusal.
-    assert rc == 1
+    # Delivery was attempted (the guard did not short-circuit) and settled as
+    # unconfirmed. The discriminator is the SELF-SEND refusal's own sentence:
+    # the receipt legitimately names the target, so a bare "this session" match
+    # would now be satisfied by the delivery line itself.
+    #
+    # The code is the residual's OWN (UX round 1, U5), not 1: a script that
+    # retries on any non-zero would otherwise do exactly the duplicate the
+    # sentence forbids.
+    assert rc == SEND_EXIT_UNCONFIRMED
     assert red.called
-    assert "this session" not in red.call_args[0][0]
+    assert "use the composer to message yourself" not in red.call_args[0][0]
 
 
 def test_self_send_is_refused_through_a_multi_hop_ancestry(capsys) -> None:
@@ -856,18 +867,16 @@ def test_a_live_refusal_is_not_converted_into_a_stored_send(capsys, tmp_path, mo
 def test_a_timed_out_dial_is_not_reported_as_a_failed_delivery() -> None:
     """R4: a deadline expiry is not proof the message did not land.
 
-    ``_dial_or_explain`` gives the message-less ``TimeoutError`` a sentence, and
-    it re-raises the SAME exception class on purpose: both callers branch on the
-    type to choose their wording, and the confident "could not deliver" arm is
-    reserved for ``RuntimeError`` — the peer ANSWERING no. Reporting a timeout
-    that way asserts a non-delivery this side cannot know (the op is already in
-    the owner's socket buffer, and the receiver commits before it acks), and a
-    sender who believes it duplicates the steer or the wake.
+    The sender reports it as ``unconfirmed`` — a state, not a failure — because
+    the op is already in the owner's socket buffer and the receiver commits
+    before it acks, so a sender who believes it duplicates the steer or the
+    wake. The confident "could not deliver" arm is reserved for a PROVEN
+    non-delivery (a dial that never opened, or the peer answering no).
 
-    The retry half of R4 is asserted too, because the wording alone is not the
-    guarantee: a timed-out dial may have LANDED, so a second submission is the
-    duplicate the sentence warns about. One dial, one failure, no automatic
-    re-send — the sender decides, and the sentence tells them what they know.
+    The retry half of R4 is asserted too, because the copy alone is not the
+    guarantee: a timed-out dial may have LANDED, so the second submission is
+    only safe against a receiver that advertises ``peer-message-id-v1`` and can
+    dedupe it. Against one that does not, there is exactly one dial.
     """
     other_pid = os.getppid() + 9999
     with (
@@ -881,13 +890,19 @@ def test_a_timed_out_dial_is_not_reported_as_a_failed_delivery() -> None:
         rc = send_command(_send_args(steer=True))
 
     assert dial.call_count == 1, dial.call_args_list
-    assert rc == 1
+    assert rc == SEND_EXIT_UNCONFIRMED, "the ambiguous state is not the retry-me 1"
     assert red.called
     line = red.call_args[0][0]
-    assert line.startswith("no delivery confirmation:"), line
+    assert "delivery unconfirmed" in line, line
     assert "could not deliver" not in line, line
-    assert "delivery is UNCONFIRMED" in line, line
-    assert "do not send it again" in line, line
+    # This receiver advertised no carriage, so nothing was probed and the
+    # sentence may not imply otherwise (agent review round 1, MAJOR).
+    assert "not yet in its transcript" not in line, line
+    # And the next step is written for a person at a terminal (UX round 1, U4).
+    assert "sessions(op=" not in line, line
+    assert "Check the target's transcript before resending" in line, line
+    assert "peer-" in line, line
+    assert "before resending" in line, line
 
 
 def test_a_partly_delivered_broadcast_reports_the_skipped_matches(monkeypatch, capsys) -> None:
@@ -920,10 +935,21 @@ def test_a_partly_delivered_broadcast_reports_the_skipped_matches(monkeypatch, c
         lambda root=None: [(engaged, "live"), (fresh[0], "live"), (fresh[1], "live")],
     )
 
-    async def _deliver(_record, **_kwargs):
-        return "delivered to the mailbox (will be read on the next turn)"
+    async def _deliver(record, **kwargs):
+        # The outcome builder is what the CLI reads now; a helper returning only
+        # a sentence would no longer be on the path.
+        return peer_send_mod.DeliveryOutcome(
+            state=peer_send_mod.DELIVERY_DELIVERED,
+            detail="delivered to the mailbox (will be read on the next turn)",
+            message_id="peer-" + "0" * 32,
+            wake=peer_send_mod.WAKE_ACKED,
+            attempts=1,
+            cause="",
+            route="live",
+            target=f"{record.conversation_name} (pid {record.pid})",
+        )
 
-    monkeypatch.setattr(peer_send_mod, "deliver_peer_message", _deliver, raising=True)
+    monkeypatch.setattr(peer_send_mod, "deliver_peer_message_outcome", _deliver)
     monkeypatch.setattr(peer_send_mod, "_record_for_pid", lambda pid: None)
     monkeypatch.setattr(peer_send_mod, "_parent_pid", lambda pid: None)
 
@@ -933,6 +959,52 @@ def test_a_partly_delivered_broadcast_reports_the_skipped_matches(monkeypatch, c
     out = capsys.readouterr().out
     assert "→ release cutter (pid 20): delivered to the mailbox" in out, out
     assert "2 matches skipped (not engaged yet)" in out, out
+
+
+def test_the_mailbox_arm_gives_each_stream_its_own_half(monkeypatch, capsys) -> None:
+    """UX round 1 N1, corrected in round 2: printing the WHOLE receipt on stdout
+    and the advisory on stderr still recited the advisory twice in a terminal that
+    shows both streams -- the stderr sentence was a verbatim suffix of the stdout
+    line. Each stream now carries its own half, and neither repeats the other."""
+    import local_operator.mobile.peer_send as peer_send_mod
+
+    message_id = "peer-" + "b" * 32
+    detail = peer_send_mod._mailbox_detail(message_id, 1)
+
+    async def _deliver(record, **kwargs):
+        return peer_send_mod.DeliveryOutcome(
+            state=peer_send_mod.DELIVERY_MAILBOX,
+            detail=detail,
+            message_id=message_id,
+            wake=peer_send_mod.WAKE_UNCONFIRMED,
+            attempts=1,
+            cause="no_answer",
+            route="live",
+            target="release-owner (pid 48213)",
+        )
+
+    monkeypatch.setattr(peer_send_mod, "deliver_peer_message_outcome", _deliver)
+    monkeypatch.setattr(
+        "local_operator.cli._resolve_peer_target",
+        lambda *args, **kwargs: (_Record(os.getppid() + 7), [], ""),
+    )
+    monkeypatch.setattr("local_operator.cli._peer_sender_identity", lambda: {"pid": 1})
+
+    rc = send_command(_send_args(target="release-owner"))
+    captured = capsys.readouterr()
+
+    assert rc == 0
+    # stdout: the id-bearing receipt, and NOT the advisory.
+    assert message_id in captured.out
+    assert "do not send it again" not in captured.out, captured.out
+    # stderr: the advisory, and NOT the receipt.
+    assert "do not send it again" in captured.err, captured.err
+    assert message_id not in captured.err, captured.err
+    # The two lines are complementary, not nested: the one property the round-1
+    # fix missed.
+    out_line = captured.out.strip().splitlines()[-1]
+    err_line = captured.err.strip().splitlines()[-1]
+    assert err_line not in out_line and out_line not in err_line
 
 
 def test_an_exact_session_naming_a_live_composer_is_refused_live_not_cold(

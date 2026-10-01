@@ -1004,6 +1004,7 @@ def project_settled_rows(
         SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
         SESSION_INCIDENT_MESSAGE_TYPE,
         SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
+        SESSION_SEND_NOTICE_MESSAGE_TYPE,
     )
 
     # The row DECISIONS this fold shares with the phone's. Held outside both
@@ -1366,6 +1367,30 @@ def project_settled_rows(
             # (``network/credentials/messages.py``) and replayed verbatim, so
             # live and replay read the same sentence.
             if getattr(message, "custom_type", None) == SESSION_BINDING_NOTICE_MESSAGE_TYPE:
+                details = getattr(message, "details", None) or {}
+                text = str(details.get("text", "")).strip()
+                if text:
+                    self._append_block(NoticeBlock(text, kind="warning", fold_width=fold_width))
+                    appended = True
+                continue
+            # A SEND THAT WAS NOT ACKNOWLEDGED, written by the opt-in
+            # ``send.journal_unconfirmed`` setting (design note B, design round 1
+            # D1 = UX round 1 U2). The tool RESULT already carries the same facts
+            # live; this row is the durable copy an operator asked for, and until
+            # this branch existed it was model-visible and PHONE-visible while the
+            # terminal — the surface a local session is read on — showed nothing,
+            # live or on resume: a ``CustomMessage`` has no ``role``, so it fell
+            # past every arm above and then past the role-based handling below.
+            # That is the identical trap the binding notice one arm up was added
+            # for.
+            #
+            # `warning`, not `note`: the message may already have landed, and the
+            # one thing the reader must not do is send it again. The text is the
+            # writer's own sentence, replayed verbatim, so live and replay read
+            # the same words — and the phone keeps its generic custom-message
+            # fallback, which already renders this type (verified, UX round 1:
+            # adding a second phone arm would paint the row twice).
+            if getattr(message, "custom_type", None) == SESSION_SEND_NOTICE_MESSAGE_TYPE:
                 details = getattr(message, "details", None) or {}
                 text = str(details.get("text", "")).strip()
                 if text:

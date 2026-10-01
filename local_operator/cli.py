@@ -826,6 +826,18 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "send",
         help="Send a message to another local lop session (no cmux needed)",
         parents=[parent_parser],
+        # The exit codes ARE the contract now that one call settles four honest
+        # ways (send/wake delivery design A.1, A.4), so they are stated where a
+        # user actually reads them. 3 rather than 1 for the ambiguous state is
+        # what lets a script separate "unknown -- check before resending" from
+        # "nothing was delivered" without parsing prose (UX round 1, U5).
+        epilog=(
+            "exit codes: 0 delivered, or delivered-to-mailbox with the wake "
+            "unconfirmed (the advisory goes to stderr); "
+            f"{SEND_EXIT_UNCONFIRMED} unconfirmed -- the message may or may not "
+            "have landed, so do not resend it without checking the target's "
+            "transcript first; 1 not delivered. Every state names the message id."
+        ),
     )
     send_parser.add_argument(
         "target",
@@ -3514,9 +3526,28 @@ def browser_command(args: argparse.Namespace) -> int:
     return 1
 
 
+#: ``lop send``'s exit code for the AMBIGUOUS state (design note D, UX round 1
+#: U5): the message may still land, so this is neither success nor the "retry
+#: me" 1 that a script reads as "nothing was delivered" -- the pair the copy
+#: deliberately forbids retrying. 3 rather than 2, which argparse already uses
+#: for a usage error. Documented in the subcommand's own ``--help``.
+SEND_EXIT_UNCONFIRMED = 3
+
+
 def _peer_red(message: str) -> None:
     """Print one red error line, matching the rest of the CLI's error style."""
     print(f"\n\033[1;31m{message}\033[0m", file=sys.stderr)
+
+
+def _peer_note(message: str) -> None:
+    """Print one plain advisory line, below the receipt it qualifies.
+
+    Distinct from :func:`_peer_red` because the mailbox state is NOT an error:
+    the message landed. The advisory ("do not send it again") is the part a
+    script must not have to parse out of stdout's receipt, which is why the
+    mailbox arm alone writes here.
+    """
+    print(f"\n{message}", file=sys.stderr)
 
 
 def _hold_sigint() -> None:
@@ -3751,8 +3782,11 @@ def send_command(args: argparse.Namespace) -> int:
     import asyncio
 
     from local_operator.mobile.peer_send import (
+        DELIVERY_FAILED,
+        DELIVERY_MAILBOX,
+        DELIVERY_UNCONFIRMED,
         candidate_lines,
-        deliver_peer_message,
+        deliver_peer_message_outcome,
         interrupted_send_detail,
         skipped_clause,
         validate_peer_body,
@@ -3949,8 +3983,8 @@ def send_command(args: argparse.Namespace) -> int:
 
     mode = "steer" if args.steer else "mailbox"
     try:
-        detail = asyncio.run(
-            deliver_peer_message(
+        outcome = asyncio.run(
+            deliver_peer_message_outcome(
                 record,
                 session_id=(record.session_id if record is not None else cold_session_id),
                 text=text,
@@ -3966,26 +4000,49 @@ def send_command(args: argparse.Namespace) -> int:
         _hold_sigint()
         _peer_red(interrupted_send_detail())
         return _die_of_sigint()
-    except TimeoutError as exc:
-        # NOT "could not deliver": a read deadline expiring means no
-        # ACKNOWLEDGED result, not an undelivered message — the mutation op is
-        # already in the owner's socket buffer, and the receiver commits before
-        # it acks (``peer_send._unanswered_dial_detail``). Saying it failed
-        # invites a duplicate steer or wake. Same split, and the same words, as
-        # the send TOOL's arm below it.
-        _peer_red(f"no delivery confirmation: {exc}")
-        return 1
-    except (RuntimeError, ConnectionError, OSError, ValueError) as exc:
-        # ValueError covers a read fault the frame reader could still surface
-        # (e.g. an oversized non-welcome line): it must become the same soft,
-        # non-zero "could not deliver" line, never an uncaught traceback (U1).
+    except RuntimeError as exc:
+        # A pre-delivery refusal (unengaged target, live or cold): nothing was
+        # minted and nothing was written, so the confident line is honest here.
         _peer_red(f"could not deliver: {exc}")
         return 1
+    except (ConnectionError, OSError, ValueError) as exc:
+        # Defensive: the outcome builder classifies transport faults itself, so
+        # this arm is a fault it could not. ValueError covers a read fault the
+        # frame reader could still surface (e.g. an oversized non-welcome line):
+        # it must become the same soft, non-zero line, never a traceback (U1).
+        _peer_red(f"could not deliver: {exc}")
+        return 1
+
+    # THE EXIT CODE FOLLOWS THE STATE, not the sentence (design note D): the two
+    # amber states are not failures for a script either. ``mailbox`` is a
+    # DELIVERY whose receipt the sender could not confirm, so it exits 0 and says
+    # so on stderr; ``unconfirmed`` is the honest residual -- the message may
+    # still land -- and exits non-zero because a script that retries on it is
+    # making the only choice this side cannot make for it.
     if record is not None:
         name = record.conversation_name or record.session_id
-        print(f"→ {name} (pid {record.pid}): {detail}{skipped_clause(skipped)}")
+        target = f"{name} (pid {record.pid})"
     else:
-        print(f"→ {cold_session_id} (not running): {detail}{skipped_clause(skipped)}")
+        target = f"{cold_session_id} (not running)"
+    clause = skipped_clause(skipped)
+    if outcome.state == DELIVERY_MAILBOX:
+        # EACH STREAM CARRIES ITS OWN HALF (UX round 1 N1, corrected in round 2:
+        # printing the WHOLE receipt on stdout and the advisory on stderr still
+        # recited the advisory twice in a terminal that shows both streams, since
+        # the advisory is a suffix of the receipt). stdout takes the receipt's
+        # first half -- the id-bearing clause a script wants -- and stderr takes
+        # the advisory the person acts on, so neither line repeats the other.
+        print(f"→ {target}: {outcome.detail.partition(' — ')[0]}{clause}")
+        if outcome.advisory:
+            _peer_note(outcome.advisory)
+        return 0
+    if outcome.state == DELIVERY_UNCONFIRMED:
+        _peer_red(f"{outcome.text}{clause}")
+        return SEND_EXIT_UNCONFIRMED
+    if outcome.state == DELIVERY_FAILED:
+        _peer_red(f"{outcome.text}{clause}")
+        return 1
+    print(f"→ {target}: {outcome.detail}{clause}")
     return 0
 
 

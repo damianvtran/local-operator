@@ -149,6 +149,54 @@ OPERATOR_SIGNATURE_CAPABILITY = "operator-signature-v1"
 #: that may send one may send the other.
 INPUT_MODE_CAPABILITY = "input-mode-v1"
 
+#: Additive discovery capability: this session's receive path understands a
+#: SENDER-MINTED ``message_id`` on a ``peer_message`` op. It names its transcript
+#: row with that id and answers a RE-SEND of the same id as a duplicate instead
+#: of appending a second row (``Session.receive_peer_message``).
+#:
+#: WHY IT IS ADVERTISED RATHER THAN ASSUMED, and this is the whole reason the
+#: string exists: without the dedupe an old receiver would write the message
+#: TWICE, so the sender's retry loop and its transcript probe are gated on seeing
+#: this capability in the record. A target that does not advertise it gets one
+#: attempt and no probe -- today's semantics, which a timeout still reports as
+#: unconfirmed rather than failed, because the sender cannot know it did not land.
+#:
+#: Advertised only by an owner whose handle's ``receive_peer_message`` takes the
+#: keyword (``server._takes_peer_message_id``), on the same fail-closed argument
+#: INPUT_MODE's string makes: an owner that would silently DROP the id cannot
+#: dedupe on it, and a sender that believed otherwise would duplicate.
+PEER_MESSAGE_ID_CAPABILITY = "peer-message-id-v1"
+
+
+class PeerReceiveDetail(str):
+    """A peer delivery's receipt sentence PLUS what the receiver now owns.
+
+    Returned by ``Session.receive_peer_message`` and forwarded by the two hosts
+    (``ServingSessionHandle``, ``TuiSessionHandle``) onto the ack frame as
+    ``delivery``. A ``str`` SUBCLASS for the same reason the sender-side
+    ``PeerAck`` is one: every existing caller prints it as the receipt line and
+    keeps working untouched, and only the delivery rail asks for `.delivery`.
+
+    ``delivery`` is ``{"message_id", "committed", "queued", "duplicate"}``:
+
+    * ``committed`` -- the message is this session's: durable, queued for the
+      drain, or handed to the turn that will persist it. The sender may say it
+      was delivered, and must not be told to retry.
+    * ``queued`` -- accepted for later delivery but NOT yet taken (a busy
+      terminal whose hop to the session had not run when the ack was written).
+      The sender classifies this as unconfirmed and probes for the row.
+    * ``duplicate`` -- this id was already owned, so nothing was appended and
+      nothing was re-woken.
+    """
+
+    __slots__ = ("delivery",)
+
+    def __new__(cls, detail: str, delivery: "dict[str, Any]") -> "PeerReceiveDetail":
+        result = super().__new__(cls, detail)
+        result.delivery = delivery
+        return result
+
+
 #: Event types a MUTED attach connection stops receiving: the wire half of
 #: ``EVENT_MUTE_CAPABILITY``, and deliberately THE SAME SET the parked
 #: ``EventController`` discards app-side (``tui/events.py`` assigns its

@@ -1455,6 +1455,14 @@ class ToolContext(BaseModel):
     # ``None`` (bare tool tests, hosts without a session) degrades to a
     # silent store: the credential still works through bash injection.
     journal_credential: Any | None = None
+    # Optional host hook that records ONE durable notice when a ``send`` settles
+    # in an amber state (``Session.journal_send_notice``). The tool RESULT
+    # already carries the same facts, so this is the configurable second copy
+    # (``send.journal_unconfirmed``, default off) an operator asks for when they
+    # want the transcript itself to remember that a message was never
+    # acknowledged. ``None`` (bare tool tests, hosts without a session) degrades
+    # to exactly the shipped behaviour: the result is the notice.
+    journal_send_notice: Any | None = None
 
 
 ToolExecuteFn = Callable[

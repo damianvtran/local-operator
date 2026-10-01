@@ -374,6 +374,13 @@ def _consumer_defaults() -> dict[str, object]:
     consumers["proactive.patience.max_attempts"] = patience_engine.DEFAULT_MAX_ATTEMPTS
     consumers["proactive.patience.episode_ttl_ms"] = patience_engine.DEFAULT_TTL_MS
     consumers["proactive.patience.max_pending"] = patience_engine.DEFAULT_MAX_PENDING
+
+    # The send tool's notice key, asked of the module that READS it: the reader
+    # is ``peer_send.journal_unconfirmed_enabled``, whose fallback constant is
+    # the shipped default. Restating ``False`` here would guard nothing.
+    from local_operator.mobile.peer_send import JOURNAL_UNCONFIRMED_DEFAULT
+
+    consumers["send.journal_unconfirmed"] = JOURNAL_UNCONFIRMED_DEFAULT
     return consumers
 
 

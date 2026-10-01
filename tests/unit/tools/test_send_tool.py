@@ -367,7 +367,13 @@ async def test_a_lost_ack_is_not_reported_as_a_failed_delivery(monkeypatch) -> N
     """The receive side commits BEFORE it acks, so a dropped socket or an ack
     timeout can mean "delivered, receipt lost". Claiming "could not deliver"
     there asserts a non-delivery this side cannot know, and a model that
-    believes it retries and duplicates the message (review round 1, MINOR-3)."""
+    believes it retries and duplicates the message (review round 1, MINOR-3).
+
+    Since the delivery states landed, a transport failure has ONE honest answer
+    and it is a state, not a sentence: ``unconfirmed``, ``is_error=False``, the
+    amber ``partial_result`` flag, and the ``delivery`` payload a renderer reads
+    instead of sniffing the prose.
+    """
     registrant, _alias, _handle = await _start_peer()
     try:
         import local_operator.mobile.peer_client as peer_client_mod
@@ -383,11 +389,19 @@ async def test_a_lost_ack_is_not_reported_as_a_failed_delivery(monkeypatch) -> N
             None,
             _context(),
         )
-        assert result.is_error is True
-        assert "no delivery confirmation" in result.text
-        assert "may or may not have arrived" in result.text
-        # The confident claim must NOT appear on this arm.
+        assert result.is_error is False
+        assert result.details is not None
+        assert result.details["delivery"]["state"] == "unconfirmed"
+        assert result.details["delivery"]["cause"] == "no_answer"
+        assert result.details["delivery"]["route"] == "live"
+        assert result.details["partial_result"] is True
+        assert "delivery unconfirmed" in result.text
+        assert "may still arrive" in result.text
+        # The confident claim must NOT appear on this arm, and the text has to
+        # carry the id a human would quote plus the retry advice.
         assert "could not deliver" not in result.text
+        assert result.details["delivery"]["message_id"] in result.text
+        assert "retry" in result.text or "resending" in result.text
     finally:
         registrant.close()
 
@@ -396,17 +410,16 @@ async def test_a_lost_ack_is_not_reported_as_a_failed_delivery(monkeypatch) -> N
 async def test_a_timed_out_dial_is_an_unconfirmed_delivery(monkeypatch) -> None:
     """A read deadline expiring is not a failed delivery, on the timeout arm.
 
-    ``peer_send._dial_or_explain`` attaches a sentence to the message-less
-    ``TimeoutError`` and re-raises the SAME class, so this lands on the
-    "no delivery confirmation" arm rather than the confident one — which is the
-    whole point of the class split. The reproduced case is a real child server
-    whose loop was blocked for 0.7 s: the sender's 0.2 s deadline expired, and
-    the receiver recorded the delivered steer the moment its loop came back.
-    Wrapping the timeout into a ``RuntimeError`` (an earlier draft did) moves
-    that case onto the arm that says nothing was delivered. R4's other half is
-    asserted below: the dial is attempted ONCE. A message that may already be
-    queued in the owner's buffer must not be re-submitted automatically, and a
-    tool result is the last place that could happen unnoticed.
+    The reproduced case is a real child server whose loop was blocked for 0.7 s:
+    the sender's 0.2 s deadline expired, and the receiver recorded the delivered
+    steer the moment its loop came back. Reporting that as a failure is the
+    defect the delivery states exist to remove, so the tool answers with
+    ``unconfirmed`` — not an error — and the text forbids exactly the retry that
+    would duplicate a message which may already be queued in the owner's buffer.
+
+    R4's other half is asserted below: against a receiver that does NOT advertise
+    ``peer-message-id-v1`` the dial is attempted ONCE. A retry is only safe when
+    the receiver can dedupe the id (see ``peer_send``'s capability gate).
     """
     registrant, _alias, _handle = await _start_peer()
     dials: list[dict[str, Any]] = []
@@ -425,9 +438,11 @@ async def test_a_timed_out_dial_is_an_unconfirmed_delivery(monkeypatch) -> None:
             None,
             _context(),
         )
-        assert result.is_error is True
-        assert "no delivery confirmation" in result.text
-        assert "delivery is UNCONFIRMED" in result.text
+        assert result.is_error is False
+        assert result.details is not None
+        assert result.details["delivery"]["state"] == "unconfirmed"
+        assert result.details["partial_result"] is True
+        assert "delivery unconfirmed" in result.text
         assert "may still arrive" in result.text
         # Neither confident claim: not "could not deliver", and nothing that
         # invites an automatic retry of a steer that may already have landed.
@@ -796,3 +811,86 @@ async def test_a_target_with_a_selector_never_spools_to_the_selector(monkeypatch
     assert "not both" in result.text, result.text
     assert "held for the next runtime" not in result.text, result.text
     assert not (session_dir / "inbox.jsonl").exists()
+
+
+@pytest.mark.asyncio
+async def test_an_amber_send_offers_the_notice_hook_and_a_clean_one_does_not(monkeypatch) -> None:
+    """The tool's second-surface seam (design note B): the hook is offered the
+    settled state, the message id and the target for the two amber states, and
+    is NOT called for a delivery that went through — one row per unanswered
+    send, never a row per send."""
+    registrant, _alias, _handle = await _start_peer()
+    calls: list[dict[str, Any]] = []
+
+    async def _journal(**kwargs: Any) -> None:
+        calls.append(kwargs)
+
+    context = _context()
+    context.journal_send_notice = _journal
+    try:
+        import local_operator.mobile.peer_client as peer_client_mod
+
+        async def _timeout(*args, **kwargs):
+            raise TimeoutError
+
+        monkeypatch.setattr(peer_client_mod, "send_peer_message", _timeout)
+        result = await execute_send(
+            "slow", {"target": "peer-target", "message": "did this land?"}, None, None, context
+        )
+        assert result.is_error is False
+        assert result.details is not None
+        assert len(calls) == 1, calls
+        call = calls[0]
+        assert call["state"] == "unconfirmed"
+        assert call["message_id"] == result.details["delivery"]["message_id"]
+        assert call["message_id"].startswith("peer-")
+        assert "peer-target" in call["target"]
+        assert call["force"] is False
+        assert "do not resend it" in call["text"] and call["message_id"] in call["text"]
+        # THE ROW SPEAKS THE SHARED WORD, not the raw state token, and its next
+        # step is the reader-neutral one every other surface now uses (design
+        # round 2 D5 = UX round 2 U8 = QA round 2 Q1).
+        from local_operator.mobile.peer_send import DELIVERY_STATE_WORDS
+
+        assert DELIVERY_STATE_WORDS[call["state"]] in call["text"], call["text"]
+        assert "is unconfirmed" not in call["text"], "the token, not the word"
+        assert "sessions(op=" not in call["text"], call["text"]
+        assert "check the target's transcript first" in call["text"], call["text"]
+
+        # THE ABORTED CALL IS FILED REGARDLESS OF THE SETTING (round 1, MINOR-3,
+        # now EXERCISED rather than described): the loop appends a COMPLETED
+        # call's result before it consults the abort signal, but a call the abort
+        # CANCELS is paired with a synthetic ``aborted`` result that carries
+        # neither the id nor the cause — so for that one call the notice row is
+        # the only durable record that a message may have landed.
+        from local_operator.harness.types import AbortSignal
+
+        calls.clear()
+        aborted = AbortSignal()
+        aborted.abort("operator stopped the turn")
+        await execute_send(
+            "aborted",
+            {"target": "peer-target", "message": "did this land?"},
+            aborted,
+            None,
+            context,
+        )
+        assert len(calls) == 1, calls
+        assert calls[0]["force"] is True, "an aborted send is filed even with the key off"
+
+        # A delivered send offers nothing: the result IS the receipt.
+        calls.clear()
+
+        async def _deliver(*args, **kwargs):
+            return "delivered and woke the session"
+
+        monkeypatch.setattr(peer_client_mod, "send_peer_message", _deliver)
+        result = await execute_send(
+            "ok", {"target": "peer-target", "message": "hello"}, None, None, context
+        )
+        assert result.is_error is False
+        assert result.details is not None
+        assert result.details["delivery"]["state"] == "delivered"
+        assert calls == []
+    finally:
+        registrant.close()

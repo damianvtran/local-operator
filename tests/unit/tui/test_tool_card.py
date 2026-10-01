@@ -4183,3 +4183,219 @@ def test_a_reset_flag_without_the_notice_line_names_the_state() -> None:
         for line in lines[1:]
     )
     assert "result: 2" in "\n".join(lines)
+
+
+def test_settled_send_rows_lead_with_their_delivery_state() -> None:
+    """The amber states get a word in the marker slot, and delivered does not.
+
+    A mailbox/unconfirmed send is NOT a failure, so it must not paint the error
+    ground; it also must not keep claiming the mode marker as though nothing had
+    gone unanswered. The word leads for the same reason the marker does -- the
+    row sheds from the right, so the discriminator has to be painted first.
+    """
+    card = ToolCard("t", "send", {"target": "release-owner", "message": "gates are green"})
+    card.mark_done("receipt", {"delivery": {"state": "mailbox"}, "partial_result": True})
+    row = card._build_row(100).plain
+    assert "wake unconfirmed · release-owner" in row
+    assert "wake · " not in row
+
+    card = ToolCard("t", "send", {"pid": 1, "message": "hi", "now": True})
+    card.mark_done("receipt", {"delivery": {"state": "unconfirmed"}, "partial_result": True})
+    # The ALIGNED word, the same one the desktop row paints (design round 1, D2
+    # = UX round 1, U3): a bare ``unconfirmed`` sat one dropped word away from
+    # the mailbox row beside it, and says nothing about WHAT is unconfirmed.
+    assert "delivery unconfirmed · " in card._build_row(100).plain
+
+    # A QUIET send keeps its mode marker in front of that word (design round 1,
+    # N2): the word says the delivery is unproven, and for a send that asked for
+    # no turn the reader must see that nobody was woken -- the message may sit in
+    # a mailbox nobody will read.
+    card = ToolCard("t", "send", {"target": "release-owner", "message": "hi", "wake": False})
+    card.mark_done("receipt", {"delivery": {"state": "unconfirmed"}, "partial_result": True})
+    quiet = card._build_row(100).plain
+    assert "quiet · delivery unconfirmed · release-owner" in quiet
+    # The marker in front of the word must not reintroduce the double word: the
+    # partial arm's ``Partial`` fallback is suppressed by the same guard that
+    # covers the unprefixed form.
+    assert "Partial" not in quiet, quiet
+    # ...and the WORD, not the marker, carries the amber ink.
+    from local_operator.tui import bindings
+
+    quiet_text = card._build_row(100)
+    amber = bindings.style("tool.status.partial_glyph")
+    assert _style_at(quiet_text, "delivery unconfirmed") == amber
+    assert _style_at(quiet_text, "quiet") != amber
+
+    # AND EVERY OTHER MARKER the label function can return, not just ``quiet``:
+    # a steer with ``wake=false`` (``send(now=true, wake=false)``, the pair the
+    # CLI's plain ``--now`` builds) reads ``now · delivery unconfirmed · …``, and
+    # enumerating ``quiet`` missed it -- shipping the doubled state mark and the
+    # dim word on that row (agent review round 2, MINOR-1).
+    steer = ToolCard(
+        "t", "send", {"target": "release-owner", "message": "hi", "now": True, "wake": False}
+    )
+    steer.mark_done(
+        "receipt", {"wake": False, "delivery": {"state": "unconfirmed"}, "partial_result": True}
+    )
+    steer_text = steer._build_row(100)
+    assert "now · delivery unconfirmed · release-owner" in steer_text.plain
+    assert "Partial" not in steer_text.plain, steer_text.plain
+    assert _style_at(steer_text, "delivery unconfirmed") == amber
+
+    # A delivered send keeps the mode marker: that is the sender's own
+    # instruction, and "delivered" is what the row already implies.
+    card = ToolCard("t", "send", {"target": "peer", "message": "hi"})
+    card.mark_done("receipt", {"delivery": {"state": "delivered"}})
+    assert "wake · peer" in card._build_row(100).plain
+
+    # An unknown or absent state (an older core, a future value) keeps the
+    # argument row exactly as it was.
+    for details in ({}, {"delivery": {"state": "mystery"}}, {"delivery": "not a mapping"}):
+        card = ToolCard("t", "send", {"target": "peer", "message": "hi"})
+        card.mark_done("receipt", details)
+        assert "wake · peer" in card._build_row(100).plain, details
+
+
+def test_the_amber_states_do_not_stack_a_second_outcome_word() -> None:
+    """The no-double-word rule covers the new words: a mailbox row already says
+    ``wake unconfirmed``, so the partial arm must not append ``Partial`` under
+    it. The glyph carries the warning instead."""
+    from local_operator.tui.widgets.tool_card import ICON_PARTIAL, ICON_SUCCESS
+
+    card = ToolCard("t", "send", {"target": "peer", "message": "hi"})
+    card.mark_done("receipt", {"delivery": {"state": "mailbox"}, "partial_result": True})
+    row = card._build_row(100).plain
+    assert ICON_PARTIAL in row and ICON_SUCCESS not in row
+    assert "Partial" not in row
+    # Settling twice (a replay over a live row) does not stack the word either.
+    card.mark_done("receipt", {"delivery": {"state": "mailbox"}, "partial_result": True})
+    assert card._build_row(100).plain.count("wake unconfirmed") == 1
+
+
+def test_the_two_painters_of_the_state_words_agree() -> None:
+    """One vocabulary, two surfaces (design round 1 D2; round 2's finding was one
+    string speaking the raw token where the others had a word).
+
+    The TUI paints ``DELIVERY_OUTCOME_WORDS`` on the collapsed row and
+    ``SEND_NOT_DELIVERED_WORD`` in the failed row's cap; the notice row is written
+    by ``tools/builtin`` from ``peer_send.DELIVERY_STATE_WORDS``. Neither table is
+    derived from the other, so this cell is what stops them drifting apart.
+    """
+    from local_operator.mobile.peer_send import DELIVERY_STATE_WORDS
+    from local_operator.tui.widgets.tool_card import (
+        DELIVERY_OUTCOME_WORDS,
+        SEND_NOT_DELIVERED_WORD,
+    )
+
+    for state, word in DELIVERY_OUTCOME_WORDS.items():
+        assert DELIVERY_STATE_WORDS[state] == word, state
+    assert DELIVERY_STATE_WORDS["failed"] == SEND_NOT_DELIVERED_WORD
+
+
+def test_the_amber_state_word_carries_the_amber_ink() -> None:
+    """Design round 1, D4: the word is the only thing on the collapsed row that
+    names the state, and it was painted in the summary's ``dim`` token — measured
+    4.18:1 on the dark card and 3.46:1 on the light theme's surface, both under
+    the 4.5:1 text floor, while the failed row's word gets its role ink. It takes
+    the partial pair the ◐ already uses."""
+    from local_operator.tui import bindings
+
+    card = ToolCard("t", "send", {"target": "release-owner", "message": "hi"})
+    card.mark_done("receipt", {"delivery": {"state": "mailbox"}, "partial_result": True})
+    text = card._build_row(100)
+    word_ink = _style_at(text, "wake unconfirmed")
+    assert word_ink == bindings.style("tool.status.partial_glyph")
+    # The rest of the summary keeps the ordinary token: one state, one coloured
+    # word, no repaint of the row.
+    assert _style_at(text, "release-owner") != word_ink
+
+    # A DELIVERED send is unchanged -- no amber run, no amber ink.
+    delivered = ToolCard("t", "send", {"target": "release-owner", "message": "hi"})
+    delivered.mark_done("receipt", {"delivery": {"state": "delivered"}})
+    assert _style_at(delivered._build_row(100), "wake") != word_ink
+
+
+def test_a_failed_send_leads_its_status_with_the_word_and_the_cause() -> None:
+    """Design round 1, D3: the cap used to spend its whole budget restating the
+    target (``could not deliver to g…``), and the cause — the part an operator
+    acts on — was past the crop at every width. The constant word leads, then the
+    cause the structured payload carries."""
+    details = {
+        "delivery": {
+            "state": "failed",
+            "cause": "peer_refused",
+            "reason": "this session cannot receive peer messages",
+        }
+    }
+    card = ToolCard("t", "send", {"target": "ghost-session", "message": "hi"})
+    card.mark_failed(
+        "could not deliver to ghost-session: this session cannot receive peer "
+        "messages. Nothing was delivered (id peer-0) — fix the cause or retry the send.",
+        details=details,
+    )
+    row = card._build_row(100).plain
+    # At a standard width the cap fits the word and the start of the cause; the
+    # whole cause fits where there is room (below), and the one thing that must
+    # NEVER happen is the old behaviour of spending the cells on the target.
+    assert "not delivered: this ses" in row
+    assert "could not deliver to" not in row
+    assert "not delivered: this session cannot receive peer messages" in card._build_row(200).plain
+
+    # Narrower: the discriminator still LEADS. The cap is `max(8, width // 3)`
+    # and the status segment also pays for the glyph pair and the duration, so at
+    # 60 columns the 13-cell constant is one cell short of the room and takes the
+    # ordinary crop — measured, and reported to the design round rather than
+    # papered over by widening a layout contract this change does not own. What
+    # the fix DOES guarantee at every width is that the target is no longer what
+    # spends the cells.
+    narrow = card._build_row(60).plain
+    assert "not delive" in narrow, narrow
+    assert "could not deliver to" not in narrow
+    # At the standard width the constant rides whole.
+    assert "not delivered" in card._build_row(80).plain
+
+    # And an ordinary failing tool keeps its own reason text untouched.
+    plain = ToolCard("t", "bash", {"command": "false"})
+    plain.mark_failed("command failed")
+    assert "not delivered" not in plain._build_row(100).plain
+    assert "command failed" in plain._build_row(100).plain
+
+
+def test_an_amber_send_promotes_its_receipt_line_into_the_expansion() -> None:
+    """UX round 1, U1: the sentence that says what to DO ("do not send it again")
+    sat past the crop in the expansion as well as the collapsed row, at 100 and
+    150 columns alike, because a send's amber result is captured output and only a
+    claimed lead wraps. The receipt line is claimed, so the instruction is
+    readable when the row is opened."""
+    receipt = (
+        "→ release-owner (pid 48213): delivered to its mailbox (id peer-abc) — the "
+        "wake was not acknowledged within 5s after 1 attempt. It will read the "
+        "message on its next turn; do not send it again."
+    )
+    card = ToolCard("t", "send", {"target": "release-owner", "message": "gates green"})
+    card.mark_done(receipt, {"delivery": {"state": "mailbox"}, "partial_result": True})
+    # The claim is for the EXPANSION: the COLLAPSED row must not gain a second,
+    # truncated receipt beside a summary that already names the target. Its cap
+    # carries the delivery word and the message, which is this round's whole
+    # distinction.
+    collapsed = card._build_row(100).plain
+    assert "→ release-owner" not in collapsed, collapsed
+    assert "wake unconfirmed" in collapsed
+
+    card.toggle_expanded()
+    # Wrapped, so the sentence is re-joined before it is matched: a claimed lead
+    # is the line that survives WRAPPING rather than the crop every other row
+    # takes, which is the whole of the fix.
+    body = " ".join(card._build_content(100).plain.split())
+    assert "do not send it again" in body, body
+    assert "wake was not acknowledged within 5s after 1 attempt" in body, body
+
+    # A send whose text is NOT the receipt shape (an older payload, a future
+    # copy) keeps the ordinary crop rather than promoting a line that is not the
+    # claim — the same two-halves rule ``_PARTIAL_LEADS`` follows.
+    other = ToolCard("t", "send", {"target": "release-owner", "message": "gates green"})
+    other.mark_done(
+        "some other output line", {"delivery": {"state": "mailbox"}, "partial_result": True}
+    )
+    other.toggle_expanded()
+    assert other._promoted_lead() == "", "the receipt shape is the other half of the test"
