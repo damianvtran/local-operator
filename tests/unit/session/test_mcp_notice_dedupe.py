@@ -179,9 +179,11 @@ async def _tui_warnings(replayed: list[Any]) -> list[Any]:
     shard ``test (3.12, 4)``) and again on an unrelated branch (run
     36811665066 job 110233263809, shard 2), each time while the replay
     itself carried the warning. So poll for ``_session`` to land, bounded
-    (200 turns — ~4 s at Textual's 20 ms pause floor — so a genuinely
-    broken boot fails with the observed count instead of hanging), then
-    one settle pause for the mount before reading the blocks.
+    at 200 turns (~4 s at Textual's 20 ms pause floor). On exhaustion the
+    helper asserts the adoption happened — a never-adopting boot must fail
+    loudly, not return an empty fold that the ``[]``-expecting call sites
+    would accept (review round 1, MINOR-1) — then one settle pause for the
+    mount before reading the blocks.
     """
     from local_operator.tui.app import OperatorApp
     from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
@@ -193,11 +195,16 @@ async def _tui_warnings(replayed: list[Any]) -> list[Any]:
     async with app.run_test(size=(100, 30)) as pilot:
         # No manual fold: the app's own boot replays `session.history()`.
         # Wait on the adoption (the docstring's measured race), kept bounded
-        # so a broken boot fails with the count instead of hanging.
+        # so a broken boot fails loudly instead of hanging.
         for _ in range(200):
             await pilot.pause()
             if getattr(app, "_session", None) is not None:
                 break
+        # Exhaustion must be loud (MINOR-1): a never-adopting boot must not
+        # hand back an empty fold the empty-expectation call sites accept.
+        assert (
+            getattr(app, "_session", None) is not None
+        ), "the app never adopted the session within the bound"
         # One settle turn for the mount that follows the replay's paint.
         await pilot.pause()
         return [
