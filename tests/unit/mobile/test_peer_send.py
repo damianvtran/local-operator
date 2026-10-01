@@ -1862,6 +1862,8 @@ def test_the_delivered_line_is_the_receipt_and_the_failed_line_is_the_only_claim
         "attempts",
         "cause",
         "route",
+        # The human cause clause (design D3).
+        "reason",
     }
 
 

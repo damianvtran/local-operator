@@ -838,12 +838,14 @@ async def test_a_foreign_or_missing_id_leaves_the_receiver_minting_its_own(tmp_p
         "no id", mode="mailbox", wake=False, sender={"pid": 1}, message_id="not-a-peer-id"
     )
 
-    assert result.delivery["message_id"] == ""
     assert result.delivery["duplicate"] is False
     rows = _peer_rows(session)
     assert len(rows) == 1
     assert rows[0].id != "not-a-peer-id"
-    assert not result.delivery["message_id"]
+    # THE ROW'S OWN ID is what this field reports, not the sender's rejected one
+    # (agent review round 1, N2): a blank here described nothing about the row
+    # the receipt is about.
+    assert result.delivery["message_id"] == rows[0].id
 
 
 @pytest.mark.asyncio
