@@ -154,6 +154,16 @@ Whenever `degraded` is non-empty (the store or the listing could not be
 read), `count` is absent from both surfaces rather than 0: a store that
 could not be read is not an empty pile.
 
+Every `conversations[]` row also carries a `push_handle` -- the opaque
+per-machine handle that push deep links use to land on one conversation. It
+is minted deterministically from the conversation's identity under a private
+key file in the config root; deleting that file rotates every handle at
+once. Handles ride these aggregate rows only: never the `sessions` listing,
+and never the list payload's `unread` block. A cold tap resolves one back to
+its conversation with `GET /api/push/conversation/{handle}` (auth-gated like
+the rest): `{"session_id": "..."}`, or a clean 404 once the handle is
+unknown -- after a rotation, or for a conversation that no longer exists.
+
 The relay maintains its existing projection ordering while alive. A new,
 authenticated and source-fenced SSE connection starts with an authoritative
 snapshot; its first projection may have a lower counter after daemon restart.
