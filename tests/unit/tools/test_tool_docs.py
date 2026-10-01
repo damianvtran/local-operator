@@ -33,6 +33,7 @@ inventory, and ``read`` reaches it through the turn's own ``ToolContext``.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -52,11 +53,14 @@ from local_operator.tools.tool_docs import (
     ToolDocNotes,
     ToolDocOp,
     chain_tool_docs,
+    is_tool_docs_link,
     make_tool_doc_resolver,
     render_tool_doc,
+    unwrap_tool_docs,
 )
 from scripts.real_tool_surface import build_real_tools
 from tests.unit.session.test_session import ScriptedStream, make_session
+from tests.unit.tools.test_effort_tier_schema import THREE, write_tiers
 
 #: Soft cap for ONE rendered doc, in characters. Enforced by TEST, never at
 #: render time — names/types/enums must not be truncated to fit, so an
@@ -75,8 +79,15 @@ _WALK_DEPTH_CAP = 2
 #: When this drifts the test prints the new table; paste it back only after
 #: deciding the change is worth its cost — the whole mechanism exists to make
 #: reference detail opt-in, and the ledger is what keeps it honest.
+#:
+#: CANONICAL ARM: every doc here is rendered against an ISOLATED, empty config
+#: (see :func:`hermetic_config`) — the arm CI runs. ``agent`` and ``task`` are
+#: the two docs a tiers-configured ``values.subagents`` changes (they advertise
+#: ``subagents.model_choice`` / ``subagents.models``); without the isolation
+#: this table could only ever be green on one of the two machines. The OTHER
+#: arm is pinned by :func:`test_the_tier_configured_arm_is_pinned_too`.
 MEASURED_TOKENS: dict[str, int] = {
-    "agent": 714,
+    "agent": 687,
     "ask": 837,
     "bash": 271,
     "browser": 1050,
@@ -99,7 +110,7 @@ MEASURED_TOKENS: dict[str, int] = {
     "secret": 209,
     "send": 614,
     "sessions": 718,
-    "task": 581,
+    "task": 422,
     "team": 412,
     "team_delete": 93,
     "todo": 463,
@@ -110,6 +121,13 @@ MEASURED_TOKENS: dict[str, int] = {
     "web_search": 202,
     "write": 100,
 }
+
+#: The SAME ledger's other arm: ``agent``/``task`` rendered against a
+#: tiers-configured ``values.subagents`` (the synthetic selectors the effort
+#: tests already use, so the config shape lives in one place). Recorded so a
+#: change to the config-sensitive branch is a visible edit here rather than a
+#: machine-dependent surprise.
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 716, "task": 585}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:
@@ -138,15 +156,34 @@ def _text_of(result: ToolResult) -> str:
     return "".join(block.text for block in result.content if isinstance(block, TextContent))
 
 
-@pytest.fixture(scope="module")
-def default_surface() -> list[AgentTool]:
+@pytest.fixture()
+def hermetic_config(tmp_path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """An ISOLATED, EMPTY config directory — the arm CI renders.
+
+    ``agent`` and ``task`` build their docs from ``values.subagents`` config
+    (``model_choice`` / ``models``, read through ``local_operator.config``), so
+    a run without this renders whatever the RECORDER's machine is configured
+    with: measured, the two docs are 687/422 tokens clean and 714/581 with
+    tiers configured — exactly how this suite once passed on CI and failed on
+    a tiers box (B2/Q-2). Empty here = the canonical arm.
+    """
+    config = tmp_path / "config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    return config
+
+
+@pytest.fixture()
+def default_surface(hermetic_config: Path) -> list[AgentTool]:
     """The full default tool surface, exactly as the budget bench measures it.
 
     Reuses ``scripts/real_tool_surface.build_real_tools`` so these drift tests
     and the ``context-budget`` CI guard cannot disagree about what "the default
     surface" is: it forces the two machine-probing createIf gates (browser and
     console) deterministically ON, which is what makes a CI runner and a
-    developer box measure the same 33 tools.
+    developer box measure the same 33 tools. Function-scoped (not module-scoped)
+    because the builders read the config at BUILD time, so each test's
+    :func:`hermetic_config` must apply to its own render; the fixture is taken
+    for its env side effect alone.
     """
     tools = build_real_tools(".")
     assert {tool.name for tool in tools} == set(DEFAULT_TOOL_NAMES), (
@@ -208,14 +245,18 @@ def _collect_enums(subschema: Any, root: dict[str, Any], enums: set[str]) -> Non
         _collect_enums(resolved["items"], root, enums)
 
 
-def _collect_names(
+def _collect_entries(
     schema: Any,
     root: dict[str, Any],
     depth: int,
-    names: set[str],
-    enums: set[str],
+    entries: dict[tuple[int, str], set[str]],
 ) -> None:
-    """Names/enums the doc must carry, following the documented depth cap."""
+    """``(depth, name) -> enum literals`` the doc must carry at that position.
+
+    ``depth`` is the CONTAINER level: root properties live at 0, and the
+    renderer indents two spaces per level, so the pair pins both the name AND
+    the line it must appear on — not merely that the bytes occur somewhere.
+    """
     resolved = _deref(schema, root)
     if not isinstance(resolved, dict):
         return
@@ -223,12 +264,25 @@ def _collect_names(
     if not isinstance(properties, dict) or not properties:
         return
     for name, subschema in properties.items():
-        names.add(str(name))
-        _collect_enums(subschema, root, enums)
+        literals = entries.setdefault((depth, str(name)), set())
+        _collect_enums(subschema, root, literals)
         if depth >= _WALK_DEPTH_CAP:
             continue
         for child in _nested_containers(subschema, root):
-            _collect_names(child, root, depth + 1, names, enums)
+            _collect_entries(child, root, depth + 1, entries)
+
+
+def _structured_lines(doc: str, depth: int, name: str) -> list[str]:
+    """The rendered parameter line(s) for ``name`` at container ``depth``.
+
+    The renderer writes one line per property, ``{indent}- `name` (annotations)``
+    with two spaces of indent per nesting level. Matching THAT form — rather
+    than "the name occurs somewhere in the doc" — is what lets the oracle see
+    a dropped line: a name surviving only in prose (a description quoting it,
+    the Purpose paragraph) does not count (M1).
+    """
+    prefix = f"{'  ' * depth}- `{name}` ("
+    return [line for line in doc.splitlines() if line.startswith(prefix)]
 
 
 def _max_properties_depth(schema: Any, root: dict[str, Any], depth: int = 0) -> int:
@@ -264,16 +318,36 @@ def test_every_default_surface_property_name_and_enum_literal_reaches_its_doc(
     gets the FULL accepted surface, not a summary of it. A missing enum
     literal is a wrong answer to the exact question ``read tool://<tool>`` is
     asked; a missing property name reads as "this field does not exist".
+
+    The name check is STRUCTURAL (M1): each collected ``(depth, name)`` pair
+    must appear as the rendered parameter line at its own indentation, and
+    each enum literal must appear INSIDE that line. A substring check would
+    pass whenever a dropped line's name (or literal) still occurs in the
+    surrounding prose — e.g. ``timeout`` inside another field's description —
+    which is exactly the drift this oracle exists to catch.
     """
     for tool in default_surface:
         doc = render_tool_doc(tool)
-        names: set[str] = set()
-        enums: set[str] = set()
-        _collect_names(tool.parameters or {}, tool.parameters or {}, 0, names, enums)
-        missing_names = sorted(name for name in names if name not in doc)
-        missing_enums = sorted(literal for literal in enums if literal not in doc)
-        assert not missing_names, f"{tool.name}: property names missing from its tool:// doc"
-        assert not missing_enums, f"{tool.name}: enum literals missing from its tool:// doc"
+        entries: dict[tuple[int, str], set[str]] = {}
+        _collect_entries(tool.parameters or {}, tool.parameters or {}, 0, entries)
+        missing_lines: list[str] = []
+        missing_literals: list[str] = []
+        for (depth, name), literals in sorted(entries.items()):
+            lines = _structured_lines(doc, depth, name)
+            rendered = f"{'  ' * depth}- `{name}` ("
+            if not lines:
+                missing_lines.append(rendered)
+                continue
+            for literal in sorted(literals):
+                if not any(literal in line for line in lines):
+                    missing_literals.append(f"{rendered} lacks enum literal {literal!r}")
+        assert (
+            not missing_lines
+        ), f"{tool.name}: parameter line(s) missing from its tool:// doc: {missing_lines}"
+        assert not missing_literals, (
+            f"{tool.name}: enum literals missing from their parameter line(s): "
+            f"{missing_literals}"
+        )
 
 
 def test_default_surface_fits_the_documented_depth_cap(
@@ -361,6 +435,34 @@ def test_docs_stay_within_the_soft_cap_and_the_token_ledger_is_current(
             "updating MEASURED_TOKENS in this file:\n\n"
             f"MEASURED_TOKENS = {json.dumps(current, indent=4, sort_keys=True)}"
         )
+
+
+def test_the_tier_configured_arm_is_pinned_too(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The config-sensitive branch is PINNED, not ignored (B2/Q-2).
+
+    ``agent``/``task`` advertise ``values.subagents.models`` and
+    ``subagents.model_choice``, so their docs move with the operator's config —
+    the non-hermeticity that once made the canonical ledger green on one
+    machine and red on the other. The canonical table above renders the CLEAN
+    arm under :func:`hermetic_config`; this test renders the tiers arm against
+    a synthetic config and pins its sizes too, so a change to EITHER branch is
+    a visible edit rather than a machine-dependent surprise.
+    """
+    config = tmp_path / "tier-config"
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config))
+    write_tiers(config, THREE)
+    tools = {tool.name: tool for tool in build_real_tools(".")}
+    measured = {
+        "agent": count_text_tokens(render_tool_doc(tools["agent"])),
+        "task": count_text_tokens(render_tool_doc(tools["task"])),
+    }
+    assert measured == TIER_ARM_TOKENS, (
+        f"The tier-configured rendering moved: {measured}. Re-measure "
+        "deliberately and update TIER_ARM_TOKENS."
+    )
+    # The branch is real: both docs differ from the clean arm's bytes.
+    assert measured["agent"] != MEASURED_TOKENS["agent"]
+    assert measured["task"] != MEASURED_TOKENS["task"]
 
 
 def test_authored_notes_and_renderers_name_real_tools(
@@ -520,6 +622,13 @@ def test_chain_serves_tool_urls_ahead_of_the_base_walker() -> None:
     assert chained("skill://s") == "SKILL"
     assert chained("mcp://m/t") is None
     assert calls == ["skill://s", "mcp://m/t"]
+    # The link is ID-BEARING (B1/Q-1): the host-field parity guard recognises
+    # the wrapper and recovers the host resolver through it instead of failing
+    # an identity check that a plain closure could not satisfy.
+    assert is_tool_docs_link(chained)
+    assert unwrap_tool_docs(chained) is base
+    assert is_tool_docs_link(base) is False
+    assert unwrap_tool_docs(base) is None
 
 
 def test_chain_still_answers_tool_urls_with_no_base_configured() -> None:
@@ -528,6 +637,11 @@ def test_chain_still_answers_tool_urls_with_no_base_configured() -> None:
     solo = chain_tool_docs(None, lambda: [_tool("bash")])
     assert solo("tool://bash") == render_tool_doc(_tool("bash"))
     assert solo("skill://s") is None
+    # The seam reports the (absent) base honestly: a link with no host
+    # resolver unwraps to None, so the parity guard still REJECTS it for a
+    # host value — that is the drop class the guard must keep seeing.
+    assert is_tool_docs_link(solo)
+    assert unwrap_tool_docs(solo) is None
 
 
 # ---------------------------------------------------------------------------

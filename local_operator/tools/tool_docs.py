@@ -20,6 +20,11 @@ Contract, mirroring ``skills/api.py`` so the chain behaves identically:
 * :func:`make_tool_doc_resolver` returns ``None`` for every non-``tool://``
   URL and never raises; an unknown name is served AS CONTENT naming the
   available set, which is the model's one-round self-correction path.
+* :func:`chain_tool_docs` returns a :class:`ToolDocsLink` — an ID-BEARING
+  wrapper, not a bare closure — because ``Session.__init__`` installs it in
+  place of the host's resolver, and the host-field parity guard must still be
+  able to recognise the wrapper and recover the host value from it
+  (:func:`is_tool_docs_link` / :func:`unwrap_tool_docs`).
 * Property names, types and enum literals are NEVER truncated — they are the
   point of the mechanism. Prose is elided only at authoring time.
 * Rendering is deterministic: a pure function of (name, label, description,
@@ -41,7 +46,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeGuard
 from urllib.parse import unquote, urlsplit
 
 from local_operator.harness.types import AgentTool
@@ -435,6 +440,64 @@ def _resolve_tool_url(url: str, inventory: Callable[[], Sequence[AgentTool]]) ->
     return render_tool_doc(tool, notes=TOOL_NOTES.get(name))
 
 
+class ToolDocsLink:
+    """The resolver link :func:`chain_tool_docs` installs — id-bearing on purpose.
+
+    A plain closure would work identically at CALL time, and this class exists
+    for the one consumer that must not treat it as identical: the host-field
+    parity guard (``tests/unit/session/test_tool_context_parity.py``) asserts
+    by IDENTITY that every value the host hands ``Session.__init__`` still
+    reaches the executor, and the session legitimately replaces the host's
+    resolver with this link (``Session.__init__`` chains ``tool://`` ahead of
+    it). That guard may keep its drop-detection only if the wrapper is
+    RECOGNISABLE and the host value is RECOVERABLE from it —
+    :func:`is_tool_docs_link` / :func:`unwrap_tool_docs` are the seam, and the
+    guard accepts the wrapper in place of identity ONLY when unwrapping
+    recovers the host's own object. Do not collapse this back into a closure
+    without carrying that permission somewhere else.
+    """
+
+    __slots__ = ("_base", "_tool_resolver")
+
+    def __init__(
+        self,
+        base: Callable[[str], str | None] | None,
+        tool_resolver: Callable[[str], str | None],
+    ) -> None:
+        self._base = base
+        self._tool_resolver = tool_resolver
+
+    def __call__(self, url: str) -> str | None:
+        if url.startswith(TOOL_DOC_SCHEME):
+            handled = self._tool_resolver(url)
+            if handled is not None:
+                return handled
+        base = self._base
+        return base(url) if base is not None else None
+
+
+def is_tool_docs_link(value: object) -> TypeGuard[ToolDocsLink]:
+    """True for a resolver link :func:`chain_tool_docs` built.
+
+    Exported for consumers that need to tell a tool-docs wrapper apart from
+    any other callable (the parity guard's acceptance path); everything else
+    should just call the resolver. A ``TypeGuard``, so ``assert
+    is_tool_docs_link(x)`` narrows ``x`` for the type checker as well as the
+    runtime — the guard's call sites depend on that.
+    """
+    return isinstance(value, ToolDocsLink)
+
+
+def unwrap_tool_docs(value: object) -> Callable[[str], str | None] | None:
+    """The host resolver a :class:`ToolDocsLink` wraps, or ``None``.
+
+    ``None`` for anything that is not a link (including a dropped field's
+    ``None``) AND for a link wrapping no base; a caller that must tell those
+    two apart checks :func:`is_tool_docs_link` first.
+    """
+    return value._base if isinstance(value, ToolDocsLink) else None
+
+
 def chain_tool_docs(
     base: Callable[[str], str | None] | None,
     inventory: Callable[[], Sequence[AgentTool]],
@@ -447,15 +510,8 @@ def chain_tool_docs(
     ``base`` is the guide->skill->mcp walker the session factory composes;
     this wrapper is installed in ``Session.__init__`` so every session — root
     or subagent, each with its own live inventory — answers ``tool://`` without
-    touching the factory chain or the subagent wiring.
+    touching the factory chain or the subagent wiring. Returns a
+    :class:`ToolDocsLink` rather than a bare closure so the identity-sensitive
+    parity guard can recognise it (see the class docstring).
     """
-    tool_resolver = make_tool_doc_resolver(inventory)
-
-    def resolver(url: str) -> str | None:
-        if url.startswith(TOOL_DOC_SCHEME):
-            handled = tool_resolver(url)
-            if handled is not None:
-                return handled
-        return base(url) if base is not None else None
-
-    return resolver
+    return ToolDocsLink(base, make_tool_doc_resolver(inventory))
