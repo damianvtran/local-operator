@@ -62,6 +62,35 @@ def _fire(text: str, wake_id: str = "w1", fires: int = 1) -> InboxLine:
     return _line(text, wake=True, wake_id=wake_id, wake_fires=fires)
 
 
+def _wake_text(message: str = "standup", occurrence: int = 1) -> str:
+    """A REAL spooled fire's text, built by the production formatter.
+
+    Shape assertions have to run against the envelope the product actually
+    writes (``(alarm) Scheduled wake w1 (20, every 20m) — cancel with …``
+    followed by the user's words), not a stand-in: the whole point of the note's
+    placement is what the receipt and the notice-marker read off this string.
+    """
+    from local_operator.harness.wake import (
+        DueWake,
+        WakeSchedule,
+        format_wake_delivery_text,
+    )
+
+    return format_wake_delivery_text(
+        DueWake(
+            schedule=WakeSchedule(id="w1", message=message, next_due_at=0, every_ms=1_200_000),
+            occurrence=occurrence,
+            planned_total=None,
+            final=False,
+        )
+    )
+
+
+def _fire_row(message: str = "standup", occurrence: int = 1) -> InboxLine:
+    """A spooled fire carrying the real envelope + message."""
+    return _fire(_wake_text(message, occurrence), wake_id="w1")
+
+
 def test_append_then_drain_preserves_write_order(tmp_path: Path) -> None:
     for index in range(5):
         assert append_inbox(tmp_path, _line(f"note {index}")) is True
@@ -781,14 +810,57 @@ def test_a_junk_fire_count_reads_as_one_and_does_not_take_the_batch_with_it(
 
 def test_three_fires_of_one_wake_coalesce_to_one_row(tmp_path: Path) -> None:
     """The core of the flood fix: N spooled fires deliver as ONE row."""
-    lines = [_fire("standup", wake_id="w1") for _ in range(3)]
-    merged = coalesce_wake_rows(lines)
+    merged = coalesce_wake_rows([_fire_row("standup", occurrence=n) for n in (20, 21, 22)])
     assert len(merged) == 1
     assert merged[0].wake is True
     assert merged[0].wake_id == "w1"
     assert merged[0].wake_fires == 3
-    assert "x3 fires of this wake were coalesced" in merged[0].text
+    assert "This wake fired 3 times while the runtime was being replaced" in merged[0].text
     assert merged[0].text.endswith("standup"), "the latest envelope is the payload"
+
+
+def test_the_note_sits_between_the_envelope_and_the_message() -> None:
+    """The delivered shape (design round 1, D1): identity, then the count, then the
+    user's own words verbatim.
+
+    The note used to lead, which made the row anonymous — the collapsed surface
+    showed the coalesce bookkeeping where the wake's name belongs.
+    """
+    merged = coalesce_wake_rows([_fire_row("standup", occurrence=n) for n in (20, 21, 22)])[0]
+    envelope, _, rest = merged.text.partition("\n\n")
+    note, _, message = rest.partition("\n\n")
+
+    assert envelope.startswith("(alarm) Scheduled wake w1 (22,"), "the LAST fire's envelope leads"
+    assert "once its goal is met." in envelope, "the envelope is whole, not truncated by the split"
+    assert "standup" not in envelope, "and it has not swallowed the message"
+    assert note == (
+        "(This wake fired 3 times while the runtime was being replaced; the latest is below.)"
+    )
+    assert message == "standup", "the user's words, untouched"
+
+
+def test_a_coalesced_row_still_reads_as_the_wakes_own_notice() -> None:
+    """Identity is what the merge must not cost: the receipt headline must still
+    name the wake (coalescing must not change the identity a single fire shows),
+    and the row must still be recognisable as harness-minted.
+
+    Both read the FIRST segment, which is exactly why the note sits behind the
+    envelope (design round 1, D1).
+    """
+    from local_operator.harness.rows import (
+        is_harness_notice_text,
+        wake_receipt_headline,
+    )
+
+    merged = coalesce_wake_rows([_fire_row("standup", occurrence=n) for n in (20, 21, 22)])[0]
+
+    assert wake_receipt_headline(merged.text) == wake_receipt_headline(
+        _wake_text("standup", occurrence=22)
+    ), "the headline names the wake exactly as an un-coalesced fire does"
+    assert "fired 3 times" not in wake_receipt_headline(merged.text)
+    assert (
+        is_harness_notice_text(merged.text) is True
+    ), "a 2026-era transcript can only prove its provenance by its opening words"
 
 
 def test_a_coalesced_row_keeps_the_last_occurrence_position(tmp_path: Path) -> None:
@@ -820,9 +892,12 @@ def test_rows_without_a_wake_id_are_untouched(tmp_path: Path) -> None:
 
 def test_a_single_fire_is_not_rewritten(tmp_path: Path) -> None:
     """One fire is not a flood: no note, no count, the same object back."""
-    only = _fire("standup", wake_id="w1")
-    assert coalesce_wake_rows([only]) == [only]
-    assert "coalesced" not in only.text
+    only = _fire_row("standup", occurrence=4)
+    merged = coalesce_wake_rows([only])
+    assert merged == [only]
+    assert merged[0] is only, "the row's bytes are handed on untouched"
+    assert merged[0].text == _wake_text("standup", occurrence=4)
+    assert "fired" not in merged[0].text
 
 
 def test_a_non_wake_row_with_a_wake_id_is_not_a_fire(tmp_path: Path) -> None:
@@ -840,17 +915,38 @@ def test_a_re_coalesce_replaces_the_note_instead_of_nesting_it() -> None:
 
     The count must be the sum of what each row already stood for (5 then 1 is 6,
     not 2), and the note must be REPLACED rather than stacked — otherwise the
-    user reads "x2 fires" for six alarms, and every handover adds another line.
+    user reads a two-fire note for six alarms, and every handover adds a line.
     """
-    once = coalesce_wake_rows([_fire("standup", wake_id="w1") for _ in range(5)])
+    once = coalesce_wake_rows([_fire_row("standup", occurrence=n) for n in range(1, 6)])
     assert once[0].wake_fires == 5
 
     # The row is re-spooled (carrying its count and note) and one more fire lands.
-    again = coalesce_wake_rows([once[0], _fire("standup", wake_id="w1")])
+    again = coalesce_wake_rows([once[0], _fire_row("standup", occurrence=23)])
     assert len(again) == 1
     assert again[0].wake_fires == 6
-    assert again[0].text.count("fires of this wake were coalesced") == 1
-    assert "x6 fires" in again[0].text
+    assert again[0].text.count("This wake fired") == 1, "replaced, never nested"
+    assert "This wake fired 6 times" in again[0].text
+    # And the replacement lands in the SAME place, so the envelope is still first.
+    assert again[0].text.startswith("(alarm) Scheduled wake w1 (23,")
+
+
+def test_a_note_shaped_string_in_the_message_is_not_stripped() -> None:
+    """The strip is anchored at the head of the text AFTER the envelope.
+
+    Only a previous merge can put the sentence there, so a wake whose own message
+    happens to quote it keeps its words: the anchor is what tells the two apart,
+    and without it a re-coalesce would quietly eat the user's text.
+    """
+    quoted = "Please review the note below.\n\nThis wake fired 4 times while the runtime "
+    quoted += "was being replaced; the latest is below."
+    merged = coalesce_wake_rows(
+        [_fire_row("earlier", occurrence=1), _fire_row(quoted, occurrence=2)]
+    )[0]
+
+    assert quoted in merged.text, "the message's own words survive verbatim"
+    # Exactly ONE inserted note: the sentence quoted inside the message is not one.
+    assert merged.text.count("(This wake fired") == 1
+    assert "(This wake fired 2 times" in merged.text
 
 
 def test_coalescing_is_pure(tmp_path: Path) -> None:
@@ -942,8 +1038,8 @@ def test_the_boot_drain_delivers_three_spooled_fires_as_one_turn(tmp_path: Path)
         + "\n",
         encoding="utf-8",
     )
-    for _ in range(3):
-        assert append_inbox(session_dir, _fire("standup", wake_id="w1"))
+    for n in (20, 21, 22):
+        assert append_inbox(session_dir, _fire_row("standup", occurrence=n))
 
     class _Transcript:
         directory = session_dir
@@ -965,5 +1061,6 @@ def test_the_boot_drain_delivers_three_spooled_fires_as_one_turn(tmp_path: Path)
     assert len(handle.received) == 1, "one reminder is one turn"
     text, wake = handle.received[0]
     assert wake is True, "it still RUNS the occurrence rather than filing a note"
-    assert "x3 fires of this wake were coalesced" in text
+    assert text.startswith("(alarm) Scheduled wake w1 ("), "the identity leads the delivery"
+    assert "This wake fired 3 times while the runtime was being replaced" in text
     assert peek_inbox(session_dir) == [], "and the spool is consumed"
