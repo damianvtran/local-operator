@@ -70,6 +70,11 @@ from local_operator.tui.projects_render import (
 )
 from local_operator.tui.widgets.projects_detail import ProjectDetailPage
 from local_operator.tui.widgets.projects_form import FORM_FOOTER_HINT, ProjectsFormPage
+from local_operator.tui.widgets.projects_send import (
+    SendTarget,
+    SendTargetCard,
+    send_targets,
+)
 from local_operator.tui.widgets.subagent_view import READ_ONLY_NOTE, HintButton
 
 #: The view vocabulary, in the order ``1``/``2``/``3`` address it and ``v``
@@ -110,6 +115,33 @@ class ProjectsViewFormSubmitted(Message):
     def __init__(self, *, edit: Any) -> None:
         super().__init__()
         self.edit = edit
+
+
+class ProjectsViewSendRequested(Message):
+    """Send this text to this target (spec §7.5.3).
+
+    The page never delivers (module docstring): the app resolves the target and
+    calls the same core ``send`` does, then reports the honest outcome back. A
+    refusal the page can decide itself (an empty body) never leaves the page.
+    """
+
+    def __init__(self, *, target: SendTarget, text: str) -> None:
+        super().__init__()
+        self.target = target
+        self.text = text
+
+
+class ProjectsViewComposeChanged(Message):
+    """Compose mode opened (``target``) or closed (``None``).
+
+    The composer belongs to the APP — the dock is not the page's — so the page
+    cannot enter compose by itself, and it must say when it leaves so the
+    composer can go back to being read-only. ``target`` is the chosen row.
+    """
+
+    def __init__(self, *, target: SendTarget | None) -> None:
+        super().__init__()
+        self.target = target
 
 
 def _style_resolver() -> Callable[[str], Style]:
@@ -315,6 +347,10 @@ class ProjectsView(Vertical):
         # `c` opens the CREATE form (P4) — the spec's own key for it, and one
         # of the letters the canvases left free.
         Binding("c", "create", "Create", show=False),
+        # `m` messages a linked session (P5a): on a session row it sends
+        # straight to it, anywhere else it opens the target picker (spec
+        # §7.5.1). Free in the mode and in the app's focused chain.
+        Binding("m", "message", "Message", show=False),
         Binding("r", "refresh", "Refresh", show=False),
         # Zoom is TIME resolution on the timeline (the org-chart "zoom is level
         # of detail" rule); in the other views it is inert and the footer sheds
@@ -385,6 +421,15 @@ class ProjectsView(Vertical):
         self._updated_at: float | None = None
         #: The footer's one-sentence notice (refusals, pops) — UX round 1.
         self._notice: str | None = None
+        # Quick-send state (P5a): the open picker card, the target compose
+        # is addressed to, and the mode to return to when compose closes.
+        self._send_card: SendTargetCard | None = None
+        self._send_target: SendTarget | None = None
+        self._compose_from = "canvas"
+        # The manager row, when the host resolved one (P5a). Injected rather
+        # than derived: only the app can read the registry, and a page that
+        # guessed would paint a row nobody answers to.
+        self._manager_target: SendTarget | None = None
         #: Last render, kept for the geometry probes and rendered_rows().
         self._last: RenderResult | None = None
         self._title = Static(classes="projects-view-title")
@@ -439,6 +484,10 @@ class ProjectsView(Vertical):
         # The canvas's headline action: a reader who cannot see how to make a
         # project cannot use the page at all (UX round 1, U1).
         self._create_hint = HintButton("c", lambda: self.action_create())
+        # `m` message (P5a). It MUST be in `_hint_buttons()` as well as in a
+        # rung: that list is what the painter hides, and a button absent from
+        # it stays visible at its DOM slot, ahead of the rung it belongs to.
+        self._msg_hint = HintButton("m", lambda: self.action_message())
         self._zoom_hint = HintButton("+/-", self._cycle_tier)
         self._exit_hint = HintButton("esc", self._leave_or_pop)
         self._tab_hint = HintButton("tab", self._form_focus_next)
@@ -651,6 +700,29 @@ class ProjectsView(Vertical):
         # scroll geometry. Both are idempotent and neither re-schedules.
         self.call_after_refresh(self._paint_chrome)
         self.call_after_refresh(self._sync_scroll_hint)
+
+    def set_manager_target(self, target: SendTarget | None) -> None:
+        """Inject the manager row the picker should offer (P5a).
+
+        ``None`` means this session has no manager — the row is then simply
+        absent, which is the spec's rule (never a dead row).
+        """
+        self._manager_target = target
+
+    def escape_surface(self) -> bool:
+        """Consume ``esc`` for a send surface, if one is up (P5a).
+
+        The composer owns the caret while composing, so the key reaches the
+        APP's Esc binding rather than this view's; this is the door the app
+        asks before it dismisses a page someone is still typing into.
+        """
+        if self._mode == "compose":
+            self.end_compose()
+            return True
+        if self._mode == "send":
+            self._close_send_picker()
+            return True
+        return False
 
     def show_notice(self, text: str) -> None:
         """One sentence in the footer until the state changes (UX round 1).
@@ -998,6 +1070,7 @@ class ProjectsView(Vertical):
             self._detail_hint,
             self._refresh_hint,
             self._create_hint,
+            self._msg_hint,
             self._open_hint,
             self._move_hint,
             self._page_hint,
@@ -1102,6 +1175,10 @@ class ProjectsView(Vertical):
         timeline_hint = (self._timeline_hint, " timeline", True)
         refresh = (self._refresh_hint, " refresh", True)
         create_hint = (self._create_hint, " create", True)
+        # `m message`: the one affordance a reader cannot guess, and per spec
+        # §3.3 the FIRST of the new keys to shed — so it rides the rungs that
+        # still carry `c create`, and the narrowest of those drops it first.
+        msg_hint = (self._msg_hint, " message", True)
         open_hint = (self._open_hint, " open", True)
         detail_hint = (self._detail_hint, " detail", True)
         nxt = (self._next_hint, " next", True)
@@ -1121,6 +1198,7 @@ class ProjectsView(Vertical):
             nxt,
             refresh,
             create_hint,
+            msg_hint,
             open_hint,
             detail_hint,
             zoom,
@@ -1138,6 +1216,7 @@ class ProjectsView(Vertical):
                     nxt,
                     refresh,
                     create_hint,
+                    msg_hint,
                     open_hint,
                     detail_hint,
                 ),
@@ -1160,7 +1239,14 @@ class ProjectsView(Vertical):
             ),
             rung(
                 leads_of(
-                    scroll, list_hint, board_hint, timeline_hint, nxt, create_hint, detail_hint
+                    scroll,
+                    list_hint,
+                    board_hint,
+                    timeline_hint,
+                    nxt,
+                    create_hint,
+                    msg_hint,
+                    detail_hint,
                 ),
                 "back",
                 state=False,
@@ -1213,15 +1299,21 @@ class ProjectsView(Vertical):
         # does (UX round 1, U3 — the name informs, the key acts).
         open_bare = (self._open_hint, f" {verb or context}", True)
         refresh = (self._refresh_hint, " refresh", True)
+        # `m message` (P5a): the detail page is where messaging lives, and it
+        # is the first of the new keys to shed (spec §3.3), so it rides only
+        # the two widest rungs of each branch.
+        msg = (self._msg_hint, " message", True)
         if named is None:
             return [
-                rung([move, page, refresh], "back"),
+                rung([move, page, msg, refresh], "back"),
+                rung([move, page, msg], "back"),
                 rung([move, page], "back"),
                 rung([move], ""),
                 rung([], ""),
             ]
         return [
-            rung([move, page, open_hint, refresh], "back"),
+            rung([move, page, open_hint, msg, refresh], "back"),
+            rung([move, page, open_hint, msg], "back"),
             rung([move, page, open_hint], "back"),
             rung([move, open_hint], "back"),
             rung([move, open_hint], ""),
@@ -1268,6 +1360,7 @@ class ProjectsView(Vertical):
             yield self._detail_hint
             yield self._refresh_hint
             yield self._create_hint
+            yield self._msg_hint
             yield self._open_hint
             yield self._move_hint
             yield self._page_hint
@@ -1834,6 +1927,11 @@ class ProjectsView(Vertical):
             # answer that question, so it asks the page.
             self._form_page.action_cancel_request()
             return
+        if self._mode in ("compose", "send"):
+            # The send surfaces pop one level, exactly like the detail (P5a):
+            # `esc cancel` on the band, `esc close` on the card.
+            self.escape_surface()
+            return
         if self._mode == "detail":
             # Leaving by hand drops any refusal/pop sentence with the page it
             # belonged to (UX round 1, U1/U5).
@@ -2036,7 +2134,7 @@ class ProjectsView(Vertical):
         NOT in the set — it is the form's own way out — and neither is `c`,
         which is inert in form mode by its own guard.
         """
-        if self._mode == "form" and action in self._CANVAS_ACTIONS:
+        if self._mode in ("form", "send", "compose") and action in self._CANVAS_ACTIONS:
             return False
         return super().check_action(action, parameters)
 
@@ -2046,6 +2144,153 @@ class ProjectsView(Vertical):
         if self._mode != "canvas":
             return
         self._enter_detail()
+
+    # -- quick-send (S6d parity P5a) ---------------------------------------
+    def action_message(self) -> None:
+        """``m``: message a linked session, or ask which one (spec §7.5)."""
+        if self._mode == "send":
+            # `m` again re-targets rather than stacking a second card.
+            self.close_send_picker()
+            return
+        if self._mode in ("form", "compose"):
+            return
+        direct = self._detail_session_target()
+        if direct is not None:
+            self.begin_compose(direct)
+            return
+        self.open_send_picker()
+
+    def _send_targets(self) -> list[SendTarget]:
+        """The rows the picker offers, built ONCE for every caller.
+
+        ``send_targets`` owns the order (manager first, live-first sessions,
+        this session never a target), so a direct row send and the picker can
+        never disagree about who is addressable.
+        """
+        row = self._views[self._cursor] if 0 <= self._cursor < len(self._views) else None
+        view_row = row if isinstance(row, dict) else {}
+        return send_targets(
+            view_row,
+            own_session=self._own_session,
+            manager=self._manager_target,
+        )
+
+    def _detail_session_target(self) -> SendTarget | None:
+        """The session row the cursor sits on, when the detail page is up.
+
+        One keystroke from the row you are reading to a message to it; any
+        other row asks for a target instead of guessing (spec §7.5.1).
+        """
+        if self._mode != "detail":
+            return None
+        payload = self._detail_page.selected_session()
+        if not isinstance(payload, dict):
+            return None
+        session_id = str(payload.get("session_id") or "")
+        if not session_id:
+            return None
+        for target in self._send_targets():
+            if target.session_id == session_id:
+                return target
+        return None
+
+    def open_send_picker(self) -> None:
+        """Mount the target card over the page and let it take the keys."""
+        if self._send_card is not None:
+            return
+        rows = self._send_targets()
+        card = SendTargetCard(rows, style_for=_style_resolver())
+        self._send_card = card
+        self._mode = "send"
+        self.mount(card, before=self._title)
+        self.call_after_refresh(self._paint_chrome)
+
+    def close_send_picker(self) -> None:
+        self._close_send_picker()
+
+    def _close_send_picker(self) -> None:
+        card = self._send_card
+        self._send_card = None
+        if card is not None:
+            card.remove()
+        if self._mode == "send":
+            self._mode = "detail" if self._detail_page.display else "canvas"
+        self._paint_chrome()
+
+    def begin_compose(self, target: SendTarget) -> None:
+        """Hand the composer over, addressed to ``target`` (spec §7.5.2).
+
+        The page does not own the composer, so this is a REQUEST; ``compose``
+        mode is entered here because the page's own keys (and the ladder) have
+        to reflect it immediately, and the app answers by giving the composer
+        back and painting the recipient strip.
+        """
+        self._close_send_picker()
+        self._compose_from = self._mode
+        self._send_target = target
+        self._mode = "compose"
+        self._notice = None
+        self.post_message(ProjectsViewComposeChanged(target=target))
+        self._paint_chrome()
+
+    def end_compose(self) -> None:
+        """``esc`` out of compose: no write, the target is dropped."""
+        if self._mode != "compose":
+            return
+        self._send_target = None
+        self._mode = "detail" if self._detail_page.display else "canvas"
+        self.post_message(ProjectsViewComposeChanged(target=None))
+        self._paint_chrome()
+
+    @property
+    def composing(self) -> bool:
+        return self._mode == "compose"
+
+    @property
+    def compose_target(self) -> SendTarget | None:
+        return self._send_target
+
+    def submit_compose(self, text: str) -> bool:
+        """The composer's submit while composing — true when the page took it.
+
+        An empty body is refused HERE, in-surface: nothing is dialled and the
+        draft rule is untouched. Anything else is the app's to deliver.
+        """
+        if self._mode != "compose" or self._send_target is None:
+            return False
+        body = text.strip()
+        if not body:
+            self.show_notice("nothing to send — type a message first")
+            return True
+        self.post_message(ProjectsViewSendRequested(target=self._send_target, text=body))
+        return True
+
+    def compose_receipt(self, sentence: str, *, ok: bool) -> None:
+        """Report a send's outcome in the surface the reader is looking at.
+
+        Acknowledged: the recipient strip stays and the sentence rides the
+        page's own notice line (the composer's band is a PLACEHOLDER — it only
+        paints while the editor is empty, so a refusal with the draft kept
+        could not be seen there; recorded in the PR beside the card deviation).
+        """
+        if self._mode != "compose":
+            # A late receipt for a compose the reader already left: the
+            # transcript is hidden by this page, so say it here.
+            self.show_notice(sentence)
+            return
+        self.show_notice(sentence)
+
+    def on_send_target_card_chosen(self, message: SendTargetCard.Chosen) -> None:
+        message.stop()
+        if self._send_card is not None and message.card is not self._send_card:
+            return
+        self.begin_compose(message.target)
+
+    def on_send_target_card_closed(self, message: SendTargetCard.Closed) -> None:
+        message.stop()
+        if self._send_card is not None and message.card is not self._send_card:
+            return
+        self._close_send_picker()
 
     def _enter_detail(self) -> None:
         view_row = self._detail_view_row()
