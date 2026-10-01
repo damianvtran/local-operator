@@ -200,9 +200,11 @@ class WakeWriteLock:
         #: Empty (the default) keeps the wake wording every existing caller
         #: has always shown.
         self.busy_sentence = busy_sentence or (
-            "Another writer is applying a change to this conversation's wakes. "
-            "Retry in a moment — on a very large conversation this can take a "
-            "while, and a later retry will succeed."
+            # Design delta D7: product words only. "Another writer" is machine
+            # talk, "wakes" has no user-facing meaning, and "a later retry will
+            # succeed" promises what a refusal cannot.
+            "Something else on this device is updating this conversation's "
+            "scheduled checks. Try again in a moment."
         )
         self._fd: int | None = None
 

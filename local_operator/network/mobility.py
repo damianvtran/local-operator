@@ -869,7 +869,7 @@ def _retire_local_runtime(
             return {
                 "result": "busy",
                 "sentence": (
-                    "this session's runtime is still shutting down, so nothing was moved; "
+                    "this conversation is still shutting down, so nothing was changed; "
                     "try again in a moment"
                 ),
             }
@@ -2111,10 +2111,10 @@ def _source_refused(
     files say. That rule breaks for a REFUSAL, which writes nothing here — so the
     inviter sat out its whole budget and answered "the outcome is unconfirmed" for a
     move that never happened. Measured on 2026-09-24 with the desktop's own view
-    holding the session: this device's refusal ("This session is open in another
-    terminal or attached client. Disconnect that client, then move again.") was
-    produced in 3 ms and reached the user 9 times out of 9 as a 60 s timeout reading
-    "the request was sent, so the move may have happened".
+    holding the session: this device's refusal — the viewer sentence
+    (``VIEWED_MOVE_REFUSAL``) — was produced in 3 ms and reached the user 9 times out
+    of 9 as a 60 s timeout reading "the request was sent, so the move may have
+    happened".
 
     NOTHING IS TRUSTED BEYOND WHICH WAY THE WAIT ENDS. It changes no state and
     survives no further than the waiting call: the refusal is recorded in memory for
@@ -2684,7 +2684,7 @@ def _source_prepare(
                 "viewed": "viewed_elsewhere",
                 "too_old": "not_implemented",
             }.get(str(outcome["result"]), "busy"),
-            "message": outcome["sentence"] or "this session is busy, so nothing was moved",
+            "message": outcome["sentence"] or "this conversation is busy, so nothing was changed",
             "session_id": session_id,
         }
     if not sync_mod.stamps_valid(

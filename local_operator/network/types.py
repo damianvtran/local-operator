@@ -755,6 +755,19 @@ INNER_OP_CAPABILITY: dict[str, str] = {
     # refuses while another viewer is attached.
     "retire_now": "stop",
     "refresh_if_idle": "stop",
+    "retire_now": "stop",
+    "refresh_if_idle": "stop",
+    # ``queue_move`` is ``retire_now`` DEFERRED (mesh slice (d), the queued
+    # move): it installs a durable intent that retires this runtime at the next
+    # turn boundary — the actor that may retire NOW may certainly schedule the
+    # same retirement for later, and the frame is the source relay's follow-
+    # through of a move the source already accepted (the relay holds the queue
+    # record and names the destination on the frame). Same authority as the
+    # immediate verb beside it; without a row the relay refuses it
+    # ``unknown_op`` and CLOSES the stream, which would break the intent's
+    # re-delivery after a runtime restart — the one property (idempotent
+    # re-arm) the queue exists for.
+    "queue_move": "stop",
     # AN OP WITH NO ROW IS REFUSED WHEN FORWARDED, and that is the
     # deliberate-absence mechanism this table used for ``operator_challenge``
     # until slice (a): "it produces material a surface uses to SIGN as the

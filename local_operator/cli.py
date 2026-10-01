@@ -4913,30 +4913,46 @@ def _sessions_move_words(
 
     if isinstance(result.get("queue"), dict):
         # THE QUEUED RECEIPT (design note §5.4) — neither a refusal nor a finished
-        # move: the intent is durable on the source and runs by itself, so the two
-        # things a person needs are the phase word and the cancel command, and
-        # `--json` carries the record for anything more. The phase notes say what
-        # is happening in the move's own terms; an unknown phase gets none rather
-        # than a guess.
+        # move: the intent is durable on the source and runs by itself. The human
+        # lines speak product words; the raw phase token stays on the record
+        # (`--json`) rather than in the sentence. The closing lines are
+        # PHASE-AWARE because the cancel hint is a lie once the move has started
+        # (`move_queue.cancel` answers ``too_late`` from ``paused`` on), so only
+        # the phases before the safe point carry it. An unknown phase gets no
+        # gloss rather than a guess, and keeps the cancel line (the
+        # pre-safe-point reading).
         queue = result["queue"]
         phase = str(result.get("phase") or queue.get("phase") or "queued")
         to_block_q = result.get("to_device") or {}
-        target = str(to_block_q.get("name") or to_block_q.get("device_id") or to)
-        phase_note = {
-            "queued": "waiting for a safe point",
-            "finishing": "waiting for the current turn (or a parked approval) to finish",
-            "paused": "the runtime is paused; attached clients have been told, and the "
-            "copy starts shortly",
-            "copying": "the copy is running",
-            "resumed": "the conversation has arrived",
-        }.get(phase, "")
-        head = f"Queued a move of {session_id} to {target} (phase: {phase}"
-        head += f"; {phase_note})." if phase_note else ")."
+        # The caller's own `to` (what they typed) beats an opaque device id, and
+        # a product phrase beats both: a raw id means nothing to a person (D9).
+        target = str(to_block_q.get("name") or to or "another device")
+        notes = {
+            "queued": ("waiting for a safe point", "queued"),
+            "finishing": (
+                "waiting for the current step to finish (a pending approval holds this up)",
+                "queued",
+            ),
+            "paused": ("the move has started", "running"),
+            "copying": ("the move has started", "running"),
+            "resumed": (f"it has arrived on {target}", "arrived"),
+        }
+        note, shape = notes.get(phase, ("", "queued"))
+        head = f"Queued a move of {session_id} to {target}"
+        head += f" — {note}." if note else "."
+        if shape == "arrived":
+            return [head, "It is no longer running on this device."]
+        if shape == "running":
+            return [
+                head,
+                f"It can no longer be cancelled; the conversation continues on {target}.",
+            ]
         return [
             head,
-            "It continues after this command exits; anyone attached there is told a move "
-            "is pending and given a window to follow or detach.",
-            f"Cancel it before it starts with `lop sessions move --cancel-queued {session_id}`.",
+            "Windows open on it are told first and get a moment to follow; any that "
+            f"can't will be disconnected, and the conversation continues on {target}.",
+            f"Cancel the queued move before it starts with "
+            f"`lop sessions move --cancel-queued {session_id}`.",
         ]
 
     to_block = result.get("to_device") or {}

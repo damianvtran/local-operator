@@ -31,7 +31,10 @@ import pytest
 
 from local_operator import update as update_mod
 from local_operator.session.runtime.server import RuntimeServer, _ClientConn
-from local_operator.session.runtime.types import EXCLUSIVE_MOVE_CAPABILITY
+from local_operator.session.runtime.types import (
+    EXCLUSIVE_MOVE_CAPABILITY,
+    VIEWED_MOVE_REFUSAL,
+)
 from local_operator.update import BuildStamp
 from tests.unit.session.runtime.test_server import FakeHandle
 
@@ -219,7 +222,7 @@ async def test_an_exclusive_move_refuses_while_another_attach_is_registered() ->
 
     detail = await _ask(server, sent, viewer, exclusive=True)
 
-    assert detail.startswith("kept: This session is open in another terminal or attached client.")
+    assert detail == f"kept: {VIEWED_MOVE_REFUSAL}"
     assert handle.stopped is False
     assert handle.retirements == [], "the latch was reached after the refusal"
     assert [f for f in sent if f.get("op") == "retiring"] == []
@@ -269,7 +272,7 @@ async def test_a_viewer_arriving_during_the_announcement_refuses_the_move(monkey
 
     detail = await _ask(server, sent, viewer, exclusive=True)
 
-    assert detail.startswith("kept: This session is open in another terminal or attached client.")
+    assert detail == f"kept: {VIEWED_MOVE_REFUSAL}"
     assert handle.stopped is False
     assert handle.retirements == []
     assert server._exclusive_move_fence is None
