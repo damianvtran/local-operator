@@ -3338,12 +3338,23 @@ class TestAnIsolatedRequestCannotDegradeTheTurnBesideIt:
         assert used_keys == ["only-key"], "a strict-signature store did not degrade to one attempt"
 
     @pytest.mark.parametrize("status", [429, 500])
-    async def test_non_auth_failures_still_make_exactly_one_attempt_and_never_sleep(
+    async def test_a_store_that_cannot_offer_a_sibling_keeps_one_attempt_and_never_sleeps(
         self, status: int
     ) -> None:
-        """The widening is auth-shaped ONLY. A 429 says "wait", a 5xx says "the
-        provider is having a moment", and an errand must do neither: one
-        attempt, no backoff sleep, exactly as before the fix."""
+        """The ceiling when the store cannot produce a DIFFERENT bearer, for the
+        whole non-auth class.
+
+        ``FakeAuth`` ignores the exclusion kwargs, so the errand's sibling ask
+        hands back the very key it was just refused on and the retry latch
+        refuses it. Pinned here: that one-attempt ceiling, plus the no-SLEEP rule
+        for every non-auth failure (a rate limit says wait, and an errand must
+        not). Deliberately NOT pinned here: the older claim that a 429/5xx leaves
+        the errand with a single wire attempt outright — against a real store the
+        sibling ask DOES reach a healthy sibling on that class, which is the
+        shipped contract and is covered by
+        ``test_a_provider_side_fault_lets_the_errand_reach_a_sibling``. A store
+        on the Protocol's exact signature degrades the same way, covered by
+        ``test_a_store_on_the_protocols_exact_signature_keeps_one_attempt``."""
         client = ScriptedClient(ProviderError(status, "boom", retryable=True))
         slept: list[float] = []
 
@@ -3368,7 +3379,7 @@ class TestAnIsolatedRequestCannotDegradeTheTurnBesideIt:
                 ]
         finally:
             failover_module._abortable_sleep = original
-        assert client.calls == 1, "a non-auth failure retried on an isolated request"
+        assert client.calls == 1, "the errand re-sent the bearer it was refused on"
         assert slept == [], "an isolated call slept on a backoff"
 
     async def test_it_neither_pins_nor_clears_the_sticky_route(self) -> None:
@@ -3772,11 +3783,65 @@ class TestAnIsolatedErrandRepairsItsOwnAccountTheWayTheTurnDoes:
             # The repair is the ACCOUNT's own bookkeeping (the rotated token is
             # persisted); nothing else moved. That is what makes the extra
             # attempt safe next to a live turn.
-            assert store.get_credential(row.id).data["access"] == "revoked-a-retokened"
+            repaired = store.get_credential(row.id)
+            assert repaired is not None, "the row vanished under the repair"
+            assert repaired.data["access"] == "revoked-a-retokened"
             assert store._sticky == {}, "the errand repointed the session's sticky credential"
             assert not store.is_blocked(row.id, "openai"), "the errand blocked the row"
             assert store._active_demotions("openai") == set(), "the errand demoted the row"
         finally:
+            store.close()
+
+    @pytest.mark.parametrize(
+        ("status", "message"),
+        [(429, "usage limit reached for this window"), (500, "overloaded")],
+    )
+    async def test_a_lone_throttled_account_is_never_force_refreshed(
+        self, tmp_path, status: int, message: str
+    ) -> None:
+        """The skip that keeps a lone throttled/faulted account off the refresh leg.
+
+        ``is_direct_credential_rotation_error`` is the rule the ordinary rotation
+        applies too: a spent window or a provider-side fault is not the
+        CREDENTIAL's problem, so a fresh bearer cannot fix it and the turn does
+        not refresh there either. The errand's answer on that class is the
+        sibling ask — and a pool of ONE has none to offer, so without the skip
+        the errand would spend a token POST plus a second wire attempt on the
+        very account the provider is refusing, with the whole suite staying
+        green. That mutation is why this test exists: the refresh function here
+        WOULD mint a working bearer, so removing the skip changes the wire.
+        """
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        row = self._oauth_row(store, "openai", "throttled-a", "a")
+        wire: list[str | None] = []
+        client_for, issued = self._refreshing_client(
+            store, {"throttled-a": ProviderError(status, message, retryable=True)}, wire
+        )
+        slept: list[float] = []
+
+        async def spy_sleep(delay_ms: float, signal: Any = None) -> None:
+            slept.append(delay_ms)
+
+        original = failover_module._abortable_sleep
+        failover_module._abortable_sleep = spy_sleep  # type: ignore[assignment]
+        try:
+            with pytest.raises(ProviderError):
+                _ = [
+                    event
+                    async for event in stream_with_failover(
+                        self._isolated(), store, None, client_for, session_id="lone-account"
+                    )
+                ]
+            assert wire == [
+                "throttled-a"
+            ], "a lone throttled account bought the errand a second wire attempt"
+            assert (
+                issued == []
+            ), "the errand spent a token POST on the account the provider is refusing"
+            assert slept == [], "an isolated errand took a backoff sleep"
+            assert not store.is_blocked(row.id, "openai"), "the errand blocked the row"
+        finally:
+            failover_module._abortable_sleep = original
             store.close()
 
     async def test_a_refused_request_keeps_the_exactly_one_attempt_rule(self, tmp_path) -> None:
@@ -3816,18 +3881,24 @@ class TestAnIsolatedErrandRepairsItsOwnAccountTheWayTheTurnDoes:
         finally:
             store.close()
 
-    async def test_a_provider_side_fault_lets_the_errand_reach_a_sibling(self, tmp_path) -> None:
+    @pytest.mark.parametrize(
+        ("status", "message"),
+        [(429, "usage limit reached for this window"), (500, "overloaded")],
+    )
+    async def test_a_provider_side_fault_lets_the_errand_reach_a_sibling(
+        self, tmp_path, status: int, message: str
+    ) -> None:
         """The other half of issue #1814's class, and the reason the recovery is
         keyed on the TURN's rotation predicate rather than on auth alone.
 
         A session sticky to an account the provider is currently refusing — a
-        spent weekly window (429) or a server-side fault — keeps working: the
-        turn rotates to a sibling and is served. The errand used to raise after
-        ONE attempt, forever, because its gate admitted auth-shaped failures
-        only. The account is not at fault, so the errand must reach the sibling
-        without demoting it and without moving the session's sticky pointer —
-        both of which are routing decisions belonging to the turn, which is
-        exactly what the ordinary control below does.
+        spent weekly window (429) or a server-side fault (500) — keeps working:
+        the turn rotates to a sibling and is served. The errand used to raise
+        after ONE attempt, forever, because its gate admitted auth-shaped
+        failures only. The account is not at fault, so the errand must reach the
+        sibling without blocking it, without demoting it and without moving the
+        session's sticky pointer — all three are routing decisions belonging to
+        the turn, which is exactly what the ordinary control below does.
         """
         store = AuthStore(db_path=tmp_path / "auth.db")
         session_id = "session-on-a-throttled-account"
@@ -3835,13 +3906,7 @@ class TestAnIsolatedErrandRepairsItsOwnAccountTheWayTheTurnDoes:
         self._oauth_row(store, "openai", "healthy-b", "b")
         wire: list[str | None] = []
         client_for, _issued = self._refreshing_client(
-            store,
-            {
-                "throttled-a": ProviderError(
-                    429, "usage limit reached for this window", retryable=True
-                )
-            },
-            wire,
+            store, {"throttled-a": ProviderError(status, message, retryable=True)}, wire
         )
 
         try:
@@ -3860,6 +3925,9 @@ class TestAnIsolatedErrandRepairsItsOwnAccountTheWayTheTurnDoes:
             assert (
                 store._active_demotions("openai") == set()
             ), "the errand demoted the throttled row"
+            assert not store.is_blocked(
+                throttled.id, "openai"
+            ), "the errand blocked the row the turn is transacting on"
 
             # CONTROL: the turn beside it walks the same two bearers and DOES
             # take the routing decision — which is what keeps the session
@@ -3903,6 +3971,9 @@ class TestAnIsolatedErrandRepairsItsOwnAccountTheWayTheTurnDoes:
             assert [e for e in got if isinstance(e, StreamTextDelta)], "no title came back"
             assert wire == ["dead-a", "good-b"], "the errand did not ask the healthy sibling"
             assert issued == [], "the errand refreshed the rejected row with a sibling available"
+            assert not store.is_blocked(
+                dead.id, "openai"
+            ), "the errand blocked the row the turn is transacting on"
             assert store._sticky == {
                 ("openai", session_id): dead.id
             }, "the errand moved the session's sticky credential"

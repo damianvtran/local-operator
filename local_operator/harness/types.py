@@ -3178,7 +3178,10 @@ class ChatRequest(BaseModel):
     #: deterministic request defect, which is the same answer on every account.
     #: Everything
     #: else holds: no fallback chain, no sticky route read or written, no
-    #: credential rotation, no backoff sleep, no preflight, no boundary
+    #: credential ROTATION — no block, no demotion clear, no move of the
+    #: session's sticky pointer; a forced refresh of the account already in hand
+    #: is that account's own bookkeeping — no backoff sleep (the store's own
+    #: refresh lease may wait ~50 ms once), no preflight, no boundary
     #: classification, no routing decision taken by its credential resolve,
     #: and not the session's cache key. It still resolves credentials under
     #: the session id, so that READ lands on the same account the turn is on

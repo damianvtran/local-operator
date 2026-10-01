@@ -16242,8 +16242,12 @@ class Session:
           re-resolve produced a different one — a sibling if the pool has one,
           otherwise the same account with a forced refresh; the pre-existing
           fast-mode-refusal
-          re-ask can add one more), no fallback chain, no credential rotation,
-          no sticky-route read or write, no quota preflight, no effort-boundary
+          re-ask can add one more), no fallback chain, no credential ROTATION —
+          no block, no demotion clear and no move of the session's sticky
+          pointer; a forced refresh of the account already in hand is that
+          account's own bookkeeping and is the one write isolation permits (see
+          ``isolated``) — no sticky-route read or write, no quota preflight, no
+          effort-boundary
           classification, a read-only credential resolve and not the session's
           prompt cache key. See the field's docstring for the six pieces of
           session-wide state that protects, and why each one mattered.
