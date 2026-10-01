@@ -49,15 +49,18 @@ a drifted digest fails CI rather than being quietly refreshed.
 | `registry-unrevoke-refusal-device-absent.json` | 404 | `device_absent` + the sentence naming the id asked about |
 | `emit-completion.json` | `POST /v1/tunnels/{tunnel_id}/push/events` | the §3.2 completion payload and the emit body (payload + `devices`) |
 | `emit-attention.json` | the same route | the attention payload, its optional `exclude`, and the absent-`exclude` variant |
-| `emit-idempotency-keys.json` | `Idempotency-Key` | §3.4's two recipes with worked vectors, including the heal |
+| `emit-digest.json` | the same route | the digest payload (`type: "digest"`, the VISIBLE coalesced catch-up), its optional `exclude`, and the absent-`exclude` variant |
+| `emit-idempotency-keys.json` | `Idempotency-Key` | §3.4's three recipes with worked vectors, including the heal and the digest |
 | `payload-forbidden-fields.json` | deny list | what may never appear in any of the above, and why each one |
 
 ## How to read them
 
 - **Shape files** carry the allow-list next to the literal: `required` /
   `optional` (for a payload: `payload_required` / `payload_optional`, and the
-  report block's own pair) with a type per field, plus `forbidden` where the shape
-  has one. A field is either named in a shape block **or** in
+  report block's own pair, plus `alert_required` on the two shapes that carry an
+  alert) with a type per field, plus `forbidden` where the shape has one and
+  `absent_fields` where a shape declares a field it must never carry. A field is
+  either named in a shape block **or** in
   `payload-forbidden-fields.json` — never both, never neither.
 - **`same_as`** means *this file does not restate the shape* — it names the file
   whose `required`/`optional`/`forbidden` blocks govern it too. `registry-register-
@@ -98,7 +101,10 @@ a drifted digest fails CI rather than being quietly refreshed.
 
 - **The APNs/FCM envelope** (`aps`, `badge`). The machine sends the `data` object
   and stops; the phone-facing envelope is the cloud's fan-out and a proposal.
-  `aps.badge` is never sent at all (§1.5).
+  `aps.badge` is never sent at all (§1.5). The machine DOES compose the
+  user-visible `alert` for the two visible types (the lane's ruling of
+  2026-10-01), and the cloud delivers that text verbatim and wraps it; the
+  attention form deliberately carries none, because it is a silent wake.
 - **The cloud's own route shapes** (`POST <cloud>/v1/push/register`, the
   heartbeat) — proposals, owned by the cloud lane's `docs/push-cloud-ops.md`. The
   one shape they share is the `devices` report block, which rides the emit body

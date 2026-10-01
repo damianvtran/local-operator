@@ -40,8 +40,10 @@ Three decisions are load-bearing and each one has a trap it avoids:
   in-flight emit needs its own storage: a refusal is retried on the wire with the
   same key, and a restart re-derives the item from the cursor and re-emits it
   with a key the cloud's ``Idempotency-Key`` turns into a duplicate ``202``
-  rather than a duplicate push. The one exception, stated where it matters, is
-  the attention emit's SEQUENCE key (§3.4) — see :meth:`PushWorker._mint_emit`.
+  rather than a duplicate push. The two exceptions, stated where they matter,
+  are the attention emit's SEQUENCE key and the digest's WINDOW ID (§3.4), which
+  are the keys that cannot be re-derived from a record — see
+  :meth:`PushWorker._mint_emit` and :meth:`PushWorker._digest`.
 
 **The transport is a seam, and it is injected.** No route emits these shapes yet
 (S7 is the cloud lane), so the worker is built against a callable: the tests pass
@@ -71,6 +73,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -85,6 +88,8 @@ from local_operator.mobile.push_payload import (
     attention_payload,
     completion_emit_key,
     completion_payload,
+    digest_emit_key,
+    digest_payload,
     emit_body,
 )
 from local_operator.session.attention import AttentionStore
@@ -134,6 +139,11 @@ EMIT_RETRY_INTERVAL_S = EMIT_RETRY_WINDOW_S / (EMIT_RETRY_ATTEMPTS - 1)
 EVENT_COMPLETION = "completion"
 EVENT_DIGEST = "digest"
 EVENT_ATTENTION = "attention"
+
+#: Each kind's value IS its ``type`` on the wire (a test asserts the three
+#: against ``push_payload``), and the three are deliberately not one form with
+#: flags: a completion names a record, an attention emit corrects the badge
+#: SILENTLY, and a digest is the visible coalesced catch-up.
 
 
 def state_path(config_dir: Path) -> Path:
@@ -226,6 +236,15 @@ class PushEmitTransport(Protocol):
     this exact emit. A retry re-invokes this with the same key and the same body,
     which is what makes the cloud's ``Idempotency-Key`` collapse it into a
     duplicate ``202`` rather than a duplicate push.
+
+    THE TRANSPORT MUST BOUND ITS OWN CALL (review round 1, m3). §2.1's retry
+    rule counts "a cloud refusal or timeout" as one failure mode, and this
+    Protocol is synchronous: a call that blocks forever blocks the worker's
+    thread, which is the daemon's 2 s scan's thread. The bound is the
+    transport's because only the transport knows its own client (this repo's
+    outbound Radient calls carry ``timeout=30``; ``daemon.py`` also cuts the
+    scan loose with ``PUSH_TICK_TIMEOUT_S``, and the worker admits one pass at a
+    time so a late pass can never meet a second one).
     """
 
     def __call__(
@@ -272,6 +291,9 @@ class _PendingEmit:
     first_attempt_at: float | None = None
     last_attempt_at: float | None = None
     deferred_since: float | None = None
+    #: The machine's identity for this emit (§3.2), minted when the item is
+    #: created — at WINDOW-CLOSE for a digest, because its key is derived from it.
+    emit_id: str = ""
     #: The conversations this emit names, so a deferral can be re-evaluated
     #: against the store (an ack terminates it early — §2.3).
     conversations: tuple[str, ...] = ()
@@ -335,6 +357,8 @@ class PushWorker:
         #: What the last successful write put on disk, so an unchanged position
         #: costs no rename (see :meth:`_save`).
         self._written: dict[str, Any] | None = None
+        #: The single-claimant guard over one pass (see :meth:`tick`).
+        self._pass = threading.Lock()
         #: The highest positions READ this run, so the cursor can move to them
         #: once nothing is pending above them (see :meth:`_advance`).
         self._seen_publication = 0
@@ -360,15 +384,28 @@ class PushWorker:
         that sleeps five minutes to prove a five-minute window is a test nobody
         runs. Returns the emits attempted in this pass (accepted or not), which
         is what the daemon logs and what a test asserts on.
+
+        ONE PASS AT A TIME. The daemon drives this from a worker thread and cuts
+        the scan loose if the pass outlives its bound, so a still-running pass
+        must not meet a second one: the queue, the cursors and the minted key
+        space are single-claimant state, and a second pass would re-attempt items
+        the first is holding. A tick that cannot claim the pass does nothing and
+        says so at debug level; the next scan interval retries.
         """
-        stamp = self._clock() if now is None else now
-        self._load(stamp)
-        attended = self._presence()
-        self._collect(stamp, attended)
-        records = self._drain(stamp, attended)
-        self._advance(stamp)
-        self._save()
-        return records
+        if not self._pass.acquire(blocking=False):
+            logger.debug("push worker tick skipped: a pass is still running")
+            return []
+        try:
+            stamp = self._clock() if now is None else now
+            self._load(stamp)
+            attended = self._presence()
+            self._collect(stamp, attended)
+            records = self._drain(stamp, attended)
+            self._advance(stamp)
+            self._save()
+            return records
+        finally:
+            self._pass.release()
 
     def _load(self, now: float) -> None:
         """Read the durable position, or BASELINE it on first use.
@@ -420,6 +457,10 @@ class PushWorker:
                 self._baseline(now)
             else:
                 self._acks = self.store.acknowledgement_map()
+                # Record what is already on disk, so the write-skip in
+                # :meth:`_save` is armed from the first tick: without this the
+                # first tick after every restart rewrites an identical file.
+                self._written = self._cursors.as_json()
         self._loaded = True
 
     def _baseline(self, now: float) -> None:
@@ -454,6 +495,15 @@ class PushWorker:
         # waits (see :meth:`_registry_gate` for why it is a skip, not a
         # deferral).
         deliverable = self._live_device()
+
+        # Positions a PENDING emit already speaks for. A digest covers a whole
+        # batch, and while it is in the queue the rows it covers must not be
+        # re-derived as fresh candidates: re-deriving them mints a second,
+        # different key for one batch, which is exactly the duplicate §3.4's
+        # ``Idempotency-Key`` exists to prevent (review round 1, B1). The rows are
+        # still re-EVALUATED below — the ack path depends on that — only the
+        # re-creation is skipped.
+        covered = {sequence for item in self._pending.values() for sequence in item.sequences}
 
         # 1. The supersede cursor first, because a heal is the one change the
         #    publication cursor cannot see (ADR §2.1): a correction rewrites the
@@ -491,6 +541,8 @@ class PushWorker:
             if not deliverable or not self._is_candidate(conversation):
                 self._discard_positions(supersedes=(sequence,))
                 continue
+            if sequence in covered:
+                continue
             self._add_completion(conversation, supersedes=(sequence,), now=now, attended=attended)
 
         # 2. The publication cursor: new completions.
@@ -502,6 +554,8 @@ class PushWorker:
             conversation = str(row["conversation"])
             if not deliverable or not self._is_candidate(conversation):
                 self._discard_positions(publications=(sequence,))
+                continue
+            if sequence in covered:
                 continue
             self._add_completion(conversation, publications=(sequence,), now=now, attended=attended)
 
@@ -521,7 +575,7 @@ class PushWorker:
             key = self._mint_emit()
             self._pending.setdefault(
                 key,
-                _PendingEmit(key=key, kind=EVENT_ATTENTION),
+                _PendingEmit(key=key, kind=EVENT_ATTENTION, emit_id=uuid.uuid4().hex),
             )
 
     def _is_candidate(self, conversation: str) -> bool:
@@ -575,6 +629,11 @@ class PushWorker:
                 key=key,
                 kind=EVENT_COMPLETION,
                 conversations=(conversation,),
+                # The machine's identity for this emit (§3.2), minted with the
+                # item and reused by every retry: it is what the cloud's delivery
+                # record is keyed on, so it must not move between attempts of one
+                # emit.
+                emit_id=uuid.uuid4().hex,
             )
             self._pending[key] = existing
         existing.publications += tuple(
@@ -617,6 +676,13 @@ class PushWorker:
         A completion still inside its presence deferral is NOT eligible and does
         not count toward the burst: it is not a banner that was coalesced, it is
         a banner whose gate has not opened.
+
+        EVERY kind goes through :meth:`_due`, the digest included. A digest is a
+        first-class retryable item with its own key (§2.1's retry rule is one
+        rule, not one per shape), and an attention correction that ignored the
+        interval would spend the frozen budget roughly twenty times faster on the
+        one emit whose key cannot be re-derived from the record (review round 1,
+        m1).
         """
         ready_completions = [
             (key, item)
@@ -624,7 +690,9 @@ class PushWorker:
             if item.kind == EVENT_COMPLETION and self._due(item, now, attended)
         ]
         others = [
-            (key, item) for key, item in self._pending.items() if item.kind == EVENT_ATTENTION
+            (key, item)
+            for key, item in self._pending.items()
+            if item.kind in (EVENT_ATTENTION, EVENT_DIGEST) and self._due(item, now, attended)
         ]
 
         # Only items that have NEVER been on the wire may be folded into a
@@ -656,14 +724,32 @@ class PushWorker:
     ) -> tuple[str, _PendingEmit] | None:
         """Fold a batch of eligible completions into ONE digest emit.
 
-        The digest is composed from the ATTENTION form, and the choice is the
-        carrier's rather than a preference: §3.4 keys a completion emit on the
-        record's CONTENT, so a set of records has no completion key — and
-        minting one from an arbitrary member would let a later heal of that
-        member mint a second, different digest for the same batch. The attention
-        form is the shape built to stand for a set (no conversation, no token, no
-        kind, a ``count``), and §3.2's example body reads "Task complete · 2
-        conversations need you", i.e. its ``count`` already names the batch.
+        THE THIRD TYPE, AND IT IS VISIBLE ON PURPOSE (ADR §2.1's burst rule, as
+        the lane ruled it on 2026-10-01). §3.2 fixes the attention form's
+        envelope as a silent, best-effort wake, so a coalesced catch-up riding it
+        would arrive with no banner, no body and no count a user could read — the
+        opposite of "one digest push naming the count". ``type: "digest"`` is
+        the signal, and the ALERT object the machine composes (a house state plus
+        the count) is the text the user reads.
+
+        THE ID IS MINTED HERE, WHEN THE WINDOW CLOSES, and the key comes from it
+        (``digest_emit_key``). That is what makes :meth:`_attempt`'s retry the
+        SAME emit: a key re-derived per attempt would hand one batch a new
+        identity on every pass, so a cloud that delivered but lost its ``202``
+        could not dedupe, and the cursor would pin behind a batch that keeps
+        wearing new names (review round 1, B1). The item keeps the id, and the
+        pass that re-reads the same rows cannot fold them again while it is
+        pending (:meth:`_collect` skips positions a pending emit covers), so one
+        window wears one key for its whole life; the NEXT window mints its own.
+
+        THE WINDOW'S IDENTITY IS PROCESS-LOCAL, and that is disclosed rather than
+        implied: the queue is derived from the cursor, so a restart re-folds the
+        same rows under a fresh id. It is the same class of duplicate the
+        sequence-keyed attention emit already carries, and the remedy is the
+        same one — the badge and the list are read from the machine, so a
+        repeated "several conversations updated" banner costs a banner and never
+        a wrong count. A completion, whose key IS its content, re-derives
+        byte-identically and is unaffected.
 
         A batch with no sequence behind it (only possible if two members share a
         key, which §3.4's content recipe makes a collision) is refused rather
@@ -674,7 +760,8 @@ class PushWorker:
         supersedes = tuple(sequence for _key, item in members for sequence in item.supersedes)
         if not publications and not supersedes:
             return None
-        key = self._mint_emit()
+        emit_id = uuid.uuid4().hex
+        key = digest_emit_key(emit_id, self.computer)
         # The batch is formed from members that are all ready to go NOW, so the
         # digest inherits no deferral of its own: every member's gate has already
         # opened, and re-deferring the set would hold a push past the bound the
@@ -688,6 +775,7 @@ class PushWorker:
             publications=publications,
             supersedes=supersedes,
             conversations=conversations,
+            emit_id=emit_id,
         )
 
     def _due(self, item: _PendingEmit, now: float, attended: bool) -> bool:
@@ -766,7 +854,7 @@ class PushWorker:
         current.
         """
         count = self._count()
-        emit_id = uuid.uuid4().hex
+        emit_id = item.emit_id or uuid.uuid4().hex
         payload: dict[str, Any]
         if item.kind == EVENT_COMPLETION:
             conversation_identity = item.conversations[0] if item.conversations else ""
@@ -792,10 +880,24 @@ class PushWorker:
                 emit_id=emit_id,
                 count=count,
             )
+        elif item.kind == EVENT_DIGEST:
+            # The coalesced catch-up: a set, so it names no conversation and
+            # carries no record field — and its own TYPE, which is what makes it
+            # a visible alert rather than the attention form's silent wake. The
+            # alert's leading phrase is the SET's honest state, so the members'
+            # kinds are read here (the batch is small by construction, and this
+            # runs once per emit rather than once per pass).
+            kinds: list[str] = []
+            for conversation in item.conversations:
+                member_kind = self.store.state(conversation).get("kind")
+                if isinstance(member_kind, str):
+                    kinds.append(member_kind)
+            payload = digest_payload(
+                computer=self.computer, count=count, emit_id=emit_id, kinds=kinds
+            )
         else:
-            # The digest and the badge correction are the same §3.2 form: both
-            # stand for a set (or for no record at all) and both carry a count
-            # and nothing the app could deep-link to.
+            # The badge correction: it stands for no record at all and carries a
+            # count and nothing the app could deep-link to.
             payload = attention_payload(computer=self.computer, count=count, emit_id=emit_id)
         if self._report_block is None:
             return payload
@@ -900,17 +1002,20 @@ class PushWorker:
                 self._resolve(item)
 
     def _mint_emit(self) -> str:
-        """Mint the idempotency key §3.4 gives this kind of emit.
+        """Mint the idempotency key the ATTENTION emit wears (ADR §3.4).
 
-        A completion emit's key is the record's content and is composed by
-        ``push_payload``; the two attention-shaped emits are keyed on the
-        machine's monotone sequence, which is PERSISTED as it is minted. That is
-        the safer of the two possible orders: reserving the number before the
-        attempt means two different emits can never wear one key, which is the
-        property the cloud's dedupe rests on. The cost is stated rather than
-        implied — an attention emit refused and then abandoned by a restart is
-        not re-emitted under its old key, and it does not need to be: the badge
-        is read from the machine and is right on the app's next read §1.5.
+        The other two kinds are keyed elsewhere, each from what makes a retry the
+        same emit: a completion on the record's CONTENT (``push_payload``), and a
+        digest on the id minted when its coalescing window closed
+        (:meth:`_digest`). The attention emit has neither — there is no record and
+        no set — so its key is the machine's monotone sequence, PERSISTED as it
+        is minted. That is the safer of the two possible orders: reserving the
+        number before the attempt means two different emits can never wear one
+        key, which is the property the cloud's dedupe rests on. The cost is
+        stated rather than implied — an attention emit refused and then abandoned
+        by a restart is not re-emitted under its old key, and it does not need to
+        be: the badge is read from the machine and is right on the app's next
+        read §1.5.
         """
         self._cursors.attention_sequence += 1
         self._save()
@@ -972,6 +1077,17 @@ class PushWorker:
         )
 
     # -- the durable position ------------------------------------------------
+
+    # -- the queue -----------------------------------------------------------
+
+    def pending(self) -> int:
+        """How many emits are queued right now.
+
+        The backlog behind the cursor IS the queue (ADR §2.1), so this number is
+        the ADR's own boundedness claim made readable: a caller — or a test —
+        asserts it is flat rather than reaching into the private map.
+        """
+        return len(self._pending)
 
     def _save(self) -> None:
         """Atomic 0600 write of the cursors: same discipline as the registry.
