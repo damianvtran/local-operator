@@ -979,6 +979,53 @@ def test_unrevoke_is_operators_only_and_clears_the_markers() -> None:
     assert push_devices.device_state(_stored_records()[0]) == push_devices.STATE_LIVE
 
 
+def test_unrevoke_clears_every_marker_the_row_carries() -> None:
+    """EVERY marker, not just the strongest (the mobile lane's follow-up, option (a)).
+
+    A row can carry both — a device revoked, and then its computer unpaired — and
+    ADR 0006 §3.1/§4 (that record lives in the mobile repository,
+    ``damianvtran/local-operator-mobile``) says the verb clears "the marker that
+    is set", which names the two STATES a row can be in rather than a licence to
+    leave the weaker one behind. Restoring a device and leaving it unpaired would
+    refuse its next registration for a reason nobody chose, and would make one
+    operator intent take two commands.
+
+    Pinned here because the claim is about the ARTIFACT, not about a projection of
+    it. A state assertion does redden under the one-marker shape — the row then
+    resolves to ``unpaired`` — but the state can only say the row is in no marked
+    state; it cannot name what was cleared. This cell reads the STORE, so the
+    absence asserted is both KEYS, and it then asserts the consequence the weaker
+    marker would have: the device can register again (200, where a surviving
+    ``unpaired_at`` is 403 ``device_unpaired``).
+    """
+    client = _client()
+    registered = client.post("/api/push/register", json=PAYLOAD).json()
+    device_id = registered["device_id"]
+    key = push_devices.operator_key(config_dir())
+    assert isinstance(key, str) and key
+    _plant(
+        [_record(device_id=device_id, revoked_at=STAMP, unpaired_at=STAMP + 10)],
+        **{push_devices.OPERATOR_KEY_FIELD: key},
+    )
+    assert push_devices.device_state(_stored_records()[0]) == push_devices.STATE_REVOKED
+
+    restored = client.post(
+        f"/api/push/devices/{device_id}/unrevoke",
+        headers={push_devices.OPERATOR_KEY_HEADER: key},
+    )
+    assert restored.status_code == 200, restored.text
+    assert restored.json() == {"ok": True, "device_id": device_id}
+    record = _stored_records()[0]
+    assert "revoked_at" not in record, "the stronger marker went"
+    assert "unpaired_at" not in record, "…and so did the weaker one, in the same act"
+    assert push_devices.device_state(record) == push_devices.STATE_LIVE
+    # The consequence, stated as the device would experience it: it may register
+    # again. Left unpaired, this would be a 403 ``device_unpaired``.
+    assert client.post("/api/push/register", json=PAYLOAD).status_code == 200
+    listed = client.get("/api/push/devices").json()["devices"]
+    assert [entry["state"] for entry in listed] == [push_devices.STATE_LIVE]
+
+
 def test_unrevoke_of_an_id_this_computer_never_registered_is_a_404() -> None:
     """Absent is a different answer from revoked, and the operator is told which.
 
