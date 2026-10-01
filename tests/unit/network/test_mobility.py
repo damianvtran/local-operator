@@ -1094,8 +1094,8 @@ def test_an_offload_returns_the_destinations_refusal_instead_of_waiting_it_out(
     session_id = "ef56ab12cd34"
     invited = server_b.identity.device_id
     sentence = (
-        "This session is open in another terminal or attached client. "
-        "Disconnect that client, then move again."
+        "This conversation is open in another window or app. "
+        "Close that window and try again, or queue the move to run at the next safe point."
     )
     progress = mobility.progress_for(server_a)
     try:

@@ -129,6 +129,15 @@ RETIRING_REASON = "owner retired for a newer build"
 #: INV-1 exists to close. A host that hears this reason goes cold WITHOUT
 #: re-engaging and surfaces the device the retiring frame named (the client
 #: remembers it as :attr:`AttachClient.moved_to`).
+#:
+#: NEVER PRINTED RAW (design delta D5). The constant is a classification token
+#: — consumers compare it by EQUALITY (``attached.py``'s reason switch), so its
+#: bytes stay stable — and it names no destination, while §5.4 requires the
+#: disconnect sentence to say where the conversation now lives. Whoever renders
+#: that sentence (the UI slice; the core only remembers ``moved_to``) builds it
+#: from that name — e.g. "This conversation moved to <name>; it is no longer
+#: running here." — avoiding "owner" (reads as the account owner, i.e. the
+#: reader) and "device" as the object of "moved" (say where it went).
 MOVED_REASON = "owner moved this conversation to another device"
 
 #: Disconnect reason for a connection the owner could not BIND — its canonical

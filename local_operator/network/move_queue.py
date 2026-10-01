@@ -167,8 +167,11 @@ def lock_for(root: Path | str, session_id: str):
         directory,
         name=f"move-{session_id}.lock",
         busy_sentence=(
-            "Another process is updating this conversation's queued move. Retry in a "
-            "moment; a later retry will succeed."
+            # Product words only (design delta D7): "another process" is machine
+            # talk, and "a later retry will succeed" is a promise a refusal
+            # cannot keep.
+            "Something else on this device is updating the queued move. Try again "
+            "in a moment."
         ),
     )
 
@@ -594,7 +597,7 @@ def drive(server: "RelayServer", session_id: str) -> str:
                         QUEUE_PHASE_FAILED,
                         detail=(
                             "this conversation's runtime is too old to queue a move "
-                            "safely; reload it first, then queue the move again"
+                            "safely; reload it in its window, then queue the move again"
                         ),
                         code="not_implemented",
                         writer="relay",

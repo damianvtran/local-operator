@@ -41,6 +41,7 @@ from local_operator.mobile.attach_client import (
 from local_operator.network import carry, mobility, move_queue
 from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.runtime.serving import ServingSessionHandle
+from local_operator.session.runtime.types import VIEWED_MOVE_REFUSAL
 from local_operator.wakes import store as wake_store
 from tests.e2e.harness import build_session
 from tests.unit.network.test_carry import MONITOR_ROW, WAKE_ROW, _custom_entry
@@ -373,7 +374,7 @@ async def test_a_bare_move_with_a_viewer_reports_viewed_elsewhere(
         payload = dict(result)
         assert payload.get("ok") is False, payload
         assert payload.get("code") == "viewed_elsewhere", payload
-        assert "another terminal or attached client" in str(payload.get("message")), payload
+        assert VIEWED_MOVE_REFUSAL in str(payload.get("message")), payload
     finally:
         viewer.close()
         await session.dispose()

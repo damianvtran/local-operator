@@ -6396,10 +6396,11 @@ class RuntimeServer:
             # fence: nothing was retired, so the runtime must admit viewers
             # again.
             self._exclusive_move_fence = None
-            return (
-                "kept: This session is open in another terminal or attached "
-                "client. Disconnect that client, then move again."
-            )
+            # The SECOND producer of the viewer sentence (review R2-1 / QA O1):
+            # routed through the shared constant so the fail-closed guarantee
+            # covers both sites — the classifier in ``mobility.py`` matches
+            # this exact prefix.
+            return f"kept: {VIEWED_MOVE_REFUSAL}"
         # The ONE await between decision and stop, so the final check is a LATCH
         # and not another sample: a ``prompt`` admitted in this gap would open a
         # turn that ``request_stop`` then aborts one await later. ``begin_retire``
