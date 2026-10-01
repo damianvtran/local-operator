@@ -1373,6 +1373,56 @@ class TestPruning:
         assert reaped not in plan.removed
         assert generations[1] in plan.removed, "the others are still pruned"
 
+    def test_a_generation_a_live_runtime_reports_is_kept(self, home: Path, tmp_path: Path) -> None:
+        """The live-argv link, closed: the process's OWN report is what holds it.
+
+        Three links of this chain are pinned elsewhere — a real child reports its
+        own generation (``TestTheRecordedInstallRoot``), a record naming a tree
+        holds it, and an unreadable read keeps everything. What none of them
+        closes is the JOINT the update lane's safety claim actually rests on: the
+        string a RUNNING process reports for itself, published on its record, is
+        what survives a prune of every other generation — so the tree kept is the
+        one the runtime is importing from, not an assumption about where it was
+        launched from. The value below is produced by executing the generation's
+        own interpreter (``process_install_root``), which is exactly what a
+        runtime stamps its record with at boot.
+        """
+        from local_operator.session.runtime import registry
+        from local_operator.session.runtime.types import SessionRecord
+
+        # The pointer lands on each ``_install`` in turn, so the first one is
+        # unreferenced by the time the prune runs — the tree that proves the
+        # prune still removes things beside the one the record holds.
+        unreferenced = _install("0.52.0")
+        newest = _install("0.52.1")
+        install_root = _real_generation("20260101T000000Z-live")
+        reported = _reported_root(install_root / "bin" / "python3", tmp_path)
+        assert (
+            reported == install_root.resolve()
+        ), "precondition: the child's own report names the tree it runs from"
+
+        record = SessionRecord(
+            pid=os.getpid(),
+            kind="daemon",
+            session_id="liveargv",
+            conversation_name="n",
+            cwd="/",
+            model_label="m",
+            control_port=0,
+            control_key="k",
+            install_root=str(reported),
+        )
+        registry.publish(record, home / ".local-operator")
+
+        plan = update_mod.prune_generations(
+            keep=0, referenced=update_mod.referenced_install_roots()
+        )
+
+        assert install_root.is_dir(), "a tree a live runtime reports must be kept"
+        assert install_root not in plan.removed
+        assert newest.is_dir(), "precondition: the pointer's own target survives"
+        assert unreferenced in plan.removed, "the others are still pruned"
+
     def test_a_prune_attests_before_it_removes_a_runtime_tree(self, home: Path) -> None:
         """I3: the deletion names its actor, in the victim's own conversation dir.
 
