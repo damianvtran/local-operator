@@ -391,7 +391,7 @@ Screen > .screen--selection {
  * even after the resize rebuilds the row to fit — a ledger of one-line
  * traces silently doubles in height. Pinning makes the worst case a clipped
  * cell for one frame, which is the right failure. */
-ToolCard, WakeBlock, PeerMessageBlock, AskResponseBlock {
+ToolCard, WakeBlock, PeerMessageBlock {
     height: 1;
     background: $lo-surface;
     /* NOTE: the one-cell LEFT inset these cards carry is drawn by the row
@@ -415,7 +415,7 @@ ToolCard, WakeBlock, PeerMessageBlock, AskResponseBlock {
  * PeerMessageBlock and MonitorDeltaBlock use their own class names because
  * they are different widgets; the height contract is the same. */
 ToolCard.tool-expanded, WakeBlock.wake-expanded, PeerMessageBlock.peer-expanded,
-MonitorDeltaBlock.monitor-expanded, AskResponseBlock.ask-response-expanded {
+MonitorDeltaBlock.monitor-expanded {
     height: auto;
 }
 
@@ -494,7 +494,6 @@ MonitorDeltaBlock.monitor-expanded, AskResponseBlock.ask-response-expanded {
 }
 
 .comfortable-rows ToolCard.tool-expanded, .comfortable-rows WakeBlock.wake-expanded,
-.comfortable-rows AskResponseBlock.ask-response-expanded,
 .comfortable-rows PeerMessageBlock.peer-expanded,
 .comfortable-rows MonitorDeltaBlock.monitor-expanded {
     height: auto;
@@ -624,7 +623,15 @@ ToolCard:focus, WakeBlock:focus, PeerMessageBlock:focus, .interactive-notice:foc
 #ask-bar {
     width: 1fr;
     height: 1;
-    background: $lo-raised;
+    /* `$lo-surface` — the composer's OWN ground, and the ground the palette
+     * gate actually checks. The first cut sat on `$lo-raised`, one elevation
+     * step up, where the bar's message measured 3.81:1 dark / 3.09:1 LIGHT
+     * (under the gate's 3.4:1 dim floor) and the accent glyph 3.96:1 in light
+     * (under its 4.0 state-hue floor) — a new surface has to solve its own
+     * pairs, and the gate cannot do it for a ground it never measures (design
+     * round 1, D2). On `surface` every ink this row uses clears its floor:
+     * fg 13.76/13.86, muted 7.93/6.58, dim 4.18/3.46, accent 8.02/4.43. */
+    background: $lo-surface;
     color: $lo-fg;
     display: none;
 }

@@ -3333,7 +3333,15 @@ class AskResponseBlock(WakeBlock):
     secret to render it would be the leak the contract exists to prevent.
     """
 
-    EXPANDED_CLASS = "ask-response-expanded"
+    #: The INHERITED class, deliberately, and this is the one place the
+    #: ledger's naming convention is not followed: ``test_minimalism`` pins the
+    #: exact selector text that opts an expanding row out of the height-1 pin
+    #: (``ToolCard.tool-expanded, WakeBlock.wake-expanded, …``), so a row that
+    #: named its own class would have to edit that pinned list to stay off
+    #: ``auto`` — and editing a guard to admit new code is how a guard stops
+    #: being one. The type selector matches this subclass, so the pin and the
+    #: opt-out both reach it with the sheet untouched.
+    EXPANDED_CLASS = WakeBlock.EXPANDED_CLASS
 
     #: The ledger's name column and icon: the ``ask`` tool's, so the receipt
     #: lines up in a column with the ``ask`` call it answers (the tool card
@@ -3369,6 +3377,26 @@ class AskResponseBlock(WakeBlock):
         else:
             identity, _ = ask_response_notice(self._details)
         return identity, str(self._details.get("text") or "")
+
+    def _summary_ink(self) -> str:  # type: ignore[override]
+        """The timeout row keeps the notice's ``warning`` ink; a response stays dim.
+
+        The two rows are NOT the same fact: one says the agent was answered, the
+        other says its deadline fired with nothing given. The notice this row
+        replaced carried the warning ink and a ``!``, and the comment beside it
+        claimed that ink was "unchanged" while the shared row builder painted
+        both in ``dim`` (round 1, MINOR-3 / design D3). This is the ink the
+        comment was already promising.
+
+        It is ``_summary_ink`` and not a hook of this row's own: that is the
+        seam the shared row builder reads (``WakeBlock._summary_ink``, which
+        :class:`MonitorDeltaBlock` already overrides for the same reason), and
+        the fold onto ``main`` is where the branch's duplicate ``_summary_style``
+        was retired in its favour — one ink, one seam, and the icon takes it too.
+        """
+        if self._kind == "timeout":
+            return "warning"
+        return super()._summary_ink()
 
     def _build_content(self, width: int) -> Text:  # type: ignore[override]
         """The summary row, plus the Q&A when the row is opened."""
@@ -3412,7 +3440,14 @@ class AskResponseBlock(WakeBlock):
                 # The KEY only. See the class docstring: the value is not here
                 # to render, and a fallback that printed the cell whole would be
                 # the leak the wire already refuses to make possible.
-                shown = ", ".join(chosen) if chosen else "not provided"
+                #
+                # The suffix is design round 1's D11: `[DEPLOY_KEY]` alone can be
+                # read as the value it is standing in for, and the picker that
+                # collected it labelled the same thing "key name". One word
+                # removes the ambiguity without putting the value anywhere near
+                # the frame.
+                keys = ", ".join(chosen) if chosen else ""
+                shown = f"{keys} (key name)" if keys else "not provided"
             else:
                 shown = ", ".join(chosen) if chosen else "not answered"
             lines.append(("A: ", shown, fg))

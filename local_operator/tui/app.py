@@ -338,7 +338,7 @@ from local_operator.tui.widgets.aside_panel import (
 )
 from local_operator.tui.widgets.ask_picker import AskPickerScreen
 from local_operator.tui.widgets.ask_queue import (
-    STATUS_LATE,
+    ASK_TOGGLE_KEY,
     STATUS_OPEN,
     STATUS_TIMED_OUT,
     AskBar,
@@ -2912,7 +2912,9 @@ ASK_ANSWER_PLACEHOLDER = "Answer the question above… — Enter sends it to the
 #: arbitrarily long. The clip lives here rather than in the widget so the
 #: bar's geometry is a constant a capture can assert on; the widget never
 #: truncates the COUNT, which is the part that must survive any width.
-ASK_BAR_HEAD_CELLS = 48
+#: UNUSED since the bar clips against its real width — ``AskBar.HEAD_CEILING``
+#: is the only budget now (design round 1, D5/D9). Kept out of the module on
+#: purpose; delete this note with the next sweep that touches the ask surfaces.
 
 #: Shown where ``/credential``'s argument rows would be while a capture is
 #: armed. The rows are suppressed there (see ``_credential_choices``), and a
@@ -4361,6 +4363,20 @@ class OperatorApp(App[None]):
         #
         # Ctrl+B is navigation across platforms; F8 keeps Aside independent of
         # terminal modifier encoding and leaves every TextArea editing key alone.
+        # Queued asks, on a FUNCTION key for the same reason as f8/f9/f10
+        # below: every `ctrl+<letter>` is spoken for. The bar's own Enter
+        # binding cannot be the only route, because nothing focuses a bar the
+        # user cannot see is focusable — measured in round 1, tab six times and
+        # shift+tab all stayed in the Editor, so a keyboard-only user could not
+        # answer a queued ask at all (UX U5). Non-priority, so a live picker
+        # keeps first refusal on the key.
+        #
+        # The key is NOT f7, which is the neighbour this row would suggest:
+        # TextArea binds f6/f7 itself (measured in Textual 8.2.8), so the one
+        # surface that most needs the route — the focused composer — swallowed
+        # it. `ASK_TOGGLE_KEY` is the single spelling, shared with the bar's own
+        # copy so the two cannot drift onto different keys.
+        Binding(ASK_TOGGLE_KEY, "toggle_asks", "Queued asks", show=False),
         Binding("f8", "aside", "Aside", show=False),
         Binding("ctrl+b", "toggle_sidebar", "Sessions", show=False),
         Binding("f9", "focus_sidebar", "Focus sessions", show=False),
@@ -5527,6 +5543,11 @@ class OperatorApp(App[None]):
         self._ask_card: AskPickerScreen | None = None
         #: The queue list widget while it is mounted, else None.
         self._ask_list: AskQueueList | None = None
+        #: Whether the mounted CARD was opened out of the list. Escaping such a
+        #: card hands the user back to the list they were choosing in rather
+        #: than all the way out to the minimized bar (UX round 1, U6). Cleared
+        #: by every collapse, so a card opened fresh cannot inherit it.
+        self._ask_from_list: bool = False
         #: ``ask_id -> AskPickerSnapshot`` for collapsed asks, so the free-text
         #: draft typed into a question survives collapsing and is restored on
         #: re-expand (R7: "collapsing preserves both drafts").
@@ -23250,7 +23271,7 @@ class OperatorApp(App[None]):
             # expanding per-route is how two of them would quietly miss it.
             self._ask_aside(expand_pastes(text, message.attachments))
             return
-        if self._ask_mode and self._ask_card is not None:
+        if self._ask_answer_active():
             # EXPANDED: the composer is the ANSWER box (§5.0's routing rule).
             #
             # It sits here, beside the aside's branch and for the same reason:
@@ -23785,6 +23806,16 @@ class OperatorApp(App[None]):
             ):
                 return True
         except Exception:  # noqa: BLE001
+            return True
+        # The OPEN-ASK list IS a hard claim, unlike the Sessions list below:
+        # it is answered with keys the composer swallows (up/down to move,
+        # Enter to open a row, `d`/`x` to settle one), so handing the keyboard
+        # to the composer makes the panel unusable — and the round-1 probe found
+        # exactly that, with `❯` still painted on row 1 (UX U2).
+        try:
+            if self._ask_list is not None:
+                return True
+        except Exception:  # noqa: BLE001 — defensive, see the docstring
             return True
         # The focused Sessions list is deliberately ABSENT from this list, and
         # that absence is the whole content of design round D2: its claim is
@@ -24456,6 +24487,19 @@ class OperatorApp(App[None]):
         # command both die on one press rather than racing.
         self._abort_shell_command()
 
+    def action_toggle_asks(self) -> None:
+        """Open the queued asks, or close them if they are already up.
+
+        The keyboard's door to the surface (UX U5), and it is a TOGGLE rather
+        than an open: f7 pressed twice must be the gesture that lets a user look
+        at the queue and then get back to what they were typing, without
+        reaching for the mouse or for Esc (which means "stop" everywhere else).
+        """
+        if self._ask_mode:
+            self._collapse_asks()
+        else:
+            self._expand_asks()
+
     def action_stop(self) -> None:
         """Esc: stop. One press, one meaning, wherever focus happens to be.
 
@@ -24497,6 +24541,18 @@ class OperatorApp(App[None]):
         ``background=true`` exists to outlive the turn. ``jobs cancel`` stops
         those.
         """
+        if self._ask_mode:
+            # The ask surface owns Esc first. §5.0/D5 makes Esc the COLLAPSE,
+            # and the state a user is in while they type an answer is the
+            # COMPOSER-focused one — where this key used to fall through the
+            # whole stop ladder and abort the running turn, from a surface whose
+            # own footer said "esc collapse" (round 1: QA Q2).
+            #
+            # The card consumes Esc itself (its own binding, focus on the card),
+            # so what reaches here is the composer and the list: both mean
+            # "leave this surface", and neither is a stop.
+            self._collapse_asks()
+            return
         if self._fork_in_progress:
             # The snapshot may already be copying. Let it settle safely, but
             # withdraw navigation without forwarding Esc to the original tool.
@@ -25353,6 +25409,15 @@ class OperatorApp(App[None]):
         * The card is taken down when its ask LEAVES the queue — answered from
           the phone, expired, or dismissed elsewhere. Leaving it up would be a
           card for a question the runtime no longer has.
+
+        THE FLAG GATES PRODUCTION, NOT RENDERING, and this is the sentence round
+        1's MINOR-4 asked for: with ``NONBLOCKING_ASK`` off nothing here mounts,
+        but a transcript that already CONTAINS an ``ask_response``/``ask_timeout``
+        row (recorded by a flag-on runtime, or read back from disk) still renders
+        as the ask receipt card — ``AskResponseBlock`` has no flag branch, by
+        design, because a stored row is a fact about the past and hiding it would
+        lose the user's own history. The flag decides whether the new surfaces
+        exist, never whether an existing row can be read.
         """
         from local_operator.asks import policy
 
@@ -25371,6 +25436,26 @@ class OperatorApp(App[None]):
             return
         self._ask_rows = list(rows)
         self._paint_ask_bar()
+        if self._ask_list is not None:
+            # The OPEN LIST follows the wire while it is up, which it did not
+            # before: it was built once from the rows of the moment and never
+            # refreshed, so an ask answered on the phone kept a live-looking row
+            # (and its answerability) until the user collapsed and re-expanded
+            # (round 1: QA Q3 / design D4 — the frame showed "3 open asks" over
+            # the bar's "1 question waiting"). Same rows, same snapshot, one
+            # writer: the two surfaces cannot disagree about the queue.
+            self._ask_list.set_rows(self._ask_rows, now_ms=self._ask_now_ms())
+        if self._ask_card is not None and self._ask_mounted_id is not None:
+            # The CARD's title is derived from the row's STATUS, and a status is
+            # exactly what a snapshot can change under a mounted card (an ask
+            # that times out while its card is open). Re-deriving it here is
+            # what keeps the card from saying "the agent asked and moved on"
+            # over a question the bar has already called timed out (UX U9).
+            row = next(
+                (item for item in self._ask_rows if item.ask_id == self._ask_mounted_id), None
+            )
+            if row is not None:
+                self._ask_card.set_title(self._ask_card_title(row))
         if self._ask_mounted_id is not None and not any(
             row.ask_id == self._ask_mounted_id for row in self._ask_rows
         ):
@@ -25378,35 +25463,51 @@ class OperatorApp(App[None]):
             # this is a plain collapse — and the chat draft IS restored, because
             # the user never asked to leave; the surface left them.
             self._collapse_asks()
+        elif self._ask_mode and not self._ask_rows:
+            # Nothing left to answer at all: a list of zero rows is dead chrome
+            # holding the composer hostage.
+            self._collapse_asks()
         self._sync_sidebar_asks(
             len([row for row in self._open_ask_rows() if row.status == STATUS_OPEN])
         )
 
+    @staticmethod
+    def _ask_now_ms() -> int:
+        """The client's clock, in the unit ``expires_at`` is stated in.
+
+        Passed DOWN to the list rather than read inside it, because the widget
+        is also constructed by tests and captures that want a frozen clock —
+        and because a countdown read at a different instant from the rows it
+        describes is a countdown that can name a deadline the row does not have.
+        (Design D8: before this, ``_now_ms`` was only ever 0, so no expiry ever
+        painted and urgency was carried by hue alone.)
+        """
+        return int(time.time() * 1000)
+
     def _open_ask_rows(self) -> list[AskRow]:
-        """The rows still waiting on the user: open, or timed out and answerable."""
-        return [
-            row
-            for row in self._ask_rows
-            if row.status in (STATUS_OPEN, STATUS_TIMED_OUT, STATUS_LATE)
-        ]
+        """The rows still waiting on the user: open, or timed out and answerable.
+
+        NOT ``late``, and that is round 1's D6/U3 fix in the second place it
+        had to be made: a late answer is an ANSWER (the agent was told, one
+        deadline too late), so offering it an answer box can only be refused —
+        and the bar counted it as an owed question for as long as it stayed in
+        this list. ``ask_rows`` drops it for the same reason; both gates read
+        the same two statuses.
+        """
+        return [row for row in self._ask_rows if row.status in (STATUS_OPEN, STATUS_TIMED_OUT)]
 
     @staticmethod
     def _ask_head_text(rows: list[AskRow]) -> str:
-        """The head question, clipped to a length the bar can always hold.
+        """The head question, UNCLIPPED — the bar clips it against its own width.
 
-        Clipped HERE rather than in the widget, so the count and the words
-        around it are never what gets cut: the bar's job is to say that
-        something is waiting, and a question that ran to the card's edge would
-        take the count with it on a narrow terminal.
+        The clip used to happen here, at a fixed 48 cells, and that is what
+        design D5/D9 found: a constant cannot know the width the row ends up
+        with, so at 80x24 the copy overflowed its bar and pushed the chevron
+        off the right edge, while at 130 columns it truncated with 38 cells
+        spare. The widget owns the width, so the widget owns the clip (see
+        ``AskBar.render``); this says which question, not how much of it fits.
         """
-        from local_operator.tui.widgets.tool_card import truncate_cells
-
-        if not rows:
-            return ""
-        text = rows[0].head_question
-        if cell_len(text) <= ASK_BAR_HEAD_CELLS:
-            return text
-        return truncate_cells(text, ASK_BAR_HEAD_CELLS)
+        return rows[0].head_question if rows else ""
 
     def _queued_ask_session(self) -> Any:
         """The session the queued-ask OPS act on.
@@ -25487,12 +25588,21 @@ class OperatorApp(App[None]):
         # the same frame as the mount rather than on the next snapshot.
         self._paint_ask_bar()
 
-    def _collapse_asks(self, *, restore_draft: bool = True) -> None:
-        """Leave the EXPANDED state: take the surface down, give the composer back.
+    def _clear_ask_surface(self) -> None:
+        """Take the mounted card/list down and FORGET it — mode and drafts stay.
 
-        ``restore_draft=False`` is the session-swap path — see this section's
-        docstring: a switch must drop the surface without writing the previous
-        conversation's text into the incoming composer.
+        Split out of :meth:`_collapse_asks` because the swap between the two
+        EXPANDED surfaces (list → card, card → list) is not a change of mode:
+        ask mode stays on, the composer keeps routing to the ask, and the chat
+        draft stays stashed where it was.
+
+        That split is the fix for review round 1's BLOCKER: the swap used to
+        call ``_collapse_asks(restore_draft=False)``, which does not put the
+        stash back and then clears it unconditionally — so expanding the list
+        and picking a row silently destroyed the conversation draft the user
+        had been typing (``_sync_ask_composer`` is where the clear happens).
+        The n>1 path is the one the list exists for, so it was the ordinary
+        path losing the draft.
         """
         card = self._ask_card
         listing = self._ask_list
@@ -25513,6 +25623,18 @@ class OperatorApp(App[None]):
             self._unmount_prompt(card)
         if listing is not None:
             self._unmount_prompt(listing)
+
+    def _collapse_asks(self, *, restore_draft: bool = True) -> None:
+        """Leave the EXPANDED state: take the surface down, give the composer back.
+
+        ``restore_draft=False`` is the session-swap path — see this section's
+        docstring: a switch must drop the surface without writing the previous
+        conversation's text into the incoming composer.
+        """
+        self._clear_ask_surface()
+        # A collapse forgets which surface the user came from, so a later card
+        # opened fresh does not inherit a stale "Esc returns to the list".
+        self._ask_from_list = False
         if self._ask_mode:
             self._ask_mode = False
             self._sync_ask_composer(restore_draft=restore_draft)
@@ -25555,6 +25677,24 @@ class OperatorApp(App[None]):
         editor.placeholder = self._composer_placeholder_for(editor)
         return_focus_to_composer(self, editor)
 
+    def _ask_answer_active(self) -> bool:
+        """Whether the composer is currently the ANSWER box — the ONE condition.
+
+        Read by both the placeholder and the submit router, in place of the two
+        expressions that disagreed in review round 1 (MAJOR-2 / UX U1): the
+        router gated on ``_ask_mode and _ask_card is not None`` while the
+        placeholder gated on ``_ask_mode`` alone, so with the LIST up the
+        composer claimed "Enter sends it to the ask" and Enter sent the text to
+        the conversation instead.
+
+        The CARD is the answer surface, because an answer needs a question and
+        the card is what shows one. The list is a CHOOSER — its own keys pick
+        which ask to answer — so while it is up the composer is an ordinary
+        conversation box and its copy says so. (Its claim on the keyboard is a
+        separate question, answered by ``_focus_is_claimed``.)
+        """
+        return bool(self._ask_mode and self._ask_card is not None)
+
     def _composer_placeholder_for(self, editor: Any, *, connection: str = "") -> str:
         """The composer's placeholder for the CURRENT mode — one authority.
 
@@ -25563,6 +25703,13 @@ class OperatorApp(App[None]):
         ladder is how two sites come to disagree about which mode is on — the
         defect the bang-mode and aside placeholders have each already had to be
         repaired for.
+
+        NOT quite the one authority the name claims, and this note is the
+        honest version of a comment review round 1 (NIT-6) caught overstating
+        it: the credential arm still writes ``editor.placeholder`` directly
+        (the login prompt's own copy) and two sibling sites restate parts of
+        this ladder. This function owns the MODE ladder; folding those three in
+        is a separate, unrequested change.
 
         ``connection`` is the sidebar's connection sentence, and only the band
         path passes one: it is a variant of the RESTING copy ("Draft a
@@ -25575,15 +25722,28 @@ class OperatorApp(App[None]):
             return ASIDE_PLACEHOLDER
         if editor.shell_mode:
             return SHELL_PLACEHOLDER
-        if self._ask_mode:
+        if self._ask_answer_active():
             return ASK_ANSWER_PLACEHOLDER
         return "Draft a message…" if connection else editor.resting_placeholder
 
-    def _mount_ask_list(self) -> None:
-        """Put the open-ask list in the prompt host, replacing any card."""
-        if self._ask_card is not None or self._ask_list is not None:
-            self._collapse_asks(restore_draft=False)
-        widget = AskQueueList(self._ask_rows, widget_id="ask-queue-list")
+    def _mount_ask_list(self, highlight: str | None = None) -> None:
+        """Put the open-ask list in the prompt host, replacing any card.
+
+        ``highlight`` names the ask the cursor should start on, which is how a
+        card hands the user back to the row they came from: Escaping a card
+        used to drop them to the ministate with the highlight reset to row 1,
+        so with three asks they had to re-expand and re-hunt (UX round 1, U6).
+        """
+        # `_clear_ask_surface` and NOT `_collapse_asks`: the swap keeps ask mode
+        # on and the stash intact (review round 1, BLOCKER-1).
+        self._clear_ask_surface()
+        widget = AskQueueList(self._ask_rows, widget_id="ask-queue-list", now_ms=self._ask_now_ms())
+        if highlight:
+            widget.set_rows(self._ask_rows, now_ms=self._ask_now_ms())
+            for index, item in enumerate(self._ask_rows):
+                if item.ask_id == highlight:
+                    widget.select(index)
+                    break
         self._ask_list = widget
         self._enter_ask_mode()
         self._mount_prompt(widget)
@@ -25592,17 +25752,23 @@ class OperatorApp(App[None]):
         # for the CARD (the answer is typed there) and wrong here.
         widget.focus()
 
-    def _mount_ask_card(self, row: AskRow) -> None:
+    def _mount_ask_card(self, row: AskRow, *, from_list: bool = False) -> None:
         """Mount the picker for ONE queued ask, wired to the queue, not a future.
 
         ``on_settle`` is bound to the ASK rather than to the card, and that is
         the whole difference from the blocking path: the app is not resolving a
         parked future, it is writing an answer onto a durable row.
+
+        ``from_list`` records that the user picked this ask OUT of the list, so
+        Escaping the card can hand them back to the list they were working in
+        rather than all the way out (UX round 1, U6). It is interaction state
+        about one surface, so it lives beside the surface fields and is cleared
+        by every collapse.
         """
         from local_operator.harness.types import AskQuestion
 
-        if self._ask_card is not None or self._ask_list is not None:
-            self._collapse_asks(restore_draft=False)
+        # `_clear_ask_surface` and NOT `_collapse_asks`: see `_mount_ask_list`.
+        self._clear_ask_surface()
         try:
             questions = [AskQuestion.model_validate(dict(q)) for q in row.questions]
         except Exception:  # noqa: BLE001 - a malformed row must not break the dock
@@ -25618,12 +25784,13 @@ class OperatorApp(App[None]):
             questions,
             lambda answers, ask_id=row.ask_id: self._on_queue_ask_settle(ask_id, answers),
             widget_id=f"ask-queue-card-{row.ask_id}",
-            title="the agent is waiting for an answer",
+            title=self._ask_card_title(row),
             exit_hint=("esc", "collapse"),
         )
         draft = self._ask_drafts.pop(row.ask_id, None)
         self._ask_card = card
         self._ask_mounted_id = row.ask_id
+        self._ask_from_list = from_list
         self._enter_ask_mode()
         self._mount_prompt(card)
         if draft is not None:
@@ -25635,6 +25802,31 @@ class OperatorApp(App[None]):
                 card.restore_state(draft)
             except Exception:  # pragma: no cover - defensive
                 logger.debug("could not restore an ask draft", exc_info=True)
+
+    @staticmethod
+    def _ask_card_title(row: AskRow) -> str:
+        """What the card says above the questions — honest about the agent.
+
+        Design round 1 (D1, blocker) flagged the old string, "the agent is
+        waiting for an answer": in the queued model the tool returned a receipt
+        and the agent MOVED ON, so a card claiming it is waiting misstates both
+        the machine's state and the cost of delay (§5: "no surface may say
+        'notified' it cannot substantiate; agent-is-working ≠ waiting for you").
+        The timeout case says what is true for it (UX U9: the card kept the
+        waiting line after its own bar said "timed out").
+
+        The `?` mark is the ask family's glyph (``ASK_MARKER``), so the card
+        announces itself in the same register as the bar and the sidebar mark
+        instead of in a second one (design D10).
+        """
+        from local_operator.tui.widgets.ask_queue import ASK_MARKER
+
+        if row.status == STATUS_TIMED_OUT:
+            return (
+                f"{ASK_MARKER} this ask timed out — the agent moved on; "
+                "your answer still reaches it"
+            )
+        return f"{ASK_MARKER} the agent asked and moved on — your answer still reaches it"
 
     def _on_queue_ask_settle(self, ask_id: str, answers: dict[str, list[str]] | None) -> None:
         """The queued picker settled — submit a complete answer, else collapse.
@@ -25665,6 +25857,18 @@ class OperatorApp(App[None]):
                         str(outcome.get("error") or "the answer was refused"), "warning"
                     )
             self._ask_drafts.pop(ask_id, None)
+        elif self._ask_from_list and self._ask_list is None:
+            # A PARTIAL map means the user Escaped mid-walk (§5.0/D5: a
+            # back-out is never an answer). If they picked this ask out of the
+            # list, the back-out returns them TO the list they were choosing
+            # in, at the row they left — collapsing to minimized made them
+            # re-expand and re-hunt for their place (UX round 1, U6).
+            self._clear_ask_surface()
+            if self._ask_rows:
+                self._mount_ask_list(highlight=ask_id)
+            else:  # pragma: no cover - the fold emptied under the card
+                self._collapse_asks()
+            return
         # A submit collapses too: §5.0's "answering one collapses the surface
         # (TUI, which returns to work)". The card is already settled, so the
         # collapse only has to take it down and give the composer back.
@@ -25700,7 +25904,21 @@ class OperatorApp(App[None]):
             return
         outcome: Any = reader(ask_id, by="terminal")
         if not outcome.get("ok"):
-            self._system_notice(str(outcome.get("error") or "the ask was refused"), "warning")
+            self._ask_gesture_refusal(str(outcome.get("error") or "the ask was refused"))
+
+    def _ask_gesture_refusal(self, text: str) -> None:
+        """Report a refused `d`/`x` where the gesture happened, not in the transcript.
+
+        The refusal is correct and well-worded, but it used to land in the
+        transcript — which is scrolled away while the dock has the user's
+        attention, so the row looked like it had simply ignored the key (UX
+        round 1, U8). A toast is the same surface the picker's own refusals use,
+        and a stripped harness with no toast falls back to the notice.
+        """
+        try:
+            self.query_one(Toast).show(text, duration_ms=TOAST_FAILURE_MS)
+        except Exception:  # noqa: BLE001 — no toast in this harness; still say it
+            self._system_notice(text, "warning")
 
     def _dismiss_ask(self, ask_id: str) -> None:
         """Take a TIMED-OUT ask out of the view. Injects nothing, ever."""
@@ -25710,7 +25928,7 @@ class OperatorApp(App[None]):
             return
         outcome: Any = reader(ask_id, by="terminal")
         if not outcome.get("ok"):
-            self._system_notice(str(outcome.get("error") or "the ask was refused"), "warning")
+            self._ask_gesture_refusal(str(outcome.get("error") or "the ask was refused"))
 
     def on_ask_bar_toggled(self, message: AskBar.Toggled) -> None:
         """A click or Enter on the minimized bar: expand, or collapse if already up."""
@@ -25725,7 +25943,7 @@ class OperatorApp(App[None]):
         message.stop()
         row = next((item for item in self._ask_rows if item.ask_id == message.ask_id), None)
         if row is not None:
-            self._mount_ask_card(row)
+            self._mount_ask_card(row, from_list=True)
 
     def on_ask_queue_list_collapse(self, message: AskQueueList.Collapse) -> None:
         message.stop()
