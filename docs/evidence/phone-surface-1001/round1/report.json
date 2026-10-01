@@ -1,0 +1,96 @@
+{
+ "receipt:team": {
+  "status": 200,
+  "ok": true,
+  "detail": "release: Led by manager \u00b7 2 members",
+  "tone": "neutral",
+  "refused": false
+ },
+ "receipt:mcp": {
+  "status": 200,
+  "ok": true,
+  "detail": "2 MCP servers: alpha-stdio, beta-oauth",
+  "tone": "neutral",
+  "refused": false
+ },
+ "receipt:agent": {
+  "status": 200,
+  "ok": true,
+  "detail": "aida: role \u00b7 packaged \u00b7 proactive \u00b7 architect: role \u00b7 packaged \u00b7 coder: role \u00b7 packaged \u00b7 copy-reviewer: role \u00b7 packaged \u00b7 designer: role \u00b7 packaged \u00b7 manager: role \u00b7 packaged \u00b7 reviewer: role \u00b7 packaged \u00b7 scout: role \u00b7 packaged \u00b7 tui-designer: role \u00b7 packaged \u00b7 ux-reviewer: role \u00b7 packaged",
+  "tone": "neutral",
+  "refused": false
+ },
+ "receipt:context": {
+  "status": 200,
+  "ok": true,
+  "detail": "Instructions: ~0 \u00b7 Tool inventory: ~0 \u00b7 Tool schemas: ~4.4k \u00b7 Environment: ~0 \u00b7 Skills / MCP / goal: ~0 \u00b7 Messages: ~0 \u00b7 Total: ~4.4k / 100k (4.4%)",
+  "tone": "neutral",
+  "refused": false
+ },
+ "receipt:goal": {
+  "status": 200,
+  "ok": true,
+  "detail": "goal set",
+  "tone": "success",
+  "refused": false
+ },
+ "receipt:effort": {
+  "status": 200,
+  "ok": true,
+  "detail": "effort is not adjustable on test/e2e-model",
+  "tone": "neutral",
+  "refused": false
+ },
+ "refusal_receipt": {
+  "text": "effort is not adjustable on test/e2e-model",
+  "cls": "rounded-sm border px-3 py-2 text-body-sm border-control bg-elevated text-ink",
+  "bg": "rgb(40, 35, 24)",
+  "fg": "rgb(241, 238, 230)",
+  "draft": ""
+ },
+ "refused_argument": {
+  "text": "usage: /model <provider>/<model-id> (e.g. openrouter/deepseek/deepseek-chat)",
+  "cls": "rounded-sm border px-3 py-2 text-body-sm border-control bg-elevated text-ink",
+  "bg": "rgb(40, 35, 24)",
+  "fg": "rgb(241, 238, 230)",
+  "draft": "/model nonexistent-model-xyz"
+ },
+ "success_receipt": {
+  "text": "goal set",
+  "cls": "rounded-sm border px-3 py-2 text-body-sm border-success-border bg-success-wash text-success",
+  "bg": "rgb(22, 40, 29)",
+  "fg": "rgb(87, 199, 133)",
+  "draft": ""
+ },
+ "team_receipt": {
+  "text": "release: Led by manager \u00b7 2 members",
+  "cls": "rounded-sm border px-3 py-2 text-body-sm border-control bg-elevated text-ink",
+  "bg": "rgb(40, 35, 24)",
+  "fg": "rgb(241, 238, 230)",
+  "draft": ""
+ },
+ "session_control_off": {
+  "pressed": "false",
+  "text": "wide",
+  "cls": "flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-md border text-meta select-none border-control bg-surface text-ink-muted active:bg-elevated px-1.5",
+  "inner": 390,
+  "stored": null,
+  "meta": "width=device-width, initial-scale=1, viewport-fit=cover"
+ },
+ "session_control_on": {
+  "pressed": "true",
+  "text": "wide",
+  "cls": "flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-md border text-meta select-none border-accent bg-accent text-on-accent active:bg-accent-active px-1.5",
+  "inner": 512,
+  "stored": "1",
+  "meta": "width=512, viewport-fit=cover"
+ },
+ "list_control": {
+  "pressed": "true",
+  "text": "wide",
+  "cls": "flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-md border text-meta select-none border-accent bg-accent text-on-accent active:bg-accent-active",
+  "inner": 512,
+  "stored": "1",
+  "meta": "width=512, viewport-fit=cover"
+ }
+}
