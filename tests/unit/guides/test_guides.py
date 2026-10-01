@@ -10,6 +10,7 @@ from typing import Any, cast
 import pytest
 
 from local_operator.guides import discover_guides, make_guide_resolver
+from local_operator.projects import DESCRIPTION_MAX
 from local_operator.prompts_api import render_template
 from local_operator.scratchpad import SCRATCHPAD_PATH_ENV
 from local_operator.session_factory import (
@@ -332,6 +333,24 @@ async def test_custom_instructions_task_routes_to_the_configuration_guide(
     ):
         selected = {guide.name for guide in await index.select(query)}
         assert "configuration" in selected, query
+
+
+def test_the_projects_guide_states_the_description_cap_the_code_enforces() -> None:
+    """Issue #1815 (review round 1, NIT-1 / D5): the guide is the agent-facing
+    contract for the field, and it states the cap in TWO places. Both are read
+    against ``DESCRIPTION_MAX`` — the constant the tool's schema text and the
+    refusal are built from — so a future cap move cannot leave the guide
+    advertising a number nothing enforces.
+    """
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    body = resolver("guide://projects")
+
+    assert body is not None
+    stated = [int(found) for found in re.findall(r"(\d+) characters max", body)]
+    # Both phrasings, not just the first: the guide says it in the create bullet
+    # and again in the field reference.
+    assert len(stated) >= 2
+    assert set(stated) == {DESCRIPTION_MAX}
 
 
 def test_mobile_guide_requires_a_password_delivery_ask() -> None:

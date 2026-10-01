@@ -18,6 +18,7 @@ import pytest
 from local_operator.harness.types import ToolContext
 from local_operator.projects import (
     DESCRIPTION_MAX,
+    PROGRESS_MAX,
     PROJECT_PROGRESS_STALE_S,
     ProjectRegistry,
 )
@@ -129,13 +130,14 @@ async def test_create_accepts_multi_paragraph_markdown_descriptions(context, reg
 @pytest.mark.asyncio
 async def test_an_over_cap_description_is_refused_with_the_remedy(context) -> None:
     """Issue #1815: no bare pydantic sentence — field, submitted size, exact
-    cap and the remedy, so the next call is not a blind retry."""
+    cap and the remedy, so the next call is not a blind retry. The sentence uses
+    the sibling refusals' ``(submitted n)`` shape (design review round 1, D4)."""
     result = await execute_project(
         "tc", {"op": "create", "name": "too-long", "description": "D" * 4000}, None, None, context
     )
     assert result.is_error
-    assert "project 'description' is 4000 characters" in result.text
-    assert "cap is 2000 characters" in result.text
+    assert f"project 'description' is over the {DESCRIPTION_MAX}-character cap" in result.text
+    assert "(submitted 4000)" in result.text
     assert "progress lines (op='update')" in result.text
     assert "String should have at most" not in result.text
 
@@ -147,8 +149,44 @@ async def test_update_refuses_an_over_cap_description_with_the_remedy(context) -
         "tc", {"op": "update", "name": "alpha", "description": "D" * 2001}, None, None, context
     )
     assert result.is_error
-    assert "project 'description' is 2001 characters" in result.text
-    assert "cap is 2000 characters" in result.text
+    assert f"project 'description' is over the {DESCRIPTION_MAX}-character cap" in result.text
+    assert "(submitted 2001)" in result.text
+
+
+@pytest.mark.asyncio
+async def test_an_over_cap_progress_is_refused_with_the_remedy(context) -> None:
+    """Issue #1815 / design review round 1, D2: the description refusal tells
+    the writer to keep the long detail in progress lines, so an over-cap
+    progress line is the FIRST thing that remedy reaches. It used to answer
+    with the store's bare pydantic sentence — the message this issue exists to
+    kill — and it is refused for BOTH write verbs that carry a line."""
+    created = await execute_project(
+        "tc",
+        {"op": "create", "name": "alpha", "progress": "y" * (PROGRESS_MAX + 200)},
+        None,
+        None,
+        context,
+    )
+    assert created.is_error
+    assert f"project 'progress' is over the {PROGRESS_MAX}-character cap" in created.text
+    assert f"(submitted {PROGRESS_MAX + 200})" in created.text
+    assert "earlier updates stay in the history" in created.text
+    assert "String should have at most" not in created.text
+
+    await call(context, op="create", name="beta")
+    updated = await execute_project(
+        "tc",
+        {"op": "update", "name": "beta", "progress": "y" * (PROGRESS_MAX + 1)},
+        None,
+        None,
+        context,
+    )
+    assert updated.is_error
+    assert f"project 'progress' is over the {PROGRESS_MAX}-character cap" in updated.text
+    assert f"(submitted {PROGRESS_MAX + 1})" in updated.text
+    # The boundary the cap names: exactly at it is accepted.
+    at_cap = await call(context, op="update", name="beta", progress="y" * PROGRESS_MAX)
+    assert "progress" in at_cap and not at_cap.startswith("invalid")
 
 
 def test_the_schema_text_names_the_cap_the_refusal_enforces() -> None:

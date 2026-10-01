@@ -954,6 +954,13 @@ BUDGET_BILLED_TOKENS = 37_756
 #:   head (this branch)               103,961 chars = ~37,396 billed
 #:     = +1 char = +0.4 billed — the 240 -> 2000 rename, nothing else.
 #:
+#: Review round 1 then moved the REFUSAL copy (remedy phrasing) and the
+#: ``@project:`` element's cut order — all of it runtime text, so the delta
+#: above is untouched: re-measured after that round this script still reads
+#: 103,961 chars = ~37,396 billed, and "over the ...-character cap" appears
+#: nowhere in the ``project`` tool's serialized schema (checked directly
+#: against that JSON), which is the only text the ratchet can move.
+#:
 #: NO RAISE: a one-character edit cannot be why the permanent per-call ceiling
 #: moves, and it does not breach the binding reading — by the recorded
 #: ~762-char platform gap that lives in ``tool_schemas``, CI's head is ~37,122

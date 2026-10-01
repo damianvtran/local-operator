@@ -39,6 +39,7 @@ from local_operator.projects import (
     DESCRIPTION_MAX,
     HISTORY_DEFAULT_TAIL,
     MILESTONES_MAX,
+    PROGRESS_MAX,
     PROJECT_STATUSES,
     SESSIONS_MAX,
     UPDATES_MAX,
@@ -385,18 +386,31 @@ def _project_edit(params: ProjectParams, *, creating: bool) -> ProjectEdit:
     the caller never mentioned, and an explicit ``""``/``None`` must stay
     distinguishable from an absent one (the clear-vs-untouched vocabulary).
 
-    An over-cap description is refused HERE, before the store's own
+    An over-cap TEXT field is refused HERE, before the store's own
     ``max_length`` backstop can answer with the bare pydantic sentence
     ("String should have at most 2000 characters") — the refusal that cost a
-    reporter two blind retries (issue #1815). This one names the field, the
-    submitted size, the exact limit and the remedy.
+    reporter two blind retries (issue #1815). Each one names the field, the
+    submitted size, the exact limit and the remedy, in the same
+    ``(submitted n)`` shape the sibling tools' refusals use.
+
+    BOTH prose fields are checked (`progress` as well as `description`): the
+    description's remedy points the writer at progress lines, so a long
+    progress line is the FIRST thing that remedy reaches — leaving it to the
+    store's backstop handed back the same bare sentence this issue is about
+    (design review round 1, D2).
     """
     description = params.description
     if description is not None and len(description) > DESCRIPTION_MAX:
         raise ValueError(
-            f"project 'description' is {len(description)} characters; the cap is "
-            f"{DESCRIPTION_MAX} characters — shorten it, or keep the long detail "
+            f"project 'description' is over the {DESCRIPTION_MAX}-character cap "
+            f"(submitted {len(description)}) — shorten it, or keep the long detail "
             "in progress lines (op='update'), which the history keeps."
+        )
+    progress = params.progress
+    if progress is not None and len(progress) > PROGRESS_MAX:
+        raise ValueError(
+            f"project 'progress' is over the {PROGRESS_MAX}-character cap "
+            f"(submitted {len(progress)}) — shorten it; earlier updates stay in the history."
         )
     payload: dict[str, Any] = {}
     # The params only THIS op dispatches on; everything else is a row field the
