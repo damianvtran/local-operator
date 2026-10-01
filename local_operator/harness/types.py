@@ -1062,8 +1062,7 @@ class AskQuestion(BaseModel):
         default=False,
         description=(
             "With secret=true, ALSO save the answer to the operator's encrypted "
-            "long-term store so it outlives this session. Set it when the credential "
-            "will be needed again later; leave it off for a one-off."
+            "long-term store so it outlives this session (leave it off for a one-off)."
         ),
     )
 
