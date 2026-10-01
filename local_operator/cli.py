@@ -922,8 +922,16 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "sessions",
         help=(
             "List active lop sessions and their resource usage; "
+            "`sessions resume` reopens a set of stored sessions (paused/failed/all) "
+            "in one bounded batch; "
             "`sessions cleanup` previews or runs the session cleanup policy; "
             "`sessions reclaim` previews or ends runtimes nothing can reach"
+        ),
+        description=(
+            "List active lop sessions and their resource usage; "
+            "`sessions resume` reopens a set of stored sessions in one command; "
+            "`sessions cleanup` previews or runs the session cleanup policy; "
+            "`sessions reclaim` previews or ends runtimes nothing can reach."
         ),
         parents=[parent_parser],
     )
@@ -1103,6 +1111,83 @@ def build_cli_parser() -> argparse.ArgumentParser:
         ),
     )
     reclaim_parser.add_argument("--json", action="store_true", help="machine-readable output")
+
+    # `lop sessions resume`: the BULK door — resume a set of stored sessions in
+    # one command. The operator escalation (2026-10-01): resuming 15+ paused/
+    # failed sessions one `lop exec --resume` at a time took ~10 minutes and
+    # had to be babysat, because every invocation pays its own launcher
+    # startup and readiness wait — serially.
+    #
+    # THE SETS ARE THE LISTING'S OWN WORDS (FAILED_OUTCOME_KINDS /
+    # PAUSED_OUTCOME_KINDS in info/collect.py, the constants behind
+    # `lop sessions --paused/--failed`): `--paused` is {interrupted, retired},
+    # `--failed` is {error}, given together they are the union, and each is a
+    # complete selection on its own (the listing's "implies --all" reading —
+    # these flags never need an accompanying --all). `--all` widens to every
+    # stored, non-live session. Live sessions are excluded by the selection
+    # itself (the same rule the stored listing uses), so a running session is
+    # never a candidate.
+    #
+    # THE DEFAULT CAP IS DELIBERATE: a bare `--all` on a well-used store can
+    # match thousands of directories, and resuming is an ACTION, so the
+    # selection is capped (newest first) unless the caller raises --limit. The
+    # cap is named in the output whenever it truncated a set.
+    resume_parser = sessions_subparsers.add_parser(
+        "resume",
+        help="Resume a set of stored sessions in one command (bulk)",
+        description=(
+            "Resume stored sessions without a shell loop: `--paused` (the "
+            "interrupted/retired pair), `--failed` (error), or `--all` (every "
+            "stored, non-live session). Newest first, capped at 20 unless "
+            "--limit is given. Each session is reopened headlessly as `lop exec "
+            "--resume <id> --background` with --message (default: a continuation). "
+            "Children run with bounded concurrency (6 at a time) and print one "
+            "line per session as it resolves. Exit codes: 0 = every selected "
+            "session resumed; 1 = at least one failed or was unresolved at the "
+            "bound; 2 = misuse (no set selected)."
+        ),
+        parents=[parent_parser],
+    )
+    resume_parser.add_argument(
+        "--paused",
+        action="store_true",
+        help=(
+            "select stored sessions whose last outcome was interrupted/retired "
+            "(the 'Unseen interruption' pair; implies the store scope)"
+        ),
+    )
+    resume_parser.add_argument(
+        "--failed",
+        action="store_true",
+        help="select stored sessions whose last outcome was error (implies the store scope)",
+    )
+    resume_parser.add_argument(
+        "--all",
+        action="store_true",
+        dest="all_sessions",
+        help="select every stored, non-live session (newest first, capped)",
+    )
+    resume_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the selected set (newest first) and resume nothing",
+    )
+    resume_parser.add_argument(
+        "--limit",
+        type=_positive_int,
+        default=None,
+        metavar="N",
+        help="cap the set at the N newest matches (default: 20)",
+    )
+    resume_parser.add_argument(
+        "--message",
+        default=None,
+        metavar="TEXT",
+        help=(
+            "the message each resumed session runs (default: a continuation — "
+            "'Continue the task from where it left off.')"
+        ),
+    )
 
     # `lop sessions move`: hand a conversation to another device, or bring one
     # home. A sub-subcommand rather than a flag on `sessions` because it is an
@@ -4898,6 +4983,179 @@ def _remote_listing(*, peer: str = "", all_peers: bool = False) -> _RemoteListin
         return _local_relay_refusal()
 
 
+def sessions_resume_command(args: argparse.Namespace) -> int:
+    """``lop sessions resume [--paused] [--failed] [--all] [--dry-run]``.
+
+    Resumes a SET of stored sessions in one command: enumerate once, then
+    reopen each as its own ``lop exec --resume --background`` child under a
+    bounded capacity, printing one line per session the moment it resolves.
+    The set vocabulary, the enumeration rule and the capacity reasoning live
+    in ``session/bulk_resume.py`` (the module docstring carries the
+    measurements); this function owns only the CLI's rendering and exit codes.
+
+    EXIT CODES (scripts depend on them):
+
+    * ``0`` — every selected session resumed (a resolved run, or a job still
+      truthfully reading ``running`` at its resolution); an empty set is also
+      0 — nothing matched is an answer, not a failure;
+    * ``1`` — at least one session failed, was refused, or was unresolved at
+      the readiness bound (each is a loud line naming the session and the
+      follow-up command);
+    * ``2`` — misuse: no set selected, or an empty ``--message``.
+
+    ``--dry-run`` prints the selected set (newest first, with ages) and
+    resumes nothing; it never spawns, so it also skips the PATH prime below.
+    """
+    import asyncio
+
+    from local_operator.helpers import setup_cross_platform_environment
+    from local_operator.resume import format_age, session_name
+    from local_operator.session.bulk_resume import (
+        DEFAULT_RESUME_MESSAGE,
+        RESUME_BATCH_CONCURRENCY,
+        RESUME_DEFAULT_LIMIT,
+        ResumeOutcome,
+        live_session_ids,
+        resume_sessions,
+        select_resume_candidates,
+    )
+
+    paused = bool(getattr(args, "paused", False))
+    failed = bool(getattr(args, "failed", False))
+    all_sessions = bool(getattr(args, "all_sessions", False))
+    if not (paused or failed or all_sessions):
+        print(
+            "choose a set to resume: --paused (interrupted/retired), "
+            "--failed (error), or --all (every stored, non-live session); "
+            "add --dry-run to preview the selection.",
+            file=sys.stderr,
+        )
+        return 2
+    message = args.message if args.message is not None else DEFAULT_RESUME_MESSAGE
+    if not message.strip():
+        print(
+            "--message must be a non-empty message: a headless resume runs a "
+            "prompt, and an empty one is refused by `lop exec` the same way.",
+            file=sys.stderr,
+        )
+        return 2
+    limit = args.limit if args.limit is not None else RESUME_DEFAULT_LIMIT
+
+    root = config_dir()
+    try:
+        exclude = live_session_ids(root)
+        selection = select_resume_candidates(
+            root,
+            paused=paused,
+            failed=failed,
+            all_sessions=all_sessions,
+            limit=limit,
+            exclude_ids=exclude,
+        )
+    except Exception as exc:  # noqa: BLE001 — a resume must report, not traceback
+        print(f"could not enumerate the store: {exc}", file=sys.stderr)
+        return 1
+    sessions_dir = root / "sessions"
+    rows = [
+        (session_id, session_name(sessions_dir / session_id) or "(unnamed)")
+        for session_id, _mtime in selection.sessions
+    ]
+    mtime_by_id = dict(selection.sessions)
+    capped = ""
+    if selection.matched > len(selection.sessions):
+        capped = (
+            f" (newest {len(selection.sessions)} of {selection.matched} matched; "
+            f"raise --limit to act on more)"
+        )
+
+    if args.dry_run:
+        for session_id, name in rows:
+            age = format_age(max(0.0, time.time() - mtime_by_id[session_id]))
+            print(f'  {session_id}  "{name}"  ({age})')
+        if not rows:
+            print("no sessions matched the selection.")
+        else:
+            print(f"{len(rows)} session(s) selected{capped}; nothing resumed (dry run).")
+        return 0
+
+    if not rows:
+        print(f"no sessions matched the selection{capped}; nothing to resume.")
+        return 0
+
+    # THE ONE-TIME PATH PRIME. Children are `lop exec` invocations, and each
+    # would otherwise run its own login-shell round-trip (measured 0.9-1.3 s
+    # on this host — the single most expensive step of a child's startup).
+    # Reconciling PATH here, ONCE, marks the environment (helpers.
+    # PATH_PRIMED_ENV) so every child inherits the answer and skips the
+    # capture; see ``setup_cross_platform_environment`` for why inheritance is
+    # a sound substitute for a cache.
+    setup_cross_platform_environment()
+
+    sets = []
+    if paused:
+        sets.append("paused")
+    if failed:
+        sets.append("failed")
+    if all_sessions:
+        sets.append("all")
+    print(
+        f"resuming {len(rows)} session(s) ({'+'.join(sets)}, newest first){capped} "
+        f"— {RESUME_BATCH_CONCURRENCY} at a time, message: {message!r}",
+        flush=True,
+    )
+
+    started = time.monotonic()
+    reported: set[str] = set()
+
+    def _render_line(outcome: ResumeOutcome) -> None:
+        # One line per session AS IT RESOLVES. ``ok`` means the worker was seen
+        # live (or its run already completed); anything else carries the reason
+        # — a refusal, a worker failure, or the readiness bound — inline.
+        reported.add(outcome.session_id)
+        if outcome.ok:
+            print(
+                f'  ok    {outcome.session_id}  "{outcome.name}"  '
+                f"({outcome.status}, job {outcome.job_id})",
+                flush=True,
+            )
+        else:
+            print(
+                f'  FAIL  {outcome.session_id}  "{outcome.name}"  — '
+                f"{outcome.detail or outcome.status}",
+                flush=True,
+            )
+
+    def progress(outcome: ResumeOutcome) -> None:
+        _render_line(outcome)
+
+    outcomes = asyncio.run(
+        resume_sessions(
+            rows,
+            message=message,
+            env=dict(os.environ),
+            progress=progress,
+        )
+    )
+    # The callback above is the LIVE half; this is the fallback that keeps the
+    # report complete if an outcome ever arrives without one (the runner
+    # reports progress for every resolved outcome, but a future code path
+    # that forgets must not cost a session its line — the summary counts
+    # alone would then disagree with what was printed).
+    for outcome in outcomes:
+        if outcome.session_id not in reported:
+            _render_line(outcome)
+    wall = time.monotonic() - started
+    ok = sum(1 for outcome in outcomes if outcome.ok)
+    unresolved = sum(1 for outcome in outcomes if outcome.status == "unresolved")
+    failed_count = len(outcomes) - ok - unresolved
+    print(
+        f"{len(outcomes)} session(s): {ok} ok, {failed_count} failed, "
+        f"{unresolved} unresolved — {wall:.1f}s",
+        flush=True,
+    )
+    return 0 if ok == len(outcomes) else 1
+
+
 def _sessions_move_words(
     result: dict[str, Any], *, session_id: str, to: str, engage_on_arrival: bool = False
 ) -> list[str]:
@@ -5146,6 +5404,9 @@ def sessions_command(args: argparse.Namespace) -> int:
 
     if getattr(args, "sessions_command", None) == "reclaim":
         return sessions_reclaim_command(args)
+
+    if getattr(args, "sessions_command", None) == "resume":
+        return sessions_resume_command(args)
 
     # The two mesh verbs. Both reach the relay, so both are refusals rather than
     # no-ops on a device with no relay running — which is the state of every
@@ -11172,6 +11433,22 @@ def _maybe_brand_process(args: argparse.Namespace) -> None:
     """
     subcommand = getattr(args, "subcommand", None)
     if subcommand not in _BRANDED_SUBCOMMANDS:
+        return
+    if subcommand == "exec" and (
+        getattr(args, "background", False) or getattr(args, "status", None)
+    ):
+        # THE SHORT-LIVED EXEC PATHS ARE NOT WORTH A RE-EXEC (measured).
+        # ``lop exec --background`` spawns a detached worker and exits once the
+        # readiness wait resolves (seconds); ``lop exec --status`` exits on the
+        # first read. Neither process lingers in Activity Monitor for the
+        # re-exec's +~200 ms to buy a name anyone sees -- and the WORKER, the
+        # process whose row actually matters, is born branded regardless:
+        # ``exec_mode`` spawns it with ``executable=`` set to the branded
+        # image via ``procname.spawn_identity``. A bulk resume pays this
+        # re-exec ONCE PER CHILD, so skipping it saves the interpreter restart
+        # and its re-import on every one of N launches. Foreground ``lop exec``
+        # (the run itself in this process) keeps the brand, and so does every
+        # other subcommand above.
         return
     procname.reexec_branded(_process_label(args))
 

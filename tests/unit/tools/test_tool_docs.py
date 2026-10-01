@@ -105,6 +105,15 @@ _WALK_DEPTH_CAP = 2
 #: ``help`` op's enum value) and the eval failure notice — and they were
 #: re-measured through this file's own renderer, not pasted from another
 #: machine. Every other entry is byte-identical to #1862's table.
+#:
+#: RE-MEASURED AGAIN 2026-10-01 by ``feat/sessions-bulk-resume-1001`` (the
+#: bulk-resume SET form): ``sessions`` 738 -> 850 is the ONLY entry that
+#: moved, and it moved for the four new accepted inputs on ``resume``
+#: (``paused``/``failed``/``all``/``dry_run``, plus ``limit`` joining the
+#: op's set) and the rewritten summary/refusal lines — the ``op='help'``
+#: reference is exactly where the added vocabulary is supposed to land, one
+#: read away instead of on every request. Re-measured through this file's own
+#: renderer; every other entry is byte-identical.
 MEASURED_TOKENS: dict[str, int] = {
     "agent": 687,
     "ask": 837,
@@ -128,7 +137,7 @@ MEASURED_TOKENS: dict[str, int] = {
     "read_variable": 74,
     "secret": 209,
     "send": 614,
-    "sessions": 738,
+    "sessions": 850,
     "task": 422,
     "team": 540,
     "team_delete": 93,

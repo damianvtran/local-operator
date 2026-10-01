@@ -13448,11 +13448,26 @@ class SessionsParams(BaseModel):
         default=True,
         description="spawn/resume: detach (v1's only value).",
     )
+    # --- bulk resume: the SET form of `resume` (2026-10-01) ------------------
+    # The single form keeps its shape byte-for-byte: these fields select FROM
+    # the store instead of addressing one session, so the two forms are
+    # mutually exclusive by construction (the refusals say so). Descriptions
+    # are deliberately terse — the schema rides every request, and the full
+    # vocabulary lives in the `help` reference.
+    paused: bool = Field(default=False, description="resume set: interrupted/retired.")
+    failed: bool = Field(default=False, description="resume set: error.")
+    all: bool = Field(default=False, description="resume set: all stored, non-live.")
+    dry_run: bool = Field(default=False, description="resume set: preview; starts nothing.")
     include_stored: bool = Field(
         default=False,
         description="list: include stored (not running) sessions.",
     )
-    limit: int = Field(default=20, ge=1, le=100, description="list: max rows.")
+    limit: int = Field(
+        default=20,
+        ge=1,
+        le=100,
+        description="list: max rows; resume: cap on the set.",
+    )
     query: str | None = Field(
         default=None,
         description="list: search stored sessions by name/content; peek: locate a step.",
@@ -13490,7 +13505,21 @@ _SESSIONS_OP_FIELDS: dict[str, frozenset[str]] = {
     "spawn": frozenset(
         {"op", "prompt", "name", "team", "profile", "model", "visibility", "background"}
     ),
-    "resume": frozenset({"op", "session", "target", "pid", "prompt", "background"}),
+    "resume": frozenset(
+        {
+            "op",
+            "session",
+            "target",
+            "pid",
+            "prompt",
+            "background",
+            "limit",
+            "paused",
+            "failed",
+            "all",
+            "dry_run",
+        }
+    ),
     "stop": frozenset({"op", "session", "target", "pid"}),
     "peek": frozenset({"op", "session", "target", "pid", "query"}) | _SESSIONS_PEEK_FIELDS,
     # ``help`` reads nothing: the reference is static, so an address or a
@@ -13590,7 +13619,8 @@ def _sessions_tool_description() -> str:
         f" Inputs per op (anything else is refused) — {summary}."
         " `spawn` opens a listed workstream for USER-requested work"
         " (`visibility='ephemeral'` hides a throwaway run); `resume` reopens a"
-        " stored/stopped session headlessly; `stop` ends gracefully; `peek` reads a"
+        " stored/stopped session headlessly, or a SET (`paused`/`failed`/`all`)"
+        " as a bounded batch; `stop` ends gracefully; `peek` reads a"
         " transcript window. Address exactly one of `session` (id), `target`"
         " (name/cwd) or `pid`. Steering mid-turn: `send` now=True."
     )
@@ -13652,12 +13682,17 @@ _SESSIONS_OP_DOCS: dict[str, _SessionsOpDoc] = {
     ),
     "resume": _SessionsOpDoc(
         summary="reopen a stored/stopped session headlessly and report what was"
-        " opened; the receipt names the session, job and pid once published.",
+        " opened; the receipt names the session, job and pid once published. Or"
+        " reopen a SET — `paused` (interrupted/retired), `failed` (error), `all`"
+        " (every stored, non-live session; capped by `limit`) — as a bounded"
+        " batch with a per-session ok/fail outcome; `dry_run` previews the set.",
         example="sessions(op='resume', session='a1b2c3d4e5f6', prompt='continue')",
         refusals=(
-            "needs an address and `prompt`; a session already open elsewhere is"
-            " refused by its lease; the calling session cannot resume itself;"
-            " `visibility` is fixed at creation and cannot be re-stamped.",
+            "the single form needs an address and `prompt`; the set form takes no"
+            " address and defaults `prompt` to a continuation; a session already"
+            " open elsewhere is refused by its lease; the calling session cannot"
+            " resume itself; `visibility` is fixed at creation and cannot be"
+            " re-stamped.",
         ),
     ),
     "stop": _SessionsOpDoc(
@@ -13858,8 +13893,23 @@ def _sessions_validation_error(params: SessionsParams) -> str | None:
     op = params.op
     given = params.model_fields_set
 
+    # THE SET FORM of resume (2026-10-01): a selector turns `resume` into a
+    # bounded batch over the store, which flips three rules below — no address
+    # may accompany it, `prompt` becomes optional (it defaults to a
+    # continuation), and `dry_run` becomes meaningful. Computed from VALUES,
+    # not from `given`: a selector passed `False` selects nothing and is not a
+    # set form, and letting it flip the rules would let `paused=False` smuggle
+    # a second personality past every check.
+    batch = op == "resume" and (params.paused or params.failed or params.all)
+
     if op in ("spawn", "resume"):
-        if params.prompt is None or not params.prompt.strip():
+        if batch:
+            if "prompt" in given and (params.prompt is None or not params.prompt.strip()):
+                return (
+                    "`prompt` must be a non-empty message when given; omit it for the "
+                    "default continuation ('Continue the task from where it left off.')."
+                )
+        elif params.prompt is None or not params.prompt.strip():
             return (
                 f"{op} needs `prompt`: the message the opened run executes. A headless "
                 "exec refuses a prompt-less run the same way."
@@ -13873,6 +13923,30 @@ def _sessions_validation_error(params: SessionsParams) -> str | None:
             )
     elif "prompt" in given:
         return _sessions_stray_field_refusal(op, "`prompt` applies to spawn/resume only.")
+
+    if batch:
+        # A set and an address are two different requests; composing them is the
+        # misspelled-intent shape this validator exists for. The check reads
+        # VALUES — an explicitly-null `session` names no session and does not
+        # conflict with the set.
+        addressed = sorted(
+            field
+            for field in _SESSIONS_ADDRESS_FIELDS
+            if field in given and getattr(params, field) is not None
+        )
+        if addressed:
+            return _sessions_stray_field_refusal(
+                op,
+                f"a set selection takes no `{addressed[0]}` — drop it, or drop "
+                "`paused`/`failed`/`all` and address ONE session.",
+            )
+
+    if op == "resume" and params.dry_run and not batch:
+        return (
+            "`dry_run` needs a set selection: it previews the sessions that "
+            "`paused`/`failed`/`all` would resume. A single resume has one target "
+            "and nothing to preview."
+        )
 
     if op == "resume" and "visibility" in given:
         # The immutability sentence (§5.3): origin.json is written once, at
@@ -13900,6 +13974,10 @@ def _sessions_validation_error(params: SessionsParams) -> str | None:
             )
         if field == "background":
             return _sessions_stray_field_refusal(op, "`background` applies to spawn/resume only.")
+        if field in ("paused", "failed", "all", "dry_run"):
+            return _sessions_stray_field_refusal(op, f"`{field}` applies to op='resume' only.")
+        if field == "limit":
+            return _sessions_stray_field_refusal(op, "`limit` applies to list/resume only.")
         if field in _SESSIONS_PEEK_FIELDS:
             return _sessions_stray_field_refusal(op, f"`{field}` applies to op='peek' only.")
         if op == "list":
@@ -13913,7 +13991,7 @@ def _sessions_validation_error(params: SessionsParams) -> str | None:
         if refusal is not None:
             return refusal
 
-    if op in _SESSIONS_TARGET_OPS:
+    if op in _SESSIONS_TARGET_OPS and not batch:
         provided = [
             field
             for field in _SESSIONS_ADDRESS_FIELDS
@@ -13978,6 +14056,28 @@ def _describe_sessions_approval(args: dict[str, Any], cwd: str) -> str:
     if op == "stop":
         return f"stop {address}: ends its current run and releases the session lease"
     if op == "resume":
+        sets_selected = [
+            label
+            for flag, label in (
+                ("paused", "paused"),
+                ("failed", "failed"),
+                ("all", "all stored"),
+            )
+            if args.get(flag)
+        ]
+        if sets_selected:
+            # The batch form: say what it will do to how many, so the prompt
+            # can be decided in one glance (a batch starts one runtime per
+            # selected session — the biggest commitment this tool makes).
+            words = " + ".join(sets_selected)
+            cap = args.get("limit")
+            cap_note = f", cap {cap}" if isinstance(cap, int) and cap > 0 else ""
+            if args.get("dry_run"):
+                return f"review the {words} session set{cap_note}: resumes nothing (dry run)"
+            return (
+                f"resume the {words} session set{cap_note}: starts one headless run "
+                "per selected session"
+            )
         return f"resume {address}: reopens its transcript headlessly"
     return op or "sessions"
 
@@ -15711,6 +15811,170 @@ async def _sessions_open(
     return _text(tool_call_id, "sessions", _sessions_open_body(params, details), details=details)
 
 
+async def _sessions_resume_batch(
+    tool_call_id: str,
+    params: SessionsParams,
+    context: ToolContext | None,
+) -> ToolResult:
+    """The SET form of `resume`: enumerate once, reopen each, report per session.
+
+    WHY THE SET FORM LIVES ON `resume` AND NOT A NEW OP (the scout's finding,
+    2026-10-01): resuming one session and resuming N is the same act with the
+    same guards and the same receipts — only the ADDRESS differs (a selector
+    over the store instead of an id). A second op would have forked the
+    approval story, the tier, the description budget and the drift table for
+    no behavioural difference.
+
+    THE MECHANICS ARE SHARED, NOT REIMPLEMENTED (``session/bulk_resume.py``):
+    the selection is the listing's own walker filtered by the listing's own
+    outcome sets, live sessions are excluded by the same rule the stored
+    listing uses, and each child is the real CLI (``lop exec --resume
+    --background``) under a bounded capacity — so every refusal and receipt a
+    single resume gets, a batch child gets too, and one session's failure
+    (say, a lease refusal) is one loud line rather than an aborted batch.
+
+    ``dry_run`` prints the selected set and starts nothing. The tool does NOT
+    mutate its own environment to prime the children's PATH (the CLI's batch
+    does that once per command): this runs inside a live session, and the
+    children inherit whatever that session already primes — see the bulk
+    module's C1 notes; a session born from a primed launcher skips the
+    round-trip for free.
+    """
+    import asyncio as _asyncio
+
+    from local_operator.paths import config_dir
+    from local_operator.resume import format_age, session_name
+    from local_operator.session.bulk_resume import (
+        DEFAULT_RESUME_MESSAGE,
+        ResumeSelection,
+        live_session_ids,
+        resume_sessions,
+        select_resume_candidates,
+    )
+
+    root = config_dir()
+    sets_name = "+".join(
+        name
+        for name, on in (
+            ("paused", params.paused),
+            ("failed", params.failed),
+            ("all", params.all),
+        )
+        if on
+    )
+
+    def _select() -> ResumeSelection:
+        return select_resume_candidates(
+            root,
+            paused=params.paused,
+            failed=params.failed,
+            all_sessions=params.all,
+            limit=params.limit,
+            exclude_ids=live_session_ids(root),
+        )
+
+    # The selection is the store scan (one warm walk). Off the loop: it reads
+    # files, and this tool runs inside the session's event loop.
+    try:
+        selection = await _asyncio.to_thread(_select)
+    except Exception as exc:  # noqa: BLE001 — a resume reports; it does not traceback
+        return _error(tool_call_id, "sessions", f"could not enumerate the store: {exc}")
+
+    sessions_dir = root / "sessions"
+    rows = [
+        (session_id, session_name(sessions_dir / session_id) or "(unnamed)")
+        for session_id, _mtime in selection.sessions
+    ]
+    mtime_by_id = dict(selection.sessions)
+    capped_note = ""
+    if selection.matched > len(selection.sessions):
+        capped_note = (
+            f" (newest {len(selection.sessions)} of {selection.matched} matched; "
+            "raise `limit` to act on more)"
+        )
+
+    if params.dry_run:
+        lines = [
+            f"resume set ({sets_name}), dry run — {len(rows)} session(s) selected{capped_note}:",
+            "",
+        ]
+        for session_id, name in rows:
+            age = format_age(max(0.0, time.time() - mtime_by_id[session_id]))
+            lines.append(f'- {session_id}  "{name}"  ({age})')
+        if not rows:
+            lines = [f"resume set ({sets_name}): no stored sessions match{capped_note}."]
+        text, spill = spill_truncate("\n".join(lines), "sessions", context)
+        details: dict[str, Any] = {
+            "op": "resume",
+            "batch": True,
+            "dry_run": True,
+            "sets": sets_name,
+            "selected": len(rows),
+            "matched": selection.matched,
+        }
+        if spill:
+            details.update(spill)
+        return _text(tool_call_id, "sessions", text, details=details)
+
+    if not rows:
+        return _text(
+            tool_call_id,
+            "sessions",
+            f"resume set ({sets_name}): no stored sessions match{capped_note}; nothing started.",
+            details={"op": "resume", "batch": True, "sets": sets_name, "selected": 0},
+        )
+
+    message = (params.prompt or "").strip() or DEFAULT_RESUME_MESSAGE
+    env = _sessions_open_env(context)
+    cwd = _sessions_child_cwd(context)
+    try:
+        outcomes = await resume_sessions(rows, message=message, env=env, cwd=cwd)
+    except Exception as exc:  # noqa: BLE001 — report, never traceback
+        return _error(tool_call_id, "sessions", f"bulk resume failed: {exc}")
+
+    ok = sum(1 for outcome in outcomes if outcome.ok)
+    unresolved = sum(1 for outcome in outcomes if outcome.status == "unresolved")
+    failed = len(outcomes) - ok - unresolved
+    lines = [
+        f"resume set ({sets_name}): {len(outcomes)} session(s) — "
+        f"{ok} ok, {failed} failed, {unresolved} unresolved{capped_note}",
+        "",
+    ]
+    for outcome in outcomes:
+        if outcome.ok:
+            lines.append(
+                f'- ok    {outcome.session_id}  "{outcome.name}"  '
+                f"({outcome.status}, job {outcome.job_id})"
+            )
+        else:
+            lines.append(
+                f'- FAIL  {outcome.session_id}  "{outcome.name}"  — '
+                f"{outcome.detail or outcome.status}"
+            )
+    text, spill = spill_truncate("\n".join(lines), "sessions", context)
+    result_details: dict[str, Any] = {
+        "op": "resume",
+        "batch": True,
+        "sets": sets_name,
+        "count": len(outcomes),
+        "ok": ok,
+        "failed": failed,
+        "unresolved": unresolved,
+        "sessions": [
+            {
+                "session_id": outcome.session_id,
+                "ok": outcome.ok,
+                "status": outcome.status,
+                "job_id": outcome.job_id,
+            }
+            for outcome in outcomes
+        ],
+    }
+    if spill:
+        result_details.update(spill)
+    return _text(tool_call_id, "sessions", text, details=result_details)
+
+
 def _sessions_params_error(
     tool_call_id: str, args: Mapping[str, Any], exc: ValidationError
 ) -> ToolResult:
@@ -15787,6 +16051,11 @@ async def execute_sessions(
         return await _sessions_peek(tool_call_id, params, context)
     if params.op == "stop":
         return await _sessions_stop(tool_call_id, params)
+    if params.op == "resume" and (params.paused or params.failed or params.all):
+        # The SET form: enumerate once and reopen each session as its own
+        # bounded child (see ``_sessions_resume_batch``). Checked before the
+        # single form so a selector can never fall through to it.
+        return await _sessions_resume_batch(tool_call_id, params, context)
     return await _sessions_open(tool_call_id, params, context)
 
 

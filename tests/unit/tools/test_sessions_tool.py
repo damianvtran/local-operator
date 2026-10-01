@@ -31,6 +31,7 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -48,7 +49,10 @@ from local_operator.resume import (
     write_session_title,
 )
 from local_operator.scratchpad import SCRATCHPAD_PATH_ENV
+from local_operator.session import bulk_resume
 from local_operator.session.archived import set_archived
+from local_operator.session.attention import AttentionStore
+from local_operator.session.bulk_resume import ResumeOutcome, ResumeSelection
 from local_operator.session.runtime import control, registry
 from local_operator.session.runtime.types import SessionRecord
 from local_operator.tools.builtin import (
@@ -967,13 +971,30 @@ def test_schema_budget_is_measured_with_the_repos_own_ruler() -> None:
     trimmed, never widen it to admit a verbose field. (The CI-side cost of the
     same growth is the ratchet entry for PR B in
     ``scripts/bench_context_budget.py``.)
+
+    RAISED 950 -> 1085 and 200 -> 231 for the bulk-resume SET form
+    (``feat/sessions-bulk-resume-1001``), stated with the arithmetic because
+    this guard exists to make copy growth an explicit decision. The change
+    adds four boolean fields to the schema — ``paused``/``failed``/``all``
+    (the selectors) and ``dry_run`` — plus the ``limit`` description's
+    resume clause; measured on the merged tree with this test's own ruler:
+    schema 949 -> 1,084 (+135: the five fields' names, titles, types,
+    defaults and lean one-clause descriptions; a first draft with fuller
+    descriptions measured 1,112 and was trimmed, which is the "never widen
+    for verbosity" rule working), description 200 -> 230 (+30: the four new
+    accepted inputs in the derived per-op summary, ~18, and the one prose
+    clause naming the set form, ~12). The ceilings are the measured figures
+    + 1, the knife-edge headroom the prior pin kept. The full vocabulary
+    (what `paused` covers, the default cap, the dry-run preview) lives in
+    the on-demand ``op='help'`` reference and the CLI's `--help`, which is
+    where the budget wants it.
     """
     from local_operator.compaction.tokens import count_text_tokens
     from local_operator.tools.builtin import _SESSIONS_TOOL_DESCRIPTION
 
     params = json.dumps(SessionsParams.model_json_schema(), ensure_ascii=False)
-    assert count_text_tokens(params) <= 950
-    assert count_text_tokens(_SESSIONS_TOOL_DESCRIPTION) <= 200
+    assert count_text_tokens(params) <= 1085
+    assert count_text_tokens(_SESSIONS_TOOL_DESCRIPTION) <= 231
 
 
 # --- peek (PR B): bounded transcript inspection ------------------------------
@@ -1612,7 +1633,8 @@ async def test_a_stray_parameter_refusal_names_the_ops_accepted_set() -> None:
     assert result.is_error
     assert result.text == (
         "`timeout_ms` is not a sessions parameter. `resume` takes: "
-        "session|target|pid, prompt, background. Call op='help' for the full per-op reference."
+        "session|target|pid, prompt, background, paused, failed, all, dry_run, limit. "
+        "Call op='help' for the full per-op reference."
     )
     assert (result.details or {}).get(FAULT_KEY) == FAULT_INVALID_ARGUMENTS
 
@@ -1858,3 +1880,160 @@ async def test_resume_resolves_an_archived_session_by_exact_id(root: Path) -> No
         assert "reopen" in result.text
     finally:
         await _reap_worker(root, "archived0009")
+
+
+# --- bulk resume: the SET form of `resume` (2026-10-01) ----------------------
+
+
+@pytest.mark.asyncio
+async def test_a_set_selection_refuses_an_address(root: Path) -> None:
+    """A set and an address are two different requests; composing is a typo."""
+    result = await execute_sessions(
+        "t",
+        {"op": "resume", "paused": True, "session": "aaaa11112222"},
+        None,
+        None,
+        _context(root),
+    )
+    assert result.is_error
+    assert "a set selection takes no `session`" in result.text
+
+
+@pytest.mark.asyncio
+async def test_set_fields_are_refused_on_other_ops(root: Path) -> None:
+    result = await execute_sessions("t", {"op": "list", "paused": True}, None, None, _context(root))
+    assert result.is_error
+    assert "`paused` applies to op='resume' only." in result.text
+
+
+@pytest.mark.asyncio
+async def test_dry_run_needs_a_set_selection(root: Path) -> None:
+    result = await execute_sessions(
+        "t",
+        {"op": "resume", "session": "aaaa11112222", "prompt": "go", "dry_run": True},
+        None,
+        None,
+        _context(root),
+    )
+    assert result.is_error
+    assert "`dry_run` needs a set selection" in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_set_selection_needs_no_prompt_but_rejects_a_blank_one(root: Path) -> None:
+    # A blank prompt IS refused — an explicit empty message is a misspelled
+    # intent, not "use the default".
+    blank = await execute_sessions(
+        "t",
+        {"op": "resume", "paused": True, "prompt": "   "},
+        None,
+        None,
+        _context(root),
+    )
+    assert blank.is_error
+    assert "must be a non-empty message when given" in blank.text
+    # With no prompt at all it reaches execution; an empty store answers
+    # "nothing started" (not an error) — the mock-free half of the contract.
+    empty = await execute_sessions(
+        "t", {"op": "resume", "paused": True}, None, None, _context(root)
+    )
+    assert not empty.is_error
+    assert "no stored sessions match" in empty.text
+
+
+def test_the_batch_approval_description_names_the_sets_and_the_commitment(
+    root: Path,
+) -> None:
+    described = _describe_sessions_approval(
+        {"op": "resume", "paused": True, "failed": True, "limit": 10}, str(root)
+    )
+    assert described == (
+        "resume the paused + failed session set, cap 10: starts one headless "
+        "run per selected session"
+    )
+    dry = _describe_sessions_approval({"op": "resume", "all": True, "dry_run": True}, str(root))
+    assert dry == "review the all stored session set: resumes nothing (dry run)"
+    # The single form's sentence is untouched.
+    single = _describe_sessions_approval(
+        {"op": "resume", "session": "aaaa11112222", "prompt": "go"}, str(root)
+    )
+    assert single == "resume session aaaa11112222: reopens its transcript headlessly"
+
+
+@pytest.mark.asyncio
+async def test_the_batch_summary_renders_per_session_outcomes(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The set form renders one line per session plus the counts and details."""
+
+    def fake_select(*args: Any, **kwargs: Any) -> ResumeSelection:
+        return ResumeSelection(
+            sessions=(("sess-ok", 1.0), ("sess-bad", 2.0)), matched=5, kinds=frozenset()
+        )
+
+    async def fake_run(rows: Any, **kwargs: Any) -> list[ResumeOutcome]:
+        assert [r[0] for r in rows] == ["sess-ok", "sess-bad"]
+        return [
+            ResumeOutcome(
+                session_id="sess-ok", name="ok one", ok=True, status="running", job_id="j1"
+            ),
+            ResumeOutcome(
+                session_id="sess-bad",
+                name="bad one",
+                ok=False,
+                status="failed",
+                job_id="j2",
+                detail="worker died: model exploded",
+            ),
+        ]
+
+    monkeypatch.setattr(bulk_resume, "select_resume_candidates", fake_select)
+    monkeypatch.setattr(bulk_resume, "live_session_ids", lambda root: set())
+    monkeypatch.setattr(bulk_resume, "resume_sessions", fake_run)
+
+    result = await execute_sessions(
+        "t", {"op": "resume", "paused": True, "limit": 3}, None, None, _context(root)
+    )
+    assert not result.is_error, result.text
+    assert "2 session(s) — 1 ok, 1 failed, 0 unresolved" in result.text
+    assert '- ok    sess-ok  "ok one"  (running, job j1)' in result.text
+    assert '- FAIL  sess-bad  "bad one"  — worker died: model exploded' in result.text
+    assert "newest 2 of 5 matched" in result.text
+    details = result.details or {}
+    assert details["batch"] is True and details["count"] == 2
+    assert details["sessions"][1]["session_id"] == "sess-bad"
+
+
+@pytest.mark.asyncio
+async def test_resume_set_form_really_reopens_each_session(root: Path) -> None:
+    """The REAL path: two paused sessions, one `resume(paused=True)` call.
+
+    Real nested CLI children on mock hosting, like the single-resume tests:
+    the tool's job is to hand each child the right argv and environment, and
+    only a real run proves the whole batch wiring.
+    """
+    _write_config(root)
+    _requester(root)
+    for session_id, name in (("bulk00000001", "bulk one"), ("bulk00000002", "bulk two")):
+        _session(root, session_id, name)
+    store = AttentionStore(root / "attention.db")
+    for session_id in ("bulk00000001", "bulk00000002"):
+        store.publish(
+            f"session/{session_id}",
+            str(uuid.uuid4()),
+            f"e-{session_id}",
+            "interrupted",
+            reason="seed",
+        )
+    try:
+        result = await execute_sessions(
+            "t", {"op": "resume", "paused": True}, None, None, _context(root)
+        )
+        assert not result.is_error, result.text
+        details = result.details or {}
+        assert details.get("batch") is True
+        assert details.get("count") == 2, result.text
+        assert details.get("ok") == 2, result.text
+    finally:
+        for session_id in ("bulk00000001", "bulk00000002"):
+            await _reap_worker(root, session_id)
