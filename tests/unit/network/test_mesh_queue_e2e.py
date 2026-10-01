@@ -326,3 +326,56 @@ async def test_the_queued_move_pauses_at_the_boundary_carries_the_wake_and_lets_
         # and joins the same task, but only the await makes the ordering a fact).
         await runtime.aclose()
         lease.release()
+
+
+@pytest.mark.asyncio
+async def test_a_bare_move_with_a_viewer_reports_viewed_elsewhere(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 1 Q1: the attached-viewer refusal is ``viewed_elsewhere``.
+
+    A BARE move keeps its behaviour — refuse while an observer is attached —
+    but the refusal's CODE carries the §5.4 split: the blocker is the VIEWER
+    (waiting cannot clear it; the queue can), not a turn, so a notice can offer
+    Queue vs Wait instead of "Wait for the turn to finish". Driven at the wire
+    the way the CLI drives it (the destination's own relay call, a real
+    runtime, a real registered viewer), which is the QA repro's own shape.
+    """
+    paired = request.getfixturevalue("pair")
+    server_a, server_b = paired[0], paired[1]
+    _pair_settled(paired, monkeypatch, role="admin")
+    session_dir = _owned_session(server_a, SESSION)
+    # The ownership claim the in-process runtime's record resolution needs
+    # (``.session.pid`` is what ``live_runtime_pid`` reads); released in the
+    # teardown, the half a real runtime's process exit supplies.
+    from local_operator.session_lease import acquire_session_lease
+
+    lease = acquire_session_lease(session_dir)
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
+    session = build_session(session_dir, _GatedStream())
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(session_dir))
+    runtime = RuntimeServer(handle, kind="tui")
+    await runtime.start_in_process()
+    assert await runtime.wait_until_published()
+
+    viewer = AttachClient(
+        lambda _projection: None, lambda _reason: None, locality="local", surface="terminal"
+    )
+    try:
+        record, _pid = find_runtime_record(server_a.root, SESSION)
+        assert record is not None, "the runtime published no record to attach to"
+        await viewer.connect(record, SESSION)
+
+        result = await asyncio.to_thread(
+            mobility.request_move, SESSION, to="local", root=server_b.root
+        )
+        payload = dict(result)
+        assert payload.get("ok") is False, payload
+        assert payload.get("code") == "viewed_elsewhere", payload
+        assert "another terminal or attached client" in str(payload.get("message")), payload
+    finally:
+        viewer.close()
+        await session.dispose()
+        await runtime.aclose()
+        lease.release()

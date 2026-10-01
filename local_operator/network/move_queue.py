@@ -878,8 +878,8 @@ def _watch_for_commit(server: "RelayServer", session_id: str) -> str:
         QUEUE_PHASE_FAILED,
         detail=(
             "the destination did not confirm the move in time; this device still holds "
-            "the conversation (its state is unchanged), and `lop sessions move` can be "
-            "run again"
+            "the conversation (its state is unchanged), and the move can be requested "
+            "again"
         ),
         code="deadline_exceeded",
         writer="relay",

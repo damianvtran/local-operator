@@ -105,6 +105,7 @@ from local_operator.session.runtime.types import (
     PEER_MESSAGE_ID_CAPABILITY,
     QUEUED_MOVE_CAPABILITY,
     RUNTIME_RECORD_KIND,
+    VIEWED_MOVE_REFUSAL,
     ClientKind,
     ClientLocality,
     SessionRecord,
@@ -2205,6 +2206,14 @@ class RuntimeServer:
         #: commits. Runtime memory only, by design: the durable record is the
         #: relay-owned file, and a dead runtime's intent re-arms from it.
         self._queued_move: dict[str, Any] | None = None
+        #: Whether the retire latch is currently HELD BY THIS WATCHER (step 3
+        #: committed; step 4's claim not yet decided, step 6 not yet reached).
+        #: Its whole job is the exception path in :meth:`_queued_move_watch`: a
+        #: raise between the latch and the claim must RELEASE it, or a serving
+        #: runtime refuses every admission for the rest of its process life —
+        #: the same wedged state the cancel race exists to prevent, reached from
+        #: the other direction (review round 1, F1).
+        self._queued_move_latched = False
         #: The watcher's last stage ("", "finishing", "paused", "retiring") —
         #: what the relay's delivery polls see in the ``queue_move`` reply.
         self._queued_move_stage = ""
@@ -5833,10 +5842,7 @@ class RuntimeServer:
                     try:
                         observers = self._other_observers(conn)
                         if observers > 0:
-                            detail = (
-                                "kept: This session is open in another terminal or attached "
-                                "client. Disconnect that client, then move again."
-                            )
+                            detail = f"kept: {VIEWED_MOVE_REFUSAL}"
                         else:
                             detail = await self._retire_for("moved", exclusive_owner=conn)
                             committed = detail == "retiring"
@@ -6533,6 +6539,21 @@ class RuntimeServer:
             logger.warning(
                 "queued move: the watcher failed for %s", self._record.session_id, exc_info=True
             )
+            # RELEASE THE LATCH ON THE WAY OUT (review round 1, F1). A raise
+            # between the latch (step 3) and the claim (step 4) — `claim_pause`
+            # on a lock timeout, a write error — must not leave a runtime that
+            # serves yet refuses every admission. Best effort by contract: the
+            # warning above is the record, and an unwind that raised would mask
+            # the reason this block is running at all.
+            if self._queued_move_latched and not self._retirement_committed:
+                try:
+                    end_retire = getattr(self._handle, "end_retire", None)
+                    if callable(end_retire):
+                        await self._handle_call_on_session_loop(end_retire)
+                except Exception:  # noqa: BLE001 — the warning above is the record
+                    logger.debug("queued move: could not release the latch", exc_info=True)
+                finally:
+                    self._queued_move_latched = False
             self._queued_move = None
             self._queued_move_stage = ""
 
@@ -6611,6 +6632,7 @@ class RuntimeServer:
                     self._queued_move_stage = "finishing"
                     await asyncio.sleep(QUEUED_MOVE_TICK_S)
                     continue
+                self._queued_move_latched = True
 
                 # 4. THE CLAIM — the cancel race's fulcrum.
                 _claimed, outcome = await asyncio.to_thread(
@@ -6627,6 +6649,7 @@ class RuntimeServer:
                     end_retire = getattr(self._handle, "end_retire", None)
                     if callable(end_retire):
                         released = await self._handle_call_on_session_loop(end_retire)
+                    self._queued_move_latched = False
                     logger.info(
                         "queued move: stood down for %s (record was %s, latch released: %s)",
                         session_id,
@@ -6656,6 +6679,10 @@ class RuntimeServer:
             self._queued_move_stage = "retiring"
             await self.announce_retiring("moved", to=to_name)
             self._retirement_committed = True
+            # THE RETIREMENT SUPERSEDES THE LATCH: past the announcement the
+            # session is LEAVING, so an ``end_retire`` would be wrong — the
+            # unwind only ever releases a latch that has not become a departure.
+            self._queued_move_latched = False
             request_stop = getattr(self._handle, "request_stop", None)
             if callable(request_stop):
                 await self._handle_call_on_session_loop(request_stop)

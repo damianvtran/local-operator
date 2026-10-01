@@ -24,6 +24,7 @@ the flag.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, cast
 
 import pytest
@@ -187,10 +188,17 @@ class LatchingHandle(MovableHandle):
         super().__init__(reason=reason)
         self.commit = commit
         self.retirements: list[tuple[str, str]] = []
+        #: One entry per ``end_retire`` — the unwind recorder the queued-move
+        #: watcher's exception-path cell (F1) and the cancel-race cell read.
+        self.releases: list[str] = []
 
     def begin_retire(self, cause: str, detail: str = "") -> bool:
         self.retirements.append((cause, detail))
         return self.commit
+
+    def end_retire(self) -> bool:
+        self.releases.append("released")
+        return True
 
 
 @pytest.mark.asyncio
@@ -326,3 +334,45 @@ async def test_a_stop_that_raises_after_the_latch_commits_keeps_the_fence() -> N
     assert [f for f in sent if f.get("op") == "ack"] == []
     errors = [f for f in sent if f.get("op") == "error"]
     assert errors and "stop failed" in str(errors[-1].get("message"))
+
+
+@pytest.mark.asyncio
+async def test_a_watcher_failure_between_latch_and_claim_releases_the_latch(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F1 (review round 1): the exception path must unwind the retire latch.
+
+    A raise between the latch (step 3) and the claim (step 4) — ``claim_pause``
+    on a lock timeout, a write error — used to be caught by the watcher's
+    wrapper, which cleared the intent WITHOUT releasing the latch: a runtime
+    that keeps serving yet refuses every admission for the rest of its life,
+    the exact wedged state the cancel race exists to prevent, reached from the
+    other direction. The cell drives the real watcher task with the latch
+    committed and the claim raising, and asserts the handle saw ``end_retire``.
+    """
+    from local_operator.network import move_queue as mq
+
+    handle = LatchingHandle()
+    server, sent = _rig(handle)
+    server._config_root = tmp_path
+    viewer = _conn("attach")
+    server._clients[id(viewer.writer)] = viewer
+
+    record = {"phase": "queued", "to_device": "d_b", "to_name": "device-b"}
+    monkeypatch.setattr(mq, "read_record", lambda root, sid: dict(record))
+
+    def _boom(root: Any, sid: Any) -> Any:
+        raise RuntimeError("lock timeout while claiming the pause")
+
+    monkeypatch.setattr(mq, "claim_pause", _boom)
+
+    await server._on_request(
+        {"op": "queue_move", "req": 1, "to_device": "d_b", "to_name": "device-b"}, viewer
+    )
+    task = server._queued_move_task
+    assert task is not None, "the op did not start the watcher"
+    await asyncio.wait_for(task, timeout=5.0)
+
+    assert handle.retirements, "the latch was never reached"
+    assert handle.releases == ["released"], "the latch was not unwound on the failure path"
+    assert server._queued_move is None

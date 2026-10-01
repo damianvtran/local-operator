@@ -875,6 +875,20 @@ def _retire_local_runtime(
             }
         return {"result": "retired", "sentence": ""}
     sentence = answer[len("kept:") :].strip() if answer.startswith("kept:") else answer
+    from local_operator.session.runtime.types import VIEWED_MOVE_REFUSAL
+
+    if sentence.startswith(VIEWED_MOVE_REFUSAL):
+        # THE VIEWER BLOCKER, TOLD APART FROM BUSY-NESS (QA round 1, Q1; §5.4).
+        # The runtime refused ONLY because another attach client is present —
+        # its exclusive branch answers with this one sentence — and the outcome
+        # vocabulary already names that case ``viewed``. The wire carries the
+        # token as ``viewed_elsewhere``, which is what lets a notice offer
+        # Queue ("move at the next safe point") instead of "wait for the
+        # turn" for a blocker waiting cannot clear. The match is against the
+        # SHARED constant the runtime writes
+        # (``session/runtime/types.py``), so rewording either side cannot
+        # silently collapse this back into ``busy``.
+        return {"result": "viewed", "sentence": _busy_sentence(sentence)}
     return {"result": "busy" if sentence else "retired", "sentence": _busy_sentence(sentence)}
 
 
@@ -2526,8 +2540,8 @@ def _source_prepare(
                 "code": "in_progress",
                 "message": (
                     f"a move of {session_id} is already queued for the next safe point "
-                    f"(phase: {phase_now or 'queued'}); cancel it first with "
-                    "`lop sessions move --cancel-queued` if you meant a different one"
+                    f"(phase: {phase_now or 'queued'}); cancel the queued move first "
+                    "if you meant a different one"
                 ),
                 "session_id": session_id,
             }
