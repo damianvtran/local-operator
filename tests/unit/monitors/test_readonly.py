@@ -485,3 +485,244 @@ def test_the_external_resolver_refuses_by_class() -> None:
     reason = readonly.external_monitor_verdict("mcp__srv__thing", {})
     assert reason is not None, "mcp"
     assert "read-only hint can only be checked inside a running session" in reason, reason
+
+
+# ---------------------------------------------------------------------------
+# §D2: the shape check — one validator for arm and tick
+# ---------------------------------------------------------------------------
+
+
+def real_tool(name: str) -> AgentTool:
+    """A tool built by its own real builder, schema and all.
+
+    The shape check's whole point is the tool's OWN params model, so these rows
+    use the shipped builders rather than a hand-written schema: a fake would
+    let the check pass while the real ``extra="forbid"`` model still rejected
+    the call at tick, which is the bug this closes.
+    """
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools.registry import TOOL_BUILDERS
+
+    tool = TOOL_BUILDERS[name](ToolContext())
+    assert tool is not None, name
+    return tool
+
+
+def test_glob_with_path_is_refused_at_arm() -> None:
+    """The arm-time half of the `glob({path: ...})` report: the call was
+    accepted, then died on every tick with ``Extra inputs are not permitted``
+    and disabled the monitor after five strikes.
+    """
+    glob_tool = real_tool("glob")
+    assert readonly.monitor_call_verdict(glob_tool, {"pattern": "*.py"}) is None
+    reason = readonly.monitor_call_verdict(glob_tool, {"pattern": "*.py", "path": "/tmp"})
+    assert reason is not None
+    assert 'unknown argument(s) "path"' in reason, reason
+    assert "glob accepts: pattern." in reason, reason
+
+
+def intent_tool(name: str) -> AgentTool:
+    """A tool as a SESSION builds it — the schema carries the injected ``i``.
+
+    The distinction matters and is the whole point of the intent rows below:
+    ``TOOL_BUILDERS`` returns the raw schema, and ``create_tools`` is what
+    applies ``apply_intent_schema`` (registry.py). Real sessions use the
+    latter, which is why a model arming a monitor naturally includes ``i``.
+    """
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools.registry import create_tools
+
+    tool = next(tool for tool in create_tools(ToolContext()) if tool.name == name)
+    return tool
+
+
+def test_injected_intent_key_is_stripped_at_tick_and_accepted_at_arm() -> None:
+    """LOOP PARITY (plan amendment, live evidence).
+
+    Every tool schema advertises the injected ``i``, so a model arming a
+    monitor includes it — and every builtin params model is ``extra="forbid"``,
+    so leaving it in fails the tick deterministically with
+    ``- i: Extra inputs are not permitted``. Two live monitors were failing
+    every tick on exactly that. The fix lifts it before validation and before
+    ``execute``, as the loop does, rather than refusing it at arm.
+    """
+    glob_tool = intent_tool("glob")
+    from local_operator.harness.intent import intent_is_injected
+
+    assert intent_is_injected(glob_tool.parameters), "create_tools injects the intent property"
+
+    # Accepted at arm...
+    assert readonly.monitor_call_verdict(glob_tool, {"pattern": "x", "i": "narrate"}) is None
+    # ...and the arguments the tool actually runs with do not carry it.
+    assert readonly.monitor_call_arguments(glob_tool, {"pattern": "x", "i": "narrate"}) == {
+        "pattern": "x"
+    }
+    # The refusal a real typo earns is unchanged, and the accepts list does not
+    # advertise the harness's own field.
+    reason = readonly.monitor_call_verdict(glob_tool, {"pattern": "x", "path": "/tmp"})
+    assert reason is not None and "glob accepts: pattern." in reason, reason
+
+
+def test_a_tool_that_declares_its_own_i_keeps_it() -> None:
+    """Loop parity runs both ways: a tool owning the name ``i`` never had ours
+    injected, so its value is a real argument and is forwarded.
+    """
+    own_i = fake_tool(
+        "grep",
+        parameters={
+            "type": "object",
+            "properties": {"i": {"type": "string", "description": "their own"}},
+            "additionalProperties": False,
+        },
+    )
+    assert readonly.monitor_call_arguments(own_i, {"i": "x"}) == {"i": "x"}
+    assert readonly.monitor_call_verdict(own_i, {"i": "x"}) is None
+
+
+def test_mcp_extras_are_not_refused() -> None:
+    """Arm refuses exactly what a tick refuses. The manager's
+    ``prepare_outbound_args`` drops undeclared extras before the call, so a
+    tick tolerates them and arm must not be stricter than the run.
+    """
+    tool = fake_tool(
+        "mcp__datadog_search_datadog_hosts",
+        mcp_annotations={"readOnlyHint": True},
+        parameters={
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    )
+    assert readonly.monitor_call_verdict(tool, {"query": "x", "extra": 1}) is None
+
+
+def test_mcp_without_the_read_only_hint_is_still_refused_first() -> None:
+    """Order: the safety verdict runs first, so its sentence is byte-identical
+    and the shape check can only ADD refusals.
+    """
+    tool = fake_tool(
+        "mcp__srv_thing",
+        parameters={"type": "object", "properties": {}, "additionalProperties": False},
+    )
+    reason = readonly.monitor_call_verdict(tool, {"anything": 1})
+    assert reason is not None
+    assert "readOnlyHint" in reason, reason
+
+
+def test_required_and_type_errors_refused() -> None:
+    read_tool = real_tool("read")
+    missing = readonly.monitor_call_verdict(read_tool, {"range": "1-5"})
+    assert missing is not None and "missing required argument 'path'" in missing, missing
+    wrong_type = readonly.monitor_call_verdict(read_tool, {"path": 5})
+    assert wrong_type is not None and "does not match type" in wrong_type, wrong_type
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "args"),
+    [
+        ("glob", {"pattern": "*.py"}),
+        ("glob", {"pattern": "*.py", "path": "/tmp"}),
+        ("read", {"path": "/x"}),
+        ("read", {"range": "1-5"}),
+    ],
+)
+def test_in_session_and_external_verdicts_agree(tool_name: str, args: dict[str, Any]) -> None:
+    """PARITY: one call must not be describable two ways. The agent's own tool
+    goes through ``monitor_call_verdict``; the CLI and the desktop route reach
+    the same call through ``external_monitor_verdict``.
+    """
+    in_session = readonly.monitor_call_verdict(real_tool(tool_name), args)
+    external = readonly.external_monitor_verdict(tool_name, args)
+    if in_session is None:
+        assert external is None
+    else:
+        assert external == in_session, (tool_name, args, in_session, external)
+
+
+def test_the_external_arm_accepts_an_injected_intent_like_the_session_arm() -> None:
+    """ARITY DOES NOT DEPEND ON THE DOOR (review round 1, MAJOR R1).
+
+    ``external_monitor_verdict`` builds its tool from the raw ``TOOL_BUILDERS``,
+    and the raw schema has NOT been through ``apply_intent_schema`` — the
+    transform ``create_tools`` applies and a real session therefore resolves.
+    Without applying it here too, the external arm kept the ``i``, refused it,
+    and disagreed with both the session arm and the tick about the same call.
+    """
+    args = {"pattern": "x", "i": "narrate"}
+    assert readonly.monitor_call_verdict(intent_tool("glob"), args) is None
+    assert readonly.external_monitor_verdict("glob", args) is None
+
+    # The parity is accept-parity on the injected key ONLY: a genuinely
+    # undeclared key is still refused from both doors, so the transform cannot
+    # become an accept-bypass for anything else.
+    stray = {"pattern": "x", "path": "/tmp"}
+    assert readonly.monitor_call_verdict(intent_tool("glob"), stray) is not None
+    assert readonly.external_monitor_verdict("glob", stray) is not None
+
+
+# ---------------------------------------------------------------------------
+# §D7: kubectl, as a read-only allow-list
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "kubectl get pods -n kube-system",
+        "kubectl get pods -A -o json",
+        "kubectl get nodes --no-headers --sort-by=.metadata.name",
+        "kubectl describe node gpu-1",
+        "kubectl describe pod x -l app=ner",
+        "kubectl logs -n datadog pod-x --tail=100",
+        "kubectl logs pod-x -c app --since=1h -p",
+        "kubectl get pods --context prod",
+        "kubectl get pods -o name",
+        # R10: the glued ``=`` spelling kubectl accepts. It was refused as
+        # "-o =json" until round 1 fixed it, and the fix had no pin.
+        "kubectl get pods -o=json",
+        "kubectl get pods -o json | jq .items",
+    ],
+)
+def test_kubectl_read_verbs_are_monitorable(command: str) -> None:
+    assert readonly._bash_verdict(command) is None, command
+
+
+@pytest.mark.parametrize(
+    ("command", "phrase"),
+    [
+        ("kubectl get secret db-creds", "reads secret data"),
+        ("kubectl get secrets", "reads secret data"),
+        ("kubectl get all,secrets", "reads secret data"),
+        ("kubectl get pods --raw=/api/v1/pods", "arbitrary API path"),
+        ("kubectl get pods -w", "waits for events"),
+        ("kubectl get pods --watch", "waits for events"),
+        ("kubectl logs -f pod-x", "follows the stream"),
+        ("kubectl logs --follow pod-x", "follows the stream"),
+        ("kubectl get pods --kubeconfig=/tmp/x", "retargets which cluster"),
+        ("kubectl get pods --token=abc", "bearer token"),
+        ("kubectl get pods --as=admin", "impersonates another identity"),
+        ("kubectl get pods --insecure-skip-tls-verify", "unverified server certificate"),
+        ("kubectl get pods -o go-template=abc", "not a rendering format"),
+        ("kubectl get pods -o jsonpath={.items}", "brace expansion"),
+        ("kubectl exec -it pod -- sh", "not on the read-only kubectl allow-list"),
+        ("kubectl apply -f x.yaml", "not on the read-only kubectl allow-list"),
+        ("kubectl delete pod x", "not on the read-only kubectl allow-list"),
+        ("kubectl get pods -n", "expects a value"),
+    ],
+)
+def test_kubectl_refusals_name_their_reason(command: str, phrase: str) -> None:
+    reason = readonly._bash_verdict(command)
+    assert reason is not None, command
+    assert phrase in reason, (command, reason)
+
+
+def test_kubectl_global_flag_before_the_subcommand_is_refused() -> None:
+    """The rule that makes the allow-list complete: kubectl's global flags are
+    exactly the ones that retarget the cluster, so the subcommand comes first.
+    """
+    reason = readonly._bash_verdict("kubectl --context prod get pods")
+    assert reason is not None
+    assert "comes before the subcommand" in reason, reason
+    # And no separator form exists either: the ``--`` rule is the bash layer's.
+    reason = readonly._bash_verdict("kubectl get pods -- :")
+    assert reason is not None

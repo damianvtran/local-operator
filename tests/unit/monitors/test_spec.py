@@ -171,3 +171,24 @@ def test_ids_are_never_reused_after_a_cancel() -> None:
     assert monitor_spec.allocate_monitor_id([], high_water=7) == ("m7", 8)
     # A hand-edited transcript cannot lower the mark or break the parse.
     assert monitor_spec.next_monitor_seq(["not-an-id", "m2"], "junk") == 3
+
+
+def test_a_shape_refusal_from_the_real_validator_is_not_malformed() -> None:
+    """The arm path's classification for the §D2 refusal: a call that is
+    well-formed but NOT runnable is a conflict ("this cannot be watched"), not a
+    malformed request — the same split the interval floor and the read-only gate
+    take, and what makes the desktop route answer 409 rather than 422.
+    """
+    from local_operator.monitors.readonly import external_monitor_verdict
+
+    outcome = monitor_spec.build_monitor_spec(
+        {"tool": "glob", "arguments": {"pattern": "*.py", "path": "/tmp"}},
+        monitor_id="m1",
+        now_ms=1,
+        settings=settings(),
+        cwd="",
+        validate=lambda tool, args: external_monitor_verdict(tool, args),
+    )
+    failed = _error_of(outcome)
+    assert failed["malformed"] is False
+    assert 'unknown argument(s) "path"' in failed["error"]
