@@ -83,8 +83,22 @@ let capabilities: Capabilities | null = null;
    and therefore the order the reader sees) stays on the confirmed flag until
    the daemon's own list repaint says so. */
 let pinMarks: ReadonlyMap<string, boolean> = new Map();
-const projections = new Map<string, ProjectionSlot>();
-// useSyncExternalStore requires referentially stable snapshots, including the
+/* THE ASK SIGNATURE'S REVISION (design §5.3). The aggregate asks sheet reads
+   `GET /api/asks` on demand — an HTTP route, deliberately not a feed — so it
+   needs a signal for WHEN re-reading is worth doing. The list frame carries
+   every session's `asks_open`, and a change in that signature is exactly "a
+   queued ask appeared, settled, or changed hands" — the events a reader of the
+   sheet would want to see. A counter rather than a boolean so two changes
+   between renders cannot collapse into one; the signature compares the count
+   per session, so an unrelated repaint (a streaming session bumping its
+   activity 30x/s) does not move it.
+
+   WHY NOT EVERY LIST FRAME: a list frame is emitted on every projection push,
+   which is ~30/s while a turn streams. Re-reading the whole aggregate on each
+   would be a poll disguised as an event. */
+let asksRevision = 0;
+let asksSignature = "";
+const projections = new Map<string, ProjectionSlot>();// useSyncExternalStore requires referentially stable snapshots, including the
 // first render before the route's effect has subscribed its SSE stream.
 const EMPTY_PROJECTION_SLOT: ProjectionSlot = { projection: null, connected: false };
 
@@ -134,6 +148,43 @@ export function useProjection(sessionId: string): ProjectionSlot {
 		() =>
 			projections.get(sessionId) ?? EMPTY_PROJECTION_SLOT,
 	);
+}
+
+/** A counter that moves whenever the outstanding-ask population changes.
+
+    The aggregate asks sheet subscribes to it so a new ask (or one settled on
+    another surface) re-reads `GET /api/asks` without anybody pressing
+    refresh — and without re-reading on every unrelated repaint. */
+export function useAsksRevision(): number {
+	return useSyncExternalStore(subscribe, () => asksRevision);
+}
+
+/** Fold one list frame's per-session ask counts into a signature.
+
+    PURE and exported so the rule is testable on its own (agent review round 1,
+    R4): the sheet mocks the hook, so nothing exercised the part that decides
+    WHEN a re-read is worth doing. The rule is threefold and each clause is a
+    deliberate answer: per-SESSION counts (so an unrelated repaint of a session
+    streaming at 30/s cannot move it), ORDER-INSENSITIVE (the daemon's row order
+    is its own rank and a re-rank is not new information), and a runtime that
+    does not publish asks contributes NOTHING rather than a zero (absence is the
+    capability proxy, §4 — a zero would be a claim it cannot make). */
+export function asksPopulationSignature(rows: SessionSummary[]): string {
+	const parts: string[] = [];
+	for (const row of rows) {
+		const count = row?.asks_open;
+		if (typeof count !== "number" || count <= 0) continue;
+		parts.push(`${row.session_id}:${count}`);
+	}
+	parts.sort();
+	return parts.join(",");
+}
+
+function publishAsksRevision(rows: SessionSummary[]): void {
+	const next = asksPopulationSignature(rows);
+	if (next === asksSignature) return;
+	asksSignature = next;
+	asksRevision += 1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -214,6 +265,7 @@ export function retainSessionListStream(): () => void {
 					sessions = payload.sessions;
 					capabilities = payload.capabilities ?? null;
 					sessionsConnected = true;
+					publishAsksRevision(payload.sessions);
 					/* A frame is the daemon's answer for every row it carries, so a mark
 					   it AGREES with has been confirmed and is dropped: from here the
 					   confirmed flag alone renders the row, in the section it belongs in.
@@ -431,6 +483,97 @@ export function useRouteTitle(title: string | null): void {
 /* ------------------------------------------------------------------ */
 
 const DRAFT_PREFIX = "lo-mobile-draft:";
+
+/** The answer-draft key for one ask: the CHAT draft's prefix plus an ask
+    namespace, so an ask draft is purged by the same auth sweep
+    (`private-storage.ts` matches on the prefix) without that sweep needing to
+    learn a second spelling. */
+const ASK_DRAFT_PREFIX = `${DRAFT_PREFIX}ask:`;
+
+/** What an answer draft holds: the chosen labels (or the typed text) per
+ *  question id, plus the questions the user explicitly skipped.
+ *
+ *  WHY THIS SURVIVES UNMOUNTING (QA round 1 Q-1 = UX round 1 U1, design §5.0's
+ *  R7). The draft used to live in `AskCard`'s own `useState`, and the sheet
+ *  unmounts when it closes — so collapsing to read the transcript and coming
+ *  back re-answered every question from scratch, which is exactly what R7's
+ *  "toggling preserves BOTH drafts" forbids (it keeps the chat draft, which
+ *  has lived here all along). Storage is the same home the chat draft uses, for
+ *  the same reasons, and it comes free with the reload/navigation survival and
+ *  the sign-out purge. */
+export interface AskDraft {
+	answers: Record<string, string[]>;
+	skipped: string[];
+}
+
+const EMPTY_ASK_DRAFT: AskDraft = { answers: {}, skipped: [] };
+
+function readAskDraft(askId: string): AskDraft {
+	const raw = localStorage.getItem(ASK_DRAFT_PREFIX + askId);
+	if (!raw) return EMPTY_ASK_DRAFT;
+	try {
+		const parsed = JSON.parse(raw) as Partial<AskDraft>;
+		return {
+			answers: parsed.answers && typeof parsed.answers === "object" ? parsed.answers : {},
+			skipped: Array.isArray(parsed.skipped) ? parsed.skipped.map(String) : [],
+		};
+	} catch {
+		/* Unreadable is the same as absent: a half-written value must not take
+		   the card down, and the user's next gesture overwrites it. */
+		return EMPTY_ASK_DRAFT;
+	}
+}
+
+/** Drop one ask's draft, called when the ask SETTLES.
+
+    A settled ask's draft is spent: leaving it would re-fill a card the user
+    already answered (and the sheet re-reads the aggregate, so a settled card can
+    come back in the list). Ids are unique per ask, so this is hygiene rather
+    than collision defence. */
+export function clearAskDraft(askId: string): void {
+	localStorage.removeItem(ASK_DRAFT_PREFIX + askId);
+}
+
+/** A value, or an updater over the current one — React's own two spellings. */
+export type AskDraftSetter = (next: AskDraft | ((current: AskDraft) => AskDraft)) => void;
+
+function persistAskDraft(askId: string, next: AskDraft): void {
+	if (Object.keys(next.answers).length === 0 && next.skipped.length === 0) {
+		clearAskDraft(askId);
+	} else {
+		localStorage.setItem(ASK_DRAFT_PREFIX + askId, JSON.stringify(next));
+	}
+}
+
+/**
+ * Answer-draft hook, keyed by ask id: initialises from storage, writes through
+ * on change. The ask twin of `useDraft`, deliberately the same shape so the two
+ * buffers cannot drift in how they survive a collapse.
+ *
+ * THE SETTER IS FUNCTIONAL, and that is not decoration. The card holds one draft
+ * map for ALL of an ask's questions, so answering question 2 has to build on
+ * question 1's pick — and two taps in the same tick (a fast thumb, or the
+ * capture rig's own scripted pair) both closed over the SAME pre-tick `draft`,
+ * so the second overwrote the first and the form stayed incomplete with the send
+ * control disabled. The rig found it: `scripts/mobile_asks_capture.py` clicks
+ * both of the head ask's options in one evaluate, and its log said "send
+ * disabled — the form is incomplete" while the frame showed one option pressed.
+ */
+export function useAskDraft(askId: string): [AskDraft, AskDraftSetter] {
+	const [draft, setDraftState] = useState<AskDraft>(() => readAskDraft(askId));
+	useEffect(() => {
+		setDraftState(readAskDraft(askId));
+	}, [askId]);
+	const setDraft: AskDraftSetter = (next) =>
+		setDraftState((current) => {
+			const value = typeof next === "function" ? next(current) : next;
+			/* Written from inside the updater so the stored copy cannot lag the
+			   rendered one. Idempotent, so a double-invoked updater is harmless. */
+			persistAskDraft(askId, value);
+			return value;
+		});
+	return [draft, setDraft];
+}
 
 export function getDraft(sessionId: string): string {
 	return localStorage.getItem(DRAFT_PREFIX + sessionId) ?? "";
