@@ -809,5 +809,6 @@ async def test_the_capability_key_is_advertised(api) -> None:
     assert caps.status_code == 200
     features: dict[str, Any] = caps.json()["result"]["features"]
     assert features.get("projects_request_update", 0) >= 1
-    # The sibling key is untouched — this is its OWN key, not a bump.
-    assert features.get("projects") == 1
+    # The sibling key is its OWN key, not a bump — and NOT version-pinned:
+    # every client reads `>=`, so a later bump of `projects` keeps this green.
+    assert features.get("projects", 0) >= 1
