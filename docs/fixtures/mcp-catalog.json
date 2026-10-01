@@ -258,6 +258,44 @@
       ]
     }
   ],
+  "verbs": [
+    {
+      "verb": "list",
+      "description": "Show every configured server and its status",
+      "destructive": false,
+      "offers": null
+    },
+    {
+      "verb": "add",
+      "description": "Configure a new server (url, or a stdio command)",
+      "destructive": false,
+      "offers": null
+    },
+    {
+      "verb": "remove",
+      "description": "Delete a server from local-operator's config",
+      "destructive": true,
+      "offers": "all"
+    },
+    {
+      "verb": "login",
+      "description": "Authorize an OAuth server (opens the browser)",
+      "destructive": false,
+      "offers": "oauth"
+    },
+    {
+      "verb": "logout",
+      "description": "Forget a server's stored OAuth credential",
+      "destructive": true,
+      "offers": "signed_in"
+    },
+    {
+      "verb": "reauth",
+      "description": "Forget first, then authorize — for an account or scope change",
+      "destructive": true,
+      "offers": "oauth"
+    }
+  ],
   "operations": [
     {
       "id": "9f3c1a77b04e4d2f8c5a6b1d2e3f4a50",

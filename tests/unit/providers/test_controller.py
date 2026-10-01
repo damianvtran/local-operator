@@ -4017,3 +4017,183 @@ async def test_a_narrowed_provider_lists_with_its_credential_not_anonymously(
     assert [provider for provider, _ttl in calls] == ["openrouter"]
     assert [entry.selector for entry in entries] == ["openrouter/vendor/model"]
     assert all(entry.connected for entry in entries)
+
+
+class TestProviderView:
+    """``view_rows`` / ``logout_rows`` — the ONE provider view.
+
+    Every surface that answers "where does this provider stand" reads this:
+    the desktop's census, the TUI's ``/login`` and ``/logout`` pickers,
+    ``/provider``, the settings pane and ``/model``'s access note. The tests
+    below pin the DERIVATION (what a store/environment/config combination
+    produces), the one-pass property that would regress invisibly (a
+    per-provider read renders identically in every frame), and the ``None``
+    contract for an unreadable store — the difference between "you have no
+    credentials" and "I cannot tell".
+    """
+
+    @staticmethod
+    def _row(controller: ProviderController, provider: str):
+        rows = controller.view_rows()
+        assert rows is not None
+        return next(row for row in rows if row.definition.id == provider)
+
+    def test_one_store_pass_assembles_every_row(self, store, monkeypatch) -> None:
+        """ONE ``list_credentials`` call, not one per provider.
+
+        The count is the property that matters rather than the rows: this runs
+        on the keystroke that opens a picker, and the old shape paid three
+        scans per provider (``has_any_credential`` + ``is_usable`` +
+        ``list_credentials``) for exactly these answers.
+        """
+        from local_operator.providers.registry import PROVIDER_REGISTRY
+
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        calls: list[Any] = []
+        original = store.list_credentials
+
+        def counting(provider=None):
+            calls.append(provider)
+            return original(provider)
+
+        monkeypatch.setattr(store, "list_credentials", counting)
+        rows = ProviderController(store).view_rows()
+        assert rows is not None
+        assert len(rows) == len(PROVIDER_REGISTRY), "every registry row, in registry order"
+        assert calls == [None], "one store read feeds the whole view"
+
+    def test_state_transitions_from_env_key_to_stored_to_none(self, store, monkeypatch) -> None:
+        """The three non-local states, in the order a user walks them.
+
+        An environment key is a working credential that is not a login, a
+        stored row is the login, and removing it with nothing left is the third
+        state — which must stay distinguishable from the FIRST one, since a
+        stored row changes what ``/logout`` can remove.
+        """
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-env")
+        controller = ProviderController(store)
+        env_row = self._row(controller, "openrouter")
+        assert env_row.state == "env_key"
+        assert env_row.has_credential is True, "an env key can run a turn"
+        assert env_row.stored_credentials == 0, "but it is not a stored login"
+
+        store.upsert_credential("openrouter", {"key": "sk-store", "type": "api_key"})
+        stored_row = self._row(controller, "openrouter")
+        assert stored_row.state == "logged_in"
+        assert (stored_row.stored_credentials, stored_row.account_count) == (1, 1)
+
+        store.delete_credentials_for_provider("openrouter")
+        monkeypatch.delenv("OPENROUTER_API_KEY")
+        empty_row = self._row(controller, "openrouter")
+        assert empty_row.state == "needs_login"
+        assert empty_row.has_credential is False and empty_row.stored_credentials == 0
+
+    def test_identity_needs_exactly_one_account_and_flavours_collapse(self, store) -> None:
+        """A label is offered only when there is ONE account to label.
+
+        Two accounts under one storage id make any single label a silent pick,
+        and a flavour (``xai-oauth``) reports the account its base (``xai``)
+        holds — one account, one row on ``/logout``.
+        """
+        store.upsert_credential("xai", {"type": "oauth", "email": "me@example.com"})
+        controller = ProviderController(store)
+        base = self._row(controller, "xai")
+        flavour = self._row(controller, "xai-oauth")
+        assert base.identity == "me@example.com"
+        assert flavour.identity == "me@example.com"
+        assert flavour.storage_id == "xai"
+        assert flavour.stored_credentials == 1
+
+        store.upsert_credential("xai", {"type": "oauth", "account_id": "acct-2"})
+        multi = self._row(controller, "xai")
+        assert multi.identity is None, "two accounts: no single label"
+        assert multi.account_count == 2
+
+    def test_local_states_come_from_the_configured_endpoint(
+        self, store, monkeypatch, tmp_path
+    ) -> None:
+        """A local server's state is its ENDPOINT, never its store row.
+
+        The predicate the TUI's ``_credential_state`` used: a local provider
+        ships with a preset port, so its presence in the registry says nothing
+        — ``providers.<id>.base_url`` is the app's own record that the user
+        pointed it somewhere.
+        """
+        from local_operator.config import ConfigManager
+
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        controller = ProviderController(store)
+        assert self._row(controller, "lmstudio").state == "local_unconfigured"
+        ConfigManager(tmp_path).update_config(
+            {"providers": {"lmstudio": {"base_url": "http://localhost:1234/v1"}}}
+        )
+        assert self._row(controller, "lmstudio").state == "local_ready"
+
+    def test_the_view_covers_the_whole_registry_not_only_login_rows(self, store) -> None:
+        """``/model``'s access note looks up whatever provider the model spec names.
+
+        That can be a row with no login flow at all (the mock host), so the view
+        is the registry — the login-only surfaces filter it themselves.
+        """
+        from local_operator.providers.registry import PROVIDER_REGISTRY
+
+        rows = ProviderController(store).view_rows()
+        assert rows is not None
+        assert {row.definition.id for row in rows} == {p.id for p in PROVIDER_REGISTRY}
+
+    def test_an_unreadable_store_is_none_and_api_misuse_still_raises(
+        self, store, monkeypatch
+    ) -> None:
+        """``None`` means "cannot tell"; a sqlite misuse is a bug and raises.
+
+        The narrow re-raise is the controller's documented contract (a
+        connection crossing threads must not dress itself as the unreadable
+        store degradation), and it is the same guard ``usable_providers``
+        carries.
+        """
+        controller = ProviderController(store)
+
+        def locked(*_args, **_kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(store, "list_credentials", locked)
+        assert controller.view_rows() is None
+        assert controller.logout_rows() is None
+
+        def misuse(*_args, **_kwargs):
+            raise sqlite3.ProgrammingError("SQLite objects created in a thread")
+
+        monkeypatch.setattr(store, "list_credentials", misuse)
+        with pytest.raises(sqlite3.ProgrammingError):
+            controller.view_rows()
+
+    def test_logout_rows_are_stored_logins_once_each_and_never_env_keys(
+        self, store, monkeypatch
+    ) -> None:
+        """The destructive projection: which rows may exist on ``/logout``.
+
+        Registry order; a flavour and its base share one row; an environment key
+        is excluded by construction, because it is the one credential a
+        keystroke cannot remove.
+        """
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-env")
+        # Stored under the BASE id, the way a login resolves it
+        # (``credential_provider_id``): the flavour row reads it back.
+        store.upsert_credential("xai", {"type": "oauth", "email": "me@example.com"})
+        store.upsert_credential("openai", {"key": "sk", "type": "api_key"})
+        controller = ProviderController(store)
+        rows = controller.logout_rows()
+        assert rows is not None
+        assert [row.definition.id for row in rows] == [
+            "openai",
+            "xai",
+        ], "registry order, one row per storage id, env keys excluded"
+        assert rows[0].credential_types == ("api_key",)
+        assert rows[1].identity == "me@example.com"
+
+        # And the positive direction on the SAME store: removing the row removes
+        # the row from the projection.
+        store.delete_credentials_for_provider("openai")
+        after = controller.logout_rows()
+        assert after is not None
+        assert [row.definition.id for row in after] == ["xai"]

@@ -816,6 +816,89 @@ async def test_provider_census_alias_storage_and_redacted_keys(desktop):
     assert secret not in bad.text
 
 
+async def _census_row(client: AsyncClient, provider_id: str) -> dict[str, Any]:
+    """One row of the census, by id — the shape every surface reads."""
+    rows = (await client.get("/v1/auth/providers")).json()["result"]["providers"]
+    return next(row for row in rows if row["id"] == provider_id)
+
+
+async def test_provider_census_publishes_the_registry_view(desktop):
+    """The five added row fields: brand, capabilities, state, identity, count.
+
+    Additive on the existing rows — an older client ignores them — and the
+    state enum is the machine form of the TUI's words, so the desktop can
+    render its own copy without re-deriving the fact (the composer's provider
+    list is built from exactly this row).
+    """
+    client, _app = desktop
+    rows = (await client.get("/v1/auth/providers")).json()["result"]["providers"]
+
+    openai = next(row for row in rows if row["id"] == "openai")
+    assert openai["brand"] == "OpenAI", "the clean title, not the flavour-qualified name"
+    assert openai["capabilities"] == ["chat"]
+    assert openai["state"] == "needs_login"
+    assert openai["identity"] is None
+    assert openai["account_count"] == 0
+
+    token_plan = next(row for row in rows if row["id"] == "alibaba-token-plan")
+    assert token_plan["brand"] == "QwenCloud", "the one explicit override"
+    elevenlabs = next(row for row in rows if row["id"] == "elevenlabs")
+    assert elevenlabs["capabilities"] == ["stt"], "the wire fact behind speech_only"
+    ollama = next(row for row in rows if row["id"] == "ollama")
+    assert ollama["state"] == "local_unconfigured"
+    # Sorted for a stable wire: the registry field is a frozenset.
+    assert all(row["capabilities"] == sorted(row["capabilities"]) for row in rows)
+
+
+async def test_provider_census_state_and_identity_track_the_store(desktop):
+    """The state transitions a user walks: needs login -> stored -> none.
+
+    Driven through the REAL store on a real isolated config dir (the same one
+    the routes read), because the point is that the census, the pickers and the
+    settings pane answer from one store rather than from three reads that can
+    disagree. An environment key is pinned in its own test below — it flips
+    `has_credential` without touching `stored_credentials`.
+    """
+    client, app = desktop
+    before = await _census_row(client, "openai")
+    assert (before["state"], before["stored_credentials"]) == ("needs_login", 0)
+
+    app.state.desktop_auth.store.upsert_credential(
+        "openai", {"type": "oauth", "email": "me@example.com", "access": "token"}
+    )
+    stored = await _census_row(client, "openai")
+    assert stored["state"] == "logged_in"
+    assert stored["identity"] == "me@example.com", "one account: the row names it"
+    assert (stored["account_count"], stored["stored_credentials"]) == (1, 1)
+    assert stored["has_credential"] is True
+
+    app.state.desktop_auth.store.upsert_credential(
+        "openai", {"type": "oauth", "account_id": "acct-2", "access": "token-2"}
+    )
+    multi = await _census_row(client, "openai")
+    assert multi["identity"] is None, "two accounts: a single label would pick one silently"
+    assert multi["account_count"] == 2
+
+    assert (await client.delete("/v1/auth/providers/openai/credentials")).status_code == 200
+    cleared = await _census_row(client, "openai")
+    assert cleared["state"] == "needs_login"
+    assert cleared["stored_credentials"] == 0
+
+
+async def test_provider_census_reports_an_environment_key_without_a_login(desktop, monkeypatch):
+    """An env key runs a turn, so `has_credential` is true — but it is not a login.
+
+    The two fields answer different questions (`stored_credentials` is what
+    `/logout` can remove), which is why the row carries both.
+    """
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-env-key")
+    client, _app = desktop
+    row = await _census_row(client, "openrouter")
+    assert row["state"] == "env_key"
+    assert row["has_credential"] is True
+    assert row["stored_credentials"] == 0
+
+
 async def test_actual_registry_key_login_input_cancel_and_persistence(desktop):
     client, app = desktop
     started = await client.post("/v1/auth/login", json={"provider": "openrouter"})
