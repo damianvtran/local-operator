@@ -1057,6 +1057,24 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "clears the fixed-basename key file this call JUST created, only on the "
         "mint's error path; never session-derived",
     ),
+    # The push worker's cursor file (`mobile/push_worker.py`): one JSON store at a
+    # fixed basename directly under the config root, beside mobile-seen.json, the
+    # device registry and the handle key. `state_path(config_dir)` is
+    # config-root-derived with no session id and no caller input, so neither the
+    # target nor the mkstemp temp file beside it can name a path under
+    # `sessions/`; the unlink runs only on `_save`'s own error path, clearing the
+    # temp this call JUST created.
+    (
+        "local_operator/mobile/push_worker.py::PushWorker._save",
+        "os.replace",
+        "temp FILE -> <config_dir>/mobile-push-worker.json; both names are "
+        "config-root-derived with a fixed basename",
+    ),
+    (
+        "local_operator/mobile/push_worker.py::PushWorker._save",
+        "os.unlink",
+        "that same temp FILE, only while the replace above is failing",
+    ),
     (
         "local_operator/multiplexer/markers.py::_FileBackend.publish",
         "os.replace",

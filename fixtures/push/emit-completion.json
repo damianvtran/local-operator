@@ -23,10 +23,19 @@
     "completion_token": "str",
     "kind": "str",
     "emit_id": "str",
-    "count": "int"
+    "count": "int",
+    "alert": "object"
   },
   "payload_optional": {},
   "payload_version": 1,
+  "alert_required": {
+    "title": "str",
+    "body": "str"
+  },
+  "alert_count_one": {
+    "title": "Local Operator",
+    "body": "Task complete · 1 conversation needs you"
+  },
   "kinds": [
     "complete",
     "error",
@@ -50,7 +59,11 @@
     "completion_token": "9f5d1d6e-6b1a-4c6e-9b3a-7a1c2f3d4e5f",
     "kind": "complete",
     "emit_id": "6b1e2d3c4a5f60718293a4b5c6d7e8f9",
-    "count": 2
+    "count": 2,
+    "alert": {
+      "title": "Local Operator",
+      "body": "Task complete · 2 conversations need you"
+    }
   },
   "body": {
     "v": 1,
@@ -61,6 +74,10 @@
     "kind": "complete",
     "emit_id": "6b1e2d3c4a5f60718293a4b5c6d7e8f9",
     "count": 2,
+    "alert": {
+      "title": "Local Operator",
+      "body": "Task complete · 2 conversations need you"
+    },
     "devices": [
       {
         "device_id": "3f1c9a7b2d4e506182a3b4c5d6e7f809",
@@ -73,6 +90,9 @@
   "notes": [
     "THE ROUTE IS THE FROZEN ONE and there is no second spelling: the devices block rides a call that already exists rather than a route of its own.",
     "The body IS the payload object plus the devices block (the registration forward and the heartbeat carry the same block; their routes are cloud-side proposals).",
+    "alert is COMPOSED BY THE MACHINE and delivered verbatim by the cloud, for every type (the lane's ruling of 2026-10-01): the title is APP_NAME and the body is a house constant for the kind plus the count — here BODY_COMPLETE and count 2. It is the only place a title or a body may appear anywhere in a push, and its text is never a conversation name, a transcript snippet or a provider's error line.",
+    "The count in the body is §3.2's count — the machine's unread CONVERSATION count at composition time, the same number S1's badge counts — which is why the sentence says conversations and never updates.",
+    "ONE NUMBER, ONE NOUN, AND THE NOUN AGREES WITH THE NUMBER: the body's count term is `<n> conversation(s) need(s) you`, so a count of one reads `1 conversation needs you` rather than `1 conversations need you` — a count of one being the common case for a completion push. alert_count_one files that literal so no reader of this tree only ever sees the plural; the ruling note carries the amendment.",
     "conversation is the per-machine opaque handle (S2), never a session id, and it is what makes apns-collapse-id / notification.tag collapse per conversation.",
     "kind is the STORE's vocabulary — complete, error, interrupted, closed, retired — not the composer's set, which is missing 'closed'.",
     "count is the machine's unread count at composition time: the one aggregate the design discloses to the cloud on purpose.",
