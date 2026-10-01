@@ -3548,6 +3548,126 @@ class TestMcpRecoveryNotice:
         assert recoveries == [], "a sinkless connect left the server armed to re-announce"
         await manager.disconnect_all()
 
+    @pytest.mark.asyncio
+    async def test_a_session_suppressed_duplicate_still_arms_and_recovers(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The pairing survives a session-side suppression of the ROW.
+
+        The shape every boot/resume hits: one process wrote the card, the
+        next re-attempts the dead server, the session's durable scan
+        suppresses the duplicate write — and the manager, which arms
+        ``_incident_announced`` off its own ``sink(...)`` call RETURNING,
+        must still be armed so a reconnect in THIS process announces the
+        recovery. (The session half itself is pinned in
+        ``tests/unit/session/test_mcp_notice_dedupe.py``; this is the
+        manager half, driven through the real session sink.)
+        """
+        from local_operator.harness.message_types import (
+            SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
+        )
+        from local_operator.harness.types import ModelSpec
+        from local_operator.session.session import Session
+        from local_operator.session.transcript import Transcript
+
+        session_dir = tmp_path / "sess"
+
+        def make_session() -> Session:
+            def no_stream(*_args: Any, **_kwargs: Any) -> Any:
+                raise AssertionError("this test never runs a turn")
+
+            return Session(
+                model=ModelSpec(provider="test", model_id="m", context_window=100_000),
+                stream_fn=no_stream,
+                tools=[],
+                transcript=Transcript(session_dir),
+                system_blocks_provider=lambda: ["stable", "env"],
+            )
+
+        async def drain(session: Session) -> None:
+            for _ in range(10):
+                pending = [task for task in list(session._background_tasks) if not task.done()]
+                if not pending:
+                    return
+                await asyncio.gather(*pending, return_exceptions=True)
+            raise AssertionError("background journal tasks never settled")
+
+        def warning_rows() -> int:
+            return sum(
+                1
+                for entry in Transcript(session_dir).entries()
+                if str(entry.payload.get("custom_type", "")) == SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE
+            )
+
+        async def good_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
+            return _make_conn(name, cfg)
+
+        # Process A: connect first — the breaker paths run against a discovered
+        # config, the way the rest of this class drives them — then the trip
+        # writes the card.
+        manager_a = McpManager(str(project))
+        session_a = make_session()
+        manager_a.on_incident = session_a._on_mcp_incident
+        try:
+            monkeypatch.setattr(manager_a, "_connect_server", good_connect)
+            await manager_a.discover_and_connect()
+            await self._trip_breaker(manager_a, "fast", monkeypatch)
+            await drain(session_a)
+            assert warning_rows() == 1
+        finally:
+            await manager_a.disconnect_all()
+            await session_a.dispose()
+
+        # Rearm the monkeypatch before process B: ``_trip_breaker`` captures
+        # ``asyncio.sleep`` expecting to be a test's first patch, and a second
+        # call would otherwise capture its own instant stub.
+        monkeypatch.undo()
+
+        # Process B: the identical incident must NOT write a second row...
+        manager_b = McpManager(str(project))
+        session_b = make_session()
+        incidents: list[tuple[str, str]] = []
+        recoveries: list[tuple[str, int]] = []
+
+        def incident_sink(server: str, reason: str) -> None:
+            incidents.append((server, reason))
+            session_b._on_mcp_incident(server, reason)
+
+        def recovery_sink(server: str, count: int) -> None:
+            recoveries.append((server, count))
+            session_b._on_mcp_recovery(server, count)
+
+        manager_b.on_incident = incident_sink
+        manager_b.on_recovery = recovery_sink
+        try:
+            monkeypatch.setattr(manager_b, "_connect_server", good_connect)
+            await manager_b.discover_and_connect()
+            await self._trip_breaker(manager_b, "fast", monkeypatch)
+            await drain(session_b)
+            assert [server for server, _ in incidents] == ["fast"]
+            # ...but the arming must still happen: it rides the sink call
+            # RETURNING, not what the sink wrote (the write was suppressed).
+            assert "fast" in manager_b._incident_announced, (
+                "a session-side suppression disarmed the manager; arming must "
+                "not depend on what the sink wrote"
+            )
+            assert warning_rows() == 1, "the duplicate re-flagged the row"
+
+            monkeypatch.setattr(manager_b, "_connect_server", good_connect)
+            assert await manager_b.reconnect_server("fast") is not None
+            assert recoveries == [("fast", 1)], "the recovery must still be announced"
+            await drain(session_b)
+            assert "fast" not in manager_b._incident_announced
+
+            # The recovery also re-armed the session half: the same card
+            # failing again after it is a new state and emits.
+            session_b._on_mcp_incident(*incidents[-1])
+            await drain(session_b)
+            assert warning_rows() == 2
+        finally:
+            await manager_b.disconnect_all()
+            await session_b.dispose()
+
 
 class TestAuthBlockRevalidation:
     """Propagation of a SHARED grant change into a session that gave up.

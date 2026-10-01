@@ -236,6 +236,11 @@ from local_operator.session.naming import (
     ConversationName,
     TitleFitCheck,
 )
+from local_operator.session.notice_guard import (
+    MCP_UNAVAILABLE_REMIND_S,
+    NoticeGuard,
+    fingerprint_text,
+)
 from local_operator.session.protocol import (
     CompactionOutcome,
     RuntimeLocality,
@@ -256,7 +261,13 @@ from local_operator.session.spend import (
 )
 from local_operator.session.spend import recall as recall_spend
 from local_operator.session.spend import serving_identity, writer_stamp
-from local_operator.session.transcript import ENTRY_CUSTOM, ENTRY_MESSAGE, Transcript
+from local_operator.session.transcript import (
+    CUSTOM_KIND_CUSTOM,
+    ENTRY_CUSTOM,
+    ENTRY_MESSAGE,
+    Transcript,
+    context_cut_index,
+)
 from local_operator.session.usage_seed import seed_reported_usage
 from local_operator.stt import AudioPath
 from local_operator.tools.builtin import (
@@ -3611,7 +3622,24 @@ class Session:
         #: this away — no current route reaches the inversion (every real
         #: incident-to-recovery path crosses a connect round trip), but a cached
         #: or in-process connect path makes it live, and the failure is silent.
+        #:
+        #: The MCP-notice guard's mutations ride the SAME lock (``note_emitted``
+        #: inside the emit path, ``note_recovered`` inside the recovery path),
+        #: so the dedupe state a failure observes is exactly the one the
+        #: recoveries before it produced — see ``journal_mcp_unavailable``.
         self._journal_lock = asyncio.Lock()
+        #: Dedupes the MCP-unavailable notice at the journal write: one card per
+        #: (server, byte-identical text) while it stays outstanding, re-armed by
+        #: a live recovery or a changed card, with a 24 h reminder window.
+        #: Deliberately IN-MEMORY: the durable half of "already outstanding" is
+        #: the transcript scan in :meth:`_mcp_unavailable_previous_ts`, which is
+        #: what survives a restart — both halves bounded at the latest
+        #: compaction cut ("outstanding" means a row the replay still shows;
+        #: see :meth:`_mcp_unavailable_record_visible`) — and the recovery half
+        #: is live-only by design (``journal_mcp_recovery``); ``NoticeGuard``
+        #: documents the cross-process blind spot that leaves,
+        #: ``MCP_UNAVAILABLE_REMIND_S`` the bound on it.
+        self._mcp_notice_guard = NoticeGuard(remind_after_s=MCP_UNAVAILABLE_REMIND_S)
         # (new_label, transient) of the last model switch made model-visible, so
         # the two edges that can both fire for one change (``set_model`` and a
         # route-settled event) do not double-announce. See journal_model_switch.
@@ -13637,6 +13665,84 @@ class Session:
         # notice into a failed turn boundary.
         return
 
+    def _mcp_unavailable_previous_ts(self, server: str, fingerprint: str) -> float | None:
+        """The timestamp of the newest PERSISTED warning for ``server`` when it
+        is byte-identical to the card ``fingerprint`` names, else ``None``.
+
+        The durable half of the MCP-unavailable dedupe (``NoticeGuard`` holds
+        the live half): a fresh process cannot know what a previous one already
+        wrote, so the transcript — the one store every surface reads — is asked
+        directly. Only the NEWEST ``session_mcp_unavailable`` row for the
+        server is consulted, and it answers ``None`` when that row's card
+        differs: the newest visible row is the state the operator last saw, so
+        a card that does not match it IS a change (or an unreadable legacy
+        row), and the caller must emit rather than suppress.
+
+        The scan is BOUNDED AT THE LATEST COMPACTION CUT
+        (:func:`context_cut_index`): rows below the cut are what the context
+        replay dropped — the model's ``build_llm_history`` and the operator's
+        display window both start at the cut — so a matching row no surface
+        still shows must NOT suppress, or a resumed session would keep a card
+        suppressed with none visible anywhere (review round 1, M1,
+        reproduced). The in-memory half of the dedupe is re-validated the
+        same way; see :meth:`_mcp_unavailable_record_visible`.
+
+        Both custom spellings are matched, the same pair
+        ``transcript._is_bookkeeping_batch`` admits: ``append_message`` writes a
+        ``message`` entry carrying ``kind: custom``, ``append_custom`` a bare
+        ``custom`` entry. The comparison is made against the row's stored card
+        TEXT — falling back to re-rendering from its bounded ``reason`` —
+        because the renderer clips the reason at 200 characters: a row written
+        from a longer reason must still reproduce its own card byte-for-byte
+        from the 1000-character copy the writer keeps.
+        """
+        from local_operator.incidents import format_mcp_unavailable_message
+
+        entries = self._transcript.entries()
+        # VISIBILITY BOUND (review round 1, M1): scan only at/above the latest
+        # compaction cut. Rows below it were dropped from the context replay —
+        # the model's ``build_llm_history`` and the operator's display window
+        # both start at the cut — so a row no surface still shows must not
+        # suppress the next identical failure: "outstanding" means "a row the
+        # replay still shows", and suppression must never outlive visibility.
+        cut = context_cut_index(entries, quiet=True)
+        for entry in reversed(entries[cut:]):
+            payload = entry.payload
+            if str(payload.get("custom_type", "")) != SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE:
+                continue
+            if not (
+                (entry.type == ENTRY_MESSAGE and payload.get("kind") == CUSTOM_KIND_CUSTOM)
+                or entry.type == ENTRY_CUSTOM
+            ):
+                continue
+            details = payload.get("details")
+            if not isinstance(details, dict) or details.get("server") != server:
+                continue
+            stored = details.get("text")
+            if not isinstance(stored, str):
+                stored_reason = details.get("reason")
+                if isinstance(stored_reason, str):
+                    stored = format_mcp_unavailable_message(server, stored_reason)
+            if isinstance(stored, str) and fingerprint_text(stored) == fingerprint:
+                return entry.ts
+            return None
+        return None
+
+    def _mcp_unavailable_record_visible(self, server: str, fingerprint: str) -> bool:
+        """Whether the guard's recorded emission is still on a replay surface.
+
+        The live half of the dedupe (``NoticeGuard``'s record) can outlive
+        what it stands for: a compaction cut drops older rows from every
+        replay — the model's ``build_llm_history`` and the display window
+        both start at the cut — while the record keeps suppressing. So the
+        record is re-validated through the SAME cut-bounded scan the durable
+        half uses (:meth:`_mcp_unavailable_previous_ts`): a record whose row
+        the cut dropped is void, and the next identical failure re-emits
+        rather than staying silent with no card anywhere (review round 1,
+        M1, reproduced).
+        """
+        return self._mcp_unavailable_previous_ts(server, fingerprint) is not None
+
     async def journal_mcp_unavailable(self, server: str, reason: str) -> None:
         """Tell the MODEL an MCP server's tools are gone — a WARNING, not a failure.
 
@@ -13667,6 +13773,28 @@ class Session:
         are not there. The accepted consequence — the un-superseded warning
         replays with no recovery after it — is the one :meth:`journal_mcp_recovery`
         already documents; it is not re-argued here.
+
+        DEDUPED AT THE WRITE — one card per state change. An identical card for
+        the same server is not appended again while the previous one is still
+        outstanding: in this process (``NoticeGuard``), in the transcript a
+        fresh process boots against (:meth:`_mcp_unavailable_previous_ts`), and
+        up to the ``MCP_UNAVAILABLE_REMIND_S`` (24 h) staleness reminder —
+        after which the same card re-emits, so a condition the operator has
+        scrolled away re-surfaces rather than going silent forever.
+        Outstanding means a row the REPLAY still shows: both halves of the
+        dedupe are bounded at the latest compaction cut, so a compaction that
+        drops the card re-arms the next identical failure instead of keeping
+        it suppressed with nothing visible (review round 1, M1). A changed
+        card — a new reason, or a re-failure after a live recovery
+        (:meth:`journal_mcp_recovery`) — always emits. Measured motivation: 96
+        byte-identical ``minerva-qa`` rows for one expired grant over ~29 h on
+        session ``1375449bf925``, one per boot/resume, including a four-card
+        cluster inside seven minutes. Suppressing HERE, at the single write
+        every surface reads, is what fixes the TUI, the desktop UI, the mobile
+        fold and the relay in one place. The manager's ``_incident_announced``
+        arming is untouched by a suppression: the sink is fire-and-forget and
+        the manager arms off its own call RETURNING, not off anything this
+        method wrote — see the three arming sites in ``mcp/manager.py``.
 
         ``preserve_mtime`` so an unavailable server does not restamp the
         session's activity clock: this is bookkeeping ABOUT a session, never
@@ -13707,26 +13835,48 @@ class Session:
         if self._disposed or not server:
             return
         text = format_mcp_unavailable_message(server, reason)
-        message = CustomMessage(
-            custom_type=SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
-            attribution="system",
-            details={
-                "text": text,
-                "server": server,
-                # Bounded like :meth:`journal_incident`'s ``raw``: the RENDERED
-                # line is clipped to 200 characters, so an unbounded copy here
-                # would persist exactly what the reader is not shown — a whole
-                # provider error envelope, most of it a restatement (review
-                # round 1, R2).
-                "reason": reason[:1000],
-            },
-        )
-        try:
-            async with self._journal_lock:
+        fingerprint = fingerprint_text(text)
+        async with self._journal_lock:
+            # The dedupe decision is taken UNDER the lock because the recovery
+            # hook mutates the same guard state under it (`note_recovered`): a
+            # decision taken outside could race a recovery that fired later in
+            # hook order, and the failure — a suppressed notice whose state had
+            # already changed back — is silent. See ``_journal_lock``.
+            if not self._mcp_notice_guard.should_emit(
+                server,
+                fingerprint,
+                find_previous=self._mcp_unavailable_previous_ts,
+                record_visible=self._mcp_unavailable_record_visible,
+            ):
+                logger.debug(
+                    "suppressed a repeated MCP-unavailable notice for %r (card unchanged)",
+                    server,
+                )
+                return
+            message = CustomMessage(
+                custom_type=SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
+                attribution="system",
+                details={
+                    "text": text,
+                    "server": server,
+                    # Bounded like :meth:`journal_incident`'s ``raw``: the RENDERED
+                    # line is clipped to 200 characters, so an unbounded copy here
+                    # would persist exactly what the reader is not shown — a whole
+                    # provider error envelope, most of it a restatement (review
+                    # round 1, R2).
+                    "reason": reason[:1000],
+                },
+            )
+            try:
                 await self._transcript.append_message(message, preserve_mtime=True)
                 self._append_or_park_journal(message)
-        except OSError:
-            logger.warning("could not journal MCP unavailability", exc_info=True)
+            except OSError:
+                logger.warning("could not journal MCP unavailability", exc_info=True)
+                return
+            # Recorded only AFTER the write landed: the timestamp is what the
+            # reminder window is measured from, and a failed append must not
+            # push the next attempt's eligibility out.
+            self._mcp_notice_guard.note_emitted(server, fingerprint)
 
     async def journal_mcp_recovery(self, server: str, tool_count: int) -> None:
         """Tell the MODEL an MCP server it was told was unavailable is usable again.
@@ -13758,6 +13908,15 @@ class Session:
         honest correction. Deleting the persisted warning was rejected — the
         transcript is append-only by design.
 
+        RE-ARMS THE WARNING'S DEDUPE: a live recovery clears this server's
+        outstanding card, so a re-failure after it emits a fresh warning even
+        though the transcript still shows the old row — the recovery is
+        live-only by design, so the durable store cannot SEE it, and
+        ``NoticeGuard`` documents the cross-process blind spot that leaves and
+        its 24 h bound. The marker is consumed by that next emission; the
+        recovery itself is not deduped: it is live-only and every one of them
+        is a real state change.
+
         Parked, never spliced: ``_append_or_park_journal`` is what keeps a
         notice arriving mid-tool-batch from producing
         ``assistant(tool_use) -> user -> tool_result`` and bricking the
@@ -13770,7 +13929,11 @@ class Session:
         transcript write, so a recovery fired straight after an incident
         reached the model FIRST and left the death notice as the last word
         (review round 1, R1). The lock makes the order a property of which hook
-        fired first, not of how many awaits each method contains.
+        fired first, not of how many awaits each method contains — and it is
+        also where the dedupe guard re-arms: :meth:`journal_mcp_unavailable`'s
+        guard mutations ride the SAME lock (see ``_journal_lock``), so the
+        re-arm is ordered against the warning it supersedes rather than racing
+        it.
         """
         from local_operator.incidents import format_mcp_recovery_message
 
@@ -13784,6 +13947,12 @@ class Session:
         )
         async with self._journal_lock:
             self._append_or_park_journal(message)
+            # The warning's dedupe re-arms HERE, under the same lock as the
+            # emission it supersedes: the guard clears the server's outstanding
+            # card and marks a live recovery, so a re-failure emits a fresh
+            # card even though the transcript still shows the old row (the
+            # recovery is never persisted — see the docstring above).
+            self._mcp_notice_guard.note_recovered(server)
 
     def _on_mcp_incident(self, server: str, reason: str) -> None:
         """MCP manager hook (breaker trips, grant expires): journal without
