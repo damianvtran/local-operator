@@ -1142,7 +1142,8 @@ $0.05–0.30, capped at $0.50. For scale on a full suite: prior uncapped
 model side of that is no longer an estimate: the campaign's sealed usage records
 now measure per-episode model spend directly. Arm 1830's ten r1 episodes — same
 arm, same route, same budgets — cost **$0.5597 to $14.3239 each, ≈$35.26 for the
-ten** (a floor, since the provider reported a price on only some calls: 49 of
+ten** ([arm 1830's record](records/TRANCHE-arm-1830.md); a floor, since the
+provider reported a price on only some calls: 49 of
 193 on `task_005`, 93 of 166 on `task_016`). That is roughly an order of
 magnitude above the $0.05–0.30 per episode the staging document predicted for
 the model, and the top of the range is the cache re-billing defect recorded
@@ -1203,7 +1204,19 @@ It produced #542 (the frame-id contract, plus the bytecode-proof digest) and
   task_004 and task_017 moved 0 → 1,000,000, 0 → 700,000 and 143k → 571k ppm
   (`~/worktrees/osworld/scripts/logs/CONTROL-repeat-1796.md`). The same
   caveat rode on a documented −46% arm-to-arm delta that the control repeat
-  put inside within-build variance (`TRANCHE-arm-1796.md`).
+  put inside within-build variance (`TRANCHE-arm-1796.md`). Arm 1830 — the
+  campaign's own paired read, now in the repository — is the direct
+  measurement of this: of its ten tasks, eight were run twice (r1/r2) on
+  identical build, route and budgets, and two of those eight flipped their
+  binary outcome, in opposite directions (task_013 went 0 → a full solve;
+  task_001 went a full solve → 0/777,778). In the record's own words the
+  arm-level result is "indistinguishable given its own spread", any single-run
+  comparison against another arm or a published baseline "has no power", and a
+  ten-task arm "cannot carry a capability claim"
+  ([`records/TRANCHE-arm-1830.md`](records/TRANCHE-arm-1830.md)). The record
+  also bounds what the arm covers: input-refusal recovery, the bridge-wedge
+  re-bind and the provider 504/media recovery never fired in any episode, so
+  the ten-pair result says nothing about them.
 - **No live kill-and-rescue drill.** The drill — SIGKILL the parent mid-episode,
   confirm the audit is non-empty, sweep, confirm it returns to `[]` — was
   staged and still pending at the time of writing. #548's fix was verified
@@ -1231,7 +1244,7 @@ It produced #542 (the frame-id contract, plus the bytecode-proof digest) and
 ### Measured scoring-side defects
 
 Four defects on the *scoring* side were measured during the campaign — three of
-them run records under `~/worktrees/osworld/scripts/logs/` (the cache defect
+them run records, committed under [`records/`](records/) (the cache defect
 carries both a controlled probe and a cost-forensics analysis), and one a
 property of the evidence format itself. None is a hypothesis
 and none is repaired by this document. They matter to any reader deciding
@@ -1289,7 +1302,8 @@ registry — normalising `openrouter` to `openai_compatible` plus
 `https://openrouter.ai/api/v1`, and raising `JudgeUnavailable` **by name before
 allocation** for anything unrecognised — is in review as PR #1887 (which
 also discloses the spend surface, since an enabled judge now spends the call it
-was always configured for).
+was always configured for). The record is
+[`records/EVAL-JUDGE-FINDING-1830-task_003.md`](records/EVAL-JUDGE-FINDING-1830-task_003.md).
 
 **An evaluator can read the wrong browser tab and score the task 0.** task_009's
 evaluator selects a tab by `tab_prefix`, which for that task is the **bare
@@ -1315,10 +1329,11 @@ episode is "not evaluated as intended", not "verified wrong", and no claim in
 either direction can be made from it. No fix has landed at the time of writing;
 the repair shape is to pin the prefix to the page that holds the submitted data,
 or to prefer a prefix match whose page can answer (`typeof getJSON === 'function'`).
+The record is [`records/ZERO-CLASSIFICATION-1830-009-013.md`](records/ZERO-CLASSIFICATION-1830-009-013.md).
 
 **Appending to the context re-writes the provider's cached prefix.** A cost
 defect, measured with a controlled nine-case prefix probe on this apparatus —
-`probe_rule4.py`, whose per-case rows read `cached_tokens` and
+[`probe_rule4.py`](records/probe_rule4.py.txt), whose per-case rows read `cached_tokens` and
 `cache_write_tokens` back out of the provider's own response: an **identical**
 prefix re-sent reads back cached, while **appending** content re-bills it.
 
@@ -1342,7 +1357,9 @@ $17.1957). It is not cache TTL expiry (re-write gaps of 33–180 s sit far below
 `provider_turn_start` 87 against 86 calls). The probe ran against **Alibaba**,
 so whether the effect is provider-specific is not yet settled. A fix — appending
 the observation frame so the cached prefix survives an action turn — is a
-candidate, not a change.
+candidate, not a change. The records are
+[`records/COST-FORENSICS-1830-task_003.md`](records/COST-FORENSICS-1830-task_003.md)
+and [`records/PROBE-RULE4-README.md`](records/PROBE-RULE4-README.md).
 
 **What these records can and cannot settle.** The diagnostics block bounds what
 any post-hoc analysis of these bundles can conclude, and the boundary is worth
@@ -1364,6 +1381,12 @@ stating plainly:
 So a zero from this apparatus can be classified as ran-and-failed more often
 than it can be classified as to cause, and a reader should not expect the
 records to name a failing checkpoint when the evaluator never named one itself.
+Several figures quoted above are not in the committed records at all — the
+provider-reported call counts (49 of 193 on `task_005`, 93 of 166 on `task_016`),
+the `$0.5597` low end of the per-episode range, `task_016`'s `cache_write` 1.69M,
+the judge defect's `18 of the 108` scope and `task_004`'s `agent_stop` ending —
+they come from the sealed episode bundles rather than the in-repo `records/`, so
+a citation that lands on one of those clauses is not backing the number.
 
 ### Known limitations and residual risks
 
