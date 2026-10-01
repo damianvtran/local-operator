@@ -30,6 +30,7 @@ what make a still a picture of a STATE rather than of an empty screen.
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,7 @@ from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
 isolate_capture()
 
 from local_operator.asks import policy  # noqa: E402
+from local_operator.tui import theme as theme_mod  # noqa: E402
 from local_operator.tui.app import OperatorApp  # noqa: E402
 from local_operator.tui.widgets.ask_queue import ask_rows  # noqa: E402
 from local_operator.tui.widgets.assistant import AssistantBlock  # noqa: E402
@@ -156,6 +158,15 @@ async def main() -> None:
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=size) as pilot:
         await pilot.pause()
+        # `ASK_QUEUE_SHOT_THEME=light` renders the same state on the paper ramp.
+        # An env seam rather than an argument, because the frame's FILENAME is
+        # what a reader compares against: threading a theme through every mode's
+        # name is how two runs of "the same" frame end up labelled alike.
+        wanted = os.environ.get("ASK_QUEUE_SHOT_THEME", "").strip()
+        if wanted:
+            theme_mod.set_theme(wanted)
+            app.refresh_css()
+            await pilot.pause()
         for turn in range(1, 5):
             app._append_block(UserBlock(f"Turn {turn}: what should we do about the stale rows?"))
             prose = AssistantBlock()
