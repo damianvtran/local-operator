@@ -485,3 +485,108 @@ def test_the_external_resolver_refuses_by_class() -> None:
     reason = readonly.external_monitor_verdict("mcp__srv__thing", {})
     assert reason is not None, "mcp"
     assert "read-only hint can only be checked inside a running session" in reason, reason
+
+
+# ---------------------------------------------------------------------------
+# §D2: the shape check — one validator for arm and tick
+# ---------------------------------------------------------------------------
+
+
+def real_tool(name: str) -> AgentTool:
+    """A tool built by its own real builder, schema and all.
+
+    The shape check's whole point is the tool's OWN params model, so these rows
+    use the shipped builders rather than a hand-written schema: a fake would
+    let the check pass while the real ``extra="forbid"`` model still rejected
+    the call at tick, which is the bug this closes.
+    """
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools.registry import TOOL_BUILDERS
+
+    tool = TOOL_BUILDERS[name](ToolContext())
+    assert tool is not None, name
+    return tool
+
+
+def test_glob_with_path_is_refused_at_arm() -> None:
+    """The arm-time half of the `glob({path: ...})` report: the call was
+    accepted, then died on every tick with ``Extra inputs are not permitted``
+    and disabled the monitor after five strikes.
+    """
+    glob_tool = real_tool("glob")
+    assert readonly.monitor_call_verdict(glob_tool, {"pattern": "*.py"}) is None
+    reason = readonly.monitor_call_verdict(glob_tool, {"pattern": "*.py", "path": "/tmp"})
+    assert reason is not None
+    assert 'unknown argument(s) "path"' in reason, reason
+    assert "glob accepts: pattern." in reason, reason
+
+
+def test_injected_intent_key_is_refused() -> None:
+    """``i`` is declared in the schema the MODEL sees but is stripped by the
+    loop before ``execute``; the monitor path calls ``execute`` directly, so a
+    nested ``i`` would pass a naive schema check and fail at tick.
+    """
+    glob_tool = real_tool("glob")
+    reason = readonly.monitor_call_verdict(glob_tool, {"pattern": "x", "i": "narrate"})
+    assert reason is not None
+    assert 'unknown argument(s) "i"' in reason, reason
+
+
+def test_mcp_extras_are_not_refused() -> None:
+    """Arm refuses exactly what a tick refuses. The manager's
+    ``prepare_outbound_args`` drops undeclared extras before the call, so a
+    tick tolerates them and arm must not be stricter than the run.
+    """
+    tool = fake_tool(
+        "mcp__datadog_search_datadog_hosts",
+        mcp_annotations={"readOnlyHint": True},
+        parameters={
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    )
+    assert readonly.monitor_call_verdict(tool, {"query": "x", "extra": 1}) is None
+
+
+def test_mcp_without_the_read_only_hint_is_still_refused_first() -> None:
+    """Order: the safety verdict runs first, so its sentence is byte-identical
+    and the shape check can only ADD refusals.
+    """
+    tool = fake_tool(
+        "mcp__srv_thing",
+        parameters={"type": "object", "properties": {}, "additionalProperties": False},
+    )
+    reason = readonly.monitor_call_verdict(tool, {"anything": 1})
+    assert reason is not None
+    assert "readOnlyHint" in reason, reason
+
+
+def test_required_and_type_errors_refused() -> None:
+    read_tool = real_tool("read")
+    missing = readonly.monitor_call_verdict(read_tool, {"range": "1-5"})
+    assert missing is not None and "missing required argument 'path'" in missing, missing
+    wrong_type = readonly.monitor_call_verdict(read_tool, {"path": 5})
+    assert wrong_type is not None and "does not match type" in wrong_type, wrong_type
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "args"),
+    [
+        ("glob", {"pattern": "*.py"}),
+        ("glob", {"pattern": "*.py", "path": "/tmp"}),
+        ("read", {"path": "/x"}),
+        ("read", {"range": "1-5"}),
+    ],
+)
+def test_in_session_and_external_verdicts_agree(tool_name: str, args: dict[str, Any]) -> None:
+    """PARITY: one call must not be describable two ways. The agent's own tool
+    goes through ``monitor_call_verdict``; the CLI and the desktop route reach
+    the same call through ``external_monitor_verdict``.
+    """
+    in_session = readonly.monitor_call_verdict(real_tool(tool_name), args)
+    external = readonly.external_monitor_verdict(tool_name, args)
+    if in_session is None:
+        assert external is None
+    else:
+        assert external == in_session, (tool_name, args, in_session, external)

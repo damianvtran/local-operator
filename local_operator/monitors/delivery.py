@@ -27,6 +27,17 @@ SOURCE_NOTE_TEMPLATE = " (via {tool})"
 
 CLOCK_FORMAT = "%H:%M"
 
+#: The lifecycle notice's whole-text budget. A notice is a PUSH into the
+#: conversation (unlike the list surfaces, which are read on demand), so it is
+#: one bounded block: a long failure reason is clipped rather than allowed to
+#: turn a disable into a wall of text, and the total is asserted in tests. The
+#: live shape is ~380-560 chars.
+NOTICE_MAX_CHARS = 700
+
+#: How much of a stored ``last_error`` a notice repeats. A transport error can
+#: carry a whole traceback; the first line is what names the failure.
+NOTICE_ERROR_CHARS = 200
+
 
 @dataclass(frozen=True)
 class MonitorDelivery:
@@ -77,3 +88,97 @@ def format_monitor_delivery_text(delivery: MonitorDelivery) -> str:
     lines.append("Diff vs the previous check:")
     lines.append(delivery.delta_text)
     return "\n".join(lines)
+
+
+#: The lifecycle kinds a notice carries. ``delta`` is the ordinary delivery and
+#: is NOT one of these: it rides ``MonitorDelivery``.
+NOTICE_KINDS = ("disabled", "stalled", "restored")
+
+
+@dataclass(frozen=True)
+class MonitorNotice:
+    """One lifecycle notice about a monitor: disabled, stalled, restored.
+
+    Deliberately NOT a :class:`MonitorDelivery`: a notice carries no delta and
+    no ``changes``, it never counts as a delivery (§9.4's rate window is for
+    material changes), and it exists because the operator's live store showed
+    monitors silently auto-disabling — the disable itself was durable state
+    that nothing ever told anyone about.
+    """
+
+    monitor_id: str
+    name: str
+    tool: str
+    kind: str
+    at_ms: int
+    checks: int = 0
+    deliveries: int = 0
+    failures: int = 0
+    #: The failure that caused a disable, or the reason a stall is not
+    #: self-healing (auth-required names its own fix).
+    detail: str = ""
+    #: §14.4, the delivery's control parameter: only the disable notice
+    #: defaults it on, because a disabled watch is the one notice that needs
+    #: the operator's attention.
+    notify: bool = False
+
+
+def format_monitor_notice_text(notice: MonitorNotice) -> str:
+    """The complete model-facing text of one lifecycle notice."""
+    clock = datetime.fromtimestamp(notice.at_ms / 1000).strftime(CLOCK_FORMAT)
+    source_note = "" if notice.tool.lower() in notice.name.lower() else f" (via {notice.tool})"
+    who = f"'{notice.name}' {notice.monitor_id}{source_note}"
+
+    if notice.kind == "disabled":
+        lines = [
+            f"(monitor) {who} was DISABLED at {clock} after {notice.failures} consecutive "
+            "failed checks — it is no longer watching."
+        ]
+        if notice.detail:
+            lines.append(f"Last error: {_clip(notice.detail)}")
+        if notice.deliveries == 0:
+            lines.append(
+                f"It never delivered a change since arming ({notice.checks} checks). "
+                "The call may not observe what you expected."
+            )
+        else:
+            plural = "" if notice.deliveries == 1 else "s"
+            lines.append(f"{notice.deliveries} deliver{plural} of change so far.")
+        lines.append(
+            'To restore: re-create the same call with monitor({op:"create",…}) '
+            f'(reactivates it) or cancel it with monitor({{op:"cancel",id:"{notice.monitor_id}"}}).'
+        )
+        lines.append("Monitors tick only while this session is open.")
+        return _bounded("\n".join(lines))
+
+    if notice.kind == "stalled":
+        detail = f" ({_clip(notice.detail)})" if notice.detail else ""
+        return _bounded(
+            f"(monitor) {who} could not run its check at {clock}{detail} — it is retrying, "
+            "without counting failures.\n"
+            "Its baseline is unchanged, so the next successful check reports everything "
+            "it missed as one delta. Cancel with "
+            f'monitor({{op:"cancel",id:"{notice.monitor_id}"}}) if unwanted.'
+        )
+
+    # restored
+    return _bounded(
+        f"(monitor) {who} is running again as of {clock} — the earlier interruption has ended.\n"
+        f"The next check diffs against the old baseline, so changes during the gap arrive as "
+        f'one delta. Cancel with monitor({{op:"cancel",id:"{notice.monitor_id}"}}) once its '
+        "goal is met."
+    )
+
+
+def _clip(text: str) -> str:
+    clipped = " ".join(str(text or "").split())
+    if len(clipped) <= NOTICE_ERROR_CHARS:
+        return clipped
+    return clipped[: NOTICE_ERROR_CHARS - 1] + "…"
+
+
+def _bounded(text: str) -> str:
+    """Enforce ``NOTICE_MAX_CHARS`` as a hard bound (tests assert it)."""
+    if len(text) <= NOTICE_MAX_CHARS:
+        return text
+    return text[: NOTICE_MAX_CHARS - 1] + "…"

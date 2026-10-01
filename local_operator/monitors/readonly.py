@@ -1,6 +1,8 @@
 """Read-only enforcement — the safety core (contract §6).
 
-One module, one consumer-facing entry point: :func:`readonly_verdict`. A
+One module, one consumer-facing entry point: :func:`monitor_call_verdict` —
+:func:`readonly_verdict` (the safety verdict) followed by an additive shape
+check, so a call that arms is a call that can run. A
 monitor may wrap a call **iff the harness's effective approval tier for that
 call is ``read``** — the same computation the loop gates on
 (``tool.call_approval_tier(args) if tool.call_approval_tier else
@@ -223,6 +225,78 @@ def readonly_verdict(
     return None
 
 
+def monitor_call_verdict(
+    tool: AgentTool,
+    args: Mapping[str, Any],
+    *,
+    mcp_annotations: Mapping[str, Any] | None = None,
+) -> str | None:
+    """The ONE arm-and-tick validator: the read-only verdict, then the call's shape.
+
+    ``readonly_verdict`` answers only "is this class of call observing?"; it
+    never looks at the argument schema. That gap let ``glob({path: ...})`` arm
+    cleanly (``glob`` is read-tier) and then fail on every tick, because the
+    tool's own params model forbids the extra key — five strikes later the
+    monitor was disabled having never run. The shape check closes it so the
+    arm refuses exactly what a tick would.
+
+    ORDER IS THE SAFETY CONTRACT: ``readonly_verdict`` runs first and is not
+    touched, so every posture sentence stays byte-identical and the shape check
+    can only ADD refusals — it never admits a call the verdict refused.
+    """
+    reason = readonly_verdict(tool, args, mcp_annotations=mcp_annotations)
+    if reason is not None:
+        return reason
+    return _shape_reason(tool, args)
+
+
+def _shape_reason(tool: AgentTool, args: Mapping[str, Any]) -> str | None:
+    """Refuse a call the tool itself would reject on every execution.
+
+    Mirrors what the tick path rejects and nothing more:
+
+    - required keys and scalar types through the loop's own
+      ``validate_tool_arguments`` (one definition of "valid", imported lazily
+      because this module is import-light and the loop is not);
+    - for a builtin whose schema is closed (``additionalProperties: false`` —
+      every builtin params model is ``extra="forbid"``), any key the schema
+      does not declare. MCP tools are deliberately NOT held to this: the
+      manager's ``prepare_outbound_args`` drops extras before the call, so a
+      tick tolerates them and refusing at arm would be stricter than the run.
+
+    The harness's injected ``i`` (intent) property is declared in the schema
+    the model sees but is stripped by the loop BEFORE ``execute``; the monitor
+    path calls ``execute`` directly, so a nested ``i`` would pass a naive
+    schema check and then fail at tick. It counts as undeclared unless the
+    tool owns a real ``i`` of its own.
+    """
+    from local_operator.harness.intent import INTENT_FIELD, intent_is_injected
+    from local_operator.harness.loop import validate_tool_arguments
+
+    name = tool.name
+    errors = validate_tool_arguments(tool, dict(args))
+    if errors:
+        return f'monitor can\'t watch "{name}": ' + "; ".join(errors) + "."
+
+    schema = tool.parameters or {}
+    if name.startswith("mcp__") or schema.get("additionalProperties") is not False:
+        return None
+    declared = {
+        key
+        for key in (schema.get("properties") or {})
+        if not (key == INTENT_FIELD and intent_is_injected(schema))
+    }
+    unknown = sorted(str(key) for key in args if key not in declared)
+    if not unknown:
+        return None
+    unknown_terms = ", ".join(f'"{key}"' for key in unknown)
+    accepts = ", ".join(sorted(declared)) or "no arguments"
+    return (
+        f'monitor can\'t watch "{name}": unknown argument(s) {unknown_terms} — '
+        f"{name} accepts: {accepts}."
+    )
+
+
 def _read_only_hint(annotations: Mapping[str, Any] | None) -> bool:
     """``annotations.readOnlyHint is True`` — the only accepted spelling."""
     if not isinstance(annotations, Mapping):
@@ -336,7 +410,9 @@ def external_monitor_verdict(tool_name: str, arguments: Mapping[str, Any]) -> st
             "it is not available without a running session — ask that "
             "conversation's agent to arm the monitor."
         )
-    return readonly_verdict(tool, arguments)
+    # The shape check is shared with the in-session path so an arm from the CLI or
+    # the desktop route refuses exactly what the agent's own arm would.
+    return monitor_call_verdict(tool, arguments)
 
 
 # ---------------------------------------------------------------------------

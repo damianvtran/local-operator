@@ -7187,6 +7187,12 @@ def _monitor_rows() -> "list[dict[str, Any]]":
                     "consecutive_failures": raw.get("consecutive_failures") or 0,
                     "disabled": bool(raw.get("disabled")),
                     "disabled_reason": raw.get("disabled_reason") or "",
+                    # §D6's two health facts, carried onto the listing row so
+                    # the CLI reads the same shared hint the tool, the desktop
+                    # route and the TUI band read.
+                    "unavailable_since": raw.get("unavailable_since") or 0,
+                    "last_error": raw.get("last_error") or "",
+                    "created_at": raw.get("created_at") or 0,
                     "dormant": dormant,
                     "due_in_s": None if due is None else (due - now_ms) / 1000.0,
                     "last_check_age_s": None if not last else max((now_ms - last) / 1000.0, 0.0),
@@ -7212,6 +7218,9 @@ def _monitor_state_word(row: "dict[str, Any]") -> str:
     dormant monitor is one nothing is SUPPOSED to run, so a failure word would
     point the reader at the wrong remedy — reopening the session re-arms it.
     Disabled wins over the due time: a disabled monitor does not tick at all.
+    ``idle`` is the last word before a clock: a monitor whose session is not
+    open is overdue by hours, and "next due now" read as a stuck check rather
+    than as a watch nothing is hosting (§D6).
     """
     if row["dormant"]:
         return "dormant"
@@ -7219,6 +7228,10 @@ def _monitor_state_word(row: "dict[str, Any]") -> str:
         return "disabled"
     if row["due_in_s"] is None:
         return "waiting"
+    from local_operator.monitors import store as monitor_store
+
+    if monitor_store.is_idle(row, int(time.time() * 1000)):
+        return "idle"
     return _format_due(row["due_in_s"])
 
 
@@ -7242,6 +7255,20 @@ def _monitor_detail(row: "dict[str, Any]") -> str:
         parts.append(f"{failures} failed")
     if row.get("disabled") and row.get("disabled_reason"):
         parts.append(str(row["disabled_reason"]))
+    from local_operator.monitors import store as monitor_store
+
+    now = int(time.time() * 1000)
+    if monitor_store.is_idle(row, now):
+        # The state WORD already says "idle"; the tail says how long, because
+        # the two answers a reader wants are "is it late or is nothing
+        # running it" and "for how long".
+        parts.append(monitor_store.idle_detail(row, now))
+    # The hint is shared with the agent tool, the desktop route and the TUI
+    # band (§D6) so one monitor cannot read as healthy on one surface and
+    # stalled on another.
+    hint = monitor_store.health_hint(row, now)
+    if hint:
+        parts.append(hint)
     return " · ".join(parts)
 
 
@@ -7298,6 +7325,14 @@ def monitor_command(args: argparse.Namespace) -> int:
                 "disabled",
                 "checks kept failing, so it stopped ticking; cancel it and create the "
                 "same watch again to reactivate",
+            )
+        )
+    if any(_monitor_state_word(row) == "idle" for row in rows):
+        legend.append(
+            (
+                "idle",
+                "overdue because no session is hosting it; monitors tick only while the "
+                "conversation that armed them is open",
             )
         )
     if legend:

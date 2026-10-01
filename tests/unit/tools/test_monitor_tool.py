@@ -235,3 +235,160 @@ async def test_a_read_only_refusal_flows_through_as_an_error(tmp_path: Any) -> N
         assert "can't watch" in (result.text or "")
     finally:
         scheduler.dispose()
+
+
+# ---------------------------------------------------------------------------
+# §D8: the arm receipt's hosting caveat, and §D6: the list row's health
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_arm_receipt_states_the_hosting_caveat(tmp_path: Any) -> None:
+    """The live store carried arms with ``checks=0``: the operator armed a
+    watch, closed the conversation, and nothing told them it would not run. The
+    caveat belongs on the receipt, not only in the guide.
+    """
+    scheduler = make_scheduler(tmp_path)
+    try:
+        context = make_context(tmp_path, scheduler)
+        monitor = builtin.build_monitor_tool(context)
+        assert monitor is not None
+        created = await monitor.execute(
+            "c",
+            {
+                "op": "create",
+                "name": "date-watch",
+                "tool": "bash",
+                "arguments": {"command": "date -u"},
+                "every": "60s",
+            },
+            None,
+            None,
+            context,
+        )
+        text = created.text or ""
+        assert "Ticks run only while this session is open" in text
+        assert "with one consolidated delta, when it reopens" in text
+        # No MCP clause on a non-MCP tool: it would name a failure mode the
+        # monitor cannot have.
+        assert "MCP tool:" not in text
+    finally:
+        scheduler.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_mcp_arm_receipt_adds_the_reconnect_clause(tmp_path: Any) -> None:
+    scheduler = make_scheduler(tmp_path)
+    try:
+        context = make_context(tmp_path, scheduler)
+        monitor = builtin.build_monitor_tool(context)
+        assert monitor is not None
+        created = await monitor.execute(
+            "c",
+            {
+                "op": "create",
+                "name": "dd-hosts",
+                "tool": "mcp__datadog_search_datadog_hosts",
+                "arguments": {"query": "up"},
+                "every": "60s",
+            },
+            None,
+            None,
+            context,
+        )
+        text = created.text or ""
+        assert (
+            "MCP tool: if its server reconnects the monitor waits without counting failures" in text
+        )
+        assert "30 minutes" in text
+    finally:
+        scheduler.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_list_row_carries_the_health_hint(tmp_path: Any) -> None:
+    """A monitor with 0 deliveries after several checks, and one that never
+    checked, otherwise read exactly like a healthy row on every surface.
+    """
+    scheduler = make_scheduler(tmp_path)
+    try:
+        context = make_context(tmp_path, scheduler)
+        monitor = builtin.build_monitor_tool(context)
+        assert monitor is not None
+        await monitor.execute(
+            "c",
+            {
+                "op": "create",
+                "name": "quiet-watch",
+                "tool": "bash",
+                "arguments": {"command": "date -u"},
+                "every": "60s",
+            },
+            None,
+            None,
+            context,
+        )
+        row = scheduler.index_rows()[0]
+        # Seven checks, no delivery, and a due instant hours in the past (a
+        # session that is not hosting it): both hints are earned.
+        rendered = builtin._monitor_row_text(
+            {
+                **row,
+                "checks": 7,
+                "deliveries": 0,
+                "created_at": NOW - 7_200_000,
+                "next_due_at": NOW - 3_600_000,
+            },
+            NOW,
+        )
+        assert "[7 checks, 0 deliveries" in rendered
+        assert "session not open" in rendered
+
+        # A healthy monitor says nothing extra.
+        healthy = builtin._monitor_row_text(
+            {**row, "checks": 7, "deliveries": 3, "next_due_at": NOW + 30_000}, NOW
+        )
+        assert "[" not in healthy
+    finally:
+        scheduler.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_glob_with_an_unknown_argument_is_refused_through_the_session(
+    tmp_path: Any,
+) -> None:
+    """The in-session half of the §D2 report, through a REAL Session validator:
+    the sentence the agent sees is the validator's own, so the arm path and the
+    CLI/desktop path cannot describe one call two ways.
+    """
+    from local_operator.harness.types import StreamEndEvent
+    from local_operator.monitors.spec import MonitorSpec
+    from local_operator.tools.registry import create_tools
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    # The tool must be in the session's set for the gate to reach its SHAPE
+    # check: an absent tool is refused one sentence earlier (by design).
+    glob_tool = [t for t in create_tools(ToolContext(cwd=str(tmp_path))) if t.name == "glob"]
+    assert glob_tool, "the glob tool must exist to test its shape check"
+    session = make_session(tmp_path, stream, tools=glob_tool)
+    try:
+        spec = MonitorSpec(
+            id="m1",
+            name="g",
+            tool="glob",
+            arguments={"pattern": "*.py", "path": "/tmp"},
+            every_ms=60_000,
+            created_at=NOW,
+        )
+        reason = session._validate_monitor_call("glob", spec.arguments)
+        assert reason == (
+            'monitor can\'t watch "glob": unknown argument(s) "path" — glob accepts: pattern.'
+        )
+        # A tick re-validates too, so a monitor armed before this build (or one
+        # whose tool changed shape) fails with the same sentence rather than a
+        # mystery from the tool's own model.
+        outcome = await session._run_monitor_check(spec)
+        assert "unknown argument" in str(outcome.get("error"))
+    finally:
+        await session.dispose()

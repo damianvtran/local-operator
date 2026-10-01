@@ -280,6 +280,28 @@ class WakePanel(Container):
             health = " ".join(str(counters.get("disabled_reason") or "").split())
         elif failing:
             health = f"{fail_count} failed"
+        else:
+            # The shared §D6 hint: never-checked and stalled watches are the
+            # two states the band could not show at all, and both are ones the
+            # operator would otherwise read as a healthy row. Warning ink only
+            # for those two — a quiet watch with 0 deliveries is NEUTRAL by
+            # design, because a watch that sees nothing may simply be watching
+            # something quiet.
+            from local_operator.monitors import store as monitor_store
+
+            now_ms = int(time.time() * 1000)
+            hint = monitor_store.health_hint(
+                {
+                    **counters,
+                    "created_at": getattr(spec, "created_at", 0) or 0,
+                    "every_ms": getattr(spec, "every_ms", None),
+                },
+                now_ms,
+            )
+            if hint:
+                health = hint
+                if hint.startswith(("tool unavailable", "never checked")):
+                    ink = "warning"
         every_ms = getattr(spec, "every_ms", None)
         every = f"every {format_duration(every_ms)}" if every_ms else "once"
         name = " ".join(str(getattr(spec, "name", "")).split())

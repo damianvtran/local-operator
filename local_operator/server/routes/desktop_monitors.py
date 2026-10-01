@@ -266,6 +266,8 @@ def _collect_listing(config_dir: Path, limit: int, include_dormant: bool) -> dic
 
 
 def _monitor_rows(entry: Mapping[str, Any], now_ms: int, dormant: bool) -> list[MonitorRow]:
+    from local_operator.monitors import store as monitor_store
+
     rows: list[MonitorRow] = []
     for raw in entry.get("monitors") or ():
         if not isinstance(raw, Mapping):
@@ -314,6 +316,8 @@ def _monitor_rows(entry: Mapping[str, Any], now_ms: int, dormant: bool) -> list[
                 due_in_s=None if due is None else (due - now_ms) / 1000.0,
                 last_check_age_s=None if not last else max((now_ms - last) / 1000.0, 0.0),
                 state=state,
+                unavailable_since=monitor_store.unavailable_since_of(raw),
+                health=monitor_store.health_hint({**raw, "next_due_at": due}, now_ms),
             )
         )
     rows.sort(key=lambda row: (row.next_due_at is None, row.next_due_at or 0, row.id))
