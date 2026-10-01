@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 
@@ -562,6 +562,67 @@ def test_a_candidate_in_cooldown_is_named_and_withheld_and_another_is_not() -> N
     )
     assert killed.killed is not None
     assert ("pid", 9900002) in killed.killed_lineage
+
+
+# Two unrelated rigs under ONE runtime: 9900002 (the larger, a respawn of what was just
+# ended, so HELD) and 9900004 (unrelated). Each leads its own group.
+_TWO_RIGS = _table(
+    [(_ROOT, 1), (9900002, _ROOT, 9900002), (9900003, 9900002, 9900002), (9900004, _ROOT, 9900004)]
+)
+_TWO_RIG_RSS = {_ROOT: 50, 9900002: 700, 9900003: 600, 9900004: 1100}
+
+
+def _holds(*held_pids: int) -> Callable[[frozenset[tuple[str, int]]], bool]:
+    """A cooldown that holds exactly the fragments rooted at ``held_pids``."""
+    return lambda lineage: any(("pid", pid) in lineage for pid in held_pids)
+
+
+def test_the_largest_held_fragment_is_passed_over_for_an_unheld_one(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """R2-a: the top fragment is held (a respawn of a lineage just ended); the next
+    one at or above the floor is unrelated and must be ended IN THE SAME PASS, not
+    withheld a minute later. The log names what was skipped and what was chosen."""
+    caplog.set_level("WARNING", logger=mm.logger.name)
+    killer = _Killer()
+    # 9900004 (1100 MB) ranks above 9900002's subtree (1300 MB)? Make the HELD one
+    # the largest: hold 9900002 (subtree 700+600) and let the unrelated rig be next.
+    report = _pass(
+        runner=_fake_runner(topology=_TWO_RIGS, rss=_TWO_RIG_RSS),
+        kill=killer,
+        in_cooldown=_holds(9900002),
+        identity_probe=_identity_probe({}),
+    )
+    assert killer.pids == [9900004], "the unheld fragment was not chosen"
+    assert report.killed is not None and report.killed.pid == 9900004
+    lines = [r.getMessage() for r in caplog.records]
+    skipped = next(m for m in lines if "skipped held" in m)
+    assert "pid 9900002" in skipped and "ending pid 9900004" in skipped
+
+
+def test_every_eligible_fragment_held_still_withholds_and_names_the_largest() -> None:
+    killer = _Killer()
+    report = _pass(
+        runner=_fake_runner(topology=_TWO_RIGS, rss=_TWO_RIG_RSS),
+        kill=killer,
+        in_cooldown=lambda lineage: True,
+    )
+    assert killer.fragments == [] and report.killed is None
+    assert report.kill_withheld is True and report.withheld_cause == "cooldown"
+    assert "pid 9900002" in report.reason  # the largest, as before
+
+
+def test_a_held_fragment_below_the_floor_is_not_in_play(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fragments under the floor are never candidates, held or not: skipping down the
+    list must stop at the floor, not reach for a small process."""
+    monkeypatch.setattr(mm.memory_guard, "MACHINE_FRAGMENT_MIN_MB", 1000)
+    killer = _Killer()
+    report = _pass(
+        runner=_fake_runner(topology=_TWO_RIGS, rss={**_TWO_RIG_RSS, 9900004: 900}),
+        kill=killer,
+        in_cooldown=_holds(9900002),
+    )
+    assert killer.fragments == [] and report.killed is None
 
 
 def test_a_runtimes_own_pid_and_group_are_never_lineage_keys() -> None:
