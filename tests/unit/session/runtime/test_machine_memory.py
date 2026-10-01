@@ -18,12 +18,30 @@ arithmetic these tests exist to pin.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
+import pytest
 
 from local_operator.session.runtime import machine_memory as mm
 
 _ROOT = 9900001
+
+
+@pytest.fixture(autouse=True)
+def _no_retry_pause(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The retry pause is real time between real forks; a fake runner needs none.
+
+    Fake pids also "exist" by default: the all-gone fast path asks the kernel
+    (``procstate.pid_alive``), and a fixture pid above any allocatable pid would
+    otherwise read as gone and turn every retry cell into a different test. The
+    cells about a gone pid say so themselves.
+    """
+    from local_operator import procstate
+
+    monkeypatch.setattr(mm, "PASS_PROBE_RETRY_PAUSE_S", 0.0)
+    monkeypatch.setattr(procstate, "pid_alive", lambda pid: True)
 
 
 class _Killer:
@@ -387,3 +405,434 @@ def test_a_kill_that_delivers_nothing_is_not_recorded_as_one() -> None:
     )
     assert report.state == "act"
     assert report.killed is None
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-30: the pass's reads survive pressure; the stop still needs identity
+# ---------------------------------------------------------------------------
+
+_FRAGMENT_TOPOLOGY = _table([(_ROOT, 1), (9900002, _ROOT), (9900003, 9900002)])
+_FRAGMENT_RSS = {_ROOT: 50, 9900002: 500, 9900003: 600}
+
+
+def _identity_probe(rows: dict[int, tuple[int, int]]) -> mm.IdentityProbe:
+    """A fork-free identity reader over a fixed table; a missing pid is gone."""
+    return lambda pid: rows.get(pid)
+
+
+def _flaky(inner: mm.Runner, *, match: list[str], failures: int) -> tuple[mm.Runner, list[int]]:
+    """``inner`` with the first ``failures`` calls of one argv shape failing."""
+    calls: list[int] = []
+
+    def run(argv: list[str]) -> tuple[int, str]:
+        if argv[: len(match)] == match:
+            calls.append(1)
+            if len(calls) <= failures:
+                return 1, ""
+        return inner(argv)
+
+    return run, calls
+
+
+def test_the_table_read_is_retried_before_the_pass_gives_up() -> None:
+    inner = _fake_runner(topology=_FRAGMENT_TOPOLOGY, rss=_FRAGMENT_RSS)
+    runner, calls = _flaky(inner, match=["ps", "-axo", "pid=,ppid=,pgid="], failures=2)
+    report = _pass(runner=runner, kill=_Killer())
+    assert report.state == "act" and len(calls) == 3
+
+
+def test_a_table_that_never_answers_is_still_unknown_and_never_kills() -> None:
+    killer = _Killer()
+    inner = _fake_runner(topology=_FRAGMENT_TOPOLOGY, rss=_FRAGMENT_RSS)
+    runner, calls = _flaky(inner, match=["ps", "-axo", "pid=,ppid=,pgid="], failures=99)
+    report = _pass(runner=runner, kill=killer)
+    assert report.state == "unknown" and killer.fragments == []
+    assert len(calls) == mm.PASS_PROBE_ATTEMPTS
+
+
+def test_the_recheck_read_is_retried_and_a_late_answer_lets_the_stop_proceed() -> None:
+    killer = _Killer()
+    inner = _fake_runner(topology=_FRAGMENT_TOPOLOGY, rss=_FRAGMENT_RSS)
+    runner, calls = _flaky(inner, match=["ps", "-o", "pid=,ppid=,pgid="], failures=2)
+    report = _pass(runner=runner, kill=killer, identity_probe=_identity_probe({}))
+    assert killer.pids == [9900002] and report.killed is not None
+    assert len(calls) == 3  # the fork-free fallback was NOT needed
+
+
+def test_ps_unreadable_but_fork_free_identity_holds_the_stop_proceeds() -> None:
+    """(e) The re-check ps never answers; every row is confirmed by syscall."""
+    killer = _Killer()
+    rows = {_ROOT: (1, _ROOT), 9900002: (_ROOT, 9900002), 9900003: (9900002, 9900003)}
+    report = _pass(
+        runner=_fake_runner(
+            topology=_FRAGMENT_TOPOLOGY, rss=_FRAGMENT_RSS, recheck_unreadable=True
+        ),
+        kill=killer,
+        identity_probe=_identity_probe(rows),
+    )
+    assert killer.pids == [9900002]
+    assert report.killed is not None and report.kill_withheld is False
+
+
+def test_ps_unreadable_and_the_identity_changed_withholds_the_stop() -> None:
+    killer = _Killer()
+    rows = {_ROOT: (1, _ROOT), 9900002: (_ROOT, 9900002), 9900003: (9900002, 4242)}  # pgid moved
+    report = _pass(
+        runner=_fake_runner(
+            topology=_FRAGMENT_TOPOLOGY, rss=_FRAGMENT_RSS, recheck_unreadable=True
+        ),
+        kill=killer,
+        identity_probe=_identity_probe(rows),
+    )
+    assert killer.fragments == [] and report.kill_withheld is True
+    assert report.withheld_cause == "changed" and "9900003" in report.reason
+
+
+def test_ps_unreadable_and_a_pid_is_gone_or_unreadable_withholds_the_stop() -> None:
+    killer = _Killer()
+    rows = {_ROOT: (1, _ROOT), 9900002: (_ROOT, 9900002)}  # 9900003 has vanished
+    report = _pass(
+        runner=_fake_runner(
+            topology=_FRAGMENT_TOPOLOGY, rss=_FRAGMENT_RSS, recheck_unreadable=True
+        ),
+        kill=killer,
+        identity_probe=_identity_probe(rows),
+    )
+    assert killer.fragments == [] and report.kill_withheld is True
+    assert report.withheld_cause == "unreadable"
+    assert "could not be re-read" in report.summary()
+
+
+def test_a_raising_identity_probe_withholds_rather_than_kills() -> None:
+    def boom(pid: int) -> tuple[int, int] | None:
+        raise OSError("libproc")
+
+    killer = _Killer()
+    report = _pass(
+        runner=_fake_runner(
+            topology=_FRAGMENT_TOPOLOGY, rss=_FRAGMENT_RSS, recheck_unreadable=True
+        ),
+        kill=killer,
+        identity_probe=boom,
+    )
+    assert killer.fragments == [] and report.withheld_cause == "unreadable"
+
+
+def test_the_default_identity_probe_confirms_a_real_process_and_refuses_a_fake_one() -> None:
+    import os
+
+    assert mm._default_identity_probe(os.getpid()) == (os.getppid(), os.getpgid(0))
+    assert mm._default_identity_probe(9900001) is None  # above any allocatable pid
+
+
+def test_a_runtime_root_is_never_a_candidate_even_when_the_recheck_is_dead() -> None:
+    """No new kill authority: the fallback only ever confirms a fragment the
+    ranking chose, and the ranking never chooses a root."""
+    killer = _Killer()
+    _pass(
+        runner=_fake_runner(
+            topology=_table([(_ROOT, 1)]), rss={_ROOT: 900}, recheck_unreadable=True
+        ),
+        kill=killer,
+        identity_probe=_identity_probe({_ROOT: (1, _ROOT)}),
+    )
+    assert killer.fragments == []
+
+
+def test_a_candidate_in_cooldown_is_named_and_withheld_and_another_is_not() -> None:
+    killer = _Killer()
+    held: list[frozenset[tuple[str, int]]] = []
+
+    def in_cooldown(lineage: frozenset[tuple[str, int]]) -> bool:
+        held.append(lineage)
+        return True
+
+    report = _pass(
+        runner=_fake_runner(topology=_FRAGMENT_TOPOLOGY, rss=_FRAGMENT_RSS),
+        kill=killer,
+        in_cooldown=in_cooldown,
+    )
+    assert killer.fragments == [] and len(held) == 1 and ("pid", 9900002) in held[0]
+    assert report.withheld_cause == "cooldown" and "pid 9900002" in report.reason
+    killed = _pass(
+        runner=_fake_runner(topology=_FRAGMENT_TOPOLOGY, rss=_FRAGMENT_RSS),
+        kill=killer,
+        in_cooldown=lambda lineage: False,
+        identity_probe=_identity_probe({}),
+    )
+    assert killed.killed is not None
+    assert ("pid", 9900002) in killed.killed_lineage
+
+
+# Two unrelated rigs under ONE runtime: 9900002 (the larger, a respawn of what was just
+# ended, so HELD) and 9900004 (unrelated). Each leads its own group.
+_TWO_RIGS = _table(
+    [(_ROOT, 1), (9900002, _ROOT, 9900002), (9900003, 9900002, 9900002), (9900004, _ROOT, 9900004)]
+)
+_TWO_RIG_RSS = {_ROOT: 50, 9900002: 700, 9900003: 600, 9900004: 1100}
+
+
+def _holds(*held_pids: int) -> Callable[[frozenset[tuple[str, int]]], bool]:
+    """A cooldown that holds exactly the fragments rooted at ``held_pids``."""
+    return lambda lineage: any(("pid", pid) in lineage for pid in held_pids)
+
+
+def test_the_largest_held_fragment_is_passed_over_for_an_unheld_one(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """R2-a: the top fragment is held (a respawn of a lineage just ended); the next
+    one at or above the floor is unrelated and must be ended IN THE SAME PASS, not
+    withheld a minute later. The log names what was skipped and what was chosen."""
+    caplog.set_level("WARNING", logger=mm.logger.name)
+    killer = _Killer()
+    # 9900004 (1100 MB) ranks above 9900002's subtree (1300 MB)? Make the HELD one
+    # the largest: hold 9900002 (subtree 700+600) and let the unrelated rig be next.
+    report = _pass(
+        runner=_fake_runner(topology=_TWO_RIGS, rss=_TWO_RIG_RSS),
+        kill=killer,
+        in_cooldown=_holds(9900002),
+        identity_probe=_identity_probe({}),
+    )
+    assert killer.pids == [9900004], "the unheld fragment was not chosen"
+    assert report.killed is not None and report.killed.pid == 9900004
+    lines = [r.getMessage() for r in caplog.records]
+    skipped = next(m for m in lines if "skipped held" in m)
+    assert "pid 9900002" in skipped and "ending pid 9900004" in skipped
+
+
+def test_every_eligible_fragment_held_still_withholds_and_names_the_largest() -> None:
+    killer = _Killer()
+    report = _pass(
+        runner=_fake_runner(topology=_TWO_RIGS, rss=_TWO_RIG_RSS),
+        kill=killer,
+        in_cooldown=lambda lineage: True,
+    )
+    assert killer.fragments == [] and report.killed is None
+    assert report.kill_withheld is True and report.withheld_cause == "cooldown"
+    assert "pid 9900002" in report.reason  # the largest, as before
+
+
+def test_a_held_fragment_below_the_floor_is_not_in_play(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fragments under the floor are never candidates, held or not: skipping down the
+    list must stop at the floor, not reach for a small process."""
+    monkeypatch.setattr(mm.memory_guard, "MACHINE_FRAGMENT_MIN_MB", 1000)
+    killer = _Killer()
+    report = _pass(
+        runner=_fake_runner(topology=_TWO_RIGS, rss={**_TWO_RIG_RSS, 9900004: 900}),
+        kill=killer,
+        in_cooldown=_holds(9900002),
+    )
+    assert killer.fragments == [] and report.killed is None
+
+
+def test_a_runtimes_own_pid_and_group_are_never_lineage_keys() -> None:
+    """R2/Q2: every command of one session is a child of the runtime, and half of
+    them share its process group. Keying on either made the cooldown per-SESSION,
+    so a second unrelated runaway under the same runtime was withheld for 10 min."""
+    rows = {_ROOT: (1, _ROOT), 9900002: (_ROOT, _ROOT), 9900003: (_ROOT, 9900003)}
+    shares_runtime_group = mm.memory_guard.Fragment(pid=9900002, mb=1, ppid=_ROOT, pgid=_ROOT)
+    own_group = mm.memory_guard.Fragment(pid=9900003, mb=1, ppid=_ROOT, pgid=9900003)
+    first = mm.lineage_keys(shares_runtime_group, rows, [_ROOT])
+    second = mm.lineage_keys(own_group, rows, [_ROOT])
+    assert first == frozenset({("pid", 9900002)})
+    assert second == frozenset({("pid", 9900003), ("pgid", 9900003)})
+    assert not (first & second)
+
+
+def test_a_fragment_under_a_non_runtime_parent_keeps_that_parent_as_a_key() -> None:
+    """A respawning supervisor (``timeout``, a runner) is NOT a runtime, so its
+    children stay kin through it — that is the regrowth the cooldown is for."""
+    rows = {_ROOT: (1, _ROOT), 9900005: (_ROOT, 9900005), 9900006: (9900005, 9900005)}
+    fragment = mm.memory_guard.Fragment(pid=9900006, mb=1, ppid=9900005, pgid=9900005)
+    keys = mm.lineage_keys(fragment, rows, [_ROOT])
+    assert ("ppid", 9900005) in keys and ("pgid", 9900005) in keys
+
+
+# -- owner notification ------------------------------------------------------
+
+
+def _notified_pass(**overrides: Any) -> tuple[mm.MemoryPassReport, list[mm.KillEvent]]:
+    events: list[mm.KillEvent] = []
+    report = _pass(
+        runner=_fake_runner(topology=_FRAGMENT_TOPOLOGY, rss=_FRAGMENT_RSS),
+        identity_probe=_identity_probe({}),
+        notify=lambda config_dir, event: events.append(event),
+        **overrides,
+    )
+    return report, events
+
+
+def test_a_delivered_stop_tells_the_owning_runtime_with_the_numbers() -> None:
+    report, events = _notified_pass(kill=_Killer())
+    assert report.killed is not None and len(events) == 1
+    event = events[0]
+    assert event.owner_runtime_pid == _ROOT
+    assert event.fragment.pid == 9900002
+    assert event.fragment.mb == 1100 and event.act_mb == 850 and event.total_mb == 1000
+    text = mm.owner_notice_text(event)
+    assert "your process group (pid 9900002" in text
+    assert "was ended by the memory guard" in text and "1.1 GB footprint" in text
+
+
+def test_a_withheld_or_undelivered_stop_tells_nobody() -> None:
+    _, events = _notified_pass(kill=_no_kill)
+    assert events == []
+    _, events = _notified_pass(kill=_Killer(), apply=False)
+    assert events == []
+    _, events = _notified_pass(kill=_Killer(), kill_allowed=False)
+    assert events == []
+
+
+def test_a_notifier_that_raises_never_undoes_the_stop() -> None:
+    def boom(config_dir: Path, event: mm.KillEvent) -> None:
+        raise RuntimeError("socket")
+
+    report = _pass(
+        runner=_fake_runner(topology=_FRAGMENT_TOPOLOGY, rss=_FRAGMENT_RSS),
+        kill=_Killer(),
+        identity_probe=_identity_probe({}),
+        notify=boom,
+    )
+    assert report.killed is not None
+
+
+def test_the_kill_is_logged_with_who_what_and_how_big(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("WARNING", logger=mm.logger.name)
+    _notified_pass(kill=_Killer())
+    line = next(r.getMessage() for r in caplog.records if "machine memory kill:" in r.getMessage())
+    for needle in (
+        f"owner_runtime_pid={_ROOT}",
+        "fragment_pid=9900002",
+        "footprint_mb=1100",
+        "act_mb=850",
+        "total_mb=1000",
+        "measured=3",
+        "unmeasured=0",
+    ):
+        assert needle in line, (needle, line)
+
+
+def _event(owner: int | None = _ROOT) -> mm.KillEvent:
+    fragment = mm.memory_guard.Fragment(pid=9900002, mb=4096, pids=(9900002, 9900003))
+    return mm.KillEvent(
+        fragment=fragment,
+        owner_runtime_pid=owner,
+        fleet_mb=900,
+        act_mb=850,
+        total_mb=1000,
+        measured=3,
+        unmeasured=0,
+        cause="test",
+    )
+
+
+def test_the_notice_is_spooled_to_the_owning_session_when_the_dial_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The session inbox is the transport that survives a runtime that will not
+    answer: the row lands under ``sessions/<id>/`` and the next drain delivers it."""
+    from local_operator.session.runtime import inbox, registry
+
+    record = type("R", (), {"pid": _ROOT, "session_id": "abc123abc123"})()
+    monkeypatch.setattr(registry, "scan", lambda *a, **k: [(record, "live")])
+
+    async def refuse(*args: Any, **kwargs: Any) -> str:
+        raise ConnectionRefusedError("no listener")
+
+    monkeypatch.setattr("local_operator.mobile.peer_client.send_peer_message", refuse)
+    assert mm.notify_owner_of_kill(tmp_path, _event()) == "spooled"
+    lines = inbox.peek_inbox(tmp_path / "sessions" / "abc123abc123")
+    assert len(lines) == 1
+    assert "your process group (pid 9900002, 2 processes, 4.0 GB footprint)" in lines[0].text
+    assert lines[0].wake is False and lines[0].source == inbox.SOURCE_PEER
+
+
+def test_a_live_owner_is_dialled_and_nothing_is_spooled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.session.runtime import registry
+
+    record = type("R", (), {"pid": _ROOT, "session_id": "abc123abc123"})()
+    monkeypatch.setattr(registry, "scan", lambda *a, **k: [(record, "live")])
+    sent: list[dict[str, Any]] = []
+
+    async def accept(rec: Any, **kwargs: Any) -> str:
+        sent.append(kwargs)
+        return "delivered"
+
+    monkeypatch.setattr("local_operator.mobile.peer_client.send_peer_message", accept)
+    assert mm.notify_owner_of_kill(tmp_path, _event()) == "dialled"
+    assert len(sent) == 1 and sent[0]["wake"] is False and sent[0]["mode"] == "mailbox"
+    assert not (tmp_path / "sessions").exists()
+
+
+def test_no_owning_runtime_means_the_owner_is_not_told_and_nothing_raises(
+    tmp_path: Path,
+) -> None:
+    assert mm.notify_owner_of_kill(tmp_path, _event(owner=None)) == "not_told"
+    assert json.dumps(mm.owner_notice_text(_event()))  # renders without a registry
+
+
+def test_a_spooled_notice_is_logged_as_queued_never_as_told(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R5: a spool is read at the next runtime OPEN, so a live-but-unresponsive
+    runtime has NOT been told; the log must not say it was."""
+    from local_operator.session.runtime import registry
+
+    record = type("R", (), {"pid": _ROOT, "session_id": "abc123abc123"})()
+    monkeypatch.setattr(registry, "scan", lambda *a, **k: [(record, "live")])
+
+    async def refuse(*args: Any, **kwargs: Any) -> str:
+        raise TimeoutError("no ack")
+
+    monkeypatch.setattr("local_operator.mobile.peer_client.send_peer_message", refuse)
+    caplog.set_level("INFO", logger=mm.logger.name)
+    assert mm.notify_owner_of_kill(tmp_path, _event()) == "spooled"
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert "QUEUED, not delivered" in text and "told session" not in text
+
+
+def test_all_pids_gone_is_one_ps_call_and_reads_as_changed_not_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R7: ``ps -p`` exits 1 with empty output when every pid has gone. That is an
+    answer: not retried (3 forks), and the cause is "changed", not "unreadable"."""
+    from local_operator import procstate
+
+    monkeypatch.setattr(procstate, "pid_alive", lambda pid: False)
+    inner = _fake_runner(topology=_FRAGMENT_TOPOLOGY, rss=_FRAGMENT_RSS, recheck_unreadable=True)
+    runner, calls = _flaky(inner, match=["ps", "-o", "pid=,ppid=,pgid="], failures=99)
+    killer = _Killer()
+    report = _pass(runner=runner, kill=killer, identity_probe=_identity_probe({}))
+    assert len(calls) == 1
+    assert killer.fragments == [] and report.withheld_cause == "changed"
+    assert "gone" in report.reason and "could not be re-read" not in report.reason
+
+
+def test_the_retry_budget_bounds_the_whole_read_not_one_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R4: no new attempt starts once the budget is spent."""
+    clock = [0.0]
+    monkeypatch.setattr(mm.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(mm.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + s))
+    monkeypatch.setattr(mm, "PASS_PROBE_RETRY_PAUSE_S", 0.5)
+    calls: list[int] = []
+
+    def slow_fail(argv: list[str]) -> tuple[int, str]:
+        calls.append(1)
+        clock[0] += mm.PASS_READ_BUDGET_S  # one attempt eats the whole budget
+        return 1, ""
+
+    assert mm._run_with_retry(slow_fail, ["ps"]) == (1, "")
+    assert len(calls) == 1
+
+
+def test_the_default_identity_probe_never_signals_a_process() -> None:
+    """R1: ``os.kill(pid, 0)`` terminates the process on Windows, and the xplat probe
+    refuses it. The identity probe must not contain the call."""
+    import inspect
+
+    source = inspect.getsource(mm._default_identity_probe)
+    assert "os.kill" not in source.replace("``os.kill(pid, 0)``", "")
