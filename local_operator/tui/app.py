@@ -391,6 +391,7 @@ from local_operator.tui.widgets.projects_view import (
     ProjectsView,
     ProjectsViewAttachmentOpened,
     ProjectsViewDismissed,
+    ProjectsViewFormSubmitted,
     ProjectsViewJumpRequested,
     ProjectsViewMilestoneToggled,
     ProjectsViewRefreshRequested,
@@ -18559,6 +18560,22 @@ class OperatorApp(App[None]):
         session = self._session
         return getattr(session, "team_registry", None) if session is not None else None
 
+    def _known_team_names(self) -> list[str]:
+        """The team names the create form's hint lists.
+
+        The SAME registry `/team`'s argument list reads (``_team_registry``), so
+        the form cannot offer a vocabulary the team store does not have; an
+        absent registry or a read failure leaves the hint's honest fallback
+        rather than failing a keypress.
+        """
+        registry = self._team_registry()
+        if registry is None or not hasattr(registry, "list_teams"):
+            return []
+        try:
+            return [str(getattr(team, "name", "") or "") for team in registry.list_teams()]
+        except Exception:  # noqa: BLE001 — a hint must never fail a keypress
+            return []
+
     def _team_choices(self) -> list[ArgumentChoice]:
         """Teams the ``/team`` argument list offers, one row per name."""
         registry = self._team_registry()
@@ -32954,6 +32971,52 @@ class OperatorApp(App[None]):
             own_session=self._own_session_id(),
         )
 
+    def on_projects_view_form_submitted(self, message: ProjectsViewFormSubmitted) -> None:
+        """`ctrl+s` on the create form: write through the SAME core the tool uses.
+
+        The form runs the store's own validators locally before it posts, so
+        what reaches here is a STORE question: a taken name, the schema guard,
+        an i/o failure. All of them come back as an in-form line with the page
+        and the draft intact (spec §7.7) — never a toast over a form that has
+        already closed — and only a landed write leaves the form.
+
+        The auto-link mirrors ``project_tool._op_create`` rather than inventing
+        a second rule: the calling session is linked as a WORKING session,
+        except the chief of staff's, whose create-time link is provenance
+        ("filed by") — her session is live almost always, and a working link
+        would make every row she files read as work in progress.
+        """
+        message.stop()
+        view = self._projects_view
+        registry = self._project_registry()
+        if view is None or registry is None:
+            return
+        import time as _time
+
+        from local_operator.projects import store_error_text
+
+        session_id = self._own_session_id()
+        coordination = False
+        if session_id:
+            from local_operator.aida.state import is_aida_session
+
+            coordination = is_aida_session(registry.config_dir, session_id)
+        try:
+            project = registry.create_project(
+                message.edit,
+                sessions=[] if coordination else ([session_id] if session_id else []),
+                coordination_sessions=[session_id] if (session_id and coordination) else [],
+            )
+        except Exception as exc:  # noqa: BLE001 — a keystroke never crashes the app
+            view.show_form_refusal(store_error_text(exc))
+            return
+        view.load(
+            views=self._projects_payload(),
+            updated_at=_time.time(),
+            own_session=self._own_session_id(),
+        )
+        view.form_created(project.id, project.title or project.name)
+
     def _own_session_id(self) -> str | None:
         """THIS process's session id, or ``None`` — the detail page's anchor.
 
@@ -38429,6 +38492,16 @@ class OperatorApp(App[None]):
         answered four presses with four warning rows, which is the noise this
         docstring's first paragraph exists to avoid.
         """
+        # A form that owns the keyboard translates `shift+tab` ITSELF. The
+        # binding is app-wide and `priority=True`, so it is matched BEFORE the
+        # focused widget (the settings capture's recorded trap, measured) — the
+        # projects create form could therefore never see the chord. Delegating
+        # the ONE key to the page keeps every other binding — including ctrl+c
+        # — exactly where disarming the app's hotkeys would have moved them.
+        page = self._projects_view
+        if page is not None and getattr(page, "wants_field_tab", False):
+            page.form_focus_previous()
+            return
         if self._session is None:
             # Not "this model has no levels": there is no model yet, and naming
             # the wrong reason is worse than naming none.
