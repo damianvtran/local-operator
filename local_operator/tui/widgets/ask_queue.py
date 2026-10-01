@@ -638,9 +638,15 @@ class AskQueueList(Widget):
         Public because the hit test and the tests both need the rule without
         restating it.
         """
-        waiting = sum(1 for row in self._rows if row.waiting)
-        urgent = sum(1 for row in self._rows if row.urgent)
-        headline = f"{ASK_MARKER} {queue_headline(waiting, len(self._rows) - waiting, urgent)}"
+        waiting_rows = [row for row in self._rows if row.status == STATUS_OPEN]
+        # The SAME set the bar counts: OPEN rows. An urgent ask is one whose
+        # deadline is imminent, and a timed-out ask has no imminent deadline —
+        # counting it here made the list say `1 urgent · 1 ask timed out` over a
+        # bar showing only the amber hue, i.e. two surfaces disagreeing about one
+        # queue again (review round 3, MINOR-1).
+        urgent = sum(1 for row in waiting_rows if row.urgent)
+        timed_out = len(self._rows) - len(waiting_rows)
+        headline = f"{ASK_MARKER} {queue_headline(len(waiting_rows), timed_out, urgent)}"
         kept: list[str] = []
         for hint in self.HEADER_HINTS:
             if cell_len("  ·  ".join([headline, *kept, hint])) > width:

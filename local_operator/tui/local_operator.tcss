@@ -652,6 +652,19 @@ AskQueueList {
     background: $lo-overlay;
     color: $lo-fg;
     padding: 1 1;
+    /* ONE PAINTED LINE PER ASK, enforced where the painting happens. Each row's
+     * `Text(no_wrap=True)` is a rich-side hint that Textual's widget painting
+     * does not read, so a question wider than the content box used to spend a
+     * SECOND painted line — and the pointer hit test, which counts one line per
+     * ask, then opened the wrong ask and left the last ones inert (review round
+     * 3: reproduced with 90-character questions, clicked through the real event
+     * path). `nowrap` + `ellipsis` is the lever that actually paints: a 49-cell
+     * question is cut with `…` instead of wrapping, which is also what the
+     * ledger's other rows do. The hit test is only valid while this holds, so
+     * the surface test asserts `virtual_size.height == header + rows` at three
+     * widths with long questions. */
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
 }
 
 #prompt-chevron {

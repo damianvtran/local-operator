@@ -1060,3 +1060,89 @@ async def test_a_refused_dismiss_reports_at_the_gesture(enabled):
         await _settle(pilot)
         # The toast owns the message while it is up; the transcript is untouched.
         assert "still open" in str(app.query_one(Toast)._message)
+
+
+# -- round 3: the row height the hit test depends on -------------------------
+
+#: A question that cannot fit any of the widths under test on one line if it is
+#: allowed to wrap — the fixture whose absence let round 3's defect through.
+LONG_QUESTION = (
+    "Which rollout should the stale-row migration take tonight, and " + "which shard " * 6
+)
+
+
+@pytest.mark.parametrize("size", [(100, 30), (80, 24), (60, 20)])
+async def test_every_row_paints_one_line_and_every_painted_row_is_clickable(enabled, size):
+    """Review round 3: the hit test counted one line per ask, but rows could WRAP.
+
+    ``Text(no_wrap=True)`` is a rich-side hint the widget's painting ignores, so
+    a 90-character question spent a second painted line and every click below it
+    opened the wrong ask — Bravo's line opened the third ask, and the last two
+    were inert. The lever that paints is the sheet's ``text-wrap: nowrap`` (a
+    post-mount ``styles.text_wrap`` write does not change the paint), and the
+    assertion below is the PAINT's own number rather than the builder's: the
+    widget's virtual height must be its padding plus one line per ask plus the
+    header. Every row is then clicked at the offset it is painted at.
+    """
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=size) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(
+            ask_rows(
+                [
+                    _row(f"a{i}", f"{name}: {LONG_QUESTION}")
+                    for i, name in enumerate(["Alpha", "Bravo", "Charlie", "Delta"], start=1)
+                ]
+            )
+        )
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        listing = app.query_one(AskQueueList)
+        padding = listing.styles.padding.top + listing.styles.padding.bottom
+        assert listing.styles.text_wrap == "nowrap", "the rows may wrap again"
+        assert listing.virtual_size.height - padding == listing.HEADER_ROWS + len(listing.rows), (
+            f"a row painted more than one line: {listing.virtual_size.height} painted rows "
+            f"for {len(listing.rows)} asks"
+        )
+        for index, row in enumerate(list(listing.rows)):
+            top = listing.content_region.y - listing.region.y
+            await pilot.click(AskQueueList, offset=(4, top + listing.HEADER_ROWS + index))
+            await _settle(pilot)
+            assert (
+                app._ask_mounted_id == row.ask_id
+            ), f"the click at painted row {index} opened {app._ask_mounted_id}, not {row.ask_id}"
+            app._clear_ask_surface()
+            app._mount_ask_list()
+            await _settle(pilot)
+
+
+async def test_the_urgency_word_counts_the_same_set_on_both_surfaces(enabled):
+    """Review round 3, MINOR-1: the bar counted OPEN urgent asks, the list every row.
+
+    With an urgent ask whose deadline has already passed, the list said
+    `1 urgent · 1 ask timed out` while the bar showed only its amber hue — one
+    queue described two ways, which is the class of defect the round-1 count
+    vocabulary fix exists to prevent.
+    """
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(
+            ask_rows(
+                [
+                    _row("a1", "Deploy now?", urgent=True),
+                    _row("a2", "Which region?", status="timed_out", urgent=True),
+                ]
+            )
+        )
+        await _settle(pilot)
+        bar = app.query_one(AskBar).render().plain
+        app._expand_asks()
+        await _settle(pilot)
+        header = app.query_one(AskQueueList).render().plain.splitlines()[0]
+        assert "1 urgent" in bar, bar
+        assert "1 urgent" in header, header
+        assert "2 urgent" not in header, header
