@@ -43,11 +43,12 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from typing import Callable, Iterable, Mapping
 
-from local_operator.mobile.resources import direct_footprint_bytes
+from local_operator.mobile.resources import direct_footprint_bytes, direct_group_pids
 
 
 def _platform() -> str:
@@ -116,6 +117,12 @@ Runner = Callable[[list[str]], "tuple[int, str]"]
 #: One pid's phys footprint in bytes, or ``None`` when this host cannot answer.
 #: Injectable for the same reason ``Runner`` is (see ``mobile/resources.py``).
 FootprintProbe = Callable[[int], "int | None"]
+
+#: The pids of one process group by a fork-free read, ``[]`` when the group is
+#: empty, ``None`` when this host cannot answer. Injectable like the others, and a
+#: test that fakes the other two MUST fake this one too: a fake pgid (``100``) is a
+#: real group on a live host, and the default reader would answer for it.
+GroupProbe = Callable[[int], "list[int] | None"]
 
 
 def _run_probe(argv: list[str], timeout_s: float) -> tuple[int, str]:
@@ -532,15 +539,13 @@ def _read_group_members(pgid: int, *, runner: Runner | None = None) -> dict[int,
     return _read_group_table(pgid, runner=runner) or None
 
 
-#: How long one guard tick may spend on the membership ``ps``, in total, across
-#: its attempts. MEASURED, not chosen: twelve ``ps -axo pid=,pgid=,rss=`` reads
-#: under the 2026-09-30 fleet load took 0.42 s min / 3.51 s mean / 13.60 s max,
-#: and the 5 s bound this replaces turned that tail into a ``None`` reading
-#: ("unknown never kills") on 3 of 8 consecutive ticks while a child held 4 GB
-#: against a 3 GB ceiling. The tick runs in a worker thread, so a long read
-#: delays the NEXT sample, never the TUI frame; and the fork-free footprint check
-#: runs BEFORE this read, so the budget is only spent on a tick that has not
-#: already decided to kill.
+#: How long ONE ``ps`` discovery read may take in total, across its attempts.
+#: MEASURED, not chosen: twelve ``ps -axo pid=,pgid=,rss=`` reads under the
+#: 2026-09-30 fleet load took 0.42 s min / 3.51 s mean / 13.60 s max, and the 5 s
+#: bound this replaces turned that tail into a ``None`` reading ("unknown never
+#: kills") on 3 of 8 consecutive ticks while a child held 4 GB against a 3 GB
+#: ceiling. The read runs on its OWN thread (see :meth:`Guard._poll_ps`), so a
+#: long one delays only the next discovery, never a tick.
 _MEMBERSHIP_BUDGET_S = 12.0
 
 #: ``ps`` attempts inside that budget. A fast failure (non-zero exit, a ``ps``
@@ -551,13 +556,23 @@ _MEMBERSHIP_ATTEMPTS = 2
 #: The longest a single membership ``ps`` may run.
 _MEMBERSHIP_ATTEMPT_TIMEOUT_S = 8.0
 
-#: The slowest the membership ``ps`` is re-read while a fork-free footprint
-#: reader is answering. The footprint of every KNOWN member is read on every tick
-#: (syscalls), so ``ps`` is only discovery of children spawned since the last
-#: read: once a second quarters the forks a 250 ms poll spent, and the fork is the
-#: probe that fails first under pressure. Where no fork-free reader answers, ``ps``
-#: is the only source and is read every tick.
+#: The slowest the ``ps`` read is re-run after one that ANSWERED. It is the
+#: fallback membership source (the fork-free group listing is primary), so it
+#: only runs where that listing is unavailable.
 _MEMBERSHIP_REFRESH_S = 1.0
+
+#: How long to wait before re-running a ``ps`` that FAILED. Longer than the
+#: refresh on purpose: a ``ps`` that fails under pressure should not be hammered
+#: by the guard (measured before this: 40 forks in 5 s from a failing ``ps``, ~8
+#: a second, aimed at the instrument that is already dying).
+_MEMBERSHIP_FAILURE_BACKOFF_S = 2.0
+
+#: How long a tick waits for the ``ps`` thread it just started. The breach check
+#: has already run by then, so this only buys a same-tick answer from a ``ps``
+#: that is fast; a slow or hung one is picked up on a LATER tick and never delays
+#: the kill clock (measured before: a hung ``ps`` made every tick 12 s long, so
+#: the fork-free check ran once per 12 s instead of per 250 ms).
+_PS_GRACE_S = 0.2
 
 
 def _membership_runner(deadline: float) -> Runner:
@@ -600,9 +615,10 @@ class Sample:
     #: The two instruments, kept apart so a result can say which one tripped.
     rss_bytes: int | None = None
     footprint_bytes: int | None = None
-    #: Where the pid set came from: ``"ps"`` (a fresh table read), ``"cached"``
-    #: (the last good read, each pid re-verified fork-free) or ``"leader"`` (only
-    #: the group leader we spawned) — ``"none"`` when nothing could be read.
+    #: Where the pid set came from: ``"group"`` (the fork-free group listing),
+    #: ``"ps"`` (a table read), ``"cached"`` (the last known members, each pid
+    #: re-verified fork-free) or ``"leader"`` (only the group leader we spawned) —
+    #: ``"none"`` when nothing could be read.
     membership: str = "none"
 
 
@@ -626,22 +642,24 @@ class Guard:
     (:func:`~local_operator.mobile.resources.direct_footprint_bytes`), and the
     decision is ``max(rss_sum, footprint_sum)``.
 
-    **THE SUBPROCESS IS THE FIRST INSTRUMENT TO DIE.** ``ps`` was measured at
-    0.42-13.6 s under the same load that makes a guard necessary, against a 5 s
-    timeout, and an unreadable ``ps`` used to mean "no reading, so no kill" — the
-    kill path failed exactly when it mattered. So the decision no longer depends on
-    one: the footprint of the last-known members (each re-verified with
-    ``os.getpgid``, a syscall) and of the leader we spawned is read BEFORE ``ps``,
-    and a breach there is final without waiting on the table. ``ps`` is the
-    membership discovery arm (it finds children spawned since the last read, and
-    supplies RSS where no footprint reader exists); it is read at most once per
-    :data:`_MEMBERSHIP_REFRESH_S`, retried inside a bounded budget, and when it
-    still fails the guard keeps going on what it can verify without it.
+    **THE SUBPROCESS IS THE FIRST INSTRUMENT TO DIE, SO NOTHING THAT DECIDES A
+    KILL DEPENDS ON ONE.** ``ps`` was measured at 0.42-13.6 s under the same load
+    that makes a guard necessary, against a 5 s timeout, and an unreadable ``ps``
+    used to mean "no reading, so no kill". Membership therefore comes, in order,
+    from: (1) the kernel's own group listing
+    (:func:`~local_operator.mobile.resources.direct_group_pids`:
+    ``proc_listpids(PROC_PGRP_ONLY)`` on macOS, a ``/proc`` scan on Linux — no fork,
+    and it sees EVERY member, so ``timeout 900 node ...`` and a late-spawned
+    allocator are covered with ``ps`` dead); (2) where that cannot answer, the
+    last-known members (each re-verified with ``os.getpgid``) plus the leader we
+    spawned, extended by a ``ps`` discovery read that runs on its own thread with
+    backoff and never delays a tick. The breach check always runs BEFORE any
+    ``ps`` is consulted. ``ps`` supplies RSS only where no footprint reader exists.
 
     **UNKNOWN STILL NEVER KILLS.** A tick where neither RSS nor any footprint could
-    be measured yields ``None`` usage and no kill. What changed is what counts as
-    measured: the leader's own fork-free footprint is a measurement of a pgid this
-    guard spawned, so it is enough to kill on when ``ps`` is unreadable.
+    be measured yields ``None`` usage and no kill; an EMPTY group listing is the
+    command having ended, not a reading. What counts as measured is the fork-free
+    footprint of a pid in the pgid this guard was handed.
     """
 
     def __init__(
@@ -651,26 +669,31 @@ class Guard:
         *,
         runner: Runner | None = None,
         footprint_probe: FootprintProbe | None = None,
+        group_probe: GroupProbe | None = None,
         tick_s: float = 0.25,
     ) -> None:
         self.pgid = pgid
         self.budget = budget
         self.runner = runner
         self.footprint_probe = footprint_probe
+        self.group_probe = group_probe
         self.tick_s = tick_s
         self._advised = False
         #: The largest MEASURED group charge seen this guard's life, for the
         #: result text and details. ``None`` until a reading lands.
         self.peak_bytes: int | None = None
-        #: The membership the last successful ``ps`` read resolved, and when. A
-        #: failed or skipped read falls back to these pids — each re-verified to
+        #: The last known membership (from the group listing or a ``ps`` read).
+        #: Where the listing cannot answer it is reused, each pid re-verified to
         #: still be in OUR group before it is charged (:meth:`_verified_members`).
         self._members: set[int] = set()
-        self._members_at: float | None = None
-        #: Whether the last tick's fork-free reader produced ANY number. When it
-        #: did not (no libproc, no ``smaps_rollup``), ``ps`` is the only source and
-        #: is read every tick rather than at the slower refresh cadence.
-        self._footprint_readable = True
+        #: The single-flight ``ps`` discovery thread, its latest UNCONSUMED answer
+        #: (``None`` = nothing new; ``{}`` = answered, group empty; a dict =
+        #: pid -> rss), and the earliest monotonic time another may start.
+        self._ps_thread: threading.Thread | None = None
+        self._ps_answer: dict[int, int] | None = None
+        self._ps_failed = False
+        self._ps_only = False
+        self._ps_next_at = 0.0
 
     @property
     def hard_bytes(self) -> int:
@@ -683,9 +706,9 @@ class Guard:
     async def sample(self) -> Sample:
         """Read the group's usage off the event loop (``asyncio.to_thread``).
 
-        Fork-free footprint arm first, ``ps`` membership only when due. The whole
-        probe runs in a worker thread: a ``ps`` read on the loop thread would
-        stall the TUI frame, which is exactly what this guard must not do.
+        Fork-free arms first, ``ps`` only where they cannot answer. The whole
+        probe runs in a worker thread: a read on the loop thread would stall the
+        TUI frame, which is exactly what this guard must not do.
         """
         return await asyncio.to_thread(self._sample_sync)
 
@@ -693,7 +716,7 @@ class Guard:
         """The same reading as :meth:`sample`, for a caller that has no event loop.
 
         The bash tool polls from the session's loop, so it hops into a worker
-        thread to keep a ``ps`` read off the frame. ``mobile.install``'s build step
+        thread to keep a read off the frame. ``mobile.install``'s build step
         is plain synchronous code (the install path is not async), so there is no
         loop for the hop to be scheduled on and the honest spelling is the read
         itself. Same call, same :class:`Sample`, same never-raise contract: an
@@ -713,6 +736,14 @@ class Guard:
         except Exception:  # noqa: BLE001 — an unknown footprint is not a kill
             return None
         return value if value is not None and value > 0 else None
+
+    def _list_group(self) -> list[int] | None:
+        """The group's members by the fork-free listing, ``None`` = cannot say."""
+        probe = self.group_probe or direct_group_pids
+        try:
+            return probe(self.pgid)
+        except Exception:  # noqa: BLE001 — an unanswerable listing is not a kill
+            return None
 
     def _verified_members(self) -> set[int]:
         """Last-known members that are still in OUR group, plus the leader.
@@ -735,25 +766,53 @@ class Guard:
                 continue
         return live
 
-    def _read_membership(self) -> dict[int, int] | None:
-        """The group's ``{pid: rss}`` from ``ps``, retried inside one bounded budget.
+    def _ps_worker(self) -> None:
+        """One bounded ``ps`` discovery read, run on :attr:`_ps_thread`.
 
-        ``None`` only when EVERY attempt failed; an empty dict means ``ps``
-        answered and the group has no members. Retried because the failures seen
-        under pressure were not all slow — a ``ps`` that cannot fork returns at
-        once — and the budget (:data:`_MEMBERSHIP_BUDGET_S`) bounds the total so
-        two slow attempts cannot stretch one tick past it. An injected ``runner``
-        is the caller's own seam and is used as given.
+        Retried inside :data:`_MEMBERSHIP_BUDGET_S`. Stamps WHEN the next read may
+        start, success or failure — the earlier version stamped only on success,
+        so a failing ``ps`` was re-forked on every tick.
         """
         deadline = time.monotonic() + _MEMBERSHIP_BUDGET_S
         run = self.runner or _membership_runner(deadline)
+        table: dict[int, int] | None = None
         for _attempt in range(_MEMBERSHIP_ATTEMPTS):
             table = _read_group_table(self.pgid, runner=run)
-            if table is not None:
-                return table
-            if time.monotonic() >= deadline:
+            if table is not None or time.monotonic() >= deadline:
                 break
-        return None
+        self._ps_failed = table is None
+        self._ps_answer = table
+        # ``ps``-only hosts read on every tick after a SUCCESS, but a failure always
+        # backs off: hammering the instrument that is failing is what made a dead
+        # ``ps`` cost ~8 forks a second.
+        if table is None:
+            backoff = _MEMBERSHIP_FAILURE_BACKOFF_S
+        else:
+            backoff = 0.0 if self._ps_only else _MEMBERSHIP_REFRESH_S
+        self._ps_next_at = time.monotonic() + backoff
+
+    def _poll_ps(self, *, every_tick: bool) -> dict[int, int] | None:
+        """Start a ``ps`` read if one is due; return the newest unconsumed answer.
+
+        Single-flight and non-blocking beyond :data:`_PS_GRACE_S`: the thread is
+        started, given a short grace to answer (a fast ``ps`` lands the same tick),
+        and otherwise left to finish while ticks carry on without it.
+        ``every_tick`` is for a host where ``ps`` is the ONLY source (no footprint
+        reader and no group listing): there it is the whole reading, so a read that
+        ANSWERED is followed by another on the next tick. A read that FAILED backs
+        off either way.
+        """
+        self._ps_only = every_tick
+        thread = self._ps_thread
+        if thread is not None and not thread.is_alive():
+            thread = self._ps_thread = None
+        if thread is None and time.monotonic() >= self._ps_next_at:
+            thread = threading.Thread(target=self._ps_worker, name="memory-guard-ps", daemon=True)
+            self._ps_thread = thread
+            thread.start()
+            thread.join(_PS_GRACE_S)
+        answer, self._ps_answer = self._ps_answer, None
+        return answer
 
     def _sample_sync(self) -> Sample:
         soft = self.soft_bytes
@@ -770,42 +829,43 @@ class Guard:
                     total += value
             return total
 
-        # 1. FORK-FREE FIRST. The last-known members plus the leader, read with
-        #    syscalls only. A breach here is decided without touching ``ps`` —
-        #    the instrument that is slowest, and most likely to fail, exactly when
-        #    the group is a runaway.
-        known = self._verified_members()
+        # 1. MEMBERSHIP WITHOUT A FORK. The kernel's group listing is exact and
+        #    instantaneous; where it cannot answer, the last-known members (each
+        #    re-verified) plus the leader stand in.
+        listed = self._list_group()
+        if listed is not None:
+            known = set(listed)
+            membership = "group"
+            self._members = set(known)
+        else:
+            known = self._verified_members()
+            membership = "cached" if len(known) > 1 else "leader"
+
+        # 2. BREACH CHECK, BEFORE ANY ``ps``. A fork-free footprint at or above the
+        #    ceiling is final: nothing below can lower it, so the tick does not
+        #    wait on the instrument most likely to be dying.
         known_fp = footprint_of(known)
-        self._footprint_readable = any(value is not None for value in footprints.values())
-
-        now = time.monotonic()
+        readable = any(value is not None for value in footprints.values())
         decided = hard > 0 and known_fp >= hard
-        due = (
-            self._members_at is None
-            or not self._footprint_readable
-            or now - self._members_at >= _MEMBERSHIP_REFRESH_S
-        )
 
-        # 2. MEMBERSHIP. Skipped when the fork-free reading already decided, and
-        #    skipped between refreshes; otherwise one ``ps`` (retried in budget).
+        # 3. ``ps``: discovery where the listing could not answer, RSS where no
+        #    footprint reader exists. Never needed (and never forked) on the
+        #    steady path of a host with both fork-free readers.
         table: dict[int, int] | None = None
-        membership = "cached" if len(known) > 1 else "leader"
-        if not decided and due:
-            table = self._read_membership()
+        if not decided and (listed is None or not readable) and (listed is None or known):
+            table = self._poll_ps(every_tick=not readable)
             if table:
-                self._members = set(table)
-                self._members_at = time.monotonic()
-                membership = "ps"
-            elif table is not None:
+                if listed is None:
+                    known = known | set(table)
+                    self._members = set(known)
+                    membership = "ps"
+            elif table is not None and listed is None:
                 # ``ps`` answered and the group is empty: the command has ended.
-                # Charge nothing from a stale cache; the loop's own wait sees it.
-                self._members = set()
-                self._members_at = time.monotonic()
                 known = set()
+                self._members = set()
                 footprints.clear()
 
-        pids = set(table) if table else known
-        footprint_sum = footprint_of(pids) if pids else 0
+        footprint_sum = footprint_of(known) if known else 0
         rss_sum = sum(table.values()) if table else None
         measured_fp = footprint_sum if footprint_sum > 0 else None
 

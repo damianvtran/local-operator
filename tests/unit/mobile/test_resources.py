@@ -556,3 +556,60 @@ def test_direct_footprint_is_the_platform_reader_and_unknown_elsewhere(monkeypat
     monkeypatch.setattr(sys, "platform", "win32")
     assert resources.direct_footprint_bytes(1) is None
     assert resources.direct_ppid_pgid(1) is None
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="proc_listpids is macOS-only")
+def test_the_fork_free_group_listing_matches_ps_for_a_real_group() -> None:
+    """``proc_listpids(PROC_PGRP_ONLY)`` against ``ps`` for a group with descendants.
+
+    The listing returns BYTES and silently truncates an undersized buffer, so the
+    size-query-then-fetch shape is what is under test: a 100-member group is larger
+    than any fixed small buffer, and parity with ``ps`` is the proof nothing was
+    clipped. A decoy group in the same table must not leak in.
+    """
+    group = subprocess.Popen(
+        ["sh", "-c", "for i in $(seq 100); do sleep 30 & done; wait"], start_new_session=True
+    )
+    decoy = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    try:
+        pgid = os.getpgid(group.pid)
+        deadline = time.time() + 10
+        listed: list[int] = []
+        while time.time() < deadline:
+            listed = resources.direct_group_pids(pgid) or []
+            if len(listed) >= 101:
+                break
+            time.sleep(0.1)
+        table = subprocess.run(
+            ["ps", "-axo", "pid=,pgid="], capture_output=True, text=True, check=True
+        ).stdout
+        via_ps = {int(r.split()[0]) for r in table.splitlines() if int(r.split()[1]) == pgid}
+        assert sorted(listed) == sorted(via_ps) and len(listed) >= 101
+        assert decoy.pid not in listed
+    finally:
+        for proc in (group, decoy):
+            try:
+                os.killpg(os.getpgid(proc.pid), 9)
+            except OSError:
+                pass
+            proc.wait()
+    assert resources.direct_group_pids(pgid) == []  # answered, and empty: the group ended
+
+
+def test_an_unanswerable_group_listing_is_none_not_empty(monkeypatch) -> None:
+    """``None`` (cannot say) and ``[]`` (answered: empty) must never be conflated —
+    unknown never kills, and an empty group has nothing to kill."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert resources.direct_group_pids(123) is None
+    monkeypatch.setattr(resources, "_darwin_libproc", lambda: None)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert resources.direct_group_pids(123) is None
+    assert resources.direct_group_pids(-5) is None
+
+
+def test_the_linux_group_scan_reads_pgrp_from_stat(monkeypatch) -> None:
+    stats = {"10": (1, 7), "11": (10, 7), "12": (10, 9)}
+    monkeypatch.setattr(resources.os, "listdir", lambda path: [*stats, "self", "cpuinfo"])
+    monkeypatch.setattr(resources, "_linux_ppid_pgid", lambda pid: stats.get(str(pid)))
+    assert resources._linux_group_pids(7) == [10, 11]
+    assert resources._linux_group_pids(8) == []
