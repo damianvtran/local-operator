@@ -556,6 +556,26 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "prefix lop-join-) once the join it was written for has run; a leaked copy is a "
         "live credential until it is redeemed",
     ),
+    (
+        "local_operator/network/move_queue.py::_write_record_raw",
+        "os.replace",
+        "Atomic write of the queued move's record FILE <config>/network/queue/"
+        "move-<session_id>.json (design note §5.4): a tmp FILE over its target, both "
+        "direct children of queue/, a sibling of sessions/ — the record is relay-owned "
+        "and never copied",
+    ),
+    (
+        "local_operator/network/move_queue.py::_write_record_raw",
+        "os.unlink",
+        "Removes only this call's own .move-<id>.<rand>.tmp sidecar in "
+        "<config>/network/queue/, and only on the failure path",
+    ),
+    (
+        "local_operator/network/move_queue.py::sweep_terminal",
+        "<path>.unlink",
+        "Sweeps terminal queue records past the TTL out of <config>/network/queue/ "
+        "(the glob's own move-*.json matches); the directory is a sibling of sessions/",
+    ),
     # -- the session STAMP: `sessions/<id>/mesh.json` ------------------------
     # THE ONE MESH FILE THAT REALLY IS INSIDE A SESSION DIRECTORY, so it is argued
     # here and not in the block above. `stamp_path` joins the literal
@@ -1112,6 +1132,28 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "wakes/deliveries/<id>.json FILE",
     ),
+    # The RESCUE ledger is the same shape one directory over
+    # (`local_operator/session/runtime/rescue.py`), and deliberately a local copy
+    # of the staged write rather than a call to ``registry._staged_write`` for the
+    # reason `network/identity.py`'s writer states: the helper is private to the
+    # run-directory's module, and this one keeps the supervisor's rescue module on
+    # its stdlib + leaf-module import contract. Every path in it is
+    # `<config>/rescue/<session-id>.json`, built from a fixed dirname plus the
+    # session id as a FILENAME — the id reaches it from a run record's own
+    # ``session_id`` field or from the ledger directory's own listing, so it can
+    # contain no separator — and nothing in the module walks, renames or removes a
+    # directory, under `sessions/` or anywhere else. The unlink is the staging
+    # file this call just wrote, never a record.
+    (
+        "local_operator/session/runtime/rescue.py::write_ledger",
+        "os.replace",
+        "temp FILE -> rescue/<id>.json",
+    ),
+    (
+        "local_operator/session/runtime/rescue.py::write_ledger",
+        "os.unlink",
+        "the rescue/<id>.json staging FILE this call just wrote",
+    ),
     # The serving plane's publication latch. `wait_until_published` takes its own
     # waiter back OUT of `_publication_gates` when its bound expires, so a
     # runtime whose boot prologue never settles cannot leave a dead
@@ -1156,6 +1198,12 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/session/runtime/registry.py::remove_stop_marker",
         "<path>.unlink",
         "the runtime-stop.json FILE the ladder's own refusal withdraws (never a directory)",
+    ),
+    (
+        "local_operator/session/runtime/stop_ledger.py::_append",
+        "os.replace",
+        "logs/stop-sweeps.jsonl -> stop-sweeps.jsonl.1: a rotated FILE under "
+        "config_dir()/logs, built from a fixed basename; no session id reaches it",
     ),
     (
         "local_operator/session/runtime/registry.py::_reap_dead_record",
@@ -2522,6 +2570,8 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/cleanup.py::_write_record",  # tmp -> last-cleanup.json
         # tmp -> update-window.json (the update window's handover marker)
         "local_operator/session/runtime/inbox.py::write_update_window",
+        # stop-sweeps.jsonl -> stop-sweeps.jsonl.1 (a FILE under config_dir()/logs)
+        "local_operator/session/runtime/stop_ledger.py::_append",
         "local_operator/session/frontend_state.py::SnapshotJobs.__init__",  # str.replace
         "local_operator/session/frontend_state.py::SnapshotWakeScheduler.__init__",
         "local_operator/session/frontend_state.py::SnapshotSubagentComms.__init__",
@@ -2537,6 +2587,7 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/attached.py::AttachedSession._apply_frontend_facades",  # facade
         "local_operator/session/runtime/inbox.py::_replace_remainder",  # tmp -> inbox FILE
         "local_operator/session/runtime/registry.py::_staged_write",  # tmp -> record FILE
+        "local_operator/session/runtime/rescue.py::write_ledger",  # tmp -> rescue/<id>.json
         "local_operator/session/runtime/registry.py::_reap_dead_record",  # -> reaped/ FILE
         "local_operator/session/runtime/viewers.py::publish_viewer",  # tmp -> viewer FILE
         "local_operator/session/search_index.py::_save",  # tmp -> index FILE

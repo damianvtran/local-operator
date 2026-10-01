@@ -42,6 +42,7 @@ not re-import them; the values and their per-record notes live in that module.
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -703,6 +704,49 @@ def involuntary_kill_detail(
     return (
         render_involuntary_attribution(mechanism=mechanism, actor=actor, killer_pid=killer_pid)
         or f" ({KILL_UNATTRIBUTED})"
+    )
+
+
+def render_signal_receipt_detail(
+    *, signal_name: str = "", at: object = None, count: int = 1
+) -> str:
+    """The parenthetical a runtime's OWN signal receipt gives a ``runtime-shutdown`` reason.
+
+    Scalar arguments, for the reason :func:`render_stop_attribution` gives: the
+    receipt's schema belongs to its writer (``session/runtime/signal_receipt``).
+
+    SAYS WHAT WAS RECORDED AND NOTHING MORE. The sender is not knowable on this
+    platform, so the sentence names an "unidentified sender" and then states the
+    one fact that matters to a reader — NOBODY ASKED FOR THIS STOP. It never
+    names a party, it leads with :data:`KILL_UNATTRIBUTED` so a marked death and
+    an unmarked one are not read as one sentence, and it opens as an aside (see
+    :func:`_render_cut_off_detail`) as ONE parenthetical, never nested.
+
+    "NOBODY ASKED FOR A STOP" RATHER THAN "NO STOP WAS STAGED" (design round 1,
+    D1). "Staged" is this feature's own verb for writing the marker file, and it
+    means nothing to somebody reading a transcript; the neighbouring arm already
+    says "no stop was asked for", so the receipt's sentence uses that vocabulary
+    instead of inventing a third name for the same fact.
+
+    THE TIME IS LOCAL WITH ITS OFFSET (design round 1, D3). This string is
+    persisted in the transcript and read later, from other devices, days after
+    the fact, so an offset-less clock time would be read in the reader's own
+    zone. The durable fact is the receipt's epoch ``at``; this rendering is for a
+    person, and it says which clock it is on. No offset is rendered for a
+    walker's own ``at`` of 0/None (nothing was recorded).
+
+    ONE COUNT, JOINED THE SAME WAY AS THE REST: "received 3 times, last at …"
+    rather than a comma-appended second clause, which read as a continuation of
+    "nobody asked for a stop" (design round 1, D5).
+    """
+    name = signal_name or "a termination signal"
+    times = f" {count} times, last" if count > 1 else ""
+    when = ""
+    if isinstance(at, (int, float)) and not isinstance(at, bool) and at:
+        when = " at " + time.strftime("%Y-%m-%d %H:%M:%S %z", time.localtime(float(at)))
+    return (
+        f" ({KILL_UNATTRIBUTED}, {name} received{times}{when} from an unidentified sender;"
+        " nobody asked for a stop)"
     )
 
 

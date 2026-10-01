@@ -296,6 +296,12 @@ if TYPE_CHECKING:
     # in the other direction too.
     from local_operator.resume import SessionAttachment
 
+    # Type-only: ``session_factory`` builds sessions, so a runtime import
+    # here would be the wrong direction. Held so the ``tool`` kind's roster
+    # can be re-derived from this session's LIVE inventory — see
+    # :meth:`Session._refresh_tool_roster`.
+    from local_operator.session_factory import _KnowledgeHooks
+
 logger = logging.getLogger(__name__)
 
 #: Transcript custom-entry type recording which model is ACTUALLY serving
@@ -2636,6 +2642,12 @@ class Session:
         # owns the call: the loop reads ``get_context_tokens_hint`` for turn calls and
         # the session's direct calls stamp ``_context_tokens_hint`` themselves.
         self._tools = list(tools)
+        #: The knowledge/classification hooks this session was built with, set
+        #: by ``set_knowledge_hooks`` once the factory has them in hand (a
+        #: moment after this constructor returns). Held so the classification
+        #: roster's ``tool`` kind can be re-derived from the session's LIVE
+        #: inventory instead of the factory's gate-less view.
+        self._knowledge_hooks: _KnowledgeHooks | None = None
         self._transcript = transcript
         # Attention bookkeeping is DELIBERATELY NON-FATAL to construction, and
         # this guard is the outer half of a pair (`bootstrap_transcript` holds
@@ -4910,6 +4922,7 @@ class Session:
         # hop away, which is not excluded.
         self._tools = self._filter_declared(merged)
         self._context.tools = self._tools
+        self._refresh_tool_roster()
 
     async def async_init(self) -> None:
         """Async second half of construction.
@@ -9072,9 +9085,41 @@ class Session:
         """
         self._tools = self._filter_declared(tools)
         self._context.tools = self._tools
+        self._refresh_tool_roster()
         if hasattr(self, "_frontend_state_store"):
             self.refresh_frontend_state()
         return self._published_tools is None
+
+    def set_knowledge_hooks(self, hooks: _KnowledgeHooks | None) -> None:
+        """Attach the knowledge/classification hooks this session was built with.
+
+        Held for ONE reason: the classification layer's ``tool`` kind is derived
+        from this session's FINAL tool inventory, and the inventory changes
+        after construction — ``_merge_capability_tools`` in ``__init__`` (and
+        again for ``ask`` rescued by ``set_ask_handler``), ``refresh_tools``
+        when MCP discovery lands. The factory's construction-time context lacks
+        the session-owned ``createIf`` gates, so a roster snapshotted there
+        holds only the unconditional tools (agent review round 1, PR #1863:
+        five of the six session-management tools were missing from the kind
+        that exists to offer them). Attaching refreshes immediately, and every
+        inventory write refreshes again.
+        """
+        self._knowledge_hooks = hooks
+        self._refresh_tool_roster()
+
+    def _refresh_tool_roster(self) -> None:
+        """Re-derive the ``tool`` kind's rows from the live inventory.
+
+        Imports lazily because ``session_factory`` builds sessions (the module
+        dependency only ever runs that way); a no-op until the hooks attach,
+        which is what every write during ``__init__`` sees.
+        """
+        hooks = self._knowledge_hooks
+        if hooks is None:
+            return
+        from local_operator.session_factory import _tool_roster_rows
+
+        hooks.tool_roster = _tool_roster_rows(self._tools)
 
     def _wire_tools(self) -> list[AgentTool]:
         """The tools array to advertise to the provider NOW — at most once a turn.

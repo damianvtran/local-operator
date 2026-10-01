@@ -570,3 +570,25 @@ def test_a_team_check_racing_a_save_never_prunes_its_baseline(env, monkeypatch) 
     teams.delete_team(team.id)
     svc.check_items(ctx, kinds=("team",))
     assert prov.read_baseline(root, "team", team.id) is None  # genuinely gone: swept
+
+
+def test_team_label_and_aliases_survive_a_hub_sync_apply(env) -> None:
+    """Labels are LOCAL metadata: a merge apply must never wipe them.
+
+    The merge's field set (``TEAM_FIELDS``) deliberately never carries label
+    or aliases, so the apply's ``TeamEditFields`` payload leaves both None --
+    the registry's "leave the stored value alone" -- and this pins that end to
+    end: pull, label locally, edit the hub, apply, read back.
+    """
+    ctx, hub, _a, teams, root = env
+    team = _pull_team(teams, hub, root)
+    teams.update_team(team.id, TeamEditFields(label="Release Display", aliases=["rel"]))
+    hub.teams["ht1"] = {**hub.teams["ht1"], "description": "new d"}
+
+    report = svc.apply_items(ctx, kind="team", allow_llm=False)
+
+    assert report.reports[0].applied
+    after = teams.get_team(team.id)
+    assert after.description == "new d"
+    assert after.label == "Release Display"
+    assert after.aliases == ["rel"]

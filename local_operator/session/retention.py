@@ -106,6 +106,10 @@ _SIDECAR_NAMES = frozenset(
         # Its mtime is a genuine interaction time and can never exceed the
         # transcript's latest write, so the clock is not moved by it.
         "runtime-stop.json",
+        # The runtime's own signal receipt (``registry.SIGNAL_RECEIPT_NAME``): the
+        # target-side twin of the marker above, bookkeeping ABOUT a run for the same
+        # reason, so it moves neither the activity clock nor the size budget.
+        "runtime-signal.json",
         # The runtime's own turn journal (``registry.TURN_JOURNAL_NAME``),
         # rewritten at every turn boundary in the session's directory. It lands
         # here for the same reason the stop marker does — this list exists so

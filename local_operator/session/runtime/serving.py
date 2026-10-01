@@ -811,6 +811,14 @@ class ServingSessionHandle(SessionHandle):
         self._background_tasks: set[asyncio.Future[Any]] = set()
         # request_id -> Future the gate/ask call is parked on.
         self._pending_futures: dict[str, asyncio.Future[Any]] = {}
+        # request_id -> (monotonic instant, settled value) for gates that LANDED
+        # recently. The desktop answer path retries ONCE under the same id when an
+        # acknowledgement is lost, so a repeat that finds no parked future is a
+        # repeat of an answer that already succeeded — not a refusal. Bounded by
+        # both an age and a count so it can never become a second store of gate
+        # state: the queue stays the single owner of settled state and this map
+        # only answers "did MY OWN id already settle, just now".
+        self._settled_futures: dict[str, tuple[float, Any]] = {}
         # request_id -> the AskQuestion.id the harness is waiting on (the
         # answer map's key — see ask_gate).
         self._pending_question_ids: dict[str, str] = {}
@@ -1979,6 +1987,49 @@ class ServingSessionHandle(SessionHandle):
                 logger.debug("could not release the job-delivery divert", exc_info=True)
         return True
 
+    def end_retire(self) -> bool:
+        """Release the retire latch: a committed departure that is NOT happening.
+
+        THE UNDO OF :meth:`begin_retire`, and it exists for exactly one caller —
+        the queued move's runtime watcher (``network/move_queue.py``, design
+        note §5.4). The sequence there is: latch (:meth:`begin_retire`), THEN
+        claim the queue record's ``paused`` phase under its lock
+        (``move_queue.claim_pause``) — because the claim is what makes a
+        concurrent ``--cancel-queued`` either lose (the move is started and the
+        cancel refuses) or win (the cancel lands first and the move must not
+        happen). When the cancel wins that race, the runtime has latched a
+        departure it must now abANDON: nothing else can stand it back up, and
+        a latched runtime refuses every admission (``prompt``,
+        ``receive_peer_message``) for the rest of its life, so "we committed and
+        then found the record cancelled" would wedge a session nobody moved.
+
+        REFUSES TO UNDO A DRAIN. ``_draining`` is :meth:`begin_drain`'s latch
+        and belongs to the exit path (a signal drain, a refresh handover);
+        clearing its cause would mislabel a departure the runtime is committed
+        to and is still executing. ``False`` when the retire latch was never
+        set, so a caller need not check first.
+
+        WHAT IT DOES NOT UNDO, the same omission :meth:`end_drain` documents:
+        deliveries already diverted to the transcript stay there (durable rows
+        that ride the next turn either way); the resume hook below re-installs
+        the live path for everything that settles after this returns.
+        """
+        if getattr(self, "_draining", False):
+            return False
+        if not getattr(self, "_exit_committed", False):
+            return False
+        self._retiring_cause = ""
+        self._retiring_detail = ""
+        self._exit_committed = False
+        session = getattr(self, "_session", None)
+        resume = getattr(session, "resume_job_deliveries_to_turns", None)
+        if callable(resume):
+            try:
+                resume()
+            except Exception:  # noqa: BLE001 — a failed undo must not block the abort
+                logger.debug("could not release the job-delivery divert", exc_info=True)
+        return True
+
     # -- the update window -------------------------------------------------
     #
     # The IDLE handover's admission window. ``begin_retire`` is a one-way door that
@@ -2589,6 +2640,27 @@ class ServingSessionHandle(SessionHandle):
         self._pending_futures.clear()
         return denied
 
+    #: How long a settled gate id is remembered, and how many at most. The retry
+    #: window is one control request (`DESKTOP_CONTROL_ATTACH_S` plus one ack
+    #: envelope), so a few minutes is far longer than any repeat can arrive; the
+    #: cap is what keeps the map bounded on a long session with many prompts.
+    _SETTLED_FUTURE_TTL_S = 300.0
+    _SETTLED_FUTURE_MAX = 64
+
+    def _record_settled_future(self, request_id: str, value: Any) -> None:
+        """Remember that ``request_id`` settled, with the value it settled to.
+
+        Called only from the loop-thread ``settle`` closure below, so it needs no
+        lock of its own (the same ordering ``_pending_futures`` relies on).
+        """
+        now = time.monotonic()
+        settled = self._settled_futures
+        settled[request_id] = (now, value)
+        for key in [k for k, (at, _) in settled.items() if now - at > self._SETTLED_FUTURE_TTL_S]:
+            settled.pop(key, None)
+        while len(settled) > self._SETTLED_FUTURE_MAX:
+            settled.pop(min(settled, key=lambda k: settled[k][0]), None)
+
     async def _resolve_pending(self, request_id: str, value: Any) -> None:
         """Atomically reserve and settle one gate on its owning event loop."""
         # THE GATE PATH NEEDS THE REFUSAL TOO (review round 2, UX U8). This is the
@@ -2605,6 +2677,22 @@ class ServingSessionHandle(SessionHandle):
         def settle() -> None:
             future = self._pending_futures.pop(request_id, None)
             if future is None or future.done():
+                settled = self._settled_futures.get(request_id)
+                if settled is not None and settled[1] == value:
+                    # A REPEAT OF AN ANSWER THAT LANDED, WITH THE SAME VALUE. The
+                    # desktop answer path re-issues once under the same id after a
+                    # lost acknowledgement (`session/attached.py::answer_gate`);
+                    # without this the owner answered "no longer waiting" to the
+                    # press it had already honoured. Success is the truthful report.
+                    #
+                    # THE VALUE MUST MATCH, and that is what keeps the
+                    # single-winner rule intact: a second front end answering the
+                    # SAME id with a DIFFERENT decision is still refused
+                    # (`test_concurrent_gate_answers_have_one_authoritative_winner`),
+                    # because reporting a choice the owner did not make would be a
+                    # worse lie than the refusal this change exists to fix.
+                    receipt.set_result(None)
+                    return
                 receipt.set_exception(ValueError("that prompt is no longer waiting"))
                 return
             try:
@@ -2612,6 +2700,7 @@ class ServingSessionHandle(SessionHandle):
             except (InvalidStateError, TypeError):
                 receipt.set_exception(ValueError("that prompt is no longer waiting"))
                 return
+            self._record_settled_future(request_id, value)
             receipt.set_result(None)
 
         self._loop.call_soon_threadsafe(settle)
@@ -7121,14 +7210,16 @@ class ServingSessionHandle(SessionHandle):
                 kind="notice", text="no teams yet. Ask the agent to create one.", style="info"
             )
         # ``member_count()``, matching the TUI's own producer (D2). The old
-        # `len(members) + 1` assumed the manager is not on the roster — false
-        # for real teams — and collapsed multi-count slots; the plural was also
+        # `len(members) + 1` assumed the manager is not on the roster -- false
+        # for real teams -- and collapsed multi-count slots; the plural was also
         # keyed to a different number than the one displayed. A detached
         # runtime and an in-process one must answer the same question with the
-        # same number.
+        # same number. The first slot carries the shared bounded display form:
+        # the viewer paints that slot verbatim, so both producers must agree
+        # byte for byte.
         items = [
             (
-                team.name,
+                self._team_row_display(team),
                 f"Led by {team.manager} · {team.member_count()} "
                 f"{'member' if team.member_count() == 1 else 'members'}",
                 (team.description or "").strip(),
@@ -7136,6 +7227,23 @@ class ServingSessionHandle(SessionHandle):
             for team in teams
         ]
         return SlashResult(kind="block", data={"type": "team_list", "items": items})
+
+    @staticmethod
+    def _team_row_display(team: Any) -> str:
+        """The ``team_list`` row's first slot: the shared, BOUNDED display form.
+
+        The same rule and cap the local listing paints (D2/N1), so a follower
+        and an owner read one team the same way; a reduced double degrades to
+        its plain name rather than failing the listing.
+        """
+        from local_operator.teams import bounded_display_form
+
+        try:
+            return bounded_display_form(
+                str(getattr(team, "name", "") or ""), str(getattr(team, "label", "") or "")
+            )
+        except Exception:  # noqa: BLE001 — a listing is never worth an error
+            return str(getattr(team, "name", "") or "")
 
     def _team_attach_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
         """``/team <name> [<request>]`` on the owner: resolve, then attach.
@@ -7195,14 +7303,19 @@ class ServingSessionHandle(SessionHandle):
             )
         # The band and the discovery record both name the attached team, so the
         # projection has to refresh before the viewer paints its receipt.
+        from local_operator.teams import display_form
+
         self._notify()
+        shown = display_form(team.name, team.label)
         return SlashResult(
             kind="notice",
             text=(
-                f"team {team.name} is ready. {team.manager} leads it. "
+                # The prose uses the shared display form (D4); the addressing
+                # instruction and the receipt `data` keep the raw NAME.
+                f"team {shown} is ready. {team.manager} leads it. "
                 f"Send a request with /team {team.name} <message>."
                 if not request
-                else f"sending to {team.name}. {team.manager} is coordinating."
+                else f"sending to {shown}. {team.manager} is coordinating."
             ),
             style="info",
             data={

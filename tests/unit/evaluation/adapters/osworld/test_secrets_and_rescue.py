@@ -13,12 +13,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 from lop_osworld_v2_adapter import cleanup as cleanup_mod
 from lop_osworld_v2_adapter.adapter import (
+    _JUDGE_KEY,
     AdapterStateError,
     InputsMismatch,
     JudgeUnavailable,
@@ -105,6 +107,55 @@ def _reset(episode_id: str, task_id: str, tmp_path: Path, secrets: Any = ()) -> 
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in ("OSWORLD_EVAL_MODEL_API_KEY", "OSWORLD_USER_SIM_API_KEY"):
         monkeypatch.delenv(name, raising=False)
+    # The judge model settings the adapter may write (raw or normalised):
+    # cleared per test so "was it written?" assertions stay order-independent.
+    for name in (
+        "OSWORLD_EVAL_MODEL_PROVIDER",
+        "OSWORLD_EVAL_MODEL_NAME",
+        "OSWORLD_EVAL_MODEL_BASE_URL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture
+def _stub_provider_registry(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Serve ``list_providers()`` without the upstream package.
+
+    ``desktop_env`` is installed only in the evaluation venv, never in CI, so
+    the judge preflight's registry read is stubbed here the way
+    ``test_vendor_bridge`` stubs ``desktop_env.task_base``. The names mirror
+    the PINNED registry (``evaluators/backends`` at the pinned upstream
+    commit) so the registered/unregistered cases are the pinned ones; when
+    the real package is already imported, it is used instead.
+    """
+    import sys
+    import types
+
+    if "desktop_env.evaluators.backends" in sys.modules:
+        yield  # the evaluation venv: use the real one
+        return
+    package = types.ModuleType("desktop_env")
+    setattr(package, "__path__", [])
+    evaluators = types.ModuleType("desktop_env.evaluators")
+    setattr(evaluators, "__path__", [])
+    backends = types.ModuleType("desktop_env.evaluators.backends")
+    setattr(
+        backends,
+        "list_providers",
+        lambda: [
+            "anthropic",
+            "bedrock",
+            "claude",
+            "gemini",
+            "google",
+            "openai",
+            "openai_compatible",
+        ],
+    )
+    monkeypatch.setitem(sys.modules, "desktop_env", package)
+    monkeypatch.setitem(sys.modules, "desktop_env.evaluators", evaluators)
+    monkeypatch.setitem(sys.modules, "desktop_env.evaluators.backends", backends)
+    yield
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +192,7 @@ async def test_a_judged_task_without_provider_settings_is_refused(
 
 @pytest.mark.asyncio
 async def test_the_judge_key_takes_the_documented_env_path_and_is_scrubbed_on_close(
-    tmp_path: Path, episode_id: str
+    tmp_path: Path, episode_id: str, _stub_provider_registry: None
 ) -> None:
     workspace = _workspace(tmp_path, {"task_judged": fixtures.JUDGED}, provider=None)
     provider = FakeProvider()
@@ -158,6 +209,294 @@ async def test_the_judge_key_takes_the_documented_env_path_and_is_scrubbed_on_cl
     assert not any(v in _MARKERS[:2] for v in os.environ.values())
     await adapter.close(CloseParams(operation_id=f"close-{episode_id}", episode_id=episode_id))
     assert "OSWORLD_EVAL_MODEL_API_KEY" not in os.environ
+
+
+# ---------------------------------------------------------------------------
+# judge provider resolution
+# ---------------------------------------------------------------------------
+
+
+def _judge_infra_with_provider(provider: str, *, base_url: str | None = None) -> Any:
+    """The judged-task infra carrying a specific provider value (and optional URL)."""
+    values = _INFRA + (
+        ScopedInfraValue(
+            name="OSWORLD_EVAL_MODEL_PROVIDER", purpose="benchmark_judge", value=provider
+        ),
+        ScopedInfraValue(name="OSWORLD_EVAL_MODEL_NAME", purpose="benchmark_judge", value="gpt-x"),
+    )
+    if base_url is None:
+        return values
+    return values + (
+        ScopedInfraValue(
+            name="OSWORLD_EVAL_MODEL_BASE_URL", purpose="benchmark_judge", value=base_url
+        ),
+    )
+
+
+def _judge_secrets() -> Any:
+    return _AWS_SECRETS + (ResolvedSecret(name=_JUDGE_KEY, value="marker-judge-key"),)
+
+
+@pytest.mark.asyncio
+async def test_an_unconstructible_judge_provider_is_refused_by_name_before_allocation(
+    tmp_path: Path, episode_id: str, _stub_provider_registry: None
+) -> None:
+    """The silent-zero gap: a provider VALUE the registry cannot construct.
+
+    The evaluator's call site wraps ``generate_text`` in a bare
+    ``except Exception: return False``, so before this gate a typo or an
+    unsupported name graded a guaranteed 0 that read like a capability miss.
+    The refusal must name the value and fire BEFORE any resource is
+    allocated.
+    """
+    workspace = _workspace(tmp_path, {"task_judged": fixtures.JUDGED}, provider=None)
+    provider = FakeProvider()
+    adapter = OSWorldV2Adapter(provider_factory=lambda: provider, workspace_root=workspace)
+    await _prepared(adapter, episode_id, _judge_infra_with_provider("openroutr"))
+    with pytest.raises(JudgeUnavailable, match="openroutr") as excinfo:
+        await adapter.reset_start(_reset(episode_id, "task_judged", tmp_path, _judge_secrets()))
+    # The refusal must be actionable: what IS constructible, and the aliases.
+    assert "openai_compatible" in str(excinfo.value)
+    assert "openrouter" in str(excinfo.value)
+    assert provider.allocated is False
+
+
+@pytest.mark.asyncio
+async def test_the_openrouter_alias_becomes_the_registered_openai_compatible_config(
+    tmp_path: Path, episode_id: str, _stub_provider_registry: None
+) -> None:
+    """OpenRouter is an OpenAI-compatible endpoint; the registry knows that name.
+
+    The campaign driver pins ``OSWORLD_EVAL_MODEL_PROVIDER=openrouter``. The
+    vendored registry has no such entry -- and a registry alias alone could
+    not work, because ``OpenAIBackend`` still needs a base URL to reach the
+    service instead of api.openai.com -- so the preflight rewrites the value
+    the judge will read: ``openai_compatible`` plus OpenRouter's endpoint.
+    """
+    workspace = _workspace(tmp_path, {"task_judged": fixtures.JUDGED}, provider=None)
+    provider = FakeProvider()
+    adapter = OSWorldV2Adapter(provider_factory=lambda: provider, workspace_root=workspace)
+    await _prepared(adapter, episode_id, _judge_infra_with_provider("openrouter"))
+    await adapter.reset_start(_reset(episode_id, "task_judged", tmp_path, _judge_secrets()))
+    assert provider.allocated is True
+    assert os.environ["OSWORLD_EVAL_MODEL_PROVIDER"] == "openai_compatible"
+    assert os.environ["OSWORLD_EVAL_MODEL_BASE_URL"] == "https://openrouter.ai/api/v1"
+
+
+@pytest.mark.asyncio
+async def test_a_judge_provider_differing_only_in_case_or_padding_is_still_the_alias(
+    tmp_path: Path, episode_id: str, _stub_provider_registry: None
+) -> None:
+    """Loud is not enough when the value is a spelling of the one we recommend.
+
+    The refusal message names `openrouter` as a known alias, so an operator who
+    types `OpenRouter ` and is refused has been told to do something they
+    believe they just did.
+    """
+    workspace = _workspace(tmp_path, {"task_judged": fixtures.JUDGED}, provider=None)
+    provider = FakeProvider()
+    adapter = OSWorldV2Adapter(provider_factory=lambda: provider, workspace_root=workspace)
+    await _prepared(adapter, episode_id, _judge_infra_with_provider("  OpenRouter "))
+    await adapter.reset_start(_reset(episode_id, "task_judged", tmp_path, _judge_secrets()))
+    assert provider.allocated is True
+    assert os.environ["OSWORLD_EVAL_MODEL_PROVIDER"] == "openai_compatible"
+    assert os.environ["OSWORLD_EVAL_MODEL_BASE_URL"] == "https://openrouter.ai/api/v1"
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_judge_base_url_wins_over_the_alias_default(
+    tmp_path: Path, episode_id: str, _stub_provider_registry: None
+) -> None:
+    """An operator-supplied endpoint is a deliberate override, not a value to replace."""
+    workspace = _workspace(tmp_path, {"task_judged": fixtures.JUDGED}, provider=None)
+    provider = FakeProvider()
+    adapter = OSWorldV2Adapter(provider_factory=lambda: provider, workspace_root=workspace)
+    await _prepared(
+        adapter,
+        episode_id,
+        _judge_infra_with_provider("openrouter", base_url="https://judge.internal.test/v1"),
+    )
+    await adapter.reset_start(_reset(episode_id, "task_judged", tmp_path, _judge_secrets()))
+    assert os.environ["OSWORLD_EVAL_MODEL_PROVIDER"] == "openai_compatible"
+    assert os.environ["OSWORLD_EVAL_MODEL_BASE_URL"] == "https://judge.internal.test/v1"
+
+
+@pytest.mark.asyncio
+async def test_a_registered_judge_provider_is_left_untouched(
+    tmp_path: Path, episode_id: str, _stub_provider_registry: None
+) -> None:
+    """A provider the registry already serves must pass through, base URL and all.
+
+    This is the shape a future driver should prefer; normalisation must not
+    need it, and must not invent a base URL for it.
+    """
+    workspace = _workspace(tmp_path, {"task_judged": fixtures.JUDGED}, provider=None)
+    provider = FakeProvider()
+    adapter = OSWorldV2Adapter(provider_factory=lambda: provider, workspace_root=workspace)
+    await _prepared(adapter, episode_id, _judge_infra_with_provider("anthropic"))
+    await adapter.reset_start(_reset(episode_id, "task_judged", tmp_path, _judge_secrets()))
+    assert provider.allocated is True
+    assert os.environ["OSWORLD_EVAL_MODEL_PROVIDER"] == "anthropic"
+    assert "OSWORLD_EVAL_MODEL_BASE_URL" not in os.environ
+
+
+def _judge_infra_without_provider() -> Any:
+    """The judged-task infra's model NAME only: the provider arrives by the secret ref.
+
+    The refuse-missing gate accepts the provider on either channel, so a driver
+    that supplies it as a secret ref is a supported shape -- and the one the
+    first version of this preflight silently dropped, because it read the infra
+    values alone.
+    """
+    return _INFRA + (
+        ScopedInfraValue(name="OSWORLD_EVAL_MODEL_NAME", purpose="benchmark_judge", value="gpt-x"),
+    )
+
+
+def _judge_secrets_with_provider(provider: str) -> Any:
+    return _judge_secrets() + (ResolvedSecret(name="OSWORLD_EVAL_MODEL_PROVIDER", value=provider),)
+
+
+@pytest.mark.asyncio
+async def test_a_judge_provider_delivered_as_a_secret_ref_reaches_the_judge_environment(
+    tmp_path: Path, episode_id: str, _stub_provider_registry: None
+) -> None:
+    """The secret channel is a supported channel, and the judge reads env only.
+
+    Measured before this: a provider supplied this way passed the refs gate and
+    was read by nothing, so the judge fell back to its own default provider --
+    api.openai.com, with the OpenRouter key -- and the task graded a silent 0.
+    Resolving it means WRITING it, because nothing else delivers a secret to
+    ``os.environ``; resolving it into a variable nobody reads would reproduce
+    the same zero with more code.
+    """
+    workspace = _workspace(tmp_path, {"task_judged": fixtures.JUDGED}, provider=None)
+    provider = FakeProvider()
+    adapter = OSWorldV2Adapter(provider_factory=lambda: provider, workspace_root=workspace)
+    await _prepared(adapter, episode_id, _judge_infra_without_provider())
+    await adapter.reset_start(
+        _reset(episode_id, "task_judged", tmp_path, _judge_secrets_with_provider("openrouter"))
+    )
+    assert provider.allocated is True
+    assert os.environ["OSWORLD_EVAL_MODEL_PROVIDER"] == "openai_compatible"
+    assert os.environ["OSWORLD_EVAL_MODEL_BASE_URL"] == "https://openrouter.ai/api/v1"
+
+
+@pytest.mark.asyncio
+async def test_a_secret_ref_judge_provider_the_registry_cannot_serve_is_refused_by_name(
+    tmp_path: Path, episode_id: str, _stub_provider_registry: None
+) -> None:
+    """The refusal has to cover the channel that could slip past it.
+
+    A value that arrives as a secret ref is as capable of being unusable as one
+    that arrives as infra, and it was the unguarded half.
+    """
+    workspace = _workspace(tmp_path, {"task_judged": fixtures.JUDGED}, provider=None)
+    provider = FakeProvider()
+    adapter = OSWorldV2Adapter(provider_factory=lambda: provider, workspace_root=workspace)
+    await _prepared(adapter, episode_id, _judge_infra_without_provider())
+    with pytest.raises(JudgeUnavailable, match="openroutr") as excinfo:
+        await adapter.reset_start(
+            _reset(episode_id, "task_judged", tmp_path, _judge_secrets_with_provider("openroutr"))
+        )
+    assert "openai_compatible" in str(excinfo.value)
+    assert provider.allocated is False
+
+
+@pytest.mark.asyncio
+async def test_an_endpoint_less_openai_compatible_judge_is_refused_before_allocation(
+    tmp_path: Path, episode_id: str, _stub_provider_registry: None
+) -> None:
+    """Registered is not usable: without an endpoint this shape 401s at api.openai.com.
+
+    Measured against the pinned tree: ``OpenAIBackend`` forwards no base URL, so
+    the OpenAI client defaults to ``https://api.openai.com/v1/`` and the judge's
+    own ``except`` swallows the 401 into a per-metric False. It is reachable by
+    following the refusal message's own advice (it lists ``openai_compatible``
+    among the registered names), which is why it is refused rather than passed.
+    """
+    workspace = _workspace(tmp_path, {"task_judged": fixtures.JUDGED}, provider=None)
+    provider = FakeProvider()
+    adapter = OSWorldV2Adapter(provider_factory=lambda: provider, workspace_root=workspace)
+    await _prepared(adapter, episode_id, _judge_infra_with_provider("openai_compatible"))
+    with pytest.raises(JudgeUnavailable, match="OSWORLD_EVAL_MODEL_BASE_URL") as excinfo:
+        await adapter.reset_start(_reset(episode_id, "task_judged", tmp_path, _judge_secrets()))
+    assert "openai_compatible" in str(excinfo.value)
+    assert provider.allocated is False
+
+
+@pytest.mark.asyncio
+async def test_an_openai_compatible_judge_with_an_endpoint_passes(
+    tmp_path: Path, episode_id: str, _stub_provider_registry: None
+) -> None:
+    """The operator's own endpoint is the supported shape, not a refusal."""
+    workspace = _workspace(tmp_path, {"task_judged": fixtures.JUDGED}, provider=None)
+    provider = FakeProvider()
+    adapter = OSWorldV2Adapter(provider_factory=lambda: provider, workspace_root=workspace)
+    await _prepared(
+        adapter,
+        episode_id,
+        _judge_infra_with_provider("openai_compatible", base_url="https://judge.internal.test/v1"),
+    )
+    await adapter.reset_start(_reset(episode_id, "task_judged", tmp_path, _judge_secrets()))
+    assert provider.allocated is True
+    assert os.environ["OSWORLD_EVAL_MODEL_PROVIDER"] == "openai_compatible"
+    assert os.environ["OSWORLD_EVAL_MODEL_BASE_URL"] == "https://judge.internal.test/v1"
+
+
+@pytest.mark.asyncio
+async def test_close_scrubs_the_judge_addressing_the_preflight_wrote(
+    tmp_path: Path, episode_id: str, _stub_provider_registry: None
+) -> None:
+    """The judge key is scrubbed on close; the addressing it was written for goes too.
+
+    Both names can carry a value the operator never supplied (an alias default,
+    a secret-ref value), so leaving them behind would hand the next episode an
+    endpoint it did not ask for.
+    """
+    workspace = _workspace(tmp_path, {"task_judged": fixtures.JUDGED}, provider=None)
+    provider = FakeProvider()
+    adapter = OSWorldV2Adapter(provider_factory=lambda: provider, workspace_root=workspace)
+    await _prepared(adapter, episode_id, _judge_infra_without_provider())
+    await adapter.reset_start(
+        _reset(episode_id, "task_judged", tmp_path, _judge_secrets_with_provider("openrouter"))
+    )
+    assert os.environ["OSWORLD_EVAL_MODEL_PROVIDER"] == "openai_compatible"
+    await adapter.close(CloseParams(operation_id=f"close-{episode_id}", episode_id=episode_id))
+    assert "OSWORLD_EVAL_MODEL_PROVIDER" not in os.environ
+    assert "OSWORLD_EVAL_MODEL_BASE_URL" not in os.environ
+
+
+@pytest.mark.asyncio
+async def test_a_later_episode_does_not_inherit_an_earlier_episodes_judge_endpoint(
+    tmp_path: Path, episode_id: str, _stub_provider_registry: None
+) -> None:
+    """A worker that runs a second episode must not judge it at the first one's endpoint.
+
+    The stale value here is this adapter's own alias default, and it is not
+    inert: a registered provider with no endpoint of its own that inherited it
+    would silently send its judge calls to the previous episode's service. The
+    first adapter is deliberately NOT closed, which is the state the earlier
+    code left for good.
+    """
+    first_root = tmp_path / "first"
+    workspace = _workspace(first_root, {"task_judged": fixtures.JUDGED}, provider=None)
+    adapter = OSWorldV2Adapter(provider_factory=FakeProvider, workspace_root=workspace)
+    await _prepared(adapter, f"{episode_id}-a", _judge_infra_with_provider("openrouter"))
+    await adapter.reset_start(
+        _reset(f"{episode_id}-a", "task_judged", first_root, _judge_secrets())
+    )
+    assert os.environ["OSWORLD_EVAL_MODEL_BASE_URL"] == "https://openrouter.ai/api/v1"
+
+    second_root = tmp_path / "second"
+    workspace = _workspace(second_root, {"task_judged": fixtures.JUDGED}, provider=None)
+    provider = FakeProvider()
+    later = OSWorldV2Adapter(provider_factory=lambda: provider, workspace_root=workspace)
+    await _prepared(later, f"{episode_id}-b", _judge_infra_with_provider("anthropic"))
+    await later.reset_start(_reset(f"{episode_id}-b", "task_judged", second_root, _judge_secrets()))
+    assert provider.allocated is True
+    assert os.environ["OSWORLD_EVAL_MODEL_PROVIDER"] == "anthropic"
+    assert "OSWORLD_EVAL_MODEL_BASE_URL" not in os.environ
 
 
 # ---------------------------------------------------------------------------

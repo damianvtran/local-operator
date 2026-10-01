@@ -137,6 +137,11 @@ COPY_SET_NAMES: tuple[str, ...] = (
     "origin.json",
     "turn-journal.json",
     "runtime-stop.json",
+    # The target-side twin of the stop marker (``registry.SIGNAL_RECEIPT_NAME``):
+    # evidence ABOUT a past run, keyed to that run's pid, so it travels with the
+    # session exactly as the marker does — and on a destination where no such
+    # run exists the reader refuses it (``signal_receipt.covers_run``).
+    "runtime-signal.json",
     "inbox.jsonl",
     # THE ASK QUEUE'S LOG (``asks/store.ASKS_LOG_NAME``). An ask that is still
     # open when the session is forked, exported or MOVED has to travel with it:

@@ -771,6 +771,168 @@ def test_the_ways_out_are_armed_before_the_record_makes_this_process_addressable
     assert hoisted["construct"] > hoisted["socket_hook"]
 
 
+# -- wave B: the idle branch of ``_on_signal`` names the signal when it cuts a live turn --
+
+
+def test_the_idle_branch_names_an_unsanctioned_signal_that_cuts_a_live_turn() -> None:
+    """``_work_in_flight`` says idle while the session still has a turn the dispose will abort."""
+    from local_operator.session.runtime import signal_receipt
+
+    noted: list[tuple[str, str]] = []
+
+    class _Session:
+        def disposal_cuts_a_turn(self) -> bool:
+            return True
+
+        def note_cut_off(self, cause: str, detail: str = "") -> None:
+            noted.append((cause, detail))
+
+    class _Handle:
+        _session = _Session()
+
+    unsanctioned = {
+        "signals": [{"name": "SIGTERM", "number": 15, "at": 1.0, "sanction": "none"}],
+    }
+    process._note_signal_cut_off(_Handle(), unsanctioned)
+    assert noted and noted[0][0] == "runtime-shutdown"
+    assert "nobody asked for a stop" in noted[0][1]
+
+    # A covering DELIBERATE marker reads exactly as before: nothing is noted.
+    noted.clear()
+    deliberate = {
+        "signals": [
+            {
+                "name": "SIGTERM",
+                "number": 15,
+                "at": 1.0,
+                "sanction": "marker",
+                "stop_marker": {"deliberate": True},
+            }
+        ],
+    }
+    process._note_signal_cut_off(_Handle(), deliberate)
+    assert noted == []
+    assert signal_receipt.cut_off_verdict(deliberate["signals"][0]) is None
+
+    # And nothing is armed when this disposal would cut no turn (an idle session).
+    _Handle._session.disposal_cuts_a_turn = lambda: False  # type: ignore[method-assign]
+    process._note_signal_cut_off(_Handle(), unsanctioned)
+    assert noted == []
+
+
+# -- the ROUTING itself, on both branches (agent review round 1, MAJOR-1) ----------------
+
+
+class _RoutingSession:
+    """The slice of ``Session`` the signal routing touches, with a real tmp directory."""
+
+    def __init__(self, directory: Any, *, cuts: bool = True) -> None:
+        self.session_id = "route00000001"
+
+        class _Transcript:
+            directory: Any = None
+
+        transcript = _Transcript()
+        transcript.directory = directory
+        self._transcript = transcript
+        self.notes: list[tuple[str, str]] = []
+        self._cuts = cuts
+
+    def disposal_cuts_a_turn(self) -> bool:
+        return self._cuts
+
+    def note_cut_off(self, cause: str, detail: str = "") -> None:
+        self.notes.append((cause, detail))
+
+    def note_deliberate_stop(self) -> None:
+        self.notes.append(("deliberate", ""))
+
+
+class _RoutingHandle:
+    def __init__(self, session: _RoutingSession, *, busy: bool) -> None:
+        self._session = session
+        self._busy = busy
+        self._draining = False
+
+    def is_busy(self) -> bool:
+        return self._busy
+
+
+class _RoutingRuntime:
+    """A runtime double: the routing reads the record's run key for the receipt."""
+
+    class _Record:
+        session_id = "route00000001"
+        started_at = 1_760_000_000.0
+
+    _record = _Record()
+    _boot_build = None
+
+
+def _route(tmp_path: Any, *, busy: bool, cuts: bool = True, marker: Any = None):
+    """Run the REAL routing once and hand back the state it produced."""
+    from local_operator.session.runtime import registry, signal_receipt
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    session = _RoutingSession(tmp_path, cuts=cuts)
+    if marker is not None:
+        registry.write_stop_marker(tmp_path, marker)
+    handle = _RoutingHandle(session, busy=busy)
+    state = process._SignalState(stop=asyncio.Event(), trigger={})
+    process._route_signal(handle, _RoutingRuntime(), process.signal.SIGTERM, state=state)
+    assert state.receipts and state.receipts[-1] is not None, "no receipt was written"
+    assert signal_receipt  # the module the verdict comes from
+    return session, state
+
+
+@pytest.mark.asyncio
+async def test_the_routing_names_the_signals_effect_on_BOTH_branches(tmp_path: Any) -> None:
+    """THE MAJOR-1 CELL: an idle runtime AND a busy one both arm the cause before leaving.
+
+    The wave-B victims were busy (a ``wait`` in flight) and their rows still read
+    ``user-stop``, so the drain branch cannot be the one branch that stays silent:
+    it waits for the BOUNDARY, and the turn it waits for can be ended by somebody
+    else first (measured: the ``wait`` tool's own "aborted" result 171 ms after
+    the signal, with the row following it).
+    """
+    idle_session, idle_state = _route(tmp_path / "idle", busy=False)
+    assert idle_state.stop.is_set(), "an idle runtime must leave now"
+    assert idle_state.draining is None
+    assert idle_session.notes and idle_session.notes[0][0] == "runtime-shutdown"
+    assert "nobody asked for a stop" in idle_session.notes[0][1]
+
+    busy_session, busy_state = _route(tmp_path / "busy", busy=True)
+    assert not busy_state.stop.is_set(), "a busy runtime drains rather than stopping now"
+    assert busy_state.draining is not None, "the busy branch must commit to a drain"
+    # ... AND THE CAUSE IS ARMED BEFORE THE DRAIN STARTS, which is the whole point:
+    # everything the turn publishes between here and the boundary reads that cause.
+    assert busy_session.notes and busy_session.notes[0][0] == "runtime-shutdown"
+    busy_state.draining.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await busy_state.draining
+
+
+@pytest.mark.asyncio
+async def test_the_routing_stays_silent_for_a_deliberate_stop_and_for_a_quiescent_session(
+    tmp_path: Any,
+) -> None:
+    """The two pairs the widening must not touch, both on the real helper."""
+    marker = {
+        "session_id": "route00000001",
+        "pid": process.os.getpid(),
+        "started_at": 1_760_000_000.0,
+        "at": process.time.time() - 1.0,
+        "rung": "sigterm",
+        "deliberate": True,
+        "killer": {"pid": 1, "argv0": "lop", "command": "lop stop"},
+    }
+    sanctioned, state = _route(tmp_path / "marked", busy=False, marker=marker)
+    assert state.stop.is_set() and sanctioned.notes == [], "a sanctioned stop notes nothing"
+
+    quiescent, _state = _route(tmp_path / "quiescent", busy=False, cuts=False)
+    assert quiescent.notes == [], "a session with no turn to cut arms nothing"
+
+
 # --- the progress clock: a beating turn is never cut (wave C, 2026-10-01) -----
 #
 # The bound used to be a wall-clock deadline on the whole wait, so any turn

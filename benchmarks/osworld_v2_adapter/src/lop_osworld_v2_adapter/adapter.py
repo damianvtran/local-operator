@@ -77,6 +77,7 @@ from local_operator.evaluation.adapters.api import (
     PrepareResult,
     RequirementsResult,
     ResetStartParams,
+    ResolvedSecret,
     ScopedInfraValue,
     ScoreParams,
     ScoreResult,
@@ -120,13 +121,17 @@ class InfeasibleTaskExcluded(RuntimeError):
 
 
 class JudgeUnavailable(RuntimeError):
-    """A judged task was started without the judge credential and settings.
+    """A judged task was started without a usable judge credential and settings.
 
-    Raised from ``reset_start`` BEFORE allocation. ``inspect_requirements``
-    already names the judge key/provider/model as required for such a task,
-    so a host that runs preflight never reaches this; it exists so a host
-    that skipped preflight cannot spend money on an episode OSWorld would
-    score as a silent zero (``llm_metrics`` returns 0.0 on any exception).
+    Raised from ``reset_start`` BEFORE allocation, for either half of
+    "configured": a missing key/provider/model (``inspect_requirements``
+    already names them as required, so a host that runs preflight never
+    reaches this) or a provider VALUE the vendored evaluator client cannot
+    construct (see ``_resolve_judge_provider``; the requirements table can
+    only check presence, and the judge fails closed on anything else). It
+    exists so a host that skipped preflight cannot spend money on an episode
+    OSWorld would score as a silent zero (``llm_metrics`` returns 0.0 on any
+    exception).
     """
 
 
@@ -144,6 +149,21 @@ class InputsMismatch(RuntimeError):
 _JUDGE_KEY = "OSWORLD_EVAL_MODEL_API_KEY"
 _USER_SIM_KEY = "OSWORLD_USER_SIM_API_KEY"
 _DEFAULT_INPUTS_ROOT = "~/worktrees/osworld"
+
+# Judge provider names the vendored evaluator client does not know, mapped to
+# the shape it does: (registered provider, the service's default endpoint).
+# OpenRouter is an OpenAI-compatible aggregator, and the registry's own
+# documented configuration for any such endpoint is ``openai_compatible`` plus
+# a base URL (``OpenAIBackend.__init__`` forwards ``base_url`` to the OpenAI
+# client; the registry docstring lists the same shape for DeepSeek, Ollama and
+# Azure). The campaign driver pins ``OSWORLD_EVAL_MODEL_PROVIDER=openrouter``,
+# so without this mapping every judged task scores a silent zero -- the judge's
+# bare ``except Exception`` swallows ``create_backend``'s ValueError. Anything
+# not in this table and not registered is refused BY NAME; see
+# ``_resolve_judge_provider``.
+_JUDGE_PROVIDER_ALIASES: dict[str, tuple[str, str]] = {
+    "openrouter": ("openai_compatible", "https://openrouter.ai/api/v1"),
+}
 
 
 def _episode_cache_root(artifact_root: Path, episode_id: str) -> Path:
@@ -507,6 +527,15 @@ class OSWorldV2Adapter:
                     f"{missing} were not supplied; OSWorld would return a silent "
                     "0.0, which this adapter refuses to seal"
                 )
+            # Present is not the same as usable: a provider VALUE the vendored
+            # client cannot serve fails closed into a silent 0, so it gets the
+            # same refusal -- before any allocation -- or a written
+            # normalisation the judge will actually read. The refs come from the
+            # same two channels the gate above reads. Inside this branch on
+            # purpose: an episode whose task never reaches the judge has no
+            # silent zero to prevent, and refusing it for a judge setting it will
+            # never read would be a false refusal of a payable episode.
+            self._resolve_judge_provider(params.task_id, params.secrets)
         # The proxy pool, checked HERE rather than in prepare because prepare
         # has no task: PrepareParams carries no task_id and self._task is first
         # populated a few lines above, so a prepare-time check reads
@@ -648,6 +677,145 @@ class OSWorldV2Adapter:
             if value.name == name:
                 return value.value
         return None
+
+    def _judge_setting(self, name: str, secrets: tuple[ResolvedSecret, ...]) -> str | None:
+        """Read a judge setting from BOTH channels the refs gate above accepts.
+
+        The requirements table and the refuse-missing gate treat an ``--infra``
+        value and a ``--secret`` ref as interchangeable for the judge provider
+        and model, so this preflight has to read the same two channels. Reading
+        only ``self._infra`` left the secret channel unguarded: a provider
+        supplied that way passed the gate and then graded the silent zero the
+        gate exists to stop, because nothing writes a secret into the process
+        environment the judge reads. ``self._secrets`` is filled further down
+        ``reset_start``, so the refs come from the caller.
+        """
+
+        value = self._infra(name)
+        if value is not None:
+            return value
+        for secret in secrets:
+            if secret.name == name:
+                return secret.value
+        return None
+
+    def _apply_judge_setting(self, name: str, value: str | None) -> None:
+        """Make the environment carry exactly what this episode resolved.
+
+        The vendored judge reads its provider, model and endpoint from the
+        process environment and nowhere else, and the worker's environment is
+        built from a closed allowlist (locale and temp only), so a value present
+        for either of these names was written by this adapter -- by
+        ``inject_infra_environment`` at ``prepare`` for an operator's ``--infra``
+        value, or by this preflight. That is what makes "set the environment from
+        the resolution" correct rather than presumptuous, and it has to happen
+        because BOTH directions of drift are silent: a value that never reaches
+        the environment leaves the judge on its own default provider, and a base
+        URL left over from an episode that wanted one retargets this episode's
+        judge at the previous endpoint. Each measures a silent 0.
+        """
+
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
+    def _clear_judge_env(self) -> None:
+        """Drop the judge addressing this preflight owns; the episode is over.
+
+        Only these two names. ``OSWORLD_EVAL_MODEL_NAME`` is injected by
+        ``prepare`` from the operator's own infra and re-injected for the next
+        episode, but a provider or endpoint the preflight *wrote* can be one the
+        operator never supplied at all (an alias default, a value that arrived as
+        a secret ref), so it would otherwise survive into a worker that runs
+        another episode without a fresh ``prepare`` -- and a surviving base URL is
+        not inert, it retargets the judge.
+        """
+
+        self._apply_judge_setting("OSWORLD_EVAL_MODEL_PROVIDER", None)
+        self._apply_judge_setting("OSWORLD_EVAL_MODEL_BASE_URL", None)
+
+    def _resolve_judge_provider(self, task_id: str, secrets: tuple[ResolvedSecret, ...]) -> None:
+        """Make the configured judge provider one the vendored client can use.
+
+        The judge fails closed -- the corpus task's own ``_llm_judge`` wraps
+        ``model_client.generate_text`` in a bare ``except Exception: return
+        False``, and ``llm_metrics`` does the same per metric -- so a provider
+        VALUE the registry cannot serve is a silent per-metric False: a
+        guaranteed 0 that reads like a capability miss. The missing-refs gate
+        above cannot see it (the value is present, just unusable), and it reads
+        two channels where this preflight used to read one, so it reads both.
+
+        What is checked here, exactly: the value is a registered provider (or a
+        known alias, normalised to one, case and surrounding space aside), and an
+        ``openai_compatible`` value
+        carries an endpoint. What is deliberately NOT checked is the half only a
+        call can answer -- a stale key, a model the provider will not serve, an
+        unreachable endpoint, an outage. Those construct a backend perfectly
+        well and then fail at call time; see the adapter README for what a
+        judged episode therefore cannot be promised.
+        """
+
+        raw_provider = self._judge_setting("OSWORLD_EVAL_MODEL_PROVIDER", secrets)
+        if raw_provider is None:
+            # Unreachable for a judged task -- the missing-refs gate above
+            # fires first -- so do not fabricate a refusal from absence.
+            return
+        # Case and surrounding space do not make a different provider: refusing
+        # `OpenRouter ` while the refusal message names `openrouter` as a known
+        # alias would be a refusal the operator cannot act on, and every
+        # registry name is lowercase anyway. The registered lookup stays
+        # exact-first so a mixed-case registration is still honoured verbatim.
+        provider = raw_provider.strip()
+        base_url = self._judge_setting("OSWORLD_EVAL_MODEL_BASE_URL", secrets)
+        alias = _JUDGE_PROVIDER_ALIASES.get(provider.lower())
+        if alias is None:
+            available = vendor_bridge.model_client_providers()
+            registered = (
+                provider
+                if provider in available
+                else next((name for name in available if name.lower() == provider.lower()), None)
+            )
+            if registered is None:
+                raise JudgeUnavailable(
+                    f"task {task_id!r} scores through the LLM judge but its "
+                    f"provider {raw_provider!r} is not one the vendored evaluator "
+                    f"client can construct (registered: {', '.join(available)}; "
+                    f"known aliases: {', '.join(sorted(_JUDGE_PROVIDER_ALIASES))}); "
+                    "OSWorld's judge fails closed (bare `except Exception: return "
+                    "False`), so the episode would grade a silent 0.0, which this "
+                    "adapter refuses to seal"
+                )
+            provider = registered
+        else:
+            service_provider, default_base_url = alias
+            provider = service_provider
+            # An explicitly supplied base URL always wins: the operator's
+            # endpoint is a deliberate override, and the alias only supplies
+            # the default the bare service name cannot carry.
+            if base_url is None:
+                base_url = default_base_url
+        if provider == "openai_compatible" and base_url is None:
+            # Membership is not usability, and this is the shape where the gap
+            # is statically visible: ``OpenAIBackend`` forwards no base URL to
+            # the OpenAI client, which then targets https://api.openai.com/v1/
+            # with the judge key (measured: 401 -> swallowed -> False). The
+            # refusal message above lists `openai_compatible` as registered, so
+            # an operator following its own advice lands here without an
+            # endpoint -- which is why this is refused rather than passed.
+            raise JudgeUnavailable(
+                f"task {task_id!r} scores through the LLM judge with provider "
+                "'openai_compatible' but no OSWORLD_EVAL_MODEL_BASE_URL was "
+                "supplied (as an infra value or a secret ref); the vendored "
+                "OpenAIBackend forwards no endpoint to the OpenAI client, which "
+                "then targets https://api.openai.com/v1/ and 401s, so the "
+                "episode would grade a silent 0.0, which this adapter refuses "
+                "to seal"
+            )
+        self._apply_judge_setting("OSWORLD_EVAL_MODEL_PROVIDER", provider)
+        # Passed even when None: a value resolved for a PREVIOUS episode in this
+        # worker is not this one's, and leaving it would retarget the judge.
+        self._apply_judge_setting("OSWORLD_EVAL_MODEL_BASE_URL", base_url)
 
     def _aws_credentials(self) -> Any:
         from lop_osworld_v2_adapter.providers.aws import AwsCredentials
@@ -1042,6 +1210,7 @@ class OSWorldV2Adapter:
         # Must not raise even if the env is already dead. The judge key is
         # scrubbed from the worker env here, the only place it was written.
         vendor_bridge.scrub_secret_environment()
+        self._clear_judge_env()
         # Restore the cwd reset_start moved off the workspace. Best-effort:
         # close must not raise, and a scratch dir that vanished under us is
         # not a reason to fail teardown — the episode is over either way.
