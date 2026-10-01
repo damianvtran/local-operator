@@ -62,6 +62,9 @@ ACTIONS = (
     # design verbs, which is why they belong in this list rather than beside it.
     "credentials",
     "credential",
+    # The onboarding approval record (remote-onboarding §3.5): file it, read it,
+    # answer it, run it — six verbs under one group, the shape the design froze.
+    "approvals",
 )
 
 
@@ -214,7 +217,7 @@ def test_every_leaf_action_accepts_json() -> None:
         # own ``definitions`` group, plus ``member``, ``identity`` and ``credential``
         # (the last from the credential broker's surfaces), and ``mcp`` (the
         # definitions pair's shape for the user-scope MCP servers).
-        if name in ("member", "identity", "definitions", "credential", "mcp"):
+        if name in ("member", "identity", "definitions", "credential", "mcp", "approvals"):
             for nested_name, nested_parser in net_fixtures.subcommands_of(subparser).items():
                 nested_flags = {
                     option for action in nested_parser._actions for option in action.option_strings
@@ -631,7 +634,8 @@ def test_a_reachable_peer_row_carries_its_build_and_the_behind_hint(
         "pixel-8  reachable  build 0.64.1"
     )
     assert net_cli._peer_line({**row, "build": {"version": "0.63.2"}}) == (  # noqa: SLF001
-        "pixel-8  reachable  build 0.63.2 — behind this device (0.64.1); " "run `lop-update` there"
+        "pixel-8  reachable  build 0.63.2 — behind this device (0.64.1); "
+        "ask Local Operator to update it there"
     )
     assert net_cli._peer_line({**row, "build": {"version": "0.66.0"}}) == (  # noqa: SLF001
         "pixel-8  reachable  build 0.66.0"

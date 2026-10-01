@@ -539,11 +539,23 @@ def test_signing_refuses_an_unknown_purpose_or_a_missing_challenge(keyed: Any) -
         sign_challenge(challenge="", purpose="loosen", config_root=keyed.root, session_id="s")
     # And with no key at all, the message names the one-step remedy rather than
     # raising a bare failure the caller has to translate.
+    #
+    # Q6 (agent review round 2): the expectation is PLATFORM-TOLERANT on purpose.
+    # The cell is platform-branched underneath — on Linux ``load_signer`` returns
+    # ``None`` and ``sign.py``'s repaved sentence raises; on macOS the key agent's
+    # own diagnosis (``keychain.secure_enclave_diagnosis``) raises first, a
+    # different message that is also a remedy. So assert the two facts that hold
+    # either way: SOME next step is named, and the RETIRED dead-end shape R1-4
+    # repaved ("no operator key on this machine — run `lop operator init`") has
+    # not come back. Pinning one exact string here is what made this cell red on
+    # the Linux runner only.
     empty = keyed.root / "empty"
     empty.mkdir()
     with pytest.raises(keychain.KeyBackendError) as excinfo:
         sign_challenge(challenge="ab" * 32, purpose="loosen", config_root=empty, session_id="s")
-    assert "lop operator init" in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "operator authority" in message or "lop operator init" in message, message
+    assert "no operator key on this machine — run" not in message, message
 
 
 def test_the_staged_anchor_is_only_a_hint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1223,3 +1235,60 @@ def test_the_built_helper_asserts_its_own_ownership_model() -> None:
     mismatched = [check for check in report["checks"] if check["expected"] != check["actual"]]
     assert report["ok"] is True and result.returncode == 0, mismatched
     assert len(report["checks"]) >= 10, "the selftest stopped asserting the model"
+
+
+def test_the_repaved_refusals_name_the_action_and_never_the_dead_end_command() -> None:
+    """R2-2: the five §2.9 repaves carry their own pins.
+
+    The retired-sentence sweep deliberately CANNOT see the ``lop operator init``
+    shape — that verb is live and deliberately documented (see the PR body's
+    scope note) — so without this cell a revert of any of these five refusal
+    sentences to dead-end terminal copy goes green. Four of the five are reached
+    only through platform-branched or prompt-involving paths (on macOS the key
+    agent raises first; the key-agent rows build their text from a table; the
+    pair-confirm path needs a held pending row), so each is pinned against the
+    SHIPPED STRING LITERALS of the unit that owns it rather than by driving it.
+
+    Literals only, comments and docstrings excluded — the same idiom the sweep
+    uses, and for the same reason: ``pair_handlers`` carries a comment quoting the
+    retired shape to explain what it replaced, and that quote must not fail the
+    pin.
+    """
+    import ast
+    import inspect
+
+    from local_operator.operator import handlers, keychain, pair_handlers, sign
+
+    phrase = "ask Local Operator to set up operator authority"
+    # The dead-end shape R1-4 repaved. NOTE the closing backtick: the deliberate
+    # file-only fallback ("run `lop operator init --backend file-only`") and the
+    # capital-R darwin remedy do NOT contain it, which is exactly the keeps the
+    # scope decision protects.
+    dead_end = "run `lop operator init`"
+    modules = {
+        "local_operator/operator/keychain.py": keychain,
+        "local_operator/operator/sign.py": sign,
+        "local_operator/operator/handlers.py": handlers,
+        "local_operator/operator/pair_handlers.py": pair_handlers,
+    }
+    for name, module in modules.items():
+        tree = ast.parse(inspect.getsource(module))
+        docstrings = {
+            id(node.body[0].value)
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and node.body
+            and isinstance(node.body[0], ast.Expr)
+            and isinstance(node.body[0].value, ast.Constant)
+            and isinstance(node.body[0].value.value, str)
+        }
+        literals = [
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and id(node) not in docstrings
+        ]
+        joined = "\n".join(literals)
+        assert phrase in joined, name
+        assert dead_end not in joined, name

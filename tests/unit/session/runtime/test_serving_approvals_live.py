@@ -471,11 +471,12 @@ async def test_a_bare_approvals_reports_a_divergence_against_the_file(
     ), refused
     assert capable == approvals_default_notice(may_loosen=True), capable
     # ...and the OTHER host's sentence is pinned here rather than left to whichever
-    # machine runs the suite: the install step is named instead of the two levers
-    # being offered as if they worked.
+    # machine runs the suite: the SETUP ACTION is named instead of the two levers
+    # being offered as if they worked (copy rule §2.9: a remedy names a product
+    # action, never a terminal command).
     both = approvals_default_notice(may_loosen=False, anchor_unusable=True)
-    assert "lop operator install" in both, both
-    assert "authority is not installed on this machine" in both, both
+    assert "one approval and one admin password prompt" in both, both
+    assert "authority is not installed here" in both, both
     assert len(both) <= 400, len(both)
     await handle.dispose()
 

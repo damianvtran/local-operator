@@ -104,19 +104,22 @@ def _yolo_action(parser: Any) -> Any:
     return actions[0]
 
 
-def test_the_sessions_verb_does_not_promise_yolo_it_refuses() -> None:
-    """QA round 1, Q3: the help advertised a flag this verb declines.
+def test_the_sessions_verb_names_the_condition_on_yolo() -> None:
+    """QA round 1, Q3, reshaped by the granted model (remote-onboarding §2 OQ4).
 
     ``cli._propagate_global_flags`` gives every subcommand ``--yolo`` with its global
     sentence ("Auto-approve all tool executions … without prompting"), and
-    ``network sessions --create`` REFUSES it on both ends — a session on another device
-    must not run unattended. The flag stays accepted (so a caller gets the refusal
-    sentence rather than "unrecognized arguments"); only the promise goes.
+    ``network sessions --create`` runs unattended only when the TARGET device grants
+    this one ``unattended`` — the target decides. The flag is accepted and forwarded
+    (so a granted member's create is not a dead end), and only the promise is made
+    conditional, because the global sentence would claim the flag always means
+    unattended.
     """
     sessions = _leaf(["network", "sessions"])
     action = _yolo_action(sessions)
     help_text = action.help or ""
-    assert "Refused for this verb's peer create" in help_text, help_text
+    assert "Conditional for this verb's peer create" in help_text, help_text
+    assert "unattended" in help_text, help_text
     assert "Auto-approve" not in help_text, help_text
     # Still parsed, and still a real bool: the guard reads it, it is not rejected by
     # argparse.

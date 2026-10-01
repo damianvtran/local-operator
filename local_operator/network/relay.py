@@ -6025,22 +6025,26 @@ class RelayServer:
                 "protocol_error",
                 "the device that will own a session mints its id; this frame named one",
             )
-        # ``yolo`` IS REFUSED BY NAME, and the refusal lives HERE as well as on the
-        # requesting side (``_ctl_peer_create``) so neither path can be the only
-        # one that remembers. There is deliberately NO capability that unlocks it:
-        # ``yolo`` auto-approves every tool tier, so honouring it from across a
-        # network would let one device make another run UNATTENDED — the peer's own
-        # person is not at that machine to see the card, and the requesting device
-        # is not the one whose files execute. A capability would make it a grant an
-        # admin could hand out by accident; a name that is always refused makes the
-        # boundary structural. The creator may still set it on the device the
-        # session lives on, which is the only place its consequences are visible.
-        if wire.yolo_requested(frame.get("yolo")):
+        # ``yolo`` IS HONOURED ONLY ON THIS DEVICE'S OWN GRANT, and the check is
+        # receiver-side against the SENDER's member row for one reason: the fact
+        # that decides it is "has the operator admitted this member to unattended
+        # running on THIS machine", and only this machine's record can answer it.
+        # The boundary moved from structural to granted with the remote-onboarding
+        # slice (§2 OQ4, defect 2) because the product has two legitimate unattended
+        # flows the old rule made dead ends — a full-auto send to a node, and a move
+        # of an auto session onto it — and both are the operator's own choice, made
+        # once, on the device whose files would execute. One grant suffices; nothing
+        # reciprocal is needed, the same rule the forwarded approval challenge
+        # follows. A member without the grant is still refused HERE, with a
+        # sentence that names the grant rather than pretending the wish is absurd.
+        unattended = wire.yolo_requested(frame.get("yolo"))
+        if unattended and "unattended" not in link.context.capabilities:
             raise MeshRefusal(
                 "not_permitted",
-                "a session created on another device cannot start unattended (yolo): that "
-                "would make this machine run tools with nobody here to see them. Create it "
-                "here, or start it on your own device with yolo.",
+                "a session created on another device can start unattended (yolo) only when "
+                "this device grants the requesting member 'unattended' — ask an admin "
+                "device in this network for that grant. Until then, create it here or "
+                "start it on your own device with yolo.",
             )
         from local_operator.fork import new_session_id
         from local_operator.network import definitions
@@ -6103,6 +6107,13 @@ class RelayServer:
                 "source_device": link.device_id,
                 "source_session_id": "",
             },
+            # CARRIED AUTO AUTHORITY (§6 defect 2): the accepted grant travels ON
+            # THE SESSION, so the runtime this create engages — and every runtime a
+            # later move engages — applies full-auto at construction. The field is
+            # the CARRY, never the authority: the runtime re-checks this device's
+            # grant at every engage (``serving._carried_auto_authority``), which is
+            # what makes a revocation effective at the next engage.
+            unattended=unattended,
         )
         try:
             # CLAIM BEFORE mkdir, then RELEASE — and the release is not an
@@ -9072,12 +9083,16 @@ class RelayServer:
 
         The three things this half owns, in order, and none of them is optional:
 
-        1. **``yolo`` is refused before the peer is asked.** The peer refuses it too
-           (``_op_session_create``), and the duplication is deliberate: the refusal
-           that reaches the user should be local, immediate and identical, and a
-           guard that lives only on the far end is one a future client can forget
-           to install. There is no capability that unlocks it — see the peer's
-           comment for why the boundary is structural rather than grantable.
+        1. **``yolo`` IS FORWARDED, NOT JUDGED HERE.** The refusal that used to live
+           here was structural and local; under the granted model (design §2 OQ4) the
+           authority belongs to the device that will RUN the session, checked against
+           ITS member row for us — a fact this side does not hold. A local check could
+           therefore only be wrong in one direction of the other: refusing a granted
+           member loudly, or admitting an ungranted one silently. So the frame travels
+           and the owner's answer, its refusal sentence included, is raised VERBATIM
+           by ``_relay_answer`` below. The receiver-side check is pinned in
+           ``_op_session_create``; a non-granted member is still refused, by the
+           device whose files would execute.
         2. **The names are RECONCILED BEFORE the create is sent.** A definition the
            peer does not hold cannot resolve there, so ``definitions.push_to_peer``
            runs first — this is what makes the create work against a CLEAN install
@@ -9100,13 +9115,6 @@ class RelayServer:
         ``definition_stale`` rather than resolving whatever it has.
         """
         peer = str(frame.get("peer") or "")
-        if wire.yolo_requested(frame.get("yolo")):
-            raise MeshRefusal(
-                "not_permitted",
-                "a session created on another device cannot start unattended (yolo): that "
-                "would make that machine run tools with nobody there to see them. Create "
-                "it here, or start it on your own device with yolo.",
-            )
         profile = str(frame.get("profile") or "")
         agent_name = str(frame.get("agent_name") or "")
         agent_id = str(frame.get("agent_id") or "")
@@ -9190,6 +9198,10 @@ class RelayServer:
             "prompt": str(frame.get("prompt") or ""),
             "images": list(frame.get("images") or []),
             "origin": str(frame.get("origin") or "user"),
+            # THE REQUEST TRAVELS WITH THE FRAME, and the answer comes from the
+            # owner: it accepts only against its own ``unattended`` grant
+            # (``_op_session_create``), which is the fact this side cannot read.
+            "yolo": frame.get("yolo"),
         }
         # ``profile`` and ``agent_name``/``agent_id`` are BOTH carried, because the
         # local product has both vocabularies and the frame must be honest about

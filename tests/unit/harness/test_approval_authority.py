@@ -633,6 +633,49 @@ _WINDOW_REMEDIES = (
     "reopen the session here",
 )
 
+#: THE RETIRED TERMINAL-COMMAND REMEDY SHAPE (remote-onboarding §2.9): no failure,
+#: refusal, remedy or readiness sentence may instruct its reader to run a terminal
+#: command — remedies name PRODUCT actions ("set up operator authority", "approve
+#: setup for <device> in the Mesh tab"). This is the exact sentence shape slice (a)
+#: repaved out of the product, in each markup the surfaces ship, added to the sweep
+#: DELIBERATELY: a revert, or a new sentence copying the old one, goes red here
+#: rather than needing another review round to catch it.
+_RETIRED_REMEDY_SHAPES = (
+    # The install-command shape this cell was born for, in both markups the
+    # surfaces ship (the portal renders ``<code>``).
+    "run `lop operator install`",
+    "run <code>lop operator install</code>",
+    # The spelling that survives a naive bigram check (R1-3's probe): a sentence
+    # split by other words. Matching is normalised (see below), which covers the
+    # capital-R and newline-indent forms the probe found; this entry covers the
+    # one normalisation cannot see.
+    "until `lop operator install` has run",
+    # DELIBERATELY NOT here: ``run `lop operator init` ``. The init verb is not
+    # retired — it is still the setup's own step, docs/design legitimately
+    # document it, and operator/sign.py's key-agent remedy NAMES it on purpose
+    # (docs/design/operator-key-agent.md: the sentence stays only in the state
+    # where that verb is the next step). What remediation round 1 repaved was
+    # refusal copy using it as a dead-end remedy; that is not a shape this
+    # RETIRED-sentence sweep can test for without flagging the keeps.
+)
+
+
+def _remedy_shape_present(text: str) -> list[str]:
+    """Which retired shapes a copy carries — matched on normalised text.
+
+    R1-3, probe-verified at ``fff390360``: the first version was a plain ``in``,
+    so three of the very sentences this sweep guards would have reverted green —
+    a capital "Run `lop operator install` there", a promise broken across a line
+    ("run\n `lop operator install` here"), and a phrase split by a word
+    ("neither can run until `lop operator install` has run"). Collapsing
+    whitespace and folding case on BOTH sides is what makes "a revert goes red"
+    true for the exact spellings the product shipped.
+    """
+    folded = " ".join(text.split()).casefold()
+    return [
+        phrase for phrase in _RETIRED_REMEDY_SHAPES if " ".join(phrase.split()).casefold() in folded
+    ]
+
 
 def _shipped_notices() -> dict[str, str]:
     """Every notice CONSTANT the product ships, by name.
@@ -713,6 +756,81 @@ def test_no_shipped_notice_names_a_window_remedy() -> None:
                         f"{module.relative_to(_REPO_ROOT).as_posix()}:{node.lineno}"
                     )
     assert not offenders, f"shipped copy still promises a window remedy: {offenders}"
+
+
+def test_no_shipped_copy_instructs_the_retired_install_command() -> None:
+    """§2.9 as a class: no shipped copy tells a reader to run the retired command.
+
+    WHY ITS OWN CELL rather than a second phrase in the window list: the two
+    invariants judge different claims ("a WINDOW is where you act" versus "a
+    TERMINAL COMMAND is how you act") and carry different exceptions policies —
+    the window list keeps the design record's documentation exemption, which this
+    one must not have, because a doc repeating the retired sentence as CURRENT
+    guidance is exactly the leak this cell exists to catch.
+
+    Subjects mirror the window sweep, for its reason (a hand-picked list is how a
+    fourth sentence slips past): every shipped notice constant, every Python string
+    constant — docstrings excluded, so the code that records WHY the sentence was
+    retired can quote it — the portal sources with comments stripped, and every
+    shipped doc. Matching is normalised (``_remedy_shape_present``), so the sweep
+    catches the exact spellings that were retired, not only the one canonical
+    form it was first written against.
+    """
+    offenders: dict[str, list[str]] = {}
+    for name, copy in sorted(_shipped_notices().items()):
+        for phrase in _remedy_shape_present(copy):
+            offenders.setdefault(phrase, []).append(f"harness/approval.py::{name}")
+
+    for module in sorted((_REPO_ROOT / "local_operator").rglob("*.py")):
+        tree = ast.parse(module.read_text(encoding="utf-8"))
+        docstrings = {
+            id(node.body[0].value)
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and node.body
+            and isinstance(node.body[0], ast.Expr)
+            and isinstance(node.body[0].value, ast.Constant)
+            and isinstance(node.body[0].value.value, str)
+        }
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                continue
+            if id(node) in docstrings:
+                continue
+            for phrase in _remedy_shape_present(node.value):
+                offenders.setdefault(phrase, []).append(
+                    f"{module.relative_to(_REPO_ROOT).as_posix()}:{node.lineno}"
+                )
+
+    for source in sorted((_REPO_ROOT / "local_operator" / "mobile" / "web" / "src").rglob("*.ts*")):
+        normalised = _js_copy(source)
+        for phrase in _remedy_shape_present(normalised):
+            offenders.setdefault(phrase, []).append(source.relative_to(_REPO_ROOT).as_posix())
+
+    for doc in sorted((_REPO_ROOT / "docs").rglob("*.md")):
+        normalised = " ".join(doc.read_text(encoding="utf-8").split())
+        for phrase in _remedy_shape_present(normalised):
+            offenders.setdefault(phrase, []).append(doc.relative_to(_REPO_ROOT).as_posix())
+
+    assert not offenders, f"shipped copy still instructs a retired terminal command: {offenders}"
+
+
+def test_the_sweep_detects_the_three_revert_shapes() -> None:
+    """R1-3, probe-verified: the exact forms a revert of the old copy would take.
+
+    Feeds the pre-repave spellings (``fff390360``'s harness:716 capital R,
+    pair_handlers' newline-indent promise, serving/tui's "until ... has run")
+    through the same matcher the sweep uses and asserts each is a hit — the
+    guard cannot silently regress to the plain-``in`` version that missed all
+    three while claiming a revert goes red.
+    """
+    shapes = (
+        "Run `lop operator install` there",  # harness:716, capital R
+        "run\n `lop operator install` here",  # pair_handlers, newline + indent
+        "neither can run until `lop operator install` has run there",  # serving/tui
+    )
+    for shape in shapes:
+        assert _remedy_shape_present(shape), shape
 
 
 def _js_copy(path: Path) -> str:
