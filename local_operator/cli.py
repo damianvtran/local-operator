@@ -7840,6 +7840,8 @@ def _mobile_devices_command(args: argparse.Namespace) -> int:
     # revoke, and a row that carried no marker had nothing to clear — saying
     # "unrevoked" for either is the ADR §4 rule 1 failure ("instead of claiming a
     # revoke nobody performed") on the one surface that carries the vocabulary.
+    # ``push_devices.unrevoke`` holds the full rule: the store clears EVERY
+    # marker the row carries, and this line names the strongest one it did.
     before_state = str(target.get("state") or push_devices.STATE_LIVE)
 
     if command == "revoke":
