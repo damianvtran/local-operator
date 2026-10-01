@@ -8,7 +8,17 @@ match wins (manager decisions, 2026-09-28):
    so the resolver and the executor cannot disagree about what "signed in"
    means.
 2. ``provider_stt_elevenlabs`` — a stored ElevenLabs key exists.
-3. ``provider_stt_openai`` — a stored OpenAI key exists.
+3. ``provider_stt_openai`` — a stored OpenAI API key exists: an ``api_key`` row in
+   the ``openai-key`` namespace (``/login openai-key``) or the legacy
+   ``OPENAI_API_KEY`` provider-class store row. A ChatGPT OAuth login does NOT
+   count (its token is not valid at the audio endpoint).
+
+"Stored" means PERSISTED ROWS ONLY for all three rungs (cascade-lane sign-off,
+2026-10-01): rows in the encrypted store, and never a runtime/config override,
+the process environment or the fallback resolver. See :func:`_probe_key` and
+``AuthStore.has_persisted_credential``. Rungs 1-2 bind the probe only; the
+executor's call-time key fetch keeps the full cascade. Rung 3's call-time key
+follows its probe onto the same credential class (:func:`_openai_stt_key`).
 4. ``provider_stt_superwhisper`` — reserved; ALWAYS unavailable, and no code
    path returns it (unit-pinned).
 5. ``model_audio_sidecar`` — the selected model accepts audio input.
@@ -49,7 +59,10 @@ from local_operator.clients._http import APIError
 from local_operator.clients.radient import RadientClient
 from local_operator.env import resolve_radient_api_base_url
 from local_operator.providers.auth_store import AuthStore
-from local_operator.providers.radient_credentials import resolve_radient_credential
+from local_operator.providers.radient_credentials import (
+    has_persisted_radient_credential,
+    resolve_radient_credential,
+)
 from local_operator.stt import (
     AudioPath,
     AudioPathResolution,
@@ -136,20 +149,61 @@ def _ensure_store(config_dir: Path | None, store: AuthStore | None) -> tuple[Aut
     return AuthStore(db_path, config_dir=config_dir), True
 
 
-async def _probe_key(store: AuthStore, provider: str, session_id: str | None) -> bool:
-    """Whether ``provider`` has a key, without letting a probe take the mic down.
+#: The credential namespace rung 3 reads: the ``openai-key`` login's own, holding
+#: a platform API key. NOT ``openai`` -- that provider's only logins are ChatGPT
+#: OAuth grants, and a ChatGPT token is not valid at ``/v1/audio/*``, so probing
+#: it advertised a rung that could only 401 while the very key the speech login
+#: stores never lit it (voicing S0 review round 1, MAJOR / S-1).
+OPENAI_STT_NAMESPACE = "openai-key"
 
-    ``read_only=True`` so the probe decides nothing (see module docstring). A
-    store failure (a refresh it cannot confirm, a locked db) means this rung
-    cannot be used right now, which is exactly what "unavailable" says; the
-    exception is logged and the answer is ``False``.
+#: Rung 3 accepts API-key rows only, at probe AND call time. One constant so the
+#: two cannot drift: an availability answer about one credential class and a
+#: request sent with another is the defect this closes.
+OPENAI_STT_KINDS = frozenset({"api_key"})
+
+
+async def _openai_stt_key(store: AuthStore, session_id: str | None) -> str | None:
+    """The API key rung 3 would send: ``openai-key`` rows, else the legacy store row.
+
+    The legacy fallback is the provider-class STORE row ``lop credential update
+    OPENAI_API_KEY`` writes (named by the registry's ``legacy_store_keys`` for
+    ``openai-key``), kept so nobody who set the rung up that way loses it. It is an
+    encrypted persisted secret, never the process environment. A ChatGPT OAuth row
+    never answers (``OPENAI_STT_KINDS``).
+
+    Never raises: ``None`` is "no key", which the probe reads as unavailable and
+    the executor reports as the rung's own refusal.
+    """
+    return await store.get_persisted_api_key(
+        OPENAI_STT_NAMESPACE, session_id, kinds=OPENAI_STT_KINDS
+    )
+
+
+async def _probe_key(store: AuthStore, provider: str, session_id: str | None) -> bool:
+    """Whether ``provider`` is LOGGED IN, without letting a probe take the mic down.
+
+    PERSISTED ROWS ONLY (cascade-lane sign-off, 2026-10-01): the question this
+    answers is "advertise this rung?", and the 7-tier ``get_api_key`` it used to
+    call answers a different one -- "what would a request authenticate with?" --
+    so a runtime/config override or an exported ``OPENAI_API_KEY`` lit a rung the
+    user never signed in to. :meth:`AuthStore.has_persisted_credential` reads
+    stored rows (OAuth and ``api_key``) only, is ``read_only`` (the probe decides
+    nothing, see module docstring) and never raises; the guard below is for a
+    non-``AuthStore`` seam, and means the same thing: cannot tell -> unavailable.
+
+    ONLY this probe changed for rungs 1-2: the executor's call-time fetch
+    (``_run_radient_rung``, ``_run_elevenlabs_rung`` -> the full cascade) is
+    untouched, so an operator's own export still runs a call that a signed-in rung
+    would. RUNG 3 is the one deliberate exception (refinement of that split, cascade
+    lane re-ack): its probe AND its call-time key both go through
+    :func:`_openai_stt_key`, because a ChatGPT OAuth token is available to the
+    full cascade but is not a credential the audio endpoint accepts.
     """
     try:
-        value = await store.get_api_key(provider, session_id, read_only=True)
+        return await store.has_persisted_credential(provider, session_id)
     except Exception:
         logger.warning("stt probe for %s failed; reporting the rung unavailable", provider)
         return False
-    return bool(value)
 
 
 def _model_capable(model: object | None) -> bool:
@@ -176,13 +230,20 @@ async def resolve_audio_path(
     store, owned = _ensure_store(config_dir, store)
     try:
         try:
-            credential = await resolve_radient_credential(config_dir, radient_base, store=store)
-            radient_available = bool(credential.get_secret_value())
+            # Persisted-only, like rungs 2-3 below (see ``_probe_key``): the
+            # call-time ``resolve_radient_credential`` stays the executor's.
+            radient_available = await has_persisted_radient_credential(
+                config_dir, radient_base, store=store
+            )
         except Exception:
             logger.warning("stt probe for radient failed; reporting the rung unavailable")
             radient_available = False
         elevenlabs_available = await _probe_key(store, "elevenlabs", session_id)
-        openai_available = await _probe_key(store, "openai", session_id)
+        try:
+            openai_available = bool(await _openai_stt_key(store, session_id))
+        except Exception:  # a non-AuthStore seam; the real store never raises
+            logger.warning("stt probe for openai failed; reporting the rung unavailable")
+            openai_available = False
     finally:
         if owned:
             store.close()
@@ -312,8 +373,8 @@ async def _run_openai_rung(
     prompt: str | None,
     timeout_s: float,
 ) -> str:
-    """Rung 3: the user's own OpenAI key."""
-    key = await store.get_api_key("openai", session_id, read_only=True)
+    """Rung 3: the user's own OpenAI API key (``openai-key`` rows, never ChatGPT OAuth)."""
+    key = await _openai_stt_key(store, session_id)
     if not key:
         raise APIError("No OpenAI API key is stored.", status_code=None)
     client = OpenAiSttClient(key)
