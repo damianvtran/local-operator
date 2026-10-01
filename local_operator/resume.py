@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import time
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -257,19 +258,22 @@ ORIGIN_CACHE_VERSION = 2
 #: deleted by hand to un-hide a session is not silently written back**. The
 #: codebase therefore treats deleting ``origin.json`` as a supported gesture,
 #: and a permanent skip would answer that gesture with a session that stays
-#: invisible forever. Three independent repairs bound it: this epoch, a cold
-#: start (the counter begins at 0, so ``0 % REVALIDATE_EVERY == 0`` and a fresh
-#: process always revalidates on its first scan), and the cache being derived
-#: data under ``cache/`` that a user may delete at any time.
+#: invisible forever. Three independent repairs bound it: this epoch, the
+#: revalidation stamp (:data:`REVALIDATE_WINDOW_S` — a scan whose store was
+#: last fully re-derived more than the window ago revalidates it itself), and
+#: the cache being derived data under ``cache/`` that a user may delete at any
+#: time.
 #:
-#: THE COUNTER ADVANCES PER POLL, NOT PER SECOND, so the "~5 minutes" ceiling
-#: holds only for a sidebar that is actually polling. A closed sidebar pauses
-#: its timer (``_sidebar_timer.pause()``), which freezes the counter: wall-clock
-#: staleness is UNBOUNDED while the sidebar is shut, and reopening it does not
-#: force a revalidation — the first poll after reopening serves the armed fast
-#: path and the epoch resumes from wherever it stopped. A cold start still
-#: revalidates, so this is bounded per PROCESS, never per wall-clock. The
-#: variable-poll-rate case below is the same hazard in continuous form.
+#: THE COUNTER ADVANCES PER POLL, NOT PER SECOND, so within any one polling
+#: process the "~5 minutes" ceiling holds only while that process is actually
+#: polling (a closed sidebar pauses its timer, ``_sidebar_timer.pause()``, and
+#: freezes the counter). The stamp closes that gap ACROSS processes: it is
+#: written whenever a full revalidation completes and read by any later
+#: process's first scan, so staleness is bounded per WALL-CLOCK as well. That
+#: conversion costs one deliberate behaviour change, recorded at
+#: :data:`REVALIDATE_WINDOW_S`: a restart INSIDE the window serves the armed
+#: fast path rather than repairing a just-deleted marker on the spot — the
+#: hand-edit is noticed when the window next expires instead of immediately.
 #:
 #: One caller opts out of all of this rather than living with the window:
 #: ``session.cleanup`` passes ``revalidate=True`` through
@@ -297,14 +301,67 @@ ORIGIN_CACHE_VERSION = 2
 #: poll — same structure and ratio, wrong surface (QA round 1, Q2).
 REVALIDATE_EVERY = 150
 
+#: How stale a completed revalidation may be before a fresh process's first
+#: scan revalidates the store rather than arming the hidden-skip fast path.
+#:
+#: WHY THIS EXISTS — the ONE-SHOT caller. The epoch above is counted in POLLS
+#: of a single process, and its "first scan of a fresh process revalidates"
+#: rule was written for long-lived pollers restarting: a sidebar that rescans
+#: on open. But ``lop sessions`` — and every other one-shot caller: the CLI's
+#: recovery listing, search, a script — issues exactly ONE scan per process,
+#: so under poll-counted terms EVERY invocation is a cold start and pays the
+#: revalidating pass. Measured on a 15k-directory pad (1,400 user sessions):
+#: 17,820 syscalls and ~121 ms warm per invocation, against the 4,220
+#: syscalls / ~39 ms the armed scan it can never reach would pay.
+#:
+#: THE STAMP, not a persisted counter: a scan that completes a revalidation
+#: writes ``revalidated_at`` into the verdict cache, and a first scan that
+#: finds it fresh arms the fast path instead of re-deriving. Consecutive CLI
+#: invocations inside the window then cost the armed number, and the store
+#: still gets a full revalidation at most once per window — from whichever
+#: scan first runs after it expires. The window is the epoch's own ~5 minutes
+#: at the sidebar's 2 s cadence, so a polling sidebar's cadence is unchanged:
+#: it revalidates every 150 polls (each one stamping) and its restarts merely
+#: stop re-paying a scan some process already paid inside the window.
+#:
+#: WHY A WALL-CLOCK BOUND AT ALL: the repair gesture above ("delete the
+#: marker to un-hide the session") needs a ceiling, and a count of polls
+#: cannot bound a process that never polls again. The ceiling therefore has to
+#: be a fact about the store that outlives the process — the same shape as
+#: ``model.catalogue.REVALIDATE_BACKOFF_S``, except PERSISTED, because the
+#: question ("were these verdicts fully re-derived lately?") is about the
+#: cache file and must be answerable by the NEXT process, not only by the one
+#: that asked. The counter (:data:`_SCAN_COUNT`) therefore stays process-local
+#: — it is policy — while the stamp lives beside the verdicts it describes.
+#: The epoch's in-process scans are untouched: scan #150 of a live process
+#: revalidates on schedule whatever the stamp says.
+#:
+#: FAILURE MODES — every one degrades to "revalidate", the conservative
+#: direction (a redundant scan; never a wrong row, never a raise):
+#: * cache absent, unreadable, corrupt, torn, or written by an older build:
+#:   no stamp is read, so the scan revalidates and re-stamps; the save itself
+#:   is best-effort and swallows its ``OSError``, so an unwritable cache just
+#:   means the next process revalidates again;
+#: * clock jump forward: the stamp looks old, costing one redundant
+#:   revalidation; clock jump backward: the stamp looks FUTURE and
+#:   ``_revalidation_is_due`` deliberately distrusted a negative age (see its
+#:   docstring), so skew can cost scans but cannot freeze a stale verdict;
+#: * two processes whose clocks disagree can flap a scan between them —
+#:   bounded by the window, costs one redundant scan per flap, recorded here
+#:   rather than defended against because a monotonic clock cannot be
+#:   persisted across restarts, which is exactly the property the stamp needs.
+REVALIDATE_WINDOW_S = 5 * 60
+
 #: Scans issued so far, per store, driving :data:`REVALIDATE_EVERY`.
 #:
-#: Process-local on purpose: it is a POLICY counter, not a fact about the store,
-#: and persisting it would let one of the dozen ``lop`` processes on this machine
-#: decide another's staleness window — and would cost a write on a path whose
-#: whole point is to stop touching the disk. In production this holds exactly one
-#: key, the running session's config dir. Keyed by path string rather than
-#: ``Path`` so a test's ``tmp_path`` cannot collide with a live store.
+#: Process-local on purpose: it is a POLICY counter — "how long has THIS
+#: process been serving the skip" — and the store-side question ("when were
+#: these verdicts last fully re-derived?") is answered by the stamp in the
+#: cache file instead (:data:`REVALIDATE_WINDOW_S`), a fact about the verdicts
+#: rather than a count of one process's polls. In production this holds
+#: exactly one key, the running session's config dir. Keyed by path string
+#: rather than ``Path`` so a test's ``tmp_path`` cannot collide with a live
+#: store.
 _SCAN_COUNT: dict[str, int] = {}
 
 #: Journals the session's title (and every name it has ever borne) beside the
@@ -1571,42 +1628,90 @@ def origin_cache_path(config_dir: Path) -> Path:
     return config_dir / "cache" / ORIGIN_CACHE_NAME
 
 
-def _load_origin_cache(path: Path) -> dict[str, Any]:
-    """The cached verdicts, or an empty mapping when absent, stale or corrupt.
+def _load_origin_cache(path: Path) -> tuple[dict[str, Any], float | None]:
+    """The cached verdicts AND their revalidation stamp; empties when unusable.
 
-    Every failure yields an empty mapping rather than raising, mirroring
+    Every failure yields ``({}, None)`` rather than raising, mirroring
     ``search_index._load``: this is a cache whose worst cost must be a rebuild
     (today's full-read behaviour), never a wrong verdict and never the picker.
+
+    The second term is when the verdicts were last FULLY re-derived
+    (:data:`REVALIDATE_WINDOW_S`), or ``None`` when no trustworthy one exists —
+    no cache, an unreadable or corrupt one, a document written before the stamp
+    existed, or a stamp of the wrong type. ``None`` is the conservative answer
+    every caller treats as "revalidate": see :func:`_revalidation_is_due`.
     """
     try:
         raw = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return {}
+        return {}, None
     try:
         loaded = json.loads(raw)
     except ValueError:
-        return {}
+        return {}, None
     if not isinstance(loaded, dict) or loaded.get("version") != ORIGIN_CACHE_VERSION:
-        return {}
+        return {}, None
     entries = loaded.get("entries")
-    return entries if isinstance(entries, dict) else {}
+    stamp = loaded.get("revalidated_at")
+    if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+        stamp = None
+    return (
+        entries if isinstance(entries, dict) else {},
+        float(stamp) if stamp is not None else None,
+    )
 
 
-def _save_origin_cache(path: Path, entries: dict[str, Any]) -> None:
-    """Persist the verdicts, best-effort and atomically.
+def _revalidation_is_due(stamp: float | None, *, now: float | None = None) -> bool:
+    """Whether a fresh process's first scan must revalidate the store.
+
+    ``stamp`` is :func:`_load_origin_cache`'s second term. DUE is the
+    conservative direction, and every failure takes it:
+
+    * ``None`` — no cache, an unreadable, corrupt or older-format one, or a
+      save that never landed — revalidates, exactly as every cold start did
+      before the stamp existed;
+    * an age OUTSIDE ``[0, window)`` revalidates: older than the window is the
+      ordinary expiry, and a NEGATIVE age (a stamp in the future, i.e. a clock
+      that moved backward between writer and reader) is deliberately
+      distrusted rather than served — otherwise a skewed clock could freeze a
+      stale verdict for as long as the skew lasted. The cost of distrusting it
+      is one redundant scan, the direction that can never show a wrong row.
+
+    Only an age inside the window, in the past, arms the fast path. ``now`` is
+    injectable so the boundary is testable without touching the clock.
+    """
+    if stamp is None:
+        return True
+    age = (time.time() if now is None else now) - stamp
+    return not (0.0 <= age < REVALIDATE_WINDOW_S)
+
+
+def _save_origin_cache(
+    path: Path,
+    entries: dict[str, Any],
+    *,
+    revalidated_at: float | None = None,
+) -> None:
+    """Persist the verdicts AND the revalidation stamp, best-effort and atomically.
 
     Atomic with a PID-suffixed temp for the reason ``search_index._save``
     documents: several sessions open a picker at once, and a fixed temp name
     lets one process ``replace`` a document another is still filling. A torn
     document is discarded by the loader, so the bound is a needless rebuild.
+
+    ``revalidated_at`` rides in the SAME document as the verdicts because it is
+    a fact ABOUT them — one file must tell a reader both what the verdicts are
+    and how stale they are. An armed caller that found its entries changed
+    passes the stamp it loaded so the write preserves it; ``None`` records
+    "no revalidation is claimed" and reads exactly like a pre-stamp file.
     """
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(
-            json.dumps({"version": ORIGIN_CACHE_VERSION, "entries": entries}),
-            encoding="utf-8",
-        )
+        document: dict[str, Any] = {"version": ORIGIN_CACHE_VERSION, "entries": entries}
+        if revalidated_at is not None:
+            document["revalidated_at"] = revalidated_at
+        tmp.write_text(json.dumps(document), encoding="utf-8")
         tmp.replace(path)
     except OSError:
         return
@@ -1856,6 +1961,15 @@ def _scan_sessions(
     ``session.cleanup._picker_rows``, which is a deletion authority and must
     never decide from a speculatively-stale answer.
 
+    A caller that does NOT pass ``revalidate`` still gets a first scan whose
+    cost follows the STORE rather than this process merely being new: a
+    process-first scan arms the fast path when the store's verdicts were fully
+    re-derived — by anyone — within :data:`REVALIDATE_WINDOW_S`, and
+    revalidates when they were not. That is the window that keeps a one-shot
+    caller (``lop sessions``, a script) from paying the revalidating pass on
+    every invocation; in-process epoch scans and ``revalidate=True`` are
+    unchanged.
+
     ``strict=True`` makes a store that exists but cannot be WALKED an error
     (:class:`~local_operator.session.errors.SessionStoreUnavailable`) instead
     of an empty listing, and the caller declaring it is one whose answer a UI
@@ -1924,6 +2038,7 @@ def _scan_sessions(
     # still advances the counter — otherwise a session started before its
     # config dir exists would sit at 0 and revalidate on every poll forever.
     scans_so_far = _SCAN_COUNT.get(str(config_dir), 0)
+    cold_start = False
     if revalidate:
         # A FORCED revalidation is the epoch's expensive scan, merely arriving
         # early, so it RESTARTS the epoch rather than counting as one more
@@ -1936,7 +2051,17 @@ def _scan_sessions(
         _SCAN_COUNT[str(config_dir)] = 1
     else:
         _SCAN_COUNT[str(config_dir)] = scans_so_far + 1
-        revalidate = scans_so_far % REVALIDATE_EVERY == 0
+        if scans_so_far == 0:
+            # A PROCESS-FIRST scan's decision is DEFERRED past the cache load
+            # below, where the store's revalidation stamp answers it: a
+            # one-shot caller (``lop sessions``, a script) must arm the skip
+            # when some process already revalidated inside the window, and it
+            # has no next poll in which its own epoch could. The counter still
+            # advances here, before any I/O can fail, so the deferral cannot
+            # starve it (see the read-before-scandir note above).
+            cold_start = True
+        else:
+            revalidate = scans_so_far % REVALIDATE_EVERY == 0
 
     rows: list[tuple[str, float, str, bool]] = []
     # THE ARCHIVE INDEX, READ LAZILY AND MEMOISED, on the first candidate that
@@ -1981,7 +2106,14 @@ def _scan_sessions(
             raise SessionStoreUnavailable(_store_error_detail(error)) from error
         return [], set()
     cache_path = origin_cache_path(config_dir)
-    cached = _load_origin_cache(cache_path)
+    cached, revalidated_at = _load_origin_cache(cache_path)
+    if cold_start:
+        # THE WINDOW, asked of the STORE rather than of this process: arm the
+        # skip when the verdicts were fully re-derived within
+        # ``REVALIDATE_WINDOW_S`` by whoever scanned last. Every failure of the
+        # stamp (absent, corrupt, unwritable, clock-skewed) is answered by
+        # ``_revalidation_is_due`` in the conservative direction — revalidate.
+        revalidate = _revalidation_is_due(revalidated_at)
     fresh: dict[str, Any] = {}
     # Every name that carried a marker in THIS scan. The cache is rewritten to
     # exactly this set, which is what drops entries for disposed sessions and
@@ -2186,11 +2318,19 @@ def _scan_sessions(
         name: entry for name, entry in cached.items() if name in seen and isinstance(entry, dict)
     }
     merged.update(fresh)
-    # Written only when it would actually change, so a steady store's picker
-    # open stays read-only: an unconditional save would rewrite a multi-megabyte
-    # file on every open to persist nothing.
-    if merged != cached:
-        _save_origin_cache(cache_path, merged)
+    # Written when the entries changed, and ALSO when this scan completed a
+    # revalidation: the stamp is what lets the NEXT process's first scan arm
+    # the skip, and refreshing it is the one write a steady store pays — once
+    # per revalidation, not per poll. An armed scan whose entries are unchanged
+    # still writes nothing, so a steady store's picker open stays read-only as
+    # before. The stamp passed through on an armed write is the one loaded; on
+    # a revalidating write it is this scan's own completion moment.
+    if merged != cached or revalidate:
+        _save_origin_cache(
+            cache_path,
+            merged,
+            revalidated_at=time.time() if revalidate else revalidated_at,
+        )
     # Newest first; EQUAL stamps break on the id, ascending, so the order is
     # a property of the store rather than of ``scandir`` on this filesystem.
     # The cleanup policy sorts on the same key: with an unstable tie order
