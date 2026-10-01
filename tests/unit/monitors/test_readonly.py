@@ -590,3 +590,68 @@ def test_in_session_and_external_verdicts_agree(tool_name: str, args: dict[str, 
         assert external is None
     else:
         assert external == in_session, (tool_name, args, in_session, external)
+
+
+# ---------------------------------------------------------------------------
+# §D7: kubectl, as a read-only allow-list
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "kubectl get pods -n kube-system",
+        "kubectl get pods -A -o json",
+        "kubectl get nodes --no-headers --sort-by=.metadata.name",
+        "kubectl describe node gpu-1",
+        "kubectl describe pod x -l app=ner",
+        "kubectl logs -n datadog pod-x --tail=100",
+        "kubectl logs pod-x -c app --since=1h -p",
+        "kubectl get pods --context prod",
+        "kubectl get pods -o name",
+        "kubectl get pods -o json | jq .items",
+    ],
+)
+def test_kubectl_read_verbs_are_monitorable(command: str) -> None:
+    assert readonly._bash_verdict(command) is None, command
+
+
+@pytest.mark.parametrize(
+    ("command", "phrase"),
+    [
+        ("kubectl get secret db-creds", "reads secret data"),
+        ("kubectl get secrets", "reads secret data"),
+        ("kubectl get all,secrets", "reads secret data"),
+        ("kubectl get pods --raw=/api/v1/pods", "arbitrary API path"),
+        ("kubectl get pods -w", "waits for events"),
+        ("kubectl get pods --watch", "waits for events"),
+        ("kubectl logs -f pod-x", "follows the stream"),
+        ("kubectl logs --follow pod-x", "follows the stream"),
+        ("kubectl get pods --kubeconfig=/tmp/x", "retargets which cluster"),
+        ("kubectl get pods --token=abc", "bearer token"),
+        ("kubectl get pods --as=admin", "impersonates another identity"),
+        ("kubectl get pods --insecure-skip-tls-verify", "unverified server certificate"),
+        ("kubectl get pods -o go-template=abc", "not a rendering format"),
+        ("kubectl get pods -o jsonpath={.items}", "brace expansion"),
+        ("kubectl exec -it pod -- sh", "not on the read-only kubectl allow-list"),
+        ("kubectl apply -f x.yaml", "not on the read-only kubectl allow-list"),
+        ("kubectl delete pod x", "not on the read-only kubectl allow-list"),
+        ("kubectl get pods -n", "expects a value"),
+    ],
+)
+def test_kubectl_refusals_name_their_reason(command: str, phrase: str) -> None:
+    reason = readonly._bash_verdict(command)
+    assert reason is not None, command
+    assert phrase in reason, (command, reason)
+
+
+def test_kubectl_global_flag_before_the_subcommand_is_refused() -> None:
+    """The rule that makes the allow-list complete: kubectl's global flags are
+    exactly the ones that retarget the cluster, so the subcommand comes first.
+    """
+    reason = readonly._bash_verdict("kubectl --context prod get pods")
+    assert reason is not None
+    assert "comes before the subcommand" in reason, reason
+    # And no separator form exists either: the ``--`` rule is the bash layer's.
+    reason = readonly._bash_verdict("kubectl get pods -- :")
+    assert reason is not None

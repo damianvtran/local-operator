@@ -453,6 +453,10 @@ _ALLOWED_COMMANDS: frozenset[str] = frozenset(
         "gh",
         "glab",
         "find",
+        # kubectl is allow-listed by SUBCOMMAND (``_kubectl_reason``): the
+        # read verbs are a strict set and every flag that retargets the
+        # cluster, the identity or an arbitrary API path is denied by name.
+        "kubectl",
     }
 )
 
@@ -777,6 +781,8 @@ def _stage_reason(stage_text: str) -> str | None:
         return _git_reason(rest)
     if command in ("gh", "glab"):
         return _gh_reason(command, rest)
+    if command == "kubectl":
+        return _kubectl_reason(rest)
     if command == "date":
         return _date_reason(rest)
     return _flags_reason(command, rest, _FLAG_TABLE[command])
@@ -954,6 +960,202 @@ def _gh_reason(cmd: str, tokens: list[str]) -> str | None:
             f"{' '.join(sorted(verbs))})."
         )
     return _flags_reason(f"{cmd} {family} {verb}", tokens[2:], _GH_FLAGS)
+
+
+#: kubectl's allow-list, by subcommand. Deliberately three verbs: every other
+#: verb is either a write (``apply``/``delete``/``cordon``/``scale``/…) or an
+#: escape hatch that can execute code or reach an arbitrary API path
+#: (``exec``, ``cp``, ``port-forward``, ``proxy``, ``auth``, ``config``, …).
+#: No plugin dispatch is possible either, because the first token must be
+#: exactly one of the three.
+_KUBECTL_SUBCOMMAND_FLAGS: dict[str, dict[str, Any]] = {
+    "get": _flags(
+        "A",
+        valued_short="nlo",
+        long="all-namespaces no-headers show-labels",
+        valued_long="namespace context selector field-selector output sort-by",
+    ),
+    "describe": _flags(
+        "A",
+        valued_short="nl",
+        long="all-namespaces show-events",
+        valued_long="namespace context selector",
+    ),
+    "logs": _flags(
+        "p",
+        valued_short="nlc",
+        long="previous timestamps",
+        valued_long=(
+            "namespace context container tail since since-time selector "
+            "max-log-requests limit-bytes"
+        ),
+    ),
+}
+
+#: Flags refused with a NAMED reason rather than the generic "not an allowed
+#: flag", because each one is a trust boundary a reader would not guess: the
+#: first four never return, the rest retarget what the call reads.
+_KUBECTL_DENIED_FLAGS: dict[str, str] = {
+    "--watch": "waits for events instead of returning — a monitor check must return",
+    "-w": "waits for events instead of returning — a monitor check must return",
+    "--follow": "follows the stream instead of returning — a monitor check must return",
+    "-f": "follows the stream instead of returning — a monitor check must return",
+    "--raw": "requests an arbitrary API path, which this allow-list cannot bound",
+    "--kubeconfig": "retargets which cluster and identity every later call uses",
+    "--server": "retargets which cluster the call reads",
+    "-s": "retargets which cluster the call reads",
+    "--token": "supplies a bearer token, so the call runs as another identity",
+    "--user": "selects another identity from the kubeconfig",
+    "--as": "impersonates another identity",
+    "--as-group": "impersonates another group",
+    "--as-uid": "impersonates another uid",
+    "--cluster": "selects another cluster from the kubeconfig",
+    "--certificate-authority": "retargets which server certificate is trusted",
+    "--client-certificate": "supplies another client identity",
+    "--client-key": "supplies another client identity",
+    "--insecure-skip-tls-verify": "accepts an unverified server certificate",
+}
+
+#: The ``-o/--output`` values that are RENDERING only. ``go-template*`` is
+#: deliberately absent: template functions are a small evaluator, and a monitor
+#: must be provably read-only rather than probably.
+_KUBECTL_OUTPUT_OK: frozenset[str] = frozenset({"name", "wide", "json", "yaml"})
+
+#: Operands naming a secret are refused because monitor output is copied into
+#: the transcript and from there into the provider request: a delta carrying a
+#: decoded credential is the one datum no later redaction pass can recall.
+#: Matched as a CASE-INSENSITIVE SUBSTRING (``secret``, ``secrets``,
+#: ``secrets/x``, ``all,secrets``), and without a regex import: this module is
+#: deliberately import-light.
+_KUBECTL_SECRET_WORD = "secret"
+
+
+def _kubectl_reason(tokens: list[str]) -> str | None:
+    """``kubectl get|describe|logs`` with a default-deny flag set (§6.4).
+
+    Three rules beyond the flag table:
+
+    - the SUBCOMMAND must be the first token. A global flag before it (or a
+      second subcommand) is refused rather than skipped, because kubectl's own
+      global flags are exactly the ones that retarget the cluster;
+    - ``-o/--output`` must be a rendering format. ``go-template*`` is an
+      evaluator, so it is refused by name while ``jsonpath=``/``custom-columns=``
+      (pure selectors) are allowed;
+    - no operand may name a secret, and none may begin with ``-`` (there is no
+      ``--`` form: an operand that needs to look like a flag is not one of the
+      shapes this allow-list covers).
+    """
+    if not tokens:
+        return 'kubectl needs a read-only subcommand ("get", "describe" or "logs").'
+    sub = tokens[0]
+    table = _KUBECTL_SUBCOMMAND_FLAGS.get(sub)
+    if table is None:
+        if sub.startswith("-"):
+            return (
+                f'"{sub}" comes before the subcommand — a global flag is one of the '
+                "shapes that retargets the cluster, so the subcommand must come first."
+            )
+        allowed = " ".join(sorted(_KUBECTL_SUBCOMMAND_FLAGS))
+        return (
+            f'"{sub}" is not on the read-only kubectl allow-list ({allowed}) — every '
+            "other verb either writes or can execute code."
+        )
+    cmd = f"kubectl {sub}"
+    index = 0
+    rest = tokens[1:]
+    while index < len(rest):
+        token = rest[index]
+        if token == "--":
+            return (
+                'the "--" separator is not accepted here: an operand that needs to look '
+                "like a flag is not one of the shapes this allow-list covers."
+            )
+        if token.startswith("-") and token != "-":
+            denied = _kubectl_denied_reason(token, table)
+            if denied is not None:
+                return denied
+            output = _kubectl_output_value(token, rest, index)
+            if output is not None and not _kubectl_output_ok(output):
+                return (
+                    f'"-o {output}" is not a rendering format this allow-list accepts '
+                    "(name, wide, json, yaml, jsonpath=…, custom-columns=…); "
+                    "go-template runs template functions."
+                )
+            reason, consumed = _check_flag(cmd, token, rest, index, table)
+            if reason is not None:
+                return reason
+            index += consumed
+            continue
+        if _KUBECTL_SECRET_WORD in token.lower():
+            return (
+                f'"{token}" reads secret data — monitor output is copied into the '
+                "transcript and the provider request, so secret reads are refused."
+            )
+        index += 1
+    return None
+
+
+def _kubectl_output_ok(value: str) -> bool:
+    """Whether one ``-o/--output`` value renders output without evaluating it.
+
+    ``name``/``wide``/``json``/``yaml`` are fixed renderings; the two selector
+    forms are accepted by PREFIX (their syntax owns everything after ``=``).
+    """
+    if value in _KUBECTL_OUTPUT_OK:
+        return True
+    return value.startswith("jsonpath=") or value.startswith("custom-columns=")
+
+
+def _kubectl_denied_reason(token: str, table: dict[str, Any]) -> str | None:
+    """A named refusal for one flag token, or ``None`` when it is not denied.
+
+    Only the head of a short cluster is judged, and only up to the first
+    value-taking letter: ``-nw`` is ``-n`` with the value ``w``, not ``-w``.
+    """
+    if token.startswith("--"):
+        base = token.partition("=")[0]
+        reason = _KUBECTL_DENIED_FLAGS.get(base)
+        if reason is not None:
+            return f'"{base}" {reason}.'
+        return None
+    head: list[str] = []
+    for ch in token[1:]:
+        if ch in table["short_valued"]:
+            break
+        head.append(ch)
+    for ch in head:
+        reason = _KUBECTL_DENIED_FLAGS.get(f"-{ch}")
+        if reason is not None:
+            return f'"-{ch}" {reason}.'
+    return None
+
+
+def _kubectl_output_value(token: str, tokens: list[str], index: int) -> str | None:
+    """The value of ``-o/--output`` in this token, or ``None`` if it is not one.
+
+    Handles all four spellings (``-o json``, ``-ojson``, ``--output json``,
+    ``--output=json``) because the check must see the value the flag will
+    actually receive, whatever shape the caller used.
+    """
+    if token.startswith("--output"):
+        _base, sep, value = token.partition("=")
+        if sep:
+            return value
+        return tokens[index + 1] if index + 1 < len(tokens) else None
+    if not token.startswith("-") or token.startswith("--"):
+        return None
+    body = token[1:]
+    for position, ch in enumerate(body):
+        if ch == "o":
+            glued = body[position + 1 :]
+            if glued:
+                return glued
+            return tokens[index + 1] if index + 1 < len(tokens) else None
+        if ch in _KUBECTL_SUBCOMMAND_FLAGS["get"]["short_valued"]:
+            # A value-taking letter before ``o`` means the rest of the token
+            # is THAT flag's value, not an output format.
+            return None
+    return None
 
 
 def _find_reason(tokens: list[str]) -> str | None:
