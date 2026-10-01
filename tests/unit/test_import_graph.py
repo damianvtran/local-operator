@@ -648,3 +648,76 @@ def test_the_lazy_provider_reexports_still_resolve() -> None:
     assert RetrySettings and StoredCredential and WireClient
     with pytest.raises(AttributeError):
         providers.no_such_export  # noqa: B018
+
+
+# --- the wake supervisor's lazily-imported passes ----------------------------
+
+
+def test_the_rescue_pass_is_not_on_the_startup_path(
+    cli_modules: set[str], session_factory_modules: set[str]
+) -> None:
+    """``session.runtime.rescue`` must stay lazily imported.
+
+    ``rescue.py``'s own docstring claims this file pins it, and the wake
+    supervisor imports it from its sweep seat (never at module scope) precisely
+    so the supervisor's cheap, harness-free startup holds. A regression that
+    pulled it in would cost every invocation that reaches the supervisor and
+    every session build that reaches the composition root, and nothing else
+    would notice — so it is pinned in a fresh interpreter, like the rest here.
+    """
+    why = "the rescue pass is stdlib + registry-level and must stay off the startup path"
+    _assert_absent(cli_modules, "local_operator.session.runtime.rescue", why)
+    _assert_absent(session_factory_modules, "local_operator.session.runtime.rescue", why)
+
+
+#: The modules importing the rescue pass is ALLOWED to pull in, beyond the
+#: stdlib: its own package's leaves and the wake index's store. Stated as a
+#: subset test rather than an equality so an added leaf is a decision a reviewer
+#: makes in this list, while a harness/module pull-in fails immediately.
+_RESCUE_LEAF_MODULES = frozenset(
+    {
+        "local_operator",
+        "local_operator.paths",
+        "local_operator.procstate",
+        "local_operator.session",
+        "local_operator.session.retention",
+        "local_operator.session.runtime",
+        "local_operator.session.runtime.registry",
+        "local_operator.session.runtime.rescue",
+        "local_operator.session.runtime.types",
+    }
+)
+
+
+def test_importing_the_rescue_pass_pulls_no_heavy_modules() -> None:
+    """The supervisor's rescue pass must stay stdlib + leaf modules.
+
+    The claim ``rescue.py``'s docstring makes — "stdlib plus
+    registry/types/retention, nothing that pulls the harness in" — is a COST
+    claim about the always-on wake supervisor, and the absence test above cannot
+    see it: it only proves the CLI and the composition root do not reach the
+    module. A heavy module-scope import added to ``rescue.py`` would pass that
+    cell and still put the harness on the supervisor's resident set, so this
+    cell imports the pass in a FRESH interpreter and reads what came with it.
+    """
+    modules = _imported_modules("local_operator.session.runtime.rescue")
+    for banned, why in (
+        ("asyncio", "the pass is synchronous; the seat owns the loop"),
+        ("pydantic", "the supervisor is deliberately pydantic-free"),
+        ("local_operator.harness", "the harness must not load in the supervisor"),
+        ("local_operator.tui", "no surface loads in the supervisor"),
+        ("local_operator.server", "the backend service is not the supervisor's dependency"),
+        ("local_operator.model", "no provider/model layer loads in the supervisor"),
+    ):
+        _assert_absent(modules, banned, why)
+    pulled = {m for m in modules if m == "local_operator" or m.startswith("local_operator.")}
+    unexpected = sorted(pulled - _RESCUE_LEAF_MODULES)
+    assert not unexpected, (
+        "the rescue pass grew a module-scope import outside its stated leaf set "
+        f"({', '.join(unexpected)}); add it here only if it stays stdlib-level, "
+        "otherwise import it lazily inside the pass"
+    )
+    # The two modules it must keep: the record plane and the store that carries
+    # the young-session rule's constants.
+    assert "local_operator.session.runtime.registry" in pulled
+    assert "local_operator.session.retention" in pulled
