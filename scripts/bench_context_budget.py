@@ -909,7 +909,38 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: calls in its own text). A local tiers-configured run reads 219 over
 #: (37,734 vs 37,515) — the recorded gap minus the band — and CI remains the
 #: binding reading; if any reading disagrees, the script wins.
-BUDGET_BILLED_TOKENS = 37_515
+#: RAISED 37,515 -> 37,756 for the ``team`` tool's ``label``/``aliases``
+#: fields (the teams-label lane's core half: teams gain a local display label
+#: and extra addressing keys), stated with the arithmetic because the guard
+#: exists to make schema growth an explicit decision. Both are ADDITIONS to
+#: one existing schema -- rung 1 of the footprint ladder, the cheapest rung --
+#: and they are create/update fields only: no new tool, no new op, nothing on
+#: the list/show path, nothing on any other tool.
+#:
+#: FOLDED ONTO THE HEAD ABOVE (a fourth fold for this branch: the
+#: sessions-resume raise and the main-side merges landed while it was open),
+#: re-derived against the merge-ref tree CI tests: the clean head measures
+#: 104,809 chars = ~37,701 billed, so the ceiling is that + the 55-token band
+#: this file keeps = 37,756. The composition is exact, measured rather than
+#: summed: this branch's reading was 104,743 at the previous fold and the
+#: sessions-resume slice above adds its own +66 chars (68,760 -> 68,826 in
+#: ``tool_schemas``; every other counter byte-identical). This branch's own
+#: delta underneath remains +670 chars = +241 billed against its base
+#: (103,232 -> 103,902, measured ISOLATED with this script; the two fields
+#: and nothing else):
+#:
+#:   + tool_schemas    68,333 vs 67,663 = +670 chars = +241
+#:
+#: A NON-isolated local run reads the 762-char subagents-tiers config delta
+#: larger (see the ``tool://`` entry), so CI remains the binding reading and
+#: an isolated local run can be compared to CI directly.
+#:
+#: The trade: labels/aliases on the tool schema are the ONLY model-facing
+#: documentation of the new fields, and each sentence prevents a real misuse
+#: (the empty-string reset; the whole-list replacement; the collision rule).
+#: The peel-off a future reduction can act on: dropping the two fields from
+#: the schema should take this ceiling back down ~241 billed.
+BUDGET_BILLED_TOKENS = 37_756
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

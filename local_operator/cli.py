@@ -514,6 +514,21 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Roster slot as role or role:count (repeatable)",
     )
     teams_create.add_argument("--description", type=str, default="", help="One-line description")
+    teams_create.add_argument(
+        "--label",
+        type=str,
+        default=None,
+        help="Display label shown in listings, the chart and the status band "
+        "(free text; addressing still uses the name)",
+    )
+    teams_create.add_argument(
+        "--alias",
+        action="append",
+        default=[],
+        dest="aliases",
+        help="Extra addressing key for this team (repeatable; letters, digits, "
+        "dot, underscore, hyphen)",
+    )
     teams_show = teams_subparsers.add_parser(
         "show", help="Show a team's roster and briefs", parents=[parent_parser]
     )
@@ -9048,6 +9063,8 @@ def teams_list_command(team_registry: Any) -> int:
     a peer's publish to finish rather than lose the race and skip healing an
     interrupted save (R7-1; the UI path stays strictly non-blocking).
     """
+    from local_operator.teams import display_form
+
     teams = team_registry.list_teams(recovery_wait=_cli_recovery_wait())
     if not teams:
         print("\n\033[1;33mNo teams found.\033[0m")
@@ -9057,7 +9074,9 @@ def teams_list_command(team_registry: Any) -> int:
         is_last = i == len(teams) - 1
         branch = "└──" if is_last else "├──"
         left = "│  " if is_last else "│ │"
-        print(f"\033[1;32m│ {branch} {team.name}\033[0m")
+        # The shared display rule (D2): a row paints what every surface
+        # shows, and `teams delete` / `/team <name>` still address by the key.
+        print(f"\033[1;32m│ {branch} {display_form(team.name, team.label)}\033[0m")
         print(f"\033[1;32m{left}   • Manager: {team.manager}\033[0m")
         print(f"\033[1;32m{left}   • Members: {team.member_count()}\033[0m")
         if team.description:
@@ -9080,6 +9099,8 @@ def teams_create_command(args: argparse.Namespace, team_registry: Any) -> int:
                 description=getattr(args, "description", "") or "",
                 manager=getattr(args, "manager", None) or "manager",
                 members=members,
+                label=getattr(args, "label", None),
+                aliases=list(getattr(args, "aliases", None) or []),
             )
         )
     except ValueError as exc:
@@ -9098,14 +9119,21 @@ def teams_show_command(name: str, team_registry: Any) -> int:
 
     Same one-shot recovery budget as ``teams_list_command`` (R7-1).
     """
+    from local_operator.teams import display_form
+
     team = team_registry.get_team_by_name(name, recovery_wait=_cli_recovery_wait())
     if team is None:
         print(f"\n\033[1;31mError: No team found with name: {name}\033[0m")
         return 1
-    print(f"\n\033[1;32m╭─ Team {team.name} ───────────────────────────\033[0m")
+    shown = display_form(team.name, team.label)
+    print(f"\n\033[1;32m╭─ Team {shown} ───────────────────────────\033[0m")
     print(f"\033[1;32m│ Manager: {team.manager}\033[0m")
     if team.description:
         print(f"\033[1;32m│ Description: {team.description}\033[0m")
+    if team.aliases:
+        # D5: aliases are addressing keys, and this is the one surface a
+        # script or a human can read to find out what a team answers to.
+        print(f"\033[1;32m│ Aliases: {', '.join(team.aliases)}\033[0m")
     print("\033[1;32m│ Roster:\033[0m")
     for line in team.roster_lines():
         print(f"\033[1;32m│   {line}\033[0m")

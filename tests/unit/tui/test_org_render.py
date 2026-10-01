@@ -124,6 +124,9 @@ def test_ghost_and_cycle_markers(tmp_path: Path) -> None:
     node = resolve_org("a", teams=reg)
     result = render_org(node, tier=2)
     # Cycle back-reference and a missing-team ghost both draw with markers.
+    # The cycle marker names the team by its DISPLAY label (the derived
+    # default here); the ghost keeps the raw slot reference, which by
+    # definition has no team row to label.
     assert "↩ a" in result.text.plain
     assert "? missing" in result.text.plain
 
@@ -213,3 +216,18 @@ def test_outline_double_badge_is_separated(nested: TeamRegistry) -> None:
     outline = render_org(resolve_org("org", teams=nested), tier=0).text.plain
     # pod-b: 1 member, 2 copies → "·1 · ×2", never the garbled "·1 ×2".
     assert "·1 · ×2" in outline
+
+
+def test_team_nodes_paint_the_display_label_not_the_slug(tmp_path: Path) -> None:
+    """A resolved team node carries the display form (label, else derived).
+
+    The addressable key stays visible where it is needed (the chart title and
+    every command that addresses a team); the node itself renders like every
+    other label-first surface.
+    """
+    registry = TeamRegistry(tmp_path)
+    registry.create_team(TeamEditFields(name="data-quality", label="Data Quality"))
+    registry.create_team(TeamEditFields(name="legacy-slug"))
+
+    assert resolve_org("data-quality", teams=registry).label == "Data Quality"
+    assert resolve_org("legacy-slug", teams=registry).label == "Legacy Slug"
