@@ -12,6 +12,7 @@ import asyncio
 import json
 import threading
 from pathlib import Path
+from typing import Any
 
 from local_operator import procstate
 from local_operator.harness.types import Message, TextContent
@@ -759,7 +760,7 @@ def test_eviction_stands_down_when_the_memo_moves_under_it(tmp_path: Path, monke
     """
     from local_operator import resume as resume_module
 
-    class _RacingDict(dict):
+    class _RacingDict(dict[str, Any]):
         def __iter__(self):
             raise RuntimeError("dictionary changed size during iteration")
 
