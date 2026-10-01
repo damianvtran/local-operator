@@ -79,11 +79,18 @@ IDEMPOTENCY_HEADER = "Idempotency-Key"
 
 #: The credential report block's row key (ADR §3.2 #2). It is S4c's shape, sent
 #: as a whole block on this body; :func:`emit_body` adds it and never builds a
-#: row, so the block has one builder and this module has none. S4c's own part 1
-#: (PR #1881, open at this head) spells the same key as ``REPORT_DEVICES_FIELD``
-#: and is written against the freeze this module IS — the reconciliation is
-#: that its constant and this one name one string, and neither may drift.
-DEVICES_FIELD = "devices"
+#: row, so the block has one builder and this module has none.
+#:
+#: THE NAME IS S4C'S ON PURPOSE (review round 1, M3). S4c part 1 (PR #1881) spells
+#: this key as ``REPORT_DEVICES_FIELD`` in ``push_credentials`` — which owns the
+#: block's rows — and one wire key with two names in two modules of one package is
+#: the drift a freeze exists to prevent, so this constant takes that module's NAME
+#: rather than inventing a second. It cannot be an import yet: #1881 is open, not
+#: merged, and importing an unmerged module would put this branch's tests on
+#: someone else's uncommitted tree. The one-line follow-up when #1881 merges is to
+#: replace this assignment with ``from ...push_credentials import
+#: REPORT_DEVICES_FIELD`` — the name and the value stay, so nothing else moves.
+REPORT_DEVICES_FIELD = "devices"
 
 #: The prefix that keeps the two key spaces disjoint by SHAPE. A completion key
 #: is 64 lowercase hex characters, so ``attention-<n>`` can never be mistaken for
@@ -200,4 +207,4 @@ def emit_body(payload: Mapping[str, Any], devices: Sequence[Mapping[str, Any]]) 
     coalescer), never re-spelled here: two spellings of one wire block is the
     drift a freeze exists to prevent.
     """
-    return {**payload, DEVICES_FIELD: [dict(row) for row in devices]}
+    return {**payload, REPORT_DEVICES_FIELD: [dict(row) for row in devices]}

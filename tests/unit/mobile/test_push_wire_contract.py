@@ -70,6 +70,46 @@ def _fixture(name: str) -> dict[str, Any]:
     return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
 
 
+#: Every registry shape this tree files. Kept as one list so the artefact-level
+#: cells (shape and deny-list conformance) cannot silently skip a file added
+#: later without someone deciding to leave it out.
+REGISTRY_FIXTURES = (
+    "registry-register-response.json",
+    "registry-register-rotation.json",
+    "registry-register-refusal-device-revoked.json",
+    "registry-register-refusal-device-unpaired.json",
+    "registry-list-response.json",
+    "registry-unrevoke-success.json",
+    "registry-unrevoke-refusal-machine-only.json",
+    "registry-unrevoke-refusal-device-absent.json",
+)
+
+
+def _shape_blocks(fixture: dict[str, Any], *, _seen: tuple[str, ...] = ()) -> dict[str, Any]:
+    """The allow-list that governs a fixture: its own, or the one it INHERITS.
+
+    ``same_as`` is how the re-register response avoids restating the register
+    response's blocks — two copies of one allow-list is how the two drift — and
+    it is resolved here so the pointer is load-bearing rather than decorative
+    (review round 1, N2 / QA Q3: an empty ``forbidden: []`` on that file read as
+    a guard that was not one). A file that declares a block anyway must declare
+    the SAME one, which is asserted rather than trusted.
+    """
+    declared = {
+        key: fixture[key] for key in ("required", "optional", "forbidden") if key in fixture
+    }
+    pointer = fixture.get("same_as")
+    if pointer is None:
+        return declared
+    assert pointer not in _seen, f"same_as cycle: {(*_seen, pointer)}"
+    inherited = _shape_blocks(_fixture(pointer), _seen=(*_seen, pointer))
+    for key, value in declared.items():
+        assert value == inherited.get(
+            key
+        ), f"{key!r} is restated here and disagrees with {pointer}, the file `same_as` names"
+    return {**inherited, **declared}
+
+
 def _assert_shape(
     value: dict[str, Any], required: dict[str, str], optional: dict[str, str], *, where: str
 ) -> None:
@@ -140,8 +180,9 @@ def test_the_register_response_matches_the_frozen_shape() -> None:
     body = _register(_client())
 
     assert fixture["provenance"]["kind"] == "synthetic"
-    _assert_shape(body, fixture["required"], fixture["optional"], where="register")
-    _assert_no_forbidden(body, fixture["forbidden"], where="register")
+    blocks = _shape_blocks(fixture)
+    _assert_shape(body, blocks["required"], blocks["optional"], where="register")
+    _assert_no_forbidden(body, blocks["forbidden"], where="register")
     assert body["ok"] is True
     assert body["device_key"], "the response is the key's only delivery path"
 
@@ -157,7 +198,8 @@ def test_a_reregister_matches_the_rotation_fixture() -> None:
         first["device_id"],
         first["registered_at"],
     ), "a re-register keeps the identity: the fixture's two literals are the same id and stamp"
-    _assert_no_forbidden(second, fixture["forbidden"], where="reregister")
+    blocks = _shape_blocks(fixture)
+    _assert_no_forbidden(second, blocks["forbidden"], where="reregister")
     assert second["device_key"] != first["device_key"], "every register re-mints the key"
 
     record = _records()[0]
@@ -181,7 +223,8 @@ def test_the_list_response_matches_the_frozen_shape() -> None:
     )
 
     body = client.get("/api/push/devices").json()
-    _assert_shape(body, fixture["required"], fixture["optional"], where="list")
+    blocks = _shape_blocks(fixture)
+    _assert_shape(body, blocks["required"], blocks["optional"], where="list")
     assert body["precedence"] == fixture["precedence"] == PRECEDENCE
     assert len(body["devices"]) == 2
 
@@ -193,7 +236,7 @@ def test_the_list_response_matches_the_frozen_shape() -> None:
             where=f"list.devices[{index}]",
         )
         assert row["state"] in fixture["states"]
-    _assert_no_forbidden(body, fixture["forbidden"], where="list")
+    _assert_no_forbidden(body, blocks["forbidden"], where="list")
 
     # The absence rule: the labelled row carries its name, the other does not —
     # and neither carries a credential fact, because S4c's per-device route is
@@ -256,7 +299,7 @@ def test_the_unrevoke_success_matches_the_frozen_body() -> None:
     # device_id is machine-minted (uuid4().hex), so the literal is the shape's
     # example and only the field set can be compared verbatim.
     assert response.json() == {**fixture["example"], "device_id": device["device_id"]}
-    _assert_no_forbidden(response.json(), fixture["forbidden"], where="unrevoke")
+    _assert_no_forbidden(response.json(), _shape_blocks(fixture)["forbidden"], where="unrevoke")
 
     assert client.get("/api/push/devices").json()["devices"][0]["state"] == "live"
     assert (
@@ -309,3 +352,83 @@ def test_a_wrong_operator_key_is_the_machine_only_refusal() -> None:
 def test_no_registry_response_carries_the_operator_key(name: str) -> None:
     """No shape in this tree may hand a caller the machine's own secret."""
     assert OPERATOR_KEY_FIELD not in _keys(_fixture(name)["example"])
+
+
+@pytest.mark.parametrize("name", REGISTRY_FIXTURES)
+def test_every_filed_example_obeys_the_shape_that_governs_it(name: str) -> None:
+    """The litteral each lane transcribes, checked against its own declaration.
+
+    The route cells check what the CODE answers; this checks the FILE, which is
+    the artefact the app and the cloud copy from. Without it an example could
+    grow an undeclared field, or a forbidden one, or lose a required one and
+    every cell would still pass — the gap QA round 1's Q1 and the review's M2
+    both filed (the same field arriving on a live response WAS caught, which is
+    exactly the asymmetry worth closing).
+    """
+    fixture = _fixture(name)
+    blocks = _shape_blocks(fixture)
+    example = fixture["example"]
+    where = f"{name}.example"
+
+    if "body_required" in fixture:
+        # A refusal body is exactly its declared fields — there is no optional
+        # set to hedge with, so the key-set equality IS the check.
+        assert set(example) == set(fixture["body_required"]), f"{where}: {sorted(example)}"
+        _assert_shape(example, fixture["body_required"], {}, where=where)
+
+    if blocks.get("required") or blocks.get("optional"):
+        _assert_shape(example, blocks.get("required", {}), blocks.get("optional", {}), where=where)
+    _assert_no_forbidden(example, blocks.get("forbidden", []), where=where)
+
+    if "device_required" in fixture:
+        rows = example["devices"]
+        assert rows, f"{where}: the list example must show at least one device"
+        for index, row in enumerate(rows):
+            _assert_shape(
+                row,
+                fixture["device_required"],
+                fixture["device_optional"],
+                where=f"{where}.devices[{index}]",
+            )
+        required = set(fixture["device_required"])
+        optional = set(fixture["device_optional"])
+        assert any(set(row) == required for row in rows), (
+            f"{where}: no row shows the ABSENCE rule — a device carrying only its "
+            "always-present fields and none of the optional ones"
+        )
+        assert any(
+            required < set(row) <= required | optional for row in rows
+        ), f"{where}: no row shows a device that also carries its optional fields"
+
+
+def test_the_rotation_fixture_inherits_its_shape_instead_of_restating_it() -> None:
+    """``same_as`` is load-bearing, and a disagreeing restatement is refused."""
+    rotation = _fixture("registry-register-rotation.json")
+    assert rotation["same_as"] == "registry-register-response.json"
+    for key in ("required", "optional", "forbidden"):
+        assert (
+            key not in rotation
+        ), f"{key!r} is restated: two copies of one allow-list is how they drift"
+    assert _shape_blocks(rotation) == _shape_blocks(_fixture(rotation["same_as"]))
+
+    # The resolver's drift check bites — the guard is the resolver, not the
+    # absence of the key.
+    with pytest.raises(AssertionError, match="restated here and disagrees"):
+        _shape_blocks({**rotation, "required": {"ok": "str"}})
+
+
+@pytest.mark.parametrize("name", REGISTRY_FIXTURES)
+def test_no_registry_fixture_is_silently_unguarded(name: str) -> None:
+    """Every shape either declares a real deny list or carries an exact-set guard.
+
+    The anti-regression for QA round 1's Q3 / the review's N2: an empty
+    ``forbidden: []`` reads as a guard while refusing nothing, and a fixture with
+    neither a deny list nor a closed body is a shape nothing checks at all.
+    """
+    fixture = _fixture(name)
+    if "forbidden" in fixture:
+        assert fixture["forbidden"], f"{name}: an empty deny list is a guard that is not one"
+        return
+    assert (
+        "same_as" in fixture or "body_required" in fixture
+    ), f"{name} declares no deny list and no exact-set body: nothing guards this shape"

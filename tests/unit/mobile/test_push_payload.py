@@ -70,7 +70,30 @@ def _assert_type(where: str, value: object, type_name: str) -> None:
             value, bool
         ), f"{where}: expected int, got {type(value).__name__}"
         return
+    if type_name == "list[str]":
+        # The ITEMS, not just the list: a bare ``list`` would accept
+        # ``exclude: [1, 2]``, and ``exclude`` carries device ids the cloud
+        # matches against its registry (review round 1, N3).
+        assert isinstance(value, list), f"{where}: expected list, got {type(value).__name__}"
+        offenders = [item for item in value if not isinstance(item, str)]
+        assert not offenders, f"{where}: non-string item(s) {offenders!r}"
+        return
     assert isinstance(value, expected), f"{where}: expected {type_name}, got {type(value).__name__}"
+
+
+def _walk_values(value: object) -> list[str]:
+    """Every string at every depth, for the value-level half of the deny scan.
+
+    Keys alone are not enough: the rule the file states is about what a raw
+    session id or a conversation name must not REACH, and a value is where one
+    would travel (review round 1, N3 — a substring test on the serialized body
+    would also fail a correct payload whose value merely contained the text).
+    """
+    if isinstance(value, dict):
+        return [item for entry in value.values() for item in _walk_values(entry)]
+    if isinstance(value, list):
+        return [item for entry in value for item in _walk_values(entry)]
+    return [value] if isinstance(value, str) else []
 
 
 def _check_shape(
@@ -110,16 +133,71 @@ def _forbidden() -> dict[str, str]:
     return _fixture("payload-forbidden-fields.json")["forbidden"]
 
 
+#: One report-block row, the emit cells' INPUT.
+#:
+#: THE TEST OWNS THE INPUT; THE FILE OWNS THE EXPECTED OUTPUT (review round 1,
+#: M1). Feeding ``fixture["body"]["devices"]`` into :func:`emit_body` and
+#: comparing the result to that same file made the comparison a tautology: a row
+#: edited in the fixture moved both sides at once, which is why the block's
+#: declared allow-list could be broken without a red cell. Written here, either
+#: side drifting fails — a field dropped from this row is missing from the built
+#: body, and a field dropped from the file is missing from the expected one.
+DEVICE_ROWS: list[dict[str, Any]] = [
+    {
+        "device_id": "3f1c9a7b2d4e506182a3b4c5d6e7f809",
+        "credential_live": True,
+        "credential_expires_at": 1791592000,
+        "last_authenticated_at": 1789099000,
+    }
+]
+
+#: The completion emit's input, spelled here rather than read back from
+#: ``emit-completion.json`` for the same reason as :data:`DEVICE_ROWS`.
+COMPLETION_INPUT: dict[str, Any] = {
+    "computer": "VZ8kQ1mT4pR7sW2xY6bN9c",
+    "conversation": "jH3kL9mN2pQ5rS8tU1vW4x",
+    "completion_token": "9f5d1d6e-6b1a-4c6e-9b3a-7a1c2f3d4e5f",
+    "kind": "complete",
+    "emit_id": "6b1e2d3c4a5f60718293a4b5c6d7e8f9",
+    "count": 2,
+}
+
+#: The attention emit's input: one field fewer (no ``conversation``, no
+#: ``completion_token``, no ``kind``) and an ``exclude`` naming one device.
+ATTENTION_INPUT: dict[str, Any] = {
+    "computer": "VZ8kQ1mT4pR7sW2xY6bN9c",
+    "count": 1,
+    "emit_id": "1a2b3c4d5e6f708192a3b4c5d6e7f809",
+}
+
+
+def _check_block(rows: object, fixture: dict[str, Any], *, where: str) -> None:
+    """Every report-block row against the block's OWN allow-list.
+
+    ``report_block_required`` / ``report_block_optional`` are the §3.2 block's
+    declaration, and before this they were read by nothing: the block was only
+    ever compared as a pass-through, so an extra ``platform``, a retyped
+    ``last_authenticated_at`` or a row missing ``credential_live`` travelled
+    unguarded (review round 1, M1).
+    """
+    assert isinstance(rows, list) and rows, f"{where}: expected a non-empty block"
+    for index, row in enumerate(rows):
+        _check_shape(
+            row,
+            fixture["report_block_required"],
+            fixture["report_block_optional"],
+            where=f"{where}[{index}]",
+        )
+
+
 def _completion_from_fixture(fixture: dict[str, Any]) -> dict[str, Any]:
-    payload = fixture["payload"]
-    return completion_payload(
-        computer=payload["computer"],
-        conversation=payload["conversation"],
-        completion_token=payload["completion_token"],
-        kind=payload["kind"],
-        emit_id=payload["emit_id"],
-        count=payload["count"],
-    )
+    """The builder's output for :data:`COMPLETION_INPUT`, not for the file's.
+
+    The fixture is the EXPECTED side of this comparison; taking the input from it
+    too would make the cell agree with whatever the file says (review round 1,
+    M1).
+    """
+    return completion_payload(**COMPLETION_INPUT)
 
 
 def test_the_completion_payload_and_emit_body_equal_the_filed_literals() -> None:
@@ -140,7 +218,13 @@ def test_the_completion_payload_and_emit_body_equal_the_filed_literals() -> None
         "fixture's allow-list in the same change"
     )
 
-    body = emit_body(payload, fixture["body"]["devices"])
+    body = emit_body(payload, DEVICE_ROWS)
+    # Both sides of the block, against the block's own allow-list FIRST, so a
+    # block-shaped defect reports which field was wrong rather than the blunter
+    # "these two objects differ": the rows this test built, and the literal the
+    # next repos copy.
+    _check_block(body["devices"], fixture, where="emit-completion.body.devices")
+    _check_block(fixture["body"]["devices"], fixture, where="emit-completion.filed.devices")
     assert body == fixture["body"], "the emit body is the payload plus the report block"
     assert set(body) - set(payload) == {"devices"}
 
@@ -149,12 +233,7 @@ def test_the_attention_payload_equals_the_filed_literals_with_and_without_exclud
     fixture = _fixture("emit-attention.json")
     payload = fixture["payload"]
 
-    with_exclude = attention_payload(
-        computer=payload["computer"],
-        count=payload["count"],
-        emit_id=payload["emit_id"],
-        exclude=payload["exclude"],
-    )
+    with_exclude = attention_payload(**ATTENTION_INPUT, exclude=[DEVICE_ROWS[0]["device_id"]])
     _check_shape(
         with_exclude,
         fixture["payload_required"],
@@ -167,16 +246,48 @@ def test_the_attention_payload_equals_the_filed_literals_with_and_without_exclud
     # ``exclude`` absent is a whole, valid payload — not an empty list. A
     # tick-detected change never knows who acknowledged, and the cloud reads one
     # spelling of "exclude nobody".
-    without = attention_payload(
-        computer=payload["computer"],
-        count=payload["count"],
-        emit_id=payload["emit_id"],
-    )
+    without = attention_payload(**ATTENTION_INPUT)
     assert without == fixture["exclude_absent_payload"]
     assert "exclude" not in without
 
-    body = emit_body(without, fixture["body"]["devices"])
-    assert set(body) - set(without) == {"devices"}
+    body = emit_body(with_exclude, DEVICE_ROWS)
+    _check_block(body["devices"], fixture, where="emit-attention.body.devices")
+    _check_block(fixture["body"]["devices"], fixture, where="emit-attention.filed.devices")
+    assert body == fixture["body"], "the emit body is the payload plus the report block"
+
+
+def test_the_report_block_allow_list_rejects_an_extra_or_mistyped_row() -> None:
+    """The block's declaration bites — the mutation the review round filed as M1.
+
+    A pure negative: each of these rows is what the guard must refuse, so the
+    cell fails if a later edit loosens ``_check_shape`` or drops the block's
+    declaration.
+    """
+    fixture = _fixture("emit-completion.json")
+    good = DEVICE_ROWS[0]
+
+    with pytest.raises(AssertionError, match="unlisted field"):
+        _check_block([{**good, "platform": "ios"}], fixture, where="mutated.devices")
+    with pytest.raises(AssertionError, match="required field 'credential_live' is missing"):
+        _check_block(
+            [{key: value for key, value in good.items() if key != "credential_live"}],
+            fixture,
+            where="mutated.devices",
+        )
+    with pytest.raises(AssertionError, match="expected int"):
+        _check_block(
+            [{**good, "last_authenticated_at": "whenever"}], fixture, where="mutated.devices"
+        )
+    with pytest.raises(AssertionError, match="expected bool"):
+        _check_block([{**good, "credential_live": "true"}], fixture, where="mutated.devices")
+
+    # The dropping direction is the emit cells': the block row is the test's own
+    # input there, so a row that loses a field the filed body carries cannot
+    # equal ``fixture["body"]``. Asserted here on the file side so the pair is
+    # visible in one place.
+    assert set(fixture["report_block_required"]) | set(fixture["report_block_optional"]) == set(
+        fixture["body"]["devices"][0]
+    ), "the filed row carries exactly the declared fields"
 
 
 def test_the_attention_form_carries_no_completion_field() -> None:
@@ -235,8 +346,6 @@ def test_no_forbidden_field_appears_anywhere_in_a_filed_shape(name: str) -> None
 
 def test_the_two_payloads_carry_nothing_the_cloud_must_not_hold() -> None:
     """The machine's own output, scanned against the deny list and for a raw id."""
-    completion_fixture = _fixture("emit-completion.json")
-    attention_fixture = _fixture("emit-attention.json")
     forbidden = set(_forbidden())
 
     session_id = "session-2f1c9a7b"
@@ -251,7 +360,7 @@ def test_the_two_payloads_carry_nothing_the_cloud_must_not_hold() -> None:
         count=1,
     )
     bodies = [
-        emit_body(completion, completion_fixture["body"]["devices"]),
+        emit_body(completion, DEVICE_ROWS),
         emit_body(
             attention_payload(
                 computer="c" * 22,
@@ -259,15 +368,22 @@ def test_the_two_payloads_carry_nothing_the_cloud_must_not_hold() -> None:
                 emit_id="99887766554433221100ffeeddccbbaa",
                 exclude=["d" * 32],
             ),
-            attention_fixture["body"]["devices"],
+            DEVICE_ROWS,
         ),
     ]
 
     for body in bodies:
         assert not (set(_walk_keys(body)) & forbidden), "a forbidden key reached the wire"
-        text = json.dumps(body)
-        assert session_id not in text, "a raw session id reached the wire"
-        assert "aps" not in text, "the APNs envelope is the cloud's to build, not the machine's"
+        # Values, not the serialized text: a substring test on ``json.dumps`` would
+        # also fire on a correct payload whose value merely contained the text, and
+        # a raw session id smuggled INSIDE a value still leaks — so the check is a
+        # substring test over every string the body carries.
+        assert not any(
+            session_id in value for value in _walk_values(body)
+        ), "a raw session id reached the wire"
+        assert "aps" not in _walk_keys(
+            body
+        ), "the APNs envelope is the cloud's to build, not the machine's"
         # The handle is the wire identity: 22 base64url characters (§4's mint).
         assert re.fullmatch(r"[A-Za-z0-9_-]{22}", completion["conversation"])
 
