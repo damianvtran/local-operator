@@ -47,7 +47,8 @@
       "delegate": false,
       "tags": [
         "role",
-        "tools:read,glob,grep,list_variables,read_variable,bash,todo,write,web_search,web_fetch"
+        "tools:read,glob,grep,list_variables,read_variable,bash,todo,write,web_search,web_fetch",
+        "class:reactive"
       ],
       "categories": [
         "role"
@@ -65,7 +66,8 @@
       "effort": null,
       "delegate": false,
       "tags": [
-        "role"
+        "role",
+        "class:reactive"
       ],
       "categories": [
         "role"
@@ -83,7 +85,8 @@
       "effort": null,
       "delegate": false,
       "tags": [
-        "role"
+        "role",
+        "class:reactive"
       ],
       "categories": [
         "role"
@@ -101,7 +104,8 @@
       "effort": null,
       "delegate": false,
       "tags": [
-        "role"
+        "role",
+        "class:reactive"
       ],
       "categories": [
         "role"
@@ -132,7 +136,8 @@
       "tags": [
         "role",
         "tools:read,glob,grep,list_variables,read_variable,bash,todo,project,web_search,web_fetch",
-        "delegate:yes"
+        "delegate:yes",
+        "class:reactive"
       ],
       "categories": [
         "role"
@@ -161,7 +166,8 @@
       "delegate": false,
       "tags": [
         "role",
-        "tools:read,glob,grep,list_variables,read_variable,bash,todo,web_search,web_fetch"
+        "tools:read,glob,grep,list_variables,read_variable,bash,todo,web_search,web_fetch",
+        "class:reactive"
       ],
       "categories": [
         "role"
@@ -188,7 +194,8 @@
       "delegate": false,
       "tags": [
         "role",
-        "tools:read,glob,grep,list_variables,read_variable,web_search,web_fetch"
+        "tools:read,glob,grep,list_variables,read_variable,web_search,web_fetch",
+        "class:reactive"
       ],
       "categories": [
         "role"
@@ -206,7 +213,8 @@
       "effort": null,
       "delegate": false,
       "tags": [
-        "role"
+        "role",
+        "class:reactive"
       ],
       "categories": [
         "role"
@@ -224,7 +232,8 @@
       "effort": null,
       "delegate": false,
       "tags": [
-        "role"
+        "role",
+        "class:reactive"
       ],
       "categories": [
         "role"

@@ -84,15 +84,38 @@ class TestTags:
     def test_a_tag_round_trips_case_insensitively(self) -> None:
         assert class_from_tags(["role", "Class:Proactive"]) == PROACTIVE
 
-    def test_reactive_is_encoded_by_absence(self) -> None:
+    def test_reactive_is_written_explicitly_not_left_absent(self) -> None:
+        """A deliberate ``reactive`` is RECORDED, not implied by an absence.
+
+        This is the encoding the class backfill's safety rests on
+        (``agent_profiles.backfill_seed_action_class``): a row with no class tag
+        means "never classified" — the state every row installed before the
+        class feature existed is in — while a row the operator switched off
+        says so. Without the distinction, a repair for those pre-class rows
+        would equally re-arm a check-in the operator had switched off, which is
+        the one outcome the class exists to prevent.
+        """
         tags = with_class_tag(["role", "class:proactive", "seed:aida"], REACTIVE)
-        assert tags == ("role", "seed:aida")
+        assert tags == ("role", "seed:aida", "class:reactive")
         assert with_class_tag(tags, REACTIVE) == tags  # idempotent
+        assert class_from_tags(tags) == REACTIVE
+        # ...and absent still reads reactive, so pre-class rows and rows
+        # installed from a starter that declares nothing keep working.
+        assert class_from_tags(["role", "seed:aida"]) == REACTIVE
 
     def test_proactive_is_appended_once(self) -> None:
         tags = with_class_tag(["role"], PROACTIVE)
         assert tags == ("role", "class:proactive")
         assert with_class_tag(tags, PROACTIVE) == tags
+
+    def test_a_flip_replaces_rather_than_stacks(self) -> None:
+        # One class tag per row is the invariant the readers depend on
+        # (``class_from_tags`` takes the first): flipping back and forth must
+        # not leave a duplicate behind for a later flip to trip over.
+        tags = with_class_tag(["role", "class:proactive"], REACTIVE)
+        again = with_class_tag(tags, PROACTIVE)
+        assert again == ("role", "class:proactive")
+        assert [t for t in again if t.startswith("class:")] == ["class:proactive"]
 
 
 class TestSessionActionClass:

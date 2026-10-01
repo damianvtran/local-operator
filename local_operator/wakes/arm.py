@@ -1018,6 +1018,48 @@ def _read_index_entry(config_dir: Path, session_id: str) -> dict[str, Any]:
         return {}
 
 
+async def repair_index(config_dir: Path, session_id: str, *, cwd: str | None = None) -> bool:
+    """Re-project a session's TRANSCRIPT rows onto the derived index.
+
+    WHY THIS EXISTS, given ``store`` documents the index as "derived, never
+    authoritative" with "the next open repairs it". That repair needs an open,
+    and an open is exactly what the wake supervisor ENGAGES — for a wake it can
+    only see in the index. A session whose index entry is missing, empty or
+    behind its transcript therefore has a schedule nothing will fire until the
+    operator happens to open the conversation: the derived file being wrong is
+    not harmless, it is a dropped wake with a delay on it.
+
+    The window is real rather than theoretical, because every external arm
+    writes transcript first and index second (the ordering the whole
+    subsystem shares) — a crash, a kill or a full disk between the two leaves
+    the transcript holding rows the index has never seen. The engine's boot
+    arm hits it as a CONFLICT on its own ``aida-cadence`` row: the row is
+    there, so nothing is armed, and without this call nothing would repair it
+    either.
+
+    Writes only what the transcript already says (no row is invented,
+    advanced or retired), preserves the entry's own keys through ``write_entry``
+    (``stopped_at``, the lateness stamps), and is a no-op for the common case of
+    a session with no rows. Best-effort like every other writer here: an
+    unreadable transcript leaves the index alone and answers False.
+    """
+
+    session_dir = Path(config_dir) / "sessions" / session_id
+    try:
+        rows = await asyncio.to_thread(_read_rows, session_dir)
+    except Exception:  # noqa: BLE001 — an unreadable transcript is not proof of "no wakes"
+        logger.debug("could not read %s's rows for an index repair", session_id, exc_info=True)
+        return False
+    previous = _read_index_entry(config_dir, session_id)
+    resolved = cwd or _resolved_cwd(session_dir, previous)
+    try:
+        _write_index(config_dir, session_id, resolved, rows, previous)
+    except Exception:  # noqa: BLE001 — the index is derived; the transcript stands
+        logger.warning("could not repair the wake index for %s", session_id, exc_info=True)
+        return False
+    return True
+
+
 def _write_index(
     config_dir: Path,
     session_id: str,
