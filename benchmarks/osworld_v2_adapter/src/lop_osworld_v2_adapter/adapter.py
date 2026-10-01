@@ -120,13 +120,17 @@ class InfeasibleTaskExcluded(RuntimeError):
 
 
 class JudgeUnavailable(RuntimeError):
-    """A judged task was started without the judge credential and settings.
+    """A judged task was started without a usable judge credential and settings.
 
-    Raised from ``reset_start`` BEFORE allocation. ``inspect_requirements``
-    already names the judge key/provider/model as required for such a task,
-    so a host that runs preflight never reaches this; it exists so a host
-    that skipped preflight cannot spend money on an episode OSWorld would
-    score as a silent zero (``llm_metrics`` returns 0.0 on any exception).
+    Raised from ``reset_start`` BEFORE allocation, for either half of
+    "configured": a missing key/provider/model (``inspect_requirements``
+    already names them as required, so a host that runs preflight never
+    reaches this) or a provider VALUE the vendored evaluator client cannot
+    construct (see ``_resolve_judge_provider``; the requirements table can
+    only check presence, and the judge fails closed on anything else). It
+    exists so a host that skipped preflight cannot spend money on an episode
+    OSWorld would score as a silent zero (``llm_metrics`` returns 0.0 on any
+    exception).
     """
 
 
@@ -144,6 +148,21 @@ class InputsMismatch(RuntimeError):
 _JUDGE_KEY = "OSWORLD_EVAL_MODEL_API_KEY"
 _USER_SIM_KEY = "OSWORLD_USER_SIM_API_KEY"
 _DEFAULT_INPUTS_ROOT = "~/worktrees/osworld"
+
+# Judge provider names the vendored evaluator client does not know, mapped to
+# the shape it does: (registered provider, the service's default endpoint).
+# OpenRouter is an OpenAI-compatible aggregator, and the registry's own
+# documented configuration for any such endpoint is ``openai_compatible`` plus
+# a base URL (``OpenAIBackend.__init__`` forwards ``base_url`` to the OpenAI
+# client; the registry docstring lists the same shape for DeepSeek, Ollama and
+# Azure). The campaign driver pins ``OSWORLD_EVAL_MODEL_PROVIDER=openrouter``,
+# so without this mapping every judged task scores a silent zero -- the judge's
+# bare ``except Exception`` swallows ``create_backend``'s ValueError. Anything
+# not in this table and not registered is refused BY NAME; see
+# ``_resolve_judge_provider``.
+_JUDGE_PROVIDER_ALIASES: dict[str, tuple[str, str]] = {
+    "openrouter": ("openai_compatible", "https://openrouter.ai/api/v1"),
+}
 
 
 def _episode_cache_root(artifact_root: Path, episode_id: str) -> Path:
@@ -507,6 +526,11 @@ class OSWorldV2Adapter:
                     f"{missing} were not supplied; OSWorld would return a silent "
                     "0.0, which this adapter refuses to seal"
                 )
+            # Present is not the same as usable: a provider VALUE the vendored
+            # client cannot construct fails closed into a silent 0, so it gets
+            # the same refusal -- before any allocation -- or a written
+            # normalisation the judge will actually read.
+            self._resolve_judge_provider(params.task_id)
         # The proxy pool, checked HERE rather than in prepare because prepare
         # has no task: PrepareParams carries no task_id and self._task is first
         # populated a few lines above, so a prepare-time check reads
@@ -648,6 +672,48 @@ class OSWorldV2Adapter:
             if value.name == name:
                 return value.value
         return None
+
+    def _resolve_judge_provider(self, task_id: str) -> None:
+        """Make the configured judge provider one the vendored client can construct.
+
+        The judge call site fails closed -- ``generate_text`` is wrapped in a
+        bare ``except Exception: return False`` -- so a provider VALUE the
+        registry cannot serve is a silent per-metric False: a guaranteed 0
+        that reads like a capability miss. The missing-refs gate above cannot
+        see it (the value is present, just unusable). Known aliases are
+        normalised to the registered backend they name; anything else that is
+        not registered is refused BY NAME, before any resource is allocated.
+        The write below overwrites what ``inject_infra_environment`` put in the
+        environment at ``prepare``: the judge reads this name at CALL time,
+        never at import, so the correction is not too late.
+        """
+
+        provider = self._infra("OSWORLD_EVAL_MODEL_PROVIDER")
+        if provider is None:
+            # Unreachable for a judged task -- the missing-refs gate above
+            # fires first -- so do not fabricate a refusal from absence.
+            return
+        alias = _JUDGE_PROVIDER_ALIASES.get(provider)
+        if alias is None:
+            available = vendor_bridge.model_client_providers()
+            if provider in available:
+                return
+            raise JudgeUnavailable(
+                f"task {task_id!r} scores through the LLM judge but its "
+                f"provider {provider!r} is not one the vendored evaluator "
+                f"client can construct (registered: {', '.join(available)}; "
+                f"known aliases: {', '.join(sorted(_JUDGE_PROVIDER_ALIASES))}); "
+                "OSWorld's judge fails closed (bare `except Exception: return "
+                "False`), so the episode would grade a silent 0.0, which this "
+                "adapter refuses to seal"
+            )
+        service_provider, default_base_url = alias
+        os.environ["OSWORLD_EVAL_MODEL_PROVIDER"] = service_provider
+        # An explicitly supplied base URL always wins: the operator's endpoint
+        # is a deliberate override, and the alias only supplies the default
+        # the bare service name cannot carry.
+        if not self._infra("OSWORLD_EVAL_MODEL_BASE_URL"):
+            os.environ["OSWORLD_EVAL_MODEL_BASE_URL"] = default_base_url
 
     def _aws_credentials(self) -> Any:
         from lop_osworld_v2_adapter.providers.aws import AwsCredentials

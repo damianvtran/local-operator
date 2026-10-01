@@ -156,6 +156,32 @@ def load_desktop_env() -> Any:
     return DesktopEnv
 
 
+def model_client_providers() -> tuple[str, ...]:
+    """Provider names the vendored evaluator model client can construct.
+
+    The judge resolves its backend through ``desktop_env.evaluators.backends``,
+    a closed registry: ``create_backend`` raises ``ValueError`` for any other
+    name, and the judge's call site wraps everything in a bare
+    ``except Exception: return False`` -- so an unusable provider VALUE silently
+    scores zero instead of failing. The adapter's judge preflight reads this
+    list to tell "present" apart from "usable" before any resource is
+    allocated, and it asks the registry itself rather than keeping a copy that
+    would drift from the pinned upstream.
+
+    Lazy, per the module rule, and a narrow import: this submodule pulls in the
+    four backend modules and ``desktop_env.image_utils`` only, and reads no
+    environment at import (measured), so it is safe on the stripped worker
+    environment at ``reset_start`` time. An unimportable vendored tree fails
+    HERE -- loudly, and before allocation -- rather than after the VM is billed.
+    """
+
+    from desktop_env.evaluators.backends import (  # type: ignore[import-not-found]
+        list_providers,
+    )
+
+    return tuple(list_providers())
+
+
 def instantiate_task(module_path: str, task_id: str) -> Any:
     """Import the task module by file location and instantiate its task class.
 

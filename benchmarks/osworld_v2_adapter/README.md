@@ -324,6 +324,16 @@ does NOT create IAM roles or security groups; those are one-time human steps.
    worker writes into its own environment (OSWorld reads it from nowhere
    else); it is scrubbed on `close`.
 
+   The provider VALUE must also be one the vendored evaluator client can
+   construct. An unregistered name (the same silent-zero shape) is **refused
+   by name at `reset_start`**, before allocation; the known alias
+   `openrouter` is normalised to `openai_compatible` plus
+   `https://openrouter.ai/api/v1`, and an explicitly supplied
+   `OSWORLD_EVAL_MODEL_BASE_URL` always wins. Note the spend consequence: a
+   judged episode now spends its judge call where it previously spent nothing
+   and scored 0 — the call is what the judge wiring was always for, and it is
+   no longer silent.
+
 7. **Anything else the task's own source declares** → the value that requirement
    names, as a `--secret` ref or an `--infra` value (the refusal names which, and
    which substitute will also do). A task whose controller reads a value when the
