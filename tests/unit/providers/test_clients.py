@@ -2384,7 +2384,7 @@ def _strip_cache_markers(value: Any) -> Any:
     """A body fragment normalized for content comparison.
 
     Drops every ``cache_control`` marker (a directive, not prompt content --
-    the live probes behind the settled-boundary policy read byte-identical
+    the live probes behind the settled-boundary policy read token-identical
     prompts across different marker layouts) and normalizes a plain-string
     message body to its single-text-part form, since a marker landing on a
     message converts it from one shape to the other without changing the
@@ -2415,6 +2415,38 @@ def _frame_history(newest_data: str) -> list[Message]:
         Message.assistant("acting"),
         Message.user("newest observation", [_tiny_frame(newest_data)]),
     ]
+
+
+def _anthropic_frame_history(newest_data: str) -> list[Message]:
+    """A screenshot session the way the ANTHROPIC renderer produces it.
+
+    Screenshots arrive as TOOL RESULTS, and ``AnthropicClient._build_body``
+    nests a tool result's frame inside ``tool_result.content`` -- so there is
+    no top-level ``image`` part anywhere in the conversation, and a scan that
+    only looks at the top level finds no frame at all. Each tool row is
+    preceded by its assistant tool-call turn (which is also what stops the
+    two rows from being grouped into one user message).
+    """
+    return [
+        Message.user("task"),
+        Message(role="assistant", tool_calls=[ToolCall(id="c1", name="shot", arguments={})]),
+        Message(
+            role="tool",
+            tool_call_id="c1",
+            content=[TextContent(text="step 1"), _tiny_frame("b2xk")],
+        ),
+        Message(role="assistant", tool_calls=[ToolCall(id="c2", name="shot", arguments={})]),
+        Message(
+            role="tool",
+            tool_call_id="c2",
+            content=[TextContent(text="step 2"), _tiny_frame(newest_data)],
+        ),
+    ]
+
+
+def _marked_message_indices(messages: list[dict[str, Any]]) -> list[int]:
+    """Every message index carrying a ``cache_control`` marker anywhere."""
+    return [i for i, m in enumerate(messages) if "cache_control" in json.dumps(m.get("content"))]
 
 
 def _image_message_indices(messages: list[dict[str, Any]], part_type: str) -> list[int]:
@@ -2474,6 +2506,11 @@ def test_openai_compat_settled_block_survives_a_frame_rerender() -> None:
     msgs1 = turn1["messages"]
     settled_idx = _image_message_indices(msgs1, "image_url")[-1] - 1
     covered = _strip_cache_markers(msgs1[: settled_idx + 1])
+    # The policy has to be LIVE on that block, or this test holds under the
+    # old placement too (it compares marker-STRIPPED content, which is the
+    # same either way) and could not detect a revert -- which is the only
+    # thing that makes it a regression test.
+    assert "cache_control" in msgs1[settled_idx]["content"][-1]
 
     # turn 2: the previously-newest frame is re-rendered smaller (the churn)
     # and the conversation appends a batch
@@ -2487,6 +2524,9 @@ def test_openai_compat_settled_block_survives_a_frame_rerender() -> None:
     msgs2 = turn2["messages"]
     assert _strip_cache_markers(msgs2[: settled_idx + 1]) == covered
     assert len(msgs2) - settled_idx <= 4  # still inside the lookback
+    # the boundary followed the tail: turn 2's own settled message is marked
+    settled_idx2 = _image_message_indices(msgs2, "image_url")[-1] - 1
+    assert "cache_control" in msgs2[settled_idx2]["content"][-1]
     # sanity: the churn is real -- the newest frame's bytes changed
     churned = _strip_cache_markers(msgs2)[settled_idx + 1]
     assert churned != _strip_cache_markers(msgs1)[settled_idx + 1]
@@ -2511,6 +2551,82 @@ def test_anthropic_settled_breakpoint_replaces_the_old_user_turn_marker() -> Non
     assert "cache_control" not in str(messages[0].get("content"))
     total = len([e for e in body["system"] if "cache_control" in e]) + 2
     assert total <= AnthropicClient.MAX_CACHE_BREAKPOINTS
+
+
+def test_anthropic_settled_breakpoint_fires_on_nested_tool_result_frames() -> None:
+    """The Anthropic half must fire on the shape the renderer REALLY sends.
+
+    Screenshot sessions put every frame inside ``tool_result.content``, so
+    the top level of the body carries no ``image`` part at all. A scan that
+    only read the top level returned ``None`` here and left the second marker
+    on the newest-but-one tool result -- the frame that is re-encoded on the
+    next turn, which is the churn this policy exists to step over.
+    """
+    body = AnthropicClient()._build_body(
+        ChatRequest(
+            model=_spec(provider="anthropic"),
+            system_blocks=["instructions", "inventory"],
+            messages=_anthropic_frame_history("ZnJhbWU="),
+        )
+    )
+    messages = body["messages"]
+    top_level = [
+        p
+        for m in messages
+        if isinstance(m.get("content"), list)
+        for p in m["content"]
+        if isinstance(p, dict) and p.get("type") == "image"
+    ]
+    nested = [
+        p
+        for m in messages
+        if isinstance(m.get("content"), list)
+        for p in m["content"]
+        if isinstance(p, dict)
+        and p.get("type") == "tool_result"
+        and any(q.get("type") == "image" for q in p["content"] if isinstance(q, dict))
+    ]
+    assert top_level == [] and len(nested) == 2  # every frame is nested
+
+    # the boundary is the assistant tool-call turn before the newest frame
+    assert messages[3]["content"][-1]["type"] == "tool_use"
+    assert "cache_control" in messages[3]["content"][-1]
+    assert "cache_control" in messages[-1]["content"][-1]
+    # ...and not on the older frame's tool result, which is what base marked
+    assert _marked_message_indices(messages) == [3, 4]
+    total = len([e for e in body["system"] if "cache_control" in e]) + 2
+    assert total <= AnthropicClient.MAX_CACHE_BREAKPOINTS
+
+
+def test_identical_consecutive_frames_keep_the_settled_breakpoint() -> None:
+    """Two byte-identical frames must still get two markers.
+
+    An unchanged screen renders identical frame bytes, so the settled block
+    and the newest message's block compare EQUAL while being different parts.
+    Deduping by value dropped the settled marker and sent the turn with the
+    system head and the last message only -- the collapse by another route,
+    reached non-deterministically.
+    """
+    spec = _spec()
+    spec.supports_prompt_cache = True
+    same = "c2FtZS1mcmFtZQ=="
+    body = OpenAICompatClient("https://x")._build_body(
+        ChatRequest(
+            model=spec,
+            system_blocks=["instructions", "inventory"],
+            messages=[
+                Message.user("task"),
+                Message.user("first observation", [_tiny_frame(same)]),
+                Message.user("second observation", [_tiny_frame(same)]),
+            ],
+        )
+    )
+    messages = body["messages"]
+    frames = _image_message_indices(messages, "image_url")
+    assert len(frames) == 2
+    # both frames keep a marker: the settled boundary is a DIFFERENT part that
+    # happens to carry the same bytes, not the last message's block again
+    assert _marked_message_indices(messages) == frames
 
 
 def test_cache_markers_fall_back_to_the_previous_user_turn_without_frames() -> None:
