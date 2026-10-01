@@ -1603,9 +1603,7 @@ def test_a_candidate_without_a_session_still_signals_and_stages_nothing(
     assert list(tmp_path.glob("sessions/*/runtime-stop.json")) == []
 
 
-def test_an_unattestable_signal_is_logged_and_still_sent(
-    tmp_path: Path, caplog
-) -> None:
+def test_an_unattestable_signal_is_logged_and_still_sent(tmp_path: Path, caplog) -> None:
     """A gap in the artifact is SAID, never swallowed — and never blocks the act.
 
     The conversation directory does not exist here (no mkdir), which is the one
