@@ -110,6 +110,13 @@ def _deadline(minutes: int) -> int:
     return int(time.time() * 1000) + minutes * 60_000
 
 
+#: Longer than any width this capture set uses, so it MUST wrap if the row is
+#: allowed to (round 3).
+LONG_QUESTION = (
+    "Which rollout should the stale-row migration take tonight, and which shard "
+    "should take the read traffic while the backfill runs?"
+)
+
 THREE = [
     _row(
         "a1",
@@ -227,6 +234,21 @@ async def main() -> None:
             # whose count and rows the late answer must not appear in — rather
             # than collapsing to a single ask's card.
             app._sync_ask_surface(ask_rows([dict(THREE[0], status="late"), THREE[1], THREE[2]]))
+            await pilot.pause()
+            app._expand_asks()
+        elif mode == "list-long":
+            # Round 3's wrap defect: questions that cannot fit one line. The
+            # frame is the evidence that each ask spends exactly ONE painted
+            # row, which is the assumption the pointer hit test rests on.
+            app._sync_ask_surface(
+                ask_rows(
+                    [
+                        _row("a1", LONG_QUESTION),
+                        _row("a2", LONG_QUESTION, urgent=True),
+                        _row("a3", LONG_QUESTION),
+                    ]
+                )
+            )
             await pilot.pause()
             app._expand_asks()
         elif mode == "list-refreshed":
