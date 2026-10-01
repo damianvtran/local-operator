@@ -62,8 +62,13 @@ claimed would silence the desktop banner on this machine and a desktop claim
 would silence the phone (ADR §2.3, decision 1). It NEVER acknowledges anything:
 the attention emit is a consequence of a read that already moved, so
 :meth:`PushWorker.note_ack` takes the acting device's id and writes no receipt —
-the route acks, and the worker only asks the OTHER devices to re-read (S6). And
-it does not decide WHO the cloud wakes: the ``Idempotency-Key`` and the payloads
+the route acks, and the worker only asks the OTHER devices to re-read (S6). That
+nudge emits nothing itself: the pass that follows reads the store and does the
+emitting, so §3.1's "the nudge consumes the change" is kept in OUTCOME — at most
+one emit per change, with the entry's detector state advanced by the pass —
+rather than in the entry's literal spelling of an immediate emit that the next
+tick then has to suppress; there is no immediate emit here to duplicate. And it
+does not decide WHO the cloud wakes: the ``Idempotency-Key`` and the payloads
 come from ``push_payload`` (S3's freeze), the ``exclude`` list is carried
 verbatim, and the per-device skip belongs to the emit-side gate in the cloud,
 fed by the S4c report block.
@@ -429,13 +434,13 @@ class PushWorker:
         #: The previous tick's ``{conversation: acknowledged}``. In-memory on
         #: purpose (see :meth:`_load`).
         self._acks: dict[str, int] = {}
-        #: The acting devices a ``/seen`` nudge has named since the last pass.
-        #: The ONE piece of state an off-tick thread may write (the route's),
-        #: so it carries its own lock and is held for a set-add only — it must
-        #: never be able to block a pass, and a pass must never block on it
-        #: while holding a store read.
+        #: The ``(device, conversation)`` hints a ``/seen`` nudge has left since
+        #: the last pass. The ONE piece of state an off-tick thread may write
+        #: (the route's), so it carries its own lock and is held for a set-add
+        #: only — it must never be able to block a pass, and a pass must never
+        #: block on it while holding a store read.
         self._nudge_lock = threading.Lock()
-        self._nudge_exclude: set[str] = set()
+        self._nudge_exclude: set[tuple[str, str]] = set()
 
     # -- the tick ------------------------------------------------------------
 
@@ -543,8 +548,8 @@ class PushWorker:
 
     # -- the /seen nudge -----------------------------------------------------
 
-    def note_ack(self, *, device_id: str | None = None) -> None:
-        """A ``/seen`` landed and this is the device that acted (ADR §3.1, step 2).
+    def note_ack(self, *, device_id: str, conversation: str) -> None:
+        """A ``/seen`` landed: this device acted, on this conversation (ADR §3.1).
 
         A HINT, not an emit: the caller has already written the receipt, and the
         correction is a consequence of that read moving rather than a second ack
@@ -555,26 +560,42 @@ class PushWorker:
         means exclude nobody"), so the device the user just read on would be
         woken to re-read state it already has.
 
-        NOT CONSUMED HERE, and that is the point of the split. The pass takes it
-        at the moment it reads the acknowledgement map, so the emit and the
-        exclusion are built from one snapshot of one change: a nudge that
-        arrives while a pass is already reading cannot be applied to that pass's
-        emit (the benign window §3.1 states), and it is not carried forward onto
-        a LATER change either, where it would exclude a device that never acted.
-        A desk ack sends no id at all — the TUI and the desktop write straight
-        into the store and the tick detects them — which is the same thing as a
-        nudge that excludes nobody.
+        BOTH HALVES ARE CARRIED, and the conversation is what makes the
+        exclusion exact rather than approximate. A hint is a claim about ONE
+        change, and the pass applies it only when that change is one it is
+        actually carrying (see :meth:`_collect`): without the conversation a
+        hint that outlived its own change would be subtracted from whatever
+        change came next, skipping a device that did not act on it.
+
+        NOT CONSUMED HERE, and that is the point of the split. The pass takes the
+        hints BEFORE it reads the acknowledgement map, so a hint it takes always
+        describes a receipt written before that read — the receipt precedes the
+        nudge, because the route acks first — and therefore a change in the map
+        that pass diffs. The one case that order alone cannot cover (a receipt an
+        earlier pass already consumed while its nudge was still in flight) is
+        covered by the per-conversation match above: the hint is spent rather
+        than applied, so the acting device is corrected like every other device —
+        one benign extra silent wake, the window §3.1 states, and the badge is
+        right on its next read either way.
+
+        ``device_id`` and ``conversation`` are the worker's own vocabulary: the
+        conversation is the store key (``session/<id>``), not a handle. A desk
+        ack sends no hint at all — the TUI and the desktop write straight into
+        the store and the tick detects them — which is the same thing as a device
+        list that excludes nobody.
         """
-        if not device_id:
+        if not device_id or not conversation:
             return
         with self._nudge_lock:
-            self._nudge_exclude.add(device_id)
+            self._nudge_exclude.add((device_id, conversation))
 
-    def _take_nudged_devices(self) -> set[str]:
-        """The devices nudged since the last pass, taken and cleared.
+    def _take_nudged_devices(self) -> set[tuple[str, str]]:
+        """The ``(device, conversation)`` hints left since the last pass.
 
-        ONE CALL PER PASS, made whether or not anything moved (see
-        :meth:`_collect`): the hint is about the change being read now.
+        ONE CALL PER PASS, taken BEFORE the acknowledgement-map read and cleared
+        whether or not anything moved: a hint describes the change the pass is
+        about to read, and one held over would describe a pass that has already
+        happened.
         """
         with self._nudge_lock:
             taken = set(self._nudge_exclude)
@@ -666,9 +687,19 @@ class PushWorker:
         # 3. The acknowledgement map, diffed against the last tick. An ack is a
         #    durable change to the same watermark ``unseen`` is computed from, and
         #    the phone has to be told to re-read: that is the attention emit.
-        #    ``exclude`` is taken from the nudges the ``/seen`` route left since
-        #    this pass's predecessor — a tick-detected change (the TUI's or the
+        #    ``exclude`` comes from the nudges the ``/seen`` route left since this
+        #    pass's predecessor — a tick-detected change (the TUI's or the
         #    desktop's ack) never knows who acknowledged, and sends none (§3.2).
+        #
+        #    THE HINTS ARE TAKEN BEFORE THE MAP IS READ, and that order is what
+        #    makes a hint mean something. A route acks its receipt and only then
+        #    nudges, so a hint taken here describes a receipt written before this
+        #    read, and its change is therefore in the map being diffed. Taking it
+        #    after the read would let a receipt that landed inside the gap sit in
+        #    ``exclude`` while its conversation sits outside ``acked``, which is
+        #    how one change's actor gets skipped on another change's correction
+        #    (review round 1, m1).
+        hints = self._take_nudged_devices()
         current = self.store.acknowledgement_map()
         acked = sorted(
             conversation
@@ -676,10 +707,14 @@ class PushWorker:
             if self._acks.get(conversation) != value
         )
         self._acks = current
-        # TAKEN ON EVERY PASS, including the ones where nothing moved: the hint
-        # describes the change this pass read, and a hint held over to the next
-        # one would exclude a device that did not act on it.
-        exclude = self._take_nudged_devices()
+        # ... and each hint is applied ONLY to the change it names, because the
+        # order above cannot cover the one case where a hint outlives its own
+        # change: a pass that read the receipt and consumed it while the nudge
+        # was still in flight. That hint is spent here (taken above, so it does
+        # not reach a later pass) rather than subtracted from somebody else's
+        # change, where it would skip a device that never acted on it.
+        moved = set(acked)
+        exclude = {device for device, conversation in hints if conversation in moved}
         # §3.2's exclusion, applied where it means something: the recipients are
         # the live devices MINUS the ones that just acted, so a correction
         # addressed at nobody is not sent at all — "an ack with no other device
@@ -688,6 +723,20 @@ class PushWorker:
         # consumed either way: ``self._acks`` has moved above, which is what
         # keeps the same ack from being emitted again on the next pass (the
         # detector state §3.1 says the nudge consumes).
+        #
+        # NOT GATED BY PRESENCE, deliberately (QA round 1, O-1). §2.3's presence
+        # gate is a DEFERRAL for a completion banner, and it cannot apply to an
+        # emit whose trigger IS the ack; this form carries no ``alert``, so a
+        # desktop window being attended is no reason to leave every other device
+        # stale. The ADR's own Q5/Q6 read it the same way — gate 1 (``unseen``)
+        # cannot suppress a correction that exists because the read moved.
+        #
+        # ONE EMIT PER PASS, not one per changed conversation (QA round 1, O-2):
+        # the form names no conversation and carries no record, so N frames would
+        # be N identical silent wakes telling each device to do the same one
+        # thing — re-read the machine — which is what §2.1's "at most one emit per
+        # change" asks for. A shape that needs per-conversation addressing would
+        # be a different emit type, not this one.
         recipients = [device for device in devices if device not in exclude]
         if acked and recipients:
             key = self._mint_emit()

@@ -4029,6 +4029,38 @@ def build_app(daemon: MobileDaemon):
             headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
         )
 
+    def known_device_id(value: object) -> str | None:
+        """The device id a ``/seen`` body names that THIS machine knows, or ``None``.
+
+        §3.1's ``device_id`` is the app's advice about who acted, and it ends up
+        in the cloud's ``exclude`` for this machine's corrections, so it is
+        accepted only when it names a device of this computer. Without the check
+        an authenticated caller could put an arbitrary string into the fan-out's
+        skip list; with it the field is bounded by the same read gate 4 already
+        trusts (``push_devices.credential_facts``, read-only). The capability this
+        closes is small and dominated — a paired device can already delete a row
+        through the revoke route — so this is tidiness, not a boundary (review
+        round 1, n1).
+
+        A non-string, an empty string, one past the registry's own field bound,
+        and a store this process cannot read all answer ``None``: none of them is
+        a device id, and none of them fails the ack, because the field is
+        advisory and the receipt is the read's whole purpose. The caller runs
+        this off the event loop, for the reason ``_note_device_credential``
+        states: this daemon serves a 2 s SSE repaint loop.
+        """
+        if not isinstance(value, str) or not value:
+            return None
+        if len(value) > mobile_push_devices.MAX_FIELD_CHARS:
+            return None
+        from local_operator.paths import config_dir
+
+        try:
+            facts = mobile_push_devices.credential_facts(config_dir())
+        except (mobile_push_devices.PushRegistryCorrupt, OSError):
+            return None
+        return value if any(fact.get("device_id") == value for fact in facts) else None
+
     async def api_session_seen(request: Request) -> Response:
         """The phone marks a session seen; the unread verdict clears.
 
@@ -4064,7 +4096,8 @@ def build_app(daemon: MobileDaemon):
         # the badge correction the worker emits for this ack — so a body that
         # omits it, or sends something that is not an id, acks exactly as it
         # always did. Refusing here would fail a read over a field the read does
-        # not need.
+        # not need; what IS checked is the value's shape and whether it names a
+        # device of this computer (see ``known_device_id``).
         device_id = body.get("device_id") if isinstance(body, dict) else None
         try:
             state = await asyncio.to_thread(
@@ -4091,16 +4124,20 @@ def build_app(daemon: MobileDaemon):
         daemon.table.invalidate_summaries_cache()
         daemon.table.notify_list_changed()
         # S6's nudge (ADR §3.1, step 2), and it is a NUDGE and nothing more: the
-        # receipt was written above, so the worker is told WHICH DEVICE acted
-        # and no more than that. It writes no receipt, acks nothing and touches
-        # no ``deliveries`` row — the attention emit is a consequence of the
-        # read state that moved here, never a second acknowledgement path, and
-        # the pass that emits it reads the store for itself. ``None`` on the
-        # in-process worker (a daemon with push not armed) is not a failure: the
-        # ack has already happened and the endpoint's job is done.
+        # receipt was written above, so the worker is told which device acted and
+        # on which conversation — and no more than that. It writes no receipt,
+        # acks nothing and touches no ``deliveries`` row: the attention emit is a
+        # consequence of the read state that moved here, never a second
+        # acknowledgement path, and the pass that emits it reads the store for
+        # itself. ``None`` on the in-process worker (a daemon with push not
+        # armed) is not a failure — but note the guard also keeps an unarmed
+        # daemon from paying the registry read below. The conversation is the
+        # store key, because the hint is applied only to the change it names.
         worker = daemon.push_worker
-        if worker is not None and isinstance(device_id, str) and device_id:
-            worker.note_ack(device_id=device_id)
+        if worker is not None and device_id is not None:
+            known = await asyncio.to_thread(known_device_id, device_id)
+            if known is not None:
+                worker.note_ack(device_id=known, conversation=f"session/{session_id}")
         return JSONResponse({"ok": True, "attention": state})
 
     async def api_session_pin(request: Request) -> Response:
