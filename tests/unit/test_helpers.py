@@ -1060,12 +1060,12 @@ def test_get_posix_shell_path_macos_success(
     launchd-spawned runtimes.
     """
     mock_environ["SHELL"] = "/bin/zsh"
-    mock_run.return_value = MagicMock(stdout="/usr/bin:/bin:/opt/homebrew/bin\n")
+    mock_run.return_value = MagicMock(stdout="__LOP_PATH__/usr/bin:/bin:/opt/homebrew/bin\n")
     expected_path = "/usr/bin:/bin:/opt/homebrew/bin"
     assert get_posix_shell_path() == expected_path
     mock_run.assert_called_once()
     call_args = mock_run.call_args[0][0]
-    assert call_args == "'/bin/zsh' -l -i -c 'echo \"$PATH\"'"
+    assert call_args == "'/bin/zsh' -l -i -c 'echo __LOP_PATH__\"$PATH\"'"
     assert mock_run.call_args.kwargs["stdin"] == subprocess.DEVNULL
 
 
@@ -1079,7 +1079,7 @@ def test_get_posix_shell_path_linux_adds_local_bin(
 ):
     """Test that ~/.local/bin is added on Linux if missing."""
     mock_environ["SHELL"] = "/bin/bash"
-    mock_run.return_value = MagicMock(stdout="/usr/bin:/bin\n")
+    mock_run.return_value = MagicMock(stdout="__LOP_PATH__/usr/bin:/bin\n")
     expected_path = f"/home/user/.local/bin{os.pathsep}/usr/bin:/bin"
     assert get_posix_shell_path() == expected_path
     mock_run.assert_called_once()
@@ -1098,8 +1098,9 @@ def test_get_posix_shell_path_linux_local_bin_exists(
     """Test that ~/.local/bin is not added if already present."""
     mock_environ["SHELL"] = "/bin/bash"
     existing_path = "/usr/bin:/bin:/home/user/.local/bin"  # No f needed here
-    # Simulate stdout without trailing newline as .strip() is used in the function
-    mock_run.return_value = MagicMock(stdout=existing_path)
+    # Simulate marked stdout without a trailing newline as .strip() is used
+    # in the function.
+    mock_run.return_value = MagicMock(stdout="__LOP_PATH__" + existing_path)
     assert get_posix_shell_path() == existing_path  # Path should be unchanged
     mock_run.assert_called_once()
     mock_expanduser.assert_called_once_with("~/.local/bin")
@@ -1120,7 +1121,7 @@ def test_get_posix_shell_path_macos_adds_local_bin(
     launchd lineage must not lose it even if a future capture regresses.
     """
     mock_environ["SHELL"] = "/bin/zsh"
-    mock_run.return_value = MagicMock(stdout="/usr/bin:/bin\n")
+    mock_run.return_value = MagicMock(stdout="__LOP_PATH__/usr/bin:/bin\n")
     expected_path = f"/Users/user/.local/bin{os.pathsep}/usr/bin:/bin"
     assert get_posix_shell_path() == expected_path
     mock_expanduser.assert_called_once_with("~/.local/bin")
@@ -1139,14 +1140,14 @@ def test_get_posix_shell_path_macos_falls_back_to_non_interactive_on_timeout(
     mock_environ["SHELL"] = "/bin/zsh"
     mock_run.side_effect = [
         subprocess.TimeoutExpired(cmd="zsh -l -i -c", timeout=10),
-        MagicMock(stdout="/usr/bin:/bin\n"),
+        MagicMock(stdout="__LOP_PATH__/usr/bin:/bin\n"),
     ]
     assert get_posix_shell_path() == "/usr/bin:/bin"
     assert mock_run.call_count == 2
     first_command = mock_run.call_args_list[0][0][0]
     second_command = mock_run.call_args_list[1][0][0]
-    assert first_command == "'/bin/zsh' -l -i -c 'echo \"$PATH\"'"
-    assert second_command == "'/bin/zsh' -l -c 'echo \"$PATH\"'"
+    assert first_command == "'/bin/zsh' -l -i -c 'echo __LOP_PATH__\"$PATH\"'"
+    assert second_command == "'/bin/zsh' -l -c 'echo __LOP_PATH__\"$PATH\"'"
 
 
 @patch("local_operator.helpers.platform.system", return_value="Darwin")
@@ -1161,12 +1162,12 @@ def test_get_posix_shell_path_macos_falls_back_to_non_interactive_on_failure(
     mock_environ["SHELL"] = "/bin/zsh"
     mock_run.side_effect = [
         subprocess.CalledProcessError(1, "cmd", stderr="boom"),
-        MagicMock(stdout="/usr/bin:/bin\n"),
+        MagicMock(stdout="__LOP_PATH__/usr/bin:/bin\n"),
     ]
     assert get_posix_shell_path() == "/usr/bin:/bin"
     assert mock_run.call_count == 2
     second_command = mock_run.call_args_list[1][0][0]
-    assert second_command == "'/bin/zsh' -l -c 'echo \"$PATH\"'"
+    assert second_command == "'/bin/zsh' -l -c 'echo __LOP_PATH__\"$PATH\"'"
 
 
 @patch("local_operator.helpers.platform.system", return_value="Darwin")
@@ -1177,12 +1178,84 @@ def test_get_posix_shell_path_macos_falls_back_to_non_interactive_on_failure(
 def test_get_posix_shell_path_macos_retries_after_empty_capture(
     mock_isdir, mock_expanduser, mock_run, mock_environ, mock_system
 ):
-    """An exit-0 capture that printed nothing is unusable; the next attempt must run."""
+    """An exit-0 capture that produced an empty PATH is unusable; the next attempt must run."""
     mock_environ["SHELL"] = "/bin/zsh"
     mock_run.side_effect = [
-        MagicMock(stdout="\n"),
-        MagicMock(stdout="/usr/bin:/bin\n"),
+        MagicMock(stdout="__LOP_PATH__\n"),  # marker present, empty capture
+        MagicMock(stdout="__LOP_PATH__/usr/bin:/bin\n"),
     ]
+    assert get_posix_shell_path() == "/usr/bin:/bin"
+    assert mock_run.call_count == 2
+
+
+@patch("local_operator.helpers.platform.system", return_value="Darwin")
+@patch("local_operator.helpers.os.environ", new_callable=dict)
+@patch("local_operator.helpers.subprocess.run")
+@patch("local_operator.helpers.os.path.expanduser", return_value="/Users/user/.local/bin")
+@patch("local_operator.helpers.os.path.isdir", return_value=False)
+def test_get_posix_shell_path_discards_rc_stdout_around_the_marker(
+    mock_isdir, mock_expanduser, mock_run, mock_environ, mock_system
+):
+    """An rc file that prints to stdout must not contaminate the capture.
+
+    Login shells source user rc files, so stdout can carry banners; only what
+    follows the LAST `__LOP_PATH__` marker is the PATH. Before this hardening
+    a banner put an embedded newline into the first PATH entry and
+    `setup_cross_platform_environment` installed it process-wide.
+    """
+    mock_environ["SHELL"] = "/bin/zsh"
+
+    # A plain banner, then the marked capture: the banner is discarded.
+    mock_run.return_value = MagicMock(stdout="WELCOME TO YOUR SHELL\n__LOP_PATH__/usr/bin:/bin\n")
+    assert get_posix_shell_path() == "/usr/bin:/bin"
+
+    # Even a banner that itself mentions the marker cannot win: the capture
+    # is everything after the LAST occurrence, and our own echo runs last.
+    mock_run.return_value = MagicMock(
+        stdout="__LOP_PATH__ (from ~/.zshrc)\n__LOP_PATH__/usr/bin:/bin\n"
+    )
+    assert get_posix_shell_path() == "/usr/bin:/bin"
+    assert mock_run.call_count == 2
+
+
+@patch("local_operator.helpers.platform.system", return_value="Darwin")
+@patch("local_operator.helpers.os.environ", new_callable=dict)
+@patch("local_operator.helpers.subprocess.run")
+@patch("local_operator.helpers.os.path.expanduser", return_value="/Users/user/.local/bin")
+@patch("local_operator.helpers.os.path.isdir", return_value=False)
+def test_get_posix_shell_path_without_marker_is_a_failed_attempt(
+    mock_isdir, mock_expanduser, mock_run, mock_environ, mock_system
+):
+    """Stdout without the capture marker cannot be trusted; the next shape runs."""
+    mock_environ["SHELL"] = "/bin/zsh"
+    mock_run.side_effect = [
+        MagicMock(stdout="WELCOME BANNER\n"),  # no marker anywhere
+        MagicMock(stdout="__LOP_PATH__/usr/bin:/bin\n"),
+    ]
+    assert get_posix_shell_path() == "/usr/bin:/bin"
+    assert mock_run.call_count == 2
+    # The fallback attempt uses the same marked command shape.
+    second_command = mock_run.call_args_list[1][0][0]
+    assert second_command == "'/bin/zsh' -l -c 'echo __LOP_PATH__\"$PATH\"'"
+
+
+@patch("local_operator.helpers.platform.system", return_value="Darwin")
+@patch("local_operator.helpers.os.environ", new_callable=dict)
+@patch("local_operator.helpers.subprocess.run")
+@patch("local_operator.helpers.os.path.expanduser", return_value="/Users/user/.local/bin")
+@patch("local_operator.helpers.os.path.isdir", return_value=False)
+def test_get_posix_shell_path_without_marker_anywhere_keeps_inherited_path(
+    mock_isdir, mock_expanduser, mock_run, mock_environ, mock_system
+):
+    """No shape producing a usable capture settles for the inherited PATH.
+
+    Unmarked output must never be used; with neither attempt usable the chain
+    behaves like the existing empty-capture case and falls back to
+    os.environ["PATH"] (None stays reserved for attempts that raised).
+    """
+    mock_environ["SHELL"] = "/bin/zsh"
+    mock_environ["PATH"] = "/usr/bin:/bin"
+    mock_run.return_value = MagicMock(stdout="WELCOME BANNER\n")
     assert get_posix_shell_path() == "/usr/bin:/bin"
     assert mock_run.call_count == 2
 

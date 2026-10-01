@@ -284,8 +284,9 @@ async def test_a_malformed_entry_costs_one_session_not_the_sweep(
 # observe the bootstrap actually running.
 #
 # `SHELL` pointed at a two-line script is the seam that makes them hermetic:
-# the bootstrap shells out to `$SHELL -l -i -c 'echo "$PATH"'`, so a fake shell
-# echoing a known marker directory gives an identical result on CI and on a
+# the bootstrap shells out to `$SHELL -l -i -c 'echo __LOP_PATH__"$PATH"'`, and
+# the capture is everything after that marker — so a fake shell that prints the
+# marker in front of a known PATH gives an identical result on CI and on a
 # laptop, with no dependence on the developer's rc files or on Homebrew being
 # installed.
 
@@ -318,7 +319,7 @@ def _observe_entry_point_path(driver: str, tmp_path: Path) -> str:
     marker = tmp_path / "marker-bin"
     marker.mkdir()
     shell = tmp_path / "fake-login-shell"
-    shell.write_text(f'#!/bin/sh\necho "{marker}:/usr/bin:/bin"\n', encoding="utf-8")
+    shell.write_text(f'#!/bin/sh\necho "__LOP_PATH__{marker}:/usr/bin:/bin"\n', encoding="utf-8")
     shell.chmod(0o755)
     config_dir = tmp_path / "config"
     config_dir.mkdir()

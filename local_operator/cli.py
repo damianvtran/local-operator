@@ -10912,7 +10912,8 @@ def main() -> int:
         # run shell commands whose PATH must match a login terminal's, but
         # `config list`, `credential`, `login`, `agents` and the like never
         # spawn a tool — yet every one of them used to pay a full login-shell
-        # round-trip (`$SHELL -l -i -c 'echo $PATH'`) on startup. The helper is
+        # round-trip (`$SHELL -l -i -c 'echo __LOP_PATH__"$PATH"'`) on
+        # startup. The helper is
         # NOT cached, so this membership test is the only thing keeping that
         # round-trip off the cheap subcommands — adding a name here costs
         # every invocation of it one login shell. ``None`` is the bare
