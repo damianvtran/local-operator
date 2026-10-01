@@ -167,6 +167,21 @@ async def _tui_warnings(replayed: list[Any]) -> list[Any]:
     to the ``[session warning]`` card by TEXT: compaction markers are also
     ``NoticeBlock`` subclasses, and this helper must count the warning, not
     the fold's bookkeeping.
+
+    The wait before the read is the ADOPTION, not the clock. The replay is
+    applied by ``_adopt_session`` INSIDE the boot worker the app spawns in
+    ``on_mount`` (``run_worker(..., group="session")``), and that method is
+    synchronous end to end: it commits ``self._session`` and the painted
+    fold in one uninterrupted stretch. A single ``pilot.pause()`` is one
+    message-drain hop against that worker, so under load it reads the app
+    BEFORE the adoption lands — measured: the parity test read "the TUI
+    painted 0 notices" twice in one CI cell (run 36802746654, attempts 1+2,
+    shard ``test (3.12, 4)``) and again on an unrelated branch (run
+    36811665066 job 110233263809, shard 2), each time while the replay
+    itself carried the warning. So poll for ``_session`` to land, bounded
+    (200 turns — ~4 s at Textual's 20 ms pause floor — so a genuinely
+    broken boot fails with the observed count instead of hanging), then
+    one settle pause for the mount before reading the blocks.
     """
     from local_operator.tui.app import OperatorApp
     from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
@@ -177,6 +192,13 @@ async def _tui_warnings(replayed: list[Any]) -> list[Any]:
     app = OperatorApp(lambda: _factory(shell))
     async with app.run_test(size=(100, 30)) as pilot:
         # No manual fold: the app's own boot replays `session.history()`.
+        # Wait on the adoption (the docstring's measured race), kept bounded
+        # so a broken boot fails with the count instead of hanging.
+        for _ in range(200):
+            await pilot.pause()
+            if getattr(app, "_session", None) is not None:
+                break
+        # One settle turn for the mount that follows the replay's paint.
         await pilot.pause()
         return [
             block
