@@ -168,7 +168,7 @@ def _no_writes(store: Path) -> Iterator[None]:
     real_save = resume._save_origin_cache
     written: list[str] = []
 
-    def refuse(path: Path, entries: dict[str, Any]) -> None:
+    def refuse(path: Path, entries: dict[str, Any], **kwargs: Any) -> None:
         written.append(str(path))
 
     resume._save_origin_cache = refuse  # type: ignore[assignment]
