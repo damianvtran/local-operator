@@ -12,9 +12,9 @@ calls worse than the bug it fixes.
 from __future__ import annotations
 
 import asyncio
-import os
 import contextlib
 import json
+import os
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -1439,7 +1439,9 @@ async def _sigterm_a_session_mid_turn(
     loop = _RecordingLoop()
     interrupted = asyncio.Event()
     facts: dict[str, Any] = {}
-    exec_worker._install_sigterm_handler(loop, [session], interrupted, facts, None)  # type: ignore[arg-type]
+    sessions: list[Any] = [session]
+    install: Any = exec_worker._install_sigterm_handler
+    install(loop, sessions, interrupted, facts, None)
     loop.callbacks[_signal.SIGTERM]()
     assert interrupted.is_set()
     await asyncio.wait_for(task, timeout=30)

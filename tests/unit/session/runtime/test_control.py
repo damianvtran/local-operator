@@ -1891,9 +1891,7 @@ async def test_a_single_stop_session_writes_no_sweep_row(no_signals, tmp_path: P
     no_signals[1]["handle"] = handle
     server, record = await _serve(handle)
     try:
-        outcome = await control.stop_session(
-            _record_for(record), timeout_s=3.0, _root=config_dir()
-        )
+        outcome = await control.stop_session(_record_for(record), timeout_s=3.0, _root=config_dir())
         assert outcome.method == "socket"
         assert stop_ledger.read_sweeps(config_dir()) == []
         marker = control.registry.read_stop_marker(

@@ -13,7 +13,10 @@ from local_operator.session.runtime import stop_ledger
 
 
 def _targets(n: int) -> list[dict[str, Any]]:
-    return [{"session_id": f"s{i}", "pid": 100 + i, "rec_kind": "exec", "name": f"n{i}"} for i in range(n)]
+    return [
+        {"session_id": f"s{i}", "pid": 100 + i, "rec_kind": "exec", "name": f"n{i}"}
+        for i in range(n)
+    ]
 
 
 def test_begin_then_end_are_two_rows_sharing_one_id(tmp_path: Path) -> None:
@@ -44,7 +47,9 @@ def test_targets_are_capped_and_flagged(tmp_path: Path) -> None:
     assert begin["counts"]["targets"] == stop_ledger.MAX_TARGETS + 5
 
 
-def test_the_file_rotates_once_past_the_bound(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_file_rotates_once_past_the_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(stop_ledger, "ROTATE_BYTES", 400)
     for _ in range(6):
         stop_ledger.begin_sweep(mechanism="m", command="c", targets=_targets(2), root=tmp_path)

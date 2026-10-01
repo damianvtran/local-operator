@@ -253,7 +253,11 @@ def describe(receipt: dict[str, Any] | None) -> str:
         last = signals[-1]
         when = time.strftime("%H:%M:%S", time.localtime(float(last["at"])))
         sanction = last.get("sanction") or "none"
-        extra = f" (+{int(receipt.get('count') or 1) - 1} more)" if (receipt.get("count") or 1) > 1 else ""
+        extra = (
+            f" (+{int(receipt.get('count') or 1) - 1} more)"
+            if (receipt.get("count") or 1) > 1
+            else ""
+        )
         return f"{last.get('name')} at {when}, sanction={sanction}, sender=unavailable{extra}"
     except Exception:  # noqa: BLE001 — a log suffix must never fail an exit path
         return ""

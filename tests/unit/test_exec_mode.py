@@ -2251,7 +2251,8 @@ def _spawn_batch(tmp_path: Path, count: int) -> list[Any]:
         if not ready:
             for other, *_ in workers:
                 other.kill()
-            raise AssertionError(f"a batch worker never became ready: {proc.stderr.read()}")  # type: ignore[union-attr]
+            stderr = proc.stderr.read() if proc.stderr else ""
+            raise AssertionError(f"a batch worker never became ready: {stderr}")
     return workers
 
 
