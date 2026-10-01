@@ -92,7 +92,7 @@ def test_the_cooldown_withholds_a_second_stop_of_the_same_lineage(
         config_dir: Path, *, apply: bool = True, in_cooldown: object = None, **_: object
     ) -> object:
         assert callable(in_cooldown)
-        held.append(in_cooldown(_fragment(9900011, ppid=9900001)))
+        held.append(bool(in_cooldown(_fragment(9900011, ppid=9900001))))
         return _report_ending(ended)
 
     monkeypatch.setattr(machine_memory, "machine_memory_pass", spy)
