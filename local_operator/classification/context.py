@@ -266,12 +266,19 @@ def _stem(token: str) -> str:
     singular/plural splits — "restart a peer session" against a guide NAMED
     "sessions", "skill" against a blurb that says "skills", "credential"
     against "credentials" (see ``shortlist``). A real stemming library would add
-    a dependency and conflations a reviewer cannot recompute; one strip at
+    a dependency and conflations a reviewer cannot recompute; one +s strip at
     length ≥ 4 fixes the plural class alone, which is the class the catalogue
     actually loses on. The length floor keeps three-letter words whose final
     ``s`` is part of the word ("its", "was") out of it, and stripping BOTH sides
     is what lets a word ending in ``s`` still match itself ("harness" ↔
     "harness").
+
+    SCOPE, IN FULL: a SINGLE trailing ``s``, only at length ≥ 4 — so an ``-ss``
+    word and an ``-es`` plural fold to different stems and stay unmatched, as
+    before this change ("class"/"classes", "process"/"processes"). No catalogue
+    case turns on that today; widening the rule (``-es``, or a real stemmer) is
+    a separate, evidenced change, because every extra rule is one more line a
+    reviewer can no longer recompute by hand.
     """
     return token[:-1] if len(token) >= 4 and token.endswith("s") else token
 

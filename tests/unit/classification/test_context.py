@@ -650,6 +650,8 @@ def test_a_plural_description_word_matches_a_singular_message_word() -> None:
     names = [row.name for row in picked]
 
     assert "harness-authoring" in names
+    # The cap binds exactly as in fixture 1: the last filler loses its place.
+    assert "fleet-011" not in names
     assert len(names) == 12
 
 
@@ -675,6 +677,8 @@ def test_a_plural_name_token_matches_a_singular_word() -> None:
     names = [row.name for row in picked]
 
     assert "minerva-credentials" in names
+    # The cap binds exactly as in fixture 1: the last filler loses its place.
+    assert "fleet-011" not in names
     assert len(names) == 12
 
 

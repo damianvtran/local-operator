@@ -323,11 +323,12 @@ WHICH CANDIDATES TRAVEL is a separate question as soon as the catalogue is bigge
 permanent shortlist: with hundreds of installed skills the same dozen would be offered on every
 message for the life of the session while the rest of the catalogue stayed unreachable — exactly
 when scaling is the thing that matters. The wiring therefore shortlists LOCALLY
-(`classification.context.shortlist`: a Jaccard overlap of the candidate line against the message,
-plus a bonus when the resource's own name appears in it — no network call, no embedding request,
-tens of microseconds for hundreds of rows) whenever a kind exceeds the cap, and returns the
-survivors in the caller's discovery order, so the request's line and option order is still the
-caller's.
+(`classification.context.shortlist`: a Jaccard overlap of the candidate line against the message
+over plural-folded word sets, plus a bonus when the resource's own name appears in it or when a
+name token folds to a message token (so `sessions` matches `session`) — no network call, no
+embedding request, tens of microseconds for hundreds of rows) whenever a kind exceeds the cap,
+and returns the survivors in the caller's discovery order, so the request's line and option order
+is still the caller's.
 
 ## 5a. Latency budget (operator requirement, 2026-09-18)
 
