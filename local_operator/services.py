@@ -336,6 +336,13 @@ class ServiceRefresh:
     name: str
     lines: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+    #: Machine-readable daemon outcomes passed through from the refresh step
+    #: (``update.DaemonRefresh.statuses``): opaque HERE — this module renders the
+    #: human sentences and never reads them — but they ride this list's return so
+    #: ``update._services_stage`` can build the process's report line without
+    #: composing the same repairs a second time. Empty on entries this module
+    #: builds itself (serve reloads).
+    statuses: tuple[Any, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1429,7 +1436,10 @@ def restart_services(*, wait_s: float = RELOAD_WAIT_S) -> list[ServiceRefresh]:
         for refresh in update.refresh_daemons_after_upgrade():
             refreshes.append(
                 ServiceRefresh(
-                    refresh.name, lines=tuple(refresh.lines), warnings=tuple(refresh.warnings)
+                    refresh.name,
+                    lines=tuple(refresh.lines),
+                    warnings=tuple(refresh.warnings),
+                    statuses=tuple(refresh.statuses),
                 )
             )
     except Exception:  # noqa: BLE001 — a failed repair must not fail the command
@@ -1452,25 +1462,25 @@ def restart_services(*, wait_s: float = RELOAD_WAIT_S) -> list[ServiceRefresh]:
 #: 137 columns rendered as ``curre`` / ``nt`` (design review D6).
 _LINE_BUDGET = 80
 
-#: The mobile relay's LaunchAgent label. It is the one supervised daemon that `restart`
-#: bounces even when the repair guard refuses to repoint the others, which is why the
-#: note names it separately and only when its plist is installed.
-_MOBILE_AGENT_LABEL = "com.local-operator.mobile"
-
 
 def _install_may_repoint_daemons() -> bool:
     """May THIS caller rewrite the supervised plists?
 
-    The repair guard's own question, and only IT — because the guard does not speak for
-    the other half of ``restart``. Measured on 2026-09-18 by bouncing the real daemon
-    from a checkout: ``update.refresh_daemons_after_upgrade`` composes
+    The repair guard's own question, and only IT — and the two halves' relationship
+    to it CHANGED on 2026-09-30 (round 1 review, finding 1). Measured on 2026-09-18:
+    ``update.refresh_daemons_after_upgrade`` composed
     ``refresh_service_daemons_after_upgrade`` (the plist REPAIR, which consults this
-    guard) with ``refresh_mobile_after_upgrade`` (a plain ``lop mobile restart`` BOUNCE,
-    which consults nothing). So a checkout refuses to repoint browser/tunnel/wakes and
-    still bounces the mobile relay onto the current build.
+    guard) with ``refresh_mobile_after_upgrade`` (a plain ``lop mobile restart``
+    BOUNCE, which consulted nothing) — so a checkout refused to repoint
+    browser/tunnel/wakes and still bounced the mobile relay onto the current build.
+    Since 2026-09-30 the mobile unit refreshes its own plist and then bounces, one
+    actor, so it consults this guard for BOTH halves: a refused caller now repoints
+    nothing AND bounces nothing, and the old "still bounces the mobile relay"
+    promise was retired with it (the narrowed truth — do not restore the promise
+    without restoring the ungated bounce).
 
-    Drawing that distinction too coarsely is what round 11's R11-3 fix got wrong in the
-    other direction: it suppressed a clause that is TRUE in every state, and gated the
+    Drawing the distinction coarsely is what round 11's R11-3 fix got wrong in the
+    other direction: it suppressed a clause that was TRUE then, and gated the
     serve-daemon advice — which never consults this guard at all — on it as well.
 
     An unanswerable guard is NOT permission, so an exception reads as "no".
@@ -1553,16 +1563,12 @@ def status_lines() -> list[str]:
         lines.append("      so its build is not in the plist.")
         if _install_may_repoint_daemons():
             lines.append("      `lop services restart` puts them on the current build")
-        elif any(path.stem == _MOBILE_AGENT_LABEL for path in supervised):
-            # TRUE IN BOTH HALVES, which the blunt gate was not: the bounce happens
-            # whatever this caller is, the repoint does not. Gated on the mobile plist
-            # being among the installed ones (round 13, R13-1; the design round's D21):
-            # with no mobile plist `refresh_mobile_after_upgrade` returns without
-            # bouncing anything, so promising a bounce would over-warn about a daemon
-            # the reader does not have.
-            lines.append("      `lop services restart` still bounces the mobile relay;")
-            lines.append("      the rest are repointed only by the install that owns them")
         else:
+            # THE MOBILE CLAUSE IS GONE (round 1 review, finding 1), and with it the
+            # R13-1/D21 label gate that used to make it exact: the bounce is no longer
+            # caller-independent — the mobile unit consults the same guard the repoint
+            # does — so the old "still bounces the mobile relay" line promised
+            # something the tool no longer keeps. See `_install_may_repoint_daemons`.
             lines.append("      `lop services restart` repoints them only from the")
             lines.append("      install that owns them")
     return lines

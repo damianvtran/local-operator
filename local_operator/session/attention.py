@@ -1627,7 +1627,55 @@ class AttentionStore:
         found and an empty conversation still gets this method's own answer.
         """
         identities = list(dict.fromkeys(conversations))
-        states = {
+        states = self._no_completion_states(identities)
+        if not identities or not self.path.exists():
+            return states
+        states.update(self._retry_read(lambda: self._state_many_once(identities)))
+        return states
+
+    def state_many_and_revision(
+        self, conversations: Iterable[str]
+    ) -> tuple[dict[str, dict[str, Any]], tuple[int, int, int]]:
+        """``state_many``'s snapshot AND ``revision``'s token, on ONE connection.
+
+        WHY THE PAIR IS ONE CALL, and both halves are load-bearing:
+
+        * ONE CONNECTION, because the mobile daemon's listing build is where this
+          is read and its cost is PINNED at one store connection per build --
+          ``tests/unit/mobile/test_attention.py::
+          test_summary_receipts_are_one_batch_off_the_event_loop`` counts them,
+          for the reason that test exists: this is the read every phone repaint
+          on this machine pays, against the fleet's most contended store. Two
+          methods would be two connections per build for a number and a token
+          that are always read together (push/ack-sync S1, ADR 0006 §1.1).
+        * ONE SNAPSHOT, because the count and the change token must describe the
+          same instant: the client pairs them (the token answers "probably
+          unchanged, go and look") and a pair straddling a write would let a
+          fresh count wear a stale token. The single ``BEGIN`` below is that
+          guarantee, and it is why this method exists instead of two call sites
+          where one would do.
+
+        The contract is :meth:`state_many`'s, one term wider, with the
+        differences stated rather than implied: a store that does not exist
+        yields the no-completion defaults and the ``(0, 0, 0)`` token exactly as
+        the two single reads would report it, and the read is made even when
+        ``conversations`` is empty -- that is the one case ``state_many`` skips
+        it, and skipping here would publish ``(0, 0, 0)`` as "nothing ever
+        happened" for a store that may be busy with conversations the caller
+        cannot see (it counts the phone's rows, not the store).
+        """
+        identities = list(dict.fromkeys(conversations))
+        states = self._no_completion_states(identities)
+        if not self.path.exists():
+            return states, (0, 0, 0)
+        found, revision = self._retry_read(lambda: self._state_many_and_revision_once(identities))
+        states.update(found)
+        return states, revision
+
+    @staticmethod
+    def _no_completion_states(identities: list[str]) -> dict[str, dict[str, Any]]:
+        """The explicit no-completion state per identity, for empty/new stores."""
+        return {
             identity: {
                 "conversation_id": identity,
                 "completion_token": None,
@@ -1641,41 +1689,59 @@ class AttentionStore:
             }
             for identity in identities
         }
-        if not identities or not self.path.exists():
-            return states
-        states.update(self._retry_read(lambda: self._state_many_once(identities)))
-        return states
 
     def _state_many_once(self, identities: list[str]) -> dict[str, dict[str, Any]]:
         """One attempt at :meth:`state_many`'s snapshot, on its own connection."""
-        found: dict[str, dict[str, Any]] = {}
         with closing(self._connect_read_only()) as conn:
             conn.execute("BEGIN")
             if self._uninitialized(conn):
-                return found
-            for offset in range(0, len(identities), 500):
-                chunk = identities[offset : offset + 500]
-                placeholders = ",".join("?" for _ in chunk)
-                rows = conn.execute(
-                    "SELECT c.*, COALESCE(r.acknowledged,0) AS acknowledged FROM "
-                    "(SELECT conversation, MAX(sequence) AS sequence FROM completions "
-                    f"WHERE conversation IN ({placeholders}) GROUP BY conversation) latest "
-                    "JOIN completions c ON c.sequence=latest.sequence "
-                    "LEFT JOIN receipts r ON r.conversation=c.conversation",
-                    chunk,
-                )
-                for row in rows:
-                    found[row["conversation"]] = {
-                        "conversation_id": row["conversation"],
-                        "completion_token": row["token"],
-                        "anchor_id": row["anchor"],
-                        "kind": row["kind"],
-                        "reason": _optional_column(row, "reason"),
-                        "cause": _optional_column(row, "cause"),
-                        "notify": _optional_flag(row, "notify", default=True),
-                        "unseen": row["sequence"] > row["acknowledged"],
-                        "revision": [row["sequence"], row["acknowledged"]],
-                    }
+                return {}
+            return self._states_on(conn, identities)
+
+    def _state_many_and_revision_once(
+        self, identities: list[str]
+    ) -> tuple[dict[str, dict[str, Any]], tuple[int, int, int]]:
+        """One attempt at the paired read, on its own single connection."""
+        with closing(self._connect_read_only()) as conn:
+            conn.execute("BEGIN")
+            if self._uninitialized(conn):
+                return {}, (0, 0, 0)
+            return self._states_on(conn, identities), self._revision_on(conn)
+
+    def _states_on(
+        self, conn: sqlite3.Connection, identities: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        """The latest state per identity, ON THE CALLER'S CONNECTION.
+
+        Split out of :meth:`_state_many_once` so the paired read
+        (:meth:`state_many_and_revision`) runs THE SAME queries in THE SAME
+        order on its own connection -- one implementation of the snapshot, not
+        two that could drift.
+        """
+        found: dict[str, dict[str, Any]] = {}
+        for offset in range(0, len(identities), 500):
+            chunk = identities[offset : offset + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                "SELECT c.*, COALESCE(r.acknowledged,0) AS acknowledged FROM "
+                "(SELECT conversation, MAX(sequence) AS sequence FROM completions "
+                f"WHERE conversation IN ({placeholders}) GROUP BY conversation) latest "
+                "JOIN completions c ON c.sequence=latest.sequence "
+                "LEFT JOIN receipts r ON r.conversation=c.conversation",
+                chunk,
+            )
+            for row in rows:
+                found[row["conversation"]] = {
+                    "conversation_id": row["conversation"],
+                    "completion_token": row["token"],
+                    "anchor_id": row["anchor"],
+                    "kind": row["kind"],
+                    "reason": _optional_column(row, "reason"),
+                    "cause": _optional_column(row, "cause"),
+                    "notify": _optional_flag(row, "notify", default=True),
+                    "unseen": row["sequence"] > row["acknowledged"],
+                    "revision": [row["sequence"], row["acknowledged"]],
+                }
         return found
 
     def state(self, conversation: str) -> dict[str, Any]:
@@ -2154,23 +2220,33 @@ class AttentionStore:
             conn.execute("BEGIN")
             if self._uninitialized(conn):
                 return (0, 0, 0)
-            # This connection is READ-ONLY, so it cannot run the additive
-            # migration itself: a database written before this fix, whose runtime
-            # has not reconnected yet, legitimately has no `mutations` table and
-            # must read as 0 rather than raising. A poller that raised here
-            # would lose cross-process read sync for the life of the loop.
-            row = conn.execute(
-                "SELECT COALESCE(MAX(sequence),0), "
-                "(SELECT COALESCE(SUM(acknowledged),0) FROM receipts), "
-                "(SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='mutations') "
-                "FROM completions"
-            ).fetchone()
-            supersedes = 0
-            if row[2]:
-                supersedes = conn.execute(
-                    "SELECT COALESCE(MAX(supersedes),0) FROM mutations"
-                ).fetchone()[0]
-            return (row[0], row[1], supersedes)
+            return self._revision_on(conn)
+
+    def _revision_on(self, conn: sqlite3.Connection) -> tuple[int, int, int]:
+        """The three counters, ON THE CALLER'S CONNECTION.
+
+        Split out of :meth:`_revision_once` so the paired read
+        (:meth:`state_many_and_revision`) computes the token with THE SAME
+        statements as :meth:`revision` -- one implementation, not two that could
+        drift.
+        """
+        # This connection is READ-ONLY, so it cannot run the additive
+        # migration itself: a database written before this fix, whose runtime
+        # has not reconnected yet, legitimately has no `mutations` table and
+        # must read as 0 rather than raising. A poller that raised here
+        # would lose cross-process read sync for the life of the loop.
+        row = conn.execute(
+            "SELECT COALESCE(MAX(sequence),0), "
+            "(SELECT COALESCE(SUM(acknowledged),0) FROM receipts), "
+            "(SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='mutations') "
+            "FROM completions"
+        ).fetchone()
+        supersedes = 0
+        if row[2]:
+            supersedes = conn.execute(
+                "SELECT COALESCE(MAX(supersedes),0) FROM mutations"
+            ).fetchone()[0]
+        return (row[0], row[1], supersedes)
 
     def acknowledge(self, conversation: str, token: str) -> dict[str, Any]:
         """Advance only through the observed token, never through server 'now'.

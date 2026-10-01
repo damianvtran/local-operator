@@ -249,7 +249,10 @@ async def test_d_opens_the_detail_and_esc_pops_one_level(tmp_path: Path) -> None
             rows[0]
             == "projects · TUI parity spec (parity-spec) [● active] · updated " + rows[0][-5:]
         )
-        assert rows[1].startswith("── overview ")
+        # The ruler names the section the viewport is actually showing: the
+        # feed's rows moved where the entry reveal settles, so the expectation
+        # comes from the DOM truth rather than a literal (design D1's rule).
+        assert rows[1].startswith(f"── {_dom_top_section(view._detail_page)} ")
         assert any("milestones (1/3)" in row for row in rows)
         assert "◆ ab12cd34ef56 [missing]" in " ".join(rows)  # own session, missing dir
         assert any(row.startswith("no progress recorded") for row in rows)
@@ -398,16 +401,22 @@ async def test_detail_section_jumps_move_the_row_cursor_to_the_neighbour(
 
 
 def _dom_top_section(page: Any) -> str | None:
-    """The section the viewport actually shows: the last heading at/above the
-    container's content top, read from live widget regions — the DOM truth a
-    ruler assertion compares against."""
+    """The section the viewport actually shows, read from live widget regions.
+
+    The last heading at/above the container's content top — the DOM truth a
+    ruler assertion compares against. A heading's ``.gap-above`` blank row
+    counts as part of its section (design review round 1, D6): when the top row
+    is that blank the reader is looking at the heading below it, not at the
+    section that scrolled away above.
+    """
     base = page.content_region.y
     best: str | None = None
     for child in page.children:
         section = getattr(child, "section", None)
         if section is None:
             continue
-        if child.region.y <= base:
+        start = child.region.y - (1 if "gap-above" in child.classes else 0)
+        if start <= base:
             best = section[0]
         else:
             break
@@ -445,15 +454,14 @@ async def test_the_detail_ruler_tracks_scrolling_with_a_tall_page(
         # fixture edits — design review round 1, D1 (the old math read a
         # section the viewport did not show).
         page = view._detail_page
-        assert _dom_top_section(page) == "overview"
-        assert view.rendered_rows()[1].startswith("── overview ")
+        assert view.rendered_rows()[1].startswith(f"── {_dom_top_section(page)} ")
         assert page.max_scroll_y > 0
         # A FORCED repaint must not change the reading: the entry frames used
         # to pass by paint ORDER (the reveal scroll never repainted the rule),
         # not by computation (D1).
         view._paint_rule()
         await pilot.pause()
-        assert view.rendered_rows()[1].startswith("── overview ")
+        assert view.rendered_rows()[1].startswith(f"── {_dom_top_section(page)} ")
         await pilot.press("end")  # to the content's bottom; cursor stays put
         await pilot.pause()
         await pilot.pause()
@@ -490,6 +498,7 @@ async def test_detail_heading_gap_rides_the_sanctioned_class(
         assert [row.section[0] for row in headings] == [
             "overview",
             "description",
+            "updates",
             "milestones",
             "todos",
             "sessions",
@@ -767,6 +776,574 @@ async def test_a_long_refusal_notice_fits_a_narrow_footer(tmp_path: Path) -> Non
         assert cell_len(footer) <= box
         assert footer.endswith("…")
         assert "no longer in the store" in footer
+
+
+def _feed_registry(tmp_path: Path) -> ProjectRegistry:
+    """One project with a two-entry feed, an image attachment and a long entry.
+
+    The long entry overflows :data:`UPDATE_BODY_LINES` so the clamp marker and
+    its `↵` toggle have something real to act on; the attachment is COPIED into
+    the store, so its row carries a resolvable path.
+    """
+    registry = ProjectRegistry(tmp_path)
+    project = registry.create_project(
+        ProjectEdit(
+            name="parity-spec",
+            title="TUI parity spec",
+            description="The spec, in one paragraph.",
+            milestones=[ProjectMilestone(name="groundwork", target_date="2026-09-20")],
+        )
+    )
+    shot = tmp_path / "board-60x20.png"
+    shot.write_bytes(b"x" * 83904)
+    registry.update_project(
+        project.id,
+        ProjectEdit(progress="first report"),
+        reporter="operator",
+        attachments=[shot],
+    )
+    long_body = "a much longer second report\n\n## Heading\n" + "\n".join(
+        f"line {n} of a long entry" for n in range(1, 12)
+    )
+    registry.update_project(
+        project.id,
+        ProjectEdit(progress=long_body),
+        reporter="ab12cd34ef56",
+    )
+    return registry
+
+
+async def test_the_updates_feed_renders_newest_first_with_day_and_attachments(
+    tmp_path: Path,
+) -> None:
+    """Spec §7.3/§7.4: day group, newest entry first, markdown body, files."""
+    session = _ProjectSession()
+    session.project_registry = _feed_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        rows = view._detail_page.painted_rows()
+        assert any(row.startswith("updates (2)") for row in rows)
+        assert any(row.startswith("── today ──") for row in rows)
+        stamps = [row for row in rows if "session ab12cd34ef56" in row]
+        assert stamps, rows
+        # Newest first: the long (second) entry's body precedes the first's.
+        joined = "\n".join(rows)
+        assert joined.index("a much longer second report") < joined.index("first report")
+        # The clamped tail names the key that opens it.
+        assert any("more lines — ↵ expand" in row for row in rows)
+        # The attachment affordance carries kind, name and size; the path
+        # rides its own row under it and is visible without selecting.
+        attachment = next(row for row in rows if row.startswith("[img]"))
+        assert "board-60x20.png" in attachment and "KB" in attachment
+        # The path is the COPY's, under the store's own name for it — that is
+        # the file a reader can actually open (the original may be long gone).
+        path_row = next(row for row in rows if row.strip().startswith("→"))
+        assert "attachments" in path_row and path_row.strip().endswith(".png")
+        # The feed is a SECTION: the ruler can name it.
+        ruler = view.rendered_rows()[1]
+        assert ruler.startswith("── overview ")
+
+
+async def test_the_updates_section_says_so_when_there_are_no_entries(tmp_path: Path) -> None:
+    """Empty is an honest sentence, never a zeroed placeholder (spec §7.3)."""
+    session = _ProjectSession()
+    session.project_registry = _rich_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        rows = view._detail_page.painted_rows()
+        assert any(row.startswith("updates") and "(" not in row for row in rows)
+        assert any("no updates recorded yet" in row for row in rows)
+
+
+async def test_enter_on_an_update_stamp_opens_and_closes_its_clamped_body(
+    tmp_path: Path,
+) -> None:
+    """Spec §7.3: `↵` toggles the tail; the cursor stays on the same row."""
+    session = _ProjectSession()
+    session.project_registry = _feed_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        page = view._detail_page
+        assert page.selected_action_label() == "expand"
+        assert any("more lines — ↵ expand" in row for row in page.painted_rows())
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert page.selected_action_label() == "collapse"
+        rows = page.painted_rows()
+        assert any("more lines — ↵ collapse" in row for row in rows)
+        assert any("line 11 of a long entry" in row for row in rows)
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert page.selected_action_label() == "expand"
+        assert any("more lines — ↵ expand" in row for row in page.painted_rows())
+
+
+async def test_enter_on_an_attachment_asks_the_host_to_open_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec §7.4: the row's verb is ``open``, the host opens, the page says so.
+
+    The opener itself is stubbed: the real one is a process spawn handing a
+    file to a GUI, which a headless run must never do. What this pins is the
+    wiring — the row's verb, the path that reaches the host, and the sentence
+    that comes back — with the spawn replaced at the module seam the handler
+    reads.
+    """
+    import local_operator.tui.attachments as attachments_mod
+
+    opened: list[str] = []
+
+    async def _fake_open(path: str) -> bool:
+        opened.append(path)
+        return True
+
+    monkeypatch.setattr(attachments_mod, "opener_argv", lambda path: ["true", path])
+    monkeypatch.setattr(attachments_mod, "open_path_quietly", _fake_open)
+    session = _ProjectSession()
+    session.project_registry = _feed_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        page = view._detail_page
+        while page.selected_action_label() != "open":
+            await pilot.press("down")
+            await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert opened, "the attachment row never reached the opener"
+        # The store keeps the copy under its own name; the ORIGINAL name is
+        # what the row and the receipt show.
+        assert "attachments" in opened[-1]
+        assert Path(opened[-1]).is_file()
+        assert "opened board-60x20.png" in view.rendered_rows()[-1]
+        assert view._mode == "detail"  # the page keeps the reader
+
+
+async def test_a_gone_attachment_is_flagged_and_offers_no_verb(tmp_path: Path) -> None:
+    """Spec §7.4 + UX round 1, U3: the row stops offering what it cannot do."""
+    registry = _feed_registry(tmp_path)
+    project = registry.get_project_by_name("parity-spec")
+    assert project is not None
+    Path(project.updates[0].attachments[0].path).unlink()
+    session = _ProjectSession()
+    session.project_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        page = view._detail_page
+        assert any("[missing on disk]" in row for row in page.painted_rows())
+        # The row is still a cursor stop, but it advertises nothing: the reader
+        # learns the row is dead from the marker, not from spending a press.
+        attachment_rows = [row for row in page._selectables if "open" in (row.action_label() or "")]
+        assert attachment_rows == []
+        assert page.selected_action_label() != "open"
+
+
+async def test_a_copy_that_vanishes_after_composition_answers_honestly(
+    tmp_path: Path,
+) -> None:
+    """The handler still guards at the boundary: a press against a gone file."""
+    session = _ProjectSession()
+    session.project_registry = _feed_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        page = view._detail_page
+        while page.selected_action_label() != "open":
+            await pilot.press("down")
+            await pilot.pause()
+        # Delete it AFTER composition, so the page still believes it is there.
+        project = session.project_registry.get_project_by_name("parity-spec")
+        assert project is not None
+        Path(project.updates[0].attachments[0].path).unlink()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert view._mode == "detail"  # the page keeps the reader
+        assert "missing on disk" in view.rendered_rows()[-1]
+
+
+async def test_a_row_without_the_updates_field_still_loads(tmp_path: Path) -> None:
+    """Back-compat: a row stored before the feed existed renders its sentence."""
+    session = _ProjectSession()
+    session.project_registry = _rich_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "board-entry")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        rows = view._detail_page.painted_rows()
+        assert any("no updates recorded yet" in row for row in rows)
+        assert any(row.startswith("milestones") for row in rows)
+
+
+async def test_a_long_attachment_path_is_fitted_to_its_row(tmp_path: Path) -> None:
+    """A path too long for the box is cut HERE, with an ellipsis (spec §7.4).
+
+    Textual wraps a ``Static``'s text whatever its ``no_wrap`` says, so a long
+    path painted as a bare ``→`` with the rest hard-split onto following rows —
+    measured in the 60- and 100-column frames. The row fits itself to the box
+    instead, so the reader always gets as much of the handle as the width
+    allows.
+    """
+    session = _ProjectSession()
+    session.project_registry = _feed_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(60, 24)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.pause()
+        page = view._detail_page
+        from local_operator.tui.widgets.projects_detail import DetailAttachmentPathRow
+
+        path_row = next(c for c in page.children if isinstance(c, DetailAttachmentPathRow))
+        # `content` is a union on the Static; the file's own idiom is getattr.
+        text = str(getattr(path_row.content, "plain", ""))
+        assert text.strip().startswith("→ ")
+        # Middle-ellipsized: the FILE's tail survives, which is what tells one
+        # attachment row from another (design review round 1, D2).
+        assert "…" in text and text.strip().endswith(".png")
+        assert path_row.region.height == 1  # fitted: nothing wrapped
+        assert cell_len(text) <= path_row.region.width
+
+
+async def test_the_selected_feed_row_is_on_screen_when_the_page_opens(tmp_path: Path) -> None:
+    """The entry reveal must survive a box too short to hold the page (60x24).
+
+    Textual treats a row on the viewport's bottom EDGE as visible while the
+    painted rows stop a cell earlier, so the selected entry sat one row below
+    the box and the feed looked empty until a key was pressed — measured, and
+    the reason the reveal clamps explicitly.
+    """
+    session = _ProjectSession()
+    session.project_registry = _feed_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(60, 24)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.pause()
+        page = view._detail_page
+        row = page._selectables[page.selected_index]
+        # `region.y` IS the painted screen row (measured: the same value the
+        # frame shows), so containment is a direct comparison — the earlier
+        # `content_region.y + region.y - scroll_offset.y` reconstruction
+        # described a different quantity than the one it claimed (agent review
+        # round 1, MINOR-4).
+        assert page.region.y <= row.region.y <= page.region.y + page.region.height - 1
+
+
+async def test_a_one_line_entry_offers_no_verb_and_toggles_nothing(tmp_path: Path) -> None:
+    """Design review round 1, D1: no hint for a key that cannot act.
+
+    The first thing a reader saw on open was `↵ expand` on an entry with nothing
+    to expand: the press flipped the row's label while `painted_rows()` stayed
+    byte-identical.
+    """
+    registry = ProjectRegistry(tmp_path)
+    project = registry.create_project(ProjectEdit(name="shorty", title="Shorty"))
+    registry.update_project(project.id, ProjectEdit(progress="one line only"), reporter="operator")
+    session = _ProjectSession()
+    session.project_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "shorty")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        page = view._detail_page
+        assert page.selected_action_label() is None
+        assert "expand" not in view.rendered_rows()[-1]
+        before = page.painted_rows()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert page.painted_rows() == before
+        assert page.selected_action_label() is None
+        assert page._expanded == set()
+
+
+async def test_expanding_an_entry_does_not_leak_into_another_project(tmp_path: Path) -> None:
+    """Agent review round 1, MINOR-1: expansion is per-project view state."""
+    registry = ProjectRegistry(tmp_path)
+    long_body = "\n".join(f"line {n}" for n in range(1, 12))
+    for name in ("alpha", "beta"):
+        project = registry.create_project(ProjectEdit(name=name, title=name.title()))
+        registry.update_project(project.id, ProjectEdit(progress=long_body), reporter="operator")
+    session = _ProjectSession()
+    session.project_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "alpha")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        page = view._detail_page
+        assert page.selected_action_label() == "expand"
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert page.selected_action_label() == "collapse"
+        assert any("line 11" in row for row in page.painted_rows())
+        await pilot.press("escape")
+        await pilot.pause()
+        view = await _open(pilot, app, "beta")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        page = view._detail_page
+        # beta's own entry: same ordinal, different project — not expanded.
+        assert page.selected_action_label() == "expand"
+        assert not any("line 11" in row for row in page.painted_rows())
+
+
+async def test_a_verbless_row_offers_no_open_hint_at_all(tmp_path: Path) -> None:
+    """UX review round 2, U6: no verb means no `↵` rung, not a dimmed one.
+
+    The ladder's `" open"` fallback was unreachable until design D1 and UX U3
+    made verb-less rows real; on a one-line entry it printed a dimmed `↵ open`
+    for a key that cannot act there.
+    """
+    import re
+
+    registry = ProjectRegistry(tmp_path)
+    project = registry.create_project(ProjectEdit(name="shorty", title="Shorty"))
+    registry.update_project(project.id, ProjectEdit(progress="one line only"), reporter="operator")
+    long_body = "\n".join(f"line {n}" for n in range(1, 12))
+    other = registry.create_project(ProjectEdit(name="longie", title="Longie"))
+    registry.update_project(other.id, ProjectEdit(progress=long_body), reporter="operator")
+
+    def painted(view: Any) -> str:
+        text = " ".join(
+            hint.rendered()
+            for hint in view._hints.children
+            if isinstance(hint, HintButton) and hint.display
+        )
+        return re.sub(r"\s+", " ", text)
+
+    session = _ProjectSession()
+    session.project_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "shorty")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        page = view._detail_page
+        assert page.selected_action_label() is None
+        hints = painted(view)
+        assert "↵" not in hints, hints
+        assert " move " in hints  # the ladder itself still offers what works
+        await pilot.press("escape")
+        await pilot.pause()
+        view = await _open(pilot, app, "longie")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        assert view._detail_page.selected_action_label() == "expand"
+        assert "↵ expand" in painted(view)
+
+
+async def test_clicking_a_feed_row_selects_and_a_second_click_acts(tmp_path: Path) -> None:
+    """UX review round 1, U4: the new affordances are not keyboard-only.
+
+    One `esc` away the canvas selects on the first click and acts on the
+    second; the page's rows looked the same and did nothing at all.
+    """
+    session = _ProjectSession()
+    session.project_registry = _feed_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        page = view._detail_page
+        stamps = [row for row in page._selectables if "expand" in (row.action_label() or "")]
+        assert stamps, page.painted_rows()
+        target = stamps[0]
+        # The first click moves the cursor and reveals, like the canvas.
+        await pilot.click(target, offset=(3, 0))
+        await pilot.pause()
+        await pilot.pause()
+        assert page._selectables[page.selected_index] is target
+        assert page.selected_action_label() == "expand"
+        # A second click on the SAME row activates it (both clicks in one
+        # chain, the canvas's `event.chain == 2`).
+        await pilot.click(target, offset=(3, 0), times=2)
+        await pilot.pause()
+        await pilot.pause()
+        assert page.selected_action_label() == "collapse"
+        assert any("line 11" in row for row in page.painted_rows())
+
+
+async def test_the_hint_row_re_syncs_the_verb_after_a_toggle(tmp_path: Path) -> None:
+    """UX review round 1, U2: the verb is the hint row's own input.
+
+    The footer kept offering `↵ expand` on the row the reader had just opened
+    and only caught up on the next cursor move — the press's only visible
+    effect being that the offered key no longer matched what it would do.
+    """
+    session = _ProjectSession()
+    session.project_registry = _feed_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+
+        def hints() -> str:
+            import re
+
+            text = " ".join(
+                hint.rendered()
+                for hint in view._hints.children
+                if isinstance(hint, HintButton) and hint.display
+            )
+            return re.sub(r"\s+", " ", text)
+
+        assert "↵ expand" in hints()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        # No cursor move in between: the toggle itself must re-arm the hint.
+        assert "↵ collapse" in hints()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert "↵ expand" in hints()
+
+
+async def test_the_cursor_stays_on_screen_through_every_feed_stop(tmp_path: Path) -> None:
+    """UX round 1, U1: `↓` through the feed never leaves the row off-screen.
+
+    The earlier reveal clamped the scroll itself, comparing the row's
+    ``region.y`` (a SCREEN row) with ``scroll_offset.y`` (a virtual one): the
+    cursor went off-screen at 4/14 stops at 100x30 and 8/14 at 60x24 while the
+    footer kept advertising a verb. Both sizes are walked here.
+    """
+    for size in ((100, 30), (60, 24)):
+        # A store per size: the fixture names its project, and one tmp_path
+        # cannot hold two of them.
+        store = tmp_path / f"{size[0]}x{size[1]}"
+        store.mkdir()
+        session = _ProjectSession()
+        session.project_registry = _feed_registry(store)
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=size) as pilot:
+            await _boot(pilot, app)
+            view = await _open(pilot, app, "parity-spec")
+            await pilot.press("d")
+            await pilot.pause()
+            await pilot.pause()
+            page = view._detail_page
+            stops = page.selectable_count
+            assert stops > 1
+            for _ in range(stops - 1):
+                await pilot.press("down")
+                await pilot.pause()
+                row = page._selectables[page.selected_index]
+                assert (
+                    page.region.y <= row.region.y <= page.region.y + page.region.height - 1
+                ), f"cursor off-screen at {size}, stop {page.selected_index} of {stops}"
+
+
+async def test_the_cursor_is_on_screen_when_a_tall_page_opens(tmp_path: Path) -> None:
+    """The pin the design round asked for in place of the old literal (D6).
+
+    A tall page reveals its first selectable row on open — the standing
+    "reveal-then-act" rule. Measured on the page box, because the literal it
+    replaces ("opens at overview") no longer holds once a feed sits above the
+    milestones.
+    """
+    session = _ProjectSession()
+    session.project_registry = _feed_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.pause()
+        page = view._detail_page
+        assert page.max_scroll_y > 0, "the fixture must be taller than the box"
+        row = page._selectables[page.selected_index]
+        assert page.region.y <= row.region.y <= page.region.y + page.region.height - 1
+
+
+async def test_the_ruler_matches_the_dom_truth_at_every_scroll_offset(tmp_path: Path) -> None:
+    """Design review round 1, D6: a heading's blank row belongs to ITS section.
+
+    The defect was one specific offset — the one the page OPENS at, where the
+    viewport's top row is the updates heading's ``.gap-above`` blank and the
+    ruler still named the description that had scrolled away above it. Rather
+    than pin that single state, this sweeps every offset the page can hold and
+    asserts the reading equals the DOM truth at each: with the gap ignored by
+    the anchor math, the boundary offset disagrees.
+    """
+    session = _ProjectSession()
+    session.project_registry = _feed_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.pause()
+        page = view._detail_page
+        assert page.max_scroll_y > 0, "the fixture must be taller than the box"
+        for offset in range(int(page.max_scroll_y) + 1):
+            page.scroll_to(y=offset, animate=False)
+            await pilot.pause()
+            truth = _dom_top_section(page)
+            ruler = view.rendered_rows()[1]
+            if truth is None:
+                continue
+            assert ruler.startswith(f"── {truth} "), (offset, ruler, truth)
 
 
 async def test_the_canvas_ladder_advertises_d_detail_and_keeps_the_60_snapshot(

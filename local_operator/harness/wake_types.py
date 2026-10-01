@@ -116,7 +116,19 @@ class WakeSchedule(BaseModel):
     #: every pre-patience row reads as). ``patience`` rows are hidden,
     #: created only by the ``patience`` tool / ``send(patience=…)``, and
     #: filtered out of every human-facing listing and count.
-    kind: Literal["scheduled", "patience"] = "scheduled"
+    #:
+    #: ``ask_timeout`` is the queued ask's deadline (design
+    #: ``docs/design/ask-nonblocking.md`` §2.2, D10): also hidden, also filtered
+    #: out of every human listing (the SAME ``is_internal_wake_row`` predicate),
+    #: and created only by the ask queue. It rides this engine so a deadline
+    #: survives a runtime that does not exist — the supervisor engages a runtime
+    #: for the row, and that runtime's boot ``reconcile`` does the delivery, so
+    #: the fire itself carries no payload (the ``WakeErrand`` rule). Adding a
+    #: literal here is a LOAD change, not a persist-only change:
+    #: ``extra="forbid"`` plus this Literal means an older build drops such a row
+    #: on load, exactly as it does a patience row, and the queue then degrades to
+    #: its in-runtime timer.
+    kind: Literal["scheduled", "patience", "ask_timeout"] = "scheduled"
     #: Hidden deliveries emit no receipt event and are skipped by replay — the
     #: requirement is "no wake line, no card, no badge, no timer notification"
     #: while the TEXT stays in the model's context (``harness/render.py`` turns

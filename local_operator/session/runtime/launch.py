@@ -210,6 +210,40 @@ class WakeErrand:
 
 
 @dataclass(frozen=True, slots=True)
+class AskErrand:
+    """Start a cold session because a queued ask's deadline is due.
+
+    **It delivers nothing, for exactly the ``WakeErrand`` reason** (design
+    ``docs/design/ask-nonblocking.md`` §2.3): the ask queue is durable and the
+    deadline row rides the wake engine, so a runtime that merely EXISTS runs
+    ``AskQueue.reconcile`` at boot and delivers whatever is owed — the timeout
+    notice if the ask is still unanswered, the response if it was answered while
+    nothing was running. Carrying a payload would need a ``CustomMessage`` on the
+    wire and would double-deliver against that reconcile.
+
+    It is therefore SESSION-AGNOSTIC, which is the property the design is built
+    on: whether the runtime was engaged by a wake fire, a monitor fire, a
+    supervisor sweep or a user reopening the session, the boot path it runs is
+    the same one. ``ask_id`` is carried for the log line and the derived
+    ``command_id`` only — no code branches on it.
+
+    **It has no constructor call site yet, and the DEADLINE path will never need
+    one** (review round 1, NIT 10). A due ``ask_timeout`` row IS a wake row, so the
+    supervisor engages a runtime with :class:`WakeErrand` and the boot reconcile
+    does the delivering — wiring an errand into that path would be the second
+    timer substrate the design's D10 exists to avoid. The caller this exists for is
+    the COLD ANSWER: a surface that records an answer while no runtime is running
+    and then engages one so the response is delivered, which is the desktop/relay
+    route's cold arm in A2/B (§6). Declared here so that call site passes a legal
+    payload instead of inventing one, and stated in the PR body so its absence is
+    read as deliberate rather than unwired.
+    """
+
+    ask_id: str = ""
+    command_id: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class WarmErrand:
     """Start the runtime, deliver nothing.
 
@@ -228,7 +262,7 @@ class WarmErrand:
     model_selection_override: bool = False
 
 
-Errand = Union[PromptErrand, SteerErrand, PeerMessageErrand, WakeErrand, WarmErrand]
+Errand = Union[PromptErrand, SteerErrand, PeerMessageErrand, WakeErrand, AskErrand, WarmErrand]
 
 
 @dataclass(frozen=True, slots=True)
@@ -798,11 +832,13 @@ async def _deliver(record: Any, session_id: str, work: Errand) -> tuple[str, boo
     """Hand one errand to a live runtime. Returns ``(detail, duplicate)``."""
     from local_operator.mobile.peer_client import send_peer_message
 
-    if isinstance(work, (WarmErrand, WakeErrand)):
-        # Neither delivers anything: a warm engage exists to pay the start-up
-        # cost early, and a wake is delivered by the session's own scheduler
-        # the moment it loads (see WakeErrand). Reaching a live runtime IS the
-        # completed errand for both.
+    if isinstance(work, (WarmErrand, WakeErrand, AskErrand)):
+        # None of these delivers anything: a warm engage exists to pay the
+        # start-up cost early, a wake is delivered by the session's own
+        # scheduler the moment it loads (see WakeErrand), and a queued ask's
+        # deadline/response is delivered by the boot ``AskQueue.reconcile`` (see
+        # AskErrand). Reaching a live runtime IS the completed errand for all
+        # three.
         #
         # AND THAT IS WHY A LEAVING RUNTIME MUST NOT ANSWER ``runtime ready``.
         # The record stays published and the heartbeat stays fresh for the whole
@@ -1118,7 +1154,8 @@ async def engage_runtime(
         # They are not equally harmless, and the difference is worth keeping
         # straight. A cheap ``_lease_holder`` can only make this loop wait. A
         # cheap ``find_runtime_record`` can also hand back a corpse's RECORD, and
-        # the two errands that deliver nothing (``WarmErrand``, ``WakeErrand``)
+        # the two errands that deliver nothing (``WarmErrand``, ``WakeErrand`` —
+        # and ``AskErrand``, which joined them for the same reason)
         # treat reaching a record as the completed errand -- so on the one pass
         # where an owner published and died between two dense polls, that errand
         # is reported ready against a corpse. One pass later the proof lands and

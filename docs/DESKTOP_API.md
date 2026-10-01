@@ -564,7 +564,8 @@ readings.
 | GET `.../{id}/history` | optional `before_id`, `limit` 1..500 | `{entries,has_more,cursor_missing}` (**read envelope**) |
 | POST `.../{id}/messages` | `{request_id,text,images?,mode?:prompt|steer}` | `{status:admitted,command_id,duplicate,detail,replayed?}` |
 | POST `.../{id}/commands` | `{request_id,command,args?,images?}` | `{command,result:SlashResult,replayed?}` |
-| POST `.../{id}/answers` | `{epoch,request_id,value,question_index}` OR `{epoch,request_id,approved}` | runtime receipt; stale runtime/request/question409 |
+| POST `.../{id}/answers` | `{epoch,request_id,value,question_index}` OR `{epoch,request_id,approved}` OR `{ask_id,answers}` / `{ask_id,decline:true}` | runtime receipt; stale runtime/request/question409. A **queued ask** is answered by `ask_id` with NO epoch check (an ask outlives the owner that queued it), and the refusal is the ask's own sentence (expired / already answered by `<surface>` / already declined) as a `409`. A body with neither answers nor `decline:true` is a `422`: `decline:false` is not a way to answer with nothing |
+| GET `/v1/desktop/asks` | — | `{asks:[PendingAsk + {session_id,cwd}]}`, index-backed: served with nothing running, from `<config_dir>/asks/<sid>.json`. **The key is a plain list here**: unlike a session frame, its presence is NOT the queued-ask capability proxy — this route only exists on a build that has the feature, and an empty list is the ordinary "nothing is waiting" answer |
 | GET `.../{id}/events` | optional `epoch`, `after_seq`, `frontend_replace=1` | authenticated SSE, `data: <DesktopSessionFrame>` (**read envelope**) |
 | POST `.../{id}/watch` | `{subscription_id,visible,can_notify}` | `{lease_seconds:45}`; disconnected/wrong-session ID404 (**read envelope**; the visible lease still creates residency) |
 | POST `.../{id}/notified` | `{completion_token}` | `{claimed:bool}`; cold, never marks read |
@@ -1142,6 +1143,12 @@ rows come from the checkpoint, the local registries or the config store —
 that takes a session — every mutation, every receipt, `/warm`, `/interrupt`,
 `/move` — keeps the control envelope, because none of those can be served
 without the owner that admitted them.
+
+`GET /v1/desktop/skills` splits by form the same way: its `cwd` arm (home when
+omitted) answers for a folder with NO session — no bridge is taken — while the
+`session_id` form in the list above keeps the read envelope, so that entry stays
+true for it. A composer reaches the sessionless form behind
+`features.skill_catalogue`.
 
 `GET /v1/desktop/mcp` is outside that list because it is outside the session: it
 answers the MCP catalog from the config files and the grant store for a folder, so
@@ -2047,6 +2054,7 @@ absent.
 | `desktop_feed` | 1 | `GET /v1/desktop/events`, `POST /v1/desktop/presence` and their frame/lease shapes | the app opens no feed, beats no presence, and keeps its 5 s catalogue poll and its per-session notification path verbatim |
 | `desktop_presence` | 1 | the backend reads the per-publisher records under `run/desktop/delivery/` (plus the legacy `run/desktop/delivery.json` while an older sibling writes it) and defers its own completion banner to a notify-capable desktop | nothing is suppressed on the strength of a lease nobody publishes |
 | `mcp_catalog` | 1 | `GET|POST /v1/desktop/mcp` and `POST /v1/desktop/mcp/credentials`: MCP list, add, remove, test, sign-in and credentials with NO session and NO configured model, in the catalog vocabulary (`connected`/`needs_sign_in`/`not_started`/`connecting`/`error`, per-row `actions`, bounded refusal codes) — see [DESKTOP_CONTROLS.md](DESKTOP_CONTROLS.md) | the app keeps the session-scoped `/v1/desktop/sessions/{id}/mcp` path verbatim; it must NOT show "update the backend", because that path still works |
+| `skill_catalogue` | 1 | `GET /v1/desktop/skills` with `cwd` (home when omitted) — the folder's discoverable skills with NO session, for a composer that needs them before a conversation exists — and `version`, the skill tree's identity, on every answer (sessionless and session form alike) | the composer fires no sessionless skill query and says "update the backend" instead: an older backend REQUIRES `session_id` on that route, so a sessionless call is a 422 the client cannot classify. Nothing else is gated on this key — the session arm and the session-scoped `/skills` panel keep working |
 | `radient_org` | 1 | the four organization reads on `POST /v1/desktop/radient` — `memberships.list`, `org_agents.list`, `org_teams.list`, `org_team.get` — and the frozen membership refusals they carry through under their own codes (`not_a_member`, `insufficient_role`, `team_plan_required`) | the org selector is not offered: a backend without these operations answers them with a masked 422 ("The request has invalid fields."), indistinguishable from a malformed call, so the app must not attempt them |
 | `tunnel` | 1 | `GET /v1/desktop/tunnel`, and `radient_login`/`tunnel_remedy` on `GET /v1/auth/status` | the app shows no tunnel state and no sign-in callout, and the account section keeps its current wording — it must not read the absent key as "the tunnel is fine" |
 | `subagent_trajectory` | 1 | `POST`/`DELETE /v1/desktop/sessions/{id}/children/{job}/trajectory` and the per-job `job_trajectory_appends`/`job_trajectory_replacements` fields they turn on | the child reader keeps its durable pager, opens no watch, and its session's frames carry the empty pair they always have (the opt-in is per session, so an app that opens no reader for ANY child gets exactly today's frames) |

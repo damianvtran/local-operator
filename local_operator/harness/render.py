@@ -48,6 +48,12 @@ from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE
 # behind them, which is precisely what made this module unreachable from an
 # episode (see the module docstring). Import nothing heavy into that module.
 from local_operator.harness.message_types import (
+    ASK_RESPONSE_MESSAGE_TYPE as ASK_RESPONSE_CUSTOM_TYPE,
+)
+from local_operator.harness.message_types import (
+    ASK_TIMEOUT_MESSAGE_TYPE as ASK_TIMEOUT_CUSTOM_TYPE,
+)
+from local_operator.harness.message_types import (
     HUB_MESSAGE_TYPE,
     PEER_MESSAGE_MESSAGE_TYPE,
     PROJECT_REMINDER_MESSAGE_TYPE,
@@ -200,6 +206,24 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             # anything the model reads. Same treatment, same reason: unlisted
             # means bookkeeping-dropped here, and the transcript row, the TUI
             # fold and replay carry it (see `harness/message_types.py`).
+            out.append(_injected_user_message(message.details.get("text", ""), message.id))
+        elif message.custom_type == ASK_TIMEOUT_CUSTOM_TYPE:
+            # A queued ask's DEADLINE (design docs/design/ask-nonblocking.md
+            # §2.5). Unlike the approval row below this one DOES carry its own
+            # preformatted text: the notice quotes the questions (clipped) or, for
+            # a secret ask, names the key and never the prompt — and the model and
+            # the card must see the same words, so ``asks/render.py`` writes them
+            # once and this branch carries them through. It reports the wait and
+            # says the ask stays answerable; it never says the user denied
+            # anything, because nobody did.
+            out.append(_injected_user_message(message.details.get("text", ""), message.id))
+        elif message.custom_type == ASK_RESPONSE_CUSTOM_TYPE:
+            # A queued ask's ANSWER, late answer or DECLINE — one type, one row,
+            # because all three settle the same ask and a second registration is
+            # a row that can silently drop (design §2.3). The text again comes
+            # from ``asks/render.py``: for an answer it IS ``_ask_report``, the
+            # same report the blocking tool returned, so the model cannot tell
+            # the two paths apart in what it is told.
             out.append(_injected_user_message(message.details.get("text", ""), message.id))
         elif message.custom_type == GATE_TIMEOUT_CUSTOM_TYPE:
             # An unattended gate that expired is NOT a user decision, and the

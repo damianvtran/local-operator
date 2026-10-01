@@ -3183,6 +3183,40 @@ class AttachedSession:
             return await client.ask_answer(request_id, value, question_index=question_index)
         raise ValueError("the answer does not match the current question")
 
+    async def ask_respond(
+        self,
+        ask_id: str,
+        answers: Mapping[str, Sequence[str]] | None = None,
+        *,
+        decline: bool = False,
+    ) -> str:
+        """Answer or decline a QUEUED ask from a desktop client (design §2.4/§4).
+
+        THE COLD ARM IS THE BIND, and that is the design's whole point rather
+        than an implementation convenience: an ask outlives the runtime that
+        queued it (durability is the feature), so answering one may mean
+        starting a runtime first. ``_ensure_bound`` is the ordinary background
+        engage every other mutating call opens with; the runtime it starts runs
+        its boot ``reconcile``, which is what delivers the response turn.
+
+        NO EPOCH CHECK, here or at the route, and it is deliberate: asks address
+        an ``ask_id`` rather than an owner epoch because the owner that queued
+        them may be gone — the single-winner rule that replaces it lives on the
+        log (the first ``answered`` event wins), so a stale screen cannot settle
+        a question twice.
+        """
+        await self._ensure_bound()
+        client = self._client
+        if client is None or not client.connected:
+            raise ConnectionError(self._unavailable_reason())
+        if decline:
+            return await client.ask_decline(ask_id, by="desktop")
+        body = {
+            str(key): [str(item) for item in (values or [])]
+            for key, values in (answers or {}).items()
+        }
+        return await client.ask_respond(ask_id, body, by="desktop")
+
     def move_will_wait(self) -> bool:
         """Whether :meth:`set_working_directory` is about to make the user wait.
 

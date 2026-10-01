@@ -604,6 +604,17 @@ _BOUNDED_COLLECTION_FIELDS = {
 #: Each must be exercised by the class guard below.
 _CAPPED_COLLECTION_FIELDS = {
     "usage_components": "capped at accumulation (USAGE_COMPONENT_CAP)",
+    # Capped at the WIRE by `_bound_asks_in_place`: the fold bounds the row
+    # COUNT (PROJECTION_CAP, 20) and this bounds the BYTES, because a
+    # question, its option labels and their consequence lines are
+    # model-authored free text. Twenty rows of the widest shape measured
+    # ~28 KB against a frame with ~110 B of slack at this head -- a field
+    # that could put the attach frame through the socket line without any
+    # of it being wrong on its own.
+    "asks": (
+        "text clipped and the list yielded when the frame has no room "
+        "(_bound_asks_in_place / _yield_asks_when_the_frame_has_no_room)"
+    ),
     "jobs": "trajectories stripped, receipts folded, free text clipped on the wire",
     # Swept at the RECORD (GOAL_HISTORY_MAX, newest-first) and yielded at the
     # WIRE: the whole list is dropped and `goal_history_truncated` set when the
@@ -1119,6 +1130,37 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
         # fits HOWEVER long the owner's list is, so the fixture has to be longer
         # than the budget can hold rather than tuned to sit under it.
         "model_catalogue": [_catalogue_row(index) for index in range(5_000)],
+        # ONE ROW PER CAP SLOT, at the widest shape the fold permits: the ask
+        # fold caps the list at PROJECTION_CAP (20) and each row carries its
+        # questions with their full option text (a surface that cannot see the
+        # options cannot draw a picker). The count is the cap rather than a
+        # round number so the fixture measures the WORST case the field can
+        # reach, not a sample of it.
+        "asks": [
+            {
+                "ask_id": f"a-{index:04x}",
+                "created_at": 1_700_000_000_000,
+                "expires_at": 1_700_003_600_000,
+                "timeout_s": 3600,
+                "urgent": False,
+                "status": "open",
+                "delivered": False,
+                "questions": [
+                    {
+                        "id": f"q{question}",
+                        "question": "question text " * 8,
+                        "options": [{"label": "an option label", "description": "why"}],
+                        "multi": False,
+                        "secret": False,
+                        "persist": False,
+                        "recommended": None,
+                    }
+                    for question in range(4)
+                ],
+            }
+            for index in range(20)
+        ],
+        "asks_open": 20,
     }
     missing = _collection_fields() - set(populated)
     assert not missing, (

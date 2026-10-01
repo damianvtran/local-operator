@@ -24,9 +24,14 @@ from __future__ import annotations
 import inspect
 from typing import Any
 
-from local_operator.harness.types import ModelSpec, ToolContext
+from local_operator.harness.types import AgentTool, ModelSpec, ToolContext
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
+from local_operator.tools.tool_docs import (
+    chain_tool_docs,
+    is_tool_docs_link,
+    unwrap_tool_docs,
+)
 from local_operator.variables import VariableStore
 
 MODEL = ModelSpec(provider="test", model_id="m", context_window=1000)
@@ -40,6 +45,21 @@ def never_streams(request: Any, signal: Any) -> Any:
         yield
 
     return gen()
+
+
+def _tool(name: str) -> AgentTool:
+    """A minimal live tool, so the tool-docs link has an inventory to render."""
+
+    async def execute(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("no tool is executed here")
+
+    return AgentTool(
+        name=name,
+        label=name.title(),
+        description=f"{name} tool",
+        parameters={"type": "object", "properties": {}},
+        execute=execute,
+    )
 
 
 #: A distinguishable value per ToolContext field that ``Session.__init__``
@@ -126,6 +146,24 @@ def test_every_paired_field_has_a_sentinel() -> None:
     )
 
 
+def _host_value_reaches(context_value: Any, host_value: Any) -> bool:
+    """Identity — or identity RECOVERED through the documented tool-docs link.
+
+    ``Session.__init__`` chains the ``tool://`` reference link AHEAD of the
+    host's resolver (``local_operator/tools/tool_docs.py``), so the value that
+    reaches the executor for ``resolve_internal_url`` is that link, not the
+    host's object. The wrapper is accepted ONLY when unwrapping recovers the
+    host's own value, so the drop class this guard exists for still fails: a
+    dropped field (``None`` or missing), a link that lost the host resolver,
+    or any other wrapper all fail the identity check. The delegation
+    behaviour that earns the permission is exercised by
+    :func:`test_the_tool_docs_link_delegates_foreign_urls_to_the_host_resolver`.
+    """
+    if context_value is host_value:
+        return True
+    return unwrap_tool_docs(context_value) is host_value
+
+
 def test_no_host_supplied_field_is_dropped_before_the_executor(tmp_path) -> None:
     """Give the Session a distinguishable value for every field it accepts and
     assert the per-turn context still carries it. This is the assertion the
@@ -149,12 +187,59 @@ def test_no_host_supplied_field_is_dropped_before_the_executor(tmp_path) -> None
     dropped = [
         field
         for field in pairs
-        if field in SENTINELS and getattr(context, field) is not SENTINELS[field]
+        if field in SENTINELS and not _host_value_reaches(getattr(context, field), SENTINELS[field])
     ]
     assert not dropped, (
         f"Session._build_tool_context() does not pass through: {dropped}. The host "
         "configured these and the running tool cannot see them."
     )
+
+
+def test_the_tool_docs_link_delegates_foreign_urls_to_the_host_resolver(tmp_path) -> None:
+    """The permission the guard grants above, exercised rather than assumed.
+
+    The guard accepts the ``ToolDocsLink`` wrapper for ``resolve_internal_url``
+    ONLY because the host's resolver still decides every foreign URL. This test
+    drives that behaviour over a real Session: ``skill://``/``guide://`` reach
+    the host's resolver, ``tool://`` is answered by the chain itself (the host
+    resolver never sees it), and the drop class still fails the guard's
+    acceptance — a link with no host resolver, a bare ``None``, or any other
+    wrapper is rejected.
+    """
+    seen: list[str] = []
+
+    def host_resolver(url: str) -> str | None:
+        seen.append(url)
+        return f"host:{url}" if url.startswith("skill://") else None
+
+    session = Session(
+        model=MODEL,
+        stream_fn=never_streams,
+        tools=[_tool("bash")],
+        transcript=Transcript(tmp_path / "tool-docs-link"),
+        system_blocks_provider=lambda: ["sys"],
+        skill_resolver=host_resolver,
+    )
+    link = session._build_tool_context().resolve_internal_url
+    assert is_tool_docs_link(link)
+    assert unwrap_tool_docs(link) is host_resolver
+
+    # Every foreign scheme reaches the host resolver...
+    assert link("skill://deploy") == "host:skill://deploy"
+    assert link("guide://g") is None
+    assert seen == ["skill://deploy", "guide://g"]
+
+    # ...while `tool://` is answered by the chain, and the host never sees it.
+    doc = link("tool://bash")
+    assert doc is not None
+    assert "# Tool: `bash`" in doc
+    assert seen == ["skill://deploy", "guide://g"]
+
+    # The drop class remains red-capable: identity, or identity recovered
+    # through THIS link — nothing else passes.
+    assert _host_value_reaches(host_resolver, host_resolver)
+    assert not _host_value_reaches(chain_tool_docs(None, lambda: []), host_resolver)
+    assert not _host_value_reaches(None, host_resolver)
 
 
 def test_the_guard_would_have_caught_the_variables_bug(tmp_path) -> None:

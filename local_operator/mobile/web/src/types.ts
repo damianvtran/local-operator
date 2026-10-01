@@ -25,7 +25,14 @@ export type EntryKind =
 	// because this union mirrors `local_operator/mobile/types.py` field-for-field
 	// -- the client renders it through its unknown-kind path today, which is what
 	// it rendered before the runtime emitted reasoning at all.
-	| "reasoning";
+	| "reasoning"
+	// A queued ask SETTLING (design docs/design/ask-nonblocking.md §4): one row
+	// per answer/late answer/decline and one for the deadline that passed. Here
+	// for the same mirror rule as `reasoning`; the ask sheet itself lands with
+	// PR D, and an unrendered kind is a row the transcript skips rather than
+	// crashes on (its unknown-kind path returns null).
+	| "ask_response"
+	| "ask_timeout";
 
 export type ToolState =
 	| "composing"
@@ -219,6 +226,28 @@ export interface CompletionAttention {
 	revision: [number, number];
 }
 
+export interface PendingAsk {
+	ask_id: string;
+	created_at: number;
+	expires_at: number;
+	timeout_s: number;
+	urgent: boolean;
+	status:
+		| "open"
+		| "answered"
+		| "declined"
+		| "timed_out"
+		| "late"
+		| "dismissed"
+		| "expired";
+	delivered: boolean;
+	questions: Record<string, unknown>[];
+	/** Secret answers hold the KEY ONLY (`[<key>]`), never a value. */
+	answers?: Record<string, string[]>;
+	answered_by?: Record<string, unknown>;
+	answered_at?: number;
+}
+
 export interface SessionProjection {
 	attention?: CompletionAttention;
 	session_id: string;
@@ -269,6 +298,12 @@ export interface SessionProjection {
 	    A parallel tool batch can open several approvals at once; the card
 	    shows "1 of N" so the user knows more follow this one. */
 	pending_count: number;
+	/** One queued ask as the runtime publishes it (design §4). */
+	asks?: PendingAsk[];
+	/** How many of `asks` are still open. ABSENT (not 0) while the runtime
+	    does not publish asks at all — the field's presence is the client-side
+	    capability proxy (N2), exactly as it is for `asks` itself. */
+	asks_open?: number;
 	/** input/output tokens. */
 	usage: Record<string, number>;
 	/**
@@ -328,6 +363,11 @@ export interface SessionSummary {
 	    omit the field entirely, so readers must treat absence as false. */
 	unseen?: boolean;
 	pending_kind: "approval" | "ask" | "" | null;
+	/** Outstanding queued asks on this row (design §4/§5.0), from the runtime's
+	    own count. ABSENT, never 0, while the runtime does not publish asks —
+	    presence is the capability proxy. Distinct from `pending_kind`, which
+	    stays the APPROVAL signal. */
+	asks_open?: number;
 	/** The record's own phrase when the runtime has been SIGNALLED and is
 	    finishing the work in flight before it exits; `""` otherwise (an older
 	    daemon omits it, so readers normalise with `?? ""`).

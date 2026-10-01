@@ -528,6 +528,73 @@ real tree's tests carry (not the resolver's output), and
 spelling above — collection and resolution — so a narrower regex, a stricter
 resolver or a lost edge fails a test rather than a CI job.
 
+### Shell-query guards: shallow first, and a soft budget for the rest
+
+The other inner-loop cost is the shell query an agent writes instead of using a
+tool: a recursive `grep` from a repo root, a whole-store `find` swept per file, a
+`du` walk at full CPU. The guards on that path are layered because each can only
+see its own slice:
+
+* **`tools/search_guard.py` — refuse the unbounded ROOT.** A `grep`/`rg`/`find`/
+  `fd`/`locate`/`du` whose root is `.`/`/`/`~`, a bare glob, an unresolved
+  `$VAR`/`$(...)`, a heavy directory (`node_modules`, `.git`, `out`, …), the
+  session STORE or a REPOSITORY ROOT (a resolved directory holding `.git` or
+  `node_modules`) is refused with a message and never rewritten. The same module
+  also generates the ripgrep config that prunes vendor/build trees for an `rg` it
+  does not block; `git grep` stays exempt. The STORE class is narrow on purpose:
+  the store root and `<root>/sessions/`, and NOT its other children (`skills/`,
+  `attachments/`, `agents/`, `logs/`, the config file) — every one of those was a
+  legitimate named-directory search before the class existed. The one exemption
+  inside `sessions/` is `sessions/<id>/scratchpad/**`, the tree agents are told to
+  work in, which is why `$LOCAL_OPERATOR_SCRATCHPAD` resolves out of the class
+  rather than into it. At an unbounded/store/repo root a `find`/`fd` is ACCEPTED
+  on a DEPTH bound only (`-maxdepth`; `fd -d`/`--max-depth`) regardless of
+  predicate — so the measured `find ~/.local-operator/sessions -maxdepth 2 -name
+  transcript.jsonl -mmin -720` passes and `find ~/.local-operator/sessions -name
+  transcript.jsonl` does not. A TIME FILTER is deliberately not accepted:
+  `-mmin`/`-mtime`/`-newer` prune the output, not the walk (measured: 41.7 s
+  without `-maxdepth` against 2.3 s with it on the same predicate). The store and
+  repo classes are best-effort filesystem probes whose failure mode is "not a
+  repo": a probe that errors falls back to the string rules rather than blocking.
+  Escape hatch: `LOCAL_OPERATOR_ALLOW_UNBOUNDED_SEARCH=1`, read per segment off the
+  command.
+* **`tools/query_budget.py` — bound the AGGREGATE.** The root guard cannot see a
+  depth-bounded `find` piped into a per-file `grep` loop, which is how a live
+  session spent seven minutes (37.8 s over 80 transcripts on re-measure). A
+  command is QUERY-SHAPED when it has a WALK-ISH occurrence — a `find`/`fd`/
+  `locate`/`du`, a grep-family word carrying `-r`/`-R`/`--recursive`, or a
+  non-stdin-filter `rg`/`ag`/`ack`, in a segment, a substitution or a loop body —
+  and NO LONG-RUNNER segment anywhere (`make`, `pytest`, `npm`, `cargo`, `python`,
+  `docker`, …). The veto is load-bearing: without it `pytest -q; grep -c FAILED
+  out.log` put a 60 s budget on a test suite and blamed a filesystem walk. A
+  query-shaped command gets ONE advisory at **10 s** and a process-group KILL at
+  the budget (default **60 s**) unless it carries `LOCAL_OPERATOR_ALLOW_SLOW_QUERY=1`
+  (advisory still shows, stop skipped). Both are visible in the result and on the
+  live card (`tui/app.py::_partial_advisory` reads both advisory keys). The grant
+  is per CALL but not position-free: it counts on a walk-ish segment, on a
+  standalone `…=1;`/`export …=1;` statement (the form a loop can carry — the
+  inline prefix is a bash syntax error in front of `for`), or as an `env …=1`
+  prefix of a walk. `bash -c '…'` is parsed recursively, so the wrapper neither
+  hides a query nor blocks a grant. Wrappers (`timeout`, `sudo`, `env`, `time`,
+  `nice`, `command`, `nohup`, `xargs`) are peeled in BOTH guards. Budget vs the
+  tool's `timeout`: both bound the same command and the SMALLER wins — a budget
+  above `timeout` never fires, because the tool's deadline kills it first and
+  reports `TIMEOUT`. Keys: `bash.query_budget.enabled` / `.stop` / `.seconds`
+  (LIVE scope).
+* **`tools/sleep_guard.py`** refuses a foreground call that is mostly a long
+  literal `sleep`, routing it to `background: true` + `wait`.
+* **`memory_guard.py`** puts a per-command RAM ceiling on a command, so one
+  oversized one is killed instead of taking the device down.
+
+Tests: `tests/unit/tools/test_bash_search_interception.py` (the false-positive
+contract — every legitimate shape that must pass is pinned by name) and
+`tests/unit/tools/test_query_budget.py` (the classifier matrix, the pure
+thresholds, three integration cases). `tests/unit/tui/test_live_advisory_wiring.py`
+plus the card cell in `tests/unit/tui/test_tool_card.py` cover the advisory's
+arrival on screen. The norm they encode, and the one to write from, is in
+`prompts_md/system.md`: **query shallow, then deepen on signals** — start at the
+narrowest scope that could hold the answer, and widen only when it shows nothing.
+
 ### Running the suite locally: what it costs, and how to read a stall
 
 **CI's five shards are the whole-tree gate. A local whole-tree run is not one, and
@@ -2232,8 +2299,35 @@ stylesheet change at all.
 
 An SVG is not something to eyeball as markup, and the reader does not render one
 (it decodes raster images only). Render it and view it — open the `file://` URL of
-the printed path in a browser tool and screenshot it, or render it to a PNG in the
-scratchpad and read that back: a human or a vision-capable agent **sees the frame**.
+the printed path in a browser tool and screenshot it, or rasterise it to a PNG in
+the scratchpad and read that back: a human or a vision-capable agent **sees the frame**.
+
+**Rasterise with `rsvg-convert`; never `qlmanage`.** When the browser host
+refuses a `file://` render (cmux has), the sanctioned conversion is the one
+`scripts/visual_gallery.py` uses and `docs/VISUAL_CAPTURE.md` documents
+(librsvg's `rsvg-convert` — Homebrew on this host, resolved from PATH; the
+gallery fails clearly if it is absent):
+
+```sh
+rsvg-convert "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/before.svg" \
+  -o "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/before.png"
+```
+
+`qlmanage` must not be used from a rig, in **any** form: every invocation —
+`-t` thumbnails included — checks its QuickLook app bundle in with
+LaunchServices as a **foreground** app (`CHECKEDIN: … foreground=1` in the
+unified log; measured 2026-09-30), so each run flashes a Dock tile, and a `-p`
+preview parks one in the Dock until the panel is dismissed. That is UI on the
+operator's screen, exactly what "headless" must exclude. `rsvg-convert` links
+no LaunchServices app — 0 LaunchServices/Dock registrations against the
+unified log on the same host — and it consumes the SVG `save_capture` already
+wrote, so it sidesteps the `file://` refusal entirely. Keep one rasteriser: a
+before/after pair must come from the same tool, so rigs use the path the
+gallery targets; if `rsvg-convert` is missing, install librsvg rather than
+switching tools mid-pair (`sips` renders SVG and is headless-safe too, but
+mixing rasterisers is the §3 trap with the tool as the hidden variable).
+`open`-based previews launch a foreground app — fine for a human glance,
+never for agent evidence.
 
 ### 3. Always capture before AND after
 

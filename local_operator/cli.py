@@ -1449,6 +1449,18 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    # Hidden for the same reason, and it is the MOBILE half's child. ``lop
+    # update`` spawns it from the newly installed wheel so the mobile daemon's
+    # own LaunchAgent is rendered by THIS build and the daemon is bounced right
+    # after — one actor for that daemon's plist and its bounce, with one bounded
+    # retry around the bounce. Reachable by hand for a machine whose upgrade
+    # predates this fix; see ``update.mobile_refresh_command``.
+    update_parser.add_argument(
+        "--refresh-mobile",
+        dest="refresh_mobile",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     # Install a build that is already on this machine into its own generation:
     # a source directory, or a git ref of the repository this command runs in.
     # Named separately from the PyPI path because it answers a different
@@ -10924,6 +10936,7 @@ def main() -> int:
                 check=bool(getattr(args, "check", False)),
                 refresh_daemons=bool(getattr(args, "refresh_daemons", False)),
                 services_only=bool(getattr(args, "services_only", False)),
+                refresh_mobile=bool(getattr(args, "refresh_mobile", False)),
                 from_snapshot=getattr(args, "from_snapshot", None),
                 services=not bool(getattr(args, "no_services", False)),
             )

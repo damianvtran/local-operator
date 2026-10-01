@@ -1745,15 +1745,16 @@ def refresh_plist_if_stale() -> launchd.PlistRefresh:
         if outcome.kind == "current":
             # THE BUILD QUESTION IS DELIBERATELY NOT ASKED FOR THIS DAEMON (review
             # round 1, R4). `update.refresh_mobile_after_upgrade` bounces this daemon
-            # UNCONDITIONALLY, through the new wheel's own `lop mobile restart` — on
-            # the UPGRADE path, where it runs right after the refresh child, and now
-            # on the hand-run `lop update --refresh-daemons` too (round 2, MINOR-2:
+            # UNCONDITIONALLY, through the new wheel's own `update --refresh-mobile`
+            # child — which since 2026-09-30 also performs THIS repair, so the plist
+            # and the bounce are one actor — on the UPGRADE path and on the hand-run
+            # `lop update --refresh-daemons` too (round 2, MINOR-2:
             # `update._run_daemon_repair` composes it, because there is no other
-            # caller there) — so asking here as well would restart the phone relay
-            # twice for one upgrade and print two lines about it. Kept: that bounce,
-            # because it is the wheel-aware path with its own failure reporting and
-            # the phone-UI notice, and because removing it would be a change to what
-            # that step is for.
+            # caller there). Asking the build question here as well would restart
+            # the phone relay twice for one upgrade and print two lines about it.
+            # Kept: that bounce, because it is the wheel-aware path with its own
+            # failure reporting and the phone-UI notice, and because removing it
+            # would be a change to what that step is for.
             #
             # WHAT THIS COSTS, stated rather than hidden: if that unconditional bounce
             # fails, this repair does not act as its fallback. The failure is reported

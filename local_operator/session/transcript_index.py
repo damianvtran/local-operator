@@ -1396,7 +1396,7 @@ def resident(config_dir: str | Path, session_id: str) -> TranscriptIndex | None:
     return entry
 
 
-def start_refresh(config_dir: str | Path, session_id: str) -> "asyncio.Task[Any]":
+def start_refresh(config_dir: str | Path, session_id: str) -> "tuple[asyncio.Task[Any], bool]":
     """Start (or join) the background refresh for one session.
 
     Single-flight per session, with the strong reference asyncio tasks need —
@@ -1404,6 +1404,12 @@ def start_refresh(config_dir: str | Path, session_id: str) -> "asyncio.Task[Any]
     mid-flight (the pattern serving.py uses for the same reason). Callers in
     another event loop than a recorded entry get a fresh task; the stale entry
     is replaced.
+
+    Returns ``(task, started)``: ``started`` is True only when THIS call created
+    the task, False when it joined one already in flight. The distinction is
+    :func:`checkpoints_view`'s to spend — only the call that STARTS a build
+    owes the first-paint wait for it (see the comment there for the measured
+    cost of re-paying it on every poll).
     """
     key = _key(config_dir, session_id)
     loop = asyncio.get_running_loop()
@@ -1411,7 +1417,7 @@ def start_refresh(config_dir: str | Path, session_id: str) -> "asyncio.Task[Any]
     if entry is not None:
         entry_loop, task = entry
         if entry_loop is loop and not task.done():
-            return task
+            return task, False
         if entry_loop is loop:
             _IN_FLIGHT.pop(key, None)
 
@@ -1446,7 +1452,7 @@ def start_refresh(config_dir: str | Path, session_id: str) -> "asyncio.Task[Any]
             _IN_FLIGHT.pop(key, None)
 
     task.add_done_callback(_drop)
-    return task
+    return task, True
 
 
 def _manifest_state(
@@ -1512,8 +1518,10 @@ async def checkpoints_view(
     Fast path: the resident index, revalidated against one stat. Else the disk
     cache decides; a stale/missing cache starts a background build and awaits it
     only for the first-paint budget, answering ``building`` (with whatever the
-    previous scan has) when it is still running. A failure inside the cooldown
-    answers ``error`` without hammering a broken journal.
+    previous scan has) when it is still running. Only the poll that STARTS a
+    build waits that budget; a poll that JOINS one answers ``building``
+    immediately instead of re-awaiting the same build. A failure inside the
+    cooldown answers ``error`` without hammering a broken journal.
     """
     key = _key(config_dir, session_id)
     resident_index = _RESIDENT.get(key)
@@ -1548,18 +1556,31 @@ async def checkpoints_view(
     failed_at = _FAILURES.get(key)
     if failed_at is not None and (time.monotonic() - failed_at) < _FAILURE_COOLDOWN_S:
         return _manifest_state(session_id, "error", probe.index, probe.built_at)
-    task = start_refresh(config_dir, session_id)
-    done, _pending = await asyncio.wait({task}, timeout=wait_s)
-    if task in done:
-        error = task.exception()
-        if error is not None:
-            return _manifest_state(session_id, "error", probe.index, probe.built_at)
-        built = task.result()
-        if built is not None:
-            cache_st = await asyncio.to_thread(_stat_or_none, index_path(config_dir, session_id))
-            return _manifest_state(session_id, "ready", built, _mtime_or_none(cache_st))
-        return _manifest_state(session_id, "ready", None, None)
-    return _manifest_state(session_id, "building", probe.index, probe.built_at)
+    task, started = start_refresh(config_dir, session_id)
+    if started:
+        # FIRST PAINT: only the call that STARTS the build owes this wait — the
+        # rail's loading state must be able to appear within the budget (design
+        # D3) even while the build runs on.
+        done, _pending = await asyncio.wait({task}, timeout=wait_s)
+        settled = task in done
+    else:
+        # JOINED an in-flight build: the starting call already owns the
+        # first-paint wait for it, so re-awaiting it here would charge EVERY
+        # poll the full budget for the same build (measured: 6 polls over one
+        # 3.0 s bda7 scan, ~220 ms each). Answer from the task's own state
+        # instead — near-zero wait — and let the shared path below serve a
+        # build that settled since this poll joined it.
+        settled = task.done()
+    if not settled:
+        return _manifest_state(session_id, "building", probe.index, probe.built_at)
+    error = task.exception()
+    if error is not None:
+        return _manifest_state(session_id, "error", probe.index, probe.built_at)
+    built = task.result()
+    if built is not None:
+        cache_st = await asyncio.to_thread(_stat_or_none, index_path(config_dir, session_id))
+        return _manifest_state(session_id, "ready", built, _mtime_or_none(cache_st))
+    return _manifest_state(session_id, "ready", None, None)
 
 
 def _stat_or_none(path: Path) -> os.stat_result | None:

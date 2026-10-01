@@ -91,6 +91,8 @@ from local_operator.harness.loop import AgentLoop, LoopContext, _materialize_asi
 # module, so the vocabulary cannot be defined here or in the modules that own
 # it (``harness/message_types.py`` carries the full reasoning).
 from local_operator.harness.message_types import (
+    ASK_RESPONSE_MESSAGE_TYPE,
+    ASK_TIMEOUT_MESSAGE_TYPE,
     HUB_MESSAGE_TYPE,
     PEER_MESSAGE_MESSAGE_TYPE,
     PROJECT_REMINDER_MESSAGE_TYPE,
@@ -234,6 +236,11 @@ from local_operator.session.naming import (
     ConversationName,
     TitleFitCheck,
 )
+from local_operator.session.notice_guard import (
+    MCP_UNAVAILABLE_REMIND_S,
+    NoticeGuard,
+    fingerprint_text,
+)
 from local_operator.session.protocol import (
     CompactionOutcome,
     RuntimeLocality,
@@ -254,7 +261,13 @@ from local_operator.session.spend import (
 )
 from local_operator.session.spend import recall as recall_spend
 from local_operator.session.spend import serving_identity, writer_stamp
-from local_operator.session.transcript import ENTRY_CUSTOM, ENTRY_MESSAGE, Transcript
+from local_operator.session.transcript import (
+    CUSTOM_KIND_CUSTOM,
+    ENTRY_CUSTOM,
+    ENTRY_MESSAGE,
+    Transcript,
+    context_cut_index,
+)
 from local_operator.session.usage_seed import seed_reported_usage
 from local_operator.stt import AudioPath
 from local_operator.tools.builtin import (
@@ -263,6 +276,7 @@ from local_operator.tools.builtin import (
     todo_fingerprint,
     todo_snapshot,
 )
+from local_operator.tools.tool_docs import chain_tool_docs
 
 if TYPE_CHECKING:
     # Type-only: the session must never pull the MCP stack in at import time.
@@ -553,7 +567,20 @@ _PRE_ABORT_DROP_NOTICE_AT = 3
 #: which is exactly why they are the ones that must not clear a stop. A caller
 #: that needs everything to stop regardless has the stronger rung: the ``abort``
 #: control op cancels the children, and ``lop stop`` ends the process.
-_STOPPED_WORK_RESIDUE_TYPES = frozenset({HUB_MESSAGE_TYPE, JOB_RESULT_MESSAGE_TYPE})
+_STOPPED_WORK_RESIDUE_TYPES = frozenset(
+    {
+        HUB_MESSAGE_TYPE,
+        JOB_RESULT_MESSAGE_TYPE,
+        # A queued ask's DEADLINE NOTICE is not human intent, so it must not clear
+        # a sticky abort: a stop means "buy no more paid turns", and a timer the
+        # session set for itself firing afterwards is exactly the thing that rule
+        # exists to catch (design docs/design/ask-nonblocking.md §2.3). The
+        # RESPONSE type deliberately stays OUT of this set: an answer, a late
+        # answer and even a decline are all a person deciding, which is fresh
+        # intent and clears the abort exactly like a typed prompt.
+        ASK_TIMEOUT_MESSAGE_TYPE,
+    }
+)
 
 #: Event families a provider stream produces at TOKEN rate. An unobserved
 #: subagent does not fold these into its own frontend store (see ``_emit``):
@@ -1163,6 +1190,18 @@ _PERSISTABLE_CUSTOM_TYPES: frozenset[str] = frozenset(
         # servers this feature is about — the replay asserts tools that are not
         # there. The live tool inventory and ``mcp://`` status tell the truth at
         # resume time; the harness must not replay a claim it cannot re-verify.
+        #
+        # THE QUEUED-ASK PAIR (design docs/design/ask-nonblocking.md §2.3). Both
+        # are REAL ACTIVITY and must survive a resume: an ``ask_response`` is a
+        # person's answer, and an ``ask_timeout`` is the record of a deadline the
+        # agent acted on — a transcript that dropped it would replay a turn whose
+        # model half is missing (the model was told to proceed without the
+        # answer, and the replay would show it deciding for no stated reason).
+        # NOTE they are deliberately NOT in ``transcript.BOOKKEEPING_CUSTOM_TYPES``
+        # for the same reason: bookkeeping does not move the activity clock, and
+        # a human answering is activity by any reading.
+        ASK_RESPONSE_MESSAGE_TYPE,
+        ASK_TIMEOUT_MESSAGE_TYPE,
     }
 )
 
@@ -1181,6 +1220,21 @@ ASIDE_TOOL_CALL_REFUSAL = (
     "call was rejected and nothing ran. Answer the user's question in plain text "
     "or markdown."
 )
+
+
+def _ask_refusal_copy(record: Mapping[str, Any] | None) -> str:
+    """Why an answer was refused, in the QUEUE's words (design §2.2).
+
+    A thin hop so the session can refuse without importing the text module at
+    module scope (``asks/render.py`` reaches into the tool layer for the answer
+    report, and that import belongs on the answer path, not on every session's
+    construction). One copy of the sentence per state, enforced by there being
+    one function — a second phrasing here is how the TUI, the desktop app and
+    the phone would start telling the user different stories about the same tap.
+    """
+    from local_operator.asks.render import refusal_copy
+
+    return refusal_copy(record)
 
 
 def _collect_tool_call_delta(state: dict[int, dict[str, Any]], event: Any) -> None:
@@ -3062,7 +3116,16 @@ class Session:
         self._output_contract: OutputContract | None = None
         self._has_ui = has_ui
         self._cwd = cwd or "."
-        self._skill_resolver = skill_resolver
+        # ``tool://`` is chained AHEAD of the factory's knowledge resolver in
+        # the ONE place every session must pass through — root or subagent,
+        # because each child constructs its own Session — so each gets a
+        # ``tool://`` link over ITS OWN live inventory. The lambda, not a
+        # snapshot: ``refresh_tools`` rebinds ``self._tools`` mid-session, and
+        # a doc must describe the tools the reader holds at READ time. Every
+        # other scheme reaches ``skill_resolver`` exactly as before, and a
+        # session constructed with no resolver at all still answers
+        # ``tool://``. Mechanism + contract: ``tools/tool_docs.py``.
+        self._skill_resolver = chain_tool_docs(skill_resolver, lambda: self._tools)
         self._request_approval = request_approval
         # No constructor kwarg, unlike ``request_approval``: there is no
         # default ask host to fall back to. Only a front end that owns the
@@ -3569,7 +3632,24 @@ class Session:
         #: this away — no current route reaches the inversion (every real
         #: incident-to-recovery path crosses a connect round trip), but a cached
         #: or in-process connect path makes it live, and the failure is silent.
+        #:
+        #: The MCP-notice guard's mutations ride the SAME lock (``note_emitted``
+        #: inside the emit path, ``note_recovered`` inside the recovery path),
+        #: so the dedupe state a failure observes is exactly the one the
+        #: recoveries before it produced — see ``journal_mcp_unavailable``.
         self._journal_lock = asyncio.Lock()
+        #: Dedupes the MCP-unavailable notice at the journal write: one card per
+        #: (server, byte-identical text) while it stays outstanding, re-armed by
+        #: a live recovery or a changed card, with a 24 h reminder window.
+        #: Deliberately IN-MEMORY: the durable half of "already outstanding" is
+        #: the transcript scan in :meth:`_mcp_unavailable_previous_ts`, which is
+        #: what survives a restart — both halves bounded at the latest
+        #: compaction cut ("outstanding" means a row the replay still shows;
+        #: see :meth:`_mcp_unavailable_record_visible`) — and the recovery half
+        #: is live-only by design (``journal_mcp_recovery``); ``NoticeGuard``
+        #: documents the cross-process blind spot that leaves,
+        #: ``MCP_UNAVAILABLE_REMIND_S`` the bound on it.
+        self._mcp_notice_guard = NoticeGuard(remind_after_s=MCP_UNAVAILABLE_REMIND_S)
         # (new_label, transient) of the last model switch made model-visible, so
         # the two edges that can both fire for one change (``set_model`` and a
         # route-settled event) do not double-announce. See journal_model_switch.
@@ -3606,6 +3686,27 @@ class Session:
             ),
         )
         self._wake_deliver_hook: Callable[[DueWake], Awaitable[None]] = self._deliver_wake
+        #: The queued-ask engine (design docs/design/ask-nonblocking.md). Built
+        #: LAZILY and only while ``asks.policy.NONBLOCKING_ASK`` is on: with the
+        #: flag off a session has no queue, no timer and no log, so every existing
+        #: path stays byte-for-byte today's (§5 invariant). ``_ask_reach`` is the
+        #: host's presentation probe (a Session cannot see the attach state), and
+        #: ``_ask_cwd`` is carried into the derived index so the aggregate
+        #: "all my open asks" view can name a session without opening it.
+        self._ask_queue: Any = None
+        # Serializes the ask queue's two wake-row writers (``arm_ask_wake`` /
+        # ``retire_ask_wake``). They are the only writers that BUILD a whole list
+        # and hand it to a full-list writer, so two of them interleaving lose one
+        # of the rows: the snapshot and the write have to happen together, which
+        # is what this lock is for (review round 1, MAJOR 4).
+        self._ask_wake_lock = asyncio.Lock()
+        self._ask_reach: Callable[[], Any] | None = None
+        #: The host's wire publisher for the ask fold (design §4, N2). A
+        #: runtime/terminal host registers one so the queue's own change path
+        #: (``AskQueue._refresh`` -> ``publish_ask_state``) can push the asks
+        #: onto the MOBILE projection as well as the frontend state; a headless
+        #: session leaves it ``None`` and only the frontend state carries them.
+        self._ask_state_sink: Callable[[Any, Any], None] | None = None
         # The monitor scheduler is the wake scheduler's twin (design
         # monitor-tool.md §5.1): in-process, one timer, a persist callback and
         # a deliver callback — plus the check runner, which executes the
@@ -8242,6 +8343,144 @@ class Session:
         """
         self._request_approval = handler
 
+    async def deliver_ask_messages(self, messages: list[CustomMessage]) -> None:
+        """Hand queued-ask response/timeout rows to this session (design §2.3).
+
+        Modelled on :meth:`_deliver_wake`, because the delivery shapes are the
+        same and a second transport for the live case is what the design
+        forbids. A BUSY turn takes the rows at its next successful boundary as
+        COURTESY messages — the batch is already written by ``reconcile`` and
+        nothing in flight is cancelled — and an IDLE session runs ONE turn
+        carrying the whole batch, so N asks settling together cost one paid turn
+        rather than N.
+
+        The wake-a-parked-``wait`` mark goes in AFTER the queue puts, for the
+        lost-wakeup reason ``_deliver_wake`` records: the woken tool returns into
+        a drain, and the drain has to find the messages already queued.
+        """
+        if not messages or self._disposed:
+            return
+        if self._is_streaming:
+            for message in messages:
+                self._courtesy_wake_count += 1
+                self._steering_queue.put_nowait(message)
+            self._peer_arrival.mark(messages[-1].custom_type)
+            return
+        self._spawn_background(self._prompt_messages(list(messages)))
+
+    async def reconcile_asks(self, now_ms: int | None = None, *, load_time: bool = False) -> None:
+        """Level-triggered: deliver whatever the ask log says is owed.
+
+        Called at runtime boot (beside ``process._drain_inbox_into``), at turn
+        start (beside :meth:`_drain_spooled_peer_inbox`), from the queue's own
+        deadline tick, and on every answer/decline/dismiss op. Idempotent by
+        construction — the transcript row IS the delivery marker — so calling it
+        an extra time costs one log read and nothing else.
+
+        ``load_time`` is the REOPEN fact and only the boot drain passes it: it is
+        what arms the "lapsed while the session was stopped" annotation, which the
+        design scopes to the reopen (review round 2, M1). Every other caller is a
+        path where the session is running, so the annotation cannot be true there.
+        """
+        queue = self.ask_queue()
+        if queue is None:
+            return
+        await queue.reconcile(now_ms, load_time=load_time)
+
+    def arm_ask_wake(self, row: Any) -> None:
+        """Add or replace one internal ``ask_timeout`` row and re-arm wakes.
+
+        The session owns ``_wake`` and its persist-and-re-arm path, so the write
+        lives here rather than in the queue; the queue only mints the row. Best
+        effort by the same contract every wake writer has: a failed index write
+        must never take down the ask it describes, and the in-runtime timer still
+        covers the deadline.
+
+        THE SNAPSHOT IS TAKEN INSIDE THE LOCK AND INSIDE THE COROUTINE (review
+        round 1, MAJOR 4). Building the list here and handing it to a spawned
+        ``update`` is a read-modify-write against a full-list writer, and three
+        arms in a row were therefore all built from the same pre-yield list: the
+        last write carried only the last row and the others were gone. A lost
+        deadline row degrades SILENTLY to the in-runtime timer, which is the cold
+        durability this engine exists to provide, so the loss is invisible until
+        a runtime dies with an ask open. Reading after the lock is taken also means
+        a user ``wake`` created in the gap is in the list the write carries.
+        """
+
+        async def _apply() -> None:
+            async with self._ask_wake_lock:
+                rows = [r for r in self._wake.schedules if getattr(r, "id", "") != row.id]
+                rows.append(row)
+                await self._wake.update(rows)
+
+        try:
+            self._spawn_background(_apply())
+        except Exception:  # noqa: BLE001 — degrade to the in-runtime timer
+            logger.warning("ask: could not arm the deadline wake row", exc_info=True)
+
+    def retire_ask_wake(self, row_id: str) -> None:
+        """Drop an internal ``ask_timeout`` row once its ask is terminal.
+
+        Same lock and same reason as :meth:`arm_ask_wake`: a retire racing an arm
+        must not restore the row the arm just removed, nor drop the row the arm
+        just added. An id that is absent is not a write at all, so a retire for an
+        ask that never armed one costs no wake-list write.
+        """
+
+        async def _apply() -> None:
+            async with self._ask_wake_lock:
+                current = list(self._wake.schedules)
+                rows = [r for r in current if getattr(r, "id", "") != row_id]
+                if len(rows) == len(current):
+                    return
+                await self._wake.update(rows)
+
+        try:
+            self._spawn_background(_apply())
+        except Exception:  # noqa: BLE001 — best-effort, like every wake-index writer
+            logger.warning("ask: could not retire the deadline wake row", exc_info=True)
+
+    def set_ask_state_sink(self, sink: "Callable[[Any, Any], None] | None") -> None:
+        """Register the host's publisher for the ask fold (design §4, N2).
+
+        The sibling of :meth:`set_ask_reach`, and it exists for the same reason:
+        a Session owns the queue and the frontend state, but the MOBILE
+        projection and the legacy single-slot card are built by whichever host
+        is attached, and only that host can repaint them. The sink receives
+        ``(rows, open_count)`` — the frozen wire shape and its open tally — so a
+        host never re-derives the fold.
+        """
+        self._ask_state_sink = sink
+
+    def publish_ask_state(self) -> None:
+        """Push the queue's fold to every wired surface (design §4, N2).
+
+        The ONE publication seam: the queue calls it on every change (see
+        ``AskQueue._publish_state``), and ``refresh_from_session`` folds the same
+        values into the periodic snapshot, so the two can never disagree about
+        which asks are open.
+
+        PRESENCE IS THE CAPABILITY PROXY, so this publishes ABSENCE — ``None``,
+        not an empty list — whenever the queue is not there (the flag is off, or
+        this host has no ask surface). A client keys "this runtime has queued
+        asks" on the field's presence, which is the design's own rule for the
+        whole A2→F window: while the server default is still blocking, a field
+        that shipped anyway would take a new client down the queued path against
+        a blocking backend.
+        """
+        from local_operator.session.frontend_state import ask_wire
+
+        rows, open_count = ask_wire(self)
+        store = getattr(self, "_frontend_state_store", None)
+        if store is not None:
+            store.mutate(asks=rows, asks_open=open_count)
+        sink = self._ask_state_sink
+        if sink is not None:
+            try:
+                sink(rows, open_count)
+            except Exception:  # noqa: BLE001 — a repaint is never worth a turn
+                logger.debug("ask: the host's state sink failed", exc_info=True)
+
     def set_ask_handler(self, handler: AskUserFn | None) -> None:
         """Install the host's interactive-question surface (see SessionProtocol).
 
@@ -8277,10 +8516,209 @@ class Session:
         the model calls it.
         """
         self._ask_user = handler
+        if handler is None and self._ask_queue is not None:
+            # The capability went away, so the queue must not outlive it: a
+            # deadline timer with nothing able to show the ask would keep
+            # waking the session for a question no surface can present.
+            self._ask_queue.dispose()
+            self._ask_queue = None
         if handler is not None:
             self._merge_capability_tools(("ask",))
         elif any(tool.name == "ask" for tool in self._tools):
             self.refresh_tools([tool for tool in self._tools if tool.name != "ask"])
+
+    # -- queued asks (design docs/design/ask-nonblocking.md) -----------------
+
+    def set_ask_reach(self, probe: Callable[[], Any] | None) -> None:
+        """Install the host's presentation probe for an ask RECEIPT (design §2.1).
+
+        The receipt claims PRESENTATION and never notice-delivery, and only the
+        host that owns the transport can answer that — a Session cannot see the
+        attach state. The probe returns a surface name (or a sequence of them)
+        when something is attached and a falsy value otherwise; ``None`` means
+        "this host cannot say", which renders as the unreachable wording rather
+        than guessing that someone was told.
+        """
+        self._ask_reach = probe
+
+    def ask_reach(self) -> str | None:
+        """The surface name a receipt may name, or ``None`` for "nobody"."""
+        probe = self._ask_reach
+        if probe is None:
+            return None
+        try:
+            value = probe()
+        except Exception:  # noqa: BLE001 — an unreadable probe is "unreachable"
+            logger.debug("ask: reach probe failed", exc_info=True)
+            return None
+        if not value:
+            return None
+        if isinstance(value, (list, tuple, set, frozenset)):
+            names = [str(item) for item in value if str(item)]
+            return ", ".join(names) if names else None
+        return str(value)
+
+    def ask_queue(self) -> Any:
+        """The session's ask queue, or ``None`` while the feature is DARK.
+
+        Two conditions, and both are the ones that already decide whether ``ask``
+        exists at all: the flag (``asks.policy.NONBLOCKING_ASK``) and the host
+        hook. With either missing this returns ``None`` and nothing in this file
+        constructs a log, a timer or a transcript row — which is what makes the
+        PR's flag-off invariant a property of the code rather than a promise.
+        """
+        from local_operator.asks import policy
+
+        if not policy.enabled() or self._ask_user is None:
+            return None
+        if self._ask_queue is None:
+            from local_operator.asks.queue import AskQueue
+            from local_operator.paths import config_dir as _resolve_config_dir
+
+            self._ask_queue = AskQueue(
+                self,
+                config_dir=_resolve_config_dir(),
+                session_id=self._session_id,
+                cwd=self._cwd,
+            )
+        return self._ask_queue
+
+    def _ask_enqueue_callable(self) -> Callable[..., Any] | None:
+        """The tool's queued-ask door, or ``None`` on the blocking path.
+
+        Bound per turn (like every other field of the tool context), and ``None``
+        whenever :meth:`ask_queue` would return ``None`` — so the tool decides by
+        the presence of THIS callable, one fact, rather than by reading the flag
+        in two places.
+        """
+        if self.ask_queue() is None:
+            return None
+        return self._enqueue_ask
+
+    def _enqueue_ask(
+        self, questions: list[Any], timeout: Any = None, tool_call_id: str = ""
+    ) -> dict[str, Any]:
+        """Queue one ask and return the tool's receipt (or a refusal).
+
+        Thin by design: the caps, the log write, the index and the deadline row
+        all live in ``AskQueue.enqueue``, and the tool layer never learns about
+        any of them.
+        """
+        queue = self.ask_queue()
+        if queue is None:  # pragma: no cover — the tool only calls this when set
+            return {"ok": False, "error": "this session has no queued-ask engine"}
+        return queue.enqueue(questions, timeout, tool_call_id=tool_call_id)
+
+    def respond_ask(
+        self, ask_id: str, answers: Mapping[str, Sequence[str]], *, by: str = "unknown"
+    ) -> dict[str, Any]:
+        """Answer a queued ask (design §2.4), storing any secret values first.
+
+        **The ORDER is the security property.** A secret value is written to the
+        session's memory-only credential store BEFORE the answer row is appended,
+        and the row carries the KEY NAME — never the value — because that row is
+        durable, replayed to the provider and shown on every card. The value
+        therefore never reaches ``asks.jsonl``, the index, the transcript, an
+        event or a notification, which is what the sentinel-grep test asserts.
+        """
+        queue = self.ask_queue()
+        if queue is None:
+            return {"ok": False, "error": "this session's runtime predates queued asks"}
+        record = queue.find(ask_id)
+        if record is None:
+            return {"ok": False, "error": _ask_refusal_copy(None)}
+        refusal = _ask_refusal_copy(record)
+        if refusal:
+            return {"ok": False, "error": refusal}
+        merged = {str(k): [str(v) for v in (vals or ())] for k, vals in answers.items()}
+        if any(q.get("secret") for q in (record.get("questions") or ())):
+            # The same hop the blocking path used: it keeps the raw bytes out of
+            # the model's context by substituting the key name, announces the new
+            # key to later turns, and reports a refused store as NOT PROVIDED.
+            from local_operator.asks.render import apply_secret_answers
+
+            merged.update(
+                apply_secret_answers(
+                    record.get("questions") or (),
+                    answers,
+                    variables=self._variables,
+                    journal_credential=self.journal_credential_change,
+                )
+            )
+        return queue.respond(ask_id, merged, by=by)
+
+    def answer_ask_question(
+        self,
+        ask_id: str,
+        question_id: str,
+        values: "Sequence[str]",
+        *,
+        by: str = "unknown",
+    ) -> dict[str, Any]:
+        """THE LEGACY INCREMENTAL ANSWER (design §4, A2 addendum).
+
+        The mirror exists for clients that can only answer ONE question at a
+        time — today's single-slot card, whose flow advanced question by question
+        because the blocking gate held one future per question. The NEW ops
+        (``ask_respond``) are atomic per ask and refuse a partial map, which is
+        right for a client that can hold the whole ask. This method is the bridge:
+        it merges one cell into the queue's in-flight draft and lets
+        :meth:`AskQueue.answer_one` settle the ask in one atomic write once every
+        question has an entry.
+
+        The SECRET hop is the same one and in the same order as
+        :meth:`respond_ask`, per question rather than per ask: the value reaches
+        the session's memory-only store and the draft carries the KEY NAME, so a
+        partial never puts a value anywhere durable.
+        """
+        queue = self.ask_queue()
+        if queue is None:
+            return {"ok": False, "error": "this session's runtime predates queued asks"}
+        record = queue.find(ask_id)
+        if record is None:
+            return {"ok": False, "error": _ask_refusal_copy(None)}
+        refusal = _ask_refusal_copy(record)
+        if refusal:
+            return {"ok": False, "error": refusal}
+        key = str(question_id)
+        question = next(
+            (item for item in (record.get("questions") or ()) if str(item.get("id") or "") == key),
+            None,
+        )
+        if question is None:
+            refusals = ", ".join(
+                f"{str(item.get('id') or '')!r}" for item in (record.get("questions") or ())
+            )
+            return {
+                "ok": False,
+                "error": f"{key!r} is not a question on ask {ask_id}; it asks {refusals}.",
+            }
+        cell = [str(item) for item in (values or ())]
+        if question.get("secret") and cell:
+            from local_operator.asks.render import apply_secret_answers
+
+            substituted = apply_secret_answers(
+                [question],
+                {key: cell},
+                variables=self._variables,
+                journal_credential=self.journal_credential_change,
+            )
+            cell = [str(item) for item in substituted.get(key, ())]
+        return queue.answer_one(ask_id, key, cell, by=by)
+
+    def decline_ask(self, ask_id: str, *, by: str = "unknown") -> dict[str, Any]:
+        """Decline a queued ask — today's Esc, made explicit (design D5)."""
+        queue = self.ask_queue()
+        if queue is None:
+            return {"ok": False, "error": "this session's runtime predates queued asks"}
+        return queue.decline(ask_id, by=by)
+
+    def dismiss_ask(self, ask_id: str, *, by: str = "unknown") -> dict[str, Any]:
+        """Remove a timed-out ask from the view. Injects nothing, ever."""
+        queue = self.ask_queue()
+        if queue is None:
+            return {"ok": False, "error": "this session's runtime predates queued asks"}
+        return queue.dismiss(ask_id, by=by)
 
     def abort(self, reason: str = "interrupted") -> None:
         """Abort the running turn; the engine emits an aborted agent_end.
@@ -11746,6 +12184,12 @@ class Session:
             # ``--wake`` asks for attention, and it gets the attention of the
             # turn already running.
             await self._drain_spooled_peer_inbox()
+            # Anything the ask log owes is delivered at the same boundary and for
+            # the same reason: a row written while this session was cold (an
+            # answer that arrived with no runtime, or a deadline that passed) must
+            # land before the turn's own message so the model reads it in order.
+            # A no-op with the flag off — ``ask_queue()`` is ``None``.
+            await self.reconcile_asks()
 
             # Inventory changes deferred from a `web_*.enabled` edit land HERE,
             # before the tool context and the loop config are built for this
@@ -12463,6 +12907,11 @@ class Session:
             resolve_internal_url=self._skill_resolver,
             request_approval=self._tool_approval_gate(),
             ask_user=self._ask_user,
+            # THE QUEUED-ASK DOOR (design §2.1). ``None`` on the blocking path
+            # (the flag is off, or no host installed an ask surface), which is
+            # how ``execute_ask`` decides: a callable here means enqueue-and-
+            # receipt, an absent one means today's await.
+            enqueue_ask=self._ask_enqueue_callable(),
             # The BOUND METHOD, not its value: this context is a snapshot taken
             # once per turn, so a stored boolean would freeze the answer for the
             # whole turn and a re-read per call is what the browser flow needs
@@ -13226,6 +13675,84 @@ class Session:
         # notice into a failed turn boundary.
         return
 
+    def _mcp_unavailable_previous_ts(self, server: str, fingerprint: str) -> float | None:
+        """The timestamp of the newest PERSISTED warning for ``server`` when it
+        is byte-identical to the card ``fingerprint`` names, else ``None``.
+
+        The durable half of the MCP-unavailable dedupe (``NoticeGuard`` holds
+        the live half): a fresh process cannot know what a previous one already
+        wrote, so the transcript — the one store every surface reads — is asked
+        directly. Only the NEWEST ``session_mcp_unavailable`` row for the
+        server is consulted, and it answers ``None`` when that row's card
+        differs: the newest visible row is the state the operator last saw, so
+        a card that does not match it IS a change (or an unreadable legacy
+        row), and the caller must emit rather than suppress.
+
+        The scan is BOUNDED AT THE LATEST COMPACTION CUT
+        (:func:`context_cut_index`): rows below the cut are what the context
+        replay dropped — the model's ``build_llm_history`` and the operator's
+        display window both start at the cut — so a matching row no surface
+        still shows must NOT suppress, or a resumed session would keep a card
+        suppressed with none visible anywhere (review round 1, M1,
+        reproduced). The in-memory half of the dedupe is re-validated the
+        same way; see :meth:`_mcp_unavailable_record_visible`.
+
+        Both custom spellings are matched, the same pair
+        ``transcript._is_bookkeeping_batch`` admits: ``append_message`` writes a
+        ``message`` entry carrying ``kind: custom``, ``append_custom`` a bare
+        ``custom`` entry. The comparison is made against the row's stored card
+        TEXT — falling back to re-rendering from its bounded ``reason`` —
+        because the renderer clips the reason at 200 characters: a row written
+        from a longer reason must still reproduce its own card byte-for-byte
+        from the 1000-character copy the writer keeps.
+        """
+        from local_operator.incidents import format_mcp_unavailable_message
+
+        entries = self._transcript.entries()
+        # VISIBILITY BOUND (review round 1, M1): scan only at/above the latest
+        # compaction cut. Rows below it were dropped from the context replay —
+        # the model's ``build_llm_history`` and the operator's display window
+        # both start at the cut — so a row no surface still shows must not
+        # suppress the next identical failure: "outstanding" means "a row the
+        # replay still shows", and suppression must never outlive visibility.
+        cut = context_cut_index(entries, quiet=True)
+        for entry in reversed(entries[cut:]):
+            payload = entry.payload
+            if str(payload.get("custom_type", "")) != SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE:
+                continue
+            if not (
+                (entry.type == ENTRY_MESSAGE and payload.get("kind") == CUSTOM_KIND_CUSTOM)
+                or entry.type == ENTRY_CUSTOM
+            ):
+                continue
+            details = payload.get("details")
+            if not isinstance(details, dict) or details.get("server") != server:
+                continue
+            stored = details.get("text")
+            if not isinstance(stored, str):
+                stored_reason = details.get("reason")
+                if isinstance(stored_reason, str):
+                    stored = format_mcp_unavailable_message(server, stored_reason)
+            if isinstance(stored, str) and fingerprint_text(stored) == fingerprint:
+                return entry.ts
+            return None
+        return None
+
+    def _mcp_unavailable_record_visible(self, server: str, fingerprint: str) -> bool:
+        """Whether the guard's recorded emission is still on a replay surface.
+
+        The live half of the dedupe (``NoticeGuard``'s record) can outlive
+        what it stands for: a compaction cut drops older rows from every
+        replay — the model's ``build_llm_history`` and the display window
+        both start at the cut — while the record keeps suppressing. So the
+        record is re-validated through the SAME cut-bounded scan the durable
+        half uses (:meth:`_mcp_unavailable_previous_ts`): a record whose row
+        the cut dropped is void, and the next identical failure re-emits
+        rather than staying silent with no card anywhere (review round 1,
+        M1, reproduced).
+        """
+        return self._mcp_unavailable_previous_ts(server, fingerprint) is not None
+
     async def journal_mcp_unavailable(self, server: str, reason: str) -> None:
         """Tell the MODEL an MCP server's tools are gone — a WARNING, not a failure.
 
@@ -13256,6 +13783,28 @@ class Session:
         are not there. The accepted consequence — the un-superseded warning
         replays with no recovery after it — is the one :meth:`journal_mcp_recovery`
         already documents; it is not re-argued here.
+
+        DEDUPED AT THE WRITE — one card per state change. An identical card for
+        the same server is not appended again while the previous one is still
+        outstanding: in this process (``NoticeGuard``), in the transcript a
+        fresh process boots against (:meth:`_mcp_unavailable_previous_ts`), and
+        up to the ``MCP_UNAVAILABLE_REMIND_S`` (24 h) staleness reminder —
+        after which the same card re-emits, so a condition the operator has
+        scrolled away re-surfaces rather than going silent forever.
+        Outstanding means a row the REPLAY still shows: both halves of the
+        dedupe are bounded at the latest compaction cut, so a compaction that
+        drops the card re-arms the next identical failure instead of keeping
+        it suppressed with nothing visible (review round 1, M1). A changed
+        card — a new reason, or a re-failure after a live recovery
+        (:meth:`journal_mcp_recovery`) — always emits. Measured motivation: 96
+        byte-identical ``minerva-qa`` rows for one expired grant over ~29 h on
+        session ``1375449bf925``, one per boot/resume, including a four-card
+        cluster inside seven minutes. Suppressing HERE, at the single write
+        every surface reads, is what fixes the TUI, the desktop UI, the mobile
+        fold and the relay in one place. The manager's ``_incident_announced``
+        arming is untouched by a suppression: the sink is fire-and-forget and
+        the manager arms off its own call RETURNING, not off anything this
+        method wrote — see the three arming sites in ``mcp/manager.py``.
 
         ``preserve_mtime`` so an unavailable server does not restamp the
         session's activity clock: this is bookkeeping ABOUT a session, never
@@ -13296,26 +13845,48 @@ class Session:
         if self._disposed or not server:
             return
         text = format_mcp_unavailable_message(server, reason)
-        message = CustomMessage(
-            custom_type=SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
-            attribution="system",
-            details={
-                "text": text,
-                "server": server,
-                # Bounded like :meth:`journal_incident`'s ``raw``: the RENDERED
-                # line is clipped to 200 characters, so an unbounded copy here
-                # would persist exactly what the reader is not shown — a whole
-                # provider error envelope, most of it a restatement (review
-                # round 1, R2).
-                "reason": reason[:1000],
-            },
-        )
-        try:
-            async with self._journal_lock:
+        fingerprint = fingerprint_text(text)
+        async with self._journal_lock:
+            # The dedupe decision is taken UNDER the lock because the recovery
+            # hook mutates the same guard state under it (`note_recovered`): a
+            # decision taken outside could race a recovery that fired later in
+            # hook order, and the failure — a suppressed notice whose state had
+            # already changed back — is silent. See ``_journal_lock``.
+            if not self._mcp_notice_guard.should_emit(
+                server,
+                fingerprint,
+                find_previous=self._mcp_unavailable_previous_ts,
+                record_visible=self._mcp_unavailable_record_visible,
+            ):
+                logger.debug(
+                    "suppressed a repeated MCP-unavailable notice for %r (card unchanged)",
+                    server,
+                )
+                return
+            message = CustomMessage(
+                custom_type=SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
+                attribution="system",
+                details={
+                    "text": text,
+                    "server": server,
+                    # Bounded like :meth:`journal_incident`'s ``raw``: the RENDERED
+                    # line is clipped to 200 characters, so an unbounded copy here
+                    # would persist exactly what the reader is not shown — a whole
+                    # provider error envelope, most of it a restatement (review
+                    # round 1, R2).
+                    "reason": reason[:1000],
+                },
+            )
+            try:
                 await self._transcript.append_message(message, preserve_mtime=True)
                 self._append_or_park_journal(message)
-        except OSError:
-            logger.warning("could not journal MCP unavailability", exc_info=True)
+            except OSError:
+                logger.warning("could not journal MCP unavailability", exc_info=True)
+                return
+            # Recorded only AFTER the write landed: the timestamp is what the
+            # reminder window is measured from, and a failed append must not
+            # push the next attempt's eligibility out.
+            self._mcp_notice_guard.note_emitted(server, fingerprint)
 
     async def journal_mcp_recovery(self, server: str, tool_count: int) -> None:
         """Tell the MODEL an MCP server it was told was unavailable is usable again.
@@ -13347,6 +13918,15 @@ class Session:
         honest correction. Deleting the persisted warning was rejected — the
         transcript is append-only by design.
 
+        RE-ARMS THE WARNING'S DEDUPE: a live recovery clears this server's
+        outstanding card, so a re-failure after it emits a fresh warning even
+        though the transcript still shows the old row — the recovery is
+        live-only by design, so the durable store cannot SEE it, and
+        ``NoticeGuard`` documents the cross-process blind spot that leaves and
+        its 24 h bound. The marker is consumed by that next emission; the
+        recovery itself is not deduped: it is live-only and every one of them
+        is a real state change.
+
         Parked, never spliced: ``_append_or_park_journal`` is what keeps a
         notice arriving mid-tool-batch from producing
         ``assistant(tool_use) -> user -> tool_result`` and bricking the
@@ -13359,7 +13939,11 @@ class Session:
         transcript write, so a recovery fired straight after an incident
         reached the model FIRST and left the death notice as the last word
         (review round 1, R1). The lock makes the order a property of which hook
-        fired first, not of how many awaits each method contains.
+        fired first, not of how many awaits each method contains — and it is
+        also where the dedupe guard re-arms: :meth:`journal_mcp_unavailable`'s
+        guard mutations ride the SAME lock (see ``_journal_lock``), so the
+        re-arm is ordered against the warning it supersedes rather than racing
+        it.
         """
         from local_operator.incidents import format_mcp_recovery_message
 
@@ -13373,6 +13957,12 @@ class Session:
         )
         async with self._journal_lock:
             self._append_or_park_journal(message)
+            # The warning's dedupe re-arms HERE, under the same lock as the
+            # emission it supersedes: the guard clears the server's outstanding
+            # card and marks a live recovery, so a re-failure emits a fresh
+            # card even though the transcript still shows the old row (the
+            # recovery is never persisted — see the docstring above).
+            self._mcp_notice_guard.note_recovered(server)
 
     def _on_mcp_incident(self, server: str, reason: str) -> None:
         """MCP manager hook (breaker trips, grant expires): journal without
@@ -17751,9 +18341,9 @@ class Session:
         # catch-up prompt would render it. Their rows stay re-armed by load()
         # to now + LOAD_GRACE_MS, so within TTL they follow the normal hidden
         # grace path, and a stale one is retired by the delivery checks.
-        from local_operator.wakes.store import is_patience_row
+        from local_operator.wakes.store import is_internal_wake_row
 
-        missed = [entry for entry in missed if not is_patience_row(entry["schedule"])]
+        missed = [entry for entry in missed if not is_internal_wake_row(entry["schedule"])]
         if not missed:
             return
         now = int(time.time() * 1000)
@@ -18759,7 +19349,19 @@ class Session:
         this one's schedule list; the load-time filter and the supervisor skip
         cover the other two paths.
         """
-        from local_operator.wakes.store import is_patience_row
+        from local_operator.wakes.store import is_ask_timeout_row, is_patience_row
+
+        if is_ask_timeout_row(due.schedule):
+            # A queued ask's DEADLINE. The fire carries no payload on purpose
+            # (design §2.2/§2.3, the ``WakeErrand`` rule applied to this kind):
+            # the row exists to make a runtime EXIST for the deadline, and the
+            # reconcile below is what delivers — a notice goes out only if the
+            # ask is still unanswered, so a fire for an ask that was settled in
+            # the meantime is a no-op (the patience watermark rule, with no
+            # cross-process row deletion needed).
+            if self._ask_queue is not None:
+                await self._ask_queue.reconcile()
+            return
 
         if is_patience_row(due.schedule):
             # A patience fire is a DIFFERENT delivery: hidden, watermark-checked,
@@ -19907,6 +20509,12 @@ class Session:
         # A courtesy wake still queued here was never delivered, so its count
         # must not survive to misclassify a later enqueue on a reused Session.
         self._courtesy_wake_count = 0
+        # The ask deadline timer is a task that would otherwise outlive the
+        # session and fire a reconcile against a disposed transcript. The LOG is
+        # untouched: durability is the point, and the next runtime's boot
+        # reconcile picks up whatever is still owed.
+        if self._ask_queue is not None:
+            self._ask_queue.dispose()
         # Same reasoning for a run of pre-aborted drops in progress: the run
         # ends with the session, so neither the count nor its notice latch may
         # carry into a reused Session and suppress (or fabricate) a notice for

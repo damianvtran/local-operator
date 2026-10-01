@@ -129,3 +129,22 @@ async def test_the_stt_key_is_advertised_unconditionally(test_app_client):
     assert response.status_code == 200
     features = _features(response.json())
     assert features.get("stt", 0) >= 1
+
+
+@pytest.mark.asyncio
+async def test_the_skill_catalogue_key_is_advertised_unconditionally(test_app_client):
+    """The sessionless skill read is a build fact, like ``stt`` and ``catalogues``.
+
+    The key gates the composer's sessionless skill query (``GET
+    /v1/desktop/skills`` with ``cwd``): a renderer that does not see it must NOT
+    fire that query — an older backend REQUIRES ``session_id`` there, so the
+    call would be a 422 the client cannot classify — and instead show the
+    update-backend state. There is no switch that may withhold it, and an
+    accidental ``0`` (which a client reads as absent) would leave every
+    composer dark, so it must be present on a default process.
+    """
+    response = await test_app_client.get("/v1/capabilities")
+
+    assert response.status_code == 200
+    features = _features(response.json())
+    assert features.get("skill_catalogue", 0) >= 1

@@ -777,16 +777,97 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: same recorded 762-char platform gap, so CI remains the binding reading. The
 #: peel-off a future reduction can act on: dropping the peek fields from the
 #: schema should take this ceiling back down ~229 billed.
+#: RAISED 37,164 -> 37,300 for ``ask``'s queued-deadline ``timeout`` field
+#: (design ``docs/design/ask-nonblocking.md`` §2.1; PR A1 of the ask-queue
+#: workstream), stated with the arithmetic because the guard exists to make
+#: schema growth an explicit decision.
 #:
-#: RAISED 37,164 -> 37,430 for the ``team`` tool's ``label``/``aliases``
+#: The raise is EXACTLY this change's delta, and that is deliberate: base and
+#: head were measured with THIS script on the same machine, so the recorded
+#: platform gap between a local and a CI reading cancels out of the subtraction
+#: and the ceiling keeps whatever headroom the base had. Local base
+#: (``origin/main`` = ``40ca7910e``, measured in a detached worktree of it)
+#: reads 103,994 chars = ~37,408 billed; this head reads 104,304 chars =
+#: ~37,519, so the delta is +310 chars = +111 billed and it is the ONE field
+#: and nothing else. The description is deliberately terse — §9 puts the
+#: calibration copy in the flip PR — and a first draft measured +173, which is
+#: why it is this short: the ladder's rung 1 (extend an existing tool) is the
+#: right rung for a deadline on a tool that already exists, and it should still
+#: cost as little as it can.
+#:
+#: A LOCAL run reads above the ceiling both before and after the raise
+#: (37,408 vs 37,164 at base; 37,519 vs 37,300 at head), which is the 762-char
+#: local-vs-CI gap the ``sessions`` entry above records — so a local overshoot
+#: here is that gap, not this change, and CI remains the binding reading. The
+#: ceiling follows THIS file's own method rather than the raw delta: CI head is
+#: the local head minus that same recorded gap (~274 billed, so ~37,245), and
+#: the ceiling is that plus the 55-token band this file keeps = 37,300. If the
+#: gap has moved for reasons unrelated to this diff, CI's own reading is the
+#: one that decides, and it prints the number to set — and the 55-token band is
+#: the reason the field can grow by its own 111 without the ceiling chasing it.
+#:
+#: RAISED 37,300 -> 37,378 for the ``tool://`` on-demand tool reference (PR-A
+#: of the prompt/tool-surface audit; design note in the audit session's
+#: scratchpad, ``audit/mechanism_design.md``). The mechanism's own wire cost is
+#: deliberately ZERO — a doc renders only when ``read tool://<name>`` asks for
+#: it — so the raise is the always-loaded pieces that make it reachable, plus
+#: two cue fixes co-landed with it and one duplication cut:
+#:
+#:   base (origin/main a2dbe29cc)       104,304 chars = ~37,519 billed
+#:   head (this branch)                 104,521 chars = ~37,597 billed
+#:     = +217 chars = +78 billed, across four edits:
+#:       + the ``tool://`` cue in system.md's Tools section, +211 chars
+#:         (already tightened once against the design draft)
+#:       + C1, so listing or inspecting a peer no longer reads as gated
+#:         behind "when the user asked" — only spawning is, +30
+#:       + C4, the restart/update cause in the incident list, +46
+#:       + the read description's one-word scheme list, +9
+#:       - MINUS the console description's restatement of system.md's own
+#:         prose: the "cannot wedge on a prompt" tail and its clause go, the
+#:         boundary and the pinned "`bash` returns output directly"
+#:         consequence stay, -79
+#:
+#: Both sides measured with THIS script on this machine (the base in a
+#: detached checkout of origin/main) under a tiers-CONFIGURED
+#: ``values.subagents``. That config is the one variable the ``agent``/``task``
+#: docs read, and measuring it alone explains the number the entries above
+#: record as a "platform gap": the 762-char difference between this machine's
+#: configured reading and CI's is exactly the config delta in ``tool_schemas``
+#: (68,665 vs 67,903, byte-exact) — with the config equal, the machine and CI
+#: read identically. The ceiling follows the CLEAN arm, because that is what
+#: CI renders and this gate compares: 104,521 - 762 = 103,759 chars = ~37,323
+#: billed, + the 55-token band = 37,378. The remaining cue cost is the price
+#: of making the reference discoverable at all — with no cue, no agent knows
+#: it exists, which is exactly the op-ambiguity failure the audit measured.
+#: The schema-slimming wave (audit fix list item 2) works this surface next
+#: and should ratchet the ceiling back down. A LOCAL run under a clean config
+#: reads 103,759 = ~37,323 and passes with the same 55 headroom; a
+#: tiers-configured box renders the 762-char-larger surface above (219 over
+#: the ceiling), which is that config dependence, not an unfixable platform
+#: offset. The tighten band below (1,200) is not in play.
+#:
+#: RAISED 37,378 -> 37,665 for the ``team`` tool's ``label``/``aliases``
 #: fields (the teams-label lane's core half: teams gain a local display label
 #: and extra addressing keys), stated with the arithmetic because the guard
 #: exists to make schema growth an explicit decision. Both are ADDITIONS to
 #: one existing schema -- rung 1 of the footprint ladder, the cheapest rung --
 #: and they are create/update fields only: no new tool, no new op, nothing on
-#: the list/show path, nothing on any other tool. Measured with THIS script on
-#: both trees, same machine, ISOLATED (``env -i HOME=$ISO
-#: LOCAL_OPERATOR_CONFIG_DIR=$ISO/.local-operator``):
+#: the list/show path, nothing on any other tool.
+#:
+#: FOLDED ONTO THE HEAD ABOVE (the ask and ``tool://`` raises landed on
+#: ``origin/main`` while this branch was open), re-derived against the folded
+#: tree: the clean head measures 104,556 chars = ~37,610 billed, so the
+#: ceiling is that + the 55-token band this file keeps = 37,665. The sum of
+#: the recorded entries predicted 104,429 (base 103,232 + 310 + 217 + this
+#: diff's 670); the 127-char residue is post-``tool://`` upstream text that
+#: never carried an entry of its own (the search-guard/query-budget and
+#: tool-docs landings), and the ceiling follows the MEASUREMENT rather than
+#: the sum, as this file's rule says CI's own reading decides.
+#:
+#: The base/head pair for THIS diff, and the folded head, were measured with
+#: THIS script under an ISOLATED empty config (``env -i HOME=$ISO
+#: LOCAL_OPERATOR_CONFIG_DIR=$ISO/.local-operator``), which is what CI
+#: renders:
 #:
 #:   base, this machine   103,232 chars = ~37,134 billed
 #:   head, this machine   103,902 chars = ~37,375 billed
@@ -796,28 +877,16 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #:   + tool_schemas    68,333 vs 67,663 = +670 chars = +241
 #:   total                                  +670 chars = +241
 #:
-#: On CI (where this gate runs) the stack's base read 103,232 chars =
-#: ~37,134 billed -- the same figure byte for byte -- PASS with 30 under the
-#: old ceiling, and this head is 103,902 chars = ~37,375 billed, so the
-#: ceiling is the CI head + 55, the band this file keeps.
-#:
-#: THE 762-CHAR GAP RECORDED ABOVE REPRODUCES HERE, AS CONFIG, NOT PLATFORM:
-#: on this machine the same tree reads +762 chars in ``tool_schemas`` when the
-#: run is NOT isolated (69,095 vs 68,333 at this head; 68,425 vs 67,663 at
-#: base -- the difference is constant) and byte-identical to CI when it is.
-#: The 762 is the operator's own CONFIG-DIR content (keeping the real HOME but
-#: pointing ``LOCAL_OPERATOR_CONFIG_DIR`` at an empty dir reproduces the
-#: isolated reading exactly -- e.g. a configured MCP surface), which CI does
-#: not have. So a local NON-isolated head reads 37,649 = +219 above this
-#: ceiling, entirely that gap; CI remains the binding reading, and an isolated
-#: local run can be compared to CI directly.
+#: A NON-isolated local run reads the 762-char subagents-tiers config delta
+#: larger (see the ``tool://`` entry), so CI remains the binding reading and
+#: an isolated local run can be compared to CI directly.
 #:
 #: The trade: labels/aliases on the tool schema are the ONLY model-facing
 #: documentation of the new fields, and each sentence prevents a real misuse
 #: (the empty-string reset; the whole-list replacement; the collision rule).
 #: The peel-off a future reduction can act on: dropping the two fields from
 #: the schema should take this ceiling back down ~241 billed.
-BUDGET_BILLED_TOKENS = 37_430
+BUDGET_BILLED_TOKENS = 37_665
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

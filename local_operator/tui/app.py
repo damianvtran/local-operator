@@ -389,6 +389,7 @@ from local_operator.tui.widgets.org_chart_view import (
 )
 from local_operator.tui.widgets.projects_view import (
     ProjectsView,
+    ProjectsViewAttachmentOpened,
     ProjectsViewDismissed,
     ProjectsViewJumpRequested,
     ProjectsViewMilestoneToggled,
@@ -5800,6 +5801,15 @@ class OperatorApp(App[None]):
         self._startup_cleanup_timer: Timer | None = None
         self._sidebar_refresh_generation = 0
         self._sidebar_refresh_pending = False
+        #: A layer flip (``ctrl+a`` or a chip press) that landed while a poll
+        #: was in flight. That poll read the store BEFORE the flip, so its
+        #: answer cannot carry the flip, and the ask would otherwise sit until
+        #: the next 2 s timer tick (UX round 1, U2 — a pointer press reads as
+        #: instantaneous). Set ONLY by the toggle path: a routine dropped poll
+        #: must stay dropped, or a catalog slower than the timer would poll
+        #: back-to-back with no gap. Consumed by the refresh worker's
+        #: ``finally``.
+        self._sidebar_refresh_again = False
         #: Polls since the footer chip's population count was last read.
         #: `subagent_population` is a SECOND full `_scan_sessions` of the store
         #: (resume.py _scan_sessions, not memoized) — measured +2.36 ms, +21% on the 2 s
@@ -10281,9 +10291,25 @@ class OperatorApp(App[None]):
             # downstream will clear the intent published for it. Drop it here
             # or the next burst would step from an id no switch is pursuing.
             self._sidebar_navigation.intend("")
-            if self.query_one("#session-workspace").has_class("sidebar-overlay"):
+            overlay = self.query_one("#session-workspace").has_class("sidebar-overlay")
+            if overlay:
+                # T1n (issue #1357 decision): in the drawer placement a valid
+                # selection CLOSES the panel and the keyboard goes back to the
+                # composer — through the guarded route, so the close never
+                # takes the keys off a live claimant on the way out (G7). The
+                # unguarded `self._editor().focus()` this replaces is the F4
+                # defect: a press on the attached session's row stole the
+                # keyboard from a live approval.
                 self._set_sidebar_open(False)
-            self._editor().focus()
+                self._return_focus_to_composer()
+            elif not self._focus_is_claimed():
+                # T1: a docked press keeps the keyboard on the list. The PRESS
+                # is what focused it (`SessionSidebar.focus_on_click`), and no
+                # handler may take it back — the shipped behaviour this
+                # decision changes, called out on its PR. Guarded so a live
+                # claimant keeps its keys (F4/G7: this branch used to call
+                # `self._editor().focus()` and steal a live approval's keys).
+                self._session_sidebar.focus()
             return
         self._select_sidebar_session(message.session_id)
 
@@ -10777,6 +10803,12 @@ class OperatorApp(App[None]):
                 logger.debug("sidebar catalog refresh failed", exc_info=True)
             finally:
                 self._sidebar_refresh_pending = False
+                if self._sidebar_refresh_again:
+                    # A flip was dropped while this poll was in flight; its
+                    # ask is served the moment the poll lands (see
+                    # `_sidebar_refresh_again`).
+                    self._sidebar_refresh_again = False
+                    self._refresh_sidebar()
 
         self.run_worker(refresh(), group="sidebar-catalog")
 
@@ -10907,6 +10939,13 @@ class OperatorApp(App[None]):
         and flip another terminal's sidebar.
         """
         message.stop()
+        if self._sidebar_refresh_pending:
+            # The poll in flight read the store before this flip, so it cannot
+            # carry the layer's rows; remember the ask and let the poll's
+            # completion serve it instead of the next timer tick (see
+            # `_sidebar_refresh_again`).
+            self._sidebar_refresh_again = True
+            return
         self._refresh_sidebar()
 
     def on_session_sidebar_pin_toggled(self, message: SessionSidebar.PinToggled) -> None:
@@ -19335,7 +19374,35 @@ class OperatorApp(App[None]):
                 )
             except Exception:  # noqa: BLE001 — one row must not hide the rest
                 logger.debug("projects: view composition failed", exc_info=True)
+        self._mark_missing_attachments(views)
         return views
+
+    @staticmethod
+    def _mark_missing_attachments(views: list[Any]) -> None:
+        """Flag attachments whose copy is gone, at COMPOSITION time (spec §7.4).
+
+        The detail page is I/O-free by construction, so the one filesystem fact
+        its attachment rows need — whether the file is still there — is decided
+        here, where every other store read already happens (the mode's two
+        composition events: open and `r`). This annotates the COMPOSED view
+        dicts only, so no schema, tool receipt or route payload changes shape.
+        """
+        from pathlib import Path
+
+        for view in views:
+            if not isinstance(view, dict):
+                continue
+            project = view.get("project")
+            if not isinstance(project, dict):
+                continue
+            for entry in project.get("updates") or []:
+                if not isinstance(entry, dict):
+                    continue
+                for attachment in entry.get("attachments") or []:
+                    if not isinstance(attachment, dict):
+                        continue
+                    path = str(attachment.get("path") or "")
+                    attachment["missing"] = not path or not Path(path).exists()
 
     def _projects_live_overlay(self) -> dict[str, dict[str, Any]] | None:
         """Fresher in-memory TODOS for this process's own session (§3 source 3).
@@ -32929,6 +32996,58 @@ class OperatorApp(App[None]):
             own_session=self._own_session_id(),
         )
 
+    def on_projects_view_attachment_opened(self, message: ProjectsViewAttachmentOpened) -> None:
+        """`↵` on an attachment row: hand the copied file to the OS (spec §7.4).
+
+        The spawn is off-loop (``open``/``xdg-open`` hand off to a GUI and
+        return, so the event loop never waits on a desktop), and the outcome is
+        stated on the PAGE's own footer — the mode the reader is looking at,
+        which is the rule every other detail refusal follows (UX round 1,
+        U1/U4/U5). A path that is gone, or a platform with no opener, gets the
+        honest sentence instead of a silent no-op.
+        """
+        message.stop()
+        view = self._projects_view
+        if view is None:
+            return
+        path = message.path
+        if not path:
+            view.show_notice(f"'{message.name}' has no stored path to open")
+            return
+        from pathlib import Path
+
+        if not Path(path).exists():
+            # The row's own words, not a second vocabulary for the same fact:
+            # the path line says `[missing on disk]` and this explains it
+            # (design review round 1, D5 — the old sentence re-stated the
+            # marker and named the store instead of the file).
+            view.show_notice(
+                f"{message.name} is missing on disk — its stored copy was moved or deleted"
+            )
+            return
+        from local_operator.tui.attachments import opener_argv
+
+        if opener_argv(path) is None:
+            view.show_notice(f"no file opener on this platform — the path is {path}")
+            return
+        view.show_notice(f"opening {message.name}…")
+        self.run_worker(self._open_attachment(message.name, path), group="open-attachment")
+
+    async def _open_attachment(self, name: str, path: str) -> None:
+        """The off-loop half: spawn the OS opener and report what it said."""
+        from local_operator.tui.attachments import open_path_quietly
+
+        opened = await open_path_quietly(path)
+        view = self._projects_view
+        if view is None:
+            return
+        if opened:
+            view.show_notice(f"opened {name}")
+        else:
+            # The path is repeated because this is the failure a reader can act
+            # on themselves — the rule the link-opener's receipt states.
+            view.show_notice(f"could not open {name} — the path is {path}")
+
     def on_projects_view_milestone_toggled(self, message: ProjectsViewMilestoneToggled) -> None:
         """`↵` on a milestone row: flip completion through the store, re-show.
 
@@ -42231,6 +42350,10 @@ class OperatorApp(App[None]):
         message.stop()
         picker = self._editor().picker
         skills = self._discovered_skills()
+        # Beside the row fill, because both are answers to the same question:
+        # the editor's `$` ink resolves against this snapshot, and the composer
+        # may have been remounted (a session switch) since the last push.
+        self._push_skill_names()
         if not skills:
             picker.set_choices([])
             picker.set_notice("no skills found — see `/skills`")
@@ -45917,10 +46040,36 @@ class OperatorApp(App[None]):
                 skills, _warnings = discover_skills(roots)
                 self._skills_by_name = {skill.name: skill for skill in skills}
                 self._skills_fingerprint = fingerprint
+                # A rescan is the ONE place the vocabulary changes: push it so
+                # the ink can never resolve against a set older than the one a
+                # submit would read (the render-side half of this cache).
+                self._push_skill_names()
         except Exception:
             if self._skills_by_name is None:
                 self._skills_by_name = {}
         return self._skills_by_name
+
+    def _push_skill_names(self) -> None:
+        """Hand the editor the discovered vocabulary its `$` ink resolves against.
+
+        The same push contract as ``set_name_choices``: the app owns discovery
+        (it is I/O — a filesystem walk gated by a fingerprint probe), and the
+        editor gets a cheap immutable snapshot for its render pass, so the
+        render path never walks the skills tree itself.
+
+        Called from the two places the vocabulary becomes or changes an answer:
+        ``on_skill_query_opened`` (the composer may have been remounted since
+        the last push) and the rescan branch of :meth:`_discovered_skills`. An
+        unpublished (``None``) map pushes NOTHING — the editor must claim no
+        ink until the app has answered at least once.
+        """
+        if self._skills_by_name is None:
+            return
+        try:
+            editor = self._editor()
+        except Exception:  # noqa: BLE001 — a push must never take the app down
+            return
+        editor.set_skill_names(frozenset(self._skills_by_name))
 
     async def _expand_references(self, text: str) -> str:
         """Expand every ``@path`` in ``text``, painting one notice per problem.
@@ -51549,7 +51698,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 135
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 136
     public members, and a positive ``isinstance`` walks every one of them.
     (The figure is RECOMPUTED with ``len(typing._get_protocol_attrs(...))`` at
     the time of measurement rather than adjusted by the size of one's own
@@ -52097,20 +52246,30 @@ def _partial_text(partial_result) -> str:
 
 
 def _partial_advisory(partial_result) -> str | None:
-    """The memory advisory carried on a streaming update, or ``None``.
+    """The bounded-work advisory carried on a streaming update, or ``None``.
 
-    A sibling of :func:`_partial_text` because the advisory is not output: it
+    A sibling of :func:`_partial_text` because an advisory is not output: it
     travels in the update's ``details`` (never in the text), so the card can
     paint it as a persistent state line instead of as a line the command printed
     (design review D1/D2). Absent details, or a non-string value, read as "no
     advisory" rather than raising — a card must never fail to render because a
     producer sent a shape it did not expect.
+
+    TWO producers, in a fixed rank: the memory guard's line first, then the soft
+    query budget's. They are different conditions (the device is short of RAM vs
+    this command is a wide filesystem walk) and either can be the only one set,
+    so the reader has to know both or one of them silently never reaches the
+    card — which is exactly what the query budget did before this line existed
+    (review M5: the advisory rode the result and nothing the human watched).
     """
     details = getattr(partial_result, "details", None)
     if not isinstance(details, dict):
         return None
-    value = details.get("memory_advisory")
-    return value if isinstance(value, str) and value else None
+    for key in ("memory_advisory", "query_budget_advisory"):
+        value = details.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 class _TreeRow(Text):
