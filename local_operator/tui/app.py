@@ -52649,12 +52649,18 @@ _VIEW_STATE_COPY: dict[str, str] = {
 
 #: Cells an identity may spend inside a `/logout` row's detail column.
 #:
-#: Close to the longest detail the app itself generates
-#: (``remove 2 credentials``, 20 cells) so the column's measured drop-cliff — 46
-#: cells before this feature — does not move for a realistic address, while a
-#: pathologically long one (a 43-cell quoted address, a pasted token-shaped
-#: label) can no longer cost every row its consequence. Design review round 1
-#: (D1) measured the cliff at 64 cells for a 25-cell address and 98+ for 43.
+#: A BOUND on the column's cost, not a preservation of the old cliff: the picker
+#: sizes the column to the widest detail in the list, so a labelled suffix moves
+#: the lowest width at which the whole column is still kept, however short it is
+#: clipped. Measured kept-down-to widths (design review rounds 1-2; 4 rows,
+#: 2-cell sweep): 44 cols with no suffix (pre-feature), 54 cols at a 14-cell
+#: identity, 62 cols once an identity wears this cap (``remove api key · …`` =
+#: 41 cells, against 21 for the widest app-generated detail, ``remove 2 oauth
+#: logins``). What the cap buys is the ceiling: unbounded, a 43-cell address
+#: dropped the column at 98 cols; capped, no address can ask for more than
+#: ~62. A narrower terminal still loses the consequences on a labelled list,
+#: and clipping to ~16-18 cells would trade the address's recognisability for
+#: that floor — left as a follow-up choice, not a blocker (D2.1).
 _IDENTITY_CELLS = 24
 
 
