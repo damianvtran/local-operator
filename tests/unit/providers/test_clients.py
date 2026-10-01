@@ -2380,6 +2380,165 @@ def test_openai_compat_markers_gate_on_cache_support():
     assert "cache_control" not in str(plain["messages"])
 
 
+def _strip_cache_markers(value: Any) -> Any:
+    """A body fragment normalized for content comparison.
+
+    Drops every ``cache_control`` marker (a directive, not prompt content --
+    the live probes behind the settled-boundary policy read byte-identical
+    prompts across different marker layouts) and normalizes a plain-string
+    message body to its single-text-part form, since a marker landing on a
+    message converts it from one shape to the other without changing the
+    text the provider sees.
+    """
+    if isinstance(value, dict):
+        if isinstance(value.get("content"), str):
+            value = {**value, "content": [{"type": "text", "text": value["content"]}]}
+        return {k: _strip_cache_markers(v) for k, v in value.items() if k != "cache_control"}
+    if isinstance(value, list):
+        return [_strip_cache_markers(v) for v in value]
+    return value
+
+
+def _tiny_frame(data: str) -> ImageContent:
+    return ImageContent(data=data, mime_type="image/png")
+
+
+def _frame_history(newest_data: str) -> list[Message]:
+    """Task, one settled frame, an acting turn, and the newest frame.
+
+    The shape that matters: the newest image-bearing message is last, so a
+    later turn re-renders it while everything before it is already final.
+    """
+    return [
+        Message.user("task"),
+        Message.user("older observation", [_tiny_frame("b2xk")]),
+        Message.assistant("acting"),
+        Message.user("newest observation", [_tiny_frame(newest_data)]),
+    ]
+
+
+def _image_message_indices(messages: list[dict[str, Any]], part_type: str) -> list[int]:
+    return [
+        i
+        for i, m in enumerate(messages)
+        if isinstance(m.get("content"), list)
+        and any(p.get("type") == part_type for p in m["content"])
+    ]
+
+
+def test_openai_compat_settled_breakpoint_sits_before_the_newest_frame() -> None:
+    """With frames in play the second conversation breakpoint must end its
+    block BEFORE the newest image-bearing message -- the frame the wire-budget
+    fit walk re-renders on a later turn -- and stay close enough to the tail
+    for the provider's backward lookback to reach it. Measured on the 005
+    benchmark renders (task_003 cost forensics): the older placement (previous
+    user turn) read 9,850 cached tokens of 92,347 and cost $0.2079 on a churn
+    turn; this placement read 90,360 and cost $0.0203."""
+    spec = _spec()
+    spec.supports_prompt_cache = True
+    body = OpenAICompatClient("https://x")._build_body(
+        ChatRequest(
+            model=spec,
+            system_blocks=["instructions", "inventory"],
+            messages=_frame_history("ZnJhbWU="),
+        )
+    )
+    messages = body["messages"]
+    newest = _image_message_indices(messages, "image_url")[-1]
+    assert "cache_control" in messages[newest - 1]["content"][-1]
+    # still reachable from the final message's marker
+    assert len(messages) - (newest - 1) <= 3
+    # the head no longer carries the second marker
+    assert all("cache_control" not in str(m.get("content")) for m in messages[: newest - 1])
+    assert "cache_control" in messages[-1]["content"][-1]
+
+
+def test_openai_compat_settled_block_survives_a_frame_rerender() -> None:
+    """The regression this policy exists for: when the fit walk downsizes the
+    newest frame on a later turn and the conversation appends, the bytes
+    covered by the earlier turn's settled breakpoint are unchanged, so the
+    provider can still serve that prefix from cache."""
+    spec = _spec()
+    spec.supports_prompt_cache = True
+
+    def build(newest: str, extra: list[Message]) -> dict[str, Any]:
+        return OpenAICompatClient("https://x")._build_body(
+            ChatRequest(
+                model=spec,
+                system_blocks=["instructions", "inventory"],
+                messages=_frame_history(newest) + extra,
+            )
+        )
+
+    turn1 = build("RlJBTUU=", [])
+    msgs1 = turn1["messages"]
+    settled_idx = _image_message_indices(msgs1, "image_url")[-1] - 1
+    covered = _strip_cache_markers(msgs1[: settled_idx + 1])
+
+    # turn 2: the previously-newest frame is re-rendered smaller (the churn)
+    # and the conversation appends a batch
+    turn2 = build(
+        "RE5HUkU=",
+        [
+            Message.assistant("acting again"),
+            Message.user("later observation", [_tiny_frame("bGF0ZXI=")]),
+        ],
+    )
+    msgs2 = turn2["messages"]
+    assert _strip_cache_markers(msgs2[: settled_idx + 1]) == covered
+    assert len(msgs2) - settled_idx <= 4  # still inside the lookback
+    # sanity: the churn is real -- the newest frame's bytes changed
+    churned = _strip_cache_markers(msgs2)[settled_idx + 1]
+    assert churned != _strip_cache_markers(msgs1)[settled_idx + 1]
+
+
+def test_anthropic_settled_breakpoint_replaces_the_old_user_turn_marker() -> None:
+    """The Anthropic client follows the same policy: with frames in play the
+    second breakpoint ends its block before the newest frame instead of on
+    the first user turn, whose block is invisible to the lookback once the
+    conversation is long, while the marker budget still holds."""
+    body = AnthropicClient()._build_body(
+        ChatRequest(
+            model=_spec(provider="anthropic"),
+            system_blocks=["instructions", "inventory", "skills", "env"],
+            messages=_frame_history("ZnJhbWU="),
+        )
+    )
+    messages = body["messages"]
+    newest = _image_message_indices(messages, "image")[-1]
+    assert "cache_control" in messages[newest - 1]["content"][-1]
+    assert "cache_control" in messages[-1]["content"][-1]
+    assert "cache_control" not in str(messages[0].get("content"))
+    total = len([e for e in body["system"] if "cache_control" in e]) + 2
+    assert total <= AnthropicClient.MAX_CACHE_BREAKPOINTS
+
+
+def test_cache_markers_fall_back_to_the_previous_user_turn_without_frames() -> None:
+    """Text-only histories keep the historical placement (the previous user
+    turn): there is no frame to settle before, and that marker is the one
+    that keeps a user-turn prefix warm."""
+    spec = _spec()
+    spec.supports_prompt_cache = True
+    body = OpenAICompatClient("https://x")._build_body(
+        ChatRequest(
+            model=spec,
+            system_blocks=["instructions", "inventory"],
+            messages=[Message.user("first"), Message.assistant("mid"), Message.user("second")],
+        )
+    )
+    first_user = next(m for m in body["messages"] if m.get("role") == "user")
+    assert "cache_control" in first_user["content"][-1]
+
+    anthropic_body = AnthropicClient()._build_body(
+        ChatRequest(
+            model=_spec(provider="anthropic"),
+            system_blocks=["instructions", "inventory"],
+            messages=[Message.user("first"), Message.assistant("mid"), Message.user("second")],
+        )
+    )
+    assert "cache_control" in anthropic_body["messages"][0]["content"][-1]
+
+
 def test_openai_compat_chat_body_carries_prompt_cache_key():
     """Chat-completions body carries prompt_cache_key when the model supports
     caching and the request carries a lineage key. OpenRouter uses this as the
