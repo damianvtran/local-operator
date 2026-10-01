@@ -27,6 +27,7 @@ from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
 from textual.color import Color
+from textual.css.constants import VALID_BORDER
 
 from local_operator.harness.types import AgentMessage, ImageContent
 from local_operator.session.naming import ConversationName
@@ -1184,16 +1185,38 @@ async def test_a_tick_never_re_measures_and_skips_the_colours_it_already_drew(
 def test_stylesheet_region_has_no_literal_hex() -> None:
     """The whole sheet is hex-free (test_minimalism pins that); this pins the
     welcome region specifically so a regression is blamed on the rule it lives
-    in, and so the region is asserted to use ONLY ``$lo-*`` tokens."""
+    in, and so the region's COLOURS are ``$lo-*`` tokens.
+
+    The region runs to EOF, so every section added after the welcome block is
+    checked here whether or not it belongs to this view — which is why a border
+    STYLE keyword (`none`, `tall`, `solid`) has to be a legal part of a border
+    value and not a violation: it is not a colour. `color` and `background` stay
+    strict — a keyword there would be a mistake, not a spelling.
+    """
     text = TCSS.read_text()
     marker = "/* ---- welcome view"
     region = text[text.index(marker) :]
     assert not _HEX_RE.search(region), f"literal hex in welcome region: {_HEX_RE.findall(region)}"
-    colors = re.findall(r"(?:color|background|border\w*)\s*:\s*([^;]+);", region)
+    colors = re.findall(r"(color|background|border\w*)\s*:\s*([^;]+);", region)
     assert colors, "the region declares no colors at all?"
-    for value in colors:
-        for part in value.split():
-            assert part.startswith("$lo-"), f"non-token color in welcome region: {value!r}"
+    for prop, value in colors:
+        parts = value.split()
+        if prop.startswith("border"):
+            # A border value is a STYLE keyword plus, optionally, a colour
+            # (`border: solid $lo-edge`), and the keyword cannot be a token: the
+            # sheet clears a border with `border: none` — the composer's own
+            # spelling at the top of the file, and load-bearing rather than
+            # cosmetic (measured on textual 8.2.8: `border: none` and
+            # `border: hidden lime` both give `Edges()`, while a colour-only
+            # `border: lime` draws a SOLID one). So the scanner learns the style
+            # keywords instead of the sheet bending to it.
+            #
+            # The table is Textual's OWN (`VALID_BORDER`), not a transcription:
+            # a hand-copied list would be a second source that drifts silently
+            # when a version adds a style.
+            parts = [part for part in parts if part not in VALID_BORDER]
+        for part in parts:
+            assert part.startswith("$lo-"), f"non-token color in welcome region: {prop}: {value!r}"
 
 
 # --- the rotating tip ----------------------------------------------------------
