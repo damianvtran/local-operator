@@ -940,7 +940,6 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: (the empty-string reset; the whole-list replacement; the collision rule).
 #: The peel-off a future reduction can act on: dropping the two fields from
 #: the schema should take this ceiling back down ~241 billed.
-BUDGET_BILLED_TOKENS = 37_756
 #:
 #: UPDATED (NO RAISE), 2026-09-30 — issue #1815: the ``project`` tool's
 #: ``description`` field text now ends "(<= 2000 chars)." where it said
@@ -965,12 +964,13 @@ BUDGET_BILLED_TOKENS = 37_756
 #: ratchet can move.
 #:
 #: NO RAISE: a one-character edit cannot be why the permanent per-call ceiling
-#: moves, and it does not breach the binding reading. Both arms read ~265
+#: moves, and it does not breach the binding reading. Both arms read ~265-266
 #: billed above the ceiling locally — the config gap this file now attributes
 #: to ``values.subagents`` (762 chars byte-exact in ``tool_schemas``, not a
 #: platform offset) — so the CI arm is the binding one: 104,649 - 762 =
-#: 103,887 chars = ~37,369 billed against the 37,378 ceiling, i.e. ~8 billed
+#: 103,887 chars = ~37,369 billed against the 37,378 ceiling, i.e. ~9 billed
 #: of headroom, and +0.4 of it is this change.
+BUDGET_BILLED_TOKENS = 37_756
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
