@@ -336,8 +336,9 @@ REMOTE_PARK_APPROVAL_ATTACHED_LEAD = (
 #: different vocabulary at the exact step the card sent them to.
 REMOTE_PARK_APPROVAL_REMAINDER = (
     "Allowing it happens on {device} (Touch ID) or on a phone paired with it. "
-    "If nothing there can check a signature: run `lop operator install` on {device} "
-    "(one privileged step) — `lop network ready --peer {device}` shows the "
+    "If nothing there can check a signature: approve setup for {device} in the "
+    "Mesh tab (one approval and one admin prompt) — "
+    "`lop network ready --peer {device}` shows the "
     "operator_authority row (a peer too old to report that row answers "
     "`peer_too_old`, and needs `lop-update` first)."
 )

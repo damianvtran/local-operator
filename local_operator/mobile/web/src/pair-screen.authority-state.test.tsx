@@ -51,12 +51,11 @@ describe("the pairing screen and the machine's own state", () => {
 			authority_ready: false,
 		});
 		await pairAway();
-		// Found by the SENTENCE rather than by the `<code>` inside it: the default
-		// matcher returns the innermost element whose text matches, so a query on
-		// "lop operator install" answers with the code element and would leave the
-		// paragraph's own wording unasserted.
+		// Found by the SENTENCE rather than by a prominent inner element: a phrase
+		// query would answer with the innermost match and would leave the paragraph's
+		// own wording unasserted.
 		const said = await screen.findByText(/can sign already/, undefined, { timeout: 5000 });
-		expect(said.textContent).toContain("lop operator install");
+		expect(said.textContent).toContain("Approve setup for that machine in the Mesh tab");
 		expect(said.textContent).toContain("cannot check it yet");
 		expect(screen.queryByText(/can now approve parked tool calls/)).toBeNull();
 	});
@@ -75,7 +74,7 @@ describe("the pairing screen and the machine's own state", () => {
 			timeout: 5000,
 		});
 		expect(said.textContent).toContain("loosen");
-		expect(screen.queryByText(/lop operator install/)).toBeNull();
+		expect(screen.queryByText(/Approve setup for that machine/)).toBeNull();
 	});
 
 	it("treats an older relay's missing field as ready, not as unready", async () => {
@@ -123,7 +122,7 @@ describe("the pairing screen's failure copy", () => {
 		/* D2: the machine-side condition the old parenthetical asked a phone reader to
 		   evaluate is now its own sentence, gated on a check they can run. */
 		expect(screen.getByText(/lop operator status/)).toBeTruthy();
-		expect(screen.getByText(/lop operator install/)).toBeTruthy();
+		expect(screen.getByText(/set up operator authority on that machine first/)).toBeTruthy();
 	});
 
 	it("turns a relay fault into a sentence rather than a status code (U8-4)", async () => {

@@ -200,9 +200,9 @@ export function PairScreen() {
 						<p className="text-meta text-ink-muted">
 							This phone can sign already; that machine cannot check it yet. Its operator
 							authority is not installed, so there is no key there to verify this
-							phone&rsquo;s signatures against. Run <code>lop operator install</code> there
-							(one privileged step) — then this phone&rsquo;s approvals and loosenings will
-							be accepted. Revoke it with{" "}
+							phone&rsquo;s signatures against. Approve setup for that machine in the Mesh
+							tab (one approval and one admin prompt) — then this phone&rsquo;s approvals
+							and loosenings will be accepted. Revoke it with{" "}
 							<code>lop operator devices --revoke {status.deviceId}</code>.
 						</p>
 					)}
@@ -223,8 +223,8 @@ export function PairScreen() {
 					<p className="text-body-sm text-danger">
 						On the machine, run <code>{AUTHORISE_COMMAND} {status.deviceId}</code>, then
 						pair this phone again. If <code>lop operator status</code> there reports the
-						anchor as not installed, run <code>lop operator install</code> first (one
-						privileged step).
+						anchor as not installed, set up operator authority on that machine first
+						(one approval and one admin prompt).
 					</p>
 				</div>
 			) : null}

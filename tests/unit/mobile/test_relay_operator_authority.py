@@ -615,7 +615,7 @@ def test_a_refused_command_carries_the_TYPED_code_to_the_phone(tmp_path: Path, m
     body = reply.json()
     # The COPY is still carried verbatim, so every client that exists today is
     # unaffected: `error` keeps its shape and the new field is additive.
-    assert "lop operator install" in body["error"], body
+    assert "one approval and one admin prompt" in body["error"], body
     # ...and the CATEGORY rides beside it, for a client that has to decide what to
     # offer next rather than reword a sentence it does not own.
     assert body["code"] == "operator_authority_unconfigured", body

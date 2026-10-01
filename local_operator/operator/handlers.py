@@ -282,7 +282,10 @@ def _init(args: argparse.Namespace) -> int:
     print(f"  level  : {describe_level(handle)}")
     print(f"  staged : {staged}")
     print()
-    print("The runtime trusts ONLY the root-owned anchor. Install it with:")
+    print("The runtime trusts ONLY the root-owned anchor, and landing it is one privileged")
+    print("step: set up operator authority for this machine (one approval and one admin")
+    print("prompt). If you are working from this terminal, the install verb below is the")
+    print("same step and keeps its own sudo prompt:")
     print("  lop operator install")
     if handle.backend == "file-only":
         print()
@@ -347,7 +350,7 @@ def _status() -> int:
         # is in until `lop operator install` succeeds, and the state this PR's own
         # fallback advice lands them in — has no backend to name. The staged anchor does:
         # it says a key exists and what the one pending step is.
-        backend_field = "(none — an operator key is staged; `lop operator install` installs it)"
+        backend_field = "(none — an operator key is staged; the install step has not run yet)"
     print(f"private-half backend   : {backend_field}")
     print(f"presence per signature : {report['presence_enforced_by_os']}")
     print(f"spawn-capable guarantee: {report['capability_guarantee']}")
@@ -396,7 +399,7 @@ def _status() -> int:
     # created, this reports what the RUNTIME will honour, and between them sits
     # exactly one privileged command.
     if staged_here:
-        print(f"staged anchor          : {staged} (run `lop operator install` to trust it)")
+        print(f"staged anchor          : {staged} (not trusted yet — the install step has not run)")
     if report["level"] == LEVEL_OPERATOR_PRESENCE:
         print("loosening: authorised by a signature that costs a human gesture")
     elif report["level"] == LEVEL_OPERATOR_FILE_ONLY:
