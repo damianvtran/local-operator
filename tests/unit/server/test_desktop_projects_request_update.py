@@ -490,11 +490,50 @@ async def test_a_call_during_an_in_flight_request_waits_then_re_evaluates(api) -
         targets.close()
 
 
-async def test_an_unconfirmed_delivery_is_its_own_outcome(api) -> None:
-    client, _root = api
+async def test_an_unconfirmed_delivery_is_its_own_outcome(api, monkeypatch) -> None:
+    client, root = api
     project_id = await _project_with(client, SESSION_A)
     dropper = await _Dropper.start()
     (sleeper,) = _sleeper_procs(1)
+    # A spy on the delivery call, so a recurrence NAMES the mechanism instead of
+    # only showing the outcome: it records whether the peer layer RETURNED (the
+    # only way `delivered` can be reached) or RAISED, and on which branch.
+    import local_operator.mobile.peer_send as peer_send
+
+    calls: list[tuple[Any, ...]] = []
+    real_deliver = peer_send.deliver_peer_message
+
+    async def _spy(record: Any, **kwargs: Any) -> str:
+        try:
+            receipt = await real_deliver(record, **kwargs)
+        except BaseException as exc:  # noqa: BLE001 — recorded, then re-raised
+            calls.append(("raised", record is None, type(exc).__name__, str(exc)[:120]))
+            raise
+        calls.append(("returned", record is None, str(receipt)[:120]))
+        return receipt
+
+    monkeypatch.setattr(peer_send, "deliver_peer_message", _spy)
+
+    # A second spy, on the WIRE call: it records the port each dial used and
+    # whether it returned or raised. That is what separates the two candidate
+    # mechanisms for a `delivered` — a real client that returned on an unacked
+    # socket, or a dial to a DIFFERENT peer than the dropper.
+    import local_operator.mobile.peer_client as peer_client
+
+    dials: list[tuple[Any, ...]] = []
+    real_op = peer_client.send_control_op
+
+    async def _dial_spy(op_record: Any, op: str, fields: dict[str, Any], **kwargs: Any) -> str:
+        port = getattr(op_record, "control_port", None)
+        try:
+            detail = await real_op(op_record, op, fields, **kwargs)
+        except BaseException as exc:  # noqa: BLE001 — recorded, then re-raised
+            dials.append((port, "raised", type(exc).__name__))
+            raise
+        dials.append((port, "returned", str(detail)[:80]))
+        return detail
+
+    monkeypatch.setattr(peer_client, "send_control_op", _dial_spy)
     try:
         # A live record whose socket accepts then closes without acking: the
         # message may have landed, so this is "unconfirmed", never "could not
@@ -515,7 +554,13 @@ async def test_an_unconfirmed_delivery_is_its_own_outcome(api) -> None:
         await _wait_live(SESSION_A)
         # The resolution must land on the DROPPER's record, not some other live
         # listener: this is what makes a `delivered` outcome impossible here,
-        # because the dropper never writes an ack.
+        # because the dropper never writes an ack. The rig also requires that no
+        # session directory exists, so the cold/engage fallback (a DIFFERENT peer
+        # answering a DIFFERENT question) cannot stand in for the dropper.
+        assert not (root / "sessions" / SESSION_A).exists(), (
+            "the cold/engage fallback is reachable: a session directory exists for the "
+            "linked id, so an unacked dial could be replaced by a different peer"
+        )
         record, state = next(
             (rec, st) for rec, st in registry.scan() if rec.session_id == SESSION_A
         )
@@ -524,14 +569,20 @@ async def test_an_unconfirmed_delivery_is_its_own_outcome(api) -> None:
         response = await client.post(f"/v1/desktop/projects/{project_id}/request-update", json={})
         result = response.json()["result"]
         (row,) = result["sessions"]
-        # The dial MUST have reached the dropper: an unacked peer is never
-        # `delivered`, and a misresolution would leave this at 0 rather than
-        # quietly passing a `delivered`.
-        assert dropper.connections == 1, (
-            f"the dial never reached the dropper (connections={dropper.connections}); "
-            f"outcome was {row['outcome']!r}"
+        diagnostics = (
+            f"calls={calls} dials={dials} dropper.port={dropper.port} "
+            f"dropper.connections={dropper.connections} "
+            f"dropper.read_bytes={dropper.read_bytes} "
+            f"session_dir={(root / 'sessions' / SESSION_A).exists()} "
+            f"outcome={row['outcome']!r} detail={row['detail']!r}"
         )
-        assert row["outcome"] == "unconfirmed"
+        # The invariant FIRST, so a recurrence fails on the RULE rather than on a
+        # downstream expectation: a peer this test proved never acked must never
+        # be reported delivered. The diagnostics name the mechanism in one line.
+        assert row["outcome"] != "delivered", f"an unacked dial was called delivered: {diagnostics}"
+        # The dial MUST have reached the dropper.
+        assert dropper.connections == 1, f"the dial never reached the dropper: {diagnostics}"
+        assert row["outcome"] == "unconfirmed", diagnostics
         assert row["detail"] == "delivery could not be confirmed"
         assert result["counts"] == {"total": 1, "delivered": 0, "unconfirmed": 1, "failed": 0}
         # Unconfirmed STARTS the cooldown: it may have landed.
@@ -546,6 +597,54 @@ async def test_an_unconfirmed_delivery_is_its_own_outcome(api) -> None:
             sleeper.wait(timeout=5)
         except Exception:  # noqa: BLE001
             sleeper.kill()
+
+
+async def test_the_real_client_never_returns_success_for_an_unacked_dial() -> None:
+    """The REAL transport, pinned: a peer that closes without acking raises.
+
+    The taxonomy test below swaps ``deliver_peer_message``, so it pins only the
+    exception CLASSES the route maps — it could not catch a change that made the
+    real client RETURN a detail with no ack, which is the one shape that would
+    reach ``_deliver``'s success arm and be called `delivered`. This drives
+    ``send_control_op`` itself against a dropper, so "no ack ⇒ no success
+    return" is asserted at the wire rather than inferred from the mapping.
+    """
+    from local_operator.mobile.peer_client import send_control_op
+
+    dropper = await _Dropper.start()
+    try:
+        record = registry.SessionRecord(
+            pid=os.getpid(),
+            kind="tui",
+            session_id=SESSION_A,
+            conversation_name=SESSION_A,
+            cwd="/tmp",
+            model_label="test/model",
+            control_port=dropper.port,
+            control_key="0" * 64,
+            started=True,
+        )
+        returned: list[str] = []
+        raised: list[str] = []
+        for _ in range(5):
+            try:
+                returned.append(
+                    await send_control_op(
+                        record,
+                        "peer_message",
+                        {"text": "x", "mode": "mailbox", "wake": True, "sender": {}},
+                        deadline_s=5.0,
+                        default_detail="delivered",
+                        default_error="delivery failed",
+                    )
+                )
+            except (ConnectionError, OSError, TimeoutError) as exc:
+                raised.append(type(exc).__name__)
+        assert returned == [], f"an unacked dial returned a receipt: {returned!r}"
+        assert len(raised) == 5, raised
+        assert dropper.connections == 5, dropper.connections
+    finally:
+        await dropper.close()
 
 
 async def test_the_unacked_dial_taxonomy_is_pinned_without_a_socket(api, monkeypatch) -> None:
