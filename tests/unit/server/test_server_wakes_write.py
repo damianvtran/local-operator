@@ -870,7 +870,7 @@ async def test_a_refused_named_session_request_is_retryable_with_the_same_id(
 
     # The transient half: while a peer holds the write lock the answer is the
     # retryable 503, and a retry AFTER it is released applies — which is what
-    # "Retry in a moment" promises and what a recorded outcome would refuse.
+    # "Try again in a moment" promises and what a recorded outcome would refuse.
     import local_operator.wakes.arm as arm_module
 
     original = arm_module.WakeWriteLock.acquire

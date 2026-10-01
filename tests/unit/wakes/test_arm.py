@@ -724,7 +724,7 @@ async def test_a_contended_lock_refuses_rather_than_writing_unlocked(
 
     assert refused.value.status == 503
     assert refused.value.code == "wake_write_busy"
-    assert "Retry in a moment" in str(refused.value)
+    assert "Try again in a moment" in str(refused.value)
     assert [row["id"] for row in _rows_from_transcript(session_dir)] == ["w1"]
 
 
