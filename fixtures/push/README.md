@@ -35,6 +35,14 @@ one place a value is pinned rather than transcribed —
 `emit-idempotency-keys.json`'s digests — is recomputed by the test on every run, so
 a drifted digest fails CI rather than being quietly refreshed.
 
+**Two pins, on purpose.** Every shape is transcribed from the ADR at
+`b03aeb15` (S3's freeze). The DIGEST rules were amended after that freeze and are
+now merged in the same document at **`cc2569a4`** — the third emit type, the
+`alert` object, the `alert`-absent-on-attention rule, the `exclude` scope, and
+the persisted window's `emit_id` — so the digest file carries a
+`digest_rules_ref` naming that ref beside its `adr_ref`. Where the two disagree
+about the digest, `cc2569a4` is the one that governs.
+
 ## The files
 
 | File | Shape | The one thing it fixes |
@@ -61,7 +69,10 @@ a drifted digest fails CI rather than being quietly refreshed.
   alert) with a type per field, plus `forbidden` where the shape has one and
   `absent_fields` where a shape declares a field it must never carry. A field is
   either named in a shape block **or** in
-  `payload-forbidden-fields.json` — never both, never neither.
+  `payload-forbidden-fields.json` — never both, never neither. The two shapes
+  with an alert also file `alert_count_one`: the same alert at a count of one,
+  where the count term is singular (`1 conversation needs you`), so no reader of
+  this tree only ever sees the plural.
 - **`same_as`** means *this file does not restate the shape* — it names the file
   whose `required`/`optional`/`forbidden` blocks govern it too. `registry-register-
   rotation.json` uses it for the register response, so there is one home for that

@@ -14,7 +14,7 @@
   "recipes": {
     "completion": "sha256(completion_token ‖ anchor_id ‖ kind), lowercase hex. The three parts are concatenated in that order with NO separator and no salt; the ‖ in the ADR's recipe is the concatenation operator, not a literal character, and this file is where that reading is pinned so both sides derive byte-identical keys.",
     "attention": "attention-<sequence>, the machine's monotone emit sequence persisted with the cursor that produced it. The prefix makes the two key spaces disjoint BY SHAPE (a completion key is 64 lowercase hex characters), so an attention emit can never collide with a completion emit.",
-    "digest": "sha256(\"digest\" ‖ emit_id ‖ computer), lowercase hex. Concatenation again, in that order and with no separator: the literal, the id the machine minted when the coalescing window CLOSED, then the computer handle. The id is what makes a retry the same emit — the member set and the count both move, so neither can key it — and re-minting the id per attempt is the defect this recipe exists to prevent (review round 1, B1)."
+    "digest": "sha256(\"digest\" ‖ emit_id ‖ computer), lowercase hex. Concatenation again, in that order and with no separator: the literal, the id the machine minted when the coalescing window CLOSED, then the computer handle. The id is what makes a retry the same emit — the member set and the count both move, so neither can key it — and re-minting the id per attempt is the defect this recipe exists to prevent (review round 1, B1). The id itself is PERSISTED with the positions of the window it names, so a restart mid-window re-emits the same key (§3.4 as merged at `damianvtran/local-operator-mobile@cc2569a4`)."
   },
   "completion_vectors": [
     {
@@ -74,7 +74,7 @@
   ],
   "notes": [
     "A duplicate or replayed completion key is a no-op cloud-side; a heal is not, because its key differs.",
-    "A digest's key is re-derived from its EMIT ID, not from the member set: the members are resolved when the batch is accepted and the count moves with every other conversation on the machine, so neither is stable enough to key a retry. The id is minted once at window-close and kept with the pending item.",
+    "A digest's key is re-derived from its EMIT ID, not from the member set: the members are resolved when the batch is accepted and the count moves with every other conversation on the machine, so neither is stable enough to key a retry. The id is minted once at window-close, kept with the pending item, and persisted in the state file with the window's positions so a restart mid-window reuses it (§3.4 at `cc2569a4`).",
     "The badge is NOT a wire field and is not keyed here: it is the machine's count at read time, so a missed or reordered push cannot drift it."
   ]
 }

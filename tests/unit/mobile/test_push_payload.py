@@ -440,9 +440,27 @@ def test_the_digest_alert_says_the_sets_state_and_never_a_fixed_one() -> None:
     mixed = digest_alert(["complete", "error"], 2)[ALERT_BODY_FIELD]
     assert mixed.startswith("Mixed outcomes"), mixed
 
-    # Kinds that could not be read fall back to the same default a single
-    # unknown kind takes — never to a claim about the set.
-    assert digest_alert([], 2)[ALERT_BODY_FIELD].startswith(BODY_COMPLETE)
+    # Kinds that could not be read make NO claim (review round 2, R2-4): the house
+    # answers an uncharacterisable set with an empty subtitle, and a push cannot
+    # send an empty body, so the phrase is dropped rather than replaced by
+    # "Task complete" — which is the claim this vocabulary exists to refuse.
+    unreadable = digest_alert([], 2)[ALERT_BODY_FIELD]
+    assert unreadable == "2 conversations need you"
+    assert not unreadable.startswith(BODY_COMPLETE)
+
+
+def test_the_filed_count_one_alerts_are_the_builders_singular() -> None:
+    """R2-3's amendment, filed rather than only asserted.
+
+    The ruled template is `<count> conversations need you`; a count of one is the
+    common case for a completion push, so the machine spells the singular. Both
+    fixtures carry that literal (`alert_count_one`) so no reader of this tree — or
+    of the freeze — only ever sees the plural.
+    """
+    assert _fixture("emit-completion.json")["alert_count_one"] == completion_alert("complete", 1)
+    assert _fixture("emit-digest.json")["alert_count_one"] == digest_alert(["complete"], 1)
+    assert completion_alert("complete", 1)[ALERT_BODY_FIELD].endswith("1 conversation needs you")
+    assert digest_alert(["complete"], 1)[ALERT_BODY_FIELD].endswith("1 conversation needs you")
 
 
 def test_the_report_block_allow_list_rejects_an_extra_or_mistyped_row() -> None:

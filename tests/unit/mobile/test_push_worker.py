@@ -429,6 +429,94 @@ def test_the_alert_rides_the_visible_types_and_never_the_silent_one(harness: Har
     assert ALERT_FIELD not in harness.plane.calls[1][1], "the silent form has no text"
 
 
+def test_a_restart_mid_window_reuses_the_same_digest_key(tmp_path: Path) -> None:
+    """§3.4 as merged (``cc2569a4``): the window's ``emit_id`` is DURABLE.
+
+    The daemon dies with a digest in flight and its ``202`` lost, which is the
+    case the cloud's dedupe exists for: the retry after the restart must wear
+    the SAME ``Idempotency-Key``. A digest is the one VISIBLE type, so a second
+    key would put the same banner on the user's lock screen twice.
+    """
+    harness = Harness(tmp_path, verdicts=[EmitRefused(status=503)])
+    for index in range(worker_module.BURST_LIMIT + 2):
+        harness.publish(f"window-{index}")
+
+    assert [record.kind for record in harness.worker.tick()] == ["digest"]
+    window = harness.cursor()["digest_window"]
+    assert isinstance(window, dict), "the closed window is persisted as it is minted"
+    assert window["publications"] == [1, 2, 3, 4, 5], "the positions ARE the window"
+
+    restarted = harness.restart()
+    assert [record.kind for record in restarted.tick()] == ["digest"]
+
+    assert (
+        harness.plane.keys[0] == harness.plane.keys[1]
+    ), "a restart mid-window re-emits under the SAME key"
+    assert harness.plane.calls[0][1]["emit_id"] == harness.plane.calls[1][1]["emit_id"]
+
+
+def test_a_new_burst_mints_a_new_window_and_key(tmp_path: Path) -> None:
+    """The other direction (§3.4): the id is per WINDOW, not per machine — a
+    genuine second burst must never be deduped away by the cloud."""
+    harness = Harness(tmp_path)
+    for index in range(worker_module.BURST_LIMIT + 1):
+        harness.publish(f"burst-one-{index}")
+    harness.worker.tick()
+    assert harness.cursor()["digest_window"] is None, "the 202 closes the window"
+
+    for index in range(worker_module.BURST_LIMIT + 1):
+        harness.publish(f"burst-two-{index}")
+    harness.worker.tick()
+
+    assert len(harness.plane.calls) == 2
+    assert harness.plane.keys[0] != harness.plane.keys[1]
+    assert harness.plane.calls[0][1]["emit_id"] != harness.plane.calls[1][1]["emit_id"]
+
+
+def test_a_window_that_grew_is_not_the_same_window(tmp_path: Path) -> None:
+    """Sameness is the POSITION SET, not merely "a window is pending".
+
+    Rows that arrive while the window is in flight are part of the batch a
+    restart re-folds, so the batch a restart re-reads has grown — and the cloud
+    must see that as a new delivery rather than dedupe away the rows the first
+    frame never named.
+    """
+    harness = Harness(tmp_path, verdicts=[EmitRefused(status=503)])
+    for index in range(worker_module.BURST_LIMIT + 2):
+        harness.publish(f"grown-{index}")
+    harness.worker.tick()
+    assert harness.cursor()["digest_window"]["publications"] == [1, 2, 3, 4, 5]
+
+    for index in range(2):
+        harness.publish(f"grown-later-{index}")
+
+    restarted = harness.restart()
+    assert [record.kind for record in restarted.tick()] == ["digest"]
+    assert harness.plane.calls[1][1]["count"] == 7, "the grown batch is what went out"
+    assert harness.plane.keys[1] != harness.plane.keys[0], "a grown batch mints its own id"
+
+
+def test_a_dropped_window_is_cleared_so_the_next_burst_mints_again(tmp_path: Path) -> None:
+    """The third exit of the three (§3.4): the drop-with-log clears the window
+    as surely as the ``202`` does, so the next batch cannot wear a key the cloud
+    has already seen."""
+    harness = Harness(tmp_path, verdicts=[EmitRefused(status=503)])
+    for index in range(worker_module.BURST_LIMIT + 2):
+        harness.publish(f"dropped-{index}")
+
+    for _ in range(worker_module.EMIT_RETRY_ATTEMPTS):
+        harness.worker.tick()
+        harness.clock.advance(worker_module.EMIT_RETRY_INTERVAL_S)
+
+    assert harness.worker.pending() == 0, "the batch was dropped at the bound"
+    assert harness.cursor()["digest_window"] is None
+
+    for index in range(worker_module.BURST_LIMIT + 2):
+        harness.publish(f"after-the-drop-{index}")
+    harness.worker.tick()
+    assert harness.plane.keys[-1] not in harness.plane.keys[:-1], "a fresh window, a fresh key"
+
+
 def test_a_refused_digest_retries_its_own_key_then_drops_at_the_bound(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -789,12 +877,31 @@ def test_an_attention_emit_retries_on_the_wire_interval(tmp_path: Path) -> None:
 def test_a_tick_cannot_re_enter_a_pass_in_flight(harness: Harness) -> None:
     """The daemon cuts the scan loose on ``PUSH_TICK_TIMEOUT_S`` and cannot kill
     the thread, so a second pass must be refused rather than interleaved: the
-    queue, the cursors and the key space are single-claimant state."""
+    queue, the cursors and the key space are single-claimant state.
+
+    THE CELL HAS TO GIVE THE NESTED PASS SOMETHING TO DO (review round 2, R2-1).
+    It published nothing extra, so the nested tick was a no-op for the wrong
+    reason — ``_due`` refused the in-flight item because :meth:`_attempt` stamps
+    ``last_attempt_at`` before it calls the transport, which is round 1's m1 fix
+    doing its job. The row published from INSIDE the transport is eligible on its
+    own (no attempt, no deferral), so a nested pass that ran would emit it; and
+    the lock itself is observed from inside the pass, which is the assertion the
+    guard actually owns.
+    """
     inner: list[list[worker_module.EmitRecord]] = []
+    held: list[bool] = []
+    nested: list[bool] = []
     plane = harness.plane
 
     def reentrant(body: Mapping[str, Any], *, idempotency_key: str):
-        inner.append(harness.worker.tick())  # a second pass, from inside the first
+        harness.publish("reentrant-extra")
+        held.append(harness.worker.pass_held())
+        if not nested:
+            # ONE nested pass, and the flag is set BEFORE the call so a transport
+            # that is itself driving a pass cannot recurse (which would report a
+            # RecursionError instead of the assertion this cell is about).
+            nested.append(True)
+            inner.append(harness.worker.tick())
         return plane(body, idempotency_key=idempotency_key)
 
     harness.worker.transport = reentrant
@@ -803,9 +910,28 @@ def test_a_tick_cannot_re_enter_a_pass_in_flight(harness: Harness) -> None:
     records = harness.worker.tick()
 
     assert len(records) == 1, "the outer pass still emits"
+    assert held == [True], "the guard is HELD while the pass runs"
     assert inner == [[]], "the inner pass did nothing at all"
     assert harness.worker.pending() == 0
     assert len(harness.plane.calls) == 1, "and it did not put a second emit on the wire"
+
+    # The row the nested pass would have taken is still ahead of the cursor, so
+    # the refusal held it back rather than losing it.
+    assert [record.kind for record in harness.worker.tick()] == ["completion"]
+    assert len(harness.plane.calls) == 2
+
+
+def test_the_pass_guard_is_held_only_while_a_pass_runs(harness: Harness) -> None:
+    """The discrimination for the cell above.
+
+    ``pass_held()`` has to be a real observation: if the lock were taken for the
+    worker's whole life the assertion inside the transport would hold for the
+    wrong reason, and the mutant that removes the guard would keep it green.
+    """
+    assert harness.worker.pass_held() is False, "no pass is running here"
+    harness.publish("guard-observation")
+    harness.worker.tick()
+    assert harness.worker.pass_held() is False, "and none is running afterwards"
 
 
 def test_the_cursor_file_is_not_rewritten_when_nothing_moved(harness: Harness) -> None:
