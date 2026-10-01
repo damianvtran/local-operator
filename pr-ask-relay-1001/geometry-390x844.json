@@ -248,8 +248,40 @@
     "composerVisible": true,
     "headerAskEntry": 1
   },
-  "390x844-filled": {
+  "390x844-reopened": {
     "fill": "picked 6 pickers",
+    "collapsed": {
+      "dialog": false,
+      "card": false
+    },
+    "reopened": {
+      "dialog": true,
+      "card": true,
+      "pressed": [
+        "true",
+        "false",
+        "false",
+        "true",
+        "false",
+        "false"
+      ],
+      "sendDisabled": false
+    }
+  },
+  "390x844-filled": {
+    "draft": {
+      "dialog": true,
+      "card": true,
+      "pressed": [
+        "true",
+        "false",
+        "false",
+        "true",
+        "false",
+        "false"
+      ],
+      "sendDisabled": false
+    },
     "open": true,
     "loading": false,
     "empty": false,
@@ -380,7 +412,7 @@
       }
     ],
     "scroller": {
-      "scrollH": 1614,
+      "scrollH": 1622,
       "clientH": 660
     }
   },
@@ -389,8 +421,8 @@
       "dy": 115,
       "x": 195,
       "y": 224,
-      "scrollTop": 981,
-      "max": 981,
+      "scrollTop": 989,
+      "max": 989,
       "remaining": 115
     },
     "open": true,
@@ -455,7 +487,7 @@
       }
     ],
     "scroller": {
-      "scrollH": 1641,
+      "scrollH": 1649,
       "clientH": 660
     }
   },
@@ -598,7 +630,7 @@
       }
     ],
     "scroller": {
-      "scrollH": 1614,
+      "scrollH": 1622,
       "clientH": 660
     }
   }
