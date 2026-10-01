@@ -686,7 +686,8 @@ def test_a_supervisor_stop_is_classified_deliberate_not_unattributed(
     monkeypatch.setattr("local_operator.exec_session.run_session", _cancelled)
     parsed = exec_worker.build_parser().parse_args(["--prompt", "p"])
     facts: dict[str, Any] = {}
-    code = exec_worker.run(parsed, session_factory=lambda: FakeSession(), stop_facts=facts)
+    factory: Any = lambda: FakeSession()  # noqa: E731 — a test double, not a SessionProtocol
+    code = exec_worker.run(parsed, session_factory=factory, stop_facts=facts)
     assert code == exec_worker.EXIT_INTERRUPTED
     assert facts["via"] == "control-stop" and "signal" not in facts
     status, detail = exec_mode.classify_exit(code, facts)
