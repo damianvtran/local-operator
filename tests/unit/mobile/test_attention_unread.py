@@ -212,33 +212,50 @@ def test_the_route_and_the_list_block_agree_by_construction(
 async def test_overlapping_reads_publish_one_builds_pair(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Review round 1, MINOR-1: the rows and the block are ONE build's.
+    """Review round 1 MINOR-1 / round 2 R2-2: ONE build feeds both halves.
 
-    The reviewer's race: with two overlapping builds, the later-resuming caller
-    could publish build A's rows while the block still held build B's aggregate.
-    The pair is now written together, from the build the call served (joiners
-    included). This drives two concurrent callers -- the second joins the
-    in-flight build through ``summaries``' single-flight -- and asserts both
-    hold the SAME rows and that the published block names that build, tagged so
-    a split pair would name a different one. The interleave itself is
-    scheduler-ordered and not deterministically reproducible here; the
-    assignment-site structure is its guarantee, this is its observable
-    contract.
+    Two claims, each with an assertion that fails when it breaks:
+
+    * **Overlapping callers share ONE build.** The second caller joins the
+      in-flight build through ``summaries``' single-flight; a second build
+      would be a second snapshot, so the merge call count must stay at one.
+      This is the assertion round 2's R2-2 asked for: a faithful pre-fix
+      joiner (joins, returns rows, publishes nothing) passed the tuple-shape
+      assertions, so the count is what discriminates a lost join.
+    * **The block names the build the cached rows came from** -- ``tagged-N``
+      per build, so a pair left behind by an earlier build fails on the next
+      rebuild. The two-build INTERLEAVE (the race itself) is scheduler-ordered
+      and not deterministically reproducible here; the one-assignment-site
+      structure is its guarantee, and these assertions are the observable
+      contract around it.
     """
     import asyncio
 
     cfg, daemon = _fixture(tmp_path, monkeypatch, "aaaaaaaaaaaa")
     table = daemon.table
     real_merge = table._merge_summaries
+    merges: list[int] = []
 
     def tagged(durable):
         rows = real_merge(durable)
+        tag = len(merges)
+        merges.append(tag)
         for row in rows:
-            row["session_id"] = "tagged-build"
+            row["session_id"] = f"tagged-{tag}"
             row["unseen"] = True
         return rows
 
     monkeypatch.setattr(table, "_merge_summaries", tagged)
+
+    def pair_tags() -> tuple[str, str]:
+        """``(tag on the published rows, tag on the published block)``."""
+        cached = table._summaries_cache or []
+        conversations = table.unread_snapshot().get("conversations") or [{}]
+        return (
+            cached[0]["session_id"] if cached else "<no rows>",
+            conversations[0].get("session_id", "<no block>"),
+        )
+
     real_refresh = table._refresh_durable_rows
     entered = asyncio.Event()
 
@@ -255,13 +272,25 @@ async def test_overlapping_reads_publish_one_builds_pair(
     second = asyncio.ensure_future(table.summaries())
     rows_a, rows_b = await asyncio.gather(first, second)
 
+    assert merges == [0], (
+        "overlapping callers must share ONE build; a second build would be a " "second snapshot"
+    )
     assert rows_a is rows_b, "the second caller must join the in-flight build"
-    assert [row["session_id"] for row in rows_a] == ["tagged-build"]
-    snapshot = table.unread_snapshot()
-    assert snapshot["count"] == 1
-    assert (
-        snapshot["conversations"][0]["session_id"] == "tagged-build"
-    ), "the published block must describe the same build as the rows beside it"
+    assert pair_tags() == ("tagged-0", "tagged-0")
+
+    # And on every rebuild, the pair moves together: a block (or a cached row
+    # set) left behind by an earlier build fails here -- the closest a
+    # deterministic test gets to the two-build race the one-assignment site
+    # exists for.
+    for depth in (1, 2):
+        _refresh(daemon)
+        rows = await table.summaries()
+        assert [row["session_id"] for row in rows] == [f"tagged-{depth}"]
+        assert pair_tags() == (
+            f"tagged-{depth}",
+            f"tagged-{depth}",
+        ), "the block must describe the build the cached rows came from"
+    assert merges == [0, 1, 2]
 
 
 def test_exclusions_are_not_counted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -380,6 +409,50 @@ def test_a_hidden_live_generation_neither_paints_nor_counts(
         row["session_id"] for row in body["sessions"] if row["unseen"]
     ], "the counted set and the painted set are one set by construction"
     assert body["unread"]["count"] == route["count"] == 2
+
+
+def test_a_live_only_row_with_a_directory_but_no_transcript_paints_and_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 2 R2-1: the §1.2 shape the one-predicate decision exists for.
+
+    The ONE shape on which "the scan's predicate, asked of the marker" and
+    round 1's ``_durable_user_session_dir`` detail check differ: a LIVE-ONLY,
+    user-owned conversation whose directory EXISTS with NO transcript and NO
+    marker -- the "mail-spool conversation with no transcript yet" §1.2 names
+    as the reason the detail check is not the predicate. At this head it must
+    PAINT and COUNT: no marker reads as the user's own, and a directory with
+    no materialised transcript is still a conversation with an unseen receipt.
+    Substituting the detail check (which additionally requires
+    ``transcript.jsonl``) would make it vanish from both surfaces -- and this
+    is the only cell that fails, which is exactly what round 2 measured when it
+    swapped the check and watched all eleven cells stay green.
+    """
+    cfg, daemon = _fixture(tmp_path, monkeypatch)
+    client = _logged_in(daemon)
+
+    directory = cfg / "sessions" / "ffffffffffff"
+    directory.mkdir(parents=True)
+    # The shape, stated in the fixture itself: nothing to read a transcript or
+    # a marker from -- only the directory, a live record and a receipt.
+    assert not (directory / "transcript.jsonl").exists()
+    assert not (directory / "origin.json").exists()
+
+    _publish("ffffffffffff")
+    _live(daemon, "ffffffffffff", 4101)
+    _refresh(daemon)
+
+    body = client.get("/api/sessions").json()
+    route = client.get("/api/attention/unread").json()
+
+    painted = [row["session_id"] for row in body["sessions"]]
+    assert painted == [
+        "ffffffffffff"
+    ], "a live-only user row with no materialised transcript is still a row"
+    assert route["count"] == 1
+    assert [c["session_id"] for c in route["conversations"]] == ["ffffffffffff"]
+    assert route["count"] == len([row for row in body["sessions"] if row["unseen"]])
+    assert body["unread"]["count"] == route["count"] == 1
 
 
 def test_a_live_only_conversation_the_scan_has_not_seen_yet_is_counted(
