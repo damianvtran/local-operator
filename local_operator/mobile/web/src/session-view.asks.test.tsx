@@ -200,9 +200,15 @@ describe("SessionScreen and queued asks", () => {
 		render(<SessionScreen sessionId="mine" />);
 		fireEvent.click(screen.getByTestId("ask-dock"));
 		await waitFor(() => expect(screen.getByRole("dialog")).toBeTruthy());
+		const entriesBefore = window.history.length;
 		fireEvent.click(screen.getByRole("button", { name: "open" }));
 		await waitFor(() => expect(window.location.hash).toBe("#/s/other"));
 		expect(Boolean(window.history.state?.askSheet)).toBe(false);
+		/* REPLACE, not push (agent review round 3, NIT): a push would satisfy the
+		   two assertions above while leaving the sheet's own entry — and its
+		   stale `askSheet` — in the stack, so the next Back would land on a
+		   closed sheet. The entry count is what tells the two apart. */
+		expect(window.history.length).toBe(entriesBefore);
 		/* Give a queued traversal every chance to undo it. */
 		await new Promise((resolve) => setTimeout(resolve, 40));
 		expect(window.location.hash).toBe("#/s/other");
