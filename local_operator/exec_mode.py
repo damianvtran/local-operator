@@ -403,6 +403,80 @@ def classify_exit(exit_code: int, stop: dict[str, Any] | None) -> tuple[str, dic
     return status, detail
 
 
+#: Statuses the ledger can hold, ranked so a fold never lets a late row
+#: regress a worker's ready/terminal record (the order ``job_status`` folds
+#: with; shared here so the append-reader below cannot spell a second one).
+_STATUS_RANK = {
+    "starting": 0,
+    "running": 1,
+    "succeeded": 2,
+    "failed": 2,
+    "cancelled": 2,
+    "interrupted": 2,
+}
+
+
+def read_job_records_since(path: Path, offset: int) -> tuple[int, list[dict[str, Any]]]:
+    """Complete JSONL rows appended after ``offset``, and the new offset to
+    resume from.
+
+    THE WAITERS' READER (readiness poll below; the bulk-resume follow-up). The
+    ledger is append-only, so a watcher only ever needs the bytes written since
+    its last look — while :func:`read_job_records` re-reads and re-parses the
+    WHOLE file on every call, and the launcher used to call it on a 50 ms grid
+    for up to 5 s. Measured on the operator's machine: the live ledger is
+    ~682 KB / ~690 rows, so the old shape re-parsed the full history ~100 times
+    per launch and every one of those parses ran again in each child of a bulk
+    resume (15 children x ~50 polls, i.e. ~750 full-file parses for one
+    morning's set — pure repeated work, none of it new information).
+
+    Only COMPLETE lines are consumed: a partial trailing line (the writer's
+    ``O_APPEND`` write is atomic per row, but a reader can still catch an
+    in-flight one) is left unconsumed and returned unread on the next call,
+    so no caller ever sees a torn row. Corruption is skipped exactly as
+    :func:`read_job_records` skips it.
+
+    A file that is MISSING or has SHRUNK (truncated, replaced, cleaned by
+    retention) answers ``(0, [])``: the caller's next call then re-reads from
+    the start, which is the correct fallback and cannot lose a row it needed —
+    the durable fold always remains :func:`job_status`'s job.
+
+    Never raises: any read problem yields ``(offset, [])`` so a waiter can
+    keep polling exactly as before.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return 0, []
+    if size < offset:
+        return 0, []
+    if size == offset:
+        return offset, []
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(offset)
+            data = handle.read(size - offset)
+    except OSError:
+        return offset, []
+    cut = data.rfind(b"\n")
+    if cut < 0:
+        # Only a partial line so far; keep the offset and let the writer finish.
+        return offset, []
+    new_offset = offset + cut + 1
+    rows: list[dict[str, Any]] = []
+    for line in data[:cut].decode("utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            loaded = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(loaded, dict):
+            rows.append(loaded)
+    return new_offset, rows
+
+
 def update_job_exit(job_id: str, exit_code: int, stop: dict[str, Any] | None = None) -> None:
     """Append the terminal record for ``job_id`` (CL-09): ``finished_at`` +
     ``exit_code``. Append-only keeps this race-free; consumers take the
@@ -479,14 +553,7 @@ def job_status(job_id: str, *, reconcile: bool = True) -> dict[str, Any]:
     never successful, and reconciliation never acts on their resources.
     """
     result: dict[str, Any] = {}
-    rank = {
-        "starting": 0,
-        "running": 1,
-        "succeeded": 2,
-        "failed": 2,
-        "cancelled": 2,
-        "interrupted": 2,
-    }
+    rank = _STATUS_RANK
     current = -1
     for row in read_job_records():
         if row.get("id") != job_id:
@@ -689,13 +756,39 @@ def _spawn_background(command: str, exec_args: ExecArgs) -> int:
 
     # Readiness is not completion: bound the launcher's wait and report an
     # honest 'starting' receipt when provider/session initialization is slow.
+    #
+    # THE WAIT READS THE LEDGER BY APPEND ONLY. The old shape called
+    # ``job_status`` every 50 ms, and ``job_status`` re-parses the WHOLE ledger
+    # — ~682 KB of it on this host's live store — so one launch spent ~100
+    # full-file parses waiting on rows that can only ever be APPENDED. The
+    # delta reader consumes exactly the new bytes, which makes the wait's cost
+    # track the worker's own progress instead of the file's whole history (the
+    # bulk-resume children were paying this ~50 times each). The fold here is
+    # deliberately minimal: it only decides WHEN TO STOP WAITING, and the
+    # authoritative receipt below still comes from a full ``job_status`` read,
+    # so a missed row can at worst make the wait run to its full 5 s — never
+    # change what is printed.
     deadline = time.monotonic() + 5.0
     state = job_status(job_id, reconcile=False)
+    jobs_path = logs_dir() / JOBS_FILE
+    try:
+        offset = jobs_path.stat().st_size
+    except OSError:
+        offset = 0
     while state.get("status") == "starting" and time.monotonic() < deadline:
         if process.poll() is not None:
             break
         time.sleep(0.05)
-        state = job_status(job_id, reconcile=False)
+        offset, appended = read_job_records_since(jobs_path, offset)
+        for row in appended:
+            if row.get("id") != job_id:
+                continue
+            # Rank-guarded like ``job_status``'s fold: a newer row may only
+            # advance the status, so a stray late 'starting' cannot stall the
+            # wait and an out-of-order read cannot regress it.
+            current = _STATUS_RANK.get(str(state.get("status") or ""), 0)
+            if _STATUS_RANK.get(str(row.get("status") or ""), 0) >= current:
+                state.update(row)
     state = job_status(job_id)
     status = state.get("status", "starting")
     # The job/session split is the receipt's whole reason for existing, but two
