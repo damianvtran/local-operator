@@ -7102,7 +7102,8 @@ async def test_default_pinned_exhaustion_fails_legibly_with_hops_tried(
         )
 
     message = str(caught.value)
-    assert f"Pin {_PIN} failed; add another hop or fix its credentials." in message
+    assert f"Pin {_PIN} failed; add another hop or fix credentials." in message
+    assert "Last failure: unknown: model unavailable." in message
     attempted_hops = specs_seen[1:]
     assert attempted_hops == ["anthropic/claude-opus-5", "deepseek/deepseek-flash"], specs_seen
     hops_list = ", ".join(attempted_hops)
@@ -7147,8 +7148,9 @@ async def test_default_pinned_no_chain_fails_legibly_new_copy(
 
     message = str(caught.value)
     assert f"Pin {_PIN} failed; add a hop to retry.fallbackChains." in message
+    assert "Last failure: unknown: model unavailable." in message
     assert "No fallback hop is configured." in message
-    assert "Fix: add a hop to retry.fallbackChains." in message
+    assert "Fix:" not in message, "the lead already carries the remedy (design review D6)"
     assert "same-family" not in message, "no strict-policy copy under the default"
     assert message.index("add a hop") + len("add a hop") <= 58
 
@@ -7157,8 +7159,10 @@ async def test_pinned_fallback_disabled_copy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``retry.modelFallback: false``: the walk stays on the pin, and an
-    exhausted pinned child says the switch is off with the named remedy
-    instead of surfacing a bare provider error (the shape it used to get)."""
+    exhausted pinned child names the switch by its /settings row LABEL
+    (**Model fallback**) with the remedy inside the dock row's leading cells
+    — not a bare provider error (the shape it used to get), and not the raw
+    stored key (design review round 1, D2)."""
 
     async def client_for(spec: ModelSpec) -> Any:
         return ScriptedClient(ProviderError(None, "model unavailable"))
@@ -7189,9 +7193,139 @@ async def test_pinned_fallback_disabled_copy(
         )
 
     message = str(caught.value)
-    assert f"Pin {_PIN} failed; fallback is disabled (retry.modelFallback is off)." in message
-    assert "Fix: fix the pinned model, or re-enable retry.modelFallback in /settings." in message
-    assert "model unavailable" in message, "the cause is still quoted"
+    assert (
+        f"Pin {_PIN} failed; turn fallback on in /settings (Model fallback),"
+        " or fix the pinned model." in message
+    )
+    assert "Last failure: unknown: model unavailable." in message
+    assert "retry.modelFallback" not in message, "the row label, not the raw key"
+    # Design review round 1, D2: the remedy must land in the dock row's span.
+    assert message.index("turn fallback on") + len("turn fallback on") <= 58
+
+
+async def test_pinned_child_with_retry_disabled_fails_legibly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``retry.enabled: false`` + a pin: the retry-disabled fast path raises
+    the same legible failure shape as the walk tail, naming the /settings row
+    by label — never the bare provider error a pinned child used to get.
+
+    Agent review round 1, F1 / QA round 1, Q-1: with the whole cascade off
+    the walk's tail is unreachable (the fast path raises first), so the
+    pinned-child contract is honoured AT the fast path."""
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return ScriptedClient(ProviderError(None, "model unavailable"))
+
+    async def no_sleep(delay_ms: int, signal: Any) -> None:
+        return None
+
+    monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", no_sleep)
+
+    settings = {
+        "retry": {
+            "baseDelayMs": 1,
+            "enabled": False,
+            "fallbackChains": {"default": ["deepseek/deepseek-flash"]},
+        }
+    }
+
+    with pytest.raises(ProviderError) as caught:
+        await _collect(
+            stream_with_failover(
+                _request("anthropic", "claude-sonnet-5-5"),
+                FakeAuth({"anthropic": ["ka1"]}),
+                settings,
+                client_for,
+                route_state=_pinned_state(),
+            )
+        )
+
+    message = str(caught.value)
+    assert message.startswith(f"Pin {_PIN} failed; turn fallback on")
+    assert "(Retry failed calls)" in message, "the switch's /settings label, not its key"
+    assert "retry.enabled" not in message
+    assert "Last failure: unknown: model unavailable." in message
+    assert caught.value.__cause__ is not None, "the original failure stays chained"
+    assert message.index("turn fallback on") + len("turn fallback on") <= 58
+
+
+async def test_pinned_retry_disabled_transport_failure_is_legible_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The transport-error fast path wraps too: a timeout-shaped failure on a
+    pinned route with ``retry.enabled: false`` raises the same legible copy
+    (agent review round 1, F1), quoting the wrapped diagnosis."""
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return ScriptedClient(TimeoutError("read stalled"))
+
+    async def no_sleep(delay_ms: int, signal: Any) -> None:
+        return None
+
+    monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", no_sleep)
+
+    settings = {"retry": {"baseDelayMs": 1, "enabled": False}}
+
+    with pytest.raises(ProviderError) as caught:
+        await _collect(
+            stream_with_failover(
+                _request("anthropic", "claude-sonnet-5-5"),
+                FakeAuth({"anthropic": ["ka1"]}),
+                settings,
+                client_for,
+                route_state=_pinned_state(),
+            )
+        )
+
+    message = str(caught.value)
+    assert message.startswith(f"Pin {_PIN} failed; turn fallback on")
+    assert "(Retry failed calls)" in message
+    assert "Last failure: timeout: TimeoutError: read stalled." in message
+
+
+@pytest.mark.parametrize(
+    "error, expected",
+    [
+        (ProviderError(None, "model unavailable"), "model unavailable"),
+        (
+            ProviderError(
+                429, "quota reset pending", retryable=True, kind="quota", retry_after_ms=45_000
+            ),
+            "rate limit or quota exceeded (HTTP 429, retry in 45s): quota reset pending",
+        ),
+    ],
+)
+async def test_unpinned_retry_disabled_raises_the_bare_error_unchanged(
+    monkeypatch: pytest.MonkeyPatch, error: ProviderError, expected: str
+) -> None:
+    """NEGATIVE CONTROL for the fast-path wrap: with no pin marker the
+    retry-disabled raises stay exactly what they were — the bare provider
+    error, no pin, no /settings copy."""
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return ScriptedClient(error)
+
+    async def no_sleep(delay_ms: int, signal: Any) -> None:
+        return None
+
+    monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", no_sleep)
+
+    settings = {"retry": {"baseDelayMs": 1, "enabled": False}}
+
+    with pytest.raises(ProviderError) as caught:
+        await _collect(
+            stream_with_failover(
+                _request("anthropic", "claude-sonnet-5-5"),
+                FakeAuth({"anthropic": ["ka1"]}),
+                settings,
+                client_for,
+                route_state=FailoverRouteState(),  # UNPINNED
+            )
+        )
+
+    assert str(caught.value) == expected
+    assert not str(caught.value).startswith("Pin")
 
 
 async def test_unpinned_route_sequences_are_byte_for_byte_unchanged(

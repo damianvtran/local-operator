@@ -82,21 +82,23 @@ is unchanged.
   same-vendor → cross-vendor, and that ordering is shared with the quota
   preflight (`_first_available_fallback`), so the cascade walk and the
   message boundary cannot disagree about which hop may serve a pin.
-- **Cross-vendor is the announced last resort** (the shipped default,
-  `retry.pinnedFallback: cross-family`). A pinned child whose own model cannot
-  serve walks the configured chain and may end on another vendor's model — but
-  only after every same-family hop, and the substitution is DISCLOSED, live:
-  a parent-stream notice, the job badge and roster label, the durable
-  completion row (`pinned X, ran on Y`), and the persisted route reason. The
-  disclosure exists because a delegated review that silently collapses onto
-  the author's model is not a review — a substituted run that SAYS it
-  substituted stays auditable. Keep chains sane anyway: a chain can list the
-  parent's own model, and disclosure is not chain hygiene.
-- **`retry.pinnedFallback: same-family` is the strict opt-in.** The child never
-  enters a cross-vendor target; when no same-family hop can serve it, it fails
-  with a legible error — the pin, the cause, and both remedies, never a silent
-  substitution. A quota boundary under this policy **announces** instead of
-  activating the hop.
+- **Cross-vendor is the announced last resort** (the shipped default; the
+  `/settings` row is `Pinned child fallback`, showing **allow cross-vendor**
+  for `retry.pinnedFallback: cross-family`). A pinned child whose own model
+  cannot serve walks the configured chain and may end on another vendor's
+  model — but only after every same-family hop, and the substitution is
+  DISCLOSED, live: a parent-stream notice, the job badge and roster label, the
+  durable completion row (`pinned X, ran on Y`), and the persisted route
+  reason. The disclosure exists because a delegated review that silently
+  collapses onto the author's model is not a review — a substituted run that
+  SAYS it substituted stays auditable. One chain-hygiene caveat: a chain may
+  include the parent's own model, in which case the disclosure will report a
+  substitution that gained no independence.
+- **`retry.pinnedFallback: same-family` is the strict opt-in** (the row's
+  **same family only**). The child never enters a cross-vendor target; when no
+  same-family hop can serve it, it fails with a legible error — the pin, the
+  cause, and both remedies, never a silent substitution. A quota boundary
+  under this policy **announces** instead of activating the hop.
 - **An unserved pinned child fails legibly, never bare.** Whenever the walk
   ends without serving, the error names the pin, the cause, and the hops that
   were tried and could not serve it ("Every configured hop was tried…") — or
