@@ -655,6 +655,42 @@ def build_cli_parser() -> argparse.ArgumentParser:
         ),
     )
     mobile_subparsers.add_parser("password", help="Show or rotate the portal password")
+    # The operator surface ADR 0006 §4 names for the device lifecycle: the way
+    # back from a revoke is never the device's own act, so it is a command a
+    # human runs on this computer. Stdlib-only arguments here, like the rest of
+    # the mobile block; the HTTP client is imported when the command runs.
+    devices_parser = mobile_subparsers.add_parser(
+        "devices",
+        help="List this computer's push devices, or revoke/unrevoke one",
+        # Rendered from the constants the code returns, so the help cannot name a
+        # status the command does not use (design round 1, D8: it promised "1 any
+        # other failure" while a missing id returned 2).
+        epilog=(
+            "exit status: "
+            f"{MOBILE_DEVICES_OK} ok, "
+            f"{MOBILE_DEVICES_FAILED} any other failure, "
+            f"{MOBILE_DEVICES_USAGE} missing device id (or a usage error), "
+            f"{MOBILE_DEVICES_NO_SUCH_DEVICE} the device id is not in this computer's registry"
+        ),
+    )
+    devices_parser.add_argument(
+        "devices_command",
+        nargs="?",
+        choices=("list", "revoke", "unrevoke"),
+        default="list",
+        help="list (default), revoke <device_id>, or unrevoke <device_id>",
+    )
+    devices_parser.add_argument(
+        "device_id",
+        nargs="?",
+        help="the device_id `lop mobile devices` lists; required by revoke/unrevoke",
+    )
+    devices_parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="the mobile daemon's port (default: the daemon's own default)",
+    )
     uninstall_parser = mobile_subparsers.add_parser("uninstall", help="Remove the LaunchAgent")
     uninstall_parser.add_argument("--purge", action="store_true", help="Also delete the password")
     serve_mobile_parser = mobile_subparsers.add_parser("serve", help="Run the daemon (foreground)")
@@ -7631,8 +7667,421 @@ def mobile_command(args: argparse.Namespace) -> int:
             print(f"  {step}")
         return 0
 
-    print("usage: lop mobile {install|status|start|stop|restart|logs|password|uninstall|serve}")
+    if command == "devices":
+        return _mobile_devices_command(args)
+
+    print(
+        "usage: lop mobile "
+        "{install|status|start|stop|restart|logs|password|uninstall|serve|devices}"
+    )
     return 1
+
+
+#: ``lop mobile devices``' exit statuses, spelled once. The ``--help`` epilog and
+#: the code path both render from these, because a help text that names a status
+#: the command does not return is worse than no help text (design round 1, D8):
+#: the previous epilog promised "1 any other failure" while a missing device id
+#: returned 2.
+#:
+#: 3 is deliberately its own status. A script has to tell "there is no such
+#: device" — a typo, or a row that is already gone — from "the daemon did not
+#: answer", and parsing a sentence is not something a script should have to do.
+#: 2 is argparse's usage number, so "missing device id" shares it rather than
+#: inventing a fourth: both are "you did not give me a valid command line".
+MOBILE_DEVICES_OK = 0
+MOBILE_DEVICES_FAILED = 1
+MOBILE_DEVICES_USAGE = 2
+MOBILE_DEVICES_NO_SUCH_DEVICE = 3
+
+#: The column the devices legend wraps its prose at. Slightly under 80 so the two
+#: leading spaces and a terminal's own margin cannot push a word onto its own
+#: line; the state rows are single lines and are padded, not wrapped.
+_LEGEND_WIDTH = 76
+
+
+class _MobileApiUnavailable(RuntimeError):
+    """The daemon could not be reached, or there is no credential to reach it with.
+
+    ``code`` is the machine-readable half: a script asking "did the daemon say no,
+    or did the daemon not exist?" cannot answer that from a sentence, and the two
+    remedies are different (start the daemon / install the portal password).
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def _mobile_api_call(
+    port: int, method: str, path: str, *, headers: dict[str, str] | None = None
+) -> tuple[int, Any]:
+    """One authenticated loopback call to this computer's mobile daemon.
+
+    The operator's own machine talks to its own daemon the way the daemon's
+    client always has: over loopback, with the session cookie minted from the
+    portal password this computer holds (``mobile/auth.sign_cookie``). Going
+    through the daemon rather than editing the registry file directly is
+    deliberate — the store's invariant is that exactly ONE process writes it
+    (``mobile/push_devices`` module docstring), and a CLI that rewrote the file
+    behind a running daemon could lose a concurrent registration.
+
+    A non-2xx answer is returned, not raised: the refusals here are the
+    contract (``403 machine_only``, ``404 device_absent``), and the caller
+    renders them.
+    """
+    import json
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    from local_operator.mobile.auth import COOKIE_NAME, load_password, sign_cookie
+
+    password = load_password()
+    if not password:
+        raise _MobileApiUnavailable(
+            "credential_missing",
+            "no mobile password is set on this computer — run `lop mobile install`",
+        )
+    request = urllib.request.Request(  # noqa: S310 — loopback only, literal scheme
+        f"http://127.0.0.1:{port}{path}",
+        method=method,
+        headers={"Cookie": f"{COOKIE_NAME}={sign_cookie(password)}", **(headers or {})},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:  # noqa: S310
+            status, body = response.status, response.read()
+    except urllib.error.HTTPError as exc:
+        status, body = exc.code, exc.read()
+    except OSError as exc:
+        raise _MobileApiUnavailable(
+            "daemon_unreachable", f"the mobile daemon on port {port} did not answer ({exc})"
+        ) from exc
+    try:
+        payload: Any = json.loads(body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        payload = {"error": body.decode("utf-8", "replace")[:300]}
+    return status, payload
+
+
+def _mobile_devices_command(args: argparse.Namespace) -> int:
+    """``lop mobile devices`` — list, revoke or unrevoke this computer's devices.
+
+    THE OPERATOR SURFACE ADR §4 names, and the reason the daemon's unrevoke route
+    exists at all: "the way back" from a revoke is an act by the machine or the
+    account, never by the device itself, so it is a command a human runs on this
+    computer. The state vocabulary printed here is the app's Settings' own
+    (``state`` verbatim from ``GET /api/push/devices``), and the sentences are the
+    ADR's, so a phone that reached Settings and a terminal that ran this command
+    cannot describe one device two ways.
+
+    Anything secret is absent by construction: the list carries no push token
+    (never stored) and no ``device_key`` (returned once, at registration).
+    """
+    from urllib.parse import quote
+
+    from local_operator.mobile import push_devices
+    from local_operator.paths import config_dir
+
+    command = getattr(args, "devices_command", None) or "list"
+    device_id = getattr(args, "device_id", None)
+    if command != "list" and not device_id:
+        # stderr, with the same `error:` prefix as every other failure of this
+        # command (design round 1, D9): a script that captures the two streams
+        # separately must not read a usage failure as normal output.
+        print(
+            f"error: device_id_required: lop mobile devices {command} <device_id>",
+            file=sys.stderr,
+        )
+        return MOBILE_DEVICES_USAGE
+
+    port = getattr(args, "port", None)
+    if port is None:
+        from local_operator.mobile.daemon import DEFAULT_PORT
+
+        port = DEFAULT_PORT
+
+    try:
+        status, payload = _mobile_api_call(port, "GET", "/api/push/devices")
+    except _MobileApiUnavailable as exc:
+        print(f"error: {exc.code}: {exc.message}", file=sys.stderr)
+        return MOBILE_DEVICES_FAILED
+    if status != 200 or not isinstance(payload, dict):
+        detail = payload.get("error") if isinstance(payload, dict) else str(payload)
+        print(f"error: device_list_failed: {detail}", file=sys.stderr)
+        return MOBILE_DEVICES_FAILED
+
+    devices = payload.get("devices") or []
+    if command == "list":
+        _print_mobile_devices(devices)
+        return MOBILE_DEVICES_OK
+
+    # Resolved against the registry BEFORE the verb runs, so a never-registered
+    # id is one refusal with one exit status rather than a route's answer the
+    # script has to interpret — and so `revoke` cannot report a success the
+    # registry did not have (the route is idempotent by contract and answers
+    # `{"ok": true}` for an id it does not hold, which is right for the app's
+    # retry and wrong for a human's command).
+    target = next((row for row in devices if row.get("device_id") == device_id), None)
+    if target is None:
+        print(
+            f"error: {push_devices.DEVICE_ABSENT_CODE}: "
+            f"no device {device_id} in this computer's push registry",
+            file=sys.stderr,
+        )
+        return MOBILE_DEVICES_NO_SUCH_DEVICE
+    # The id is one the registry just confirmed, and it goes into a URL path:
+    # typed here rather than left as the argv ``Any | None`` the parser yields,
+    # so the quoting below is a str operation the type checker can read.
+    target_id = str(device_id)
+    # WHAT THE VERB WILL CLEAR, read BEFORE it runs (design round 1, D1). The
+    # pre-verb state is this command's own observation, and it is what lets the
+    # result line name the marker that was actually cleared: an unpair is not a
+    # revoke, and a row that carried no marker had nothing to clear — saying
+    # "unrevoked" for either is the ADR §4 rule 1 failure ("instead of claiming a
+    # revoke nobody performed") on the one surface that carries the vocabulary.
+    before_state = str(target.get("state") or push_devices.STATE_LIVE)
+
+    if command == "revoke":
+        status, payload = _mobile_api_call(port, "DELETE", f"/api/push/devices/{quote(target_id)}")
+    else:
+        # The operators-only half: the daemon refuses this route without the
+        # machine's key, which is exactly what a phone cannot present.
+        try:
+            key = push_devices.operator_key(config_dir())
+        except push_devices.PushRegistryCorrupt as exc:
+            # The one call in this command whose refusal was not rendered (review
+            # round 1, N2): unguarded it left `main`'s generic handler, which
+            # prints a traceback and no code.
+            print(f"error: registry_corrupt: {exc}", file=sys.stderr)
+            return MOBILE_DEVICES_FAILED
+        if key is None:
+            # THE CLI NEVER MINTS (review round 1, R5): the daemon is the only
+            # writer of this store, and a second writer's read-modify-write can
+            # lose a concurrent registration. A store with no key is one written
+            # before this build, and "not yet" is the honest answer.
+            print(
+                "error: operator_key_missing: no operator key yet — the daemon mints "
+                "it when a device registers",
+                file=sys.stderr,
+            )
+            return MOBILE_DEVICES_FAILED
+        status, payload = _mobile_api_call(
+            port,
+            "POST",
+            f"/api/push/devices/{quote(target_id)}/unrevoke",
+            headers={push_devices.OPERATOR_KEY_HEADER: key},
+        )
+    if status != 200:
+        code = payload.get("code") if isinstance(payload, dict) else None
+        detail = payload.get("error") if isinstance(payload, dict) else str(payload)
+        if code == push_devices.MACHINE_ONLY_CODE:
+            # Same code, machine-side remedy (design round 1, D5). The ADR's
+            # sentence is written for a DEVICE and is exactly right in the app;
+            # rendered here, on the computer, it tells the reader to use the
+            # computer they are already using. What this reader can act on is the
+            # key/registry mismatch itself.
+            print(
+                f"error: {code}: this computer's operator key does not match the "
+                "daemon's registry — check --port or restart the daemon",
+                file=sys.stderr,
+            )
+            return MOBILE_DEVICES_FAILED
+        print(f"error: {code or 'refused'}: {detail}", file=sys.stderr)
+        return MOBILE_DEVICES_FAILED
+
+    after = _read_back_state(port, target_id)
+    label = _device_label(target)
+    if command == "revoke":
+        print(f"revoked {label}")
+        print(f"  id {target_id} — {_state_clause(after)}")
+        print("  delivery stops for it; the device keeps whatever it cached.")
+        return MOBILE_DEVICES_OK
+    if before_state == push_devices.STATE_REVOKED:
+        print(f"unrevoked {label}")
+    elif before_state == push_devices.STATE_UNPAIRED:
+        print(f"cleared the unpaired marker on {label}")
+    else:
+        print(f"nothing to clear on {label}")
+        if before_state == push_devices.STATE_EXPIRED:
+            print("  it is expired, not revoked — signing in again is what resumes push")
+    print(f"  id {target_id} — {_state_clause(after)}")
+    print("  no token or credential was restored: it must register again, which")
+    print("  needs a live credential (sign in with the portal password).")
+    return MOBILE_DEVICES_OK
+
+
+def _read_back_state(port: int, device_id: str) -> str | None:
+    """The device's state AFTER the verb ran, or None when it could not be read.
+
+    Read back rather than assumed, because ``unrevoke`` restores no token: what
+    the device can actually do next is the state left after the marker cleared,
+    which may still be ``expired``.
+
+    ``None`` is not a value to print (design round 1, D4 — ``state: ?`` is a
+    variable name shown to a person); the caller renders a sentence instead.
+    ``absent`` IS returned: it is a real state of the ADR's table, and the legend
+    explains it.
+    """
+    from local_operator.mobile import push_devices
+
+    try:
+        status, refreshed = _mobile_api_call(port, "GET", "/api/push/devices")
+    except _MobileApiUnavailable:
+        return None
+    if status != 200 or not isinstance(refreshed, dict):
+        return None
+    row = next(
+        (row for row in refreshed.get("devices", []) if row.get("device_id") == device_id), None
+    )
+    if row is None:
+        return push_devices.STATE_ABSENT
+    state = row.get("state")
+    return str(state) if state else push_devices.STATE_ABSENT
+
+
+def _state_clause(after: str | None) -> str:
+    """``state: <x>``, or the sentence that says the read-back did not answer."""
+    if after is None:
+        return "state not read back: the daemon did not answer the follow-up list"
+    return f"state: {after}"
+
+
+def _device_label(device: dict[str, Any]) -> str:
+    """The device's own label, or a fallback that READS as one.
+
+    ``platform`` used to stand in bare — ``(android)`` — which reads as a device
+    name where a reader expects one (design round 1, D12). The fallback says what
+    it is: a device the user never named.
+    """
+    name = device.get("name")
+    if isinstance(name, str) and name:
+        return name
+    platform = device.get("platform")
+    return (
+        f"unnamed {platform} device" if isinstance(platform, str) and platform else "unnamed device"
+    )
+
+
+def _device_facts(device: dict[str, Any]) -> str:
+    """The row's vocabulary line: state, platform/build, and the credential flag.
+
+    ``credential_live`` is shown because it is the one fact that distinguishes
+    "registered and its credential works" from "registered, credential stale" —
+    the combination the state word alone cannot say (design round 1, D11/R3).
+    It is omitted when the machine holds no reading for that row, rather than
+    defaulted: absence is what the store actually knows.
+    """
+    from local_operator.mobile import push_devices
+
+    parts = [str(device.get("state") or push_devices.STATE_ABSENT)]
+    platform = device.get("platform")
+    version = device.get("app_version")
+    if platform or version:
+        parts.append(f"{platform or 'unknown platform'} {version or ''}".strip())
+    live = device.get("credential_live")
+    if live is True:
+        parts.append("credential live")
+    elif live is False:
+        parts.append("credential lapsed")
+    return " · ".join(parts)
+
+
+def _device_times(device: dict[str, Any]) -> str:
+    """The row's timestamps, each under the name of the field it came from.
+
+    ``last_authenticated_at`` is the credential's own clock and ``last_seen_at``
+    is the register/liveness clock; they coincide today only because one route
+    writes both (design round 1, D11/R3), and a label that names the wrong field
+    starts lying the moment they diverge. A row an earlier build wrote has no
+    ``last_authenticated_at``, and it is rendered as ``last seen`` — the field
+    that exists — rather than under the credential's name.
+    """
+    registered = _when(device.get("registered_at"))
+    authenticated = device.get("last_authenticated_at")
+    if isinstance(authenticated, int) and not isinstance(authenticated, bool):
+        return f"registered {registered} · last authenticated {_when(authenticated)}"
+    return f"registered {registered} · last seen {_when(device.get('last_seen_at'))}"
+
+
+def _when(value: Any) -> str:
+    """A local timestamp for a unix second, or ``unknown`` for anything else."""
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(value))
+    return "unknown"
+
+
+def _print_wrapped(text: str, indent: str = "") -> None:
+    """Print one sentence wrapped at the legend's width.
+
+    Wrapped rather than hand-broken (design round 1, D10): the cloud sentence is
+    rendered from ``CLOUD_IDLE_DROP_DAYS``, so its length is not something a
+    hand-broken line can be cut to — one earlier revision wrapped its neighbours
+    at 78 columns and then emitted a 125-column line the terminal broke wherever
+    it liked. ``break_long_words=False`` because a broken word is worse than a
+    long line, and the only long tokens here are constants.
+    """
+    import textwrap
+
+    for line in textwrap.wrap(text, width=_LEGEND_WIDTH - len(indent), break_long_words=False):
+        print(f"{indent}{line}")
+
+
+def _print_mobile_devices(devices: list[dict[str, Any]]) -> None:
+    """Render the registry, then the vocabulary that makes it readable.
+
+    The vocabulary is the module's (design round 1, D2): every state's sentence
+    comes from ``push_devices.STATE_DESCRIPTIONS`` and the precedence sentence
+    from ``PRECEDENCE_SENTENCE``, so the legend, the app's Settings and the wire
+    cannot describe one state three ways — the same reason the names live there.
+
+    The legend explains the states and the cloud gap, and it is DROPPED when
+    there are no devices (design round 1, D3): explaining four states to a user
+    who has no rows is eleven lines about something they cannot act on. The empty
+    render says what will appear and the action that creates it instead.
+
+    The label leads each row and the 32-character id sits on its own indented
+    line (design round 1, D7): the id is what ``revoke`` needs, but it is not
+    what the reader recognises, and leading with it pushed the label past column
+    80 on every real-world row.
+    """
+    from local_operator.mobile.push_devices import (
+        CLOUD_IDLE_DROP_DAYS,
+        DESCRIBED_STATES,
+        PRECEDENCE_SENTENCE,
+        STATE_DESCRIPTIONS,
+    )
+
+    if not devices:
+        print("no push devices registered on this computer yet")
+        print("  install the mobile app and sign in with your portal password to add one")
+        return
+
+    count = len(devices)
+    print(f"{count} push {'device' if count == 1 else 'devices'} on this computer")
+    for device in devices:
+        print()
+        print(f"  {_device_label(device)}")
+        print(f"      {_device_facts(device)}")
+        print(f"      {_device_times(device)}")
+        print(f"      id {device.get('device_id', 'unknown')}")
+
+    print()
+    print("states:")
+    width = max(len(state) for state in DESCRIBED_STATES) + 1
+    for state in DESCRIBED_STATES:
+        print(f"  {state:<{width}}{STATE_DESCRIPTIONS[state]}")
+    _print_wrapped(PRECEDENCE_SENTENCE)
+    _print_wrapped(
+        "unrevoke clears a revoked or unpaired marker (the device must then register "
+        "again); expired clears by signing in and registering again. Neither restores "
+        "a token."
+    )
+    _print_wrapped(
+        f"the cloud also drops a device after {CLOUD_IDLE_DROP_DAYS} days with no "
+        "authenticated request, and this computer cannot see that drop — a row here "
+        "can read live while push has already stopped."
+    )
 
 
 def _bind_serve_socket(host: str, port: int) -> socket.socket:

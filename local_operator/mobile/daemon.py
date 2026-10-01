@@ -4975,13 +4975,19 @@ def build_app(daemon: MobileDaemon):
     async def _push_call(fn: Callable[..., dict[str, Any]], *args: Any) -> Response:
         """Run one registry call off-loop; a refusal answers its JSON body.
 
-        ``mobile_push_devices``' refusals are typed: a register payload this
-        build cannot accept is the 422 the sibling routes answer, and a store
-        that cannot be read or written is an internal fault (500) whose
-        sentence names it — never a silent empty registry.
+        ``mobile_push_devices``' refusals are typed, and the ORDER below is the
+        contract: a state refusal (revoked/unpaired/absent) carries its own
+        status and a machine-readable ``code``, the plain payload refusal is the
+        422 the sibling routes answer, and a store that cannot be read or written
+        is an internal fault (500) whose sentence names it — never a silent empty
+        registry.
         """
         try:
             payload = await asyncio.to_thread(fn, *args)
+        except mobile_push_devices.PushDeviceStateRefusal as exc:
+            return JSONResponse(
+                {"code": exc.code, "error": exc.message}, status_code=exc.status_code
+            )
         except mobile_push_devices.PushDeviceRefusal as exc:
             return JSONResponse({"error": exc.message}, status_code=422)
         except (mobile_push_devices.PushRegistryCorrupt, OSError) as exc:
@@ -4992,9 +4998,60 @@ def build_app(daemon: MobileDaemon):
             # the diagnosis, and a retrying phone must not add a traceback per
             # attempt.
             store = mobile_push_devices.store_path(args[0]) if args else "unknown store"
-            logger.warning("push device registry refused an operation at %s: %s", store, exc)
-            return JSONResponse({"error": str(exc)[:300]}, status_code=500)
+            return _push_fault(store, exc)
         return JSONResponse(payload)
+
+    def _push_fault(store: Path | str, exc: Exception) -> Response:
+        """The one 500 every unreadable-store refusal answers, and the one log line.
+
+        Shared because two paths reach it: a registry call (``_push_call``) and
+        the operators-only gate (``_push_operator_gate``), which reads the same
+        store to check the key.
+        """
+        logger.warning("push device registry refused an operation at %s: %s", store, exc)
+        return JSONResponse({"error": str(exc)[:300]}, status_code=500)
+
+    async def _push_operator_gate(request: Request, config_dir: Path) -> Response | None:
+        """None = this caller is the machine's own operator surface.
+
+        THE ONLY PLACE THE OPERATOR DISTINCTION IS MADE, and the reason is the
+        way a phone's request can reach this daemon at all (ADR 0006 §4 round 4
+        B1). The daemon is loopback-only, so a device cannot address it directly:
+        every device request arrives through the tunnel gateway, which REBUILDS
+        the request headers from a fixed allowlist of presentation headers
+        (``local_operator/tunnels/gateway.py``), so a header of our choosing
+        cannot survive that hop — and a device that somehow managed to send one
+        still would not have the value, because the key is minted on this machine
+        and is never given to a device.
+
+        Neither half is trusted alone: the transport property is what makes the
+        header unforgeable from outside, and the key is what keeps the route
+        honest if a future gateway ever forwards more than it does today. The
+        limit this does NOT close is stated in ``push_devices``' module docstring:
+        another process on THIS machine can read the key. It could also rewrite
+        the store file, so the key is not a boundary against it, and the direction
+        that matters — a device restoring its own revoked state — is closed.
+        """
+        try:
+            allowed = await asyncio.to_thread(
+                mobile_push_devices.verify_operator_key,
+                config_dir,
+                request.headers.get(mobile_push_devices.OPERATOR_KEY_HEADER),
+            )
+        except (mobile_push_devices.PushRegistryCorrupt, OSError) as exc:
+            # NOT the machine_only refusal: a store this process cannot read is a
+            # fault, and "a device cannot restore itself" would be a false
+            # sentence for it.
+            return _push_fault(mobile_push_devices.store_path(config_dir), exc)
+        if allowed:
+            return None
+        return JSONResponse(
+            {
+                "code": mobile_push_devices.MACHINE_ONLY_CODE,
+                "error": mobile_push_devices.MACHINE_ONLY_MESSAGE,
+            },
+            status_code=403,
+        )
 
     async def api_push_register(request: Request) -> Response:
         """Record this phone's registration; idempotent on (install_id, platform).
@@ -5003,7 +5060,8 @@ def build_app(daemon: MobileDaemon):
         validated and deliberately dropped: the machine stores no push token
         (§4 — the cloud's registry is where tokens live), and the forward step
         that would hand it to the cloud is future work (S7); the store module
-        carries the full citation.
+        carries the full citation. The response also mints and returns this
+        device's ``device_key``, once per call — see ``push_devices.register``.
         """
         denied = gate(request)
         if denied is not None:
@@ -5026,13 +5084,17 @@ def build_app(daemon: MobileDaemon):
         return await _push_call(mobile_push_devices.list_devices, config_dir())
 
     async def api_push_device_delete(request: Request) -> Response:
-        """Deregister one device by id — any device in this registry, not just ours.
+        """REVOKE one device by id — any device in this registry, not just ours.
 
-        There is no per-device caller identity to scope by (the cookie is the
-        operator's, one for the whole computer), and the stolen-phone case
-        (ADR §4) needs one device able to revoke another. An id the registry
-        does not hold stays ``{"ok": true}``: the app retries this on sign-out,
-        and a retry after a successful delete must not read as a failure.
+        A tombstone, not a removal (``push_devices.revoke`` carries the ADR §4
+        citation): the row stays with ``revoked_at`` so the register route can
+        refuse it, which is what makes the revoke stick for the same
+        ``install_id``. There is no per-device caller identity to scope by (the
+        cookie is the operator's, one for the whole computer), and the
+        stolen-phone case (ADR §4) needs one device able to revoke another. An id
+        the registry does not hold stays ``{"ok": true}``: the app retries this on
+        sign-out, and a retry after a successful revoke must not read as a
+        failure.
         """
         denied = gate(request)
         if denied is not None:
@@ -5040,8 +5102,37 @@ def build_app(daemon: MobileDaemon):
         from local_operator.paths import config_dir
 
         return await _push_call(
-            mobile_push_devices.deregister,
+            mobile_push_devices.revoke,
             config_dir(),
+            str(request.path_params["device_id"]),
+        )
+
+    async def api_push_device_unrevoke(request: Request) -> Response:
+        """Clear a revoke or unpair marker — THE MACHINE'S OPERATOR ONLY (ADR §4).
+
+        THE WAY BACK IS NOT A DEVICE OPERATION (round 4 B1). A phone's requests
+        travel through the machine's relay, so a revoked phone holding a live
+        cookie could otherwise clear its own tombstone and be Live again without
+        the password — the ADR's own named worst failure, undone by the device it
+        exists to refuse. ``_push_operator_gate`` is what makes this route the
+        machine's; a device session gets the refusal the app renders.
+
+        Clears ``revoked_at`` OR ``unpaired_at`` (they are different states with
+        different refusals) and restores no token: the device must register
+        again, which needs a live credential.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.paths import config_dir
+
+        config = config_dir()
+        machine_only = await _push_operator_gate(request, config)
+        if machine_only is not None:
+            return machine_only
+        return await _push_call(
+            mobile_push_devices.unrevoke,
+            config,
             str(request.path_params["device_id"]),
         )
 
@@ -5103,6 +5194,11 @@ def build_app(daemon: MobileDaemon):
         Route("/api/push/register", api_push_register, methods=["POST"]),
         Route("/api/push/devices", api_push_devices),
         Route("/api/push/devices/{device_id:str}", api_push_device_delete, methods=["DELETE"]),
+        Route(
+            "/api/push/devices/{device_id:str}/unrevoke",
+            api_push_device_unrevoke,
+            methods=["POST"],
+        ),
         Route("/mark.png", mark_png),
         Route("/", index),
     ]
