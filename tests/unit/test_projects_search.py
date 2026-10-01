@@ -199,6 +199,19 @@ def test_ties_break_on_updated_at_then_display_name():
     assert _ids(search_projects([zulu, alpha], "keyword")) == [alpha.id, zulu.id]
 
 
+def test_the_id_is_the_last_resort_tiebreak():
+    """Titles CAN collide, so equal everything-but-id must fall to the id, asc."""
+
+    later = _row(
+        "ffffffffffff", "twin", title="Same Display", description="keyword", updated_at=2.0
+    )
+    earlier = _row(
+        "000000000001", "twin", title="Same Display", description="keyword", updated_at=2.0
+    )
+    assert _ids(search_projects([later, earlier], "keyword")) == [earlier.id, later.id]
+    assert _ids(search_projects([earlier, later], "keyword")) == [earlier.id, later.id]
+
+
 def test_limit_truncates_after_ranking():
     rows = [
         _row(_pid(), f"proj-{i:02d}", description="keyword", updated_at=float(10 - i))

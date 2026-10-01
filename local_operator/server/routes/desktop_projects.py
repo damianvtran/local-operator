@@ -248,10 +248,11 @@ async def search(
     (the sessions precedent) and ``limit`` at 200; the answer echoes the query
     so the client can apply only the answer whose echo equals the box.
 
-    An EMPTY ``q`` is not a search: every row is the answer in the LISTING's
-    own order, each with score 0 and no matched fields — mirroring
-    ``search_store``'s empty arm, so a caller can render this answer directly
-    for an empty box without re-ranking anything.
+    An EMPTY ``q`` is not a search: the answer is the LISTING's own order
+    truncated to ``limit`` (the same truncation every answer carries), each row
+    with score 0 and no matched fields — mirroring ``search_store``'s empty
+    arm, so a caller can render this answer directly for an empty box without
+    re-ranking anything.
     """
     async with errors(request):
 

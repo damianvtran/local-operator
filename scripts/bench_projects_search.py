@@ -8,25 +8,37 @@ build, i.e. the in-process index's one-time price) and the WARM per-query cost
 (one string comparison per field per row against the raw-first cache, then
 resolve + rank — see ``local_operator/projects_search.py``). Those are the
 numbers the architecture note budgets against (warm p95 <= 40 ms @ ~121 rows,
-<= 150 ms @ an 800-row simulation; cold <= 250 ms); the PR carries the runs.
+<= 150 ms @ an 800-row simulation; cold <= 250 ms); the PR carries the runs —
+including the plain verdict on those budgets, which this script helps the
+reader reach but never asserts (wall figures are observations on a shared
+host, never CI assertions).
 
 Synthetic corpus by default — no live data, deterministic seed — sized to the
-store the design measured (avg ~4.7 KB of updates per row). ``--store`` points
-it at a real ``projects/`` directory instead (READ-ONLY; aggregate numbers
-only, never row text).
+store the design measured (avg ~4.7 KB of updates per row). ``--store`` ADDS a
+real ``projects/`` directory to the same run (READ-ONLY; aggregate numbers
+only, never row text), so the simulated and live figures print side by side.
 
-Wall figures are observations on a shared host, never CI assertions. Run it
-from a worktree with that worktree's interpreter, isolated:
+**Host load moves these figures by 2-5x**, and every run prints the load it
+was taken at: the same 146-row store arm has measured warm p95 ~33-65 ms
+across this fleet's ordinary band, and a load-42 spike during review round 1
+read 2-5x the quieter figures. Compare arms back to back; never quote a
+figure without its load. p95 is a nearest-rank percentile over the warm
+sample count the run prints (the first revision's 7-sample set made "p95"
+the max; that is what the sample count is here to make visible).
+
+Run it from a worktree with that worktree's interpreter, isolated:
 
     ISO=$(mktemp -d)
     env -i HOME="$ISO" LOCAL_OPERATOR_CONFIG_DIR="$ISO/.local-operator" PATH="$PATH" \\
-      .venv/bin/python scripts/bench_projects_search.py
+      .venv/bin/python scripts/bench_projects_search.py [--store /abs/path/to/projects]
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
+import os
 import random
 import sys
 import time
@@ -66,17 +78,65 @@ def _vocabulary(size: int = 2_500) -> tuple[str, ...]:
 
 WORDS = _vocabulary()
 
-#: Worst-case-ish queries: prefix, typo, multi-term, single short word — the
-#: mix the architecture note measured (typo-heavy queries are the dear ones).
+#: The warm query mix: single tokens (exact/prefix — the cheap end), typos
+#: (bounded edit distance — the dear end), and multi-term phrases, all drawn
+#: from the vocabulary above. ~50 samples, so p95 is a real nearest-rank
+#: percentile rather than the max a 7-query set silently made it.
 QUERIES = (
+    # single tokens, exact/prefix
     "release",
-    "dashbord",
-    "release process",
-    "classifer",
-    "kube deploy",
-    "migratio",
-    "audit ledger",
+    "process",
+    "dashboard",
+    "classifier",
+    "kafka",
+    "deploy",
+    "migration",
+    "audit",
+    "billing",
+    "pipeline",
+    "rollout",
+    "cache",
+    "index",
+    "search",
+    "timeline",
     "quota",
+    "invoice",
+    "ledger",
+    "export",
+    "tenant",
+    "gateway",
+    "session",
+    "runtime",
+    "project",
+    "milestone",
+    "regression",
+    "incident",
+    "postmortem",
+    "cutover",
+    "backfill",
+    "schema",
+    "replica",
+    "partition",
+    # typos (bounded edit distance; the dear ones)
+    "dashbord",
+    "classifer",
+    "migratio",
+    "deply",
+    "invoce",
+    "milestne",
+    # multi-term phrases
+    "release process",
+    "kube deploy",
+    "audit ledger",
+    "quota invoice",
+    "cache index",
+    "search timeline",
+    "cutover backfill",
+    "schema replica",
+    "incident postmortem",
+    "gateway session",
+    "billing pipeline",
+    "tenant export",
 )
 
 #: Updates per row / words per update entry, sized so a row's history is the
@@ -113,6 +173,15 @@ def _payloads(count: int, seed: int) -> list[dict[str, Any]]:
     return payloads
 
 
+def _percentile(values: list[float], fraction: float) -> float:
+    """Nearest-rank percentile: the ``ceil(fraction * n)``-th smallest sample."""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    rank = math.ceil(fraction * len(ordered))
+    return ordered[max(rank, 1) - 1]
+
+
 def _arm(label: str, payloads: list[dict[str, Any]], queries: tuple[str, ...]) -> None:
     """Cold + warm timings for one corpus size.
 
@@ -142,15 +211,14 @@ def _arm(label: str, payloads: list[dict[str, Any]], queries: tuple[str, ...]) -
         search_mod.search_projects(rows, query)
         warm_ms.append((time.perf_counter() - start) * 1000)
 
-    warm_sorted = sorted(warm_ms)
-    p50 = warm_sorted[len(warm_sorted) // 2]
-    p95 = warm_sorted[min(len(warm_sorted) - 1, round(len(warm_sorted) * 0.95) - 1)]
+    p50 = _percentile(warm_ms, 0.50)
+    p95 = _percentile(warm_ms, 0.95)
     print(
         f"{label}: rows={len(rows_a)} corpus_chars={corpus_chars:,}\n"
         f"  cold (fold+tokenise+vocab, first search '{queries[0]}'): {cold_ms:.1f} ms "
         f"({len(first)} hits)\n"
-        f"  warm (per query, alternating row objects): p50 {p50:.2f} ms  "
-        f"p95 {p95:.2f} ms  max {max(warm_ms):.2f} ms  ({len(warm_ms)} queries)"
+        f"  warm (per query, {len(warm_ms)} samples, alternating row objects): "
+        f"p50 {p50:.2f} ms  p95 {p95:.2f} ms  max {max(warm_ms):.2f} ms"
     )
 
 
@@ -179,20 +247,25 @@ def main() -> int:
         "--store",
         type=Path,
         default=None,
-        help="a real projects/ directory to time instead of the synthetic arms (read-only)",
+        help=(
+            "ALSO time a real projects/ directory (read-only): the live figures "
+            "print beside the synthetic ones"
+        ),
     )
     args = parser.parse_args()
 
+    print(
+        "note budgets: cold <= 250 ms; warm p95 <= 40 ms @ ~121 rows / <= 150 ms @ 800-sim\n"
+        "host load (1/5/15m): " + ", ".join(f"{value:.1f}" for value in os.getloadavg())
+    )
+    for index, count in enumerate(args.rows):
+        _arm(f"N={count} (synthetic)", _payloads(count, seed=20261001 + index), QUERIES)
     if args.store is not None:
         payloads = _store_payloads(args.store)
         if not payloads:
             print(f"no readable rows under {args.store}", file=sys.stderr)
             return 1
-        _arm(f"store={args.store.name or args.store}", payloads, QUERIES)
-        return 0
-
-    for index, count in enumerate(args.rows):
-        _arm(f"N={count} (synthetic)", _payloads(count, seed=20261001 + index), QUERIES)
+        _arm(f"store={args.store}", payloads, QUERIES)
     return 0
 
 
