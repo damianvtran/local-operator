@@ -619,6 +619,62 @@ async def test_factory_publishes_stable_birth_off_loop_before_first_journal(
 
 
 @pytest.mark.asyncio
+async def test_the_tool_roster_follows_the_sessions_final_inventory(
+    tmp_config_dir: Path,
+) -> None:
+    """B1 (agent review round 1, PR #1863): the roster reads the SESSION's tools.
+
+    The factory's ToolContext carries none of the session-owned createIf
+    gates, so a roster snapshotted beside it holds only ``send``; the other
+    five arrive in ``Session._merge_capability_tools`` during construction,
+    and ``set_knowledge_hooks`` refreshes from the merged inventory. This
+    drives the REAL boot — no injected roster — then writes the inventory
+    again (the MCP-discovery path, ``refresh_tools``) to pin refresh-on-write
+    and the roster cache key's tool term.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+
+    session = cast(
+        Session,
+        await create_session(
+            _args(hosting="test", model="test", yolo=True),
+            ConfigManager(tmp_config_dir),
+            AgentRegistry(tmp_config_dir),
+        ),
+    )
+    try:
+        hooks = session._knowledge_hooks
+        assert hooks is not None
+        assert [row.name for row in hooks.tool_roster] == [
+            "sessions",
+            "send",
+            "hub",
+            "task",
+            "wait",
+            "jobs",
+        ]
+        cached = session_factory._classification_roster(hooks)
+        assert [row.name for row in cached if row.kind == "tool"] == [
+            "sessions",
+            "send",
+            "hub",
+            "task",
+            "wait",
+            "jobs",
+        ]
+        # A later inventory write rebuilds both the roster and its cache: the
+        # cache key carries the tool term, so the change is visible on the
+        # very next message rather than after a session restart.
+        session.refresh_tools([tool for tool in session._tools if tool.name == "send"])
+        assert [row.name for row in hooks.tool_roster] == ["send"]
+        rebuilt = session_factory._classification_roster(hooks)
+        assert [row.name for row in rebuilt if row.kind == "tool"] == ["send"]
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_the_factory_refuses_a_session_whose_move_is_in_flight(
     tmp_config_dir: Path,
 ) -> None:

@@ -1565,6 +1565,22 @@ def test_the_reference_is_deterministic_bounded_and_never_raises(
     assert "sessions" in fallback
 
 
+def test_the_reference_derives_the_peek_bound_from_the_constant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M3 (agent review round 1): the one enumerable bound is generated.
+
+    The renderer reads ``comms.PEEK_MAX_STEPS`` at call time, so a changed
+    constant changes the help text — the drift this replaces was a hand copy
+    that would have kept saying 50.
+    """
+    import local_operator.harness.comms as comms
+
+    assert f"max {comms.PEEK_MAX_STEPS} steps" in render_sessions_reference()
+    monkeypatch.setattr(comms, "PEEK_MAX_STEPS", 41)
+    assert "max 41 steps" in render_sessions_reference()
+
+
 @pytest.mark.asyncio
 async def test_help_returns_the_reference_and_refuses_an_address() -> None:
     """``help``: read-tier, no address, and the same bytes as the renderer."""
@@ -1718,6 +1734,62 @@ async def test_a_still_starting_resume_reports_starting_not_reopened(
     assert "still starting" in result.text
     assert "`lop exec --status feedface0001`" in result.text
     assert (result.details or {}).get("readiness") == "starting"
+
+
+@pytest.mark.parametrize(
+    ("status", "op", "expected_route"),
+    [
+        ("cancelled", "resume", "Retry with `lop exec --resume aaaa11112222 --background`"),
+        ("interrupted", "resume", "Retry with `lop exec --resume aaaa11112222 --background`"),
+        ("", "resume", "Retry with `lop exec --resume aaaa11112222 --background`"),
+        ("failed", "spawn", "Follow up with `lop exec --status feedface0001`"),
+        ("cancelled", "spawn", "Follow up with `lop exec --status feedface0001`"),
+        ("", "spawn", "Follow up with `lop exec --status feedface0001`"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_every_dead_or_missing_ledger_arm_is_loud_with_its_own_route(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    op: str,
+    expected_route: str,
+) -> None:
+    """M2 (agent review round 1): every terminal/missing arm, both ops, pinned.
+
+    ``failed``, live and starting have their own tests above; this table covers
+    what they did NOT pin: ``cancelled``/``interrupted`` and the
+    no-ledger-record wording, plus the spawn path's route — a status read is
+    not a retry, so its verb differs (N1).
+    """
+    _requester(root)
+    if op == "resume":
+        _session(root, "aaaa11112222", "stopped once")
+    log = root / "logs" / "exec-dead.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("ValueError: worker exploded\n", encoding="utf-8")
+
+    async def fake_launch(argv: list[str], env: dict[str, str], cwd: str | None):
+        return 0, "Background job feedface0001: starting (execution receipt)\n"
+
+    def fake_status(job_id: str, *, reconcile: bool = True) -> dict[str, Any]:
+        return {"id": job_id, "status": status, "log": str(log)}
+
+    monkeypatch.setattr("local_operator.tools.builtin._sessions_launch", fake_launch)
+    monkeypatch.setattr("local_operator.exec_mode.job_status", fake_status)
+    monkeypatch.setattr("local_operator.tools.builtin.SESSIONS_READY_GRACE_S", 0.05)
+
+    params: dict[str, Any] = {"op": op, "prompt": "continue"}
+    if op == "resume":
+        params["session"] = "aaaa11112222"
+    result = await execute_sessions("t", params, None, None, _context(root))
+
+    expected_outcome = status or "no ledger record"
+    assert result.is_error
+    assert f"did not become a live session ({expected_outcome})" in result.text
+    assert "ValueError: worker exploded" in result.text
+    assert expected_route in result.text
+    assert "`lop sessions`" in result.text
 
 
 @pytest.mark.asyncio

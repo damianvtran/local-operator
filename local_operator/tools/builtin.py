@@ -13600,6 +13600,18 @@ def _sessions_tool_description() -> str:
 _SESSIONS_TOOL_DESCRIPTION = _sessions_tool_description()
 
 
+def _sessions_peek_bounds_refusal() -> str:
+    """The reference's one enumerable bound, derived from the code constant.
+
+    A lazy import, like ``_sessions_peek_validation_error``'s: the renderer
+    must not make ``builtin``'s import pay for ``harness.comms``, and this
+    text is only ever asked for by ``op='help'`` (or the audit lane's reader).
+    """
+    from local_operator.harness.comms import PEEK_MAX_STEPS
+
+    return f"a window is bounded (max {PEEK_MAX_STEPS} steps — page with `before_id`)."
+
+
 class _SessionsOpDoc(NamedTuple):
     """One op's entry in the ``help`` reference (prose only — the param lists
     are generated from ``SessionsParams`` + ``_SESSIONS_OP_FIELDS``)."""
@@ -13662,8 +13674,11 @@ _SESSIONS_OP_DOCS: dict[str, _SessionsOpDoc] = {
         refusals=(
             "one window at a time (`steps`/`head`/`before_id`/`around_id` are"
             " mutually exclusive); `digest` folds the newest rows alone; `regex`"
-            " needs `query`; a window is bounded (max 50 steps — page with"
-            " `before_id`).",
+            " needs `query`.",
+            # The step bound is DERIVED from ``comms.PEEK_MAX_STEPS`` by the
+            # renderer (agent review round 1, M3) — a surface whose selling
+            # point is "everything enumerable is generated" must not keep the
+            # last hard copy of a constant; see ``_sessions_peek_bounds_refusal``.
         ),
     ),
     "help": _SessionsOpDoc(
@@ -13715,7 +13730,13 @@ def _sessions_reference_body() -> str:
         lines.append(f"`{op}` — {doc.summary}")
         lines.append(f"  inputs: {inputs or '(none)'}")
         lines.append(f"  example: {doc.example}")
-        for refusal in doc.refusals:
+        refusals = list(doc.refusals)
+        if op == "peek":
+            # The one enumerable bound, appended from the code constant
+            # (agent review round 1, M3) instead of hand-copied beside the
+            # static refusals above.
+            refusals.append(_sessions_peek_bounds_refusal())
+        for refusal in refusals:
             lines.append(f"  refusal: {refusal}")
         lines.append("")
     lines.append(
@@ -15522,16 +15543,21 @@ def _sessions_dead_job_error(
             reason = ""
     outcome = status or "no ledger record"
     detail = f" Last line: {reason}" if reason else ""
-    fallback = (
-        f"`lop exec --resume {resume_id} --background`"
-        if resume_id
-        else f"`lop exec --status {job_id}`"
-    )
+    # The verb follows what the fallback IS: a resume retries the same session
+    # (``--resume``), while a spawn has nothing to retry — ``--status`` reads
+    # the dead job's ledger entry, so the sentence says "follow up" (agent
+    # review round 1, N1).
+    if resume_id:
+        fallback = f"`lop exec --resume {resume_id} --background`"
+        verb = "Retry with"
+    else:
+        fallback = f"`lop exec --status {job_id}`"
+        verb = "Follow up with"
     return _error(
         tool_call_id,
         "sessions",
         f"the exec job {job_id} did not become a live session ({outcome}){detail}. "
-        f"Log: {log_path or '(not recorded)'}. Retry with {fallback} — and check "
+        f"Log: {log_path or '(not recorded)'}. {verb} {fallback} — and check "
         "`lop sessions` for what is actually running.",
         details={"job_id": job_id, "log_path": log_path or None, "resume_id": resume_id or None},
     )
