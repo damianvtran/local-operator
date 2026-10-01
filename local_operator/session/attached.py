@@ -3424,10 +3424,15 @@ class AttachedSession:
         ``ConnectionError``; both are verdicts about the ask, not crashes.
         """
         try:
-            detail = await call()
+            await call()
         except (ValueError, RuntimeError, ConnectionError) as exc:
             return {"ok": False, "error": str(exc) or "the ask was refused"}
-        return {"ok": True, "detail": detail}
+        # The OWNER's exact shape: ``{"ok": ...}`` and an ``"error"`` when it is
+        # False, with nothing else. The wire returns a detail string, but the
+        # dock reads only these two keys, and a third one here would be a
+        # second contract the caller has to know about (agent review round 5,
+        # NIT).
+        return {"ok": True}
 
     async def _ask_client_method(
         self,

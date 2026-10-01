@@ -113,7 +113,11 @@ def enabled(monkeypatch):
     monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
 
 
-def _app(session: _AskSession) -> OperatorApp:
+def _app(session: FakeSession) -> OperatorApp:
+    # `FakeSession` and not `_AskSession`: the viewer's double models a
+    # DIFFERENT session shape (async ops), and narrowing this parameter to
+    # the owner's double is what made that a type error rather than a test
+    # (agent review round 5).
     return OperatorApp(lambda: _factory(session))
 
 
@@ -1151,12 +1155,21 @@ async def test_the_urgency_word_counts_the_same_set_on_both_surfaces(enabled):
 # -- round 4: the VIEWER holder ---------------------------------------------
 
 
-class _ViewerAskSession(_AskSession):
+class _ViewerAskSession(FakeSession):
     """The viewer's shape: the same three ops, but ``async`` (they cross the wire).
 
     This is the double whose absence let QA round 4's blocker through: the dock
     looked the owner's names up on whichever session held the ask, and a viewer
     that lacked them made every answer silently do nothing.
+
+    It inherits ``FakeSession`` and NOT ``_AskSession``, which is a typing
+    constraint rather than a filing choice: ``_AskSession`` implements the three
+    ops SYNCHRONOUSLY (the owner's shape), so a subclass replacing them with
+    coroutines is an incompatible override — pyright said so on CI's
+    ``type-check`` while my local run had been made before this double existed
+    (agent review round 5, BLOCKER). Modelling the viewer on the pilot's plain
+    session is also the truthful shape: a viewer's ops are async, not an owner's
+    with an await bolted on.
     """
 
     def __init__(self) -> None:
@@ -1165,7 +1178,7 @@ class _ViewerAskSession(_AskSession):
 
     async def respond_ask(self, ask_id, answers=None, *, by="unknown"):
         self.wire.append(("respond", ask_id, dict(answers or {}), by))
-        return {"ok": True, "detail": "delivered"}
+        return {"ok": True}
 
     async def decline_ask(self, ask_id, *, by="unknown"):
         self.wire.append(("decline", ask_id, {}, by))
