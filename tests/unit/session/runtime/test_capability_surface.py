@@ -552,18 +552,22 @@ def test_project_slash_runs_the_verbs_with_the_shared_receipts(
     # list: one shared row per project, then the page-entry footer.
     listing = handle._project_slash(session, "list", SlashResult)
     assert listing.text.splitlines() == [
-        "- alpha [active] · 1 session (0 live) · no progress",
-        "- beta [active] · 0 sessions (0 live) · no progress",
+        "- alpha [active] · 1 working session (0 live) · no progress",
+        "- beta [active] · 0 working sessions (0 live) · no progress",
         sc.project_listing_hint_text(),
     ]
 
     # link/unlink round-trip with the resulting link set in the receipt.
     unlinked = handle._project_slash(session, "unlink alpha", SlashResult)
-    assert unlinked.text == "unlinked session 4e92693767fa from 'alpha' (0 linked now)."
+    assert unlinked.text == "unlinked session 4e92693767fa from 'alpha' (0 working now)."
     linked = handle._project_slash(session, "link alpha", SlashResult)
-    assert linked.text == "linked session 4e92693767fa to 'alpha' (1 linked now)."
+    assert linked.text == (
+        "linked session 4e92693767fa to 'alpha' as a working session (1 working now)."
+    )
     already = handle._project_slash(session, "link alpha", SlashResult)
-    assert already.text == ("session 4e92693767fa was already linked to 'alpha' (1 linked).")
+    assert already.text == (
+        "session 4e92693767fa was already linked to 'alpha' as a working session (1 working)."
+    )
 
     # remove: rehearsal first (nothing deleted), then the typed-yes form.
     rehearsal = handle._project_slash(session, "delete alpha", SlashResult)

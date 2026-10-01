@@ -16,6 +16,8 @@ from local_operator.providers.auth_store import (
     AuthStoreError,
     CredentialInvalidError,
     RefreshUnconfirmedError,
+    StoredCredential,
+    credential_identity,
 )
 from local_operator.providers.oauth.callback_server import InvalidGrantError
 
@@ -3450,3 +3452,52 @@ class TestTheRotatingRefreshTokenIsNeverRePresented:
         assert REFRESH_SEND_UNCONFIRMED_KEY not in self._current(first, row.id).data
         first.close()
         peer.close()
+
+
+def test_credential_identity_reads_email_then_account_then_org() -> None:
+    """The ONE label derivation, in the order a person recognises.
+
+    An email names an account where an opaque id does not, so it wins; the
+    order is the one the three call sites this replaced already used (the
+    census's account list, the CLI's status listing and its login receipt).
+    """
+    assert credential_identity({"email": "me@example.com", "account_id": "a"}) == "me@example.com"
+    assert credential_identity({"account_id": "a", "org_name": "o"}) == "a"
+    assert credential_identity({"org_name": "o"}) == "o"
+    assert credential_identity({}) is None
+    # An empty string is not an identity: a payload with `email: ""` must not
+    # shadow the account_id behind it.
+    assert credential_identity({"email": "", "account_id": "a"}) == "a"
+
+
+def test_credential_identity_truncates_at_the_published_bound() -> None:
+    """256 characters — the bound ``/v1/auth/status`` has published since it shipped."""
+    value = credential_identity({"email": "x" * 500})
+    assert value is not None
+    assert len(value) == 256
+    assert value == "x" * 256
+
+
+def test_credential_identity_reads_a_row_and_ignores_the_dedupe_key() -> None:
+    """A row's ``identity_key`` is a STORAGE fact, not the account's name.
+
+    For an OAuth payload with no IdP identity it is the synthetic constant
+    ``oauth:<provider>``; showing that beside a provider id reads as an account
+    label the user has never seen.
+    """
+    row = StoredCredential(
+        id=1,
+        provider="kimi",
+        credential_type="oauth",
+        data={},
+        identity_key="oauth:kimi",
+    )
+    assert credential_identity(row) is None, "a dedupe constant is not an identity"
+    labelled = StoredCredential(
+        id=2,
+        provider="deepseek",
+        credential_type="oauth",
+        data={"email": "a@b.c"},
+        identity_key="a@b.c",
+    )
+    assert credential_identity(labelled) == "a@b.c"

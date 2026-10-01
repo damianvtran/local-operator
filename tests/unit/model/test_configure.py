@@ -4732,6 +4732,92 @@ async def test_session_stream_feeds_last_context_into_anthropic_ttl(tmp_path) ->
     assert session._context_tokens_hint == 200_000
 
 
+def _revoked_bearer_stream(tmp_path, handler):
+    """A real stream fn over a real ``AuthStore`` holding ONE OAuth row whose
+    stored bearer the wire refuses.
+
+    ``expires`` is in the future, so the row is current by the store's own
+    reckoning and no resolve would refresh it unprompted: the token was revoked
+    out of band, and only the WIRE can find that out. The patched refresh
+    function mints a new bearer, which is what a real token endpoint does.
+    """
+    store = AuthStore(tmp_path / "auth.db")
+    _row = {
+        "refresh": "r-1",
+        "access": "stale-token",
+        "expires": int(time.time() * 1000) + 3_600_000,
+        "account_id": "acct-1",
+    }
+    store.upsert_credential("anthropic", dict(_row))
+
+    async def refresh(creds: dict[str, Any]) -> dict[str, Any]:
+        return {**creds, "access": "fresh-token", "expires": int(time.time() * 1000) + 3_600_000}
+
+    store._refresh_fn = lambda provider: refresh  # type: ignore[method-assign]
+    stream = create_stream_fn(store, {}, session_id="session-on-a-revoked-bearer")
+    stream._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    stream._transport.http = stream._http
+
+    def put_back_on_the_stale_bearer() -> None:
+        """Meet the errand with the situation the turn just repaired, rather
+        than with the repair itself (a successful refresh persists)."""
+        store.upsert_credential("anthropic", dict(_row))
+
+    return store, stream, put_back_on_the_stale_bearer
+
+
+@pytest.mark.asyncio
+async def test_the_title_errand_repairs_the_same_revoked_bearer_the_turn_does(
+    tmp_path, monkeypatch
+) -> None:
+    """Issue #1814, one layer up from the failover driver and over real bytes.
+
+    The reported session is healthy: its turn presents the stored bearer, the
+    wire refuses it, and the turn's own rotation repairs it. The naming errand
+    runs the same resolve through the same store and used to fail on the very
+    same token — a frozen ``CALL_FAILED``, rendered to the user as "could not
+    reach the model", on a session whose turns ran fine. Nothing here is a fake
+    at the layer under test: a real ``Session`` drives a real stream fn, the
+    real ``AuthStore`` holds one OAuth row, and the wire is a mocked transport.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    tokens: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        token = request.headers.get("authorization", "").removeprefix("Bearer ")
+        tokens.append(token)
+        if token == "stale-token":
+            return httpx.Response(
+                401,
+                json={
+                    "type": "error",
+                    "error": {"type": "authentication_error", "message": "invalid token"},
+                },
+            )
+        return httpx.Response(
+            200, content=_anthropic_sse(10_000), headers={"content-type": "text/event-stream"}
+        )
+
+    store, stream, put_back = _revoked_bearer_stream(tmp_path, handler)
+    session = _anthropic_session(tmp_path, "sess", stream, blocks=["instructions", "env"])
+    try:
+        await session.prompt("hello")
+        assert tokens == ["stale-token", "fresh-token"], "the turn beside the errand was not served"
+        put_back()
+        tokens.clear()
+        text = await session.complete_once("name this conversation", "hello")
+    finally:
+        await session.dispose()
+        await stream.close()
+        store.close()
+
+    assert tokens == ["stale-token", "fresh-token"], (
+        "the errand did not repair its own bearer: it presented the revoked token, "
+        "was refused, and never asked the account for a new one"
+    )
+    assert text == "ok"
+
+
 @pytest.mark.asyncio
 async def test_session_stream_hint_is_per_conversation_not_per_stream_fn(
     tmp_path,
@@ -5381,9 +5467,11 @@ def test_build_model_spec_carries_a_stated_audio_capability_and_defaults_closed(
 #
 # ``_first_available_fallback``'s ``different_provider`` preference is
 # ADVISORY beneath the pin policy: a pinned route's candidates are ordered
-# family-first and, under the default ``retry.pinnedFallback: same-family``,
-# cross-vendor targets are refused outright — with a notice, because "no
-# fallback" would otherwise read as "configure one" while one IS configured.
+# family-first, and under the explicit strict ``retry.pinnedFallback:
+# same-family`` opt-in cross-vendor targets are refused outright — with a
+# notice, because "no fallback" would otherwise read as "configure one"
+# while one IS configured. Under the shipped default the cross-vendor target
+# is entered as the announced last resort instead.
 
 
 @pytest.mark.asyncio
@@ -5434,9 +5522,57 @@ async def test_a_pinned_preflight_activates_the_same_family_target_not_the_chain
 async def test_a_pinned_preflight_with_no_same_family_target_announces_instead_of_crossing(
     tmp_path,
 ) -> None:
-    """T6/P3: pinned + strict + no same-family target = announce, do not
-    cross. The cross-vendor fallback from the same chain must remain
-    un-activated, and the notice must name the pin and the remedy."""
+    """T6/P3 (STRICT opt-in, pinned explicitly below): pinned + strict + no
+    same-family target = announce, do not cross. The cross-vendor fallback
+    from the same chain must remain un-activated, and the notice must name
+    the pin and the remedy. The default's cross-vendor activation is pinned
+    by the test beside this one."""
+    store = AuthStore(tmp_path / "auth.db")
+    account = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    store.block_credential(account.id, "anthropic", block_ms=60_000)
+    store.upsert_credential("openai", {"key": "sk-openai", "source": "login"})
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "pinnedFallback": "same-family",
+                "fallbackChains": {"default": ["openai/gpt-5.3-codex"]},
+            }
+        },
+        session_id="session-a",
+    )
+    stream._route_state.launch_pin = "anthropic/claude-opus-5"
+    notices: list[str] = []
+    stream.set_notice_handler(lambda text, kind: notices.append(text))
+
+    try:
+        with patch(
+            "local_operator.providers.usage.fetch_usage",
+            side_effect=lambda *_args, **_kwargs: _anthropic_usage(100.0),
+        ):
+            await stream.preflight_usage(ModelSpec(provider="anthropic", model_id="claude-opus-5"))
+
+        assert store.is_blocked(account.id, "anthropic")
+        assert stream._route_state.active is None
+        assert any(
+            "pinned model anthropic/claude-opus-5" in notice and "retry.pinnedFallback" in notice
+            for notice in notices
+        ), notices
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_preflight_under_the_default_activates_a_cross_vendor_target(
+    tmp_path,
+) -> None:
+    """The SHIPPED default descends cross-vendor as the last resort — at the
+    quota boundary too. With no same-family hop configured the preflight
+    ACTIVATES the cross-vendor target (family-first ordering does not FILTER
+    it), and the strict strand notice must NOT fire: under the default there
+    is no refusal to explain, and "no configured fallback" would be false."""
     store = AuthStore(tmp_path / "auth.db")
     account = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
     store.block_credential(account.id, "anthropic", block_ms=60_000)
@@ -5463,11 +5599,8 @@ async def test_a_pinned_preflight_with_no_same_family_target_announces_instead_o
             await stream.preflight_usage(ModelSpec(provider="anthropic", model_id="claude-opus-5"))
 
         assert store.is_blocked(account.id, "anthropic")
-        assert stream._route_state.active is None
-        assert any(
-            "pinned model anthropic/claude-opus-5" in notice and "retry.pinnedFallback" in notice
-            for notice in notices
-        ), notices
+        assert stream._route_state.active == FallbackTarget("openai/gpt-5.3-codex")
+        assert not any("will not cross vendors" in notice for notice in notices), notices
     finally:
         await stream.close()
         store.close()

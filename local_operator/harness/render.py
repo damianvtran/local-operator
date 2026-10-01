@@ -62,6 +62,7 @@ from local_operator.harness.message_types import (
     SESSION_MCP_RECOVERY_MESSAGE_TYPE,
     SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
     SESSION_MODEL_SWITCH_MESSAGE_TYPE,
+    SESSION_SEND_NOTICE_MESSAGE_TYPE,
     TODO_REMINDER_MESSAGE_TYPE,
 )
 from local_operator.harness.rows import gate_waited_text
@@ -152,6 +153,7 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             SESSION_CREDENTIAL_MESSAGE_TYPE,
             SESSION_MCP_RECOVERY_MESSAGE_TYPE,
             SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
+            SESSION_SEND_NOTICE_MESSAGE_TYPE,
             "session_state",
         ):
             # An incident rides the sender's preformatted text (the classifier
@@ -171,6 +173,14 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             # supersedes it has to arrive on the same surface or the model
             # keeps believing the older, more emphatic claim that its tools are
             # gone.
+            #
+            # A SEND NOTICE rides it for the opposite reason to the two
+            # deliberate absences below: the reader who must not re-send a
+            # duplicate is the MODEL, which is the one holding the ``send`` tool.
+            # The row is a plain sentence naming the target, the message id and
+            # what to do (peek, do not resend), and it is the durable half of a
+            # notice whose live half is the tool result of a turn the model may
+            # have long since compacted away.
             #
             # ``SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE`` IS DELIBERATELY
             # ABSENT FROM THIS TUPLE, AND THAT ABSENCE IS THE FEATURE. Do not

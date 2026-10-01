@@ -284,6 +284,30 @@ SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE = "session_mcp_unavailable"
 #: notice never restamps the session's activity clock.
 SESSION_BINDING_NOTICE_MESSAGE_TYPE = "session_credential_binding_notice.v1"
 
+#: ``CustomMessage.custom_type`` of the send tool's own delivery notice, written
+#: by ``Session.journal_send_notice`` when ``send.journal_unconfirmed`` is on and
+#: a send settled in one of the two amber states (``mailbox``, ``unconfirmed``).
+#:
+#: WHY IT IS A DEDICATED TYPE AND NOT A ``session_incident``: nothing failed. The
+#: message landed (mailbox) or may still land (unconfirmed), no turn died, and an
+#: incident's classifier category plus ``Incident.render``'s "This is why the
+#: previous turn ended" tail would both be false. The same argument that made the
+#: MCP pair and the binding notice dedicated types applies with more force here,
+#: because the ONE thing this row must not do is tell the model a send failed.
+#:
+#: MODEL-VISIBLE, unlike the credential-shape and binding notices: the reader who
+#: must not re-send a duplicate is the MODEL (it is the one holding the send
+#: tool), and ``harness/render.py``'s allow-list names it for exactly that reason.
+#: The row carries no ``<peer-session-message>`` envelope, so it can never be
+#: mistaken for the peer's own words by an inbound-message consumer.
+#:
+#: PERSISTED: it is a fact about this session's own outbound traffic, and a
+#: resumed session that re-reads the transcript must still see that a message
+#: from an earlier turn was never acknowledged. Written once per send (the id is
+#: deterministic, ``send-notice-<message_id>``, and the hook no-ops when the
+#: transcript already holds it), never per attempt.
+SESSION_SEND_NOTICE_MESSAGE_TYPE = "session_send_notice"
+
 #: ``CustomMessage.custom_type`` of a peer (cross-session) message. It MUST be
 #: added to the LLM-visible custom-type allow-list in ``session.py`` (beside
 #: ``HUB_MESSAGE_TYPE``) or the human sees the transcript row but the model

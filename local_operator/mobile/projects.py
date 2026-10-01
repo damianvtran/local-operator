@@ -65,6 +65,7 @@ from local_operator.projects import (
     build_project_view,
     readable_error,
     scan_runtime_states,
+    stale_after_s,
 )
 from local_operator.server.models.desktop_projects import (
     STATUS_RANK,
@@ -195,9 +196,16 @@ _STORE_REFUSALS = (
 )
 
 
-def _summary_payload(project: Project, *, live_sessions: int) -> dict[str, Any]:
-    """One wire summary, as JSON — the same model the desktop route serves."""
-    return project_summary(project, live_sessions=live_sessions).model_dump(mode="json")
+def _summary_payload(project: Project, *, live_sessions: int, window: float) -> dict[str, Any]:
+    """One wire summary, as JSON — the same model the desktop route serves.
+
+    ``window`` is the staleness window resolved once per request
+    (:func:`local_operator.projects.stale_after_s`), so every row of a
+    listing is measured against the configured boundary.
+    """
+    return project_summary(project, live_sessions=live_sessions, window=window).model_dump(
+        mode="json"
+    )
 
 
 def _live_counts(registry: ProjectRegistry, projects: list[Project]) -> dict[str, int]:
@@ -234,7 +242,14 @@ def list_payload(config_dir: Path) -> dict[str, Any]:
     registry = _registry(config_dir)
     listed = registry.list_projects()
     live = _live_counts(registry, listed)
-    rows = [project_summary(project, live_sessions=live.get(project.id, 0)) for project in listed]
+    rows = [
+        project_summary(
+            project,
+            live_sessions=live.get(project.id, 0),
+            window=stale_after_s(registry.config_dir),
+        )
+        for project in listed
+    ]
     rows.sort(key=lambda row: (STATUS_RANK.get(row.status, 99), -row.updated_at))
     return {"projects": [row.model_dump(mode="json") for row in rows]}
 
@@ -247,7 +262,9 @@ def detail_payload(config_dir: Path, key: str) -> dict[str, Any]:
         raise _not_found(registry, key)
     view = build_project_view(found, config_dir=registry.config_dir)
     return {
-        "project": project_view(found).model_dump(mode="json"),
+        "project": project_view(found, window=stale_after_s(registry.config_dir)).model_dump(
+            mode="json"
+        ),
         "links": [linked_session_view(row).model_dump(mode="json") for row in view["sessions"]],
     }
 
@@ -267,7 +284,12 @@ def create_payload(config_dir: Path, body: dict[str, Any]) -> dict[str, Any]:
         raise _refusal(exc) from exc
     # A created project starts unlinked (the desktop create body carries no
     # sessions either), so the live count is 0 without a scan.
-    return {"ok": True, "project": _summary_payload(created, live_sessions=0)}
+    return {
+        "ok": True,
+        "project": _summary_payload(
+            created, live_sessions=0, window=stale_after_s(registry.config_dir)
+        ),
+    }
 
 
 def patch_payload(config_dir: Path, key: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -284,7 +306,14 @@ def patch_payload(config_dir: Path, key: str, body: dict[str, Any]) -> dict[str,
         raise _refusal(exc) from exc
     updated = outcome.project
     live = _live_counts(registry, [updated])
-    return {"ok": True, "project": _summary_payload(updated, live_sessions=live.get(updated.id, 0))}
+    return {
+        "ok": True,
+        "project": _summary_payload(
+            updated,
+            live_sessions=live.get(updated.id, 0),
+            window=stale_after_s(registry.config_dir),
+        ),
+    }
 
 
 def delete_payload(config_dir: Path, key: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -333,7 +362,12 @@ def milestone_payload(config_dir: Path, key: str, body: dict[str, Any]) -> dict[
         project, _action = registry.set_milestone(found.id, fields)
     except _STORE_REFUSALS as exc:
         raise _refusal(exc) from exc
-    return {"ok": True, "project": project_view(project).model_dump(mode="json")}
+    return {
+        "ok": True,
+        "project": project_view(project, window=stale_after_s(registry.config_dir)).model_dump(
+            mode="json"
+        ),
+    }
 
 
 def milestone_remove_payload(config_dir: Path, key: str, name: str) -> dict[str, Any]:
@@ -346,7 +380,12 @@ def milestone_remove_payload(config_dir: Path, key: str, name: str) -> dict[str,
         project, _action = registry.set_milestone(found.id, MilestoneEdit(name=name, remove=True))
     except _STORE_REFUSALS as exc:
         raise _refusal(exc) from exc
-    return {"ok": True, "project": project_view(project).model_dump(mode="json")}
+    return {
+        "ok": True,
+        "project": project_view(project, window=stale_after_s(registry.config_dir)).model_dump(
+            mode="json"
+        ),
+    }
 
 
 def link_payload(config_dir: Path, key: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -364,7 +403,14 @@ def link_payload(config_dir: Path, key: str, body: dict[str, Any]) -> dict[str, 
     except _STORE_REFUSALS as exc:
         raise _refusal(exc) from exc
     live = _live_counts(registry, [project])
-    return {"ok": True, "project": _summary_payload(project, live_sessions=live.get(project.id, 0))}
+    return {
+        "ok": True,
+        "project": _summary_payload(
+            project,
+            live_sessions=live.get(project.id, 0),
+            window=stale_after_s(registry.config_dir),
+        ),
+    }
 
 
 def unlink_payload(config_dir: Path, key: str, session_id: str) -> dict[str, Any]:
@@ -378,4 +424,11 @@ def unlink_payload(config_dir: Path, key: str, session_id: str) -> dict[str, Any
     except _STORE_REFUSALS as exc:
         raise _refusal(exc) from exc
     live = _live_counts(registry, [project])
-    return {"ok": True, "project": _summary_payload(project, live_sessions=live.get(project.id, 0))}
+    return {
+        "ok": True,
+        "project": _summary_payload(
+            project,
+            live_sessions=live.get(project.id, 0),
+            window=stale_after_s(registry.config_dir),
+        ),
+    }

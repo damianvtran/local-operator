@@ -482,3 +482,134 @@ def test_parse_mem_size_units() -> None:
     assert _parse_mem_size("197M+") == 197 * 1024 * 1024  # top marks growth with '+'
     assert _parse_mem_size("1234") == 1234  # bare bytes
     assert _parse_mem_size("garbage") is None
+
+
+# ---------------------------------------------------------------------------
+# Fork-free readers the guards decide on (2026-09-30)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="proc_pidinfo is macOS-only")
+def test_the_fork_free_ppid_pgid_matches_the_kernels_other_answers() -> None:
+    """``proc_pidinfo(PROC_PIDTBSDINFO)`` against two independent readers.
+
+    The struct offsets are hardcoded, so this is the test that would catch a layout
+    that moved: a parked child in its OWN group (so ``pgid != ppid != pid``, which
+    makes a swapped field visible) must read back the parent we know and the group
+    ``os.getpgid`` reports. The same call must refuse a gone pid rather than answer.
+    """
+    import subprocess
+
+    child = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    try:
+        assert resources.direct_ppid_pgid(child.pid) == (os.getpid(), os.getpgid(child.pid))
+        assert resources.direct_ppid_pgid(child.pid) != (os.getpid(), os.getpgid(0))
+        assert resources.direct_ppid_pgid(os.getpid()) == (os.getppid(), os.getpgid(0))
+    finally:
+        child.kill()
+        child.wait()
+    assert resources.direct_ppid_pgid(child.pid) is None  # reaped: no answer, not a guess
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="proc_pidinfo is macOS-only")
+def test_a_struct_whose_echoed_pid_is_wrong_is_refused(monkeypatch) -> None:
+    """The ``pbi_pid`` echo is the layout check: a read that does not name the pid we
+    asked about answers ``None`` (which the machine pass treats as WITHHOLD) rather
+    than a (ppid, pgid) from the wrong offset (which could authorise a stop)."""
+    real = resources._darwin_libproc()
+    assert real is not None
+
+    class _Lib:
+        def proc_pidinfo(self, pid, flavor, arg, buf, size):  # noqa: ANN001
+            return real.proc_pidinfo(
+                os.getpid() if pid != os.getpid() else 1, flavor, arg, buf, size
+            )
+
+    monkeypatch.setattr(resources, "_darwin_libproc", lambda: _Lib())
+    assert resources._darwin_ppid_pgid(os.getpid()) is None
+
+
+def test_the_dispatch_never_raises_for_a_pid_that_does_not_exist() -> None:
+    assert resources.direct_ppid_pgid(2**31 - 2) is None
+    assert resources.direct_footprint_bytes(2**31 - 2) is None
+
+
+def test_the_linux_stat_parse_survives_a_hostile_comm(tmp_path, monkeypatch) -> None:
+    """``comm`` is parenthesised and may contain spaces and ``)``; split after the LAST one."""
+    import builtins
+
+    stat = "77 (a) b (c) S 12 345 345 0 -1 4194560 100 0\n"
+    real_open = builtins.open
+    monkeypatch.setattr(
+        builtins,
+        "open",
+        lambda path, *a, **k: (
+            __import__("io").StringIO(stat)
+            if str(path) == "/proc/77/stat"
+            else real_open(path, *a, **k)
+        ),
+    )
+    assert resources._linux_ppid_pgid(77) == (12, 345)
+
+
+def test_direct_footprint_is_the_platform_reader_and_unknown_elsewhere(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert resources.direct_footprint_bytes(1) is None
+    assert resources.direct_ppid_pgid(1) is None
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="proc_listpids is macOS-only")
+def test_the_fork_free_group_listing_matches_ps_for_a_real_group() -> None:
+    """``proc_listpids(PROC_PGRP_ONLY)`` against ``ps`` for a group with descendants.
+
+    The listing returns BYTES and silently truncates an undersized buffer, so the
+    size-query-then-fetch shape is what is under test: a 100-member group is larger
+    than any fixed small buffer, and parity with ``ps`` is the proof nothing was
+    clipped. A decoy group in the same table must not leak in.
+    """
+    group = subprocess.Popen(
+        ["sh", "-c", "for i in $(seq 100); do sleep 30 & done; wait"], start_new_session=True
+    )
+    decoy = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    try:
+        pgid = os.getpgid(group.pid)
+        deadline = time.time() + 10
+        listed: list[int] = []
+        while time.time() < deadline:
+            listed = resources.direct_group_pids(pgid) or []
+            if len(listed) >= 101:
+                break
+            time.sleep(0.1)
+        table = subprocess.run(
+            ["ps", "-axo", "pid=,pgid="], capture_output=True, text=True, check=True
+        ).stdout
+        via_ps = {int(r.split()[0]) for r in table.splitlines() if int(r.split()[1]) == pgid}
+        assert sorted(listed) == sorted(via_ps) and len(listed) >= 101
+        assert decoy.pid not in listed
+    finally:
+        for proc in (group, decoy):
+            try:
+                os.killpg(os.getpgid(proc.pid), 9)
+            except OSError:
+                pass
+            proc.wait()
+    assert resources.direct_group_pids(pgid) == []  # answered, and empty: the group ended
+
+
+def test_an_unanswerable_group_listing_is_none_not_empty(monkeypatch) -> None:
+    """``None`` (cannot say) and ``[]`` (answered: empty) must never be conflated —
+    unknown never kills, and an empty group has nothing to kill."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert resources.direct_group_pids(123) is None
+    monkeypatch.setattr(resources, "_darwin_libproc", lambda: None)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert resources.direct_group_pids(123) is None
+    assert resources.direct_group_pids(-5) is None
+
+
+def test_the_linux_group_scan_reads_pgrp_from_stat(monkeypatch) -> None:
+    stats = {"10": (1, 7), "11": (10, 7), "12": (10, 9)}
+    monkeypatch.setattr(resources.os, "listdir", lambda path: [*stats, "self", "cpuinfo"])
+    monkeypatch.setattr(resources, "_linux_ppid_pgid", lambda pid: stats.get(str(pid)))
+    assert resources._linux_group_pids(7) == [10, 11]
+    assert resources._linux_group_pids(8) == []

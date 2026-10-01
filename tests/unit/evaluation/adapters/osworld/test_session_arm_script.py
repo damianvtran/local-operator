@@ -324,6 +324,9 @@ def test_a_prose_done_that_is_not_re_declared_is_challenged_exactly_once(
 
     outcome = _outcome(completed, expect_status="agent_stop")
     assert outcome["steps"] == 1
+    # The ending NAMES itself: a prose claim that survived the one challenge.
+    assert outcome["terminal_reason"] == "completion-claim"
+    assert "challenged it 1 time(s)" in outcome["diagnostic"]
     kinds = _record_kinds(run_root)
     assert kinds.count("action_completion_challenged") == 1
     assert "action_finish" not in kinds
@@ -353,6 +356,9 @@ def test_a_mid_work_narration_ending_is_not_challenged(
 
     outcome = _outcome(completed, expect_status="agent_stop")
     assert outcome["steps"] == 1
+    # The ending NAMES itself: a plain terminal message, no tool call.
+    assert outcome["terminal_reason"] == "no-tool-call"
+    assert "carries no tool call" in outcome["diagnostic"]
     kinds = _record_kinds(run_root)
     assert "action_completion_challenged" not in kinds
     assert "action_finish" not in kinds

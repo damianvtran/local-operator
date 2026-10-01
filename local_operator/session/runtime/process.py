@@ -3754,6 +3754,11 @@ async def _drain_inbox_into(handle: object) -> int:
     probed = getattr(handle, "receive_peer_message", None)
     if not lines:
         return 0
+    # Imported HERE, like the server import lower in this module: the server
+    # imports this file at module scope, so a top-level import would close a
+    # cycle (and the drain is the only caller).
+    from local_operator.session.runtime.server import receives_message_id
+
     receive = cast(Callable[..., Awaitable[str]], probed)
     delivered = 0
     # Rows of ONE batch carrying the same owner ``command_id``, which the
@@ -3770,12 +3775,20 @@ async def _drain_inbox_into(handle: object) -> int:
             if owner_row:
                 await _run_owner_prompt(handle, line, seen=seen_owner_ids)
             elif callable(probed):
-                await receive(
-                    line.text,
-                    mode="mailbox",
-                    wake=bool(getattr(line, "wake", False)),
-                    sender=line.sender,
-                )
+                fields: dict[str, Any] = {
+                    "mode": "mailbox",
+                    "wake": bool(getattr(line, "wake", False)),
+                    "sender": line.sender,
+                }
+                # THE PEER PATH'S IDENTITY, which this file's own note below used
+                # to say did not exist. A handle from before the carriage does
+                # not take the keyword and keeps today's at-least-once behaviour.
+                # The probe is the server's own helper, asked of the HANDLE, so
+                # the drain and the dispatch cannot drift on what "takes the
+                # keyword" means.
+                if receives_message_id(handle):
+                    fields["message_id"] = getattr(line, "message_id", "") or None
+                await receive(line.text, **fields)
             else:
                 raise RuntimeError("this handle cannot receive a spooled peer message")
             delivered += 1
@@ -3789,15 +3802,14 @@ async def _drain_inbox_into(handle: object) -> int:
             # repeat because delivery is idempotent by the durable command index
             # (``_run_owner_prompt``) and ``inbox``'s contract is at-least-once.
             #
-            # FOR A PEER ROW IT IS AT-LEAST-ONCE WITHOUT THAT SEAM (agent review round 2,
-            # NIT B). ``inbox.InboxLine.command_id`` only ever rides a ``SOURCE_USER`` row,
-            # and ``receive_peer_message`` has no equivalent dedupe: a peer row whose
-            # delivery PERSISTED and then raised is appended a second time, and what the
-            # peer sees is a duplicate ``peer_message`` card for one send. That is the
-            # direction this file already chooses deliberately (a duplicated note is
-            # visible and harmless, a dropped one is neither), and closing it properly
-            # means an identity on the peer path — a change of its own, with its own
-            # review, rather than a second half-seam here.
+            # FOR A PEER ROW THE IDENTITY IS NOW ON THE WIRE (agent review round 2,
+            # NIT B closed here): ``InboxLine.message_id`` carries the sender's own
+            # id, the handle forwards it, and ``receive_peer_message`` dedupes on
+            # it — so a peer row whose delivery PERSISTED and then raised is
+            # answered as a duplicate instead of appearing a second time. Rows
+            # written by an older build have no id and still deliver at-least-once,
+            # which remains the deliberate direction (a duplicated note is visible
+            # and harmless, a dropped one is neither).
             if not append_inbox(directory, line):
                 logger.error(
                     "could not re-spool an undelivered inbox row (command_id=%s); it is lost",

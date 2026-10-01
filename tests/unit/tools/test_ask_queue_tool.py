@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from local_operator.harness.types import AgentTool, AskQuestion, ToolContext, ToolResult
+from local_operator.tools import builtin
 from local_operator.tools.registry import create_tools
 
 
@@ -154,6 +155,50 @@ async def test_the_timeout_field_is_in_the_advertised_schema():
     tool = _tools(_context())["ask"]
     schema = tool.parameters
     assert "timeout" in schema.get("properties", {})
+
+
+@pytest.mark.asyncio
+async def test_the_description_tells_the_model_which_mode_it_is_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tool description is the ONE surface that survives compaction.
+
+    ``system.md`` is rewritten away by a long session's compaction, so a model
+    that has been compacted reads only this text — which means the queued mode's
+    three facts (the call is not the answer, a receipt is not consent, and the
+    turn must not be spent waiting) have to live here, not only in the prompt.
+    The two arms are asserted in BOTH directions because they make OPPOSITE
+    claims about the same call: the inline arm tells the model it is parked on a
+    human, and a session reading both would learn neither.
+    """
+    from local_operator.asks import policy
+
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", False)
+    inline = _tools(_context())["ask"].description
+    assert "answers the questions back to back rather than once per turn" in inline
+    assert "RECEIPT" not in inline
+
+    monkeypatch.setattr(policy, "NONBLOCKING_ASK", True)
+    queued = _tools(_context())["ask"].description
+    assert "RECEIPT IS NOT CONSENT" in queued
+    # The answer's arrival is stated as its OWN turn: that is what makes "do not
+    # wait" actionable rather than a mood.
+    assert "ANSWER ARRIVES LATER" in queued
+    # The calibration table (design §3), which the model needs to choose a
+    # deadline at all: the default alone is a number it cannot reason about.
+    assert "1 h (3600) is routine" in queued
+    assert "5-10 minutes" in queued
+    assert "24 h" in queued
+    # The caps, whose refusals are what the model will actually read when it
+    # crosses them.
+    assert "8 asks can be open at once" in queued
+    assert "answers the questions back to back" not in queued
+
+    # The restraint half — the brake and the four triggers — is IDENTICAL in
+    # both modes and by construction, because it is one constant: a question is
+    # worth the operator's attention or it is not, however the tool settles it.
+    restraint = builtin._ASK_DESCRIPTION_RESTRAINT
+    assert inline.startswith(restraint) and queued.startswith(restraint)
 
 
 @pytest.mark.asyncio

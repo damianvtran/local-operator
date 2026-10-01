@@ -483,7 +483,7 @@ async def test_a_peer_wake_during_the_window_is_spooled(tmp_path: Path) -> None:
 
     receipt = await host.receive_peer_message("build is green", mode="wake", wake=True, sender={})
 
-    assert receipt == SPOOL_RECEIPT_WAKE, receipt
+    assert receipt.detail == SPOOL_RECEIPT_WAKE, receipt
     assert session.peer_calls == []
     assert len(peek_inbox(session.transcript.directory)) == 1
 

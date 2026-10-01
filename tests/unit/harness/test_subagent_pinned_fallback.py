@@ -432,6 +432,35 @@ def test_the_completion_row_states_the_pin_the_walk_away_reader_needs() -> None:
     assert "(pinned" not in plain
 
 
+def test_the_notice_and_row_carry_the_cross_vendor_clause() -> None:
+    """The walk's enriched settle reason — these exact words are what the
+    SHIPPED default emits on a cross-vendor descent (the end-to-end string is
+    asserted in tests/unit/providers/test_failover.py) — must reach the
+    parent notice and the durable completion row VERBATIM.
+
+    This is the disclosure half of the default policy: the child keeps
+    running on the substitute, so the reason is the surface that tells the
+    operator the substitution was a cross-vendor descent rather than an
+    ordinary same-family hop.
+    """
+    from local_operator.session.session import Session
+
+    reason = (
+        "provider failure: quota HTTP 429 "
+        "(cross-vendor descent for pinned anthropic/claude-sonnet-5-5)"
+    )
+    job = _pinned_job()
+    emitted: list[Any] = []
+    asyncio.run(_relay(job, emitted)(_fallback_event(reason=reason)))
+
+    [notice] = [e for e in emitted if isinstance(e, NoticeEvent)]
+    assert reason in notice.text
+    assert "cross-vendor descent" in notice.text
+
+    text = Session._job_result_message("designer1", "x", job).details["text"]
+    assert f"(pinned {PIN}, ran on {EFFECTIVE} — {reason})" in text
+
+
 def test_job_stats_reads_the_registration_stamp_off_the_job() -> None:
     """The stats are how the band (and every duck-typed consumer) learns both
     labels; a host whose job predates the fields degrades to ""."""

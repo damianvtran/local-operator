@@ -1461,3 +1461,56 @@ async def test_a_rebind_during_an_in_flight_push_is_owed_a_follow_up_push() -> N
     finally:
         release.set()
         await server.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_busy_terminal_answers_a_peer_message_as_queued(monkeypatch) -> None:
+    """A hop that expires is a DELIVERY IN PROGRESS, not a refusal.
+
+    Textual cannot cancel a callback it has already queued, so the message is on
+    its way the moment the budget expires; ``_on_app``'s ``TimeoutError`` used to
+    escape into the runtime's dispatch, whose generic ``except Exception`` turned
+    it into an ``error`` frame and made the sender print "could not deliver" for
+    a message the terminal was about to receive. The answer is now the honest
+    half-fact: queued, not yet taken -- which the sender classifies as
+    ``unconfirmed`` and upgrades to ``mailbox`` if the row lands.
+    """
+    from local_operator.mobile import tui_handle as mod
+    from local_operator.session.runtime.server import AckDetail
+    from local_operator.session.runtime.types import PeerReceiveDetail
+
+    monkeypatch.setattr(mod, "_APP_HOP_TIMEOUT_S", 0.3)
+    entered = threading.Event()
+
+    class Session(FakeSession):
+        async def receive_peer_message(
+            self, text: str, *, mode="mailbox", wake=False, sender=None, message_id=None
+        ) -> Any:
+            return PeerReceiveDetail(
+                "delivered",
+                {"message_id": message_id or "", "committed": True, "queued": False},
+            )
+
+    class App:
+        def __init__(self, session: Any) -> None:
+            self._session = session
+
+        def call_from_thread(self, callback: Any) -> None:
+            entered.set()
+            # Busy: the callback is queued and runs only after the budget has
+            # already expired for the caller, which is the shape under test.
+            time.sleep(1.0)
+            callback()
+
+    handle = TuiSessionHandle(App(Session()))  # type: ignore[arg-type]
+    ack = await handle.receive_peer_message("are you there", message_id="peer-" + "e" * 32)
+
+    assert entered.is_set(), "the hop never reached the app"
+    assert isinstance(ack, AckDetail), ack
+    assert ack.detail.startswith("queued")
+    assert ack.fields["delivery"] == {
+        "message_id": "peer-" + "e" * 32,
+        "committed": False,
+        "queued": True,
+        "duplicate": False,
+    }

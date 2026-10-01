@@ -103,6 +103,7 @@ from local_operator.harness.message_types import (
     SESSION_MCP_RECOVERY_MESSAGE_TYPE,
     SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
     SESSION_MODEL_SWITCH_MESSAGE_TYPE,
+    SESSION_SEND_NOTICE_MESSAGE_TYPE,
     TODO_REMINDER_MESSAGE_TYPE,
 )
 from local_operator.harness.redaction import current_tool_source, set_shape_hit_reporter
@@ -252,6 +253,7 @@ from local_operator.session.protocol import (
 # (`AttachedSession._restore_cold_subagents`) cannot drift into two opinions
 # about one persisted row (UX review round 1, U2).
 from local_operator.session.restored_rows import resolve_restored_rows, roster_records
+from local_operator.session.runtime.types import PeerReceiveDetail
 from local_operator.session.spend import (
     SESSION_SPEND_CUSTOM_TYPE,
     SessionSpend,
@@ -1056,10 +1058,10 @@ def _project_reminder_text(stale: list[Project], *, now: float | None = None) ->
     framing and the explicit "injected by the harness" label because the model
     reads it as a user turn (without the label it would answer the user about a
     message the user never sent), the stale rows verbatim, and the honest exits
-    — update progress, update status, refresh an unchanged line, unlink — plus
-    the ``ask`` clause. ``reported_age`` is the same age arithmetic every other
-    project surface composes its sentences from. ``now`` exists for tests, which
-    pin the rendered text against a fixed clock.
+    — update progress, update status, refresh a checked line (op='refresh'),
+    unlink — plus the ``ask`` clause. ``reported_age`` is the same age
+    arithmetic every other project surface composes its sentences from. ``now``
+    exists for tests, which pin the rendered text against a fixed clock.
     """
     rows: list[str] = []
     for project in stale[:_PROJECT_REMINDER_MAX_ROWS]:
@@ -1094,7 +1096,9 @@ def _project_reminder_text(stale: list[Project], *, now: float | None = None) ->
         "dated line with `project op='update' name='<name>' progress='<line>'`; "
         "if its state changed, `project op='update' name='<name>' "
         "status='paused|done'`. If the recorded progress still describes reality, "
-        "re-send the same text to refresh it. If this session no longer belongs "
+        "`project op='refresh' name='<name>'` records that you checked; it does "
+        "not reset the staleness clock, and a reworded re-send is a NEW line, "
+        "not a refresh. If this session no longer belongs "
         "to a project, `project op='unlink' name='<name>'`. If a decision here "
         "is the user's to make, put it to them with the `ask` tool.\n"
         "</system-reminder>"
@@ -1111,6 +1115,13 @@ def _project_reminder_text(stale: list[Project], *, now: float | None = None) ->
 #: time as a message replays a superseded summary back into context beside the
 #: live one. A deny-list enumerating the ephemeral types cannot see a type that
 #: does not exist yet; this one excludes it by default.
+#: Transcript entry id prefix for the send tool's delivery notice. The id is
+#: ``send-notice-<message_id>`` -- derived from the SEND's own identity, so two
+#: notices for one send collide on the transcript's ``has_entry`` check instead
+#: of stacking, and a notice can always be traced back to the message it names.
+_SEND_NOTICE_ENTRY_PREFIX = "send-notice-"
+
+
 _PERSISTABLE_CUSTOM_TYPES: frozenset[str] = frozenset(
     {
         "session_state",
@@ -1168,6 +1179,15 @@ _PERSISTABLE_CUSTOM_TYPES: frozenset[str] = frozenset(
         # consequence is the one ``journal_mcp_recovery``'s docstring already
         # documents: the un-superseded warning does still persist.
         SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
+        # SESSION_SEND_NOTICE_MESSAGE_TYPE is persisted for its own reason: the
+        # row is a fact about this session's OWN outbound traffic -- a message
+        # left with a peer that never acknowledged it -- and a resumed session
+        # must not re-send a duplicate on the strength of having forgotten. It
+        # is written through ``_append_or_park_journal`` like every other
+        # journal row in this frozenset, so the line here is the same
+        # future-proofing the credential records state: a predicate that has not
+        # been written yet must not be able to drop it.
+        SESSION_SEND_NOTICE_MESSAGE_TYPE,
         # SESSION_CREDENTIAL_MESSAGE_TYPE is deliberately absent: a credential
         # announcement asserts a LIVE capability ("$KEY is injected into every
         # bash command") against a store that is process-memory-only. A
@@ -1570,25 +1590,36 @@ def _stamped_todo_fingerprint(details: Mapping[str, Any]) -> tuple[tuple[str, st
     )
 
 
-def _stamped_project_fingerprint(details: Mapping[str, Any]) -> tuple[tuple[str, str, int], ...]:
+def _stamped_project_fingerprint(
+    details: Mapping[str, Any],
+) -> tuple[tuple[str, str, int, int], ...]:
     """The stale-set fingerprint a project reminder was built from, normalized.
 
-    The todo normaliser's twin, with one deliberate addition: the third element
-    is an INTEGER (``int(progress_updated_at or 0)``), so a stamp that will not
-    coerce is dropped rather than raised on — a reminder with no usable stamp
-    compares equal to nothing and expires, which is the safe direction (an
-    unverifiable nudge is worth less than one turn without it). The JSON round
-    trip matters identically: ``details`` is a plain dict and any round trip
-    turns the nested tuples into lists, so a raw ``!=`` against the live
-    fingerprint would expire every reminder on sight.
+    The todo normaliser's twin, with two deliberate additions: the tuple is
+    ``(id, status, int(progress_updated_at or 0), int(progress_refreshed_at or
+    0))`` — ARITY MUST MATCH ``stale_projects_fingerprint`` — and the numeric
+    elements are coerced through ``int``, so a stamp that will not coerce is
+    dropped rather than raised on — a reminder with no usable stamp compares
+    equal to nothing and expires, which is the safe direction (an unverifiable
+    nudge is worth less than one turn without it). The JSON round trip matters
+    identically: ``details`` is a plain dict and any round trip turns the
+    nested tuples into lists, so a raw ``!=`` against the live fingerprint
+    would expire every reminder on sight.
+
+    The arity is load-bearing exactly as the todo twin's is: if this stayed at
+    3 while the source grew to 4, every stamped item would be dropped, the
+    stamped side would compare empty against a non-empty current fingerprint,
+    and every project reminder would expire on every render — the latch errs
+    safe (it keeps nudging) so "does it nudge" still passes while the
+    no-second-nudge suppression silently breaks.
     """
     stamped = details.get("fingerprint") or ()
-    out: list[tuple[str, str, int]] = []
+    out: list[tuple[str, str, int, int]] = []
     for item in stamped:
-        if not isinstance(item, (list, tuple)) or len(item) != 3:
+        if not isinstance(item, (list, tuple)) or len(item) != 4:
             continue
         try:
-            out.append((str(item[0]), str(item[1]), int(item[2])))
+            out.append((str(item[0]), str(item[1]), int(item[2]), int(item[3])))
         except (TypeError, ValueError):
             continue
     return tuple(out)
@@ -3422,6 +3453,25 @@ class Session:
         #: leftover spool can never become the opening row of the history (see
         #: ``_drain_spooled_peer_inbox``).
         self._peer_inbox_drained = False
+        #: Ids of peer messages INSIDE ``receive_peer_message`` right now.
+        #:
+        #: The durable half of the duplicate gate is the transcript index
+        #: (``transcript.has_entry``), and it is not enough on its own: two
+        #: deliveries of one sender-minted id can interleave across an ``await``
+        #: before either row is persisted -- the busy-steer path queues the row in
+        #: memory and the idle-wake path hands it to a spawned task, so a re-send
+        #: arriving in that window would pass the ``has_entry`` test and write the
+        #: message TWICE. Membership is held for the WHOLE delivery -- added
+        #: before the first ``await`` of ``receive_peer_message`` and released in
+        #: its ``finally``, however many awaits and branches the delivery takes
+        #: (agent review round 1, N3: the comment used to name only an
+        #: ``await``-free stretch, which sized the window far too small).
+        #:
+        #: Peer-row ids only. The user-row admission rail
+        #: (``CommandReservations``/``_admitted_command_ids``) is deliberately
+        #: untouched: different id space, different rows, and the ask lane's
+        #: exactly-once guard depends on it (design note C/E).
+        self._peer_inflight_ids: set[str] = set()
         self._abort_requested = False  # sticky across the continuation gap
         # Turns dropped back-to-back because they were born pre-aborted. Reset
         # by any turn that actually runs, so the honest "I am dropping these"
@@ -3518,7 +3568,7 @@ class Session:
         # projects that reminder named — so a model that yields twice with a
         # byte-identical stale set is not nudged a second time. Reset per user
         # turn beside the todo latch; see :meth:`_project_continuation`.
-        self._project_reminder_fingerprint: tuple[tuple[str, str, int], ...] | None = None
+        self._project_reminder_fingerprint: tuple[tuple[str, str, int, int], ...] | None = None
         # Per-turn count of tool-execution events seen this user turn. The
         # project guardrail fires only after a worked turn: a turn that ran no
         # tools cannot have moved a project's record, so nudging it to update
@@ -8007,7 +8057,9 @@ class Session:
             self.refresh_frontend_state()
         return found
 
-    def _peer_custom_message(self, text: str, sender: dict[str, Any]) -> CustomMessage:
+    def _peer_custom_message(
+        self, text: str, sender: dict[str, Any], *, entry_id: str = ""
+    ) -> CustomMessage:
         """Build the transcript entry for one inbound cross-session message.
 
         ``details["text"]`` is what the MODEL reads: it is wrapped in a
@@ -8018,6 +8070,15 @@ class Session:
         ``details["sender"]`` carries the advisory identity for the indicator
         label. ``attribution="user"`` routes it through the same allow-listed
         user-turn path as a wake/hub delivery (see ``build_llm_history``).
+
+        ``entry_id`` is the SENDER-minted id, and it is used as the transcript
+        entry id when it has already been validated
+        (:func:`~local_operator.mobile.peer_send.valid_peer_message_id`). It is
+        what lets the sender ask "did my message land?" of the transcript at all
+        -- the id was previously minted HERE, so a sender could not name the row
+        it was waiting on -- and what makes a re-send a duplicate rather than a
+        second row. Empty means the receiver mints its own, which is what every
+        pre-field sender gets.
         """
         pid = sender.get("pid")
         conversation = sender.get("conversation_name", "")
@@ -8030,10 +8091,17 @@ class Session:
             f"{text}\n"
             "</peer-session-message>"
         )
+        peer_fields: dict[str, Any] = {}
+        if entry_id:
+            # The SENDER's identity, when it validated -- see the docstring.
+            # Spread rather than always passed so a pre-field sender's row is
+            # byte-identical to what this function built before the carriage.
+            peer_fields["id"] = entry_id
         return CustomMessage(
             custom_type=PEER_MESSAGE_MESSAGE_TYPE,
             attribution="user",
             details={"text": wrapped, "body": text, "sender": sender},
+            **peer_fields,
         )
 
     async def _drain_spooled_peer_inbox(self) -> None:
@@ -8127,6 +8195,13 @@ class Session:
                         mode="mailbox",
                         wake=bool(getattr(line, "wake", False)),
                         sender=line.sender,
+                        # The SENDER's own id, so a row that reached the spool
+                        # twice (a crash between the write and the ack, or a
+                        # successor that drained it once already) is answered as
+                        # a duplicate instead of delivered twice. Absent on rows
+                        # an older build wrote, which read as ``""`` and deliver
+                        # exactly as before.
+                        message_id=getattr(line, "message_id", "") or None,
                     )
             except Exception:  # noqa: BLE001 — one bad row is not the others' problem
                 logger.warning("spooled peer message could not be delivered", exc_info=True)
@@ -8184,7 +8259,8 @@ class Session:
         mode: str = "mailbox",
         wake: bool = False,
         sender: dict[str, Any] | None = None,
-    ) -> str:
+        message_id: str | None = None,
+    ) -> PeerReceiveDetail:
         """Deliver a message from ANOTHER local lop session into this one.
 
         This is the receive half of ``lop send``. No existing method both
@@ -8208,8 +8284,63 @@ class Session:
           turn exactly like mailbox+wake idle (dropping it would violate the
           guarantee that the message MUST appear in history).
 
-        Returns a short human-readable detail string for the sender's ack.
+        Returns a :class:`PeerReceiveDetail` for the sender's ack: the same
+        short human-readable string every caller already printed, carrying the
+        :attr:`~PeerReceiveDetail.delivery` dict the ack frame forwards
+        (``{message_id, committed, queued, duplicate}``) so the sender can
+        classify the outcome without re-deriving it from prose.
+
+        ``message_id`` is the SENDER's minted identity for this message
+        (``peer-<32hex>``). When it is present and valid it becomes this row's
+        transcript entry id, and that is what makes the receive side
+        IDEMPOTENT: a re-send of an id this session already owns -- durable or
+        merely in flight -- is answered as a duplicate instead of appending the
+        message a second time. A malformed, foreign or absent id is ignored and
+        the receiver mints its own, which is exactly pre-field behaviour.
         """
+        # THE SINGLE CONVERGENCE POINT for the duplicate gate (design note C):
+        # every persist path below passes through here, so one check covers the
+        # durable append, the in-memory steering queue and the spawned turn
+        # alike. The two halves are the transcript index (a row already on disk)
+        # and ``_peer_inflight_ids`` (a re-send that arrived across an ``await``
+        # inside an earlier delivery, before its row was durable).
+        #
+        # Imported in-function for the same reason ``resolve_sender_identity``
+        # below is: this module must not grow a module-level dependency on the
+        # mobile package.
+        from local_operator.mobile.peer_send import valid_peer_message_id
+
+        incoming = message_id if valid_peer_message_id(message_id) else None
+        if incoming is not None:
+            committed = self._transcript.has_entry(incoming)
+            if committed or incoming in self._peer_inflight_ids:
+                return PeerReceiveDetail(
+                    "duplicate — this message is already delivered",
+                    {
+                        "message_id": incoming,
+                        "committed": committed,
+                        "queued": False,
+                        "duplicate": True,
+                    },
+                )
+            self._peer_inflight_ids.add(incoming)
+        try:
+            return await self._deliver_peer_message(
+                text, incoming=incoming, mode=mode, wake=wake, sender=sender
+            )
+        finally:
+            if incoming is not None:
+                self._peer_inflight_ids.discard(incoming)
+
+    async def _deliver_peer_message(
+        self,
+        text: str,
+        *,
+        incoming: str | None,
+        mode: str,
+        wake: bool,
+        sender: dict[str, Any] | None,
+    ) -> PeerReceiveDetail:
         # Resolve the sender against the LOCAL registry before anything renders
         # or persists. The identity arrives over the wire as the sender's own
         # self-report and can be empty or pid-only (a `lop send` whose ancestry
@@ -8234,7 +8365,32 @@ class Session:
         from local_operator.mobile.peer_send import resolve_sender_identity
 
         sender = resolve_sender_identity(sender)
-        message = self._peer_custom_message(text, sender)
+        message = self._peer_custom_message(text, sender, entry_id=incoming or "")
+
+        def receipt(detail: str, *, queued: bool = False) -> PeerReceiveDetail:
+            """This branch's ack: the receipt sentence plus what the receiver owns.
+
+            ``committed`` is True on every branch that actually TOOK the message
+            -- the row is durable, or the queue/spawned turn that will persist it
+            is this session's own. Only the queued arm (a busy terminal whose
+            hop to the session had not run when the ack was written, see
+            ``TuiSessionHandle``) reports ``committed=False``, because only there
+            has nothing been accepted yet.
+            """
+            return PeerReceiveDetail(
+                detail,
+                {
+                    # THE ROW'S OWN ID, which is the sender's mint when it
+                    # supplied one and the receiver's own uuid when it did not (a
+                    # legacy sender, agent review round 1 N2): reporting "" there
+                    # described nothing about the row this receipt is about.
+                    "message_id": message.id,
+                    "committed": not queued,
+                    "queued": queued,
+                    "duplicate": False,
+                },
+            )
+
         busy = self._is_streaming
         if mode == "steer":
             if busy:
@@ -8260,7 +8416,7 @@ class Session:
                 self.refresh_frontend_state()
                 await self._emit_peer_receipt(message, sender)
                 self._peer_arrival.mark()
-                return "delivered mid-turn (steered)"
+                return receipt("delivered mid-turn (steered)")
             # Idle steer has nothing to interrupt: open a turn so the message is
             # still delivered and read. _prompt_messages persists the row once.
             await self._emit_peer_receipt(message, sender)
@@ -8269,7 +8425,7 @@ class Session:
             # prompt provenance, so a cut-off of it is an error even before a
             # provider round-trip (see ``_attention_run_has_evidence``).
             self._spawn_background(self._prompt_messages([message], carried_prompt=True))
-            return "delivered (opened a turn)"
+            return receipt("delivered (opened a turn)")
         # mode == "mailbox"
         if wake and not busy:
             # _prompt_messages persists the row through the pipeline — a
@@ -8278,7 +8434,7 @@ class Session:
             self._peer_arrival.mark()
             # Same provenance as the idle-steer arm above: a person's words.
             self._spawn_background(self._prompt_messages([message], carried_prompt=True))
-            return "delivered and woke the session"
+            return receipt("delivered and woke the session")
         # Record-only (idle without wake, or busy): persist durably NOW so the
         # human sees it and a crash cannot lose it, and make it visible to the
         # model on its next turn. The transcript write is immediate; the live
@@ -8307,7 +8463,7 @@ class Session:
         # at the post-batch boundary, which is what keeps the splice hazard
         # documented above from being reintroduced here.
         self._peer_arrival.mark()
-        return "delivered to the mailbox (will be read on the next turn)"
+        return receipt("delivered to the mailbox (will be read on the next turn)")
 
     async def _emit_peer_receipt(self, message: CustomMessage, sender: dict[str, Any]) -> None:
         """Fire the live receipt so the attached TUI paints the indicator now.
@@ -12947,6 +13103,11 @@ class Session:
             # failure behind session 835fbcafdc27). Re-bound every turn for
             # the same reason the rest of this context is rebuilt.
             journal_credential=self.journal_credential_change,
+            # The send tool's own notice hook, wired for the same reason and
+            # with the same shape: the tool cannot write a transcript row
+            # itself, and the gate (``send.journal_unconfirmed``, default off) is
+            # read inside the session method so there is one reader of the key.
+            journal_send_notice=self.journal_send_notice,
             job_id=self._job_id,
             agent_registry=self.agent_registry,
             # The proactive-class surface (R29–R38), resolved FRESH each turn:
@@ -13888,6 +14049,81 @@ class Session:
             # push the next attempt's eligibility out.
             self._mcp_notice_guard.note_emitted(server, fingerprint)
 
+    async def journal_send_notice(
+        self,
+        *,
+        text: str,
+        message_id: str,
+        state: str,
+        target: str,
+        force: bool = False,
+    ) -> None:
+        """Leave ONE durable notice that a send was not acknowledged.
+
+        The configurable half of the operator's notification requirement (design
+        note B): the tool RESULT is already a durable, model-visible,
+        error-flagged row carrying the cause, the message id and the retry
+        advice, so this exists only for an operator who wants the fact recorded
+        in the transcript as well. ``send.journal_unconfirmed`` (default OFF)
+        gates it, and the gate is read HERE rather than at the call site so
+        there is exactly one reader of the key. ``force`` bypasses that gate for
+        the one case the setting must not silence: a call the operator ABORTED.
+        The premise is narrow and verified (agent review round 1, MINOR-3): a
+        COMPLETED call's result is durable regardless — the loop appends the
+        batch and only then consults the abort signal — but a call the abort
+        CANCELS is paired with a synthetic ``aborted`` result that carries
+        neither the message id nor the cause, so the row is the only durable
+        record of a message that may already have landed.
+
+        Written ONCE per send, by construction:
+
+        * the row id is ``send-notice-<message_id>``, and both this method and
+          its caller no-op when that id is already in the transcript, so a
+          retried tool call cannot double-file it;
+        * it is emitted post-final only -- the caller passes the settled outcome
+          of the last attempt, never a per-attempt report;
+        * it is written by the SENDER's own session, never through
+          ``peer_message`` or the inbox, so it cannot re-enter the delivery rail
+          or wake anything.
+
+        Parked rather than spliced: ``_append_or_park_journal`` is what keeps a
+        mid-turn sender from writing an ``assistant(tool_use) -> user`` splice
+        the next provider round-trip would reject (the same reason
+        ``journal_mcp_unavailable`` parks).
+        """
+        from local_operator.mobile.peer_send import journal_unconfirmed_enabled
+
+        if self._disposed or not message_id:
+            return
+        if not force and not journal_unconfirmed_enabled():
+            return
+        entry_id = f"{_SEND_NOTICE_ENTRY_PREFIX}{message_id}"
+        # The idempotence check runs BEFORE the message is built: a second call
+        # for the same send must cost a dict lookup, not a write attempt.
+        if self._transcript.has_entry(entry_id):
+            return
+        message = CustomMessage(
+            id=entry_id,
+            custom_type=SESSION_SEND_NOTICE_MESSAGE_TYPE,
+            attribution="system",
+            details={
+                "text": text,
+                "message_id": message_id,
+                "state": state,
+                "target": target,
+            },
+        )
+        try:
+            async with self._journal_lock:
+                # Re-checked under the lock: two concurrent calls for one send
+                # would otherwise both pass the check above and append twice.
+                if self._transcript.has_entry(entry_id):
+                    return
+                await self._transcript.append_message(message, preserve_mtime=True)
+                self._append_or_park_journal(message)
+        except OSError:
+            logger.warning("could not journal a send notice", exc_info=True)
+
     async def journal_mcp_recovery(self, server: str, tool_count: int) -> None:
         """Tell the MODEL an MCP server it was told was unavailable is usable again.
 
@@ -14826,16 +15062,18 @@ class Session:
         Fires only while the turn is MOVING and the record is quiet: at least
         one tool-execution event landed this turn (``_turn_tool_calls`` — a
         turn that ran no tools cannot have moved a project's state), and the
-        stale set (``stale_projects_for_session``: linked, in-flight
-        (``PROJECT_LIVE_STATUSES``) AND stale) has moved since the last nudge
-        THIS turn. The latch is the
-        stale-set fingerprint ``(id, status, int(progress_updated_at or 0))``:
+        stale set (``stale_projects_for_session``: WORK-linked, in-flight
+        (``PROJECT_LIVE_STATUSES``), content-stale AND not asserted within the
+        window) has moved since the last nudge THIS turn. The latch is the
+        stale-set fingerprint
+        ``(id, status, int(progress_updated_at or 0), int(progress_refreshed_at or 0))``:
         a byte-identical set is never nudged twice (a model yielding twice on
-        it is stuck, and the reminder's own exits — update / refresh /
-        unlink — are what move it), while a refresh or a status change moves
-        the fingerprint and lets the REMAINING stale projects earn another
-        nudge in the same turn (a refresh cannot collide with the floored
-        stamp it replaces — see ``stale_projects_fingerprint``). A fresh user
+        it is stuck, and the reminder's own exits — update / refresh / unlink —
+        are what move it), while a refresh or a status change moves the
+        fingerprint and lets the REMAINING stale projects earn another nudge in
+        the same turn (a refresh lands a stamp newer than the content it
+        asserts about, so it cannot collide with the values it replaces — see
+        ``stale_projects_fingerprint``). A fresh user
         turn re-arms it (see ``_run_turn_pipeline``).
 
         Budget: shares ``max_follow_up_continuations`` with the todo producer
@@ -16827,18 +17065,25 @@ class Session:
         CONCURRENTLY with the turn, so the safety comes from the shape of the
         request instead of from the timing:
 
-        * ``isolated`` — at most two AUTH attempts (the second only when a
-          bearer was rejected outright and a read-only re-resolve hiding that
-          row produced a different one; the pre-existing fast-mode-refusal
-          re-ask can add one more), no fallback chain, no credential rotation,
-          no sticky-route read or write, no quota preflight, no effort-boundary
+        * ``isolated`` — at most two AUTH attempts (the second only when the
+          bearer was refused on the class the turn rotates on and a read-only
+          re-resolve produced a different one — a sibling if the pool has one,
+          otherwise the same account with a forced refresh; the pre-existing
+          fast-mode-refusal
+          re-ask can add one more), no fallback chain, no credential ROTATION —
+          no block, no demotion clear and no move of the session's sticky
+          pointer; a forced refresh of the account already in hand is that
+          account's own bookkeeping and is the one write isolation permits (see
+          ``isolated``) — no sticky-route read or write, no quota preflight, no
+          effort-boundary
           classification, a read-only credential resolve and not the session's
           prompt cache key. See the field's docstring for the six pieces of
           session-wide state that protects, and why each one mattered.
         * ``replayable=False`` — deliberately the opposite of the compaction
           errand below. Replay exists so a stalled read does not permanently
           lose an EXPENSIVE result; a title is worth its one or two attempts
-          and no more (see ``isolated`` for the auth-shaped second one).
+          and no more (see ``isolated`` for the one extra attempt, on the class
+          the turn's own rotation acts on).
         * ``max_tokens`` — bounds a model that ignores the output format.
         * cheapest route available: the ``lo`` subagent tier when the operator
           has configured one, otherwise this session's model — either way

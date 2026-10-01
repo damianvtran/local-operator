@@ -57,6 +57,7 @@ from local_operator.providers.failover import (
     is_fast_mode_refusal,
     is_fast_mode_refusal_for,
     is_image_rejection,
+    is_rotation_eligible,
     is_transient_error,
     is_usage_limit_error,
     resolve_chain,
@@ -109,6 +110,27 @@ async def test_refresh_step_then_sibling_rotation() -> None:
     second = await resolve_next_key(state, resolver, error)
     assert second == "key-b"  # (c) sibling
     assert any(ctx.last_chance for ctx in contexts)
+
+
+def test_the_rotation_class_is_the_one_predicate_both_callers_share() -> None:
+    """The failure classes credential rotation may act on, and nothing else.
+
+    ONE definition serves two callers — the ordinary turn's rotation and the
+    isolated errand's single extra attempt — precisely so an errand cannot
+    recover somewhere its turn would not (or fail where the turn recovers). A
+    request the provider READ and refused is the boundary: the same bytes fail
+    identically on every account, so there is nothing to rotate to.
+    """
+    assert is_rotation_eligible(ProviderError(429, "quota", retryable=True))
+    assert is_rotation_eligible(ProviderError(500, "overloaded", retryable=True))
+    assert is_rotation_eligible(ProviderError(408, "timeout", retryable=True))
+    assert is_rotation_eligible(ProviderError(401, "invalid api key", auth_error=True))
+    assert is_rotation_eligible(ProviderError(403, "permission denied"))
+    # A refusal of the request itself, and the two ends that are not provider
+    # failures at all.
+    assert not is_rotation_eligible(ProviderError(400, "unsupported field"))
+    assert not is_rotation_eligible(ProviderError(404, "no such model"))
+    assert not is_rotation_eligible(RuntimeError("not a provider error"))
 
 
 async def test_usage_limit_skips_refresh_step() -> None:
@@ -3316,12 +3338,23 @@ class TestAnIsolatedRequestCannotDegradeTheTurnBesideIt:
         assert used_keys == ["only-key"], "a strict-signature store did not degrade to one attempt"
 
     @pytest.mark.parametrize("status", [429, 500])
-    async def test_non_auth_failures_still_make_exactly_one_attempt_and_never_sleep(
+    async def test_a_store_that_cannot_offer_a_sibling_keeps_one_attempt_and_never_sleeps(
         self, status: int
     ) -> None:
-        """The widening is auth-shaped ONLY. A 429 says "wait", a 5xx says "the
-        provider is having a moment", and an errand must do neither: one
-        attempt, no backoff sleep, exactly as before the fix."""
+        """The ceiling when the store cannot produce a DIFFERENT bearer, for the
+        whole non-auth class.
+
+        ``FakeAuth`` ignores the exclusion kwargs, so the errand's sibling ask
+        hands back the very key it was just refused on and the retry latch
+        refuses it. Pinned here: that one-attempt ceiling, plus the no-SLEEP rule
+        for every non-auth failure (a rate limit says wait, and an errand must
+        not). Deliberately NOT pinned here: the older claim that a 429/5xx leaves
+        the errand with a single wire attempt outright — against a real store the
+        sibling ask DOES reach a healthy sibling on that class, which is the
+        shipped contract and is covered by
+        ``test_a_provider_side_fault_lets_the_errand_reach_a_sibling``. A store
+        on the Protocol's exact signature degrades the same way, covered by
+        ``test_a_store_on_the_protocols_exact_signature_keeps_one_attempt``."""
         client = ScriptedClient(ProviderError(status, "boom", retryable=True))
         slept: list[float] = []
 
@@ -3346,7 +3379,7 @@ class TestAnIsolatedRequestCannotDegradeTheTurnBesideIt:
                 ]
         finally:
             failover_module._abortable_sleep = original
-        assert client.calls == 1, "a non-auth failure retried on an isolated request"
+        assert client.calls == 1, "the errand re-sent the bearer it was refused on"
         assert slept == [], "an isolated call slept on a backoff"
 
     async def test_it_neither_pins_nor_clears_the_sticky_route(self) -> None:
@@ -3608,6 +3641,344 @@ class TestAnIsolatedRequestCannotDegradeTheTurnBesideIt:
         assert slept, "no backoff was spent"
         assert client.calls > 1, "only one attempt was made"
         assert state.active is not None, "no route was pinned"
+
+
+def _revoked() -> ProviderError:
+    """The refusal a revoked-but-still-stored OAuth bearer earns."""
+    return ProviderError(401, "invalid api key", auth_error=True)
+
+
+class TestAnIsolatedErrandRepairsItsOwnAccountTheWayTheTurnDoes:
+    """The residual PR #1032 left behind: its one auth re-resolve can only ask
+    the store for a SIBLING, and a pool of one has no sibling to ask.
+
+    A stored OAuth bearer can be fresh by the store's own reckoning and still be
+    refused by the wire — the token was revoked or rotated out of band, so the
+    row's ``expires`` says nothing about it. The TURN repairs that with its first
+    rotation leg (``resolve_next_key``'s step (b): force-refresh the account it
+    was on) and the conversation stays healthy; the errand could not, because
+    its one sanctioned re-resolve only ever hid the rejected row and looked for
+    someone else. On a single-account pool that made ``/title --refresh`` fail
+    deterministically with "could not reach the model" on a session whose turns
+    ran fine — the reported symptom.
+
+    Every test here runs the REAL ``AuthStore`` cascade, because the leg under
+    test is the store's own (the exclusion machinery and the refresh lease), and
+    a fake's answer would say nothing about it.
+    """
+
+    #: Far enough out that no resolve would refresh the row on its own: the
+    #: stored bearer is current by the store's reckoning, and only the WIRE can
+    #: discover it was revoked.
+    _FUTURE = int(time.time() * 1000) + 3_600_000
+
+    @staticmethod
+    def _isolated(provider: str = "openai", model_id: str = "gpt-4o") -> ChatRequest:
+        return ChatRequest(model=ModelSpec(provider=provider, model_id=model_id), isolated=True)
+
+    def _oauth_row(self, store: AuthStore, provider: str, access: str, label: str):
+        return store.upsert_credential(
+            provider,
+            {
+                "refresh": f"r-{label}",
+                "access": access,
+                "expires": self._FUTURE,
+                "account_id": f"acct-{label}",
+            },
+        )
+
+    def _refreshing_client(
+        self, store: AuthStore, rejects: dict[str, ProviderError], wire: list[str | None]
+    ) -> tuple[Any, list[str]]:
+        """A client that answers ``rejects`` for named bearers and a title otherwise.
+
+        The patched refresh function mints a NEW bearer for whatever row it is
+        asked about, which is what a real token endpoint does — and what makes
+        the repair visible on the wire rather than only in the store.
+        """
+        issued: list[str] = []
+
+        async def refresh(creds: dict[str, Any]) -> dict[str, Any]:
+            issued.append(str(creds.get("account_id")))
+            return {
+                **creds,
+                "access": f"{creds.get('access')}-retokened",
+                "expires": self._FUTURE,
+            }
+
+        store._refresh_fn = lambda provider: refresh  # type: ignore[method-assign]
+        client_for = self._client(rejects, wire)
+        return client_for, issued
+
+    @staticmethod
+    def _client(rejects: dict[str, ProviderError], wire: list[str | None]) -> Any:
+        async def client_for(spec: ModelSpec) -> Any:
+            def wrapper(
+                request: ChatRequest, api_key: str | None, oauth_access: Any = None
+            ) -> AsyncIterator[Any]:
+                wire.append(api_key)
+                if api_key in rejects:
+                    return ScriptedClient(rejects[api_key]).stream(request, api_key)
+                return ScriptedClient(
+                    [StreamTextDelta(delta="<title>x</title>"), StreamEndEvent(stop_reason="stop")]
+                ).stream(request, api_key)
+
+            return _FnClient(wrapper)
+
+        return client_for
+
+    async def test_a_lone_row_the_wire_rejects_still_gets_its_title(self, tmp_path) -> None:
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        session_id = "session-on-a-revoked-token"
+        row = self._oauth_row(store, "openai", "revoked-a", "a")
+        wire: list[str | None] = []
+        client_for, issued = self._refreshing_client(store, {"revoked-a": _revoked()}, wire)
+
+        try:
+            # CONTROL FIRST: this is the turn the reporter says runs fine. It
+            # spends the SAME two wire steps the errand is about to be asked
+            # for — the stored bearer is presented and refused, the account is
+            # force-refreshed, the new bearer is presented and answers. Run
+            # before the errand because the repair persists the rotated token.
+            _ = [
+                event
+                async for event in stream_with_failover(
+                    _request(), store, None, client_for, session_id=session_id
+                )
+            ]
+            assert wire == ["revoked-a", "revoked-a-retokened"], (
+                "the turn did not repair its own revoked bearer, so this test "
+                "proves nothing about a healthy session"
+            )
+            assert store._sticky[("openai", session_id)] == row.id, (
+                "the turn's resolve writes stickiness — the state the errand's "
+                "own call must leave exactly as it found it"
+            )
+
+            # Put the store back on the revoked bearer so the ERRAND meets the
+            # situation the turn just repaired: the row is still fresh to the
+            # store, and only the wire knows the token is dead. The sticky
+            # pointer is dropped for the same reason — a pool of ONE has only
+            # one pick, so clearing it lets the errand's own write (if it made
+            # one) show up instead of being shadowed by the value the turn had
+            # already put there.
+            again = self._oauth_row(store, "openai", "revoked-a", "a")
+            assert again.id == row.id, "the reset created a second row"
+            store._sticky.clear()
+            wire.clear()
+            issued.clear()
+
+            got = [
+                event
+                async for event in stream_with_failover(
+                    self._isolated(), store, None, client_for, session_id=session_id
+                )
+            ]
+            assert [e for e in got if isinstance(e, StreamTextDelta)], "no title came back"
+            assert wire == ["revoked-a", "revoked-a-retokened"], (
+                "the errand did not spend its one extra attempt on the same repair "
+                "the turn makes: a forced refresh of the account it was on"
+            )
+            assert issued == ["acct-a"], "the repair did not come from a refresh"
+            # The repair is the ACCOUNT's own bookkeeping (the rotated token is
+            # persisted); nothing else moved. That is what makes the extra
+            # attempt safe next to a live turn.
+            repaired = store.get_credential(row.id)
+            assert repaired is not None, "the row vanished under the repair"
+            assert repaired.data["access"] == "revoked-a-retokened"
+            assert store._sticky == {}, "the errand repointed the session's sticky credential"
+            assert not store.is_blocked(row.id, "openai"), "the errand blocked the row"
+            assert store._active_demotions("openai") == set(), "the errand demoted the row"
+        finally:
+            store.close()
+
+    @pytest.mark.parametrize(
+        ("status", "message"),
+        [(429, "usage limit reached for this window"), (500, "overloaded")],
+    )
+    async def test_a_lone_throttled_account_is_never_force_refreshed(
+        self, tmp_path, status: int, message: str
+    ) -> None:
+        """The skip that keeps a lone throttled/faulted account off the refresh leg.
+
+        ``is_direct_credential_rotation_error`` is the rule the ordinary rotation
+        applies too: a spent window or a provider-side fault is not the
+        CREDENTIAL's problem, so a fresh bearer cannot fix it and the turn does
+        not refresh there either. The errand's answer on that class is the
+        sibling ask — and a pool of ONE has none to offer, so without the skip
+        the errand would spend a token POST plus a second wire attempt on the
+        very account the provider is refusing, with the whole suite staying
+        green. That mutation is why this test exists: the refresh function here
+        WOULD mint a working bearer, so removing the skip changes the wire.
+        """
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        row = self._oauth_row(store, "openai", "throttled-a", "a")
+        wire: list[str | None] = []
+        client_for, issued = self._refreshing_client(
+            store, {"throttled-a": ProviderError(status, message, retryable=True)}, wire
+        )
+        slept: list[float] = []
+
+        async def spy_sleep(delay_ms: float, signal: Any = None) -> None:
+            slept.append(delay_ms)
+
+        original = failover_module._abortable_sleep
+        failover_module._abortable_sleep = spy_sleep  # type: ignore[assignment]
+        try:
+            with pytest.raises(ProviderError):
+                _ = [
+                    event
+                    async for event in stream_with_failover(
+                        self._isolated(), store, None, client_for, session_id="lone-account"
+                    )
+                ]
+            assert wire == [
+                "throttled-a"
+            ], "a lone throttled account bought the errand a second wire attempt"
+            assert (
+                issued == []
+            ), "the errand spent a token POST on the account the provider is refusing"
+            assert slept == [], "an isolated errand took a backoff sleep"
+            assert not store.is_blocked(row.id, "openai"), "the errand blocked the row"
+        finally:
+            failover_module._abortable_sleep = original
+            store.close()
+
+    async def test_a_refused_request_keeps_the_exactly_one_attempt_rule(self, tmp_path) -> None:
+        """A 4xx the provider READ and refused is DETERMINISTIC in its bytes: the
+        same request fails identically on every other account, so there is
+        nothing to rotate to and nothing for an errand to ask. This is the test
+        that fails if the recovery is ever widened past the class the turn
+        itself rotates on."""
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        session_id = "session-on-a-bad-request"
+        row = self._oauth_row(store, "openai", "bad-request-a", "a")
+        self._oauth_row(store, "openai", "healthy-b", "b")
+        wire: list[str | None] = []
+        client_for, issued = self._refreshing_client(
+            store, {"bad-request-a": ProviderError(400, "unsupported field")}, wire
+        )
+
+        try:
+            # The session is stuck on the account whose request is refused, so
+            # the sibling is genuinely available and would serve a rotated
+            # request — which is what makes the one-attempt assertion below
+            # mean "the errand declined to rotate" rather than "there was
+            # nothing to rotate to".
+            store._sticky[("openai", session_id)] = row.id
+            with pytest.raises(ProviderError):
+                _ = [
+                    event
+                    async for event in stream_with_failover(
+                        self._isolated(), store, None, client_for, session_id=session_id
+                    )
+                ]
+            assert wire == [
+                "bad-request-a"
+            ], "a deterministic request defect bought the errand a second attempt"
+            assert issued == [], "a request defect spent a token refresh"
+            assert not store.is_blocked(row.id, "openai")
+        finally:
+            store.close()
+
+    @pytest.mark.parametrize(
+        ("status", "message"),
+        [(429, "usage limit reached for this window"), (500, "overloaded")],
+    )
+    async def test_a_provider_side_fault_lets_the_errand_reach_a_sibling(
+        self, tmp_path, status: int, message: str
+    ) -> None:
+        """The other half of issue #1814's class, and the reason the recovery is
+        keyed on the TURN's rotation predicate rather than on auth alone.
+
+        A session sticky to an account the provider is currently refusing — a
+        spent weekly window (429) or a server-side fault (500) — keeps working:
+        the turn rotates to a sibling and is served. The errand used to raise
+        after ONE attempt, forever, because its gate admitted auth-shaped
+        failures only. The account is not at fault, so the errand must reach the
+        sibling without blocking it, without demoting it and without moving the
+        session's sticky pointer — all three are routing decisions belonging to
+        the turn, which is exactly what the ordinary control below does.
+        """
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        session_id = "session-on-a-throttled-account"
+        throttled = self._oauth_row(store, "openai", "throttled-a", "a")
+        self._oauth_row(store, "openai", "healthy-b", "b")
+        wire: list[str | None] = []
+        client_for, _issued = self._refreshing_client(
+            store, {"throttled-a": ProviderError(status, message, retryable=True)}, wire
+        )
+
+        try:
+            store._sticky[("openai", session_id)] = throttled.id
+            got = [
+                event
+                async for event in stream_with_failover(
+                    self._isolated(), store, None, client_for, session_id=session_id
+                )
+            ]
+            assert [e for e in got if isinstance(e, StreamTextDelta)], "no title came back"
+            assert wire == ["throttled-a", "healthy-b"], "the errand did not reach the sibling"
+            assert store._sticky == {
+                ("openai", session_id): throttled.id
+            }, "the errand moved the session's sticky credential"
+            assert (
+                store._active_demotions("openai") == set()
+            ), "the errand demoted the throttled row"
+            assert not store.is_blocked(
+                throttled.id, "openai"
+            ), "the errand blocked the row the turn is transacting on"
+
+            # CONTROL: the turn beside it walks the same two bearers and DOES
+            # take the routing decision — which is what keeps the session
+            # healthy while the errand previously failed.
+            wire.clear()
+            _ = [
+                event
+                async for event in stream_with_failover(
+                    _request(), store, None, client_for, session_id=session_id
+                )
+            ]
+            assert wire[0] == "throttled-a" and "healthy-b" in wire, "the turn did not rotate"
+            assert store._active_demotions("openai") or store._sticky != {
+                ("openai", session_id): throttled.id
+            }, "the turn took no routing decision, so the contrast proves nothing"
+        finally:
+            store.close()
+
+    async def test_a_sibling_is_still_preferred_over_refreshing_the_rejected_row(
+        self, tmp_path
+    ) -> None:
+        """The widening must not invert the order the errand's sibling leg exists
+        for: a refreshed token on the row the provider just rejected is the
+        candidate LEAST likely to work while a healthy sibling is sitting right
+        there. On the real store the sibling answers and no refresh is spent."""
+        store = AuthStore(db_path=tmp_path / "auth.db")
+        session_id = "session-with-a-sibling"
+        dead = self._oauth_row(store, "openai", "dead-a", "a")
+        self._oauth_row(store, "openai", "good-b", "b")
+        wire: list[str | None] = []
+        client_for, issued = self._refreshing_client(store, {"dead-a": _revoked()}, wire)
+
+        try:
+            store._sticky[("openai", session_id)] = dead.id
+            got = [
+                event
+                async for event in stream_with_failover(
+                    self._isolated(), store, None, client_for, session_id=session_id
+                )
+            ]
+            assert [e for e in got if isinstance(e, StreamTextDelta)], "no title came back"
+            assert wire == ["dead-a", "good-b"], "the errand did not ask the healthy sibling"
+            assert issued == [], "the errand refreshed the rejected row with a sibling available"
+            assert not store.is_blocked(
+                dead.id, "openai"
+            ), "the errand blocked the row the turn is transacting on"
+            assert store._sticky == {
+                ("openai", session_id): dead.id
+            }, "the errand moved the session's sticky credential"
+        finally:
+            store.close()
 
 
 class TestProviderOutageWalksTheWholePool:
@@ -6517,6 +6888,11 @@ async def test_pinned_usage_refusal_earns_a_capped_probation_re_ask_per_credenti
     earns one bounded same-credential re-ask PER CREDENTIAL (wait = the
     advertised 45s, capped at 60s, floored by the existing backoff) BEFORE
     rotation, and the walk that follows descends in same-family order.
+
+    The settings below pin the STRICT ``retry.pinnedFallback: same-family``
+    opt-in EXPLICITLY — this test was written for the strict default and
+    keeps covering the strict policy; the shipped default descends the
+    cross-vendor hop last and is covered by its own tests.
     """
     events: list[str] = []
     sleeps: list[int] = []
@@ -6539,8 +6915,9 @@ async def test_pinned_usage_refusal_earns_a_capped_probation_re_ask_per_credenti
     settings = {
         "retry": {
             "baseDelayMs": 1,
+            "pinnedFallback": "same-family",
             # Cross-vendor FIRST in config, same-vendor second: the descent
-            # must reorder to the same-vendor target, and the strict default
+            # must reorder to the same-vendor target, and the strict policy
             # must keep the cross-vendor one out entirely.
             "fallbackChains": {
                 "default": ["deepseek/deepseek-flash", "openrouter/anthropic/claude-opus-5"]
@@ -6640,10 +7017,12 @@ async def test_pinned_probation_caps_a_multi_hour_reset_then_treats_it_as_spent(
 async def test_pinned_descent_orders_pin_preserving_then_same_vendor_then_stops(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """T2/P2: the descent order is pin-preserving → same-vendor → (refused)
-    cross-vendor. The pin-preserving route is asked first even though the
-    cross-vendor target is FIRST in config, then the same-vendor sibling;
-    the cross-vendor target is never asked at all."""
+    """T2/P2 (STRICT opt-in, pinned explicitly below): the descent order is
+    pin-preserving → same-vendor → (refused) cross-vendor. The pin-preserving
+    route is asked first even though the cross-vendor target is FIRST in
+    config, then the same-vendor sibling; the cross-vendor target is never
+    asked at all. The default's cross-vendor-last descent is covered by the
+    ``default_*`` tests beside this one."""
     specs_seen: list[str] = []
 
     async def client_for(spec: ModelSpec) -> Any:
@@ -6664,6 +7043,7 @@ async def test_pinned_descent_orders_pin_preserving_then_same_vendor_then_stops(
     settings = {
         "retry": {
             "baseDelayMs": 1,
+            "pinnedFallback": "same-family",
             "fallbackChains": {
                 "default": [
                     "deepseek/deepseek-flash",
@@ -6696,9 +7076,10 @@ async def test_pinned_descent_orders_pin_preserving_then_same_vendor_then_stops(
 async def test_pinned_route_fails_visibly_rather_than_crossing_vendors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """T3/P3: with no same-family target that can serve, the strict default
-    FAILS the child with a legible error — the pin, the cause and BOTH
-    remedies — and never asks the cross-vendor target."""
+    """T3/P3 (STRICT opt-in, pinned explicitly below): with no same-family
+    target that can serve, the strict policy FAILS the child with a legible
+    error — the pin, the cause and BOTH remedies — and never asks the
+    cross-vendor target."""
     specs_seen: list[str] = []
 
     async def client_for(spec: ModelSpec) -> Any:
@@ -6713,6 +7094,7 @@ async def test_pinned_route_fails_visibly_rather_than_crossing_vendors(
     settings = {
         "retry": {
             "baseDelayMs": 1,
+            "pinnedFallback": "same-family",
             "fallbackChains": {"default": ["deepseek/deepseek-flash"]},
         }
     }
@@ -6751,11 +7133,12 @@ async def test_pinned_route_fails_visibly_rather_than_crossing_vendors(
 async def test_pinned_route_with_no_chain_still_fails_legibly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """F3: strictness is a property of the (pin, policy) pair, not of a chain
-    happening to expand. With NO fallbackChains configured, a pinned child
-    now fails with the legible refusal — pin, cause, both remedies, and the
-    nothing-configured note — where it used to surface the raw provider
-    error with no pin named and no way out."""
+    """F3 (STRICT opt-in, pinned explicitly below): strictness is a property
+    of the (pin, policy) pair, not of a chain happening to expand. With NO
+    fallbackChains configured, a strictly-pinned child fails with the legible
+    refusal — pin, cause, both remedies, and the nothing-configured note —
+    where it used to surface the raw provider error with no pin named and no
+    way out."""
 
     def pinned_call(request: ChatRequest, api_key: str | None, oauth_access: Any = None):
         raise ProviderError(429, "quota reset pending", retryable=True, retry_after_ms=45_000)
@@ -6768,7 +7151,8 @@ async def test_pinned_route_with_no_chain_still_fails_legibly(
 
     monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", no_sleep)
 
-    settings = {"retry": {"baseDelayMs": 1}}  # no fallbackChains at all
+    settings = {"retry": {"baseDelayMs": 1, "pinnedFallback": "same-family"}}
+    # ^ no fallbackChains at all
     auth = FakeAuth({"anthropic": ["ka1"]})
 
     with pytest.raises(ProviderError) as caught:
@@ -6978,6 +7362,341 @@ async def test_opt_in_cross_vendor_descent_is_recorded_loudly(
 
     assert settles and settles[0][0] == FallbackTarget("deepseek/deepseek-flash", None)
     assert "cross-vendor descent for pinned anthropic/claude-sonnet-5-5" in settles[0][1]
+
+
+async def test_default_pinned_child_descends_cross_vendor_last_and_serves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The SHIPPED default (no ``retry.pinnedFallback`` key) walks the chain:
+    family-first, cross-vendor last, and the descent is recorded.
+
+    The 2026-09-30 incident shape: the pin's credential is unusable, the
+    chain holds a same-vendor sibling that also cannot serve and a
+    cross-vendor hop that can. Under the strict default this child died
+    instantly beside a working hop; under the default it walks — same-vendor
+    sibling BEFORE the cross-vendor hop even though the chain lists the
+    cross-vendor one first — and the settle reason must carry the descent
+    clause, which is the disclosure the default is traded on."""
+    specs_seen: list[str] = []
+    settles: list[tuple[Any, str]] = []
+
+    async def client_for(spec: ModelSpec) -> Any:
+        specs_seen.append(f"{spec.provider}/{spec.model_id}")
+        if spec.model_id in ("claude-sonnet-5-5", "claude-opus-5"):
+            return ScriptedClient(ProviderError(None, "model unavailable"))
+        return ScriptedClient([StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")])
+
+    async def no_sleep(delay_ms: int, signal: Any) -> None:
+        return None
+
+    monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", no_sleep)
+
+    settings = {
+        "retry": {
+            "baseDelayMs": 1,
+            "maxRetries": 0,
+            # NO ``pinnedFallback`` key: the shipped default is under test.
+            # Cross-vendor FIRST in config; ordering must still hold the
+            # same-vendor sibling in front of it.
+            "fallbackChains": {"default": ["deepseek/deepseek-flash", "anthropic/claude-opus-5"]},
+        }
+    }
+    auth = FakeAuth({"anthropic": ["ka1"], "deepseek": ["kd1"]})
+    state = _pinned_state()
+    state.on_settle = lambda target, reason: settles.append((target, reason))
+
+    got = await _collect(
+        stream_with_failover(
+            _request("anthropic", "claude-sonnet-5-5"),
+            auth,
+            settings,
+            client_for,
+            route_state=state,
+        )
+    )
+
+    assert specs_seen == [
+        _PIN,
+        "anthropic/claude-opus-5",
+        "deepseek/deepseek-flash",
+    ], specs_seen
+    assert any(isinstance(event, StreamTextDelta) and event.delta == "ok" for event in got)
+    # The LAST settle is the cross-vendor descent itself: the same-vendor hop
+    # settled first (the pin→sibling edge), then the sibling→cross-vendor edge
+    # carries the clause this default is traded on.
+    assert settles[-1][0] == FallbackTarget("deepseek/deepseek-flash", None)
+    assert "cross-vendor descent for pinned anthropic/claude-sonnet-5-5" in settles[-1][1]
+    # ... and the same-vendor edge before it did NOT claim a cross-vendor
+    # descent.
+    assert "cross-vendor" not in settles[0][1], settles
+
+
+async def test_default_pinned_exhaustion_fails_legibly_with_hops_tried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The SHIPPED default's exhausted walk names the hops it tried.
+
+    Every configured hop fails; the child must fail with the NEW legible copy
+    — pin, cause, the hops by name, and the remedy — never the strict refusal
+    it used to print (which blamed a policy that no longer filtered
+    anything) and never a bare provider error. The hop list is asserted
+    against the selectors the walk actually ATTEMPTED, because the copy's
+    claim is "Every configured hop was tried"."""
+    specs_seen: list[str] = []
+
+    async def client_for(spec: ModelSpec) -> Any:
+        specs_seen.append(f"{spec.provider}/{spec.model_id}")
+        return ScriptedClient(ProviderError(None, "model unavailable"))
+
+    async def no_sleep(delay_ms: int, signal: Any) -> None:
+        return None
+
+    monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", no_sleep)
+
+    settings = {
+        "retry": {
+            "baseDelayMs": 1,
+            "fallbackChains": {"default": ["anthropic/claude-opus-5", "deepseek/deepseek-flash"]},
+        }
+    }
+    auth = FakeAuth({"anthropic": ["ka1"], "deepseek": ["kd1"]})
+
+    with pytest.raises(ProviderError) as caught:
+        await _collect(
+            stream_with_failover(
+                _request("anthropic", "claude-sonnet-5-5"),
+                auth,
+                settings,
+                client_for,
+                route_state=_pinned_state(),
+            )
+        )
+
+    message = str(caught.value)
+    assert f"Pin {_PIN} failed; add another hop or fix credentials." in message
+    assert "Last failure: unknown: model unavailable." in message
+    attempted_hops = specs_seen[1:]
+    assert attempted_hops == ["anthropic/claude-opus-5", "deepseek/deepseek-flash"], specs_seen
+    hops_list = ", ".join(attempted_hops)
+    assert f"Every configured hop was tried and could not serve it: {hops_list}." in message
+    assert "retry.fallbackChains" in message, "the remedy names the config key"
+    assert "refused by retry.pinnedFallback" not in message, "no stale strict blame"
+    assert "allow cross-vendor" not in message, "the strict copy's remedy is not this one"
+    # Layout: the remedy's leading phrase must land in the dock row's span.
+    assert message.index("add another hop") + len("add another hop") <= 58
+
+
+async def test_default_pinned_no_chain_fails_legibly_new_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The SHIPPED default with no chain: legible, and pointing at the key.
+
+    A pinned child with no ``fallbackChains`` under the default cannot
+    descend anywhere, and the failure must say that — not print the strict
+    copy about same-family hops (no policy refusal happened here) and never
+    a bare provider error."""
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return ScriptedClient(ProviderError(None, "model unavailable"))
+
+    async def no_sleep(delay_ms: int, signal: Any) -> None:
+        return None
+
+    monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", no_sleep)
+
+    settings = {"retry": {"baseDelayMs": 1}}  # no fallbackChains at all
+
+    with pytest.raises(ProviderError) as caught:
+        await _collect(
+            stream_with_failover(
+                _request("anthropic", "claude-sonnet-5-5"),
+                FakeAuth({"anthropic": ["ka1"]}),
+                settings,
+                client_for,
+                route_state=_pinned_state(),
+            )
+        )
+
+    message = str(caught.value)
+    assert f"Pin {_PIN} failed; add a hop to retry.fallbackChains." in message
+    assert "Last failure: unknown: model unavailable." in message
+    assert "No fallback hop is configured." in message
+    assert "Fix:" not in message, "the lead already carries the remedy (design review D6)"
+    assert "same-family" not in message, "no strict-policy copy under the default"
+    assert message.index("add a hop") + len("add a hop") <= 58
+
+
+async def test_pinned_fallback_disabled_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``retry.modelFallback: false``: the walk stays on the pin, and an
+    exhausted pinned child names the switch by its /settings row LABEL
+    (**Model fallback**) with the remedy inside the dock row's leading cells
+    — not a bare provider error (the shape it used to get), and not the raw
+    stored key (design review round 1, D2)."""
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return ScriptedClient(ProviderError(None, "model unavailable"))
+
+    async def no_sleep(delay_ms: int, signal: Any) -> None:
+        return None
+
+    monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", no_sleep)
+
+    settings = {
+        "retry": {
+            "baseDelayMs": 1,
+            "modelFallback": False,
+            "fallbackChains": {"default": ["deepseek/deepseek-flash"]},
+        }
+    }
+    auth = FakeAuth({"anthropic": ["ka1"], "deepseek": ["kd1"]})
+
+    with pytest.raises(ProviderError) as caught:
+        await _collect(
+            stream_with_failover(
+                _request("anthropic", "claude-sonnet-5-5"),
+                auth,
+                settings,
+                client_for,
+                route_state=_pinned_state(),
+            )
+        )
+
+    message = str(caught.value)
+    assert (
+        f"Pin {_PIN} failed; turn fallback on in /settings (Model fallback),"
+        " or fix the pinned model." in message
+    )
+    assert "Last failure: unknown: model unavailable." in message
+    assert "retry.modelFallback" not in message, "the row label, not the raw key"
+    # Design review round 1, D2: the remedy must land in the dock row's span.
+    assert message.index("turn fallback on") + len("turn fallback on") <= 58
+
+
+async def test_pinned_child_with_retry_disabled_fails_legibly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``retry.enabled: false`` + a pin: the retry-disabled fast path raises
+    the same legible failure shape as the walk tail, naming the /settings row
+    by label — never the bare provider error a pinned child used to get.
+
+    Agent review round 1, F1 / QA round 1, Q-1: with the whole cascade off
+    the walk's tail is unreachable (the fast path raises first), so the
+    pinned-child contract is honoured AT the fast path."""
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return ScriptedClient(ProviderError(None, "model unavailable"))
+
+    async def no_sleep(delay_ms: int, signal: Any) -> None:
+        return None
+
+    monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", no_sleep)
+
+    settings = {
+        "retry": {
+            "baseDelayMs": 1,
+            "enabled": False,
+            "fallbackChains": {"default": ["deepseek/deepseek-flash"]},
+        }
+    }
+
+    with pytest.raises(ProviderError) as caught:
+        await _collect(
+            stream_with_failover(
+                _request("anthropic", "claude-sonnet-5-5"),
+                FakeAuth({"anthropic": ["ka1"]}),
+                settings,
+                client_for,
+                route_state=_pinned_state(),
+            )
+        )
+
+    message = str(caught.value)
+    assert message.startswith(f"Pin {_PIN} failed; turn fallback on")
+    assert "(Retry failed calls)" in message, "the switch's /settings label, not its key"
+    assert "retry.enabled" not in message
+    assert "Last failure: unknown: model unavailable." in message
+    assert caught.value.__cause__ is not None, "the original failure stays chained"
+    assert message.index("turn fallback on") + len("turn fallback on") <= 58
+
+
+async def test_pinned_retry_disabled_transport_failure_is_legible_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The transport-error fast path wraps too: a timeout-shaped failure on a
+    pinned route with ``retry.enabled: false`` raises the same legible copy
+    (agent review round 1, F1), quoting the wrapped diagnosis."""
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return ScriptedClient(TimeoutError("read stalled"))
+
+    async def no_sleep(delay_ms: int, signal: Any) -> None:
+        return None
+
+    monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", no_sleep)
+
+    settings = {"retry": {"baseDelayMs": 1, "enabled": False}}
+
+    with pytest.raises(ProviderError) as caught:
+        await _collect(
+            stream_with_failover(
+                _request("anthropic", "claude-sonnet-5-5"),
+                FakeAuth({"anthropic": ["ka1"]}),
+                settings,
+                client_for,
+                route_state=_pinned_state(),
+            )
+        )
+
+    message = str(caught.value)
+    assert message.startswith(f"Pin {_PIN} failed; turn fallback on")
+    assert "(Retry failed calls)" in message
+    assert "Last failure: timeout: TimeoutError: read stalled." in message
+
+
+@pytest.mark.parametrize(
+    "error, expected",
+    [
+        (ProviderError(None, "model unavailable"), "model unavailable"),
+        (
+            ProviderError(
+                429, "quota reset pending", retryable=True, kind="quota", retry_after_ms=45_000
+            ),
+            "rate limit or quota exceeded (HTTP 429, retry in 45s): quota reset pending",
+        ),
+    ],
+)
+async def test_unpinned_retry_disabled_raises_the_bare_error_unchanged(
+    monkeypatch: pytest.MonkeyPatch, error: ProviderError, expected: str
+) -> None:
+    """NEGATIVE CONTROL for the fast-path wrap: with no pin marker the
+    retry-disabled raises stay exactly what they were — the bare provider
+    error, no pin, no /settings copy."""
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return ScriptedClient(error)
+
+    async def no_sleep(delay_ms: int, signal: Any) -> None:
+        return None
+
+    monkeypatch.setattr("local_operator.providers.failover._abortable_sleep", no_sleep)
+
+    settings = {"retry": {"baseDelayMs": 1, "enabled": False}}
+
+    with pytest.raises(ProviderError) as caught:
+        await _collect(
+            stream_with_failover(
+                _request("anthropic", "claude-sonnet-5-5"),
+                FakeAuth({"anthropic": ["ka1"]}),
+                settings,
+                client_for,
+                route_state=FailoverRouteState(),  # UNPINNED
+            )
+        )
+
+    assert str(caught.value) == expected
+    assert not str(caught.value).startswith("Pin")
 
 
 async def test_unpinned_route_sequences_are_byte_for_byte_unchanged(

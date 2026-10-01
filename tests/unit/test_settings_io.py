@@ -374,6 +374,13 @@ def _consumer_defaults() -> dict[str, object]:
     consumers["proactive.patience.max_attempts"] = patience_engine.DEFAULT_MAX_ATTEMPTS
     consumers["proactive.patience.episode_ttl_ms"] = patience_engine.DEFAULT_TTL_MS
     consumers["proactive.patience.max_pending"] = patience_engine.DEFAULT_MAX_PENDING
+
+    # The send tool's notice key, asked of the module that READS it: the reader
+    # is ``peer_send.journal_unconfirmed_enabled``, whose fallback constant is
+    # the shipped default. Restating ``False`` here would guard nothing.
+    from local_operator.mobile.peer_send import JOURNAL_UNCONFIRMED_DEFAULT
+
+    consumers["send.journal_unconfirmed"] = JOURNAL_UNCONFIRMED_DEFAULT
     return consumers
 
 
@@ -2123,26 +2130,32 @@ class TestTheSubagentModelChoiceRow:
         assert "costlier model" in by_value["model"].description
 
     def test_the_pinned_fallback_row_fits_its_copy(self) -> None:
-        """Design round 1, D1/D3, pinned as facts rather than as wording.
+        """Design round 1, D1/D3, pinned as facts rather than as wording;
+        bounds re-derived in design review round 1 of the failover PR (D1).
 
         The choice descriptions render ONLY on the expanded rows, where the
         60x20 captured-frame fields are 17 and 26 cells (a clipped line spends
         its last cell on the truncation ellipsis; the pairs at 80x24 are 37/46
-        and at 100x30 are 23/32). So each description must fit the SMALLEST
-        field pair, and the shipped pair — 16 and 22 cells — paints WITHOUT an
-        ellipsis at 60x20, 80x24 and 100x30 (frames). The pair this replaced
-        ran to 121 and 129 characters, was clipped at every size, and always
-        lost the discriminating words (which vendor the child may reach).
-        The help must fit the detail line's 93 cells at 100x30 WITHOUT losing
-        `same-family hops only, or any vendor (announced)` — the clause the
-        overlong predecessor dropped on the line that exists to say it; it
-        now paints all 87 cells there (frame).
+        and at 100x30 are 23/32). The ``(default)`` marker costs its row ~9 of
+        those cells, so the row that wears it has a 17-cell description field:
+        both descriptions must fit 17, whichever row carries the marker. This
+        pin held when the marker sat on ``same-family``; the default flip
+        moved it to ``cross-family``, and the frame showed the old 22-cell
+        ``any vendor (announced)`` clipped to ``(announce…`` — so that hint is
+        now the 10-cell ``any vendor``, and the shipped pair, 16 and 10 cells,
+        paints WITHOUT an ellipsis at 60x20, 80x24 and 100x30 (frames). The
+        pair this replaced ran to 121 and 129 characters, was clipped at every
+        size, and always lost the discriminating words (which vendor the child
+        may reach). The help must fit the detail line's 93 cells at 100x30
+        WITHOUT losing `same-family hops only, or any vendor (announced)` —
+        the clause the overlong predecessor dropped on the line that exists to
+        say it; it now paints all 87 cells there (frame).
         """
         setting = settings_io.resolve_key("retry.pinnedFallback")
         assert setting is not None
         by_value = {choice.value: choice for choice in setting.choices}
         assert cell_len(by_value["same-family"].description) <= 17
-        assert cell_len(by_value["cross-family"].description) <= 26
+        assert cell_len(by_value["cross-family"].description) <= 17
         assert "same vendor" in by_value["same-family"].description
         assert "any vendor" in by_value["cross-family"].description
         assert "same-family hops only, or any vendor (announced)" in setting.help

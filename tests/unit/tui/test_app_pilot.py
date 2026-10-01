@@ -4387,6 +4387,193 @@ async def test_logout_offers_one_row_per_credential_not_per_provider() -> None:
 
 
 @pytest.mark.asyncio
+async def test_logout_rows_name_the_stored_account_when_there_is_exactly_one() -> None:
+    """` · <identity>` — WHICH account this row would log out.
+
+    Added only when the store holds one credential under the provider's storage
+    id: with two accounts any single label is a silent pick, and that choice
+    stays in the account-level dialog. The kind does not move (``remove api
+    key``): the row answers both what would be removed and whose it is.
+    """
+
+    class LabelledStore(FakeProviderController):
+        def credentials(self):
+            return [
+                _FakeCred(
+                    7, "openrouter", "api_key", {"source": "login", "email": "me@example.com"}
+                )
+            ]
+
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=LabelledStore())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        _set_editor_line(app.query_one(Editor), "/logout ")
+        await pilot.pause()
+        assert _provider_rows(app) == [("openrouter", "remove api key · me@example.com")]
+
+
+@pytest.mark.asyncio
+async def test_multi_account_logout_rows_keep_the_kind_and_add_no_label() -> None:
+    """Two accounts under one provider: the kind, never a chosen label.
+
+    `/logout` removes the LOT (that is what the detail column has always
+    promised — "remove 2 credentials"), and a label naming one of the two
+    accounts would read as a row that removes only that one.
+    """
+
+    class TwoAccounts(FakeProviderController):
+        def credentials(self):
+            return [
+                _FakeCred(1, "openrouter", "api_key", {"source": "login"}),
+                _FakeCred(2, "openrouter", "oauth", {"email": "b@example.com"}),
+            ]
+
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=TwoAccounts())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        _set_editor_line(app.query_one(Editor), "/logout ")
+        await pilot.pause()
+        assert _provider_rows(app) == [("openrouter", "remove 2 credentials")]
+
+
+@pytest.mark.asyncio
+async def test_two_logins_of_one_kind_report_the_count_not_the_bare_kind() -> None:
+    """Multi-account rows of ONE kind say HOW MANY, not just which kind.
+
+    With neighbours carrying an account label, a bare ``remove oauth`` read as
+    "one credential with no label" rather than "two accounts, all of which go"
+    — and this is the list whose row deletes both (design review round 1, D2).
+    The mixed-kind case keeps its existing ``remove 2 credentials``.
+    """
+
+    class TwoOAuth(FakeProviderController):
+        def credentials(self):
+            return [
+                _FakeCred(1, "openrouter", "oauth", {"email": "a@b.c"}),
+                _FakeCred(2, "openrouter", "oauth", {"email": "d@e.f"}),
+            ]
+
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=TwoOAuth())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        _set_editor_line(app.query_one(Editor), "/logout ")
+        await pilot.pause()
+        assert _provider_rows(app) == [("openrouter", "remove 2 oauth logins")]
+
+
+@pytest.mark.asyncio
+async def test_a_long_identity_is_clipped_so_the_detail_column_survives() -> None:
+    """The identity is the ONLY user-supplied string in a picker detail column.
+
+    The picker sizes that column to the widest detail in the list and drops it
+    WHOLE when reserving it would squeeze the name — so one long address used to
+    decide whether every row still stated what it removes, and this is the list
+    that gates a credential deletion (design review round 1, D1: a 43-cell
+    address dropped the column at 98 cols). The clip keeps the account visible
+    AND the consequence visible: tail ellipsis, cell-measured, 24 cells max.
+    """
+
+    class LongLabel(FakeProviderController):
+        def credentials(self):
+            return [
+                _FakeCred(
+                    7,
+                    "openrouter",
+                    "api_key",
+                    {"source": "login", "email": "damian.tran@gominerva.com"},
+                )
+            ]
+
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=LongLabel())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        _set_editor_line(app.query_one(Editor), "/logout ")
+        await pilot.pause()
+        assert _provider_rows(app) == [
+            ("openrouter", "remove api key · damian.tran@gominerva.c…")
+        ], "24 cells of identity, ellipsis at the tail, kind still first"
+
+
+@pytest.mark.asyncio
+async def test_accounts_prints_the_one_label_derivation_not_the_dedupe_key() -> None:
+    """`/accounts` reads ``credential_identity`` like every other surface.
+
+    A row whose payload carries no email/account_id/org_name prints ``-``, where
+    it used to print its ``identity_key`` — which for an OAuth payload with no
+    IdP identity is the synthetic dedupe constant ``oauth:kimi``, a fact about
+    storage shown as if it named the account (agent review round 1, R1).
+    """
+
+    class MixedStore(FakeProviderController):
+        def credentials(self):
+            return [
+                _FakeCred(
+                    1, "openrouter", "api_key", {"source": "login", "email": "me@example.com"}
+                ),
+                _FakeCred(
+                    3,
+                    "kimi",
+                    "oauth",
+                    {"expires": 9999999999999},
+                    identity_key="oauth:kimi",
+                ),
+            ]
+
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=MixedStore())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        _set_editor_line(app.query_one(Editor), "/accounts")
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        texts = _transcript_text(app)
+    assert "me@example.com" in texts, texts
+    assert "oauth:kimi" not in texts, "a dedupe constant is not an account label"
+    assert "oauth · active · -" in texts, texts
+
+
+@pytest.mark.asyncio
+async def test_mcp_verb_rows_are_the_backend_table_row_for_row() -> None:
+    """The `/mcp ` verb rows ARE ``MCP_VERB_ROWS`` — including ``alert``.
+
+    Descriptions and the destructive flags are the same bytes the desktop
+    composer reads (through ``GET /v1/desktop/mcp``'s ``verbs``), and ``alert``
+    is the bit the editor's destructive gate reads to make Enter FILL instead
+    of RUN — so a local literal that drifted from the table would be a safety
+    rule with two spellings.
+    """
+    from local_operator.mcp.catalog import MCP_VERB_ROWS
+
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=FakeProviderController())
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        _set_editor_line(editor, "/mcp")
+        await pilot.pause()
+        _set_editor_line(editor, "/mcp ")
+        await pilot.pause()
+        rows = []
+        for _name, choice in editor.picker.suggestions():
+            # The picker holds commands and argument rows in one list; this slot
+            # is the argument one (``_provider_rows`` makes the same check).
+            assert isinstance(choice, ArgumentChoice)
+            rows.append((choice.name, choice.description, choice.detail, choice.alert))
+    assert rows == [(row.verb, row.description, "", row.destructive) for row in MCP_VERB_ROWS]
+
+
+@pytest.mark.asyncio
 async def test_a_provider_row_describes_what_its_id_does_not_already_say() -> None:
     """The registry name restated the id on twelve rows out of twelve.
 
@@ -4628,6 +4815,66 @@ class FakeProviderController:
             _FakeCred(2, "deepseek", "oauth", {"expires": 9999999999999, "email": "a@b.c"}),
         ]
 
+    def view_rows(self):
+        """The shared provider view, in this fake's own terms.
+
+        Composed from the two knobs the tests already turn -- ``credentials()``
+        for the store and ``has_any_credential``/``is_usable`` for the facade --
+        so an env-key override, two providers sharing one storage id or a
+        store that cannot be read all simulate the real controller the same way
+        it composes the row (see ``ProviderController.view_rows``).
+
+        A raising ``credentials()`` PROPAGATES: that is this fake's unreadable
+        store, and the guard at each call site is what the tests exercise.
+        """
+        from local_operator.providers.auth_store import credential_identity
+
+        by_storage: dict[str, list[Any]] = {}
+        for row in self.credentials():
+            by_storage.setdefault(row.provider, []).append(row)
+        rows: list[Any] = []
+        for definition in self.login_providers():
+            storage = definition.store_credentials_as or definition.id
+            mine = by_storage.get(storage, [])
+            # Store AND facade agree, the rule the old `/logout` filter spelled
+            # with two reads: this fake's facade predicate is a knob the tests
+            # set, so a row in ``credentials()`` it disowns must not become a
+            # row the user can act on.
+            count = len(mine) if self.has_any_credential(definition.id) else 0
+            usable = self.is_usable(definition.id)
+            if count > 0:
+                state = "logged_in"
+            elif usable:
+                state = "env_key"
+            else:
+                state = "needs_login"
+            rows.append(
+                _FakeViewRow(
+                    definition=definition,
+                    storage_id=storage,
+                    state=state,
+                    identity=credential_identity(mine[0]) if count == 1 else None,
+                    stored_credentials=count,
+                    account_count=count,
+                    has_credential=count > 0,
+                    usable=usable,
+                    credential_types=tuple(row.credential_type for row in mine),
+                )
+            )
+        return rows
+
+    def logout_rows(self):
+        """The ``/logout`` projection, mirroring ``ProviderController.logout_rows``."""
+        rows = self.view_rows()
+        seen: set[str] = set()
+        projected: list[Any] = []
+        for row in rows:
+            if row.stored_credentials <= 0 or row.storage_id in seen:
+                continue
+            seen.add(row.storage_id)
+            projected.append(row)
+        return projected
+
     def usage_enabled_providers(self):
         return ["openrouter", "zai"]
 
@@ -4691,12 +4938,47 @@ class _FakeDef:
 
 
 class _FakeCred:
-    def __init__(self, ident, provider, ctype, data):
+    def __init__(self, ident, provider, ctype, data, identity_key=None):
         self.id = ident
         self.provider = provider
         self.credential_type = ctype
         self.data = data
-        self.identity_key = None
+        # Typed ``str | None`` by the default: a test that models the synthetic
+        # dedupe constant (``oauth:kimi``) sets it, and pyright reads the
+        # attribute's type from here.
+        self.identity_key = identity_key
+
+
+class _FakeViewRow:
+    """Duck-typed stand-in for ``ProviderViewRow`` (see the real dataclass).
+
+    Not the real class because ``definition`` here is a ``_FakeDef``, and the
+    real row is typed against ``ProviderDefinition`` -- the same reason
+    ``login_providers`` returns ``Any``.
+    """
+
+    def __init__(
+        self,
+        *,
+        definition,
+        storage_id,
+        state,
+        identity,
+        stored_credentials,
+        account_count,
+        has_credential,
+        usable,
+        credential_types,
+    ):
+        self.definition = definition
+        self.storage_id = storage_id
+        self.state = state
+        self.identity = identity
+        self.stored_credentials = stored_credentials
+        self.account_count = account_count
+        self.has_credential = has_credential
+        self.usable = usable
+        self.credential_types = credential_types
 
 
 class RaisingStoreController(FakeProviderController):
@@ -8154,6 +8436,22 @@ class _AccessController(FakeProviderController):
         if self.store_error:
             raise RuntimeError("credential store locked")
         return provider in self.stored
+
+    def credentials(self):
+        """The store rows the facade predicate above already claims.
+
+        The two reads have to describe ONE store: the shared provider view
+        (``view_rows``) counts stored rows AND consults ``has_any_credential``,
+        so a fake that told them different stories would model a state the real
+        controller cannot produce. Rows carry no identity data, so a row's
+        detail column stays about the credential KIND, never an invented label.
+        """
+        if self.store_error:
+            raise RuntimeError("credential store locked")
+        return [
+            _FakeCred(index, provider, "oauth", {})
+            for index, provider in enumerate(sorted(self.stored), start=1)
+        ]
 
     def is_usable(self, provider):
         # Ollama stands in for `allows_missing_api_key`: a local server runs with

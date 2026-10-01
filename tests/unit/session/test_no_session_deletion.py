@@ -1011,6 +1011,18 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "that same temp FILE, only while the replace above is failing",
     ),
+    # The push handle key (`mobile/push_handles.py`): 32 random bytes at a fixed
+    # basename directly under the config root, beside mobile-seen.json and the
+    # device registry. `key_path(config_dir)` is config-root-derived with no
+    # session id and no caller input, so it cannot name a path under
+    # `sessions/`; the unlink runs only on the mint's own error path, clearing
+    # the file this call JUST created (O_EXCL create, then write/chmod failed).
+    (
+        "local_operator/mobile/push_handles.py::_mint_key",
+        "<path>.unlink",
+        "clears the fixed-basename key file this call JUST created, only on the "
+        "mint's error path; never session-derived",
+    ),
     (
         "local_operator/multiplexer/markers.py::_FileBackend.publish",
         "os.replace",
@@ -2049,6 +2061,17 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Unlinks ONE stored attachment FILE per call, and only after the resolved "
         "path is proven under <config_dir>/projects/attachments/ — a row pointing "
         "anywhere else (including sessions/) is skipped, never removed",
+    ),
+    (
+        "local_operator/projects.py::migrate_coordination_links",
+        "shutil.rmtree",
+        # Cleanup of a FAILED backup directory only (abort-if-no-backup): the
+        # path is ``projects_dir / '.migrations-backup-<stamp>'`` — config-derived
+        # plus a datetime stamp, never a session id, never under ``sessions/`` —
+        # and the call is best-effort (ignore_errors) on the abort path where no
+        # row was rewritten (the live rows are still the "before" copy).
+        "Removes <config_dir>/projects/.migrations-backup-<stamp> after a failed "
+        "backup; config-derived, never sessions/",
     ),
     # The eval tool's cross-process restart marker (``tools/eval.py``): the same
     # atomic-write shape as ``registry._staged_write`` above — a

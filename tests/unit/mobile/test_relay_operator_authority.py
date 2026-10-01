@@ -458,6 +458,10 @@ def test_the_route_table_names_the_paths_this_build_actually_serves(
     # second namespace invented to match the ADR's example would be exactly the
     # drift this test exists to catch.
     assert "/api/attention/unread" in paths
+    # The handle resolver (push/ack-sync S2): the ADR spells
+    # ``GET /api/push/conversation/{handle}``; a drifted spelling here would
+    # strand every cold tap on a push deep link.
+    assert "/api/push/conversation/{handle:str}" in paths
     assert "/api/pair" in paths
     assert "/api/pair/{device_id:str}" in paths
     # The push device registry (push/ack-sync S4, ADR 0006 §3.1): the paths the
@@ -465,6 +469,9 @@ def test_the_route_table_names_the_paths_this_build_actually_serves(
     assert "/api/push/register" in paths
     assert "/api/push/devices" in paths
     assert "/api/push/devices/{device_id:str}" in paths
+    # …and the way BACK, which is a different kind of route: the only push path
+    # that is not reachable from a device session (ADR 0006 §4 round 4 B1).
+    assert "/api/push/devices/{device_id:str}/unrevoke" in paths
     assert not [path for path in paths if path.startswith("/v1/")], paths
 
 

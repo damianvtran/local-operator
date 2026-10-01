@@ -12,6 +12,7 @@ import asyncio
 import json
 import threading
 from pathlib import Path
+from typing import Any
 
 from local_operator import procstate
 from local_operator.harness.types import Message, TextContent
@@ -19,6 +20,7 @@ from local_operator.resume import (
     _TITLE_CUSTOM_TYPE,
     TITLE_SCAN_BYTES,
     TITLE_SIDECAR_NAME,
+    TRANSCRIPT_NAME,
     _read_title_sidecar,
     backfill_session_titles,
     live_runtime_pid,
@@ -586,3 +588,225 @@ def test_the_title_sweep_without_a_predicate_finishes_even_while_a_runtime_leave
     stop_event.set()
 
     assert backfill_session_titles(tmp_path) == 3
+
+
+# -- the stat-keyed memo ------------------------------------------------------
+#
+# ``stored_session_title`` and ``session_name``'s opener fallback answer through
+# process-local memos keyed on the stats of the files that produced them
+# (``resume._TITLE_MEMO`` / ``_OPENER_MEMO``; see that block for the design).
+# The desktop chat search and every sidebar listing ask these once per session
+# per scan — 24,293 opens for 8,140 rows on a 15,441-directory store — so these
+# pin the three promises the memo makes: a repeat re-reads nothing, a change
+# recomputes, and the answer is never different from an uncached one.
+
+
+def _clear_title_memos() -> None:
+    """The memos are process state; every test here starts from nothing."""
+    from local_operator import resume as resume_module
+
+    resume_module._TITLE_MEMO.clear()
+    resume_module._OPENER_MEMO.clear()
+
+
+def _counted_opens(run):
+    """Run ``run``, counting every file it opens through ``io.open``.
+
+    Counting at ``io``/builtins measures the syscalls actually issued, which is
+    the instrument the memo's own design note uses (``pathlib`` reaches the
+    filesystem through here, so both spellings are covered).
+    """
+    import builtins
+    import io
+
+    opened: list[str] = []
+    real_open = io.open
+
+    def counting(file, *args, **kwargs):
+        opened.append(str(file))
+        return real_open(file, *args, **kwargs)
+
+    original = builtins.open, io.open
+    builtins.open = io.open = counting  # type: ignore[assignment]
+    try:
+        result = run()
+    finally:
+        builtins.open, io.open = original  # type: ignore[assignment]
+    return result, opened
+
+
+def test_a_repeat_read_opens_no_file(tmp_path: Path) -> None:
+    """The memo's whole point: a repeat scan pays a stat, not an open."""
+    _clear_title_memos()
+    session = _session(tmp_path, "the line I typed first", ("Kept Name", True))
+    assert stored_session_title(session) == "Kept Name"
+    assert session_name(session) == "Kept Name"
+
+    _, opened = _counted_opens(lambda: (stored_session_title(session), session_name(session)))
+    assert opened == []
+
+
+def test_the_opener_fallback_is_memoised_too(tmp_path: Path) -> None:
+    """Most sessions in a real store have no stored title, so the fallback
+    half must stop re-reading the transcript head as well."""
+    _clear_title_memos()
+    session = _session(tmp_path, "what I actually typed")
+    assert session_name(session) == "what I actually typed"
+
+    _, opened = _counted_opens(lambda: session_name(session))
+    assert opened == []
+
+
+def test_an_appended_rename_invalidates_the_memo(tmp_path: Path) -> None:
+    """A rename journals a new row; the transcript's stat must miss and the
+    scan must rerun, not serve the primed empty title."""
+    _clear_title_memos()
+    session = _session(tmp_path, "opening line")
+    assert stored_session_title(session) == ""  # primed from the transcript scan
+    assert session_name(session) == "opening line"
+
+    async def rename() -> None:
+        await Transcript(session).append_custom(
+            CONVERSATION_NAME_CUSTOM_TYPE, {"text": "Renamed Later", "user_set": True}
+        )
+
+    asyncio.run(rename())
+    assert stored_session_title(session) == "Renamed Later"
+    assert session_name(session) == "Renamed Later"
+
+
+def test_a_sidecar_write_wins_over_a_memoised_scan_answer(tmp_path: Path) -> None:
+    """The sidecar is consulted FIRST on every call; one written after the
+    transcript answer was primed must win immediately, not at process end."""
+    _clear_title_memos()
+    session = _session(tmp_path, "opening line")
+    assert stored_session_title(session) == ""
+    write_session_title(session, "From The Sidecar", user_set=True, past_names=[])
+    assert stored_session_title(session) == "From The Sidecar"
+
+
+def test_a_removed_transcript_flips_the_answer_without_a_restart(tmp_path: Path) -> None:
+    """Absence is a stable answer, so the memo may HOLD ``""`` — but the file
+    reappearing (or the old one leaving, as here) must still be seen."""
+    _clear_title_memos()
+    session = _session(tmp_path, "opening line")
+    assert session_name(session) == "opening line"
+    (session / TRANSCRIPT_NAME).unlink()
+    assert stored_session_title(session) == ""
+    assert session_name(session) == ""
+
+
+def test_an_unreadable_sidecar_is_answered_but_not_memoised(tmp_path: Path) -> None:
+    """UNREADABLE IS NOT CACHEABLE (see ``resume._TITLE_MEMO``): the answer for
+    a file that exists but cannot be opened is a fact about the moment, so once
+    permissions are restored the sidecar must win again — an entry pinned under
+    the unreadable state would never let it. The mode is part of the stat key
+    for exactly this case."""
+    _clear_title_memos()
+    session = _session(tmp_path, "opening line", ("Journalled Name", True))
+    write_session_title(session, "Sidecar Name", user_set=True, past_names=[])
+    assert stored_session_title(session) == "Sidecar Name"
+
+    sidecar = session / TITLE_SIDECAR_NAME
+    sidecar.chmod(0)
+    try:
+        assert stored_session_title(session) == "Journalled Name"
+    finally:
+        sidecar.chmod(0o644)
+    assert stored_session_title(session) == "Sidecar Name"
+
+
+def test_every_warm_answer_equals_an_uncached_one(tmp_path: Path) -> None:
+    """Sidecar title, journalled title, opener-only: all three storage shapes
+    must return from the memo exactly what a cleared memo returns."""
+    _clear_title_memos()
+    titled = _session(tmp_path / "one", "opening one", ("Journalled Title", True))
+    opener_only = _session(tmp_path / "two", "opening two")
+    sidecar = _session(tmp_path / "three", "opening three")
+    write_session_title(sidecar, "Sidecar Title", user_set=True, past_names=[])
+    for session in (titled, opener_only, sidecar):
+        warm = (stored_session_title(session), session_name(session))
+        _clear_title_memos()
+        fresh = (stored_session_title(session), session_name(session))
+        assert warm == fresh, session
+
+
+def test_the_memo_is_bounded_by_the_root_count(tmp_path: Path) -> None:
+    from local_operator import resume as resume_module
+
+    _clear_title_memos()
+    for index in range(resume_module._SESSION_MEMO_ROOTS + 2):
+        store = tmp_path / f"store{index}"
+        session = _session(store, f"opening {index}")
+        assert session_name(session) == f"opening {index}"
+    # One map per store, oldest evicted first — the same bound the catalog
+    # memos carry, so a process that lists many stores cannot grow these
+    # without limit.
+    assert len(resume_module._TITLE_MEMO) == resume_module._SESSION_MEMO_ROOTS
+    assert len(resume_module._OPENER_MEMO) == resume_module._SESSION_MEMO_ROOTS
+    assert str(tmp_path / "store0" / "sessions") not in resume_module._TITLE_MEMO
+    assert str(tmp_path / "store5" / "sessions") in resume_module._TITLE_MEMO
+
+
+def test_eviction_stands_down_when_the_memo_moves_under_it(tmp_path: Path, monkeypatch) -> None:
+    """A concurrent caller can move the map mid-eviction; that must not raise.
+
+    Review round 1, R1-1: ``_session_memo_for`` reads the map to evict its
+    oldest root, and CPython raises ``RuntimeError("dictionary changed size
+    during iteration")`` when a dict is mutated between an iterator and its
+    first read — which a desktop listing run from a worker thread can do. The
+    map here raises that exact exception from its own ``__iter__``, so the
+    tolerance is pinned deterministically instead of raced for.
+    """
+    from local_operator import resume as resume_module
+
+    class _RacingDict(dict[str, Any]):
+        def __iter__(self):
+            raise RuntimeError("dictionary changed size during iteration")
+
+    _clear_title_memos()
+    racing = _RacingDict(
+        {f"store{index}/sessions": {} for index in range(resume_module._SESSION_MEMO_ROOTS + 1)}
+    )
+    monkeypatch.setattr(resume_module, "_TITLE_MEMO", racing)
+
+    session = _session(tmp_path, "opening")
+    # The caller still gets its answer and its map: the race skips the
+    # eviction, never the answer.
+    assert session_name(session) == "opening"
+    assert str(tmp_path / "sessions") in racing
+
+
+def test_concurrent_eviction_never_raises(tmp_path: Path) -> None:
+    """Six threads churning stores past the root bound must not raise.
+
+    The hammer is the realistic shape — the desktop lists from worker threads —
+    and it pins that the tolerance holds under real contention, and that the
+    bound heals to its exact value on the next sequential call.
+    """
+    from local_operator import resume as resume_module
+
+    _clear_title_memos()
+    errors: list[BaseException] = []
+
+    def worker(index: int) -> None:
+        try:
+            for step in range(24):
+                opener = f"opening {index}-{step}"
+                session = _session(tmp_path / f"w{index}-{step}", opener)
+                assert session_name(session) == opener
+        except BaseException as exc:  # noqa: BLE001 — collected for the assertion
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(index,)) for index in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    # The bound is best-effort while callers race; one sequential call restores
+    # it exactly (the eviction floor is ROOTS - 1, and the call adds its own).
+    session = _session(tmp_path / "heal", "opening")
+    assert session_name(session) == "opening"
+    assert len(resume_module._TITLE_MEMO) == resume_module._SESSION_MEMO_ROOTS

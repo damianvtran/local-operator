@@ -1266,8 +1266,11 @@ def write_profile(registry: Any, params: AgentParams, *, creating: bool) -> tupl
     tags = list(seed_tags(profile)) if kind == "role" else []
     # SPECIALISTS have no seed_tags (their rows carry no role fields), but the
     # class is a platform mechanism for any agent — so encode/decode it here
-    # too, preserving an existing class when this call did not name one. A
-    # flip to reactive REMOVES the tag (sparing encoding; absent = reactive).
+    # too, preserving an existing class when this call did not name one. The
+    # class itself is written explicitly for BOTH values (``class:reactive``
+    # included), so an edit can never strip a deliberate switch back into the
+    # "never classified" state a pre-class install is in — a role gets that from
+    # ``seed_tags``, and this branch is what gives it to a specialist row.
     if kind != "role":
         from local_operator.action_class import with_class_tag
 

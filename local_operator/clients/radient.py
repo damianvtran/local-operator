@@ -1658,30 +1658,38 @@ class RadientClient:
     def create_speech(
         self,
         input_text: str,
-        model: str,
-        voice: str,
+        model: Optional[str] = None,
+        voice: Optional[str] = None,
         instructions: Optional[str] = None,
         response_format: Optional[str] = "mp3",
         speed: Optional[float] = 1.0,
         provider: Optional[str] = "openai",
+        language_code: Optional[str] = None,
     ) -> bytes:
         """Generate speech from text using the Radient API.
 
         Args:
             input_text (str): The text to convert to speech.
+            model (Optional[str]): The TTS model to use. Omitted from the request
+                when None, so the hub's own default applies (the ElevenLabs
+                plane's model choice is the hub's to make).
+            voice (Optional[str]): The voice, or a voice alias (e.g. "female"),
+                to use. Omitted when None.
             instructions (Optional[str]): Additional prompt with instructions for the
-            speech generation.
-            model (str): The TTS model to use (e.g., "tts-1").
-            voice (str): The voice to use (e.g., "alloy").
+                speech generation (OpenAI provider only; ignored by ElevenLabs).
             response_format (Optional[str]): The audio format. Defaults to "mp3".
             speed (Optional[float]): The speech speed. Defaults to 1.0.
             provider (Optional[str]): The provider. Defaults to "openai".
+            language_code (Optional[str]): ISO 639-1 language code for the
+                synthesis. Omitted when None so the provider can auto-detect.
 
         Returns:
             bytes: The binary audio data of the generated speech.
 
         Raises:
-            RuntimeError: If the API request fails.
+            APIError: When the hub refuses the request (the status, the
+                designed ``error`` prose and any machine code are carried).
+            RuntimeError: If the API request fails in any other way.
         """
         if not self.api_key:
             raise RuntimeError("RADIENT_API_KEY is not configured. Cannot create speech.")
@@ -1689,7 +1697,10 @@ class RadientClient:
         url = f"{self.base_url}/tools/speech"
         headers = self._get_headers(require_api_key=True)
 
-        # Create the payload, excluding None values for optional fields
+        # Create the payload, excluding None values for optional fields. Model
+        # and voice are omitted rather than defaulted here: the hub owns the
+        # speech model choice, and a caller that named no voice must not have
+        # one invented client-side.
         payload_data = {
             "input": input_text,
             "instructions": instructions,
@@ -1698,6 +1709,7 @@ class RadientClient:
             "response_format": response_format,
             "speed": speed,
             "provider": provider,
+            "language_code": language_code,
         }
         payload = {k: v for k, v in payload_data.items() if v is not None}
 
@@ -1725,9 +1737,16 @@ class RadientClient:
             # time and bury the status and body the route reads.
             raise
         except requests.exceptions.RequestException as e:
-            error_body = self._surfaceable_body(response_body(e))
-            raise RuntimeError(
-                f"Failed to generate speech: {str(e)}, Response Body: {error_body}"
+            # Extract the hub's designed refusal -- its ``error`` field, code
+            # and details -- from the response. The raw body is deliberately
+            # not carried further: it can hold vendor framing and echoed
+            # request material, and the route classifies on the status this
+            # error carries rather than on the body's text
+            # (``api_error_from_response``'s docstring is the long form).
+            raise api_error_from_response(
+                e.response,
+                fallback_message="Failed to generate speech",
+                secrets=self._credential_values(),
             ) from e
         except Exception as e:
             raise RuntimeError(f"Failed to generate speech: {str(e)}") from e

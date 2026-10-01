@@ -23,7 +23,10 @@ Roster members are the same roles/specialists `/agent` exposes: authoring an age
 
 ## When the user asks to create a team
 
-Work with them. Do not invent a roster silently. Ask, using the `ask` tool when a choice is theirs:
+Work with them. Do not invent a roster silently. Ask, using the `ask` tool when a
+choice is theirs. If the call returns a receipt rather than the answers, the host
+queues asks: the roster comes from the answers, which arrive as a turn, never
+from the receipt:
 
 - the team **name** (letters, digits, dot, underscore, hyphen; no spaces — it is a `/team` argument)
 - the **manager** and what they are responsible for (default: install the `manager` starter)

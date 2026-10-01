@@ -1,5 +1,12 @@
 """One-shot config migrations, run from ONE explicit startup seam.
 
+TWO STORES, ONE SEAM. The first migration here repairs ``config.yml``; the
+second (``agent_profiles.backfill_seed_action_class``) repairs the agent
+registry, for the same class of reason — a release introduced a datum and the
+rows written before it existed need it. Both are called from
+:func:`run_startup_migrations` and nowhere else; the rules below are about the
+seam, not about which file it happens to write.
+
 Why a module of its own, and why the seam matters more than the migration:
 
 The first version of the session-cleanup migration lived inside
@@ -33,7 +40,9 @@ So, two rules, both enforced here and by tests:
    on the start path, a failed backup got stamped and left the belt
    unfastened for good, and a config restored from a backup was skipped as
    "done" (review round 5, R5-2/3/4). The benefit was one ``stat`` saved on
-   a config ``lop`` is about to read anyway.
+   a config ``lop`` is about to read anyway. The same rule holds for the
+   registry backfill: its predicate is "is this row still missing the datum
+   its starter declares?", which a repaired row answers no.
 
 2. **Retired opt-out keys are WRITTEN, never removed.** The migration sets
    ``values["session.reap_unused"] = False`` (the flat-dotted key the #576
@@ -186,6 +195,13 @@ def run_startup_migrations(config_dir: Path) -> None:
     ships with it, or is handled by ``ConfigManager`` the same way it would
     have been moments later. No state is recorded: the migration's own
     no-op path is the gate (see the module docstring).
+
+    Three arms: the session-cleanup config migration, the action-class
+    backfill for the agent registry, and the projects coordination re-kind
+    (schema 1 -> 2 — the store-side migration lives in
+    :func:`local_operator.projects.migrate_coordination_links` and shares the
+    same doctrine: idempotent predicate, backup-first, abort-if-no-backup).
+    Each arm fails on its own; one skipping never skips the others.
     """
     try:
         migrate_session_cleanup(config_dir)
@@ -195,4 +211,30 @@ def run_startup_migrations(config_dir: Path) -> None:
         # to run reports THAT with its own message; a second traceback here
         # would bury it.
         logger.warning("config migration: session-cleanup migration skipped: %s", exc)
+        logger.debug("config migration: traceback", exc_info=True)
+    try:
+        # THE SECOND STORE THIS SEAM MIGRATES, and it is here for the same
+        # reason as the first: a release that introduces a datum must repair the
+        # rows written before it existed, and there is exactly one place a
+        # release may do that from. This one writes to the AGENT REGISTRY (rows
+        # installed from a packaged starter before the starter declared a
+        # class), not to ``config.yml`` — see ``backfill_seed_action_class``
+        # for the predicate and the failure it exists to end: an install whose
+        # Aida went permanently silent on upgrade because an absent class tag
+        # reads as "reactive" (the operator's 2026-09-30 report).
+        from local_operator.agent_profiles import backfill_seed_action_class
+
+        backfill_seed_action_class(config_dir)
+    except Exception as exc:  # noqa: BLE001 — never a reason not to start
+        logger.warning("config migration: action-class backfill skipped: %s", exc)
+        logger.debug("config migration: traceback", exc_info=True)
+    try:
+        # Lazily imported: the store module (pydantic models, the runtime
+        # scan's dependencies) must not ride the import path of every CLI
+        # start just because one migration may touch it.
+        from local_operator.projects import migrate_coordination_links
+
+        migrate_coordination_links(config_dir)
+    except Exception as exc:  # noqa: BLE001 — never a reason not to start
+        logger.warning("config migration: project coordination migration skipped: %s", exc)
         logger.debug("config migration: traceback", exc_info=True)

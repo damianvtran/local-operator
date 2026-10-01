@@ -545,6 +545,8 @@ class TestRunRefusesBeforeLaunch:
         outcome = await run()
         assert launched == [], "the sink must refuse before anything is launched"
         assert outcome.status == "failed_pre_bundle"
+        # The refusal NAMES the phase it died in, for the record's reader.
+        assert outcome.terminal_reason == "record-sink"
         assert outcome.record_incomplete is False
         assert outcome.diagnostic is not None
         assert outcome.diagnostic.startswith("refusing to start")

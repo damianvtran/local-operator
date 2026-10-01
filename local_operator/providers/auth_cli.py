@@ -410,7 +410,13 @@ def run_login(
     row = auth_store.upsert_credential(storage_provider, result)
     _invalidate_cached_listing(storage_provider)
     _invalidate_cached_usage(storage_provider, auth_store)
-    identity = result.get("email") or result.get("account_id") or result.get("org_name") or ""
+    # The ONE identity derivation (``credential_identity``): the login receipt
+    # and the status listing must name one account one way. Imported here, not
+    # at module scope, for the reason AuthStore is (see the TYPE_CHECKING note
+    # above): the CLI's top level must not pull the store module in.
+    from local_operator.providers.auth_store import credential_identity
+
+    identity = credential_identity(result) or ""
     suffix = f" ({identity})" if identity else ""
     print(f"Logged in to '{storage_provider}'{suffix}.")
     if result.get("grant_note"):
@@ -644,14 +650,18 @@ def stored_login_key_names(config_dir: "Path | None") -> list[str]:
 
 def list_logins(auth_store: "AuthStore", config_dir: "Path | None" = None) -> int:
     """Print one line per active credential plus env/legacy keys in the cascade."""
+    from local_operator.providers.auth_store import credential_identity
+
     rows = auth_store.list_credentials()
     if rows:
         print("Stored credentials:")
         now_ms = int(time.time() * 1000)
         for row in rows:
-            identity = (
-                row.identity_key or row.data.get("email") or row.data.get("account_id") or "-"
-            )
+            # The ONE label derivation (``credential_identity`` -> row.data
+            # email/account_id/org_name): a row whose payload carries no
+            # identity prints the same "-" every other unlabelled row does,
+            # rather than a dedupe constant like ``oauth:kimi``.
+            identity = credential_identity(row) or "-"
             if row.credential_type == "oauth":
                 expires = row.data.get("expires")
                 state = "expired" if expires is not None and int(expires) < now_ms else "active"

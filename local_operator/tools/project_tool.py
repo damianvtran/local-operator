@@ -54,9 +54,13 @@ from local_operator.projects import (
     display_name,
     history_lines,
     milestone_status,
+    progress_date_text,
     progress_is_stale,
     readable_error,
+    refreshed_age_text,
+    refreshed_note,
     reported_age,
+    stale_after_s,
     truncate_row,
 )
 from local_operator.tools.builtin import (
@@ -79,8 +83,8 @@ _STATUS_WORDS = PROJECT_STATUSES
 class ProjectParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    op: Literal["list", "show", "create", "update", "link", "unlink", "milestone"] = Field(
-        description="The verb to run."
+    op: Literal["list", "show", "create", "update", "refresh", "link", "unlink", "milestone"] = (
+        Field(description="The verb to run.")
     )
     name: str | None = Field(default=None, description="Project name (all ops but list).")
     description: str | None = Field(
@@ -115,9 +119,10 @@ class ProjectParams(BaseModel):
     progress: str | None = Field(
         default=None,
         description=(
-            "update: one dated line (markdown text), not a transcript; every NEW "
-            "line is appended to the history. The same line on a stale record "
-            "re-stamps its freshness."
+            "update: one dated line (markdown text), not a transcript; a NEW "
+            "line appends and moves the freshness clock. An identical re-send "
+            "records a refresh that keeps the clock (prefer op='refresh'); a "
+            "near-identical line is NEW — it appends."
         ),
     )
     tags: list[str] | None = Field(
@@ -230,7 +235,7 @@ def _estimate_text(project: Project) -> str:
     return f"est {number}{suffix}"
 
 
-def _row(project: Project, *, now: float | None = None) -> str:
+def _row(project: Project, *, now: float | None = None, window: float | None = None) -> str:
     """One scannable listing line, ``PROJECT_ROW_CAP``-bounded (in CELLS)."""
     identity = display_name(project) or "- unnamed"
     if project.title:
@@ -249,14 +254,25 @@ def _row(project: Project, *, now: float | None = None) -> str:
         parts.append(f"→{project.target_date}")
     if project.milestones:
         parts.append(_milestone_counts(project))
+    # WORKING sessions: ``sessions`` IS the work set, so the count and the
+    # completion check can never disagree about whether anyone is on the job;
+    # a filing is named separately and never reads as participation.
     sessions = len(project.sessions)
-    parts.append(f"{sessions} session" + ("" if sessions == 1 else "s"))
+    parts.append(f"{sessions} working session" + ("" if sessions == 1 else "s"))
+    filed = len(project.coordination_sessions)
+    if filed:
+        parts.append(f"{filed} filed")
     age = reported_age(project, now=now)
     if age is None:
         parts.append("no progress")
     else:
-        stale = " (stale)" if progress_is_stale(project, now=now) else ""
+        stale = " (stale)" if progress_is_stale(project, now=now, window=window) else ""
         parts.append(f"progress {age} ago{stale}")
+        refreshed = refreshed_age_text(project, now=now)
+        if refreshed is not None:
+            # The refreshed TOKEN beside the age: the badge keeps telling the
+            # content clock's truth, and this says the record was checked.
+            parts.append(f"refreshed {refreshed} ago")
     summary = (project.description or "").strip()
     row = " · ".join(parts)
     if summary:
@@ -266,7 +282,9 @@ def _row(project: Project, *, now: float | None = None) -> str:
     return truncate_row(row)
 
 
-def _field_lines(project: Project, *, history_tail: int = HISTORY_DEFAULT_TAIL) -> list[str]:
+def _field_lines(
+    project: Project, *, history_tail: int = HISTORY_DEFAULT_TAIL, window: float | None = None
+) -> list[str]:
     """The ``show`` header block: every stored field, derived status where one exists."""
     lines = [
         f"{display_name(project) or '(unnamed)'} [{project.status}]",
@@ -287,11 +305,16 @@ def _field_lines(project: Project, *, history_tail: int = HISTORY_DEFAULT_TAIL) 
         ]
     )
     age = reported_age(project)
-    stale = ", stale" if progress_is_stale(project) else ""
+    stale = ", stale" if progress_is_stale(project, window=window) else ""
     freshness = f"reported {age} ago{stale}" if age is not None else "none recorded"
     lines.append(f"progress ({freshness}): {project.progress or '—'}")
     if project.progress and project.progress_reported_by:
         lines.append(f"progress reported by: {project.progress_reported_by}")
+    note = refreshed_note(project)
+    if note is not None:
+        # THE sentence, one copy (``projects.refreshed_note``): "refreshed 1h
+        # ago by session X — no new content since 2026-09-29".
+        lines.append(note)
     lines.extend(history_lines(project, tail=history_tail))
     if project.milestones:
         lines.append(f"milestones ({len(project.milestones)}/{MILESTONES_MAX}):")
@@ -305,30 +328,52 @@ def _field_lines(project: Project, *, history_tail: int = HISTORY_DEFAULT_TAIL) 
 
 
 def _session_lines(view: dict[str, Any]) -> list[str]:
-    """Per-session rollup from the ONE shared composition (``build_project_view``)."""
+    """Per-session rollup from the ONE shared composition (``build_project_view``).
+
+    WORKING sessions and filings are separate sections: the working list is
+    what feeds every liveness reading, and a filing (``role='coordination'``)
+    is provenance — it is never rendered with a runtime state (there is none on
+    the row) so it can never be misread as participation.
+    """
     rows = view.get("sessions") or []
     if not rows:
         return ["linked sessions: (none)"]
-    lines: list[str] = [f"linked sessions ({len(rows)}/{SESSIONS_MAX}):"]
-    for row in rows:
-        runtime = row.get("runtime") or {}
-        state = runtime.get("state") or "stopped"
-        busy = ", busy" if runtime.get("busy") else ""
-        session_id = row["session_id"]
-        if not row.get("exists"):
-            lines.append(f"  - {session_id} [missing] — no session directory")
-            continue
-        title = row.get("title") or "(untitled)"
-        bits = [state + busy]
-        agents = row.get("subagents")
-        if agents is not None:
-            bits.append(f"{agents['running']} running · {agents['settled']} settled subagents")
-        todos = row.get("todos")
-        if todos is not None:
-            bits.append(f"todos {todos['open']} open / {todos['total']}")
-        if row.get("archived"):
-            bits.append("archived")
-        lines.append(f"  - {session_id} [{' · '.join(bits)}] {title}")
+    working = [row for row in rows if row.get("role") != "coordination"]
+    filed = [row for row in rows if row.get("role") == "coordination"]
+    lines: list[str] = []
+    if working:
+        lines.append(f"working sessions ({len(working)}/{SESSIONS_MAX}):")
+        for row in working:
+            runtime = row.get("runtime") or {}
+            state = runtime.get("state") or "stopped"
+            busy = ", busy" if runtime.get("busy") else ""
+            session_id = row["session_id"]
+            if not row.get("exists"):
+                lines.append(f"  - {session_id} [missing] — no session directory")
+                continue
+            title = row.get("title") or "(untitled)"
+            bits = [state + busy]
+            agents = row.get("subagents")
+            if agents is not None:
+                bits.append(f"{agents['running']} running · {agents['settled']} settled subagents")
+            todos = row.get("todos")
+            if todos is not None:
+                bits.append(f"todos {todos['open']} open / {todos['total']}")
+            if row.get("archived"):
+                bits.append("archived")
+            lines.append(f"  - {session_id} [{' · '.join(bits)}] {title}")
+    if filed:
+        lines.append(f"filed by ({len(filed)}):")
+        for row in filed:
+            session_id = row["session_id"]
+            if not row.get("exists"):
+                lines.append(f"  - {session_id} [filed] — no session directory")
+                continue
+            title = row.get("title") or "(untitled)"
+            bits = ["filed"]
+            if row.get("archived"):
+                bits.append("archived")
+            lines.append(f"  - {session_id} [{' · '.join(bits)}] {title}")
     return lines
 
 
@@ -387,8 +432,10 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
             "guide://projects first."
         )
         return _text(tool_call_id, "project", body)
-    body = "projects:\n" + "\n".join(_row(project) for project in projects)
-    body += "\n\nop='show' name='<name>' has the full record plus its linked sessions."
+    body = "projects:\n" + "\n".join(
+        _row(project, window=stale_after_s(registry.config_dir)) for project in projects
+    )
+    body += "\n\nop='show' name='<name>' has the full record plus its sessions."
     text, spill = spill_truncate(body, "project", context)
     return _text(tool_call_id, "project", text, details=spill or None)
 
@@ -405,7 +452,11 @@ async def _op_show(
         return _error(tool_call_id, "project", str(exc))
     if project is None:
         return _error(tool_call_id, "project", f"no project named {name!r} (try op='list')")
-    lines = _field_lines(project, history_tail=history_tail)
+    lines = _field_lines(
+        project,
+        history_tail=history_tail,
+        window=stale_after_s(registry.config_dir),
+    )
     try:
         lines.extend(_session_lines(build_project_view(project, config_dir=registry.config_dir)))
     except Exception as exc:  # noqa: BLE001 — the record is the point; the view degrades
@@ -425,10 +476,23 @@ async def _op_create(
             tool_call_id, "project", "no project registry attached to this session; cannot save."
         )
     session_id = _calling_session_id(context)
+    # The ROLE decision belongs to the write surface: the chief of staff's
+    # create-time auto-link is provenance ("filed by"), never participation —
+    # her session is live almost always, and a working link would make every
+    # row she files read as "someone is on it" and earn her a nudge for work
+    # she does not do. Every other caller keeps the working auto-link.
+    coordination = False
+    if session_id:
+        from local_operator.aida.state import is_aida_session
+
+        coordination = is_aida_session(registry.config_dir, session_id)
     try:
         fields = _project_edit(params, creating=True)
         project = registry.create_project(
-            fields, sessions=[session_id] if session_id else (), force_done=params.force_done
+            fields,
+            sessions=[] if coordination else ([session_id] if session_id else []),
+            coordination_sessions=[session_id] if (session_id and coordination) else [],
+            force_done=params.force_done,
         )
     except ProjectRegistryLockTimeout as exc:
         return _error(tool_call_id, "project", str(exc))
@@ -455,7 +519,12 @@ async def _op_create(
         # (agent review round 1, N2): a creation that closed over open
         # milestones must say so, or the receipt reads as an ordinary create.
         forced = "status 'done' forced with milestones incomplete (force_done=true). "
-    if session_id:
+    if session_id and coordination:
+        receipt = (
+            f"created project {project.name!r} [{project.status}]; filed by this session "
+            f"(session {session_id}) — a coordination link, not a working session. "
+        )
+    elif session_id:
         receipt = (
             f"created project {project.name!r} [{project.status}] and linked this session "
             f"(session {session_id}). "
@@ -560,13 +629,20 @@ async def _op_update(
         # closed over open milestones would read as an ordinary update.
         forced = "; status 'done' forced with milestones incomplete (force_done=true)"
     if outcome.refreshed:
+        # Refresh ≠ update: the receipt must not claim the record became
+        # fresher — the CHECK is dated, the line is not. The sentence names
+        # the content's own date so the model never reads it as "re-dated".
+        day = progress_date_text(updated.progress_updated_at)
+        still = (
+            f"the line still dates from {day}"
+            if day is not None
+            else "the line keeps its original date"
+        )
         return _text(
             tool_call_id,
             "project",
-            # The STAMP moved, not the text: "now dated today" read as if the
-            # snippet had gained a date (agent review round 1, n2).
-            f"refreshed project {updated.name!r} — the progress line is unchanged, "
-            f"re-stamped just now ({reporter}){replaced}{forced}.",
+            f"refreshed project {updated.name!r} — progress unchanged; {still} "
+            f"(no new content){replaced}{forced}.",
         )
     age = reported_age(updated)
     detail = f"progress {age} ago" if age is not None else "no progress recorded"
@@ -594,6 +670,75 @@ def _link_target(context: ToolContext | None, params: ProjectParams) -> str | No
     return _calling_session_id(context)
 
 
+async def _op_refresh(
+    context: ToolContext | None, tool_call_id: str, params: ProjectParams
+) -> ToolResult:
+    """The textless refresh: record that the stored line still describes reality.
+
+    Nothing is written when the record is fresh ("no reason to send it every
+    turn") or carries no progress at all (there is nothing to assert about —
+    the first honest line is the right act). A stale record gets the assertion
+    pair and NEVER moves the content clock: the stale badge keeps reading the
+    truth, while the assertion quiets the completion check for one window.
+    """
+    if "progress" in params.model_fields_set:
+        return _error(
+            tool_call_id,
+            "project",
+            "op='refresh' is textless: drop 'progress' — a new line is op='update' "
+            "progress=<text>, and re-sending the identical line already records a "
+            "refresh.",
+        )
+    registry = _registry(context)
+    if registry is None:
+        return _error(tool_call_id, "project", "no project registry attached to this session.")
+    name = (params.name or "").strip()
+    try:
+        project = registry.get_project_by_name(name)
+    except ProjectRegistryLockTimeout as exc:
+        return _error(tool_call_id, "project", str(exc))
+    if project is None:
+        return _error(tool_call_id, "project", f"no project named {name!r} (try op='list').")
+    if not (project.progress or "").strip():
+        return _error(
+            tool_call_id,
+            "project",
+            f"project {project.name!r} has no recorded progress to refresh — write the "
+            "first line with op='update' progress=<text>.",
+        )
+    reporter = _calling_session_id(context) or "operator"
+    try:
+        outcome = registry.refresh_project(project.id, reporter=reporter)
+    except ProjectRegistryLockTimeout as exc:
+        return _error(tool_call_id, "project", str(exc))
+    except ProjectSchemaGuardError as exc:
+        return _error(tool_call_id, "project", str(exc))
+    except (ValueError, ValidationError) as exc:
+        return _error(tool_call_id, "project", readable_error(exc))
+    except Exception as exc:  # noqa: BLE001
+        return _error(tool_call_id, "project", f"could not refresh the project: {exc}")
+    if not outcome.changed:
+        return _text(
+            tool_call_id,
+            "project",
+            f"project {outcome.project.name!r} is not stale — nothing written "
+            "(a refresh is for a stale record; there is no reason to send it every turn).",
+        )
+    refreshed = outcome.project
+    day = progress_date_text(refreshed.progress_updated_at)
+    still = (
+        f"the line still dates from {day}"
+        if day is not None
+        else "the line keeps its original date"
+    )
+    return _text(
+        tool_call_id,
+        "project",
+        f"refreshed project {refreshed.name!r} — progress unchanged; {still} "
+        "(no new content; the stale badge stays until a new line lands).",
+    )
+
+
 async def _op_link(
     context: ToolContext | None, tool_call_id: str, params: ProjectParams, *, linking: bool
 ) -> ToolResult:
@@ -614,9 +759,34 @@ async def _op_link(
         return _error(tool_call_id, "project", str(exc))
     if project is None:
         return _error(tool_call_id, "project", f"no project named {name!r} (try op='list').")
+    # The pre-state decides which receipt is true: linking an id that was
+    # FILED moves it between lists, and a receipt that said "linked" would
+    # hide the one act a reader must know about (its liveness role changed).
+    was_filed = session_id in project.coordination_sessions
+    # SELF-FILING (P1's write policy at the link surface): when the CHIEF OF
+    # STAFF links HERSELF, the link is provenance, not work — the create-time
+    # auto-link's role decision, applied here so a self-link can never quietly
+    # flip her from filed to working. Two edges, both deliberate:
+    #  - `session_id not in project.sessions` keeps an EXISTING work link
+    #    untouched (a self-link on a row she genuinely works on is a no-op,
+    #    never a demotion);
+    #  - the check reads TARGET == CALLER, so an explicit `link` naming her id
+    #    from ANOTHER session still lands as work — the "a wrong demotion is
+    #    one op='link' from restored" repair path (ruling §2.3).
+    self_filing = False
+    if (
+        linking
+        and session_id == _calling_session_id(context)
+        and session_id not in project.sessions
+    ):
+        from local_operator.aida.state import is_aida_session
+
+        self_filing = is_aida_session(registry.config_dir, session_id)
     try:
         if linking:
-            project, changed = registry.link_session(project.id, session_id)
+            project, changed = registry.link_session(
+                project.id, session_id, role="coordination" if self_filing else "work"
+            )
         else:
             project, changed = registry.unlink_session(project.id, session_id)
     except ProjectRegistryLockTimeout as exc:
@@ -625,26 +795,49 @@ async def _op_link(
         return _error(tool_call_id, "project", readable_error(exc))
     except Exception as exc:  # noqa: BLE001
         return _error(tool_call_id, "project", f"could not update the link set: {exc}")
-    verb = "linked" if linking else "unlinked"
+    working = f"{len(project.sessions)} working"
+    if project.coordination_sessions:
+        working += f" + {len(project.coordination_sessions)} filed"
+    if linking and self_filing:
+        if changed:
+            return _text(
+                tool_call_id,
+                "project",
+                f"filed session {session_id} on {project.name!r} — a coordination link, "
+                "not a working session.",
+            )
+        return _text(
+            tool_call_id,
+            "project",
+            f"session {session_id} is already filed on {project.name!r} — a coordination "
+            "link, not a working session.",
+        )
     if linking and not changed:
         return _text(
             tool_call_id,
             "project",
-            f"session {session_id} was already linked to {project.name!r} "
-            f"({len(project.sessions)} linked).",
+            f"session {session_id} was already linked to {project.name!r} as a working "
+            f"session ({working}).",
         )
     if not linking and not changed:
         return _error(
             tool_call_id,
             "project",
             f"session {session_id} is not linked to {project.name!r}; "
-            "op='show' lists the linked sessions.",
+            "op='show' lists its sessions and filings.",
+        )
+    if linking and was_filed:
+        return _text(
+            tool_call_id,
+            "project",
+            f"moved session {session_id} from filed to working links on {project.name!r} "
+            f"({working} now).",
         )
     return _text(
         tool_call_id,
         "project",
-        f"{verb} session {session_id} {'to' if linking else 'from'} {project.name!r} "
-        f"({len(project.sessions)} linked now).",
+        f"{'linked' if linking else 'unlinked'} session {session_id} "
+        f"{'to' if linking else 'from'} {project.name!r} ({working} now).",
     )
 
 
@@ -710,7 +903,7 @@ async def execute_project(
     except ValidationError as exc:
         return _validation_error(tool_call_id, "project", exc)
 
-    needs_name = {"show", "create", "update", "link", "unlink", "milestone"}
+    needs_name = {"show", "create", "update", "refresh", "link", "unlink", "milestone"}
     if params.op in needs_name and not (params.name or "").strip():
         return _error(tool_call_id, "project", f"op={params.op!r} needs 'name'.")
     if params.attach and params.op != "update":
@@ -729,6 +922,8 @@ async def execute_project(
         return await _op_create(context, tool_call_id, params)
     if params.op == "update":
         return await _op_update(context, tool_call_id, params)
+    if params.op == "refresh":
+        return await _op_refresh(context, tool_call_id, params)
     if params.op in {"link", "unlink"}:
         return await _op_link(context, tool_call_id, params, linking=params.op == "link")
     return await _op_milestone(context, tool_call_id, params)
@@ -742,9 +937,11 @@ def build_project_tool(context: ToolContext) -> AgentTool | None:
         name="project",
         label="Projects",
         description=(
-            "Track multi-session workstreams: create a project (auto-linked to this "
-            "session), report honest progress, link sessions, set dates/estimate/"
-            "milestones, read the aggregated view. Read guide://projects first."
+            "Track multi-session workstreams: create a project (auto-linked; "
+            "filed as coordination when the caller is the chief of staff), "
+            "report honest progress (op='refresh' when you checked and nothing "
+            "moved), link sessions, set dates/estimate/milestones, read the "
+            "aggregated view. Read guide://projects first."
         ),
         parameters=ProjectParams.model_json_schema(),
         approval_tier="read",

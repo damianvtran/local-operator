@@ -210,10 +210,19 @@ function SessionCard({
 			cancelPress();
 		}
 	};
+	/* THE MIRRORED WORD, AND WHEN IT IS RETIRED (UX round 1, U4 = agent review
+	   round 1, R3). `pending_kind === "ask"` is the daemon's projection of the
+	   LEGACY single-slot mirror — the same card the session screen already
+	   refuses to draw twice once `asks` is published (§4's client rule N3). The
+	   rule applies to the WORD too: with `asks_open` present this row rendered
+	   "question" immediately followed by its own asks chip, two quantities for
+	   one queue under two spellings. The mirrored word survives only where the
+	   asks field is ABSENT, which is exactly the old-client skew it exists for. */
+	const mirroredAskWord = s.pending_kind === "ask" && s.asks_open === undefined;
 	const pendingLabel =
 		s.pending_kind === "approval"
 			? "approval"
-			: s.pending_kind === "ask"
+			: mirroredAskWord
 				? "question"
 				: null;
 	/* Flags coexist in data; exactly one state renders. The daemon classifies
@@ -458,6 +467,34 @@ function SessionCard({
 				{s.todos_open ? (
 					<span className="shrink-0 font-mono text-mono-sm text-ink-dim">
 						{s.todos_open} todo
+					</span>
+				) : null}
+				{/* THE OUTSTANDING-ASKS CHIP (design §4/§5.0). DISTINCT FROM THE APPROVAL
+				    STATE and wearing the accent for exactly that reason: the row's
+				    `needs_attention`/`pending` arm means a decision is holding the run,
+				    while a queued ask is a question the agent keeps working through — a
+				    reader who could not tell them apart would learn to ignore both. The
+				    accent is the same ink the minimized bar's `?` glyph uses, so the two
+				    surfaces name one state with one colour.
+
+				    ABSENT AT ZERO, never a zero badge: the field itself is absent while
+				    the runtime cannot report asks, and `0` is a session with nothing
+				    waiting, which needs no mark. */}
+				{typeof s.asks_open === "number" && s.asks_open > 0 ? (
+					/* THE UNIT IS THE FIELD'S OWN (agent review round 1, R3): `asks_open`
+					   counts open ASKS, and this chip used to print that number with the
+					   word "questions" — so the PR's own fixture showed "2 questions"
+					   where the bar above it said "4 questions waiting" and the header
+					   said 3. The chip now says what it counts ("2 asks"); the surfaces
+					   that hold the whole ask list state questions, which is §5.0's own
+					   unit for the bar. */
+					<span
+						className="shrink-0 font-mono text-mono-sm text-accent"
+						aria-label={
+							s.asks_open === 1 ? "1 ask waiting" : `${s.asks_open} asks waiting`
+						}
+					>
+						{s.asks_open} ask{s.asks_open === 1 ? "" : "s"}
 					</span>
 				) : null}
 			</div>

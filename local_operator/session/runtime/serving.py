@@ -90,11 +90,12 @@ from local_operator.mobile.types import (
 # one window and start one toward the literal goal `--stop` in another.
 from local_operator.session.goal_loop import LOOP_CLEAR_ARGS, LOOP_STOP_ARGS
 from local_operator.session.runtime.inbox import SOURCE_PEER, SOURCE_USER
-from local_operator.session.runtime.server import SessionHandle
+from local_operator.session.runtime.server import AckDetail, SessionHandle
 from local_operator.session.runtime.server import audio_blocks as _audio_blocks
 from local_operator.session.runtime.server import (
     image_blocks_in_thread as _image_blocks_async,
 )
+from local_operator.session.runtime.server import receives_message_id
 from local_operator.session.runtime.types import (
     RUNNING_SUBAGENT_STATUSES,
     SIGNAL_DRAIN_CAUSE,
@@ -103,6 +104,20 @@ from local_operator.session.runtime.types import (
 from local_operator.session.transcript import TRANSCRIPT_FILENAME
 
 logger = logging.getLogger(__name__)
+
+#: The delivery dict for a REDUCED session that answered a plain receipt string
+#: (a stub, or one from before the carriage). Its contract is unchanged from the
+#: pre-field era -- it commits the row before it acks -- so the honest reading is
+#: "committed" rather than a ``None`` the sender would have to interpret.
+#: Module-level rather than a method for the reason the whole handle is: test
+#: hosts bind these methods onto stubs (``DrainHost``), and a bound method that
+#: reaches for a sibling on ``self`` breaks on every one of them.
+_ABSENT_PEER_DELIVERY: dict[str, Any] = {
+    "message_id": "",
+    "committed": True,
+    "queued": False,
+    "duplicate": False,
+}
 
 
 #: How many loop turns a dispatched admission is given to surface a SYNCHRONOUS
@@ -2227,6 +2242,7 @@ class ServingSessionHandle(SessionHandle):
         source: str = SOURCE_PEER,
         command_id: str = "",
         harness_injected: bool = False,
+        message_id: str = "",
     ) -> str:
         """Spool one message for the successor runtime, and receipt it.
 
@@ -2309,6 +2325,11 @@ class ServingSessionHandle(SessionHandle):
                     source=source,
                     command_id=command_id,
                     harness_injected=harness_injected,
+                    # The peer sender's identity, carried across the handover so
+                    # the successor's delivery is idempotent against a row that
+                    # was spooled twice (see ``inbox.InboxLine.message_id``).
+                    # Empty on the owner-prompt paths, which own none.
+                    message_id=message_id,
                 ),
             )
         except Exception:  # noqa: BLE001 — a broken spool is a refusal, not a crash
@@ -4110,7 +4131,8 @@ class ServingSessionHandle(SessionHandle):
         mode: str = "mailbox",
         wake: bool = False,
         sender: dict[str, Any] | None = None,
-    ) -> str:
+        message_id: str | None = None,
+    ) -> AckDetail:
         # This handle owns an in-process Session on the registrant's own loop,
         # so the coroutine can be awaited directly (unlike the TUI handle, which
         # must hop to the owner loop). Session.receive_peer_message does its own
@@ -4136,16 +4158,42 @@ class ServingSessionHandle(SessionHandle):
         # is latched — the announce and the latch come after it.
         if (self._retiring_cause or self._updating) and (wake or mode != "mailbox"):
             if self._updating or (self._draining and not self._exit_committed):
-                return await self._spool_for_successor(
-                    text, mode=mode, wake=wake, sender=sender or {}
+                receipt = await self._spool_for_successor(
+                    text, mode=mode, wake=wake, sender=sender or {}, message_id=message_id or ""
+                )
+                # The row is DURABLE the moment this returns (it raises instead
+                # when it cannot be written), so the sender may report it as
+                # delivered and must not be told to retry.
+                return AckDetail(
+                    receipt,
+                    {},
+                    {
+                        "delivery": {
+                            "message_id": message_id or "",
+                            "committed": True,
+                            "queued": False,
+                            "duplicate": False,
+                        }
+                    },
                 )
             raise self._retiring_refusal()
-        detail = await self._session.receive_peer_message(
-            text, mode=mode, wake=wake, sender=sender or {}
-        )
+        # The keyword is probed on the SESSION OBJECT, not assumed from this
+        # handle's own signature: the dispatch gates on the HANDLE (that is what
+        # the wire sees and what the record advertises), and a handle can wrap a
+        # session that predates the carriage -- a reduced double in a test, a
+        # session an older build made -- where the keyword raised a TypeError
+        # instead of delivering (QA round 1, Q2).
+        peer_kwargs: dict[str, Any] = {"mode": mode, "wake": wake, "sender": sender or {}}
+        if receives_message_id(self._session):
+            peer_kwargs["message_id"] = message_id
+        result = await self._session.receive_peer_message(text, **peer_kwargs)
         self._fold.note_peer_message(text, sender=sender or {})
         self._notify()
-        return detail
+        return AckDetail(
+            str(result),
+            {},
+            {"delivery": getattr(result, "delivery", None) or _ABSENT_PEER_DELIVERY},
+        )
 
     @_on_session_loop
     async def abort(self) -> str:

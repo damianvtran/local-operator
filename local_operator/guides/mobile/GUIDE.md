@@ -102,7 +102,9 @@ these options (consequence in the description; mark the one you recommend
   inside a repo.
 
 If they answer nothing, take **Leave it in the Keychain only** and say so in
-one line.
+one line. If that call came back with a receipt instead of the choice — the host
+queues asks — the install waits for the answer to arrive as a turn, and the line
+above is what applies when the timeout notice comes instead.
 
 Never invent a fourth channel (email, Slack, a gist, a Linear comment, or
 "I'll just paste it here"). If they ask to see it in chat, refuse: the

@@ -49,7 +49,7 @@ from local_operator.projects import PROJECT_ROW_CAP, PROJECT_STATUSES
 from local_operator.projects import age_text as derived_age_text
 from local_operator.projects import display_name, file_size_text, is_session_id
 from local_operator.projects import milestone_state as derived_milestone_state
-from local_operator.projects import truncate_row
+from local_operator.projects import refreshed_age_text, refreshed_note, truncate_row
 
 #: Cap on projects a single canvas renders. Past it the canvas names the
 #: overflow in one truncation row; the cap exists so one runaway store cannot
@@ -209,7 +209,12 @@ def progress_age_text(view: dict[str, Any], *, now: float | None = None) -> str 
 
 
 def live_count(view: dict[str, Any]) -> int:
-    """Linked sessions whose runtime record classifies ``live``."""
+    """Linked WORKING sessions whose runtime record classifies ``live``.
+
+    A coordination row ("filed by") carries no ``runtime`` key at all — by
+    construction, see ``projects.build_project_view`` — so a filing can never
+    satisfy this count and the working set is the only thing measured.
+    """
     rows = view.get("sessions")
     if not isinstance(rows, list):
         return 0
@@ -222,8 +227,21 @@ def live_count(view: dict[str, Any]) -> int:
 
 
 def session_count(view: dict[str, Any]) -> int:
+    """The WORK set: composed rows whose ``role`` is not ``coordination``."""
     rows = view.get("sessions")
-    return len(rows) if isinstance(rows, list) else 0
+    if not isinstance(rows, list):
+        return 0
+    return sum(
+        1 for row in rows if not (isinstance(row, dict) and row.get("role") == "coordination")
+    )
+
+
+def filed_count(view: dict[str, Any]) -> int:
+    """The FILING set: composed rows tagged ``role="coordination"``."""
+    rows = view.get("sessions")
+    if not isinstance(rows, list):
+        return 0
+    return sum(1 for row in rows if isinstance(row, dict) and row.get("role") == "coordination")
 
 
 def estimate_text(project: dict[str, Any]) -> str | None:
@@ -275,9 +293,18 @@ def _status_style(style_for: StyleFor, status: str) -> Style:
 
 
 def _sessions_text(view: dict[str, Any]) -> str:
+    """``2 working (1 live)`` — work-only counts; a filing named separately.
+
+    "working" is the same word the tool, the slash listing and the ``@project``
+    block use, so no surface can make a filed row read as a worker.
+    """
     total = session_count(view)
     live = live_count(view)
-    return f"{total} session{'' if total == 1 else 's'} ({live} live)"
+    text = f"{total} working ({live} live)"
+    filed = filed_count(view)
+    if filed:
+        text += f" · {filed} filed"
+    return text
 
 
 def _timeline_cell_index(day: date, start: date, tier: str) -> int:
@@ -480,7 +507,14 @@ def _list_row(
         extras.append(("no progress", "dim"))
     else:
         stale = " (stale)" if view.get("progress_stale") else ""
-        extras.append((f"progress {age} ago{stale}", "stale" if stale else "dim"))
+        text = f"progress {age} ago{stale}"
+        refreshed = refreshed_age_text(_row(view), now=now)
+        if refreshed is not None:
+            # The refreshed TOKEN beside the age (list contract): the stale
+            # badge keeps telling the content clock's truth, and the token
+            # says the record was checked.
+            text += f" · refreshed {refreshed} ago"
+        extras.append((text, "stale" if stale else "dim"))
     for text, key in extras:
         row.append(" · ", style=style_for("dim"))
         row.append(text, style=style_for(key))
@@ -653,6 +687,12 @@ def _card_lines(
     else:
         stale = " (stale)" if view.get("progress_stale") else ""
         stale_style = style_for("stale") if stale else style_for("dim")
+        # The refreshed assertion does NOT ride this line: a card is the
+        # narrowest surface (the three-column board truncates at ~31 cells) and
+        # the sentence clipped mid-word there ("· refr…", measured in the
+        # capture frames). §4.3's contract puts the board's copy in the
+        # tooltip; on the TUI board the two facts live on the list row and the
+        # detail page instead.
         fresh.append(f"reported {age} ago{stale}", style=stale_style)
     live = live_count(view)
     if live:
@@ -1962,7 +2002,14 @@ def detail_footer(
         stale = " · stale" if view.get("progress_stale") else ""
         by = str(project.get("progress_reported_by") or "")
         reporter = f" by {by}" if by else ""
-        progress.append(f"progress reported {age} ago{reporter}{stale}: ", style=resolver("dim"))
+        # The refresh assertion, when live, rides the same clause (detail
+        # contract): "reported 5h ago by X · stale · refreshed 1h ago by Y —
+        # no new content since 2026-09-29".
+        note = refreshed_note(project, now=now)
+        checked = f" · {note}" if note is not None else ""
+        progress.append(
+            f"progress reported {age} ago{reporter}{stale}{checked}: ", style=resolver("dim")
+        )
         progress.append(str(project.get("progress") or ""))
     clauses["progress"] = progress
 
@@ -1986,41 +2033,59 @@ def detail_footer(
     if not rows:
         sessions.append("no linked sessions", style=resolver("dim"))
     else:
-        sessions.append("sessions: ", style=resolver("dim"))
-        bits: list[str] = []
-        for row in rows[:4]:
-            if not isinstance(row, dict):
-                continue
-            session_row: dict[str, Any] = row
-            session_id = session_row.get("session_id")
-            if session_row.get("exists") is False:
-                # The link is stale — say so rather than "stopped", which
-                # would be a wrong statement about a session that is gone
-                # (agent review round 1, F5; GUIDE.md's `missing` promise).
-                bits.append(f"{session_id} [missing]")
-                continue
-            runtime_value = session_row.get("runtime")
-            runtime: dict[str, Any] = runtime_value if isinstance(runtime_value, dict) else {}
-            state = str(runtime.get("state") or "stopped")
-            busy = ", busy" if runtime.get("busy") else ""
-            bit = f"{session_id} [{state}{busy}]"
-            subagents_value = session_row.get("subagents")
-            subagents: dict[str, Any] = subagents_value if isinstance(subagents_value, dict) else {}
-            if subagents.get("running") is not None and subagents.get("settled") is not None:
-                running = int(subagents["running"])
-                settled = int(subagents["settled"])
-                bit += f" {running} running/{settled} settled"
-            todos_value = session_row.get("todos")
-            todos: dict[str, Any] = todos_value if isinstance(todos_value, dict) else {}
-            # BOTH values must exist: a snapshot-less session carries the key
-            # with null counts, and `todos None/None` is user-visible junk
-            # (UX round 1, U2 — the receipt path omits it; so does this now).
-            if todos.get("open") is not None and todos.get("total") is not None:
-                bit += f" · todos {todos['open']}/{todos['total']}"
-            bits.append(bit)
-        sessions.append(" · ".join(bits))
-        if len(rows) > 4:
-            sessions.append(f" · +{len(rows) - 4} more", style=resolver("dim"))
+        # Work links and filings are distinct clauses: the working list is
+        # what the runtime words describe; a filing says `filed by <id>` and
+        # carries no runtime claim of its own.
+        working_rows = [
+            row for row in rows if not (isinstance(row, dict) and row.get("role") == "coordination")
+        ]
+        filed_rows = [
+            row for row in rows if isinstance(row, dict) and row.get("role") == "coordination"
+        ]
+        if working_rows:
+            sessions.append("working: ", style=resolver("dim"))
+            bits: list[str] = []
+            for row in working_rows[:4]:
+                if not isinstance(row, dict):
+                    continue
+                session_row: dict[str, Any] = row
+                session_id = session_row.get("session_id")
+                if session_row.get("exists") is False:
+                    # The link is stale — say so rather than "stopped", which
+                    # would be a wrong statement about a session that is gone
+                    # (agent review round 1, F5; GUIDE.md's `missing` promise).
+                    bits.append(f"{session_id} [missing]")
+                    continue
+                runtime_value = session_row.get("runtime")
+                runtime: dict[str, Any] = runtime_value if isinstance(runtime_value, dict) else {}
+                state = str(runtime.get("state") or "stopped")
+                busy = ", busy" if runtime.get("busy") else ""
+                bit = f"{session_id} [{state}{busy}]"
+                subagents_value = session_row.get("subagents")
+                subagents: dict[str, Any] = (
+                    subagents_value if isinstance(subagents_value, dict) else {}
+                )
+                if subagents.get("running") is not None and subagents.get("settled") is not None:
+                    running = int(subagents["running"])
+                    settled = int(subagents["settled"])
+                    bit += f" {running} running/{settled} settled"
+                todos_value = session_row.get("todos")
+                todos: dict[str, Any] = todos_value if isinstance(todos_value, dict) else {}
+                # BOTH values must exist: a snapshot-less session carries the key
+                # with null counts, and `todos None/None` is user-visible junk
+                # (UX round 1, U2 — the receipt path omits it; so does this now).
+                if todos.get("open") is not None and todos.get("total") is not None:
+                    bit += f" · todos {todos['open']}/{todos['total']}"
+                bits.append(bit)
+            sessions.append(" · ".join(bits))
+            if len(working_rows) > 4:
+                sessions.append(f" · +{len(working_rows) - 4} more", style=resolver("dim"))
+        if filed_rows:
+            if working_rows:
+                sessions.append(" · ", style=resolver("dim"))
+            filed_ids = ", ".join(str(row.get("session_id") or "") for row in filed_rows[:3])
+            more = f" +{len(filed_rows) - 3} more" if len(filed_rows) > 3 else ""
+            sessions.append(f"filed by {filed_ids}{more}", style=resolver("dim"))
     clauses["sessions"] = sessions
 
     # An EMPTY clause is not a clause: a milestone-less project must not paint
@@ -2195,10 +2260,13 @@ def detail_progress_line(
 ) -> Text:
     """The detail page's pinned footer: freshness attributed, or recorded absent.
 
-    ``progress reported 2h ago by session ab12cd34ef56 · updated 17:52`` (``by
-    the operator`` when the store says so). Fitted by shedding the update
-    stamp first, then the attribution — the age is the point of the line. No
-    record: ``no progress recorded``.
+    ``progress reported 2h ago by session ab12cd34ef56 · refreshed 1h ago by
+    session ab12cd34ef56 — no new content since 2026-09-29 · updated 17:52``
+    (``by the operator`` when the store says so). The refresh clause rides while
+    the assertion is newer than the content (§4.3's detail contract). Fitted by
+    shedding the update stamp first, then the refresh clause, then the
+    attribution — the age is the point of the line. No record: ``no progress
+    recorded``.
     """
     resolver = _styles(style_for)
     project = _row(view)
@@ -2217,8 +2285,17 @@ def detail_progress_line(
         import time as _time
 
         stamp = f" · updated {_time.strftime('%H:%M', _time.localtime(float(updated)))}"
+    note = refreshed_note(project)
+    refreshed = f" · {note}" if note is not None else ""
     base = f"progress reported {age} ago"
-    for text in (base + attribution + stamp, base + attribution, base):
+    ladder = (
+        base + attribution + refreshed + stamp,
+        base + attribution + refreshed,
+        base + attribution + stamp,
+        base + attribution,
+        base,
+    )
+    for text in ladder:
         if cell_len(text) <= width or text == base:
             return Text(text, style=resolver("dim"), no_wrap=True)
     return Text(base, style=resolver("dim"), no_wrap=True)
@@ -2233,6 +2310,10 @@ _SESSION_STATE_STYLES: dict[str, str] = {
     "stale": "stale",
     "stopped": "dim",
     "missing": "stale",
+    # A coordination row ("filed by") has no runtime state to word: the
+    # receipt's word for it is `filed`, never `stopped` — nothing exists that
+    # could be misread as a liveness claim (schema 2's role split).
+    "filed": "dim",
 }
 
 
@@ -2241,8 +2322,12 @@ def detail_session_state(row: dict[str, Any]) -> str:
 
     The composed row carries ``stopped`` for a record-less link; the receipt's
     word for a directory that is gone is ``missing``, and the two surfaces
-    must not disagree (the rule ``action_jump``'s message states).
+    must not disagree (the rule ``action_jump``'s message states). A
+    coordination row reads ``filed``: it is provenance, not a runtime state,
+    and it must never be worded like one.
     """
+    if row.get("role") == "coordination":
+        return "filed"
     if row.get("exists") is False:
         return "missing"
     runtime_value = row.get("runtime")
