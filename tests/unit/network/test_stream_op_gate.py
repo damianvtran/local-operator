@@ -7,7 +7,9 @@ to that table. A table that only shows what is allowed does not show that the ga
 works, so these pin the refusals over the REAL relay path — two relays, a paired
 link, a live runtime socket on the owner:
 
-* an op with NO decision refuses (``unknown_op``), and ``operator_challenge`` is one;
+* an op with NO decision refuses (``unknown_op``) — ``teleport`` is one; the signing
+  op ISN'T any more: slice (a) granted ``operator_challenge`` on ``approve``, so a
+  member without that capability is refused by name instead;
 * a member holding only ``list``/``view`` is refused ``slash_result``, ``prompt``,
   the stop family and the credential writes, each by the capability it lacks;
 * a member holding ``slash`` but NOT ``delete`` is refused the delete-scoped verbs
@@ -51,11 +53,15 @@ _VIEWER_CLIENT = pathlib.Path(local_operator.__file__).parent / "mobile/attach_c
 #: Its senders. Each takes the op name as its FIRST positional argument.
 _REQUEST_SENDERS = frozenset({"_request", "_request_frame", "_request_payload"})
 
-#: The one op a viewer sends that MUST have no row: producing this material is
-#: signing as the operator, and no capability in the transport's set grants that.
-#: Pinned by NAME rather than by omitting it from a list, so a future row here
-#: fails the test rather than being quietly blessed by it.
-_DELIBERATELY_UNGRANTABLE = frozenset({"operator_challenge"})
+#: The ops a viewer sends that MUST have no row. EMPTY since slice (a): producing
+#: signing material used to disqualify an op from having a row, but
+#: remote-onboarding §2.8 makes a remote ALLOW impossible without a challenge
+#: crossing the mesh, so ``operator_challenge`` now has one — ``approve``, a
+#: capability no role carries and only this device's admin hands out. The set
+#: stays a NAME-keyed pin rather than being deleted: it is what makes "every real
+#: viewer op has a row" a checked statement, and a future op that mints signing
+#: material belongs back in here, by name.
+_DELIBERATELY_UNGRANTABLE: frozenset[str] = frozenset()
 
 
 def _literal_ops(node: ast.AST) -> list[str]:
@@ -123,7 +129,7 @@ def _refusal_for(client: _StreamClient, frame: dict[str, Any]) -> dict[str, Any]
     return reply if reply is not None and reply.get("op") == "error" else None
 
 
-def test_every_op_a_viewer_sends_has_a_decision_except_the_signing_one() -> None:
+def test_every_op_a_viewer_sends_has_a_decision() -> None:
     """THE DERIVED ENUMERATION, so this test cannot miss a row by omission.
 
     Round 1's version of this test iterated a hand-written tuple that was the
@@ -143,9 +149,13 @@ def test_every_op_a_viewer_sends_has_a_decision_except_the_signing_one() -> None
         "every op a real viewer sends needs a row in INNER_OP_CAPABILITY; a "
         "missing one is refused AND closes the viewer's stream"
     )
-    # And the one with no row has none, by name — a row that granted it would
-    # be a capability handing out the operator's signature.
+    # And any op the pin names as rowless has none, by name — a row that granted
+    # one would be a capability handing out what the pin exists to withhold.
     assert not (_DELIBERATELY_UNGRANTABLE & set(types.INNER_OP_CAPABILITY))
+    # AND THE SIGNING OP'S ROW, by name: slice (a) put ``operator_challenge`` on
+    # ``approve`` — the one capability that may ask for signing material, and the
+    # check that replaces this file's old "deliberately absent" pin.
+    assert types.INNER_OP_CAPABILITY["operator_challenge"] == "approve"
     # No row may grant more than the capability vocabulary has.
     assert set(types.INNER_OP_CAPABILITY.values()) <= set(types.CAPABILITIES)
     # NOTHING in the stream table needs the broker capability: none of these ops
@@ -193,17 +203,23 @@ def test_a_read_member_is_refused_every_write_and_admitted_only_the_reads(
             finally:
                 client.close()
 
-        # AN OP WITH NO DECISION REFUSES by name, whoever sends it — the signing
-        # op is the one that must stay here. One stream each: a refusal CLOSES the
-        # stream (``_forward_stream_frame``), which is itself fail-closed.
-        for req, op in enumerate(("operator_challenge", "teleport"), start=40):
+        # AN OP WITH NO DECISION REFUSES by name, whoever sends it — ``teleport``
+        # is not a wire op at all. AND AN OP WITH A ROW REFUSES BY THE CAPABILITY
+        # IT LACKS: slice (a) granted ``operator_challenge`` on ``approve``, so a
+        # read member's refusal reads "the 'approve' capability" rather than "no
+        # capability decision". One stream each: a refusal CLOSES the stream
+        # (``_forward_stream_frame``), which is itself fail-closed.
+        for req, op, needle in (
+            (40, "teleport", "no capability decision"),
+            (41, "operator_challenge", "'approve'"),
+        ):
             client = _StreamClient(server_b.root)
             try:
                 assert client.open_stream(server_a.identity.device_id, SESSION)["op"] == "ack"
                 assert client.recv() is not None
                 refusal = _refusal_for(client, {"op": op, "req": req})
                 assert refusal is not None, f"{op!r} was carried with no decision"
-                assert "no capability decision" in str(refusal["message"]), refusal
+                assert needle in str(refusal["message"]), (op, refusal)
             finally:
                 client.close()
 

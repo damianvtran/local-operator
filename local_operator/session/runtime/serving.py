@@ -7750,7 +7750,8 @@ class ServingSessionHandle(SessionHandle):
             return ""
         return (
             "; but operator authority is not installed on this machine yet: neither can run "
-            "until it is set up here (one approval and one admin prompt)"
+            "until it is set up here — ask Local Operator to set it up for you (one "
+            "approval and one admin password prompt)"
         )
 
     def _approvals_slash(

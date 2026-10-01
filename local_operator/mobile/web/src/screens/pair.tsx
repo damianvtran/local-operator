@@ -200,9 +200,10 @@ export function PairScreen() {
 						<p className="text-meta text-ink-muted">
 							This phone can sign already; that machine cannot check it yet. Its operator
 							authority is not installed, so there is no key there to verify this
-							phone&rsquo;s signatures against. Approve setup for that machine in the Mesh
-							tab (one approval and one admin prompt) — then this phone&rsquo;s approvals
-							and loosenings will be accepted. Revoke it with{" "}
+							phone&rsquo;s signatures against. Ask Local Operator on your Mac to set that
+							machine up (one approval and one admin password prompt) — then this
+							phone&rsquo;s approvals, and loosening a session&rsquo;s gate, will be
+							accepted. Revoke it with{" "}
 							<code>lop operator devices --revoke {status.deviceId}</code>.
 						</p>
 					)}
@@ -221,10 +222,11 @@ export function PairScreen() {
 						only there — pairing again will be refused.
 					</p>
 					<p className="text-body-sm text-danger">
-						On the machine, run <code>{AUTHORISE_COMMAND} {status.deviceId}</code>, then
-						pair this phone again. If <code>lop operator status</code> there reports the
-						anchor as not installed, set up operator authority on that machine first
-						(one approval and one admin prompt).
+						On the machine, run <code>{AUTHORISE_COMMAND} {status.deviceId}</code> in a
+						terminal there, then pair this phone again. If{" "}
+						<code>lop operator status</code> there reports the anchor as not installed,
+						ask Local Operator on that machine to set operator authority up first
+						(one approval and one admin password prompt).
 					</p>
 				</div>
 			) : null}

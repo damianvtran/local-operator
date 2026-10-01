@@ -333,7 +333,7 @@ def test_the_pairing_receipt_does_not_promise_authority_this_host_lacks(
     # The receipt WRAPS its paragraph (hanging indent), so the phrase is matched
     # against the joined text: a pin on the unwrapped string would fail on where
     # the line broke, which is not the fact under test.
-    assert "one approval and one admin prompt" in " ".join(captured.split()), captured
+    assert "one approval and one admin password prompt" in " ".join(captured.split()), captured
     assert "The phone can now approve parked cards" not in captured, captured
     # The certificate is still installed: the receipt is about what the phone can
     # DO, not about whether the machine recorded it (which the refusal's copy and
@@ -356,7 +356,7 @@ def test_the_pairing_receipt_does_not_promise_authority_this_host_lacks(
     assert dispatch(_args(device=second_id)) == 0
     captured = capsys.readouterr().out
     assert "The phone can now approve parked cards" in captured, captured
-    assert "one approval and one admin prompt" not in captured, captured
+    assert "one approval and one admin password prompt" not in captured, captured
 
 
 def _installed_anchor(trust: Any, root: Path, uid: Any) -> Any:
@@ -472,7 +472,7 @@ def test_the_pairing_prompt_qualifies_its_promise_on_this_host(
     monkeypatch.setattr(operator_pkg, "load_anchor", installed)
     assert _confirm(row) is False
     qualified = capsys.readouterr().out
-    assert "one approval and one admin prompt" not in qualified, qualified
+    assert "one approval and one admin password prompt" not in qualified, qualified
     assert "This lets that device APPROVE" in qualified, qualified
 
     absent = lambda uid=None: _absent_anchor(trust, uid)  # noqa: E731 - a seam, not a style
@@ -484,7 +484,7 @@ def test_the_pairing_prompt_qualifies_its_promise_on_this_host(
     # The PROMPT wraps at the terminal width (the block prints through the same
     # hanging-indent writer the receipt uses), so the phrase is matched against
     # the joined text rather than against where the line happened to break.
-    assert "one approval and one admin prompt" in " ".join(unready.split()), unready
+    assert "one approval and one admin password prompt" in " ".join(unready.split()), unready
 
 
 def test_authorising_a_device_lifts_both_halves_of_its_revocation(

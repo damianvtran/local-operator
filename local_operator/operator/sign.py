@@ -170,7 +170,7 @@ def sign_challenge(
         backend_name=backend_name or resolve_backend_name(config_root),
     )
     if signer is None:
-        raise KeyBackendError("no operator key on this machine — run `lop operator init` first")
+        raise KeyBackendError("no operator key on this machine — set up operator authority first")
     message = signed_message(
         action=purpose,
         session_id=session_id,
