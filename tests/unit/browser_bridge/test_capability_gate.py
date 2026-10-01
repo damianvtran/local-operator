@@ -34,6 +34,7 @@ from local_operator.browser_bridge.protocol import (
     Request,
     Response,
 )
+from local_operator.tools import builtin
 
 
 class _HttpRequest:
@@ -194,6 +195,63 @@ async def test_an_advertised_read_action_reaches_the_peer_with_its_params(tmp_pa
     assert body["result"] == {"count": 1, "elements": []}
     assert sent and sent[0]["method"] == "hit_test"
     assert sent[0]["params"]["x"] == 10
+
+
+@pytest.mark.asyncio
+async def test_a_pre_feature_app_gets_the_typed_refusal_for_a_gated_read() -> None:
+    """M1 (UI review round): the TOOL-side pre-check is driven off the SET.
+
+    The app leg has no daemon-side gate — the frame would travel to the app
+    host, whose pre-feature dispatch has no handler and answers a bare
+    `internal`. The typed refusal has to come from the tool's own record read,
+    BEFORE any socket work, for EVERY gated method — not for the
+    download/upload name list it used to be.
+    """
+    from local_operator.browser_bridge.backend import HostCapabilities
+
+    dialed: list[tuple[str, dict[str, Any]]] = []
+
+    class ScriptedApp:
+        host = "ui"
+
+        def __init__(self, methods: tuple[str, ...]) -> None:
+            self._methods = methods
+
+        def capabilities(self) -> HostCapabilities:
+            # A pre-feature app's record carries no advertisement at all, which
+            # reads as "told us nothing" — the refusal case; a current app's
+            # list is the other row below.
+            return HostCapabilities(methods=self._methods, version="0.0.0", capabilities_known=True)
+
+        async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            dialed.append((method, params))
+            return {}
+
+    pre_feature = ScriptedApp(())
+    for action in sorted(CAPABILITY_GATED_METHODS):
+        result, problem = await builtin._bridge_call(
+            "t",
+            action,
+            {"tab": "ui:7:nonce"},
+            surface="ui:7:nonce",
+            client=pre_feature,
+        )
+        assert result is None and problem is not None, action
+        assert (problem.details or {}).get("error_code") == ErrorCode.CAPABILITY_UNSUPPORTED.value
+        # The app-leg copy names the app and the method (not the extension's
+        # update-the-extension wording the remedy map holds for the bridge).
+        assert "desktop app's browser host does not provide" in problem.text
+        assert f"'{action}'" in problem.text
+    assert dialed == [], "the refusal must come from the record, not the wire"
+
+    # The inverse, so a gate that refused everything could not pass the row
+    # above: a current app's advertisement lets the call through.
+    current = ScriptedApp(tuple(sorted(CAPABILITY_GATED_METHODS)))
+    result, problem = await builtin._bridge_call(
+        "t", "hit_test", {"x": 1.0, "y": 2.0}, client=current
+    )
+    assert problem is None and result == {}
+    assert dialed == [("hit_test", {"x": 1.0, "y": 2.0})]
 
 
 @pytest.mark.asyncio

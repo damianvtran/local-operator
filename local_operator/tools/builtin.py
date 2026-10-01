@@ -16390,13 +16390,15 @@ _SCROLL_DIRECTIONS = frozenset({"top", "bottom", "up", "down", "left", "right"})
 #: Console levels ``logs`` filters on. Mirrors the extension's LEVELS.
 _LOG_LEVELS = frozenset({"error", "warning", "info", "log", "all"})
 
-#: Style property names ``styles`` accepts as caller-requested extras. Dashes are
-#: legal mid-name (`background-color`); dots and brackets are not part of any
-#: CSS property spelling and are refused. The page-side function only ever hands
-#: these to `getPropertyValue` (no interpolation, so nothing to inject), but a
-#: bad name would silently read as "" — refuse it here where the model can see
-#: why, rather than returning an empty value that looks like a page fact.
-_STYLE_PROPERTY_RE = re.compile(r"^[-A-Za-z0-9]+$")
+#: Style property names ``styles`` accepts as caller-requested extras. The
+#: charset is the CSS ident set that matters here: letters, digits, dashes and
+#: underscores — ``_`` is an ident character (``--brand_color`` is a legal
+#: custom property) and dots/brackets are not part of any property spelling,
+#: so those are refused. The page-side function only ever hands these to
+#: `getPropertyValue` (no interpolation, so nothing to inject), but a bad name
+#: would silently read as "" — refuse it here where the model can see why,
+#: rather than returning an empty value that looks like a page fact.
+_STYLE_PROPERTY_RE = re.compile(r"^[-_A-Za-z0-9]+$")
 
 #: Ceiling on caller-requested style extras. The page function caps the combined
 #: list at 30 (defaults + extras); this is the caller-facing bound so an absurd
@@ -16571,7 +16573,7 @@ class BrowserParams(BaseModel):
     properties: list[str] = Field(
         default_factory=list,
         description="'styles': extra computed properties on top of the defaults "
-        "(max 20; letters, digits and dashes).",
+        "(max 20; letters, digits, dashes and underscores).",
     )
     depth: int | None = Field(
         default=None,
@@ -17090,8 +17092,8 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
             for name in params.properties:
                 if not _STYLE_PROPERTY_RE.match(name):
                     return (
-                        f"invalid style property {name!r}: letters, digits and dashes "
-                        "only (e.g. 'background-color')"
+                        f"invalid style property {name!r}: letters, digits, dashes and "
+                        "underscores only (e.g. 'background-color')"
                     )
         return ""
     if action == "hit_test":
@@ -18506,9 +18508,21 @@ async def _bridge_call(
         BridgeUnreachable,
         format_error,
     )
+    from local_operator.browser_bridge.protocol import CAPABILITY_GATED_METHODS
 
     selected = client if client is not None else BridgeClient()
     host = str(getattr(selected, "host", HOST_EXTENSION) or HOST_EXTENSION)
+    # The capability pre-check, driven off the SET so every gated method gets
+    # one: download/upload call `_capability_problem` inside their own flows
+    # (upstream of arming or reading anything), and the generic action path —
+    # which the three reads ride — gets the same typed refusal here. UI-review
+    # M1: without it, a pre-feature APP answered a bare `internal` for the
+    # reads, because the daemon-side gate only covers the extension leg. The
+    # check reads the record, never the socket, so a refusal costs no dial.
+    if action in CAPABILITY_GATED_METHODS:
+        problem = _capability_problem(tool_call_id, action, selected, surface=surface)
+        if problem is not None:
+            return None, problem
     try:
         return await selected.call(action, params), None
     except BridgeError as exc:
