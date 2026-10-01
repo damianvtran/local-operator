@@ -843,7 +843,7 @@ async def test_provider_census_publishes_the_registry_view(desktop):
     token_plan = next(row for row in rows if row["id"] == "alibaba-token-plan")
     assert token_plan["brand"] == "QwenCloud", "the one explicit override"
     elevenlabs = next(row for row in rows if row["id"] == "elevenlabs")
-    assert elevenlabs["capabilities"] == ["stt"], "the wire fact behind speech_only"
+    assert elevenlabs["capabilities"] == ["stt", "tts"], "the wire fact behind speech_only"
     ollama = next(row for row in rows if row["id"] == "ollama")
     assert ollama["state"] == "local_unconfigured"
     # Sorted for a stable wire: the registry field is a frozenset.
@@ -1148,6 +1148,29 @@ async def test_key_save_reads_config_written_elsewhere_since_boot(desktop):
     assert ConfigManager(app.state.config_manager.config_dir).get_config_value("hosting") == (
         "anthropic"
     )
+
+
+async def test_openai_key_saves_a_key_and_the_census_agrees(desktop, monkeypatch):
+    """Voicing S0 S-2: the census listed an api_key method for ``openai-key`` while
+    ``accepts_api_key`` was false and this route 422d. Both now say yes, and the key
+    lands in the row's OWN namespace (never beside the ChatGPT rows)."""
+    from local_operator.providers import key_check
+
+    async def accepted(_provider, _key, **_kwargs):
+        return key_check.KeyCheck(True, None)
+
+    monkeypatch.setattr(key_check, "check_api_key", accepted)
+    client, app = desktop
+    census = await client.get("/v1/auth/providers")
+    row = next(r for r in census.json()["result"]["providers"] if r["id"] == "openai-key")
+    assert row["accepts_api_key"] is True
+    assert any(m["kind"] == "api_key" for m in row["auth_methods"])
+    assert row["storage_id"] == "openai-key"
+
+    response = await client.put("/v1/auth/providers/openai-key/key", json={"value": "sk-speech"})
+    assert response.status_code == 200
+    assert app.state.desktop_auth.store.list_credentials("openai-key")
+    assert not app.state.desktop_auth.store.list_credentials("openai")
 
 
 async def test_a_rejected_key_is_refused_and_not_stored(desktop, monkeypatch):

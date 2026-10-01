@@ -4096,6 +4096,45 @@ async def test_login_lists_providers_from_the_controller() -> None:
 
 
 @pytest.mark.asyncio
+async def test_login_status_lists_stored_logins_and_never_starts_a_login(tmp_path) -> None:
+    """`/login status` is the CLI's `login-status` listing, not a provider id.
+
+    The word is claimed before the provider lookup (so it is not "unknown
+    provider: status"), runs no login flow, and prints identities and env-var
+    NAMES only -- a stored key's value must never reach the transcript.
+    """
+    from local_operator.providers.auth_store import AuthStore
+
+    store = AuthStore(db_path=tmp_path / "auth.db", config_dir=tmp_path)
+    store.upsert_credential(
+        "openai-key", {"type": "api_key", "source": "login", "key": "sk-never-shown"}
+    )
+
+    class StatusController(FakeProviderController):
+        auth_store = store
+        config_dir = tmp_path
+
+    controller = StatusController()
+    app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=controller)
+    try:
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.query_one(Editor).focus()
+            await pilot.pause()
+            _set_editor_line(app.query_one(Editor), "/login status")
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.pause()
+            text = _transcript_text(app)
+    finally:
+        store.close()
+    assert "Stored credentials:" in text and "openai-key" in text
+    assert "sk-never-shown" not in text
+    assert "unknown provider" not in text
+    assert controller.logins == [], "no login flow was started"
+
+
+@pytest.mark.asyncio
 async def test_logout_routes_to_the_controller() -> None:
     controller = FakeProviderController()
     app = OperatorApp(lambda: _factory(FakeSession()), provider_controller=controller)

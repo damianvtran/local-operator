@@ -34,6 +34,11 @@ from local_operator.providers.registry import (
 
 logger = logging.getLogger("local_operator.providers.auth_cli")
 
+#: The word that turns ``login`` / ``/login`` into the status listing. One
+#: spelling for the CLI and the TUI; it can never collide with a provider id (no
+#: registry row is called ``status``, pinned by a test).
+LOGIN_STATUS_WORD = "status"
+
 if TYPE_CHECKING:  # lazy at runtime: the CLI top level must not import these
     from pathlib import Path
 
@@ -312,12 +317,20 @@ def run_login(
     :func:`list_logins` but plays no part in a login: new credentials land in
     ``auth_store`` only. It used to be a ``CredentialManager``, deleted in PR2b.
     """
+    if provider_id is not None and provider_id.strip().lower() == LOGIN_STATUS_WORD:
+        # `lop login status` / `/login status`: the same listing as
+        # `login-status`. "status" can never be a provider id (the registry has
+        # no such row), so claiming the word costs nothing and spares the user
+        # an "Unknown provider: status" for the command the docs name. Matched
+        # case-insensitively, as the TUI's `/login STATUS` is (it lowercases its
+        # argument first), so the two surfaces answer one spelling one way.
+        return list_logins(auth_store, _config_dir)
     if provider_id is None:
         print("Available login providers:")
         for candidate in list_login_providers():
             marker = "*" if candidate.store_credentials_as else " "
             print(f"  {marker} {candidate.id:<16} {candidate.name}")
-        print("\nUsage: local-operator login <provider>")
+        print("\nUsage: local-operator login <provider>   (or: login status)")
         return 0
 
     definition = get_provider_definition(provider_id)
@@ -648,13 +661,22 @@ def stored_login_key_names(config_dir: "Path | None") -> list[str]:
         return []
 
 
-def list_logins(auth_store: "AuthStore", config_dir: "Path | None" = None) -> int:
-    """Print one line per active credential plus env/legacy keys in the cascade."""
+def format_logins(auth_store: "AuthStore", config_dir: "Path | None" = None) -> list[str]:
+    """The status listing as LINES: one per active credential plus env/legacy keys.
+
+    Returned rather than printed so the CLI (``list_logins``, stdout) and the
+    TUI's ``/login status`` (a transcript block) render ONE derivation: a
+    printer that wrote straight to stdout cannot be reused inside a running
+    full-screen app, and a second copy of the listing is how two surfaces come
+    to disagree about who is signed in. Secrets never appear: identities and
+    env-var NAMES only.
+    """
     from local_operator.providers.auth_store import credential_identity
 
+    lines: list[str] = []
     rows = auth_store.list_credentials()
     if rows:
-        print("Stored credentials:")
+        lines.append("Stored credentials:")
         now_ms = int(time.time() * 1000)
         for row in rows:
             # The ONE label derivation (``credential_identity`` -> row.data
@@ -669,17 +691,18 @@ def list_logins(auth_store: "AuthStore", config_dir: "Path | None" = None) -> in
             else:
                 source = row.data.get("source") or "stored"
                 detail = f"api_key ({source})"
-            print(f"  [{row.id}] {row.provider:<14} {detail:<22} identity={identity}")
+            lines.append(f"  [{row.id}] {row.provider:<14} {detail:<22} identity={identity}")
     else:
-        print("No stored credentials.")
+        lines.append("No stored credentials.")
 
-    print("\nEnvironment keys visible to the cascade:")
+    lines.append("")
+    lines.append("Environment keys visible to the cascade:")
 
     found = False
     for definition in PROVIDER_REGISTRY:
         name = env_key_name(definition.id)
         if name and os.environ.get(name):
-            print(f"  {definition.id:<14} {name}=<set>")
+            lines.append(f"  {definition.id:<14} {name}=<set>")
             found = True
     if config_dir is not None:
         # The provider-class store rows, keyed by env-key name, reported as names
@@ -687,8 +710,15 @@ def list_logins(auth_store: "AuthStore", config_dir: "Path | None" = None) -> in
         # (PR2a): the file is no longer a credential source, and
         # ``stored_login_key_names`` is the one callable that reads those names.
         for key in stored_login_key_names(config_dir):
-            print(f"  secret store  {key}=<set>")
+            lines.append(f"  secret store  {key}=<set>")
             found = True
     if not found:
-        print("  (none)")
+        lines.append("  (none)")
+    return lines
+
+
+def list_logins(auth_store: "AuthStore", config_dir: "Path | None" = None) -> int:
+    """Print the status listing (:func:`format_logins`), one line per row."""
+    for line in format_logins(auth_store, config_dir):
+        print(line)
     return 0

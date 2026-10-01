@@ -1596,6 +1596,9 @@ def test_paste_key_providers_declare_that_they_require_a_prompt() -> None:
         # WHERE the credential is used (speech-to-text, never chat) rather
         # than how it is obtained.
         "elevenlabs",
+        # The OpenAI speech key: pasted from the platform console, stored under
+        # its own namespace, speech-only like ElevenLabs.
+        "openai-key",
     }, required
 
     # And the union a host actually gates on: required plus the browser

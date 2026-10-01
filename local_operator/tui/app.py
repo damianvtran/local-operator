@@ -44715,7 +44715,12 @@ class OperatorApp(App[None]):
                 return
             self._append_block(RichBlock(_tree_listing(items, "providers with interactive login")))
             return
+        from local_operator.providers.auth_cli import LOGIN_STATUS_WORD
+
         provider = arg.lower()
+        if provider == LOGIN_STATUS_WORD:
+            self._login_status_block()
+            return
         if self._providers.provider(provider) is None:
             self._system_notice(f"unknown provider: {provider}", "warning")
             return
@@ -44731,6 +44736,32 @@ class OperatorApp(App[None]):
             else f"logging in to {provider}…"
         )
         self.run_worker(self._login_flow(provider), thread=False, group="login")
+
+    def _login_status_block(self) -> None:
+        """``/login status`` — who is signed in, from the same lines as the CLI.
+
+        TUI/CLI-only by decision (voicing S0): the desktop reaches the same
+        facts through the provider census, and a status word there would need
+        the suggestion machinery extended, which this slice does not do.
+
+        The text is ``auth_cli.format_logins`` -- the function ``lop
+        login-status`` prints -- so the two surfaces cannot disagree about who
+        is signed in. It lists identities and env-var NAMES, never a secret. A
+        store that cannot be read is a notice, not a crash: this runs on a
+        keystroke, and an unreadable store is exactly when a user asks.
+        """
+        assert self._providers is not None
+        from local_operator.providers.auth_cli import format_logins
+
+        try:
+            lines = format_logins(self._providers.auth_store, self._providers.config_dir)
+        except Exception as error:  # noqa: BLE001 - a status read must not take the app down
+            self._system_notice(f"login status unavailable: {error}", "error")
+            return
+        text = Text()
+        for line in lines:
+            text.append(line + "\n")
+        self._append_block(RichBlock(text))
 
     def _cmd_credential(self, arg: str, notice: NoticeFn) -> None:
         """``/credential`` — list, store, or forget a session-only secret.
