@@ -934,6 +934,42 @@ class TestMonitorDeltaBlock:
         # by the card layer only.
         assert MONITOR_HUMAN_REMEDY not in text
 
+    def test_the_collapsed_headline_survives_the_consequence(self) -> None:
+        """R12 / QA Q1: the property U5+D13 fixed, pinned at the card's REAL
+        widths (the cited test did not exist, and the nearest one ran at 200
+        where the whole envelope fits and nothing can be cut).
+
+        Boundaries are MEASURED for this name and clock, not hoped for: the
+        whole phrase at 96 cells and up (the card's default box), ``no longer
+        wat…`` at 80, and the news alone at 60. Literal survival at 60/80 is
+        out of reach with this prefix — the point of the finding was which HALF
+        survives a cut, and that is what these assertions pin.
+        """
+        from local_operator.monitors.delivery import (
+            MonitorNotice,
+            format_monitor_notice_text,
+        )
+
+        text = format_monitor_notice_text(
+            MonitorNotice(
+                monitor_id="m2",
+                name="ner-gpu-fleet-dd",
+                tool="mcp__datadog_search_datadog_hosts",
+                kind="disabled",
+                at_ms=1_756_000_000_000,
+                checks=7,
+                deliveries=0,
+                failures=5,
+                detail="boom",
+            )
+        )
+        assert "was DISABLED" in MonitorDeltaBlock(text)._build_row(60).plain
+        narrow = MonitorDeltaBlock(text)._build_row(80).plain
+        assert "no longer wat" in narrow
+        assert "no longer watching" not in narrow
+        for width in (96, 110, 200):
+            assert "no longer watching" in MonitorDeltaBlock(text)._build_row(width).plain, width
+
     def test_the_row_wears_the_monitors_own_name_and_glyph(self) -> None:
         """The name column says ``monitor`` and the glyph table knows it — not
         the generic fallback, which would read as an unknown tool."""

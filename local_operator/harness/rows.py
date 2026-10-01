@@ -828,16 +828,29 @@ def monitor_receipt_body(text: str) -> str:
     which is the inconsistency this closes. Nothing else is rewritten: the
     expansion is what the model was handed (design §12), cancel hint and all.
 
-    A LIFECYCLE NOTICE gains :data:`MONITOR_HUMAN_REMEDY` below its own text
-    (UX review round 1, U1). Added HERE rather than in the wire text because the
-    card body is the surface a person reads while the model-facing text must
-    keep the shape the model was handed; the mobile fold calls the same
-    function, so the phone gets the sentence too.
+    A BROKEN WATCH (``disabled`` / ``stalled``) gains
+    :data:`MONITOR_HUMAN_REMEDY` below its own text (UX review round 1, U1).
+    Added HERE rather than in the wire text because the card body is the surface
+    a person reads while the model-facing text must keep the shape the model was
+    handed.
+
+    REACH: this function's one production caller is the TUI's receipt builder
+    (``tui/widgets/transcript.MonitorDeltaBlock``), so the sentence reaches the
+    expanded card there. The phone does NOT show it today: ``mobile/projection``
+    has custom-message branches for hub/peer/wake/ask/gate/compaction/job and
+    none for ``monitor_prompt``, so a monitor notice falls to the generic notice
+    row carrying the wire text. Wiring that fold is deferred (QA round 3, Q2);
+    the claim is narrowed here rather than the mobile path widened in a
+    remediation commit.
+
+    ``restored`` is EXEMPT (design round 3, D14 / UX round 1, U9): a recovery
+    notice reports good news, and a "stop it" remedy on it offers an action the
+    reader did not ask for.
     """
     body = (
         text[len(MONITOR_ENVELOPE_PREFIX) :] if text.startswith(MONITOR_ENVELOPE_PREFIX) else text
     )
-    if monitor_notice_kind(text) is not None:
+    if monitor_notice_kind(text) in ("disabled", "stalled"):
         return f"{body}\n{MONITOR_HUMAN_REMEDY}"
     return body
 
@@ -916,8 +929,9 @@ def monitor_receipt_headline(text: str) -> str:
         # paragraph rule below would collapse the whole multi-sentence block
         # into a row that cannot show it — the collapsed card became the entire
         # notice, 529 characters of it, with the news cut off (design review
-        # round 1, D4). The trailing source note is dropped here because it
-        # would spend the row's first cells on the tool name; the expansion
+        # round 1, D4). The source note is dropped WHEREVER it sits in that
+        # line — since D13 it rides behind the clock, not at the end — because
+        # it would spend the row's first cells on the tool name; the expansion
         # keeps it.
         head = _strip_source_notes(text.split("\n", 1)[0])
         if head.startswith(MONITOR_ENVELOPE_PREFIX):

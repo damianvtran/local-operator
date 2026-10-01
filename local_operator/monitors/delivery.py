@@ -133,11 +133,13 @@ class MonitorNotice:
 def format_monitor_notice_text(notice: MonitorNotice) -> str:
     """The complete model-facing text of one lifecycle notice.
 
-    SHAPE: every kind leads with the NEWS and carries the source note at the
-    END of that first line. The collapsed transcript card shows one line, so a
-    leading ``(via mcp__datadog_search_datadog_hosts)`` clause spent 36 cells
-    before the reader reached "was DISABLED" and cut both facts that matter
-    (design review round 1, D4).
+    SHAPE: every kind leads with the NEWS, and the source note rides directly
+    behind the clock — ``… was DISABLED at 10:46 (via bash) — it is no longer
+    watching …`` — because the collapsed transcript card shows one line and
+    drops notes wherever they sit (design review round 2, D13). A LEADING
+    ``(via mcp__datadog_search_datadog_hosts)`` clause spent 36 cells before the
+    reader reached "was DISABLED" and cut both facts that matter (design review
+    round 1, D4).
     """
     if notice.kind not in NOTICE_KINDS:
         # ``NOTICE_KINDS`` is the dispatch's own vocabulary, so an unknown kind

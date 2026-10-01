@@ -220,3 +220,29 @@ def test_the_stalled_notice_keeps_its_first_line_short() -> None:
     # it whole (D13).
     assert "(via bash)" in lines[0].split("—")[0]
     assert any(line.startswith("Reason: ") for line in lines[1:])
+
+
+def test_the_stalled_notice_explains_the_dormancy_and_the_restored_one_does_not() -> None:
+    """R13: UX round 1's U8, both halves pinned — the sentence that says why
+    nothing runs now rides the stalled notice as well as the disable one, and
+    ``restored`` is exempt because there the watch IS running."""
+    sentence = "Monitors tick only while this session is open."
+    assert sentence in format_monitor_notice_text(notice())
+    assert sentence in format_monitor_notice_text(notice(kind="stalled"))
+    assert sentence not in format_monitor_notice_text(notice(kind="restored"))
+
+
+def test_the_human_remedy_rides_a_broken_watch_but_not_a_recovery() -> None:
+    """U9 / D14: the remedy answers "what do I do about this broken watch", so
+    it belongs on the notices that report one."""
+    from local_operator.harness.rows import MONITOR_HUMAN_REMEDY, monitor_receipt_body
+
+    assert MONITOR_HUMAN_REMEDY in monitor_receipt_body(
+        format_monitor_notice_text(notice(kind="disabled"))
+    )
+    assert MONITOR_HUMAN_REMEDY in monitor_receipt_body(
+        format_monitor_notice_text(notice(kind="stalled"))
+    )
+    assert MONITOR_HUMAN_REMEDY not in monitor_receipt_body(
+        format_monitor_notice_text(notice(kind="restored"))
+    )
