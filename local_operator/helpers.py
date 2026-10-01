@@ -962,6 +962,11 @@ def get_posix_shell_path() -> str | None:
         # stdin is DEVNULL for the same reason: in interactive mode a prompt,
         # or an rc file that reads, must see EOF rather than block on (or
         # steal from) a terminal that is not attached.
+        #
+        # Both capture shapes echo this marker immediately before $PATH so
+        # the value can be picked out even when rc files print to stdout; see
+        # the extraction after each run.
+        capture_marker = "__LOP_PATH__"
         full_path = None
         for interactive in (True, False):
             flags = "-l -i -c" if interactive else "-l -c"
@@ -972,9 +977,11 @@ def get_posix_shell_path() -> str | None:
             )
             # The command is a shell command line: shell=True interprets it
             # with the user's own shell (executable=shell_path). The shell
-            # path is quoted, and `echo "$PATH"` stays double-quoted so the
-            # variable expands in that shell rather than in the parent.
-            command = f"'{shell_path}' {flags} 'echo \"$PATH\"'"
+            # path is quoted; the echo is one single-quoted argument, and its
+            # `"$PATH"` stays double-quoted so the variable expands in that
+            # shell rather than in the parent, with the marker printed
+            # immediately before the value and nothing between them.
+            command = f"'{shell_path}' {flags} 'echo {capture_marker}\"$PATH\"'"
             try:
                 result = subprocess.run(
                     command,
@@ -1008,26 +1015,54 @@ def get_posix_shell_path() -> str | None:
                 logger.error(f"Stderr: {e.stderr.strip()}")
                 continue
 
-            full_path = result.stdout.strip()
+            # Only the marked capture is trusted. Login shells run the
+            # user's rc files, and anything they print (a banner, a greeting)
+            # would otherwise land IN the PATH — reproduced end to end: the
+            # value that replaced os.environ["PATH"] carried an embedded
+            # newline in its first entry. The capture is everything after the
+            # LAST marker occurrence: our own command line echoes the marker
+            # after the rc files have run, so rc output that merely mentions
+            # the string cannot win over it, and the marker need not start a
+            # line, so rc output without a trailing newline cannot bleed
+            # into the value.
+            marker_at = result.stdout.rfind(capture_marker)
+            if marker_at == -1:
+                # Exit 0 but no marker anywhere: our echo did not run as the
+                # shell's last output (an rc may have execed or shadowed it),
+                # so stdout cannot be trusted as a PATH. Treat the attempt as
+                # failed — the next shape runs, and when no shape yields a
+                # capture the inherited PATH decides below.
+                logger.warning(
+                    f"Login shell output did not contain the {capture_marker} "
+                    f"capture marker; {retry_note}"
+                )
+                full_path = ""
+                continue
+            full_path = result.stdout[marker_at + len(capture_marker) :].strip()
             if full_path:
                 break
-            # Exited 0 but printed nothing usable; try the next attempt before
-            # settling for the inherited PATH below.
+            # Marker present but the captured PATH was empty; try the next
+            # attempt before settling for the inherited PATH below.
 
         if full_path is None:
-            # Every attempt failed (each raised — a timeout or a non-zero
-            # exit). Degrade to None exactly as the previous single-attempt
-            # code did; `setup_cross_platform_environment` then keeps the
-            # inherited PATH.
+            # Reached only when all attempts RAISED (a timeout or a non-zero
+            # exit): an attempt that exits 0 without a usable capture leaves
+            # `full_path` empty instead, and mixed combinations (one empty,
+            # one raised) settle on the inherited-PATH branch below rather
+            # than here. The None is the exact failure the previous
+            # single-attempt code returned; `setup_cross_platform_environment`
+            # then keeps the inherited PATH.
             return None
 
         if full_path:
             logger.debug(f"Successfully retrieved PATH from login shell: {full_path}")
         else:
-            # If the shell command succeeded but returned empty, log a warning
-            # and use current PATH as fallback
+            # No attempt produced a usable capture: at least one exited 0
+            # with empty or unmarked output, while the last attempt may have
+            # raised. Log a warning and fall back to the current process PATH.
             logger.warning(
-                "Login shell command executed but returned an empty PATH. "
+                "No login shell attempt produced a usable PATH "
+                "(empty or unmarked capture output). "
                 "Falling back to current os.environ['PATH']."
             )
             full_path = os.environ.get("PATH", "")
