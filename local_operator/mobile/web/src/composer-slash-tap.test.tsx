@@ -18,8 +18,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Composer } from "./components/composer";
 import type { SessionProjection, SlashCommand } from "./types";
 
-//: A catalogue that carries one command of each shape. `goal` is `optional`
-//: since the flag work; `copy` and `new` stay `none`, the shape whose tap runs.
+//: A catalogue that carries one command of each shape — all of them commands the
+//: phone's real sheet offers (the daemon serves only the routed set, issue #1869). `goal` is `optional`
+//: since the flag work; `compact` stays `none`, the shape whose tap runs.
 const CATALOGUE: SlashCommand[] = [
 	{
 		name: "goal",
@@ -34,8 +35,8 @@ const CATALOGUE: SlashCommand[] = [
 		arguments: "optional",
 	},
 	{
-		name: "copy",
-		description: "Copy an agent message or code block",
+		name: "compact",
+		description: "Compact the conversation context",
 		aliases: [],
 		arguments: "none",
 	},
@@ -44,7 +45,18 @@ const CATALOGUE: SlashCommand[] = [
 vi.mock("./api", () => ({
 	getCommands: vi.fn(async () => ({ commands: CATALOGUE })),
 	getModels: vi.fn(async () => ({ models: [] })),
-	sendCommand: vi.fn(async () => ({ ok: true, detail: "" })),
+	sendCommand: vi.fn(async (..._args: unknown[]) => ({ ok: true, detail: "" })),
+	// The real class: the composer tells a daemon refusal (422 + its own sentence)
+	// from a transport failure by `instanceof`.
+	HttpError: class HttpError extends Error {
+		constructor(
+			readonly status: number,
+			message: string,
+			readonly code = "",
+		) {
+			super(message);
+		}
+	},
 }));
 
 vi.mock("./store", async (importOriginal) => {
@@ -125,10 +137,18 @@ describe("the phone's slash sheet tap", () => {
 		const field = await openSheet();
 		const api = await import("./api");
 
-		fireEvent.click(screen.getByRole("button", { name: /\/copy/ }));
+		fireEvent.click(screen.getByRole("button", { name: /\/compact/ }));
 
-		expect(field.value).toBe("/copy");
+		expect(field.value).toBe("/compact");
 		expect(vi.mocked(api.sendCommand)).toHaveBeenCalledTimes(1);
+		// The routed seam, not the off-terminal subset: `slash` answers every word
+		// but /goal and /compact with "terminal-only here" (issue #1869).
+		expect(vi.mocked(api.sendCommand)).toHaveBeenCalledWith("p1", {
+			op: "slash_result",
+			command: "compact",
+			args: "",
+			images: [],
+		});
 	});
 
 	it("waits for `/loop` too, which is the safer half of the change", async () => {
@@ -140,5 +160,38 @@ describe("the phone's slash sheet tap", () => {
 		// The bare word used to start iterations; a tap no longer spends a turn.
 		expect(field.value).toBe("/loop ");
 		expect(vi.mocked(api.sendCommand)).not.toHaveBeenCalled();
+	});
+
+	it("shows what a routed command did, in the runtime's words", async () => {
+		const api = await import("./api");
+		vi.mocked(api.sendCommand).mockResolvedValueOnce({ ok: true, detail: "compacting context…" });
+		const field = await openSheet();
+
+		fireEvent.click(screen.getByRole("button", { name: /\/compact/ }));
+
+		// A command that ran and said nothing reads as a dead tap (issue #1869).
+		await waitFor(() => expect(screen.getByRole("status").textContent).toBe("compacting context…"));
+		expect(field.value).toBe("");
+	});
+
+	it("carries a runtime refusal to the alert and keeps the draft", async () => {
+		const api = await import("./api");
+		vi.mocked(api.sendCommand).mockRejectedValueOnce(
+			new api.HttpError(422, "A loop is already running"),
+		);
+		const field = await openSheet();
+		fireEvent.change(field, { target: { value: "/goal do the thing" } });
+		fireEvent.click(screen.getByRole("button", { name: "send" }));
+
+		await waitFor(() =>
+			expect(screen.getByRole("alert").textContent).toBe("A loop is already running"),
+		);
+		expect(field.value).toBe("/goal do the thing");
+		expect(vi.mocked(api.sendCommand)).toHaveBeenCalledWith("p1", {
+			op: "slash_result",
+			command: "goal",
+			args: "do the thing",
+			images: [],
+		});
 	});
 });

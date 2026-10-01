@@ -327,6 +327,7 @@ const CONTINUATION_ERROR = "Couldn’t continue this conversation. Try again.";
    that motivated the finding.) */
 const ENDED_CONTINUATION_ERROR =
 	"This session has ended — tap resume to continue.";
+const SLASH_ERROR = "Couldn’t run that command. Try again.";
 const STEER_ERROR = "Couldn’t send this instruction. Try again.";
 /* U5: one vocabulary for the retained instruction across the alert, the retry
    button, and the delivered acknowledgement — "earlier" throughout, matching
@@ -782,6 +783,10 @@ export function Composer({
 		   permanently `null` at the catch. `null` on every other route: a slash
 		   command paints no row. */
 		const submitted: { echo: { commandId: string; text: string } | null } = { echo: null };
+		/* A refused COMMAND and a failed CONTINUATION need different words: the first
+		   carries the runtime's own refusal sentence, the second is the retry copy. */
+		const isSlash =
+			trimmed.startsWith("/") && !trimmed.includes("\n") && images.length === 0;
 		try {
 			/* Slash input routes to the slash op rather than prompt — and only
 			   when there is no attachment, since a "/…" caption with an image
@@ -791,7 +796,26 @@ export function Composer({
 				const command =
 					space === -1 ? trimmed.slice(1) : trimmed.slice(1, space);
 				const args = space === -1 ? "" : trimmed.slice(space + 1);
-				await sendCommand(pid, { op: "slash", command, args });
+				/* THE ROUTED OP, not `slash`. `slash` is the owner's off-terminal subset
+				   (`/goal`, `/compact`) and refuses every other word with "terminal-only
+				   here"; `slash_result` is the seam the runtime's dispatcher answers for
+				   everything the sheet offers (the daemon builds that catalogue from the
+				   same scope table, so the two cannot disagree), and the one the gate
+				   sheet already uses. Plain `sendCommand`, not the proof variant: only
+				   `/approvals auto|off|yolo` is authority-increasing, and its signed path
+				   lives in the gate sheet — typed here it is REFUSED with the runtime's own
+				   sentence, which `humanizeGateError` carries to the alert below. */
+				const receipt = await sendCommand(pid, {
+					op: "slash_result",
+					command,
+					args,
+					images: [],
+				});
+				clearDraft();
+				/* What the command DID, in the runtime's words — a run that says nothing
+				   reads as a dead tap. */
+				setNotice(receipt.detail);
+				return;
 			} else {
 				const chosen =
 					op ?? (projection.streaming ? "steer" : "prompt");
@@ -882,7 +906,18 @@ export function Composer({
 				return;
 			}
 			clearDraft();
-		} catch {
+		} catch (failure) {
+			if (isSlash) {
+				/* The runtime's refusal (a bad argument, `/approvals auto` without a
+				   signature) is the answer — the daemon sends it as a 422 whose message is its
+				   own sentence; anything else (a dropped connection) gets the one retry
+				   line, never the raw fetch string. The draft stays so it can be
+				   corrected. There is no envelope, echo or retry to unwind here. */
+				setError(
+					failure instanceof HttpError && failure.status === 422 ? failure.message : SLASH_ERROR,
+				);
+				return;
+			}
 			/* Previous conversations can fail at every layer between fetch and
 			   provider construction. Those mechanics are intentionally invisible:
 			   retain the exact draft, images, and command id for a safe retry while
