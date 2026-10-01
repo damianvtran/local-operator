@@ -5906,8 +5906,8 @@ def _guard_credential_subcommand(args: argparse.Namespace) -> int:
 #: tests assert the sentence so a later slice that fills the runner cannot leave it
 #: stranded on a live path.
 APPROVAL_RUNNER_MISSING_SENTENCE = (
-    "the install runner is not part of this build yet, so nothing was executed: this "
-    "approval stays approved, and updating Local Operator is what lets it run"
+    "this build cannot carry out installs yet, so nothing was executed: this approval "
+    "stays approved, and updating Local Operator is what lets it run"
 )
 
 #: The step-runner seam's module (slice (b) fills it). Named here so the refusal
@@ -6011,8 +6011,9 @@ def _cmd_approvals_request(args: argparse.Namespace) -> int:
         raise MeshRefusal(
             "approval_anchor_unavailable",
             "operator authority is not set up on this machine yet, and the card has to "
-            "name the key it will install: ask Local Operator to set it up for this "
-            "machine (one approval and one admin password prompt), then file the request",
+            "name the key it will install: ask Local Operator to set up operator authority "
+            "for this machine (one approval and one admin password prompt), then file the "
+            "request",
         )
     network_id = ""
     if args.network:

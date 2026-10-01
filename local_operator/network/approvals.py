@@ -384,7 +384,8 @@ def _load_raw(approval_id: str, root: Path | None = None) -> dict[str, Any]:
         raise MeshRefusal(
             "unknown_approval",
             f"no approval {approval_id!r} on this device — it may already have been "
-            "answered, denied or expired; the pending list shows what is here",
+            "answered, denied or expired; the approvals list on this device shows what "
+            "is here",
         )
     return data
 
@@ -731,8 +732,8 @@ def signed_payload(
 #: §3.7) and no terminal command (§2.9).
 NO_SIGNING_SURFACE_SENTENCE = (
     "approving needs the operator key's consent, and operator authority is not set "
-    "up on this machine yet — ask Local Operator to set it up for this machine (one "
-    "approval and one admin password prompt), then approve again"
+    "up on this machine yet — ask Local Operator to set up operator authority for this "
+    "machine (one approval and one admin password prompt), then approve again"
 )
 
 
@@ -983,7 +984,7 @@ def _record_decision(
                 raise MeshRefusal(
                     "approval_anchor_unavailable",
                     "this machine has no operator key to verify an approval against; "
-                    "finish operator setup here first",
+                    "ask Local Operator to set up operator authority here first",
                 )
             anchor = record.get("what")
             anchor = anchor.get("anchor") if isinstance(anchor, Mapping) else None
@@ -1340,7 +1341,7 @@ def verify_for_run(approval_id: str, *, root: Path | None = None) -> dict[str, A
         raise MeshRefusal(
             "approval_anchor_unavailable",
             "this machine has no operator key to re-verify the approval against; "
-            "finish operator setup here first",
+            "ask Local Operator to set up operator authority here first",
         )
     message = signed_payload(
         kind=str(record.get("kind")),

@@ -635,7 +635,7 @@ def test_a_reachable_peer_row_carries_its_build_and_the_behind_hint(
     )
     assert net_cli._peer_line({**row, "build": {"version": "0.63.2"}}) == (  # noqa: SLF001
         "pixel-8  reachable  build 0.63.2 — behind this device (0.64.1); "
-        "updating it there is what fixes that"
+        "ask Local Operator to update it there"
     )
     assert net_cli._peer_line({**row, "build": {"version": "0.66.0"}}) == (  # noqa: SLF001
         "pixel-8  reachable  build 0.66.0"

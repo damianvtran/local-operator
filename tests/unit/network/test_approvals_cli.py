@@ -168,7 +168,7 @@ def test_deny_answers_the_frozen_shape_and_a_second_decision_refuses(
 
 
 def _assert_sets_up_without_a_command(sentence: str) -> None:
-    assert "set it up" in sentence, sentence
+    assert "ask Local Operator to set up operator authority" in sentence, sentence
     assert "`" not in sentence, sentence
     assert "lop operator" not in sentence, sentence
 

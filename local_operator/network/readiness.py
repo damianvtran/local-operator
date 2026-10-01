@@ -746,8 +746,8 @@ def _peer_too_old_rows(member: Any) -> list[dict[str, Any]]:
     # §2.9 (QA round 1, Q3): a remedy names a product action, and the action here
     # is an update ON THE PEER — the old sentence printed two ``lop-`` commands.
     remedy = (
-        f"if {_label(member)} is running an older build, updating it first is what "
-        "fixes that, then re-check"
+        f"if {_label(member)} is running an older build, ask Local Operator to update "
+        "it, then re-check"
     )
     return [
         _capability_row(
@@ -873,9 +873,9 @@ def operator_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> d
             # never a surface the reader may not have (design round 1, D1/D2: no
             # ship of a Mesh tab exists until the setup card does, so the interim
             # action is the agent path).
-            f"ask Local Operator to set up {peer_label} (one approval and one admin "
-            "password prompt), then approvals for offloaded work can be answered from "
-            "your devices"
+            f"ask Local Operator to set up operator authority on {peer_label} (one "
+            "approval and one admin password prompt), then approvals for offloaded work "
+            "can be answered from your devices"
         ],
         source=SOURCE_PEER,
     )
@@ -942,7 +942,7 @@ def build_suffix(comparison: BuildComparison) -> str:
         # remedy in this report.
         return (
             f"  build {comparison.peer_version} — behind this device "
-            f"({comparison.own_version}); updating it there is what fixes that"
+            f"({comparison.own_version}); ask Local Operator to update it there"
         )
     return f"  build {comparison.peer_version}"
 
@@ -976,10 +976,7 @@ def build_row(
                 f"the build stamp {peer_label} runs did not arrive (it predates build "
                 "reporting, or sent none), so build parity is not known"
             ),
-            remedies=[
-                f"updating the build on {peer_label} is what makes the comparison possible, "
-                "then re-check"
-            ],
+            remedies=[f"ask Local Operator to update the build on {peer_label}, then re-check"],
             source=SOURCE_PEER,
             observed=observed,
         )
@@ -995,7 +992,7 @@ def build_row(
                 f"{peer_label} {peer_version}), so build parity is not known"
             ),
             remedies=[
-                "updating both devices to a comparable build is what makes it known, then re-check"
+                "ask Local Operator to update both devices to a comparable build, then " "re-check"
             ],
             source=SOURCE_PEER,
             observed=observed,
@@ -1022,8 +1019,8 @@ def build_row(
                 f"runs {own_version} — work offloaded there runs its older build"
             ),
             remedies=[
-                f"updating it there is what fixes that ({peer_label} runs an older build), "
-                "then re-check"
+                f"ask Local Operator to update it there ({peer_label} runs an older "
+                "build), then re-check"
             ],
             source=SOURCE_PEER,
             observed=observed,
@@ -1038,7 +1035,7 @@ def build_row(
             f"{peer_label} is ahead ({peer_version} > {own_version}) — this side may lack "
             "capabilities the peer expects"
         ),
-        remedies=["updating this device is what closes the gap, then re-check"],
+        remedies=["ask Local Operator to update this device, then re-check"],
         source=SOURCE_PEER,
         observed=observed,
     )

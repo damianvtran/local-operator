@@ -336,9 +336,9 @@ REMOTE_PARK_APPROVAL_ATTACHED_LEAD = (
 #: on the other device is what to fix — and the action a person can take.
 REMOTE_PARK_APPROVAL_REMAINDER = (
     "Allowing it happens on {device} (Touch ID) or on a phone paired with it. "
-    "If nothing there can check a signature: ask Local Operator to set it up there "
-    "(one approval and one admin password prompt) — if that device is running an "
-    "older build, updating it is what fixes that."
+    "If nothing there can check a signature: ask Local Operator to set up operator "
+    "authority there (one approval and one admin password prompt) — if that device is "
+    "running an older build, updating it is what fixes that."
 )
 REMOTE_PARK_APPROVAL_BODY = REMOTE_PARK_APPROVAL_LEAD + " " + REMOTE_PARK_APPROVAL_REMAINDER
 #: The same card for the reader the F-A fix exists for: attached, with the

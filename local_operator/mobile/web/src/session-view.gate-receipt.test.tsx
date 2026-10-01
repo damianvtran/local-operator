@@ -169,7 +169,7 @@ describe("the phone's gate sheet", () => {
 		mocks.sendCommandWithProof.mockRejectedValueOnce(
 			new HttpError(
 				422,
-				"this session's gate is still at ask: /approvals auto removes it and needs the operator's own consent — but operator authority is not installed on this machine, so the remedies below cannot work yet. Ask Local Operator to set it up for you first (one approval and one admin password prompt), then authorise from this machine or from your paired phone. /approvals ask still tightens it here.",
+				"this session's gate is still at ask: /approvals auto removes it and needs the operator's own consent — but operator authority is not installed on this machine, so the remedies below cannot work yet. Ask Local Operator to set up operator authority first (one approval and one admin password prompt), then authorise from this machine or your paired phone. /approvals ask still tightens it here.",
 				"operator_authority_unconfigured",
 			),
 		);
