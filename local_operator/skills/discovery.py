@@ -417,13 +417,20 @@ def discover_skills(roots: Sequence[Path]) -> tuple[list[Skill], list[str]]:
         if existing is not None:
             # The loser's rule is named accurately, because the two are not
             # the same any more: across roots the earliest root wins, while
-            # WITHIN one root the walk order decides and that order is
-            # shallower-first (see :func:`scan_skills_dir`). Saying "earlier
-            # root wins" for a same-root pair, which is what the bounded-depth
-            # walk newly makes possible, would point the reader at a root list
-            # that had nothing to do with it.
+            # WITHIN one root the WALK ORDER decides (see
+            # :func:`scan_skills_dir`). That order is shallower-first, but a
+            # same-root pair can also be two skills at the SAME depth, where
+            # depth decided nothing and "shallower" would name a tiebreak the
+            # pair never used -- so the walk is what the message credits.
+            # Saying "earlier root wins" for a same-root pair, which the
+            # bounded-depth walk newly makes possible, would point the reader
+            # at a root list that had nothing to do with it.
             same_root = skill.source == existing.source
-            rule = "same root: the shallower skill wins" if same_root else "earlier root wins"
+            rule = (
+                "same root: earlier in the walk (shallower first)"
+                if same_root
+                else "earlier root wins"
+            )
             warnings.append(
                 f"Skill name conflict: '{skill.name}' from '{skill.file_path}' "
                 f"shadowed by '{existing.name}' from '{existing.file_path}' "

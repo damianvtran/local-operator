@@ -267,7 +267,7 @@ class TestDiscoverSkills:
         skills, warnings = discover_skills([project, home])
         assert [s.file_path for s in skills] == [project / "zzz" / "SKILL.md"]
         assert len(warnings) == 2
-        assert "same root: the shallower skill wins" in warnings[0]
+        assert "same root: earlier in the walk (shallower first)" in warnings[0]
         assert "earlier root wins" not in warnings[0]
         assert "earlier root wins" in warnings[1]
 
@@ -872,15 +872,27 @@ class TestBoundedDepthWalk:
         assert skills[0].file_path == root / "linked-group" / "tool" / "SKILL.md"
 
     def test_symlink_cycle_terminates_at_the_cap(self, tmp_path: Path) -> None:
+        """A link back up to the root is cut, not merely survived.
+
+        The loop sits ONE LEVEL HIGHER than the skill it would re-reach, and
+        that placement is the whole point: at the DEFAULT cap of 3 the cut walk
+        reads root + group/real, while an uncut walk descends through
+        ``root/loop`` (= root) and re-reaches the SAME physical skill as
+        ``root/loop/group/real`` at depth 3 -- a third fingerprint entry. With
+        the loop one level lower (inside ``group``) both readings are 2 entries
+        and the cell cannot fail, which agent review round 2 (R2-1) proved by
+        neutralizing the cut and watching 311 tests stay green.
+        """
         root = tmp_path / "skills"
         _plant(root, "group/real")
-        (root / "group" / "loop").symlink_to(root, target_is_directory=True)
+        (root / "loop").symlink_to(root, target_is_directory=True)
+
         assert [s.name for s in scan_skills_dir(root, "t")] == ["real"]
-        # Not merely "must not raise or hang": the cycle is CUT, so the reading
-        # stays the root plus the one real skill instead of re-walking the tree
-        # (agent review round 1, MINOR-4).
-        entries = roots_fingerprint([root])
-        assert _fingerprint_paths(entries) == [
+        # Not merely "must not raise or hang": the re-walk is CUT, so the
+        # reading stays the root plus the one real skill (agent review round 1,
+        # MINOR-4). The scan cannot discriminate -- realpath dedupe makes both
+        # readings ["real"] -- so the fingerprint is the assertion with teeth.
+        assert _fingerprint_paths(roots_fingerprint([root])) == [
             str(root),
             str(root / "group" / "real"),
         ]
@@ -946,27 +958,30 @@ class TestBoundedDepthWalk:
     def test_ancestor_symlinks_are_never_re_walked(self, tmp_path: Path) -> None:
         """The cycle cut: a ``loop -> <root>`` in each group must cost nothing.
 
-        Measured before the cut (agent review round 1, MINOR-3; re-measured here
-        on this tree: 22 entries / 8.5 s per fingerprint, 4.4 s per scan, for 1
-        real skill; 2 entries / 4 ms after). ``max_depth`` bounds depth, not
-        work, and this runs on the per-message path. The assertion below is
-        structural -- no entry may carry a ``loop`` component, and the count is
-        exactly the root plus the one real skill -- rather than a time bound.
+        Measured before the cut (agent review round 1, MINOR-3): 20 groups each
+        holding that symlink, at cap 5, produced 421 fingerprint entries and
+        198 ms per fingerprint for a handful of real skills.
+
+        The re-reachable skill sits at DEPTH 1, and that placement is what makes
+        this cell bite at the DEFAULT cap: an uncut walk descends through each
+        ``g<NN>/loop`` (= root) and yields ``g<NN>/loop/real`` at depth 3, so the
+        reading grows by one entry per group. With the skill one level deeper
+        the re-reach lands at depth 4, past the cap, and both readings are 2
+        entries -- the version agent review round 2 (R2-1) showed could not
+        fail. ``max_depth`` bounds depth, not work, and this runs on the
+        per-message path.
         """
         root = tmp_path / "skills"
-        _plant(root, "g00/real")
+        _plant(root, "real")
         for i in range(20):
             group = root / f"g{i:02d}"
             group.mkdir(parents=True, exist_ok=True)
             (group / "loop").symlink_to(root, target_is_directory=True)
 
         assert [s.name for s in scan_skills_dir(root, "t")] == ["real"]
-        entries = roots_fingerprint([root])
-        assert not any("loop" in path for path in _fingerprint_paths(entries))
-        assert _fingerprint_paths(entries) == [
-            str(root),
-            str(root / "g00" / "real"),
-        ]
+        entries = _fingerprint_paths(roots_fingerprint([root]))
+        assert not any("loop" in path for path in entries)
+        assert entries == [str(root), str(root / "real")]
 
     def test_unreadable_group_is_tolerated(self, tmp_path: Path) -> None:
         root = tmp_path / "skills"
