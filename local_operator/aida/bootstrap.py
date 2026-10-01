@@ -47,7 +47,22 @@ durable facts a session directory is made of, exactly as the desktop's own
 9. arm the cadence through :func:`local_operator.aida.proactive.ensure_armed`
    — the transcript-first external writer, which also installs the wake
    supervisor (R10's always-on property: she fires with every terminal
-   closed).
+   closed). Steps 1-8 build the session; THIS step runs on EVERY call, for an
+   existing id as well as a new one, because "she has a cadence" is not a fact
+   a creation can establish once and forget: any later loss of the row (see
+   ``ensure_armed``'s return words, and ``reap_orphan_rows`` below it) used to
+   be permanent and silent. Releasing the lock first is what makes that
+   possible — the armer takes its own;
+10. reap the rows the PREVIOUS incarnation left on the wake index
+    (:func:`local_operator.aida.proactive.reap_orphan_rows`) — engine rows
+    parked on a session id with no transcript, which no runtime can ever be
+    started for and which the operator otherwise clears by hand.
+
+STEP 9 IS WHY THE RE-CREATION PATH IS NOT AN EARLY RETURN any more: the old
+shape returned ``existing`` from inside the lock, so an install whose class tag
+an upgrade had left unwritten (the live cause on 2026-09-30) never asked the
+question again. Steps 9 and 10 are best-effort by contract, like every other
+side effect here.
 
 THE LOCK IS HELD ACROSS THE CREATE, on the documented wake-lock pattern: the
 acquire/release hop to a worker thread so the event loop stays free, and the
@@ -175,10 +190,13 @@ async def ensure_session(
 ) -> str | None:
     """Her session id, creating the session on first need. ``None`` when disabled.
 
-    Cheap and idempotent on every call after the first: one state read, one
-    directory stat, and one title check (which reconciles her stored title to
-    ``aida.name`` — see ``local_operator.aida.naming``), no session
-    construction, no provider resolution. Safe to call from boot paths
+    Idempotent on every call after the first, and deliberately not free: one
+    state read, one directory stat, one title check (which reconciles her
+    stored title to ``aida.name`` — see ``local_operator.aida.naming``), one
+    wake-index read to answer "is her cadence armed?" and one listing of the
+    index to reap any orphaned engine rows (step 9/10 above). What it never
+    does is construct a session or resolve a provider — the two costs that
+    would make a boot hook expensive. Safe to call from boot paths
     (best-effort: any failure logs and answers ``None``) and from every
     ``/aida``/desktop op.
     """
@@ -207,6 +225,7 @@ async def ensure_session(
         logger.info("aida: ensure lock busy; skipping this attempt", exc_info=True)
         return None
     created: str | None = None
+    hers: str | None = None
     try:
         existing = state.session_id_of(root)
         if existing and (_sessions_root(root) / existing).is_dir():
@@ -217,26 +236,57 @@ async def ensure_session(
             # stored title from disk — not only the live session's watcher.
             # Cheap when nothing moved: one small sidecar read, compare, done.
             await naming.reconcile_session_title(root, existing)
-            return existing
-        session_id = uuid.uuid4().hex[:12]
-        try:
-            await _create_session_dir(root, session_id)
-        except Exception:
-            _discard_failed_create(root, session_id)
-            raise
-        state.update_state(root, session_id=session_id, paused_at=None)
-        created = session_id
+            hers = existing
+        else:
+            session_id = uuid.uuid4().hex[:12]
+            try:
+                await _create_session_dir(root, session_id)
+            except Exception:
+                _discard_failed_create(root, session_id)
+                raise
+            state.update_state(root, session_id=session_id, paused_at=None)
+            created = session_id
+            hers = session_id
     except Exception:  # noqa: BLE001 — boot paths must not fail on her account
         logger.warning("aida: ensure_session could not create the session", exc_info=True)
         return None
     finally:
         await asyncio.to_thread(lock.release)
 
-    try:
-        from local_operator.tui.sidebar_pins import set_pin
+    if created is not None:
+        try:
+            from local_operator.tui.sidebar_pins import set_pin
 
-        await asyncio.to_thread(set_pin, root, created, True)
-    except Exception:  # noqa: BLE001 — a pin is decoration; the session is not
-        logger.warning("aida: could not pin her session", exc_info=True)
-    await proactive.ensure_armed(root, created, now_ms=now_ms)
-    return created
+            await asyncio.to_thread(set_pin, root, created, True)
+        except Exception:  # noqa: BLE001 — a pin is decoration; the session is not
+            logger.warning("aida: could not pin her session", exc_info=True)
+
+    # HER CADENCE IS ARMED ON EVERY BOOT, NOT ONLY AT HER CREATION, and that one
+    # word is the whole of the reported defect's shape. This call used to sit
+    # under the create branch alone: an incarnation got its cadence once, at
+    # birth, and nothing ever asked the question again. So any later loss — the
+    # class tag an upgrade left unwritten (the live cause on 2026-09-30),
+    # a filtered drop at load, a hand-edited index, a crash between an external
+    # arm's transcript append and its index write — was permanent and silent,
+    # and the operator's requirement is the opposite: *she never drops her
+    # check-in unless she is asked to*. ``ensure_armed`` is the idempotent
+    # question ("is the cadence row there? arm it if not"), it refuses a
+    # session a live runtime owns (that session's own reconcile is the writer),
+    # and it is the SAME call the create branch uses — one armer, two entry
+    # points, so a boot and a re-creation cannot disagree about what arming
+    # means.
+    if hers is not None:
+        await proactive.ensure_armed(root, hers, now_ms=now_ms)
+
+    # THEN REAP WHAT THE PREVIOUS INCARNATION LEFT BEHIND. A re-creation mints
+    # a new id, and the old id's armed rows are rows no runtime can ever be
+    # started for; the operator had to clear three by hand. Scoped to engine
+    # rows on sessions with no transcript, never her own entry — see
+    # ``proactive.reap_orphan_rows``. Off-thread and best-effort: a boot never
+    # fails on her account, and the sweep is a listing plus a stat per entry.
+    if hers is not None:
+        try:
+            await asyncio.to_thread(proactive.reap_orphan_rows, root, keep=hers)
+        except Exception:  # noqa: BLE001 — litter, not a boot dependency
+            logger.warning("aida: could not reap orphaned wake rows", exc_info=True)
+    return hers
