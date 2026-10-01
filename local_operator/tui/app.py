@@ -2907,15 +2907,6 @@ CREDENTIAL_PLACEHOLDER = "Type or paste the secret… — masked; Enter chips it
 #: ``_composer_placeholder_for``, the one owner of that swap.
 ASK_ANSWER_PLACEHOLDER = "Answer the question above… — Enter sends it to the ask"
 
-#: The four-argument form of that rule, for the ASK BAR's copy: the bar names
-#: the head question, and a question is model-authored prose that can be
-#: arbitrarily long. The clip lives here rather than in the widget so the
-#: bar's geometry is a constant a capture can assert on; the widget never
-#: truncates the COUNT, which is the part that must survive any width.
-#: UNUSED since the bar clips against its real width — ``AskBar.HEAD_CEILING``
-#: is the only budget now (design round 1, D5/D9). Kept out of the module on
-#: purpose; delete this note with the next sweep that touches the ask surfaces.
-
 #: Shown where ``/credential``'s argument rows would be while a capture is
 #: armed. The rows are suppressed there (see ``_credential_choices``), and a
 #: list that simply vanished would read as the gesture having been dropped —
@@ -24491,7 +24482,7 @@ class OperatorApp(App[None]):
         """Open the queued asks, or close them if they are already up.
 
         The keyboard's door to the surface (UX U5), and it is a TOGGLE rather
-        than an open: f7 pressed twice must be the gesture that lets a user look
+        than an open: the key pressed twice must be the gesture that lets a user look
         at the queue and then get back to what they were typing, without
         reaching for the mouse or for Esc (which means "stop" everywhere else).
         """
@@ -25658,6 +25649,12 @@ class OperatorApp(App[None]):
             head=self._ask_head_text(answerable),
             expanded=self._ask_mode,
             urgent=any(row.urgent for row in answerable),
+            # The COUNT of urgent asks, so the row can say "1 urgent" rather
+            # than only turning its glyph amber (design round 2, D13: the hue
+            # was the only channel, and it sat beside a question it did not
+            # describe). Counted over what the user still OWES, the same set
+            # `count` is taken from.
+            urgent_count=len([row for row in waiting if row.urgent]),
             present=bool(answerable),
             timed_out=len(answerable) - len(waiting),
         )
@@ -25777,8 +25774,10 @@ class OperatorApp(App[None]):
                 "that question cannot be shown here — answer it from another surface",
                 "warning",
             )
+            self._abandon_ask_surface()
             return
         if not questions:
+            self._abandon_ask_surface()
             return
         card = AskPickerScreen(
             questions,
@@ -25802,6 +25801,18 @@ class OperatorApp(App[None]):
                 card.restore_state(draft)
             except Exception:  # pragma: no cover - defensive
                 logger.debug("could not restore an ask draft", exc_info=True)
+
+    def _abandon_ask_surface(self) -> None:
+        """Give up on mounting a card without leaving ask mode stranded.
+
+        A card that cannot be built (a malformed row, a row with no questions)
+        bails out AFTER the previous surface was cleared, so without this the app
+        stayed in ask mode with nothing mounted: the bar kept painting
+        "collapse" over a surface that was not there, and Enter routed into an
+        answer box the user could not see (review round 2, MINOR-3).
+        """
+        if self._ask_card is None and self._ask_list is None:
+            self._collapse_asks()
 
     @staticmethod
     def _ask_card_title(row: AskRow) -> str:

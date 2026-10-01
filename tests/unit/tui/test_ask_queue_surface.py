@@ -21,6 +21,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from rich.cells import cell_len
 
 from local_operator.asks import policy
 from local_operator.tui.app import ASK_ANSWER_PLACEHOLDER, OperatorApp
@@ -704,20 +705,176 @@ async def test_escape_out_of_a_card_returns_to_the_list_at_the_same_row(enabled)
 
 
 async def test_a_click_on_a_row_opens_that_ask(enabled):
-    """UX U2: the list was mouse-dead, and the click handed the composer the caret."""
+    """UX U2 + review round 2 MAJOR: a click opens the ask that is PAINTED there.
+
+    This test asserted the MIS-mapping on the round-1 head — it clicked the row
+    where ``a1`` was painted and expected ``a2``, because ``_row_at`` counted
+    from the content area while Textual hands ``event.y`` in outer-region
+    coordinates (the panel carries ``padding: 1 1``). So it is rewritten to
+    click what the widget PAINTS: the offset for row *i* is the widget's own top
+    inset plus the header's painted height plus *i*, read from the widget rather
+    than from a constant.
+
+    Every row is clicked, not one, because the defect made the LAST ask
+    unreachable — the row that no single-row probe would have missed only if it
+    happened to be the one probed.
+    """
     session = _AskSession()
     app = _app(session)
     async with app.run_test(size=(120, 30)) as pilot:
         await _settle(pilot)
-        app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?"), _row("a2", "Which region?")]))
+        app._sync_ask_surface(
+            ask_rows(
+                [_row("a1", "Deploy now?"), _row("a2", "Which region?"), _row("a3", "Roll back?")]
+            )
+        )
         await _settle(pilot)
         app._expand_asks()
         await _settle(pilot)
-        # Row 0 is the header, so offset y=2 is the SECOND ask.
-        await pilot.click(AskQueueList, offset=(4, 2))
+        for index, ask_id in enumerate(["a1", "a2", "a3"]):
+            listing = app.query_one(AskQueueList)
+            top = listing.content_region.y - listing.region.y
+            await pilot.click(AskQueueList, offset=(4, top + listing.HEADER_ROWS + index))
+            await _settle(pilot)
+            assert (
+                app._ask_mounted_id == ask_id
+            ), f"the click at the painted row {index} opened {app._ask_mounted_id}"
+            assert app.focused is not app.query_one(Editor), "the click gave the composer the caret"
+            # Back to the list for the next click, keeping the rows in place.
+            app._clear_ask_surface()
+            app._mount_ask_list()
+            await _settle(pilot)
+
+
+@pytest.mark.parametrize(
+    "size, kept",
+    [
+        # At 80 columns the row still fits the irreversible action's own hint;
+        # at 60 it fits the primary one and no more. Both are asserted, because
+        # "which hint survives" is the part of the sacrifice order a reader has
+        # to be able to predict.
+        ((80, 24), "d decline"),
+        ((60, 20), "enter answer"),
+    ],
+)
+async def test_the_list_header_stays_one_line_and_never_splits_a_hint(enabled, size, kept):
+    """Design round 2, D12: the header wrapped at 80 columns and orphaned an `x`.
+
+    It is also the row the hit test counts from, so a header that wraps shifts
+    every pointer hit below it — the two findings are one cause. Hints are spent
+    whole, from the right, and the row is ``no_wrap``.
+    """
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=size) as pilot:
         await _settle(pilot)
-        assert app._ask_mounted_id == "a2"
-        assert app.focused is not app.query_one("Editor"), "the click gave the composer the caret"
+        app._sync_ask_surface(
+            ask_rows(
+                [
+                    _row("a1", "Deploy now?"),
+                    _row("a2", "Which region?", urgent=True),
+                    _row("a3", "Roll back?"),
+                ]
+            )
+        )
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        listing = app.query_one(AskQueueList)
+        painted = listing.render().plain.splitlines()
+        assert len(painted) == len(listing.rows) + listing.HEADER_ROWS, painted
+        header = painted[0]
+        assert cell_len(header) <= listing.content_size.width, header
+        # Every hint that IS painted is painted whole — key and verb together.
+        for hint in listing.HEADER_HINTS:
+            if hint.split()[-1] in header:
+                assert hint in header, f"{hint!r} was split at the row end"
+        # The hint that survives at this width, in full.
+        assert kept in header, header
+
+
+async def test_the_bar_says_how_many_are_urgent(enabled):
+    """Design round 2, D13: the amber glyph was the only channel for urgency.
+
+    On one row the hue said "urgent" while the sentence beside it named the
+    question that was not urgent, because the glyph is painted from
+    ``any(row.urgent)`` and the head names ``rows[0]``.
+    """
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(
+            ask_rows(
+                [
+                    _row("a1", "Which rollout should the stale-row migration take?"),
+                    _row("a2", "Rotate the deploy key before the cutover?", urgent=True),
+                ]
+            )
+        )
+        await _settle(pilot)
+        bar = app.query_one(AskBar).render().plain
+        assert "1 urgent" in bar, bar
+        assert "2 questions waiting" in bar, bar
+
+
+async def test_the_head_question_fills_a_wide_bar(enabled):
+    """Design round 2, D14: the 48-cell ceiling still bit at the widest size.
+
+    The named question was cut with empty cells left before the chevron, which
+    is the case D9 asked to be spared. The app is driven out of its boot card
+    first, because that clamp is what sizes the composer shell — the capture
+    script does the same thing (it appends the turns the frames show).
+    """
+    from local_operator.tui.widgets.transcript import UserBlock
+
+    session = _AskSession()
+    app = _app(session)
+    question = "Which rollout should the stale-row migration take tonight?"
+    async with app.run_test(size=(130, 40)) as pilot:
+        await _settle(pilot)
+        app._append_block(UserBlock("what should we do about the stale rows?"))
+        await _settle(pilot)
+        app._sync_ask_surface(ask_rows([_row("a1", question)]))
+        await _settle(pilot)
+        bar = app.query_one(AskBar)
+        assert bar.size.width > 100, bar.size.width
+        text = bar.render().plain
+        assert question in text, text
+        assert cell_len(text) <= bar.size.width, text
+
+
+async def test_a_card_that_cannot_be_built_does_not_strand_ask_mode(enabled):
+    """Review round 2, MINOR-3: an early return left ask mode on with no surface."""
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?")]))
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        assert app._ask_mode is True and app._ask_card is not None
+        # A row whose questions cannot be parsed: the card gives up, and the
+        # composer must not be left routing to a surface that is not there.
+        app._clear_ask_surface()
+        broken = ask_rows([_row("a1", "Deploy now?")])[0].__class__
+        from local_operator.tui.widgets.ask_queue import AskRow
+
+        app._mount_ask_card(  # type: ignore[arg-type]
+            AskRow(
+                ask_id="a9",
+                status=STATUS_OPEN,
+                created_at=0,
+                expires_at=0,
+                urgent=False,
+                questions=({"id": "q1", "question": "", "options": [], "multi": False},),
+            )
+        )
+        await _settle(pilot)
+        assert app._ask_card is None
+        assert app._ask_mode is False, "ask mode outlived the surface that justified it"
+        assert broken is AskRow
 
 
 async def test_the_key_route_reaches_the_surface_from_the_composer(enabled):
