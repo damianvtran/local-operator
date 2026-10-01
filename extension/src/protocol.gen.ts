@@ -4,7 +4,7 @@ export const PROTO_VERSION = 1 as const;
 // ADVISORY ONLY: nothing is refused for being older (`MIN_SUPPORTED_PROTO` is
 // the compatibility floor). Generated so the popup's update line and the
 // daemon's agree by construction.
-export const EXPECTED_EXTENSION_VERSION = '0.1.20' as const;
+export const EXPECTED_EXTENSION_VERSION = '0.1.21' as const;
 // The ONE spelling of the "a newer extension exists" advisory. `{have}` and
 // `{want}` are the reported and the expected extension versions; the
 // contingency is on the Chrome Web Store because nothing here can know what the
@@ -62,7 +62,7 @@ export const CAPABILITY_SWITCHES: Record<string, { label: string; permission: st
   "upload": { label: 'Allow uploads', permission: '' },
 };
 
-export type Method = 'open' | 'goto' | 'read' | 'snapshot' | 'screenshot' | 'click' | 'type' | 'close' | 'status' | 'tabs' | 'scroll' | 'logs' | 'request_access' | 'await_access' | 'cancel_access' | 'retitle' | 'owner_recover' | 'owner_finish' | 'owner_retain' | 'owner_release' | 'download' | 'upload';
+export type Method = 'open' | 'goto' | 'read' | 'snapshot' | 'screenshot' | 'click' | 'type' | 'close' | 'status' | 'tabs' | 'scroll' | 'logs' | 'styles' | 'hit_test' | 'ancestors' | 'request_access' | 'await_access' | 'cancel_access' | 'retitle' | 'owner_recover' | 'owner_finish' | 'owner_retain' | 'owner_release' | 'download' | 'upload';
 // One buffered console/runtime log line, as `logs` returns it (newest last).
 // `level` is normalized to the error/warning/info/log vocabulary the tool
 // filters on; `source` distinguishes a page console call from an uncaught
