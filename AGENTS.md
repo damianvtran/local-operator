@@ -1872,26 +1872,37 @@ pid, and the incident process owned ~198 GB while `ps` read ~1.4 GB. A number
 taken from `ps` alone is blind to that class; neither guard decides on it alone.
 
 - **Per command** (`memory_guard.Guard`, ticking beside every `bash` call and every
-  package-manager build step). Each tick reads the footprint of the group's members
-  with syscalls (no fork) and charges `max(rss, footprint)`; at the soft line
-  (80 %) it shows one advisory line, at the hard line it kills the **whole process
-  group** and the tool result starts `MEMORY LIMIT EXCEEDED: this command's process
-  group reached N GB, over the M GB budget for one command`. `ps` is only the
-  membership discovery arm (at most once a second, retried, with a 12 s budget —
-  it measured 0.4-13.6 s under fleet load); when it cannot be read, the leader the
-  guard itself spawned is still read fork-free and still kills. A tick where
-  nothing could be measured never kills. The ceiling is per command, not per
-  machine; raise it with `memory_mb` on the call or `bash.memory.limit_mb`.
+  package-manager build step). Each tick lists the group's members **without a
+  fork** (`proc_listpids(PROC_PGRP_ONLY)` on macOS, a `/proc` scan on Linux), reads
+  each member's footprint by syscall, and charges `max(rss, footprint)`; at the soft
+  line (80 %) it shows one advisory line, at the hard line it kills the **whole
+  process group** and the tool result starts `MEMORY LIMIT EXCEEDED: this command's
+  process group reached N GB, over the M GB budget for one command`. Measured with
+  `ps` dead from tick 0: `timeout 900 <allocator>`, a subshell, and an allocator
+  spawned late are all still seen and killed, because nothing that decides a kill
+  runs `ps` (it measured 0.4-13.6 s under fleet load). `ps` is only the fallback
+  where the kernel listing cannot answer (and the RSS source where no footprint
+  reader exists): it runs on its own thread, single-flight, backs off 2 s after a
+  failure, and never delays a tick. Where the listing cannot answer either, the
+  leader we spawned plus the last-known members are still read - there a late
+  *descendant* is only seen once `ps` answers. A tick where nothing could be
+  measured never kills. The ceiling is per command, not per machine; raise it with
+  `memory_mb` on the call or `bash.memory.limit_mb`.
 - **Machine-wide** (`session.runtime.machine_memory`, run by the wake supervisor
   every minute). When the fleet's summed footprint reaches 85 % of RAM it ends the
-  single largest non-runtime fragment (never a runtime, never a foreign process).
-  Its reads are retried inside a 15 s budget, and when the pre-signal `ps`
-  re-check cannot be read it confirms every row's `(ppid, pgid)` by syscall
-  instead; anything it cannot confirm still withholds the stop. The cooldown after
-  a kill holds only the same root pid or parent, so a *different* runaway is
-  killable on the next pass. The owning session is told ("your process group
-  (pid X, N GB footprint) was ended by the memory guard") and one `machine memory
-  kill:` line carries who/what/how big in the supervisor log.
+  single largest non-runtime fragment (a descendant of one of this config root's
+  session runtimes - never a runtime itself, which is why it cannot reach a
+  foreign process). Each read gets up to 3 attempts inside a **20 s total** budget
+  (a 15 s per-attempt bound); when the pre-signal `ps` re-check cannot be read it
+  confirms every row's `(ppid, pgid)` by syscall instead, and anything it cannot
+  confirm still withholds the stop. After a stop the cooldown holds only the same
+  pid, process group or non-runtime parent: a runtime's own pid and group are never
+  keys, so a *different* runaway - including another one under the same session -
+  is killable on the next pass. The owning session is told ("your process group
+  (pid X, N GB footprint) was ended by the memory guard"): dialled if its runtime
+  answers, otherwise **queued** in its inbox and read the next time that session
+  opens a runtime (the log says which). One `machine memory kill:` line carries
+  who/what/how big in the supervisor log.
 
 **What this is not.** It is not a throttle: nothing is slowed, a process is ended.
 It does not make allocation safe — a fast allocator can outrun a 250 ms tick, and
