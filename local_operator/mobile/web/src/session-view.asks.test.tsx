@@ -173,7 +173,27 @@ describe("SessionScreen and queued asks", () => {
 		render(<SessionScreen sessionId="s1" />);
 		slot = { projection: projection({ asks: [ask()], asks_open: 1 }), connected: true };
 		render(<SessionScreen sessionId="s1" />);
-		fireEvent.click(screen.getByRole("button", { name: /queued asks in this session \(1\)/ }));
+		/* The label states the UNIT the bar states (agent review round 1, R3 =
+		   design round 1, N3): the outstanding set, counted in QUESTIONS. */
+		fireEvent.click(
+			screen.getByRole("button", { name: /queued asks in this session \(1 question waiting\)/ }),
+		);
 		await waitFor(() => expect(screen.getByRole("dialog")).toBeTruthy());
 	});
+
+	it("collapses the sheet on Back instead of leaving the conversation", async () => {
+		/* U2 (UX round 1): the phone's back gesture popped the ROUTE and took the
+		   draft with it; the sheet claims one history entry while it is open, so a
+		   back collapses the sheet first. */
+		const back = vi.spyOn(window.history, "back");
+		render(<SessionScreen sessionId="s1" />);
+		slot = { projection: projection({ asks: [ask()], asks_open: 1 }), connected: true };
+		render(<SessionScreen sessionId="s1" />);
+		fireEvent.click(screen.getByTestId("ask-dock"));
+		await waitFor(() => expect(screen.getByRole("dialog")).toBeTruthy());
+		window.dispatchEvent(new PopStateEvent("popstate"));
+		await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+		back.mockRestore();
+	});
+
 });

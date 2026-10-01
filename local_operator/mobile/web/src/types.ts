@@ -218,14 +218,6 @@ export interface SubagentDetail extends SubagentRow {
 export interface AskOption {
 	label: string;
 	description: string;
-	/** The model's recommendation, AS A MARKER ON THE OPTION (`AskQuestion._shape`
-	    hoists the recommended option to index 0 and sets this on it). The phone
-	    used to ignore the key because position was the only channel; the queued
-	    ask card renders it as a word, so a recommendation no longer has to be
-	    decoded from which row happens to be first. Optional on the wire: an
-	    older runtime sends `{label, description}` and absence just means "no
-	    recommendation stated", never "not recommended". */
-	recommended?: boolean;
 }
 
 /** One question of a queued ask, as `PendingAsk.questions` carries it
@@ -239,6 +231,14 @@ export interface AskQuestion {
 	options: AskOption[];
 	/** More than one option may be chosen; the answer map still holds a list. */
 	multi: boolean;
+	/** The model's recommendation, as an INDEX INTO `options` — the wire's own
+	    shape (`asks/queue._question_shape` carries `raw["recommended"]` at the
+	    question level and hoists that option to index 0, so on a normalised
+	    question this is `0`). Reading a per-option boolean instead would have
+	    been dead code against a real runtime: the harness `AskOption` model
+	    serialises `{label, description}` and has no such field. `null`/absent
+	    means no recommendation was stated. */
+	recommended?: number | null;
 	/** The credential case: the answer is a masked paste field, and the answer
 	    map holds the KEY the runtime stored, never the value (§4). */
 	secret: boolean;

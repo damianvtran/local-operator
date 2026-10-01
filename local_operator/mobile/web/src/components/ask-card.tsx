@@ -37,6 +37,8 @@ import { useMemo, useState } from "react";
 import { sendCommand } from "../api";
 import { cn } from "../lib/cn";
 import { answeredPairs, askStateLine, isAnswerable, unansweredQuestions } from "../lib/asks";
+import { clearAskDraft, useAskDraft } from "../store";
+import type { AskDraft } from "../store";
 import type { AskQuestion, PendingAsk } from "../types";
 
 /** The daemon's sentence, or the plainest honest thing when it gave none.
@@ -69,7 +71,6 @@ function QuestionField({
 }) {
 	const options = Array.isArray(question.options) ? question.options : [];
 	const chosen = new Set(value);
-
 	if (options.length === 0) {
 		/* A free-text or secret question: the answer IS the typed string. */
 		return (
@@ -98,8 +99,12 @@ function QuestionField({
 
 	return (
 		<div className="flex flex-col gap-2">
-			{options.map((option) => {
+			{options.map((option, index) => {
 				const on = chosen.has(option.label);
+				/* THE RECOMMENDATION IS AN INDEX, not a flag (see `AskQuestion`): the
+				   runtime hoists the recommended option to 0 and states the position,
+				   because the harness option model has no boolean to read. */
+				const recommended = question.recommended === index && index === 0;
 				return (
 					<button
 						key={option.label}
@@ -128,7 +133,7 @@ function QuestionField({
 					>
 						<span className="text-body-sm font-medium text-ink">
 							{option.label}
-							{option.recommended ? (
+							{recommended ? (
 								/* The model's recommendation, as a word. §5's contract keeps
 								   position as the only channel for older clients, but this
 								   client is told outright, and a badge that says so is
@@ -165,21 +170,38 @@ export function AskCard({
 	onSettled?: () => void;
 }) {
 	/* The draft map: question id → the labels (or the typed string) the user has
-	   chosen but not yet sent. It lives here, per card, and that is what makes
-	   the answer draft independent of the chat draft — §5.0's invariant that
-	   neither buffer may be sent into the other's channel. */
-	const [draft, setDraft] = useState<Record<string, string[]>>({});
-	const [skipped, setSkipped] = useState<Set<string>>(new Set());
+	   chosen but not yet sent. IT LIVES IN THE STORE, not in this component
+	   (QA round 1 Q-1 = UX round 1 U1): a card-local `useState` died with the
+	   sheet's unmount, so collapsing the sheet discarded the draft that §5.0-R7
+	   requires be kept. The chat buffer has lived in the store all along; this is
+	   its twin, keyed by ask id so one collapse cannot mix two asks' answers. */
+	const [draft, setDraft] = useAskDraft(row.ask_id);
 	const [busy, setBusy] = useState<"" | "respond" | "decline" | "dismiss">("");
 	const [error, setError] = useState("");
 
 	const state = askStateLine(row, nowMs);
-	const answerable = isAnswerable(String(row.status || "open"));
+	const status = String(row.status || "open");
+	const answerable = isAnswerable(status);
+	/* DISMISS IS `timed_out`-ONLY, and the queue is the authority: `AskQueue.dismiss`
+	   accepts no other status (`asks/queue.py`), and the design states the rule twice
+	   (§2.2's table and `:115`). Offering it on an open or answered ask collected a
+	   refusal whose sentence — "only a timed-out ask can be dismissed; it is still
+	   open." — is FALSE about the row it sat under (agent review round 1, R1). */
+	const dismissible = status === "timed_out";
 	const questions = useMemo(() => (Array.isArray(row.questions) ? row.questions : []), [row]);
 	const open_questions = useMemo(
 		() => (answerable ? unansweredQuestions(row) : []),
 		[answerable, row],
 	);
+
+	const skipped = useMemo(() => new Set(draft.skipped), [draft.skipped]);
+	/* FUNCTIONAL, so two picks in one tick compose instead of overwriting (see
+	   `useAskDraft`); the options of two different questions are the normal case. */
+	const patchDraft = (patch: (current: AskDraft) => Partial<AskDraft>) =>
+		setDraft((current) => ({
+			answers: patch(current).answers ?? current.answers,
+			skipped: patch(current).skipped ?? current.skipped,
+		}));
 
 	/** Whether every still-open question carries a usable cell.
 	 *
@@ -190,7 +212,7 @@ export function AskCard({
 	 *  deliberate empty answer to the model. */
 	const filled = (id: string): boolean => {
 		if (skipped.has(id)) return true;
-		const cell = draft[id] ?? [];
+		const cell = draft.answers[id] ?? [];
 		return cell.some((value) => value.trim() !== "");
 	};
 	const complete = open_questions.length > 0 && open_questions.every((q) => filled(String(q.id)));
@@ -201,6 +223,11 @@ export function AskCard({
 		setError("");
 		try {
 			await send();
+			/* THE DRAFT IS SPENT ONCE THE ASK SETTLES. Cleared here rather than left
+			   for the next mount: the sheet re-reads the aggregate, so a settled card
+			   can come back in the list, and a re-filled card the user already
+			   answered reads as if their answer never landed. */
+			clearAskDraft(row.ask_id);
 			onSettled?.();
 		} catch (failure) {
 			setError(refusalText(failure));
@@ -222,7 +249,7 @@ export function AskCard({
 			for (const question of questions) {
 				const id = String(question.id);
 				if (skipped.has(id)) answers[id] = [];
-				else answers[id] = (draft[id] ?? []).map((value) => value.trim());
+				else answers[id] = (draft.answers[id] ?? []).map((value) => value.trim());
 			}
 			return sendCommand(sessionId, { op: "ask_respond", ask_id: row.ask_id, answers });
 		});
@@ -238,6 +265,13 @@ export function AskCard({
 		);
 
 	const settledPairs = answeredPairs(row.questions, row.answers);
+	/* INK FOLLOWS THE PROMISE, not the mood (design round 1, D2). An open ask's
+	   line was `text-accent` and a settled one `text-success`, two greens that are
+	   ΔE 17 apart here and IDENTICAL in three of the 28 shipped themes — so the
+	   one distinction this card exists to draw (still waiting vs already settled)
+	   could vanish. `accent` is no longer spent on the state line at all: "the
+	   agent is continuing" is information, not an achievement, and success green
+	   is reserved for the states that are receipts. */
 	const toneClass =
 		state.tone === "attention"
 			? "text-warning"
@@ -245,7 +279,7 @@ export function AskCard({
 				? "text-success"
 				: state.tone === "gone"
 					? "text-ink-dim"
-					: "text-accent";
+					: "text-ink-muted";
 
 	return (
 		<div
@@ -277,25 +311,36 @@ export function AskCard({
 								</span>
 								<QuestionField
 									question={question}
-									value={draft[id] ?? []}
+									value={draft.answers[id] ?? []}
 									disabled={busy !== "" || skipped.has(id)}
 									onChange={(next) =>
-										setDraft((current) => ({ ...current, [id]: next }))
+										patchDraft((current) => ({
+											answers: { ...current.answers, [id]: next },
+										}))
 									}
 								/>
-								{questions.length > 1 || question.options.length === 0 ? (
+								{/* A 44 px TARGET, NOT A 17 px LINK (UX round 1, U5 = design round
+								    1, D5). This was `text-meta underline`: measured 136x17 against
+								    44 px for every other control in the card, under WCAG 2.5.8's
+								    24 px floor and with no spacing exception to claim (its centre
+								    sits 8 px under the send button). It is the ONLY way to say
+								    "no answer to this question", so it is a control, and it now
+								    wears the card family's quiet control shape. */}
+								{questions.length > 1 ||
+								(Array.isArray(question.options) && question.options.length === 0) ? (
 									<button
 										type="button"
 										disabled={busy !== ""}
-										onClick={() =>
-											setSkipped((current) => {
-												const next = new Set(current);
-												if (next.has(id)) next.delete(id);
-												else next.add(id);
-												return next;
-											})
-										}
-										className="self-start text-meta text-ink-dim underline disabled:opacity-50"
+										onClick={() => {
+											const next = new Set(skipped);
+											if (next.has(id)) next.delete(id);
+											else next.add(id);
+											patchDraft(() => ({ skipped: Array.from(next) }));
+										}}
+										className={cn(
+											"flex min-h-11 self-start items-center rounded-sm border border-control px-3 text-body-sm active:bg-elevated disabled:opacity-50",
+											skipped.has(id) ? "text-ink" : "text-ink-muted",
+										)}
 									>
 										{skipped.has(id) ? "answer this after all" : "skip — send no answer"}
 									</button>
@@ -303,6 +348,25 @@ export function AskCard({
 							</div>
 						);
 					})}
+
+					{/* R6 (agent review round 1): an answerable ask whose questions are all
+					    already taken elsewhere used to render no fields and a permanently
+					    disabled send, with nothing saying why. The queue is right (a draft
+					    elsewhere is not this card's to submit); the card just has to say
+					    so instead of inviting a tap that cannot land. */}
+					{open_questions.length === 0 ? (
+						<p className="text-body-sm text-ink-muted">
+							nothing left to answer here — another surface has already taken these
+							questions.
+						</p>
+					) : null}
+
+					{/* THE REFUSAL SITS WITH THE CONTROLS IT ANSWERS (round-1 design, D4):
+					    it used to render after the control row, which put it below the
+					    fold in the frame captured to show it — the same failure
+					    `pending-card.tsx` pinned its own error for. Above the row, the
+					    sentence and the control that produced it are on screen together. */}
+					{error ? <p className="text-body-sm text-danger">{error}</p> : null}
 
 					<div className="flex flex-wrap gap-2">
 						<button
@@ -327,26 +391,33 @@ export function AskCard({
 						</button>
 					</div>
 					{/* DISMISS IS A THIRD, QUIETER ACTION and it is deliberately not
-					    beside Decline: declining ANSWERS the agent ("decide
-					    yourself"), dismissing answers nobody and buys no turn. A
-					    pair of equal buttons would make them look like two ways of
-					    saying no. Its own state line says what happened. */}
-					<button
-						type="button"
-						disabled={busy !== ""}
-						onClick={dismiss}
-						className="self-start text-meta text-ink-dim underline disabled:opacity-50"
-					>
-						{busy === "dismiss" ? "…" : "dismiss — send no reply"}
-					</button>
+					    beside Decline: declining ANSWERS the agent ("decide yourself"),
+					    dismissing answers nobody and buys no turn. A pair of equal
+					    buttons would make them look like two ways of saying no. Its own
+					    state line says what happened. */}
+					{dismissible ? (
+						<button
+							type="button"
+							disabled={busy !== ""}
+							onClick={dismiss}
+							className="flex min-h-11 self-start items-center rounded-sm border border-control px-3 text-body-sm text-ink-muted active:bg-elevated disabled:opacity-50"
+						>
+							{busy === "dismiss" ? "…" : "dismiss — send no reply"}
+						</button>
+					) : null}
 				</>
 			) : (
 				<>
 					{/* A settled ask: the questions and the answers chosen, so the
 					    card is a receipt rather than a sentence. `row.answers` holds a
 					    secret answer as the KEY the runtime stored, never a value. */}
+					{/* PAIRING CARRIED BY SPACE, not only by ink (design round 1, N1):
+					    the receipt's inside-pair gap and its between-pair gap measured
+					    ~10 px vs ~12 px, so a two-question receipt read as one
+					    four-line block. The gap BETWEEN pairs is now the container's;
+					    the gap inside a pair stays tight. */}
 					{settledPairs.length > 0 ? (
-						<dl className="flex flex-col gap-1">
+						<dl className="flex flex-col gap-3">
 							{settledPairs.map((pair) => (
 								<div key={pair.question} className="flex flex-col">
 									<dt className="text-body-sm text-ink-muted">{pair.question}</dt>
@@ -355,25 +426,22 @@ export function AskCard({
 							))}
 						</dl>
 					) : (
-						<span className="text-body-sm text-ink-muted">{row.questions[0]?.question}</span>
+						/* GUARDED like every other read of a wire list (agent review round
+						   1, R5): a settled row that arrives without `questions` used to throw
+						   during render, which unmounts the whole sheet rather than
+						   degrading to a line. */
+						<span className="text-body-sm text-ink-muted">
+							{questions[0]?.question ?? ""}
+						</span>
 					)}
-					{/* An EXPIRED ask keeps no control and no error register (§5): the
-					    remedy is stated in the state line ("ask the agent again") and a
-					    red line under it would read as a failure the user caused. */}
-					{String(row.status) === "expired" ? null : (
-						<button
-							type="button"
-							disabled={busy !== ""}
-							onClick={dismiss}
-							className="self-start text-meta text-ink-dim underline disabled:opacity-50"
-						>
-							{busy === "dismiss" ? "…" : "dismiss from the list"}
-						</button>
-					)}
+					{/* NO DISMISS HERE, deliberately (agent review round 1, R1): dismiss is
+					    a `timed_out` action and a timed-out ask renders in the ANSWERABLE
+					    branch above, so every status that reaches this branch (answered,
+					    late, declined, dismissed, expired, unknown) can only be refused.
+					    An EXPIRED ask additionally keeps no error register at all (§5) —
+					    the remedy is in the state line. */}
 				</>
 			)}
-
-			{error ? <p className="text-body-sm text-danger">{error}</p> : null}
 		</div>
 	);
 }

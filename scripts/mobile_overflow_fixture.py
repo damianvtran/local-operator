@@ -846,9 +846,7 @@ class QueuedAskHarness:
     async def approval_answer(self, request_id: Any, approved: Any, remember: Any) -> str:
         return self._record("approval_answer", request_id, approved, remember)
 
-    async def ask_answer(
-        self, request_id: Any, value: Any, question_index: Any = None
-    ) -> str:
+    async def ask_answer(self, request_id: Any, value: Any, question_index: Any = None) -> str:
         return self._record("ask_answer", request_id, value)
 
     #: The ask whose answer this runtime REFUSES with the queue's own sentence,
@@ -920,6 +918,98 @@ class QueuedAskHarness:
             self.on_change()
 
 
+def _empty_index_requested() -> bool:
+    """Whether the caller asked for the EMPTY-index variant.
+
+    A FLAG, NOT A TRUTHINESS TEST (QA round 1, Q-2). `os.environ.get(...)` on the
+    raw string made `LOP_ASK_FIXTURE_EMPTY_INDEX=0` — the way anyone would turn a
+    flag off — serve the empty index instead, which is the opposite of the
+    request and silently photographs the wrong state. Only the two spellings that
+    mean "on" count, the same set `asks.policy.NONBLOCKING_ASK` accepts.
+    """
+    return os.environ.get("LOP_ASK_FIXTURE_EMPTY_INDEX", "").strip().lower() in {"1", "true"}
+
+
+def _foreign_ask_projection() -> SessionProjection:
+    """A session with ONE ask of its own, so the asks sheet opened from here
+    shows its own row beside rows belonging to other conversations.
+
+    WHY THIS SESSION EXISTS (design round 1, D6). The sheet's reason for existing
+    is the ask you are NOT looking at, and no frame showed it: every row in the
+    shipped set belonged to the conversation on screen, so the foreign-row
+    treatment (conversation name + "this conversation has ended…") appeared
+    nowhere. Opening the sheet needs a bar, and a bar needs an outstanding ask —
+    hence one of its own rather than none.
+    """
+    projection = SessionProjection(
+        session_id="asks-foreign",
+        pid=900012,
+        kind="tui",
+        conversation_name="Asks elsewhere",
+        streaming=False,
+        transcript=[TranscriptEntry(id="f-1", kind="user", text="Ask me the second one too.")],
+        version=3,
+    )
+    projection.asks = [
+        _ask(
+            "fa-mine",
+            created_s=-30,
+            expires_in_s=870,
+            questions=[
+                _question(
+                    "fm1",
+                    "Answer this one from its own conversation?",
+                    options=[("yes", "this row belongs to the screen's session")],
+                )
+            ],
+        )
+    ]
+    projection.asks_open = 1
+    return projection
+
+
+def _asks_stacked_projection() -> SessionProjection:
+    """Queued asks in the BUSIEST column: todos, a running subagent roster, a
+    pending approval card AND the minimized ask chip in one stack.
+
+    WHY (design round 1, D6). The chip shares this slot with three other strips,
+    and no frame showed them together — the compounding case the layout caps
+    exist for. Built from the existing pieces rather than a new shape, so the
+    stack is one the other fixtures already measure.
+    """
+    projection = _stacked_projection("asks-stacked", approval=True)
+    projection.pid = 900013
+    projection.conversation_name = "Asks behind a decision"
+    # ITS OWN ASKS, with their own ids. Copying the ``asks`` session's objects
+    # would put one ask in two sessions: the aggregate route is index-backed and
+    # keyed by the OWNING session, so a shared ask_id made the sheet's copy of a
+    # row resolve to a session with no runtime — the answer was refused with
+    # "session not connected" and the frame that exists to show the answer flow
+    # photographed a failure instead.
+    projection.asks = [
+        _ask(
+            "st-first",
+            created_s=-120,
+            expires_in_s=780,
+            questions=[
+                _question(
+                    "s1",
+                    "Ship behind the flag while this decision is pending?",
+                    options=[("yes", "one more session for the same queue")],
+                )
+            ],
+        ),
+        _ask(
+            "st-second",
+            created_s=-60,
+            expires_in_s=840,
+            questions=[_question("s2", "And record this one as a follow-up?")],
+        ),
+    ]
+    projection.asks_open = 2
+    return projection
+
+
 def seed_ask_index(projections: list[SessionProjection]) -> None:
     """Publish the asks into the daemon's INDEX, the way a live runtime does.
 
@@ -962,6 +1052,11 @@ async def main() -> None:
         # THE ZERO-ASKS STATE of the same surface (the bar must be absent, and
         # the settling rows are still in the transcript).
         _settled_ask_projection(),
+        # The two frames design round 1 (D6) asked for: a sheet whose rows are
+        # FOREIGN (the sheet's reason for existing) and the busiest stack, where
+        # the chip shares its slot with todos, a roster and an approval card.
+        _foreign_ask_projection(),
+        _asks_stacked_projection(),
     ]
     # The ANSWERABLE queued-ask session is not in that list: it is served by a
     # real runtime below, so its projection arrives over the relay's own dial
@@ -993,7 +1088,7 @@ async def main() -> None:
     # can be on the projection a moment before the aggregate carries it — and it
     # is the only way to photograph the sheet's empty state at all, because at
     # zero asks a session offers neither the bar nor the header entry to open it.
-    seed_ask_index([] if os.environ.get("LOP_ASK_FIXTURE_EMPTY_INDEX") else [*projections, queued])
+    seed_ask_index([] if _empty_index_requested() else [*projections, queued])
     # THE ANSWERABLE SESSION IS A REAL RUNTIME, not another still picture: the
     # phone's answer flow is only meaningful if the frame reaches a runtime and
     # the runtime's own fold comes back (see ``QueuedAskHarness``). The relay

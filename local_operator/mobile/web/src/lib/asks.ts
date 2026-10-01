@@ -88,11 +88,37 @@ export function remainingMs(row: PendingAsk, nowMs: number): number {
  */
 export function durationLabel(ms: number): string {
 	const seconds = Math.floor(ms / 1000);
-	if (seconds <= 0) return "";
-	if (seconds < 90 * 60) return `${Math.max(1, Math.floor(seconds / 60))} m`;
+	/* SUB-SECOND IS NOT NOTHING (agent review round 1, N1). This returned ""
+	   for a deadline inside the next second, so the open line read "expires in"
+	   with no value at all — a sentence whose whole point is the number. The
+	   floor is stated as the bound it is rather than rounded to "1 m", which
+	   would claim a minute that has already nearly passed. */
+	/* A deadline already past is the caller's other branch (""), not a countdown. */
+	if (ms <= 0) return "";
+	if (seconds < 60) return "<1 m";
+	if (seconds < 90 * 60) return `${Math.floor(seconds / 60)} m`;
 	const hours = seconds / 3600;
 	if (hours < 48) return `${Math.floor(hours)} h`;
 	return `${Math.floor(hours / 24)} d`;
+}
+
+/** The rows in the order every ask surface should show them: the HEAD ask
+ *  first, then newest-first — the wire's own order with the head lifted to the
+ *  front.
+ *
+ *  WHY THE ORDER IS THE CLIENT'S TO DECIDE (UX round 1, U8). The bar names the
+ *  head ask (the OLDEST open one, `headAsk`), and the published list leads with
+ *  the NEWEST — so tapping a bar that says "Which sequencing…" opened a sheet
+ *  whose first card was a different question, with the named one below the fold.
+ *  A thumb arrives expecting what it just read. The design's A2 addendum already
+ *  names this divergence and its fix ("a later PR may make the list lead with
+ *  the oldest too"); this is that fix, applied where the reader stands, with no
+ *  wire change. */
+export function orderedForDisplay(rows: PendingAsk[] | undefined | null): PendingAsk[] {
+	const list = Array.isArray(rows) ? rows : [];
+	const head = headAsk(list);
+	if (head === null) return [...list];
+	return [head, ...list.filter((row) => row.ask_id !== head.ask_id)];
 }
 
 /** The one line a queued ask's own state is stated in (§5's shared copy).
@@ -157,6 +183,21 @@ export function askStateLine(row: PendingAsk, nowMs: number): { text: string; to
 export function outstandingAsks(rows: PendingAsk[] | undefined | null): PendingAsk[] {
 	if (!Array.isArray(rows)) return [];
 	return rows.filter((row) => isOutstanding(String(row?.status || "open")));
+}
+
+/** The ask the bar should NAME: the oldest OPEN ask, or — when nothing is open
+ *  — the first still-answerable one (a timed-out ask is answerable, §5).
+ *
+ *  WHY THE FALLBACK (UX round 1, U7). With only a timed-out ask left, the bar
+ *  said "? 1 question waiting" with no preview at all: the count includes the
+ *  answerable timeout while the preview did not, so the one state R7 keeps
+ *  answerable was also the one state that named nothing. The head rule is
+ *  unchanged where an open ask exists. */
+export function dockAsk(rows: PendingAsk[] | undefined | null): PendingAsk | null {
+	const head = headAsk(rows);
+	if (head !== null) return head;
+	const outstanding = outstandingAsks(rows);
+	return outstanding.length > 0 ? outstanding[0] : null;
 }
 
 /** The HEAD ask: the OLDEST still-open ask.
