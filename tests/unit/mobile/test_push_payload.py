@@ -23,7 +23,7 @@ from typing import Any
 
 import pytest
 
-from local_operator.mobile import push_handles
+from local_operator.mobile import push_credentials, push_handles, push_payload
 from local_operator.mobile.push_payload import (
     EMIT_ROUTE,
     IDEMPOTENCY_HEADER,
@@ -190,7 +190,7 @@ def _check_block(rows: object, fixture: dict[str, Any], *, where: str) -> None:
         )
 
 
-def _completion_from_fixture(fixture: dict[str, Any]) -> dict[str, Any]:
+def _completion_built() -> dict[str, Any]:
     """The builder's output for :data:`COMPLETION_INPUT`, not for the file's.
 
     The fixture is the EXPECTED side of this comparison; taking the input from it
@@ -202,7 +202,7 @@ def _completion_from_fixture(fixture: dict[str, Any]) -> dict[str, Any]:
 
 def test_the_completion_payload_and_emit_body_equal_the_filed_literals() -> None:
     fixture = _fixture("emit-completion.json")
-    payload = _completion_from_fixture(fixture)
+    payload = _completion_built()
 
     _check_shape(
         payload,
@@ -226,7 +226,7 @@ def test_the_completion_payload_and_emit_body_equal_the_filed_literals() -> None
     _check_block(body["devices"], fixture, where="emit-completion.body.devices")
     _check_block(fixture["body"]["devices"], fixture, where="emit-completion.filed.devices")
     assert body == fixture["body"], "the emit body is the payload plus the report block"
-    assert set(body) - set(payload) == {"devices"}
+    assert set(body) - set(payload) == {push_payload.REPORT_DEVICES_FIELD}
 
 
 def test_the_attention_payload_equals_the_filed_literals_with_and_without_exclude() -> None:
@@ -426,6 +426,30 @@ def test_the_route_and_header_are_the_frozen_ones() -> None:
     assert IDEMPOTENCY_HEADER in completion["required_headers"]
     assert IDEMPOTENCY_HEADER in attention["required_headers"]
     assert completion["payload_version"] == attention["payload_version"] == PAYLOAD_VERSION
+
+
+def test_the_report_block_key_is_single_sourced() -> None:
+    """One wire key, one home (review round 1, M3, closed once #1881 merged).
+
+    The block's rows are S4c's, and so is the name of the key they travel under:
+    ``push_payload`` imports ``push_credentials.REPORT_DEVICES_FIELD`` rather than
+    declaring a second string, so the two cannot drift. Tested rather than trusted
+    — the import is one line and a later edit could as easily re-add a literal —
+    and the value is asserted against the filed fixtures' own extra key.
+    """
+    assert push_payload.REPORT_DEVICES_FIELD == push_credentials.REPORT_DEVICES_FIELD
+    assert push_payload.REPORT_DEVICES_FIELD == "devices"
+
+    for name in ("emit-completion.json", "emit-attention.json"):
+        fixture = _fixture(name)
+        extra = set(fixture["body"]) - set(fixture["payload"])
+        assert extra == {
+            push_payload.REPORT_DEVICES_FIELD
+        }, f"{name}: the filed body's only extra key is the report block's"
+
+    body = emit_body(_completion_built(), DEVICE_ROWS)
+    assert push_payload.REPORT_DEVICES_FIELD in body
+    assert set(body) - set(_completion_built()) == {push_payload.REPORT_DEVICES_FIELD}
 
 
 def test_the_idempotency_key_vectors_are_reproducible() -> None:

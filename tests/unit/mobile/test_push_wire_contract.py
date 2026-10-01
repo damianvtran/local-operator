@@ -169,6 +169,18 @@ def _operator_key() -> str:
     return key
 
 
+def _write_store(store: dict[str, Any]) -> None:
+    """Plant a store as an earlier build — or a writer this build lacks — would.
+
+    Two cases need it: ``unpaired_at`` (unpairing a computer is S10, so no route
+    writes it yet) and a row with no credential fact at all (an earlier build's,
+    which is what the absence rule is about). The file is the input those cases
+    are about, and writing it by hand is what the sibling suite does.
+    """
+    path = config_dir() / PUSH_DEVICES_STORE_NAME
+    path.write_text(json.dumps(store), encoding="utf-8")
+
+
 def _register(client: TestClient, **overrides: Any) -> dict[str, Any]:
     response = client.post("/api/push/register", json={**REGISTER, **overrides})
     assert response.status_code == 200, response.text
@@ -238,13 +250,31 @@ def test_the_list_response_matches_the_frozen_shape() -> None:
         assert row["state"] in fixture["states"]
     _assert_no_forbidden(body, blocks["forbidden"], where="list")
 
-    # The absence rule: the labelled row carries its name, the other does not —
-    # and neither carries a credential fact, because S4c's per-device route is
-    # what writes those.
+    # The absence rule, both halves, under the merged S4c writers. A row the
+    # register route wrote carries ``credential_live`` — DERIVED from the expiry
+    # the request's own cookie presented, which register stores as
+    # ``credential_expires_at`` (ADR §4 rule 2), and not from a flag on the row —
+    # and it carries NO ``last_authenticated_at``, because that stamp is written
+    # only by a request that NAMES its device (``X-Lop-Device`` + key), which an
+    # ordinary register cannot do.
     by_id = {row["device_id"]: row for row in body["devices"]}
     assert by_id[labelled["device_id"]]["name"] == "Damian's iPhone"
     assert "name" not in by_id[other["device_id"]]
-    assert all("credential_live" not in row for row in body["devices"])
+    assert isinstance(by_id[labelled["device_id"]]["credential_live"], bool)
+    assert "last_authenticated_at" not in by_id[labelled["device_id"]]
+
+    # ...and a row an EARLIER build wrote carries no credential fact at all, so
+    # the store omits both keys rather than inventing one (the repo's absence
+    # rule). Planted, because this build's register always writes the expiry.
+    store = _store()
+    planted = next(d for d in store["devices"] if d["device_id"] == other["device_id"])
+    for key in ("credential_live", "last_authenticated_at", "credential_expires_at"):
+        planted.pop(key, None)
+    _write_store(store)
+
+    after = {row["device_id"]: row for row in client.get("/api/push/devices").json()["devices"]}
+    assert "credential_live" not in after[other["device_id"]]
+    assert "last_authenticated_at" not in after[other["device_id"]]
 
 
 def test_the_register_refusal_bodies_match_the_frozen_literals() -> None:
@@ -273,7 +303,7 @@ def test_the_register_refusal_bodies_match_the_frozen_literals() -> None:
     store = _store()
     row = next(d for d in store["devices"] if d["device_id"] == other["device_id"])
     row["unpaired_at"] = 1789000500
-    (config_dir() / PUSH_DEVICES_STORE_NAME).write_text(json.dumps(store), encoding="utf-8")
+    _write_store(store)
 
     refused = client.post(
         "/api/push/register",
