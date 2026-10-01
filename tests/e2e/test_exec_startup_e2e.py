@@ -676,7 +676,13 @@ async def test_exec_supervisor_approval_ui(exec_server, tmp_path, approve):
 
 
 @pytest.mark.parametrize(
-    "termination,expected", [("term", "cancelled"), ("kill", "interrupted"), ("stop", "cancelled")]
+    "termination,expected",
+    # `term` is an UNSANCTIONED SIGTERM (a bare os.kill, no stop marker), which is
+    # deliberately NOT a cancellation any more: nobody asked for it, and the ledger says
+    # so (`interrupted` + `stop_class: unattributed-signal`). `stop` is the supervisor's
+    # own control op and stays `cancelled`. `kill` is uncatchable, so the worker leaves
+    # no row and reconcile classifies it `unattributed-death`.
+    [("term", "interrupted"), ("kill", "interrupted"), ("stop", "cancelled")],
 )
 def test_exec_loop_lifecycle_outcomes(exec_server, termination, expected):
     import signal
@@ -715,6 +721,11 @@ def test_exec_loop_lifecycle_outcomes(exec_server, termination, expected):
             break
         time.sleep(0.05)
     assert status["status"] == expected
+    assert status.get("stop_class") == {
+        "term": "unattributed-signal",
+        "kill": "unattributed-death",
+        "stop": "deliberate",
+    }[termination], status
     before = len(requests)
     assert json.loads(run("exec", "--status", job_id, stdin="").stdout)["status"] == expected
     assert len(requests) == before, "Status/reconciliation must never restart iterations"
