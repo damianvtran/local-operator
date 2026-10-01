@@ -86,6 +86,12 @@ _WALK_DEPTH_CAP = 2
 #: ``subagents.model_choice`` / ``subagents.models``); without the isolation
 #: this table could only ever be green on one of the two machines. The OTHER
 #: arm is pinned by :func:`test_the_tier_configured_arm_is_pinned_too`.
+#:
+#: UPDATE (folded head dfb109697, teams-label lane): ``team`` moved 412 -> 540
+#: (+128) for the ``label``/``aliases`` create/update fields this branch adds
+#: to the team schema — the same addition the context-budget entry records as
+#: +670 schema chars on its own ruler. Every other entry was unmoved across
+#: the fold (measured isolated, this file's own fixture).
 MEASURED_TOKENS: dict[str, int] = {
     "agent": 687,
     "ask": 837,
@@ -111,7 +117,7 @@ MEASURED_TOKENS: dict[str, int] = {
     "send": 614,
     "sessions": 718,
     "task": 422,
-    "team": 412,
+    "team": 540,
     "team_delete": 93,
     "todo": 463,
     "wait": 275,
