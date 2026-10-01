@@ -284,7 +284,7 @@ async def test_a_malformed_entry_costs_one_session_not_the_sweep(
 # observe the bootstrap actually running.
 #
 # `SHELL` pointed at a two-line script is the seam that makes them hermetic:
-# the bootstrap shells out to `$SHELL -l -c 'echo "$PATH"'`, so a fake shell
+# the bootstrap shells out to `$SHELL -l -i -c 'echo "$PATH"'`, so a fake shell
 # echoing a known marker directory gives an identical result on CI and on a
 # laptop, with no dependence on the developer's rc files or on Homebrew being
 # installed.
