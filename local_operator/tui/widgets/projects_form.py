@@ -56,6 +56,10 @@ from local_operator.tui.projects_render import StyleFor, _styles
 #: not a value — see the module docstring.
 DESCRIPTION_SCAFFOLD = "## Summary\n\n## Goals\n\n## Notes\n"
 
+#: The description's hint while the scaffold is untouched (it is cleared once
+#: the writer types — see `on_text_area_changed`).
+DESCRIPTION_HINT = "starter text — left as it is, nothing is saved"
+
 #: The estimate vocabularies the store accepts, in the order the cycle row
 #: offers them.
 ESTIMATE_UNITS: tuple[str, ...] = ("points", "days")
@@ -355,7 +359,7 @@ class ProjectsFormPage(Vertical):
         self._description_block = FormFieldBlock(
             "description",
             self._description,
-            hint="starter text — left as it is, nothing is saved",
+            hint=DESCRIPTION_HINT,
             style_for=style_for,
         )
         self._status_block = FormFieldBlock(
@@ -413,7 +417,10 @@ class ProjectsFormPage(Vertical):
         # layout is a documented churn) and the caret lands on the Goals line —
         # the heading a writer fills in first (spec §7.7).
         try:
-            self._description.move_cursor((2, 0))
+            # (1, 0) is the BLANK row under `## Summary`: the caret used to sit
+            # on the `## Goals` heading, so the first keystroke glued a sentence
+            # onto it (`hello## Goals`) — UX round 1, U2.
+            self._description.move_cursor((1, 0))
         except Exception:  # noqa: BLE001 — caret placement is a nicety
             pass
         self.focus_first()
@@ -445,7 +452,9 @@ class ProjectsFormPage(Vertical):
         self._key_block.set_hint("follows the title until you edit it")
         self._tags_block.set_hint(self._tags_hint())
         try:
-            self._description.move_cursor((2, 0))
+            # (1, 0) is the blank row under `## Summary` (see `on_mount`) — UX
+            # round 1, U2.
+            self._description.move_cursor((1, 0))
         except Exception:  # noqa: BLE001 — caret placement is a nicety
             pass
         # Un-armed until the host takes the baseline it will return to.
@@ -546,8 +555,38 @@ class ProjectsFormPage(Vertical):
                 self._sync_key_hint()
         if event.input is self._tags_input:
             self._tags_block.set_hint(self._tags_hint())
+        self._clear_error_for(event.input)
+        if event.input is self._title_input:
+            # While the key follows the title the offending value IS the title,
+            # so a handle refusal has to clear with it or it outlives its cause
+            # (UX round 1, U3).
+            self._key_block.set_error("")
         if self._on_state_change is not None:
             self._on_state_change()
+
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        """The description's two live rules: its refusal, and its scaffold hint."""
+        self._clear_error_for(event.text_area)
+        if event.text_area is self._description:
+            # The hint states a rule about the STARTER TEXT; once the writer has
+            # typed, it is describing a state that no longer exists (UX round 1,
+            # U6).
+            self._description_block.set_hint(
+                DESCRIPTION_HINT if self._description_value() is None else ""
+            )
+        if self._on_state_change is not None:
+            self._on_state_change()
+
+    def _clear_error_for(self, control: Any) -> None:
+        """Drop a refusal the moment the value it named changes.
+
+        The reader correcting the field IS the answer to the sentence under it;
+        leaving the line up while they type is how a fixed form still reads as
+        refused (UX round 1, U3).
+        """
+        for block in dict.fromkeys(self._blocks().values()):
+            if block.control is control and block.error:
+                block.set_error("")
 
     def _write_key(self, value: str) -> None:
         self._key_written = value
@@ -569,10 +608,6 @@ class ProjectsFormPage(Vertical):
             # (design review round 1, N2).
             else "set by hand — clear it to follow the title again"
         )
-
-    def on_text_area_changed(self, event: Any) -> None:
-        if self._on_state_change is not None:
-            self._on_state_change()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """``enter`` in a single-line field moves on; on the LAST one it saves."""
@@ -649,10 +684,21 @@ class ProjectsFormPage(Vertical):
                 return None
             raw["estimate_unit"] = self._unit_row.value
         if not raw["name"]:
-            self._fail(
-                "key",
-                "the key is required — it is the reference handle, e.g. `parity-spec`",
-            )
+            if not raw["title"]:
+                # Nothing typed at all: this form is TITLE-first and derives the
+                # key from it, so the refusal belongs on the title, where the
+                # cursor already is (UX round 1, U4). A reader who cleared the
+                # key while keeping the title is a different case — that one is
+                # about the key itself.
+                self._fail(
+                    "title",
+                    "the title is required — it becomes the key, e.g. `parity-spec`",
+                )
+            else:
+                self._fail(
+                    "key",
+                    "the key is required — it is the reference handle, e.g. `parity-spec`",
+                )
             return None
         try:
             edit = ProjectEdit(**raw)
@@ -702,20 +748,25 @@ class ProjectsFormPage(Vertical):
         except Exception:  # noqa: BLE001 — focus is a nicety
             pass
 
-    def show_refusal(self, sentence: str) -> None:
+    def show_refusal(self, sentence: str, field: str = "key") -> None:
         """A refusal from the WRITE (a name conflict, the schema guard).
 
-        Painted under the title, where the spec puts it: the form stays up and
-        keeps everything typed, so the reader can change the name and press
-        `ctrl+s` again without losing the description.
+        Painted under the field the store refused, which for a CREATE is the
+        handle: ``create_project`` answers a taken name with a sentence naming
+        it, and the caps it enforces are the handle's. It used to land under the
+        title — the sentence was a conflict while the cursor sat on a field the
+        store never looked at, so a reader corrected the title and watched the
+        refusal stay (UX round 1, U3). The form stays up and keeps everything
+        typed whichever field wears it.
         """
-        self._title_block.set_error(sentence)
-        # The sentence lands under the TITLE, so that is where the cursor goes:
-        # a receipt that points at one field while the cursor sits in another is
-        # half a receipt, and the reader's next act is to fix what it names
-        # (design review round 1, D5).
+        block = self._blocks().get(field, self._key_block)
+        block.set_error(sentence)
+        # The cursor follows the line: a receipt that points at one field while
+        # the cursor sits in another is half a receipt, and the reader's next
+        # act is to fix what it names (design review round 1, D5; the field it
+        # is painted under is UX round 1, U3).
         try:
-            self._title_input.focus()
+            block.control.focus()
         except Exception:  # noqa: BLE001 — focus is a nicety
             pass
 
@@ -807,7 +858,11 @@ class ProjectsFormPage(Vertical):
             event.prevent_default()
             self.action_discard()
             return
-        if event.key == "escape":
+        if event.key in ("escape", "n", "enter"):
+            # The question is a y/n one whatever the row prints, and `esc` is
+            # not the only answer a reader reaches for: `n` and `enter` used to
+            # be swallowed in silence, so the honest outcome (keep editing) was
+            # reachable only by guessing the right key (UX round 1, U5).
             event.stop()
             event.prevent_default()
             self.disarm_confirm()

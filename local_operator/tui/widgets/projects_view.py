@@ -436,6 +436,9 @@ class ProjectsView(Vertical):
         self._timeline_hint = HintButton("3", lambda: self.action_show_timeline())
         self._next_hint = HintButton("v", lambda: self.action_cycle_view())
         self._refresh_hint = HintButton("r", lambda: self.action_refresh())
+        # The canvas's headline action: a reader who cannot see how to make a
+        # project cannot use the page at all (UX round 1, U1).
+        self._create_hint = HintButton("c", lambda: self.action_create())
         self._zoom_hint = HintButton("+/-", self._cycle_tier)
         self._exit_hint = HintButton("esc", self._leave_or_pop)
         self._tab_hint = HintButton("tab", self._form_focus_next)
@@ -994,6 +997,7 @@ class ProjectsView(Vertical):
             self._next_hint,
             self._detail_hint,
             self._refresh_hint,
+            self._create_hint,
             self._open_hint,
             self._move_hint,
             self._page_hint,
@@ -1056,6 +1060,13 @@ class ProjectsView(Vertical):
         a gesture a reader finds by trying an arrow goes before a view they
         cannot discover, and the newest view types stay advertised on a
         narrow terminal (UX round 1, U3).
+
+        ``c create`` joined at the same rank as ``d detail`` (UX round 1, U1):
+        a reader who cannot see how to make a project cannot use the page, so
+        the two share the newest rungs and shed together. It was a BINDING
+        with no hint at all before this round — the create key existed and
+        nothing advertised it, which is the one failure this ladder exists to
+        prevent.
         """
 
         def rung(
@@ -1090,6 +1101,7 @@ class ProjectsView(Vertical):
         board_hint = (self._board_hint, " board", True)
         timeline_hint = (self._timeline_hint, " timeline", True)
         refresh = (self._refresh_hint, " refresh", True)
+        create_hint = (self._create_hint, " create", True)
         open_hint = (self._open_hint, " open", True)
         detail_hint = (self._detail_hint, " detail", True)
         nxt = (self._next_hint, " next", True)
@@ -1102,7 +1114,16 @@ class ProjectsView(Vertical):
         )
 
         all_leads = leads_of(
-            scroll, list_hint, board_hint, timeline_hint, nxt, refresh, open_hint, detail_hint, zoom
+            scroll,
+            list_hint,
+            board_hint,
+            timeline_hint,
+            nxt,
+            refresh,
+            create_hint,
+            open_hint,
+            detail_hint,
+            zoom,
         )
         return [
             rung(all_leads, "back to conversation", state=True),
@@ -1116,6 +1137,7 @@ class ProjectsView(Vertical):
                     timeline_hint,
                     nxt,
                     refresh,
+                    create_hint,
                     open_hint,
                     detail_hint,
                 ),
@@ -1123,17 +1145,28 @@ class ProjectsView(Vertical):
                 state=False,
             ),
             rung(
-                leads_of(scroll, list_hint, board_hint, timeline_hint, nxt, refresh, detail_hint),
+                leads_of(
+                    scroll,
+                    list_hint,
+                    board_hint,
+                    timeline_hint,
+                    nxt,
+                    refresh,
+                    create_hint,
+                    detail_hint,
+                ),
                 "back",
                 state=False,
             ),
             rung(
-                leads_of(scroll, list_hint, board_hint, timeline_hint, nxt, detail_hint),
+                leads_of(
+                    scroll, list_hint, board_hint, timeline_hint, nxt, create_hint, detail_hint
+                ),
                 "back",
                 state=False,
             ),
             rung(
-                leads_of(list_hint, board_hint, timeline_hint, nxt, detail_hint),
+                leads_of(list_hint, board_hint, timeline_hint, nxt, create_hint, detail_hint),
                 "back",
                 state=False,
             ),
@@ -1234,6 +1267,7 @@ class ProjectsView(Vertical):
             yield self._next_hint
             yield self._detail_hint
             yield self._refresh_hint
+            yield self._create_hint
             yield self._open_hint
             yield self._move_hint
             yield self._page_hint
