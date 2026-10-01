@@ -87,6 +87,25 @@ export interface TranscriptEntryDetails {
 	   opens EXPANDED — they are waiting to read the output, not to be told a
 	   command they typed has finished. Mirrors the TUI's ToolCard user_run. */
 	user_run?: boolean;
+	/* A queued ask SETTLING (design §4): the `ask_response` row carries the
+	   structured Q&A the model's text was built from, so the response card
+	   renders questions and answers rather than parsing a sentence. `answers`
+	   holds a secret answer as the KEY the runtime stored, never a value. */
+	ask_id?: string;
+	status?: "answered" | "late" | "declined" | "timed_out";
+	questions?: AskQuestion[];
+	answers?: Record<string, string[]>;
+	at?: number;
+	/* The row's own text, as the producer wrote it. For an `ask_timeout` this is
+	   the notice the MODEL was given (it quotes the questions, or names a secret
+	   ask's key and never its prompt); for an `ask_response` it is the injected
+	   response text. The phone shows it as such rather than paraphrasing it. */
+	text?: string;
+	/* The `ask_timeout` row's own facts: how long the ask waited, and whether it
+	   was urgent (which changes what the model was told to do, not what the user
+	   reads). `text` is the notice verbatim for both kinds. */
+	waited_s?: number;
+	urgent?: boolean;
 }
 
 export interface PeerSender {
@@ -199,6 +218,33 @@ export interface SubagentDetail extends SubagentRow {
 export interface AskOption {
 	label: string;
 	description: string;
+	/** The model's recommendation, AS A MARKER ON THE OPTION (`AskQuestion._shape`
+	    hoists the recommended option to index 0 and sets this on it). The phone
+	    used to ignore the key because position was the only channel; the queued
+	    ask card renders it as a word, so a recommendation no longer has to be
+	    decoded from which row happens to be first. Optional on the wire: an
+	    older runtime sends `{label, description}` and absence just means "no
+	    recommendation stated", never "not recommended". */
+	recommended?: boolean;
+}
+
+/** One question of a queued ask, as `PendingAsk.questions` carries it
+    (design §4's frozen contract, mirrored from
+    `asks/queue._question_shape`). The FULL question rides the wire — options,
+    `multi`, `secret`, `persist` — so the phone draws a picker without
+    re-deriving the ask from the model's tool call. */
+export interface AskQuestion {
+	id: string;
+	question: string;
+	options: AskOption[];
+	/** More than one option may be chosen; the answer map still holds a list. */
+	multi: boolean;
+	/** The credential case: the answer is a masked paste field, and the answer
+	    map holds the KEY the runtime stored, never the value (§4). */
+	secret: boolean;
+	/** For a secret question, save it to the operator's long-term store rather
+	    than only session memory. The flag rides; the value never does. */
+	persist: boolean;
 }
 
 export interface PendingRequest {
@@ -228,6 +274,14 @@ export interface CompletionAttention {
 
 export interface PendingAsk {
 	ask_id: string;
+	/** The conversation the ask belongs to. Absent on the per-session projection
+	    (the frame the phone is already addressing); PRESENT on every row of the
+	    aggregate (`GET /api/asks`), because a row drawn under another
+	    conversation's name must be answerable against that conversation's own
+	    route. */
+	session_id?: string;
+	/** The owning conversation's working directory, aggregate rows only. */
+	cwd?: string;
 	created_at: number;
 	expires_at: number;
 	timeout_s: number;
@@ -241,11 +295,17 @@ export interface PendingAsk {
 		| "dismissed"
 		| "expired";
 	delivered: boolean;
-	questions: Record<string, unknown>[];
+	questions: AskQuestion[];
 	/** Secret answers hold the KEY ONLY (`[<key>]`), never a value. */
 	answers?: Record<string, string[]>;
-	answered_by?: Record<string, unknown>;
+	/** Who settled it, when another surface beat this one to the answer. */
+	answered_by?: { surface?: string } & Record<string, unknown>;
 	answered_at?: number;
+	/** Question ids the LEGACY incremental card has already taken in this runtime
+	    (§4's A2 addendum). They are drafts, not settled answers: the card must
+	    advance past them, and the log still holds nothing until the last question
+	    lands. Absent on every ask answered the atomic way. */
+	draft_question_ids?: string[];
 }
 
 export interface SessionProjection {
@@ -304,6 +364,10 @@ export interface SessionProjection {
 	    does not publish asks at all — the field's presence is the client-side
 	    capability proxy (N2), exactly as it is for `asks` itself. */
 	asks_open?: number;
+	/** True only when the attach frame's byte bound DROPPED ask rows (§4's A2
+	    addendum). Absent when the list is complete, so a client can never draw a
+	    prefix beside a full count and call it whole. */
+	asks_truncated?: boolean;
 	/** input/output tokens. */
 	usage: Record<string, number>;
 	/**
@@ -555,6 +619,16 @@ export type CommandOp =
 			    recorded against the wrong question. */
 			question_index: number;
 	  }
+	/* THE QUEUED-ASK FAMILY (design §4). `ask_respond` is ATOMIC per ask: one map
+	   of question id → chosen labels, so a partial map is refused rather than
+	   half-applied, and a multi-question ask settles in a single write. It goes
+	   down the ordinary session command route — the same one the desktop plane
+	   uses — so the phone is not a second answering implementation. */
+	| { op: "ask_respond"; ask_id: string; answers: Record<string, string[]> }
+	| { op: "ask_decline"; ask_id: string }
+	/* Dismiss is VIEW-ONLY: it removes the row from the queue's front end and
+	   injects nothing — no turn is bought. */
+	| { op: "ask_dismiss"; ask_id: string }
 	| { op: "snapshot" };
 
 /* ---- projects (GET/POST/DELETE ``/api/projects…``) ------------------------ */

@@ -83,8 +83,22 @@ let capabilities: Capabilities | null = null;
    and therefore the order the reader sees) stays on the confirmed flag until
    the daemon's own list repaint says so. */
 let pinMarks: ReadonlyMap<string, boolean> = new Map();
-const projections = new Map<string, ProjectionSlot>();
-// useSyncExternalStore requires referentially stable snapshots, including the
+/* THE ASK SIGNATURE'S REVISION (design §5.3). The aggregate asks sheet reads
+   `GET /api/asks` on demand — an HTTP route, deliberately not a feed — so it
+   needs a signal for WHEN re-reading is worth doing. The list frame carries
+   every session's `asks_open`, and a change in that signature is exactly "a
+   queued ask appeared, settled, or changed hands" — the events a reader of the
+   sheet would want to see. A counter rather than a boolean so two changes
+   between renders cannot collapse into one; the signature compares the count
+   per session, so an unrelated repaint (a streaming session bumping its
+   activity 30x/s) does not move it.
+
+   WHY NOT EVERY LIST FRAME: a list frame is emitted on every projection push,
+   which is ~30/s while a turn streams. Re-reading the whole aggregate on each
+   would be a poll disguised as an event. */
+let asksRevision = 0;
+let asksSignature = "";
+const projections = new Map<string, ProjectionSlot>();// useSyncExternalStore requires referentially stable snapshots, including the
 // first render before the route's effect has subscribed its SSE stream.
 const EMPTY_PROJECTION_SLOT: ProjectionSlot = { projection: null, connected: false };
 
@@ -134,6 +148,30 @@ export function useProjection(sessionId: string): ProjectionSlot {
 		() =>
 			projections.get(sessionId) ?? EMPTY_PROJECTION_SLOT,
 	);
+}
+
+/** A counter that moves whenever the outstanding-ask population changes.
+
+    The aggregate asks sheet subscribes to it so a new ask (or one settled on
+    another surface) re-reads `GET /api/asks` without anybody pressing
+    refresh — and without re-reading on every unrelated repaint. */
+export function useAsksRevision(): number {
+	return useSyncExternalStore(subscribe, () => asksRevision);
+}
+
+/** Fold one list frame's per-session ask counts into the signature. */
+function publishAsksRevision(rows: SessionSummary[]): void {
+	const parts: string[] = [];
+	for (const row of rows) {
+		const count = row?.asks_open;
+		if (typeof count !== "number" || count <= 0) continue;
+		parts.push(`${row.session_id}:${count}`);
+	}
+	parts.sort();
+	const next = parts.join(",");
+	if (next === asksSignature) return;
+	asksSignature = next;
+	asksRevision += 1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -214,6 +252,7 @@ export function retainSessionListStream(): () => void {
 					sessions = payload.sessions;
 					capabilities = payload.capabilities ?? null;
 					sessionsConnected = true;
+					publishAsksRevision(payload.sessions);
 					/* A frame is the daemon's answer for every row it carries, so a mark
 					   it AGREES with has been confirmed and is dropped: from here the
 					   confirmed flag alone renders the row, in the section it belongs in.
