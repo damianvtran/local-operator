@@ -1,0 +1,93 @@
+CATALOGUE offers 46
+slash        /help           422 {"error":"/help is terminal-only here"}
+slash        /copy           422 {"error":"/copy is terminal-only here"}
+slash        /links          422 {"error":"/links is terminal-only here"}
+slash        /new            422 {"error":"/new is terminal-only here"}
+slash        /reload         422 {"error":"/reload is terminal-only here"}
+slash        /update         422 {"error":"/update is terminal-only here"}
+slash        /resume         422 {"error":"/resume is terminal-only here"}
+slash        /aida           422 {"error":"/aida is terminal-only here"}
+slash        /move           422 {"error":"/move is terminal-only here"}
+slash        /rename         422 {"error":"/rename is terminal-only here"}
+slash        /fork           422 {"error":"/fork is terminal-only here"}
+slash        /archive        422 {"error":"/archive is terminal-only here"}
+slash        /unarchive      422 {"error":"/unarchive is terminal-only here"}
+slash        /delete         422 {"error":"/delete is terminal-only here"}
+slash        /model          422 {"error":"/model is terminal-only here"}
+slash        /effort         422 {"error":"/effort is terminal-only here"}
+slash        /fast           422 {"error":"/fast is terminal-only here"}
+slash        /theme          422 {"error":"/theme is terminal-only here"}
+slash        /provider       422 {"error":"/provider is terminal-only here"}
+slash        /settings       422 {"error":"/settings is terminal-only here"}
+slash        /sidebar        422 {"error":"/sidebar is terminal-only here"}
+slash        /search         422 {"error":"/search is terminal-only here"}
+slash        /accounts       422 {"error":"/accounts is terminal-only here"}
+slash        /failovers      422 {"error":"/failovers is terminal-only here"}
+slash        /usage          422 {"error":"/usage is terminal-only here"}
+slash        /context        422 {"error":"/context is terminal-only here"}
+slash        /session        422 {"error":"/session is terminal-only here"}
+slash        /info           422 {"error":"/info is terminal-only here"}
+slash        /analytics      422 {"error":"/analytics is terminal-only here"}
+slash        /goal           200 {"ok":true,"detail":"goal set"}
+slash        /loop           422 {"error":"/loop is terminal-only here"}
+slash        /btw            422 {"error":"/btw is terminal-only here"}
+slash        /compact        200 {"ok":true,"detail":"compacting context"}
+slash        /stop           422 {"error":"/stop is terminal-only here"}
+slash        /approvals      422 {"error":"/approvals is terminal-only here"}
+slash        /skills         422 {"error":"/skills is terminal-only here"}
+slash        /mcp            422 {"error":"/mcp is terminal-only here"}
+slash        /login          422 {"error":"/login is terminal-only here"}
+slash        /logout         422 {"error":"/logout is terminal-only here"}
+slash        /notifications  422 {"error":"/notifications is terminal-only here"}
+slash        /mobile         422 {"error":"/mobile is terminal-only here"}
+slash        /network        422 {"error":"/network is terminal-only here"}
+slash        /credential     422 {"error":"/credential is terminal-only here"}
+slash        /team           422 {"error":"/team is terminal-only here"}
+slash        /agent          422 {"error":"/agent is terminal-only here"}
+slash        /project        422 {"error":"/project is terminal-only here"}
+slash_result /help           200 {"ok":true,"detail":""}
+slash_result /copy           200 {"ok":true,"detail":""}
+slash_result /links          200 {"ok":true,"detail":""}
+slash_result /new            200 {"ok":true,"detail":""}
+slash_result /reload         200 {"ok":true,"detail":""}
+slash_result /update         200 {"ok":true,"detail":""}
+slash_result /resume         200 {"ok":true,"detail":""}
+slash_result /aida           200 {"ok":true,"detail":""}
+slash_result /move           200 {"ok":true,"detail":""}
+slash_result /rename         200 {"ok":true,"detail":""}
+slash_result /fork           200 {"ok":true,"detail":""}
+slash_result /archive        200 {"ok":true,"detail":""}
+slash_result /unarchive      200 {"ok":true,"detail":""}
+slash_result /delete         200 {"ok":true,"detail":""}
+slash_result /model          200 {"ok":true,"detail":""}
+slash_result /effort         200 {"ok":true,"detail":""}
+slash_result /fast           200 {"ok":true,"detail":""}
+slash_result /theme          200 {"ok":true,"detail":""}
+slash_result /provider       200 {"ok":true,"detail":""}
+slash_result /settings       200 {"ok":true,"detail":""}
+slash_result /sidebar        200 {"ok":true,"detail":""}
+slash_result /search         200 {"ok":true,"detail":""}
+slash_result /accounts       200 {"ok":true,"detail":""}
+slash_result /failovers      200 {"ok":true,"detail":""}
+slash_result /usage          200 {"ok":true,"detail":""}
+slash_result /context        200 {"ok":true,"detail":""}
+slash_result /session        200 {"ok":true,"detail":""}
+slash_result /info           200 {"ok":true,"detail":""}
+slash_result /analytics      200 {"ok":true,"detail":""}
+slash_result /goal           200 {"ok":true,"detail":""}
+slash_result /loop           200 {"ok":true,"detail":""}
+slash_result /btw            200 {"ok":true,"detail":""}
+slash_result /compact        200 {"ok":true,"detail":""}
+slash_result /stop           200 {"ok":true,"detail":""}
+slash_result /approvals      200 {"ok":true,"detail":""}
+slash_result /skills         200 {"ok":true,"detail":""}
+slash_result /mcp            200 {"ok":true,"detail":""}
+slash_result /login          200 {"ok":true,"detail":""}
+slash_result /logout         200 {"ok":true,"detail":""}
+slash_result /notifications  200 {"ok":true,"detail":""}
+slash_result /mobile         200 {"ok":true,"detail":""}
+slash_result /network        200 {"ok":true,"detail":""}
+slash_result /credential     200 {"ok":true,"detail":""}
+slash_result /team           200 {"ok":true,"detail":""}
+slash_result /agent          200 {"ok":true,"detail":""}
+slash_result /project        200 {"ok":true,"detail":""}

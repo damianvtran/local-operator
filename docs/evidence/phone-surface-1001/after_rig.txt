@@ -1,0 +1,12 @@
+CATALOGUE offers 11
+slash_result /rename         200 {"ok":true,"detail":"renamed to rig name"}
+slash_result /model          200 {"ok":true,"detail":"model: test/e2e-model"}
+slash_result /effort         200 {"ok":true,"detail":"effort is not adjustable on test/e2e-model"}
+slash_result /fast           200 {"ok":true,"detail":"fast mode: not available on test/e2e-model"}
+slash_result /context        200 {"ok":true,"detail":"Instructions: ~0 · Tool inventory: ~0 · Tool schemas: ~4.4k · Environment: ~0 · Skills / 
+slash_result /goal           200 {"ok":true,"detail":"goal set"}
+slash_result /compact        200 {"ok":true,"detail":"compacting context…"}
+slash_result /approvals      200 {"ok":true,"detail":"tool approvals: ask — write and command tools prompt before running (this session)"}
+slash_result /mcp            200 {"ok":true,"detail":"no MCP servers configured."}
+slash_result /team           200 {"ok":true,"detail":"teams are unavailable in this session. Ask the agent to create one."}
+slash_result /agent          200 {"ok":true,"detail":"ran /agent"}
