@@ -559,9 +559,9 @@ def owner_notice_text(event: KillEvent) -> str:
     gb = fragment.mb / 1024
     count = len(fragment.pids)
     fleet = (
-        f"{event.fleet_mb / 1024:.0f} GB of {event.total_mb / 1024:.0f} GB"
+        f"{event.fleet_mb / 1024:.1f} GB of {event.total_mb / 1024:.1f} GB"
         if event.total_mb
-        else (f"{event.fleet_mb / 1024:.0f} GB")
+        else (f"{event.fleet_mb / 1024:.1f} GB")
     )
     return (
         f"MEMORY GUARD: your process group (pid {fragment.pid}, {count} "
