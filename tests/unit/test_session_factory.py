@@ -3791,7 +3791,9 @@ def test_a_fragment_opener_with_a_role_preamble_stamps_subagent(tmp_path: Path) 
                 # Bulk AFTER the text, base64-image-shaped: the line runs past
                 # the scan window while the text value (and its closing quote)
                 # stay inside it — exactly how a pasted screenshot fragments.
-                {"data": "A" * 70_000, "mime_type": "image/png"},
+                # The size is DERIVED from the window so the fixture cannot
+                # silently stop fragmenting if the window moves.
+                {"data": "A" * (resume_mod.NAME_SCAN_CHARS + 6_000), "mime_type": "image/png"},
             ],
         },
     }
