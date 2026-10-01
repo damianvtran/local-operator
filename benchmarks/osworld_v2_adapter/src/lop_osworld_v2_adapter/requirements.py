@@ -105,10 +105,13 @@ _OPTIONAL_INFRA = (
 # the judge client, and absent for every other task, so preflight refuses a
 # judged episode up front rather than sealing a zero.
 #
-# This table can only check that these NAMES are present. Whether the provider
-# VALUE is usable -- one the vendored registry can construct -- is checked in
-# ``adapter._resolve_judge_provider``, which runs in the worker, the only place
-# the registry is importable.
+# This table can only check that these NAMES are present, on either channel -- an
+# ``--infra`` value or a ``--secret`` ref. Whether the provider VALUE is one the
+# vendored registry serves (and, for ``openai_compatible``, one that carries an
+# endpoint) is checked in ``adapter._resolve_judge_provider``, which runs in the
+# worker, the only place the registry is importable. That check reads the same
+# two channels this table does; reading one of them would leave the other
+# unguarded.
 _JUDGE_SECRET = "OSWORLD_EVAL_MODEL_API_KEY"
 _JUDGE_INFRA = (
     "OSWORLD_EVAL_MODEL_PROVIDER",
