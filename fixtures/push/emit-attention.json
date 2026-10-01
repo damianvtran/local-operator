@@ -25,6 +25,9 @@
   "payload_optional": {
     "exclude": "list[str]"
   },
+  "absent_fields": [
+    "alert"
+  ],
   "payload_version": 1,
   "report_block_required": {
     "device_id": "str",
@@ -71,6 +74,7 @@
   },
   "notes": [
     "The attention form is NOT the completion form with a flag: no conversation, no completion_token and no kind, because a tap on an attention push must not deep-link anywhere — it is a badge correction.",
+    "NO alert, and the absence is the rule rather than an omission: the attention push is a silent, best-effort wake (§3.2), so it has no title and no body to show — a badge correction that raised a banner would interrupt a user to tell them nothing they asked for. alert is present on completion and digest and must not appear here (absent_fields).",
     "exclude names the device that just acted, so the self-correcting push skips it. It is OPTIONAL and absent means 'exclude nobody', which is what a tick-detected change sends because it never knows who acknowledged — see exclude_absent_payload, which is a whole valid payload and not an empty list.",
     "An attention emit is keyed on the machine's emit SEQUENCE, never on a completion key (emit-idempotency-keys.json): an ack is not a heal.",
     "On a phone this arrives as a silent, best-effort wake; the type is what stops the tap asking for a conversation that the payload never named."

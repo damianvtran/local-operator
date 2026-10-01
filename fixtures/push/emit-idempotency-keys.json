@@ -13,7 +13,8 @@
   "header": "Idempotency-Key",
   "recipes": {
     "completion": "sha256(completion_token ‖ anchor_id ‖ kind), lowercase hex. The three parts are concatenated in that order with NO separator and no salt; the ‖ in the ADR's recipe is the concatenation operator, not a literal character, and this file is where that reading is pinned so both sides derive byte-identical keys.",
-    "attention": "attention-<sequence>, the machine's monotone emit sequence persisted with the cursor that produced it. The prefix makes the two key spaces disjoint BY SHAPE (a completion key is 64 lowercase hex characters), so an attention emit can never collide with a completion emit."
+    "attention": "attention-<sequence>, the machine's monotone emit sequence persisted with the cursor that produced it. The prefix makes the two key spaces disjoint BY SHAPE (a completion key is 64 lowercase hex characters), so an attention emit can never collide with a completion emit.",
+    "digest": "sha256(\"digest\" ‖ emit_id ‖ computer), lowercase hex. Concatenation again, in that order and with no separator: the literal, the id the machine minted when the coalescing window CLOSED, then the computer handle. The id is what makes a retry the same emit — the member set and the count both move, so neither can key it — and re-minting the id per attempt is the defect this recipe exists to prevent (review round 1, B1). The id itself is PERSISTED with the positions of the window it names, so a restart mid-window re-emits the same key (§3.4 at `damianvtran/local-operator-mobile@5da35710`)."
   },
   "completion_vectors": [
     {
@@ -58,8 +59,22 @@
       "key": "attention-41"
     }
   ],
+  "digest_vectors": [
+    {
+      "emit_id": "5c7e9a1b3d5f708192a3b4c5d6e7f809",
+      "computer": "VZ8kQ1mT4pR7sW2xY6bN9c",
+      "key": "91b24a8098d68e15738ab41cfed66b5bf1257cfb65648e2d2539c2a6e5616393"
+    },
+    {
+      "emit_id": "5c7e9a1b3d5f708192a3b4c5d6e7f809",
+      "computer": "Qq7Zz2Ww4Ee6Rr8Tt0Yy1Uu",
+      "key": "ac18b2de497db002c830fb9509c3d3411f781d3bdddec649ad57262d1c4c0493",
+      "why": "The COMPUTER is in the recipe, so the same emit id on another machine is a different key — a digest is this machine's event, and the cloud routes it per (account → computer → device)."
+    }
+  ],
   "notes": [
     "A duplicate or replayed completion key is a no-op cloud-side; a heal is not, because its key differs.",
+    "A digest's key is re-derived from its EMIT ID, not from the member set: the members are resolved when the batch is accepted and the count moves with every other conversation on the machine, so neither is stable enough to key a retry. The id is minted once at window-close, kept with the pending item, and persisted in the state file with the window's positions so a restart mid-window reuses it (§3.4 at `5da35710`).",
     "The badge is NOT a wire field and is not keyed here: it is the machine's count at read time, so a missed or reordered push cannot drift it."
   ]
 }

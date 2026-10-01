@@ -357,6 +357,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         1,
         "the mobile push-handle key file under the store root",
     ),
+    "local_operator/mobile/push_worker.py": (
+        1,
+        "``PUSH_WORKER_STATE_NAME``: the mobile push-worker state file under the "
+        "config root — not an entry of a session directory",
+    ),
     "local_operator/secrets/keys.py": (
         2,
         "``secrets/`` and its registration ticket: the credential store at the config root",

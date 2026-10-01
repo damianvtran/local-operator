@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 if TYPE_CHECKING:
     from local_operator.mobile.attach_client import AttachClient
+    from local_operator.mobile.push_worker import PushWorker
 
 from local_operator.harness.approval import (
     frame_authority,
@@ -93,6 +94,16 @@ logger = logging.getLogger(__name__)
 #: session starts or dies); the scan is cheap, and 2 s makes a new terminal
 #: session appear on the phone before the user reaches for it.
 SCAN_INTERVAL_S = 2.0
+
+#: The bound on ONE push-worker pass, for the tick hook in ``_scan_once`` (S5).
+#:
+#: Deliberately ABOVE the 30 s the repo's own outbound Radient calls carry
+#: (``tunnels/api.py``) so a transport that bounds itself is never cut off
+#: mid-call — which matters because a pass cut off mid-call leaves the emit
+#: in flight while the next pass may start. The worker's own single-claimant
+#: guard is what makes that safe either way; this bound only stops a transport
+#: that ignores its rule from holding the scan open indefinitely.
+PUSH_TICK_TIMEOUT_S = 45.0
 
 #: The pin-file fingerprint before the first scan has looked. Distinct from
 #: ``None`` ("no file"), which is a real observation the first tick must still
@@ -2335,10 +2346,18 @@ class MobileDaemon:
         port: int = DEFAULT_PORT,
         password: str | None = None,
         dial_registrants: bool = True,
+        push_worker: PushWorker | None = None,
     ) -> None:
         self.port = port
         self.password = password
         self.table = SessionTable()
+        # Push/ack-sync S5: the emit loop's host, and ``None`` on every machine
+        # that has not armed one. The worker is INJECTED rather than built here
+        # because its transport is the cloud's (S7), and the transport is the
+        # one thing this process cannot mint: until it exists, nothing in the
+        # product constructs a worker, and the seam is how a deployment — or a
+        # test — arms one. ``_scan_once`` ticks it when it is set.
+        self.push_worker = push_worker
         # Stamp the build THIS process loaded, before any lazy import can meet a
         # replaced tree: every later comparison in ``_log_import_failure`` is
         # against this value.
@@ -2944,6 +2963,30 @@ class MobileDaemon:
             # durable listing itself may have moved.
             self.table.invalidate_summaries_cache()
             self.table.notify_list_changed()
+        # Push/ack-sync S5: the emit loop, on the polling loop that already
+        # exists. Off the loop (its store reads and its wire call block), LAST in
+        # this pass, and caught locally: the scan loop's own guard would log it
+        # too, but only after the exception unwound out of this pass, and a push
+        # fault is not a reason to skip anything else the scan does.
+        push_worker = self.push_worker
+        if push_worker is not None:
+            try:
+                # BOUNDED (review round 1, m3). The transport is required to
+                # bound its own call — that is stated where the Protocol is — and
+                # this is the belt to that brace: a transport that ignores the
+                # rule must not hold the whole pass open, because this pass also
+                # paints list frames and repaints sessions. The bound sits ABOVE
+                # the 30 s this repo's outbound Radient calls carry, so a
+                # self-bounding transport is never cut off mid-call. A fired
+                # bound does not kill the thread (Python cannot), which is safe
+                # because the worker admits one pass at a time: a tick that is
+                # still running makes the next one a no-op, never a second pass
+                # over the same queue.
+                await asyncio.wait_for(
+                    asyncio.to_thread(push_worker.tick), timeout=PUSH_TICK_TIMEOUT_S
+                )
+            except Exception:  # noqa: BLE001 — a push fault must not cost the tick
+                logger.warning("push worker tick failed", exc_info=True)
 
     async def _refresh_pins_if_changed(self) -> None:
         """Wake the list stream when ANOTHER surface changed the shared pins.

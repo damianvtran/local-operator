@@ -25,18 +25,27 @@ import pytest
 
 from local_operator.mobile import push_credentials, push_handles, push_payload
 from local_operator.mobile.push_payload import (
+    ALERT_BODY_FIELD,
+    ALERT_FIELD,
+    ALERT_TITLE_FIELD,
     EMIT_ROUTE,
     IDEMPOTENCY_HEADER,
     PAYLOAD_VERSION,
     PUSH_KINDS,
     TYPE_ATTENTION,
     TYPE_COMPLETION,
+    TYPE_DIGEST,
     attention_emit_key,
     attention_payload,
+    completion_alert,
     completion_emit_key,
     completion_payload,
+    digest_alert,
+    digest_emit_key,
+    digest_payload,
     emit_body,
 )
+from local_operator.tui.notify import APP_NAME, BODIES, BODY_COMPLETE, digest_subtitle
 
 #: ``tests/unit/mobile/<this file>`` -> the repo root, where the shared
 #: contract tree lives. Derived from the file rather than the cwd so the suite
@@ -116,6 +125,27 @@ def _check_shape(
             _assert_type(f"{where}.{name}", value[name], type_name)
 
 
+def _without_alert(value: dict[str, Any]) -> dict[str, Any]:
+    """A body with the machine's alert object removed, for the deny-list scan.
+
+    The deny list is scanned by KEY NAME and forbids ``title``/``body`` as payload
+    fields. Since the lane's ruling the machine composes the user-visible alert,
+    and that object is the one place those two keys legitimately appear. Its
+    CONTENT stays checked: :func:`_check_alert` asserts it is the house text plus
+    the count, so removing it from the name scan does not loosen the rule that no
+    name, snippet or error line may travel.
+    """
+    return {key: item for key, item in value.items() if key != ALERT_FIELD}
+
+
+def _check_alert(value: dict[str, Any], fixture: dict[str, Any], *, where: str) -> None:
+    """The alert's own allow-list, and the two facts about its text."""
+    alert = value[ALERT_FIELD]
+    _check_shape(alert, fixture["alert_required"], {}, where=f"{where}.{ALERT_FIELD}")
+    assert alert[ALERT_TITLE_FIELD] == APP_NAME, f"{where}: the title is the product's own name"
+    assert " · " in alert[ALERT_BODY_FIELD], f"{where}: the body is <house constant> · <count>"
+
+
 def _walk_keys(value: object) -> list[str]:
     """Every key at every depth — the deny list is scanned, not just the top level."""
     found: list[str] = []
@@ -170,6 +200,21 @@ ATTENTION_INPUT: dict[str, Any] = {
     "emit_id": "1a2b3c4d5e6f708192a3b4c5d6e7f809",
 }
 
+#: The digest emit's input: the same three fields as the attention form, and
+#: deliberately its OWN literal rather than a reuse of the one above — the two
+#: forms share a field set and nothing else, and a test that shared their input
+#: could not tell a copy-paste from a shape.
+#:
+#: ``kinds`` is the batch's member kinds, which is what the alert's leading
+#: phrase is composed from (the wire carries no per-member kind: the batch is a
+#: set). A uniform batch of four, so the filed alert reads "Complete · 4 …".
+DIGEST_INPUT: dict[str, Any] = {
+    "computer": "VZ8kQ1mT4pR7sW2xY6bN9c",
+    "count": 4,
+    "emit_id": "5c7e9a1b3d5f708192a3b4c5d6e7f809",
+    "kinds": ["complete", "complete", "complete", "complete"],
+}
+
 
 def _check_block(rows: object, fixture: dict[str, Any], *, where: str) -> None:
     """Every report-block row against the block's OWN allow-list.
@@ -217,6 +262,10 @@ def test_the_completion_payload_and_emit_body_equal_the_filed_literals() -> None
         "the completion form carries no optional field: a new key must be added to the "
         "fixture's allow-list in the same change"
     )
+    _check_alert(payload, fixture, where="emit-completion")
+    assert payload[ALERT_FIELD] == completion_alert(
+        COMPLETION_INPUT["kind"], COMPLETION_INPUT["count"]
+    )
 
     body = emit_body(payload, DEVICE_ROWS)
     # Both sides of the block, against the block's own allow-list FIRST, so a
@@ -250,10 +299,168 @@ def test_the_attention_payload_equals_the_filed_literals_with_and_without_exclud
     assert without == fixture["exclude_absent_payload"]
     assert "exclude" not in without
 
+    # The attention form is the SILENT one, so it carries no alert at all — and
+    # the absence is declared (absent_fields) rather than left to the equality
+    # above, so a later edit that "tidy-ups" an alert onto it fails here.
+    assert fixture["absent_fields"] == [ALERT_FIELD]
+    for key in ("payload", "exclude_absent_payload", "body"):
+        assert ALERT_FIELD not in fixture[key], f"the attention form must not carry {key}.alert"
+    assert ALERT_FIELD not in with_exclude
+    assert ALERT_FIELD not in without
+
     body = emit_body(with_exclude, DEVICE_ROWS)
     _check_block(body["devices"], fixture, where="emit-attention.body.devices")
     _check_block(fixture["body"]["devices"], fixture, where="emit-attention.filed.devices")
     assert body == fixture["body"], "the emit body is the payload plus the report block"
+
+
+def test_the_digest_payload_equals_the_filed_literals_with_and_without_exclude() -> None:
+    """The third form, against its own filed literal in both variants.
+
+    The digest is a VISIBLE alert (the lane's ruling of 2026-10-01): its type is
+    what tells the cloud to compose a banner from it, so this cell pins the type
+    and the field set — a digest that drifted into the attention form's shape or
+    its type would arrive with no banner at all.
+    """
+    fixture = _fixture("emit-digest.json")
+    payload = fixture["payload"]
+
+    with_exclude = digest_payload(**DIGEST_INPUT, exclude=[DEVICE_ROWS[0]["device_id"]])
+    _check_shape(
+        with_exclude,
+        fixture["payload_required"],
+        fixture["payload_optional"],
+        where="emit-digest.payload",
+    )
+    assert with_exclude == payload
+    assert with_exclude["type"] == TYPE_DIGEST
+
+    without = digest_payload(**DIGEST_INPUT)
+    assert without == fixture["exclude_absent_payload"]
+    assert "exclude" not in without
+    _check_alert(with_exclude, fixture, where="emit-digest")
+    assert with_exclude[ALERT_FIELD] == digest_alert(DIGEST_INPUT["kinds"], DIGEST_INPUT["count"])
+
+    body = emit_body(with_exclude, DEVICE_ROWS)
+    _check_block(body["devices"], fixture, where="emit-digest.body.devices")
+    _check_block(fixture["body"]["devices"], fixture, where="emit-digest.filed.devices")
+    assert body == fixture["body"], "the emit body is the payload plus the report block"
+    assert set(body) - set(with_exclude) == {push_payload.REPORT_DEVICES_FIELD}
+
+    # The three forms are told apart by the TYPE alone, so nothing a tap could
+    # resolve to may appear on this one either (ADR §3.2).
+    for name in ("conversation", "completion_token", "kind"):
+        assert name not in with_exclude, f"the digest form must not carry {name}"
+    assert set(with_exclude) - {"exclude"} == set(fixture["payload_required"])
+
+
+def test_the_digest_allow_list_bites_in_both_directions() -> None:
+    """The digest's declaration refuses an extra field and a missing one.
+
+    Written as the negative pair so the cell fails if a later edit loosens the
+    builder's field set or the fixture's declaration: a digest that grew a field
+    the cloud validates with ``extra="forbid"`` would be refused on the wire, and
+    one that lost a required field would be refused for the other reason.
+    """
+    fixture = _fixture("emit-digest.json")
+    required = fixture["payload_required"]
+    optional = fixture["payload_optional"]
+    built = digest_payload(**DIGEST_INPUT)
+
+    assert set(built) <= set(required) | set(optional)
+    assert set(required) <= set(
+        fixture["exclude_absent_payload"]
+    ), "the filed literal carries every required field"
+
+    with pytest.raises(AssertionError, match="unlisted field"):
+        _check_shape({**built, "thread": "x"}, required, optional, where="mutated")
+    with pytest.raises(AssertionError, match="required field 'emit_id' is missing"):
+        _check_shape(
+            {k: v for k, v in built.items() if k != "emit_id"},
+            required,
+            optional,
+            where="mutated",
+        )
+
+
+def test_the_alert_allow_list_bites_in_both_directions() -> None:
+    """The alert's own declaration, with the same negative pair as the payload's.
+
+    Both emits that carry an alert are checked, because both builders compose it
+    through the same two helpers: a field added to :func:`completion_alert` or
+    :func:`digest_alert` must be declared in the fixture before the cloud will
+    accept it, and one dropped must be dropped there too.
+    """
+    for name, alert in (
+        ("emit-completion.json", completion_alert("complete", 2)),
+        ("emit-digest.json", digest_alert(["complete", "complete"], 2)),
+    ):
+        fixture = _fixture(name)
+        required = fixture["alert_required"]
+        _check_shape(alert, required, {}, where=f"{name}.alert")
+        assert set(alert) == set(required), f"{name}: the alert's fields are the declared ones"
+
+        with pytest.raises(AssertionError, match="unlisted field"):
+            _check_shape({**alert, "subtitle": "x"}, required, {}, where="mutated")
+        with pytest.raises(AssertionError, match="required field 'body' is missing"):
+            _check_shape({ALERT_TITLE_FIELD: APP_NAME}, required, {}, where="mutated")
+
+
+def test_the_alert_is_the_house_text_and_the_count_and_nothing_else() -> None:
+    """The machine composes the user-visible text, so this is the privacy cell.
+
+    Every string the alert can carry is the product's own: the app name, a house
+    sentence for the outcome, and the §3.2 count. A name, a snippet or a
+    provider's error line has no way in — which is why the builder takes a KIND
+    and a COUNT and no free text at all.
+    """
+    alert = completion_alert("complete", 2)
+    assert alert == {
+        ALERT_TITLE_FIELD: APP_NAME,
+        ALERT_BODY_FIELD: f"{BODIES['complete']} · 2 conversations need you",
+    }
+    assert completion_alert("error", 5)[ALERT_BODY_FIELD] == (
+        f"{BODIES['error']} · 5 conversations need you"
+    )
+    # The singular: a count of one is the common case for a completion push, and
+    # "1 conversations need you" is prose no surface should ship.
+    assert completion_alert("complete", 1)[ALERT_BODY_FIELD].endswith("1 conversation needs you")
+    # An unknown kind takes the composer's own default rather than inventing one.
+    assert completion_alert("not-a-kind", 1)[ALERT_BODY_FIELD].startswith(BODY_COMPLETE)
+
+
+def test_the_digest_alert_says_the_sets_state_and_never_a_fixed_one() -> None:
+    """A coalesced batch speaks for a SET, so it must not claim one member's state."""
+    uniform = digest_alert(["error"] * 3, 3)
+    assert (
+        uniform[ALERT_BODY_FIELD] == f"{digest_subtitle(['error'] * 3)} · 3 conversations need you"
+    )
+    assert uniform[ALERT_TITLE_FIELD] == APP_NAME
+
+    mixed = digest_alert(["complete", "error"], 2)[ALERT_BODY_FIELD]
+    assert mixed.startswith("Mixed outcomes"), mixed
+
+    # Kinds that could not be read make NO claim (review round 2, R2-4): the house
+    # answers an uncharacterisable set with an empty subtitle, and a push cannot
+    # send an empty body, so the phrase is dropped rather than replaced by
+    # "Task complete" — which is the claim this vocabulary exists to refuse.
+    unreadable = digest_alert([], 2)[ALERT_BODY_FIELD]
+    assert unreadable == "2 conversations need you"
+    assert not unreadable.startswith(BODY_COMPLETE)
+
+
+def test_the_filed_count_one_alerts_are_the_builders_singular() -> None:
+    """R2-3's amendment, filed rather than only asserted.
+
+    The ruled template is `<count> conversations need you`; a count of one is the
+    common case for a completion push, so the machine spells the singular. Both
+    fixtures carry that literal (`alert_count_one`) so no reader of this tree — or
+    of the freeze — only ever sees the plural.
+    """
+    assert _fixture("emit-completion.json")["alert_count_one"] == completion_alert("complete", 1)
+    assert _fixture("emit-digest.json")["alert_count_one"] == digest_alert(["complete"], 1)
+    assert completion_alert("complete", 1)[ALERT_BODY_FIELD].endswith("1 conversation needs you")
+    assert digest_alert(["complete"], 1)[ALERT_BODY_FIELD].endswith("1 conversation needs you")
 
 
 def test_the_report_block_allow_list_rejects_an_extra_or_mistyped_row() -> None:
@@ -322,15 +529,17 @@ def test_an_unlisted_field_fails_the_allow_list_in_both_directions() -> None:
         _check_shape(mistyped, required, optional, where="mutated")
 
 
-@pytest.mark.parametrize("name", ["emit-completion.json", "emit-attention.json"])
+@pytest.mark.parametrize(
+    "name", ["emit-completion.json", "emit-attention.json", "emit-digest.json"]
+)
 def test_no_forbidden_field_appears_anywhere_in_a_filed_shape(name: str) -> None:
     """The deny list is scanned at every depth, including the nested report block.
 
-    Scanned over the shape's LITERALS (``payload`` / ``body`` /
+    scanned over the shape's LITERALS (``payload`` / ``body`` /
     ``exclude_absent_payload``) and not over the whole file: the file's own metadata
     legitimately names a forbidden field (``payload-forbidden-fields.json`` keys its
     reasons by the field it forbids), and the deny list is about what travels on the
-    wire. The two emits are the scope because that is what the file's ``applies_to``
+    wire. The three emits are the scope because that is what the file's ``applies_to``
     says — the list response carries a device ``name``, which is a label and not a
     conversation, and its own ``forbidden`` array is asserted in the registry suite.
     """
@@ -338,13 +547,19 @@ def test_no_forbidden_field_appears_anywhere_in_a_filed_shape(name: str) -> None
     assert set(fixture["provenance"].get("sections", [])) & {"§3.2"}
     forbidden = set(_forbidden())
     assert set(_fixture("payload-forbidden-fields.json")["applies_to"]) >= {name}
+    # The ``alert`` object is scanned for its CONTENT rather than by key name: the
+    # machine composes the user-visible text (the lane's ruling of 2026-10-01), and
+    # ``title``/``body`` are the two keys it is allowed to hold there. _check_alert
+    # is the cell that keeps the exception narrow.
     for part in ("payload", "body", "exclude_absent_payload"):
         if part in fixture:
-            present = set(_walk_keys(fixture[part])) & forbidden
+            present = set(_walk_keys(_without_alert(fixture[part]))) & forbidden
             assert not present, f"{name}.{part} carries forbidden field(s): {sorted(present)}"
+            if ALERT_FIELD in fixture[part]:
+                _check_alert(fixture[part], fixture, where=f"{name}.{part}")
 
 
-def test_the_two_payloads_carry_nothing_the_cloud_must_not_hold() -> None:
+def test_the_three_payloads_carry_nothing_the_cloud_must_not_hold() -> None:
     """The machine's own output, scanned against the deny list and for a raw id."""
     forbidden = set(_forbidden())
 
@@ -370,10 +585,25 @@ def test_the_two_payloads_carry_nothing_the_cloud_must_not_hold() -> None:
             ),
             DEVICE_ROWS,
         ),
+        emit_body(
+            digest_payload(
+                computer="c" * 22,
+                count=3,
+                emit_id="00112233445566778899aabbccddeeff",
+                kinds=["complete", "complete", "complete"],
+                exclude=["d" * 32],
+            ),
+            DEVICE_ROWS,
+        ),
     ]
 
     for body in bodies:
-        assert not (set(_walk_keys(body)) & forbidden), "a forbidden key reached the wire"
+        # The alert is the one object allowed to carry ``title``/``body``, and its
+        # text is asserted to be the house constants in the cells above; the name
+        # scan therefore runs over the body without it.
+        assert not (
+            set(_walk_keys(_without_alert(body))) & forbidden
+        ), "a forbidden key reached the wire"
         # Values, not the serialized text: a substring test on ``json.dumps`` would
         # also fire on a correct payload whose value merely contained the text, and
         # a raw session id smuggled INSIDE a value still leaks — so the check is a
@@ -422,10 +652,25 @@ def test_the_kind_vocabulary_is_the_stores_and_refuses_the_composers_gaps() -> N
 def test_the_route_and_header_are_the_frozen_ones() -> None:
     completion = _fixture("emit-completion.json")
     attention = _fixture("emit-attention.json")
-    assert EMIT_ROUTE == completion["route"] == attention["route"]
-    assert IDEMPOTENCY_HEADER in completion["required_headers"]
-    assert IDEMPOTENCY_HEADER in attention["required_headers"]
-    assert completion["payload_version"] == attention["payload_version"] == PAYLOAD_VERSION
+    digest = _fixture("emit-digest.json")
+    assert EMIT_ROUTE == completion["route"] == attention["route"] == digest["route"]
+    for fixture in (completion, attention, digest):
+        assert IDEMPOTENCY_HEADER in fixture["required_headers"]
+    assert (
+        completion["payload_version"]
+        == attention["payload_version"]
+        == digest["payload_version"]
+        == PAYLOAD_VERSION
+    )
+    assert {
+        completion["payload"]["type"],
+        attention["payload"]["type"],
+        digest["payload"]["type"],
+    } == {
+        TYPE_COMPLETION,
+        TYPE_ATTENTION,
+        TYPE_DIGEST,
+    }, "one route, three types, and the type is the only discriminator"
 
 
 def test_the_report_block_key_is_single_sourced() -> None:
@@ -440,7 +685,7 @@ def test_the_report_block_key_is_single_sourced() -> None:
     assert push_payload.REPORT_DEVICES_FIELD == push_credentials.REPORT_DEVICES_FIELD
     assert push_payload.REPORT_DEVICES_FIELD == "devices"
 
-    for name in ("emit-completion.json", "emit-attention.json"):
+    for name in ("emit-completion.json", "emit-attention.json", "emit-digest.json"):
         fixture = _fixture(name)
         extra = set(fixture["body"]) - set(fixture["payload"])
         assert extra == {
@@ -472,6 +717,22 @@ def test_the_idempotency_key_vectors_are_reproducible() -> None:
 
     keys = [v["key"] for v in fixture["completion_vectors"]]
     assert len(set(keys)) == len(keys), "the filed vectors must not collide"
+
+    # The digest recipe (the lane's ruling, 2026-10-01) is recomputed the same
+    # way: the id is what the machine mints at window-close, so the vector is the
+    # only place the derivation is written down outside the builder.
+    assert "no separator" in fixture["recipes"]["digest"].lower(), message
+    digest_keys: list[str] = []
+    for vector in fixture["digest_vectors"]:
+        key = digest_emit_key(vector["emit_id"], vector["computer"])
+        assert key == vector["key"], f"digest {vector['emit_id']}: key drifted"
+        assert re.fullmatch(r"[0-9a-f]{64}", key), "the key is lowercase hex sha256"
+        digest_keys.append(key)
+    assert len(set(digest_keys)) == len(digest_keys), "the filed digest vectors must not collide"
+    assert digest_keys[0] != digest_keys[1], (
+        "the COMPUTER is part of the recipe: the same emit id on another machine is a "
+        "different key"
+    )
 
 
 def test_a_heal_mints_a_new_key_and_the_attention_sequence_never_collides() -> None:
