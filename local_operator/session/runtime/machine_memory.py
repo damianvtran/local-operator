@@ -47,13 +47,15 @@ Unknown never kills — the per-command sampler's rule, kept here.
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Any, Callable, Sequence
 
 from local_operator import memory_guard
-from local_operator.mobile.resources import session_resource_usage
+from local_operator.mobile.resources import direct_ppid_pgid, session_resource_usage
 
 logger = logging.getLogger(__name__)
 
@@ -63,19 +65,60 @@ Runner = memory_guard.Runner
 FootprintProbe = memory_guard.FootprintProbe
 
 
+#: How long one of THIS pass's ``ps``/``top`` reads may run. Longer than the
+#: per-command guard's 5 s on purpose, and MEASURED: twelve ``ps -axo`` reads under
+#: the 2026-09-30 fleet load took 0.42 s min / 3.51 s mean / 13.60 s max, and every
+#: one past 5 s collapsed to "no data" — which is how the pass came to withhold
+#: four runaway kills (95-309 GB) with "the fragment's rows could not be re-read".
+#: The pass runs once a minute on a worker thread, so seconds cost nothing; the
+#: per-command guard runs inside a 250 ms poll and keeps its own, separate budget.
+PASS_PROBE_TIMEOUT_S = 15.0
+
+#: Attempts for the pass's table read and for the pre-signal re-check. A failure
+#: under pressure is not always a slow one (a ``ps`` that cannot fork returns at
+#: once), so a retry is worth its fork; three is the most a once-a-minute pass
+#: should spend before it falls back to the fork-free check or fails closed.
+PASS_PROBE_ATTEMPTS = 3
+
+#: Pause between attempts. Module-level so a test need not sleep for it.
+PASS_PROBE_RETRY_PAUSE_S = 0.5
+
+
 def _default_runner(argv: list[str]) -> tuple[int, str]:
-    """Run one probe with a short timeout, swallowing every failure mode.
+    """Run one probe with a bounded timeout, swallowing every failure mode.
 
     Same contract as ``memory_guard._default_runner`` (a missing binary, a
-    timeout, or a non-zero exit all collapse to ``(1, "")``); kept local rather
-    than imported because that one is private to the per-command guard and this
-    module's probes differ (one table read, not three).
+    timeout, or a non-zero exit all collapse to ``(1, "")``), with the budget the
+    pass can afford (:data:`PASS_PROBE_TIMEOUT_S`) rather than the one a 250 ms
+    poll can. Kept local rather than imported because the two budgets are
+    deliberately different numbers for different cadences.
     """
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=5.0, check=False)
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=PASS_PROBE_TIMEOUT_S, check=False
+        )
         return proc.returncode, proc.stdout
     except (OSError, subprocess.SubprocessError):
         return 1, ""
+
+
+def _run_with_retry(runner: Runner, argv: list[str]) -> tuple[int, str]:
+    """``runner(argv)`` up to :data:`PASS_PROBE_ATTEMPTS` times; the last answer.
+
+    A raising runner counts as a failed attempt (the pass's seams are
+    injectable, and a probe must never be the reason a pass dies).
+    """
+    code, out = 1, ""
+    for attempt in range(PASS_PROBE_ATTEMPTS):
+        try:
+            code, out = runner(argv)
+        except Exception:  # noqa: BLE001 — a failed probe is "no data"
+            code, out = 1, ""
+        if code == 0:
+            break
+        if attempt < PASS_PROBE_ATTEMPTS - 1:
+            time.sleep(PASS_PROBE_RETRY_PAUSE_S)
+    return code, out
 
 
 def parse_process_table(output: str) -> list[tuple[int, int, int]]:
@@ -186,6 +229,7 @@ def machine_memory_pass(
     pids_probe: Callable[[Path], list[int]] | None = None,
     kill: Callable[[memory_guard.Fragment], bool] | None = None,
     total_mb: int | None = None,
+    identity_probe: "IdentityProbe | None" = None,
 ) -> MemoryPassReport:
     """Run one aggregate pass; blocking, and the caller hands it to a thread.
 
@@ -213,7 +257,7 @@ def machine_memory_pass(
     base = runner or _default_runner
     probe = pids_probe or _live_runtime_pids
 
-    code, table = base(["ps", "-axo", "pid=,ppid=,pgid="])
+    code, table = _run_with_retry(base, ["ps", "-axo", "pid=,ppid=,pgid="])
     if code != 0:
         return MemoryPassReport(
             state="unknown",
@@ -366,7 +410,7 @@ def machine_memory_pass(
             + f"; would end the largest fragment (pid {candidate.pid}), kill withheld",
         )
 
-    cause, message = _fragment_refusal(candidate, runner=base)
+    cause, message = _fragment_refusal(candidate, runner=base, identity_probe=identity_probe)
     if cause:
         return MemoryPassReport(
             state="act",
@@ -409,7 +453,12 @@ def machine_memory_pass(
     )
 
 
-def _fragment_refusal(fragment: memory_guard.Fragment, *, runner: Runner) -> tuple[str, str]:
+def _fragment_refusal(
+    fragment: memory_guard.Fragment,
+    *,
+    runner: Runner,
+    identity_probe: "IdentityProbe | None" = None,
+) -> tuple[str, str]:
     """``("", "")`` when every process of the fragment still matches the snapshot.
 
     **THE DECISION IS A SNAPSHOT AND THE SIGNAL IS NOT** — the same hazard the
@@ -432,19 +481,39 @@ def _fragment_refusal(fragment: memory_guard.Fragment, *, runner: Runner) -> tup
     summary and the reason say WHERE the withhold came from — a stale
     snapshot and a ``ps`` that would not answer send an operator to different
     places (round 3, R3-2).
+
+    **THE RE-CHECK USED TO BE THE FIRST INSTRUMENT TO DIE** (2026-09-30): its one
+    ``ps -p`` read, on a 5 s timeout, failed under the memory pressure the pass
+    exists for, and four runaway fragments (95-309 GB) were withheld as "rows could
+    not be re-read". Two changes, neither of which adds kill authority:
+
+    1. the ``ps`` read is retried inside a longer budget (:func:`_run_with_retry`);
+    2. when it STILL cannot be read, a FORK-FREE identity check runs instead
+       (:func:`fork_free_identity_refusal`): every row of the walk must still
+       exist with the same ``(ppid, pgid)``, read by syscall. A fragment that
+       passes it is exactly as verified as one that passed ``ps`` — the same
+       fields, compared against the same snapshot — and anything it cannot
+       confirm withholds the whole stop, as before.
     """
     if fragment.rows:
         snapshot = fragment.rows
     else:  # nothing carried (a hand-built Fragment); fall back to its root row
         snapshot = ((fragment.pid, fragment.ppid, fragment.pgid),)
     csv = ",".join(str(pid) for pid, _ppid, _pgid in snapshot)
-    code, out = runner(["ps", "-o", "pid=,ppid=,pgid=", "-p", csv])
+    code, out = _run_with_retry(runner, ["ps", "-o", "pid=,ppid=,pgid=", "-p", csv])
     if code != 0:
-        return (
-            "unreadable",
-            f"the fragment's rows could not be re-read (pid set starting "
-            f"{fragment.pid}); withheld",
+        fallback = fork_free_identity_refusal(
+            fragment, snapshot, identity_probe=identity_probe or _default_identity_probe
         )
+        if fallback is None:
+            logger.warning(
+                "machine memory: the re-check ps could not be read for the fragment at pid %s; "
+                "the fork-free identity check confirmed all %d rows, so the stop proceeds",
+                fragment.pid,
+                len(snapshot),
+            )
+            return "", ""
+        return fallback
     seen: dict[int, tuple[int, int]] = {}
     for line in out.splitlines():
         parts = line.split()
@@ -461,6 +530,74 @@ def _fragment_refusal(fragment: memory_guard.Fragment, *, runner: Runner) -> tup
                 f"the fragment changed before the signal (pid {pid}); withheld",
             )
     return "", ""
+
+
+#: One pid's ``(ppid, pgid)`` by a fork-free read, or ``None`` when it cannot be
+#: read (gone, foreign, or no reader on this platform). The seam a test injects.
+IdentityProbe = Callable[[int], "tuple[int, int] | None"]
+
+
+def _default_identity_probe(pid: int) -> tuple[int, int] | None:
+    """Existence by ``kill(pid, 0)``, then ``(ppid, pgid)`` by a syscall.
+
+    ``kill(pid, 0)`` first because it is the cheapest "is it still there" and its
+    ``ESRCH`` is unambiguous; ``EPERM`` (it exists under another account) is NOT
+    a pass — a process this one cannot read is one it must not judge — so only a
+    clean return or a readable row continues. The row then comes from
+    :func:`~local_operator.mobile.resources.direct_ppid_pgid` (``proc_pidinfo`` on
+    macOS, ``/proc/<pid>/stat`` on Linux), and for the pid's own ``pgid`` the
+    kernel is asked a second, independent way (``os.getpgid``): the two must
+    agree, or the row is treated as unreadable.
+    """
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return None
+    row = direct_ppid_pgid(pid)
+    if row is None:
+        return None
+    try:
+        if os.getpgid(pid) != row[1]:
+            return None
+    except (OSError, AttributeError):
+        return None
+    return row
+
+
+def fork_free_identity_refusal(
+    fragment: memory_guard.Fragment,
+    snapshot: Sequence[tuple[int, int, int]],
+    *,
+    identity_probe: IdentityProbe,
+) -> tuple[str, str] | None:
+    """``None`` when EVERY row still matches the snapshot, else ``(cause, message)``.
+
+    The fallback for a ``ps`` that cannot be read. Each pid of the walk is a
+    signal target, so each is compared — ``(ppid, pgid)`` against what the ranking
+    walked — exactly as the ``ps`` path does. A pid that is gone, or whose row the
+    kernel would not give us, is ``"unreadable"`` (not ``"changed"``): the summary
+    must send an operator to the right place. A readable row that differs is
+    ``"changed"``. Both withhold; this function can only ever say "go" when every
+    row has been positively confirmed, which is why it adds no kill authority.
+    """
+    for pid, ppid, pgid in snapshot:
+        try:
+            row = identity_probe(pid)
+        except Exception:  # noqa: BLE001 — a probe that raises is "unknown"
+            row = None
+        if row is None:
+            return (
+                "unreadable",
+                f"the fragment's rows could not be re-read, and pid {pid} could not be "
+                f"confirmed without a subprocess either (pid set starting {fragment.pid}); "
+                "withheld",
+            )
+        if row != (ppid, pgid):
+            return (
+                "changed",
+                f"the fragment changed before the signal (pid {pid}); withheld",
+            )
+    return None
 
 
 def _default_kill(fragment: memory_guard.Fragment) -> bool:
