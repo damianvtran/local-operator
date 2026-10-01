@@ -112,6 +112,19 @@ def key_id_for(spki: bytes) -> str:
     return hashlib.sha256(spki).hexdigest()[:32]
 
 
+def spki_fp(spki: bytes) -> str:
+    """The SHORT display fingerprint of a public key: 64 bits, hex, grouped.
+
+    ``9A3C-EF12-3456-7890`` — the value an approval card puts beside the full
+    ``key_id`` so a human can compare two screens the way they compare a device
+    fingerprint. Cosmetic and derived, never authority (the card's check is the
+    digest + signature): the same split the device fingerprint draws in
+    ``network/identity.py``.
+    """
+    text = hashlib.sha256(spki).hexdigest().upper()[:16]
+    return "-".join(text[index : index + 4] for index in range(0, len(text), 4))
+
+
 def decode_point(spki: bytes) -> Any | None:
     """An ``EllipticCurvePublicKey`` from a 65-byte uncompressed P-256 point.
 
