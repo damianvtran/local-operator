@@ -429,10 +429,11 @@ def credential_live_at(record: Mapping[str, Any], now: float) -> bool:
        no request has ever named has no credential fact, and inventing one would
        tell the cloud it may deliver on evidence the machine does not hold.
 
-    It is one function and not a rule restated per caller so the stored flag the
-    Settings list renders and the flag the report sends cannot disagree about
-    what "live" means — the only difference between them is the instant they
-    answer for.
+    It is one function and not a rule restated per caller so that every reader —
+    the Settings list, the credential report, the recompute itself — answers
+    "live?" the same way, and the only thing that can differ between them is the
+    instant they ask about. The stored flag is an INPUT to it (point 3), never a
+    second answer beside it (review round 1, AR-1).
     """
     if "expired_at" in record:
         return False
@@ -658,7 +659,7 @@ def note_credential(
     presented (``auth.cookie_expiry`` on the cookie, which is what makes the
     instant the COOKIE'S and not ``now``).
 
-    The four refusals that make it safe, each of which is a test:
+    The three refusals that make it safe, each of which is a test:
 
     * **no key, or a wrong one, moves NO device's state.** Attribution is bound,
       not asserted (``m3``): ``X-Lop-Device`` is a claim anyone holding the
@@ -677,9 +678,19 @@ def note_credential(
       action here can only *pause* its own delivery, never restore it"). The way
       back is the register that follows an authenticated login, which clears
       ``expired_at`` because the credential that earned it was live.
-    * **it writes only what changed.** A row already holding these values is left
-      byte-identical, so the store's mtime is a signal a reader can use and a
-      phone polling every 2 s is not a disk writer.
+
+    **What it writes, exactly — and a claim this docstring used to get wrong**
+    (review round 1, AR-5). It rewrites the row once per ATTRIBUTABLE request,
+    and that is the semantics rather than an accident: ``last_authenticated_at``
+    IS the fact such a request updates, so the row changes whenever the request
+    crosses an integer second. The ``before == after`` guard below therefore
+    suppresses a rewrite only inside the same second (a retry, a burst); an
+    earlier draft claimed it left a phone polling every 2 s as a non-writer,
+    which was false of the code. The fix is the claim, not the write — "when did
+    this device last authenticate" is a question whose whole point is that it
+    moves, and the ADR's list shape renders it. What the guard does buy is that a
+    same-second burst does not touch the file, so the store's mtime stays a signal
+    a reader can use rather than noise.
 
     The return value is ``None`` for "no state moved" and otherwise the moved
     facts, which is what lets a caller (or a test) tell an evaluation apart from
@@ -817,24 +828,26 @@ def rotate_credentials(config_dir: Path, *, now: float | None = None) -> list[st
         changed = False
         for record in store["devices"]:
             rotated.append(record["device_id"])
-            if record.get("expired_at") == stamp and record.get("credential_live") is False:
+            if record.get("expired_at") == stamp:
                 # Idempotent: a second rotation at the same instant writes nothing.
                 continue
+            # The marker ALONE, and no ``credential_live`` beside it. An earlier
+            # revision also wrote the flag here, to stop the Settings list
+            # rendering "live" beside an ``expired`` state — which was treating a
+            # derived answer as a second stored fact, the exact drift review
+            # round 1's AR-1 found between two renderers. ``credential_live_at``
+            # answers False for a row carrying this marker (it outranks the
+            # arithmetic), so the marker is the whole write and the stored flag
+            # keeps meaning one thing: what the relay computed when it last saw
+            # this device's cookie.
             record["expired_at"] = stamp
-            # Written here as well as derived by ``credential_live_at``, and the
-            # duplication is deliberate: this is the one action that kills a
-            # cookie whose ``credential_expires_at`` is still in the future, so
-            # the stored flag the Settings list renders would otherwise say
-            # "live" beside an ``expired`` state — the one-row-read-two-ways
-            # defect the resolver exists to prevent.
-            record["credential_live"] = False
             changed = True
         if changed:
             _save(config_dir, store)
     return rotated
 
 
-def list_devices(config_dir: Path) -> dict[str, Any]:
+def list_devices(config_dir: Path, *, now: float | None = None) -> dict[str, Any]:
     """``GET /api/push/devices`` — the Settings list.
 
     Exactly the fields the ADR's shape names, ``environment`` and
@@ -844,6 +857,24 @@ def list_devices(config_dir: Path) -> dict[str, Any]:
     special-case; absence is the truth), and so are ``credential_live`` and
     ``last_authenticated_at`` on a row an earlier build wrote: this store will
     not invent a credential fact it does not hold.
+
+    ``credential_live`` is the DERIVED answer (:func:`credential_live_at`), not
+    the flag the record happens to hold (review round 1, AR-1 / QA Q-F1). The
+    stored flag is what the relay computed when it last SAW the cookie, and the
+    two part company exactly when it matters — a cookie that died with no keyed
+    request since leaves ``credential_live: true`` on the row while the machine
+    has stopped delivering, which is the case the ADR's heartbeat exists for. One
+    reader rendering the stored value while the credential report derived would be
+    one row read two ways, so both go through the one rule. The presence guard is
+    widened to either credential field rather than to the flag alone: a row with an
+    expiry and no stored flag still has a fact to report, and a row with NEITHER is
+    an earlier build's and keeps omitting the key.
+
+    That makes this function's answer a function of the CLOCK, which is the
+    intent rather than a side effect: a lapse is derived from the cookie's own
+    death, so the same store can render differently across a cookie's lifetime
+    without anything having written to it. ``now`` is injectable for the same
+    reason every other function here takes one.
 
     ``state`` and the response's ``precedence`` are ADR §4's one vocabulary: the
     state is :func:`device_state`'s answer on this row, and the precedence string
@@ -856,6 +887,7 @@ def list_devices(config_dir: Path) -> dict[str, Any]:
     position does not move under a token rotation. READ-ONLY: nothing is
     written, so opening Settings cannot bump anything.
     """
+    stamp = float(time.time() if now is None else now)
     with _LOCK:
         records = _load(config_dir)
     devices: list[dict[str, Any]] = []
@@ -870,8 +902,8 @@ def list_devices(config_dir: Path) -> dict[str, Any]:
         }
         if "name" in record:
             entry["name"] = record["name"]
-        if "credential_live" in record:
-            entry["credential_live"] = record["credential_live"]
+        if "credential_live" in record or "credential_expires_at" in record:
+            entry["credential_live"] = credential_live_at(record, stamp)
         if "last_authenticated_at" in record:
             entry["last_authenticated_at"] = record["last_authenticated_at"]
         devices.append(entry)

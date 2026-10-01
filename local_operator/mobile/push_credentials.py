@@ -19,7 +19,13 @@ authenticated request (``push_devices.note_credential``) and SENT coalesced:
   computer, because both already talk to the cloud and a third call would be one
   more thing to fail;
 - **throttled per device** — at most one report per device per
-  :data:`MIN_REPORT_INTERVAL_S`;
+  :data:`MIN_REPORT_INTERVAL_S`. The throttle is a bound on when the CLOUD hears,
+  never on when the machine acts: a rotation writes its markers immediately and
+  the emitter skips a marked device on its very next tick, so a change can wait
+  up to that window for its report (`MIN_REPORT_INTERVAL_S`, or
+  :data:`HEARTBEAT_INTERVAL_S` if nothing else is due) and is never lost —
+  :meth:`CredentialReport.note_rotation` states the same bound at the code
+  (round 1, QA Q-F2);
 - **heartbeated** — when neither carrier has fired for
   :data:`HEARTBEAT_INTERVAL_S`, a call of its own carries the whole block, which
   is what catches the device whose credential lapsed while its app was shut: no
@@ -36,6 +42,12 @@ the device last presented has not died, and the instant is the COOKIE's — not 
 timer, not the last-request stamp, and not a value the cloud can reason about. A
 marker a rotation wrote outranks the arithmetic, because a rotation kills every
 cookie while each of their nominal expiries is still days away.
+
+...and it is asked THROUGH ``push_devices.credential_live_at`` rather than
+restated (the delegation is in :meth:`CredentialFact.live_at`). One rule, one
+home: the Settings list and the report both answer "live?" by calling it, which
+is what review round 1's AR-1 restored after this branch briefly had the list
+render the stored flag while the report derived.
 
 **The wire is behind one seam, deliberately.** The ADR's §3.2 block is frozen
 against a payload the mobile lane is pinning; nothing here is sent from this
@@ -69,12 +81,18 @@ CARRIER_REGISTER = "register"
 CARRIER_EMIT = "emit"
 CARRIER_HEARTBEAT = "heartbeat"
 
-# TODO(push/ack-sync S4c/part 2 — bind to the ADR §3.2 freeze SHA): the four
-# names and the row shape below are the ONLY place this module spells the wire,
-# and they are provisional until the payload freeze lands. The mobile lane is
-# pinning §3.2; when it does, this block is the whole binding, and the callers
-# (`CredentialFact.wire`, the transport) do not move.
+# TODO(push/ack-sync S4c/part 2 — bind to the ADR §3.2 freeze SHA): the five names
+# below are the ONLY place this module spells the wire, and they are provisional
+# until the payload freeze lands. The mobile lane is pinning §3.2; when it does,
+# this block is the whole binding and the callers (`CredentialFact.wire`, the
+# transport) do not move. ``REPORT_COMPUTER_FIELD`` is the ENVELOPE key every
+# §3.2 carrier sends beside the rows — the register forward, the emit body and
+# the heartbeat call all carry it (review round 1, AR-3: omitting it would have a
+# part-2 transport posting a body the cloud cannot route). Its VALUE is the
+# opaque per-account computer handle (ADR §3.2), which is the one thing here that
+# cannot be minted locally, so it is injected into the report rather than derived.
 REPORT_ROUTE = "/v1/push/credentials"
+REPORT_COMPUTER_FIELD = "computer"
 REPORT_DEVICES_FIELD = "devices"
 REPORT_DEVICE_FIELDS = (
     "device_id",
@@ -186,6 +204,25 @@ class CredentialEvent:
     devices: tuple[str, ...] = field(default_factory=tuple)
 
 
+@dataclass
+class _PendingEvent:
+    """A recorded event, plus the devices it names that no report has carried yet.
+
+    Private, and the reason it exists rather than the coalescer clearing all
+    events on any send (review round 1, AR-4): a rotation names EVERY device,
+    and the per-device throttle can split them across blocks, so "was this event
+    carried?" is not a question about one block. It is carried once every device
+    it names has ridden a report SINCE it was recorded — across however many
+    blocks that takes — and until then it survives every block that does not
+    finish the set. A device the registry no longer names is dropped from
+    ``outstanding`` when the facts are re-read (it cannot ride anything again), so
+    an event cannot be kept alive by a row that no longer exists.
+    """
+
+    event: CredentialEvent
+    outstanding: set[str]
+
+
 class CredentialTransport(Protocol):
     """Where a coalesced report goes.
 
@@ -211,6 +248,7 @@ class CredentialReport:
         transport: Callable[..., None],
         *,
         loader: Callable[[float], Sequence[CredentialFact]],
+        computer: str,
         clock: Callable[[], float] = time.time,
     ) -> None:
         """``loader`` reads the registry's current facts at a given instant.
@@ -219,15 +257,22 @@ class CredentialReport:
         both the test's, and so this class never reads ``push_devices``' file
         itself: it is a state machine over facts, and the module function that
         wires it to the registry is :func:`registry_loader`.
+
+        ``computer`` is the envelope's opaque per-account handle (ADR §3.2) —
+        injected for the same reason and one more: it is the one wire value this
+        module cannot mint for itself, because it is the account's name for this
+        machine rather than the machine's. It rides every block, not just the
+        heartbeat's, because every §3.2 carrier carries it (AR-3).
         """
         self._transport = transport
         self._loader = loader
+        self.computer = computer
         self._clock = clock
         self._facts: dict[str, CredentialFact] = {}
         self._reported: dict[str, CredentialFact] = {}
         self._reported_at: dict[str, float] = {}
         self._last_send_at: float | None = None
-        self._events: list[CredentialEvent] = []
+        self._pending: list[_PendingEvent] = []
 
     # -- observation ----------------------------------------------------------
 
@@ -273,6 +318,14 @@ class CredentialReport:
         self._reported_at = {
             device_id: at for device_id, at in self._reported_at.items() if device_id in incoming
         }
+        # A device the registry no longer names cannot ride a report again, so it
+        # stops holding its event open. Without this a rotation naming a device
+        # that was later dropped would leave its event pending for the life of the
+        # process — the same "the loader is authoritative" rule the replacement
+        # above applies to the facts.
+        for item in self._pending:
+            item.outstanding &= set(incoming)
+        self._pending = [item for item in self._pending if item.outstanding]
         return moved
 
     def note_rotation(
@@ -283,9 +336,25 @@ class CredentialReport:
         The bound is the ADR's ("one credential-change event per rotation", §4
         rule 2) and it is why this takes the whole set rather than being called
         once per device: a rotation kills every cookie at once, and a device-per-
-        call API is how a caller ends up reporting N events for one action. The
-        registry is re-read here, so the event's devices and the facts that follow
-        it are the ones the rotation actually wrote.
+        call API is how a caller ends up reporting N events for one action.
+        ``devices`` is the CALLER's list — ``push_devices.rotate_credentials``'
+        return value, which is the set the rotation actually wrote — and this
+        method does not second-guess it; what the re-read below refreshes is the
+        FACTS the following report will carry, not the event's roster (review
+        round 1, AR-7: an earlier revision of this sentence claimed the re-read
+        was what put the devices in the event).
+
+        **The event is never lost, and the bound on its LATENCY is stated rather
+        than implied** (round 1, QA Q-F2). Suppression is immediate: a rotation
+        writes ``expired_at`` on every row, so ``credential_facts`` — the emitting
+        side's only input — answers not-live for all of them at once, and the
+        emitter (S5) skips them from its very next tick. What waits is the REPORT:
+        the event rides the next block that is due, so it reaches the cloud within
+        :data:`MIN_REPORT_INTERVAL_S` if some device is reportable, and within
+        :data:`HEARTBEAT_INTERVAL_S` at the outside. That is ADR §2.2's coalescing
+        rule ("the cloud sees O(devices) state, never O(requests) traffic") doing
+        its job, not a dropped signal: the machine has already stopped delivering,
+        and the report tells the cloud why.
 
         A rotation of a computer with no devices returns ``None`` and records
         nothing: there is no credential whose change the cloud could act on, and
@@ -300,14 +369,20 @@ class CredentialReport:
             at=stamp,
             devices=tuple(devices),
         )
-        self._events.append(event)
+        self._pending.append(_PendingEvent(event=event, outstanding=set(event.devices)))
         return event
 
     # -- reporting -----------------------------------------------------------
 
     def pending_events(self) -> tuple[CredentialEvent, ...]:
-        """The events a report has not yet carried (machine-side, never on the wire)."""
-        return tuple(self._events)
+        """The events no report has yet carried IN FULL (never on the wire).
+
+        An event retires once every device it names has ridden a report since it
+        was recorded — which for the ordinary rotation is the one block that
+        carries them all, and for a rotation split by the per-device throttle is
+        the block that completes the set (``_PendingEvent``).
+        """
+        return tuple(item.event for item in self._pending)
 
     def changed(self) -> tuple[str, ...]:
         """Device ids whose facts differ from the ones last reported."""
@@ -377,15 +452,29 @@ class CredentialReport:
     def _flush(self, device_ids: Sequence[str], carrier: str, now: float) -> dict[str, Any] | None:
         if not device_ids:
             return None
+        carried = set(device_ids)
         block = {
-            REPORT_DEVICES_FIELD: [self._facts[device_id].wire(now) for device_id in device_ids]
+            REPORT_COMPUTER_FIELD: self.computer,
+            REPORT_DEVICES_FIELD: [self._facts[device_id].wire(now) for device_id in device_ids],
         }
+        # The transport runs BEFORE any bookkeeping, and it is the only call here
+        # that can raise: a send that did not go out must not look like one that
+        # did, so a raise leaves every counter and every pending event exactly as
+        # it found them (AR-4).
         self._transport(block, carrier=carrier)
         for device_id in device_ids:
             self._reported[device_id] = self._facts[device_id]
             self._reported_at[device_id] = now
         self._last_send_at = now
-        self._events.clear()
+        # Only the events every device of which this block has now carried are
+        # retired — see ``_PendingEvent``: a rotation names every device and the
+        # per-device throttle can split them across blocks, so a block retires an
+        # event only when it completes the set. Clearing everything here would let
+        # some OTHER device's change in the same window drop the one
+        # credential-change event the ADR requires, silently (AR-4).
+        for item in self._pending:
+            item.outstanding -= carried
+        self._pending = [item for item in self._pending if item.outstanding]
         return block
 
 

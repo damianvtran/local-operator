@@ -5160,7 +5160,7 @@ def build_app(daemon: MobileDaemon):
         WHY THE EARLY RETURN IS LOAD-BEARING, and the reason this is not simply a
         call: a request WITHOUT the key moves no device's state, so this returns
         before reading the cookie or the store at all. The registry is a file on
-        the request path of every phone call, and a key-less caller (the desktop
+        the request path of the three push routes, and a key-less caller (the desktop
         app, the CLI, a paired harness — all of which hold the computer's cookie
         and none of which is a device) must not pay a disk read for evidence it
         cannot supply. It is also what makes the discrimination testable at all:
@@ -5226,8 +5226,16 @@ def build_app(daemon: MobileDaemon):
         2. ``register``, with the expiry the request PRESENTED (ADR §4 rule 2,
            round 7 Q-F15 / R8-m1: the registering row is the device that held the
            cookie, and ``/login`` knows no device). Register is also the act that
-           clears a lapse, so a device that authenticated and then registered
-           ends this call live whatever step 1 found.
+           clears a lapse, so a row that step 1 marked ``expired`` does not stay
+           marked: the marker goes, and what is left is the honest answer about
+           the expiry that was presented — which is NOT automatically "live"
+           (review round 1, AR-6, against an earlier sentence here that claimed
+           it was). A cookie accepted inside ``auth._SKEW_S`` is already past its
+           own expiry, so register stores that past instant and
+           ``credential_live_at`` answers not-live for it. That is the correct
+           reading rather than a wart: the phone's credential really is dead, it
+           simply has not noticed, and the next register after a fresh login
+           writes a live expiry.
         """
         denied = gate(request)
         if denied is not None:

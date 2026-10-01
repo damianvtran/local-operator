@@ -21,6 +21,8 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
+import pytest
+
 from local_operator.mobile import push_credentials
 from local_operator.mobile.push_credentials import (
     CARRIER_EMIT,
@@ -44,6 +46,10 @@ class Rig:
     and the carrier the seam received is visible.
     """
 
+    #: The envelope's computer handle. Synthetic and obviously so: it is the one
+    #: wire value this module cannot mint, so a test supplies it.
+    COMPUTER = "computer-handle-synthetic-4f2a"
+
     def __init__(self) -> None:
         self.facts: dict[str, CredentialFact] = {}
         self.sends: list[tuple[str, dict[str, Any]]] = []
@@ -51,9 +57,18 @@ class Rig:
         #: here sleeps, and so a cell that means to test the five-minute bound
         #: moves the clock it is testing rather than waiting on a real one.
         self.now = float(NOW)
-        self.report = CredentialReport(self._transport, loader=self._load, clock=lambda: self.now)
+        #: Set by a cell that wants the transport to fail.
+        self.transport_error: Exception | None = None
+        self.report = CredentialReport(
+            self._transport,
+            loader=self._load,
+            computer=self.COMPUTER,
+            clock=lambda: self.now,
+        )
 
     def _transport(self, block: dict[str, Any], *, carrier: str) -> None:
+        if self.transport_error is not None:
+            raise self.transport_error
         self.sends.append((carrier, block))
 
     def _load(self, now: float) -> Sequence[CredentialFact]:
@@ -287,7 +302,13 @@ def test_the_report_block_is_spelled_in_exactly_one_place() -> None:
     block = rig.report.heartbeat()
 
     assert block is not None
-    assert set(block) == {push_credentials.REPORT_DEVICES_FIELD}
+    # BOTH envelope keys, because both are wire: the report block is
+    # ``{computer, devices}`` on every §3.2 carrier (review round 1, AR-3).
+    assert set(block) == {
+        push_credentials.REPORT_COMPUTER_FIELD,
+        push_credentials.REPORT_DEVICES_FIELD,
+    }
+    assert block[push_credentials.REPORT_COMPUTER_FIELD] == Rig.COMPUTER
     row = push_credentials.block_devices(block)[0]
     assert set(row) == set(push_credentials.REPORT_DEVICE_FIELDS)
     assert row == {
@@ -418,3 +439,116 @@ def test_the_lapse_rule_is_not_restated_here() -> None:
     rig.facts["device-a"] = lapsed
     assert rig.report.heartbeat() is not None
     assert rig.sent_rows[0]["credential_live"] is False
+
+
+def test_an_event_a_block_did_not_carry_is_not_retired_by_it() -> None:
+    """Only the events a report actually CARRIED are retired (round 1, AR-4).
+
+    A rotation names every device, and the per-device throttle can hold some of
+    them back — so the block that goes out next may carry only the others. An
+    unconditional clear would let that block retire the machine's record of the
+    one credential-change event the ADR requires, and it would retire it without
+    the event ever having gone out. The event survives until every device it
+    names has ridden a report.
+    """
+    rig = Rig()
+    rig.device("device-a", expires_at=NOW + 10_000)
+    assert rig.report.piggyback(CARRIER_EMIT) is not None, "device-a's first report"
+    assert rig.rows == ["device-a"]
+
+    # A second device appears a second later and has never been reported, so the
+    # two are in different positions in the per-device window.
+    rig.advance(1)
+    rig.device("device-b", expires_at=NOW + 10_000)
+
+    # The password rotates: every cookie dies, both of these included.
+    lapsed = int(rig.now)
+    rig.device("device-a", expires_at=NOW + 10_000, expired_at=lapsed, live=False)
+    rig.device("device-b", expires_at=NOW + 10_000, expired_at=lapsed, live=False)
+    event = rig.report.note_rotation(("device-a", "device-b"))
+    assert event is not None
+
+    # device-a is one second into its five-minute window, so this block carries
+    # ONLY device-b. The event names both, so it must not be retired here.
+    block = rig.report.piggyback(CARRIER_EMIT)
+    assert block is not None and rig.rows == ["device-b"]
+    assert rig.report.pending_events() == (
+        event,
+    ), "the event still names a device no report has carried"
+
+    # Once device-a's window passes it rides a report, the set is complete, and
+    # only then is the event retired — two blocks, one event, carried in full.
+    rig.advance(MIN_REPORT_INTERVAL_S)
+    assert rig.report.piggyback(CARRIER_EMIT) is not None
+    assert rig.rows == ["device-a"]
+    assert rig.report.pending_events() == ()
+
+
+def test_an_event_is_not_kept_alive_by_a_device_the_registry_no_longer_names() -> None:
+    """The other end of the same rule: the loader is authoritative for events too.
+
+    A device the cloud dropped (dead token, the 60-day idle drop) cannot ride a
+    report again, so it must not hold its event open for the life of the process.
+    """
+    rig = Rig()
+    rig.device("device-a", expires_at=NOW + 10_000, expired_at=int(rig.now), live=False)
+    rig.device("device-b", expires_at=NOW + 10_000, expired_at=int(rig.now), live=False)
+    assert rig.report.note_rotation(("device-a", "device-b")) is not None
+
+    del rig.facts["device-b"]
+    assert rig.report.refresh() == (), "the survivor's fact did not move"
+
+    assert [event.devices for event in rig.report.pending_events()] == [("device-a", "device-b")]
+    block = rig.report.piggyback(CARRIER_EMIT)
+    assert block is not None and rig.rows == ["device-a"]
+    assert rig.report.pending_events() == (), "the departed device no longer holds it open"
+
+
+def test_a_send_that_fails_retires_nothing() -> None:
+    """AR-4's other half: the transport is the only call in ``_flush`` that raises.
+
+    It runs before any bookkeeping, so a cloud that is unreachable leaves every
+    pending event AND the throttle counters exactly as they were — the next
+    opportunity retries the same block rather than treating a failure as a send.
+    """
+    rig = Rig()
+    rig.device("device-a", expires_at=NOW + 10_000)
+    rig.device("device-b", expires_at=NOW + 10_000)
+    rig.report.refresh()
+    event = rig.report.note_rotation(("device-a", "device-b"))
+    assert event is not None
+
+    rig.transport_error = RuntimeError("cloud unreachable")
+    with pytest.raises(RuntimeError):
+        rig.report.heartbeat()
+
+    assert rig.sends == [], "nothing was recorded as sent"
+    assert rig.report.pending_events() == (event,), "and the event is still pending"
+    assert rig.report.heartbeat_due() is True, "a failed send is not a send for the heartbeat"
+    assert rig.report.due() is True, "nor for the per-device throttle"
+
+
+def test_the_rotation_events_latency_bound_is_documented_where_it_is_enforced() -> None:
+    """QA Q-F2: the wait is a stated bound, not an accident.
+
+    The event is never lost and the machine has already stopped delivering; what
+    waits is the REPORT, inside the coalescing window. Pinned as prose because a
+    prose claim is what a later edit can quietly drop — the same shape as
+    ``test_the_state_descriptions_are_the_modules_own_copy``: the statement and
+    the rule it describes live together in the module, so a reader of either one
+    cannot get the latency wrong.
+
+    Both bounds must appear wherever the wait is stated, because the per-device
+    window alone understates it: a rotation with nothing else due waits out the
+    heartbeat instead.
+    """
+    import inspect
+
+    places = {
+        "module docstring": inspect.getdoc(push_credentials) or "",
+        "note_rotation": inspect.getdoc(push_credentials.CredentialReport.note_rotation) or "",
+    }
+    for where, text in places.items():
+        assert "never lost" in text, f"{where} must say the event is not lost"
+        assert "MIN_REPORT_INTERVAL_S" in text, f"{where} must name the coalescing window"
+        assert "HEARTBEAT_INTERVAL_S" in text, f"{where} must name the bound behind it"
