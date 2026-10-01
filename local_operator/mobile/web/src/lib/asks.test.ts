@@ -10,9 +10,11 @@ import {
 	answeredBySurface,
 	askStateLine,
 	blockingPending,
+	dockAsk,
 	durationLabel,
 	headAsk,
 	isAnswerable,
+	orderedForDisplay,
 	outstandingAsks,
 	questionProgress,
 	unansweredQuestions,
@@ -83,6 +85,36 @@ describe("durationLabel", () => {
 		expect(durationLabel(400)).toBe("<1 m");
 		expect(durationLabel(30_000)).toBe("<1 m");
 		expect(durationLabel(60_000)).toBe("1 m");
+	});
+});
+
+describe("orderedForDisplay", () => {
+	it("lifts the ask the chip names — the head when one is open", () => {
+		const older = ask({ ask_id: "older", created_at: 100 });
+		const newer = ask({ ask_id: "newer", created_at: 900 });
+		expect(orderedForDisplay([newer, older]).map((row) => row.ask_id)).toEqual([
+			"older",
+			"newer",
+		]);
+	});
+
+	it("lifts the answerable TIMEOUT when nothing is open — the same row the chip names", () => {
+		/* r2-N2 (agent review round 2): lifting only the open-ask head left the
+		   chip naming a timed-out ask while the sheet kept wire order, in exactly
+		   the state U7 exists for. */
+		const deadline = ask({ ask_id: "deadline", created_at: 100, status: "timed_out" });
+		const settled = ask({ ask_id: "settled", created_at: 50, status: "answered" });
+		expect(orderedForDisplay([settled, deadline]).map((row) => row.ask_id)).toEqual([
+			"deadline",
+			"settled",
+		]);
+		expect(dockAsk([settled, deadline])?.ask_id).toBe("deadline");
+	});
+
+	it("leaves the wire's order alone when there is nothing outstanding", () => {
+		const a = ask({ ask_id: "a", status: "answered" });
+		const b = ask({ ask_id: "b", status: "declined" });
+		expect(orderedForDisplay([a, b]).map((row) => row.ask_id)).toEqual(["a", "b"]);
 	});
 });
 

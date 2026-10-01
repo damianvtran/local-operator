@@ -128,6 +128,12 @@ SHEET_PROBE = """
     scroller: scroller
       ? {scrollH: scroller.scrollHeight, clientH: scroller.clientHeight}
       : null,
+    // The panel's own text, truncated: what the reader sees, as a string, so a
+    // frame's claim about a sentence can be checked against the DOM that drew it
+    // rather than argued from the component's source. No whitespace collapsing —
+    // a regex here would have to escape a backslash inside this Python string,
+    // and reading the raw text is closer to the truth anyway.
+    text: dialog ? dialog.textContent.trim().slice(0, 600) : null,
   });
 })()
 """
@@ -181,6 +187,23 @@ SUBMIT_HEAD = """
   return "sent";
 })()
 """
+
+#: Tap the `open` control that belongs to the ENDED conversation's row — the
+#: foreign-row link r2-M1 broke, and the one D7/U9 resized. The link lives in the
+#: row's header, above its card, so it is found from the card outwards.
+OPEN_FOREIGN = """
+(() => {
+  const card = document.querySelector('[data-testid="ask-card"][data-ask-id="fa-mine"]');
+  if (!card) return "no card";
+  const row = card.parentElement;
+  const link = row ? [...row.querySelectorAll('button')]
+      .find((b) => b.textContent.trim() === "open") : null;
+  if (!link) return "no open control";
+  link.click();
+  return "tapped";
+})()
+"""
+
 
 #: The single-winner race, in TWO steps. They cannot be one ``Runtime.evaluate``:
 #: React has not re-rendered after the option click, so the send control is still
@@ -253,8 +276,12 @@ SCROLL_TO_CARD_JS = """
   const panel = document.querySelector('[role="dialog"] .lo-scroll');
   const card = document.querySelector('[data-testid="ask-card"][data-ask-id="' + askId + '"]');
   if (!panel || !card) return null;
+  // THE ROW, not the card: a foreign row's name and its "this conversation has
+  // ended" sentence live in the row's header, ABOVE the card, so scrolling the
+  // card to the top clips the very lines a frame of that row exists to show.
+  const target = card.parentElement || card;
   const p = panel.getBoundingClientRect();
-  const c = card.getBoundingClientRect();
+  const c = target.getBoundingClientRect();
   return JSON.stringify({
     dy: Math.round(c.top - p.top - 8),
     x: Math.round(p.left + p.width / 2),
@@ -349,6 +376,29 @@ def main() -> None:
             time.sleep(1.5)
             page.shot(outdir / f"{label}-{vp}-foreign.png")
             report[f"{vp}-foreign"] = json.loads(page.js(SHEET_PROBE))
+
+            # 2b2. The ENDED conversation's sentence (design round 1, D6/D8): a
+            #      foreign row whose runtime is gone, stated BEFORE the tap. The
+            #      card is dragged into the panel's viewport so the sentence, not
+            #      just the row, is on screen.
+            page.goto(f"{base}/#/s/asks")
+            time.sleep(1.5)
+            page.js(TAP_ROW)
+            time.sleep(1.2)
+            report[f"{vp}-ended"] = {"drag": scroll_to_card(page, "fa-mine")}
+            time.sleep(0.6)
+            page.shot(outdir / f"{label}-{vp}-ended.png")
+            report[f"{vp}-ended"].update(json.loads(page.js(SHEET_PROBE)))
+            # r2-M1: the link must actually GO there. Tapped for real, and the
+            # resulting hash reported, because that is the fact the finding was
+            # about (the old order navigated and then popped itself back).
+            tapped = page.js(OPEN_FOREIGN)
+            time.sleep(1.5)
+            report[f"{vp}-ended"]["open"] = {
+                "tap": tapped,
+                "hash": page.js("location.hash"),
+            }
+            page.shot(outdir / f"{label}-{vp}-opened.png")
 
             # 2c. The BUSIEST STACK (design round 1, D6): todos, a running roster,
             #     an approval card AND the ask chip sharing one column.

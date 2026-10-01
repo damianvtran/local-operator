@@ -481,6 +481,26 @@ export function SessionScreen({
 		   the next Back is not eaten by a sheet that is already closed. */
 		if (window.history.state?.askSheet) window.history.back();
 	}, []);
+	/* LEAVING THE SHEET FOR A FOREIGN CONVERSATION REPLACES ITS ENTRY.
+	 *
+	 * The sheet's own entry is the current one when this fires, so replacing it
+	 * puts the target route exactly where the sheet was: no extra history stop,
+	 * and Back from the target returns to where the reader was before opening the
+	 * sheet. Closing by hand (above) still gives the entry back with `back()`,
+	 * which is the right thing for a dismissal — but NOT for a navigation, which
+	 * is why this is a separate path and not `closeAsks()` plus a push: the pop
+	 * and the push raced (agent review round 2, M1), and the entry the push had
+	 * created was the one the pop then discarded.
+	 *
+	 * THE FLAG IS CLEARED WITH THE ENTRY. `navigate` spreads the current state
+	 * into the route it pushes, so an `askSheet` left set here would ride into
+	 * the target's entry and let a later dismissal pop a route the reader is
+	 * standing on. */
+	const openForeignConversation = useCallback((target: string) => {
+		setAsksOpen(false);
+		window.history.replaceState({ ...window.history.state, askSheet: false }, "");
+		navigate(`/s/${target}`, { replace: true, hasInAppPredecessor: true });
+	}, []);
 	useEffect(() => {
 		if (!asksOpen) return;
 		const onPop = () => setAsksOpen(false);
@@ -808,7 +828,7 @@ export function SessionScreen({
 				open={asksOpen}
 				onClose={closeAsks}
 				currentSessionId={sessionId}
-				onOpenConversation={(target) => navigate(`/s/${target}`)}
+				onOpenConversation={openForeignConversation}
 			/>
 			</>}
 		</div>

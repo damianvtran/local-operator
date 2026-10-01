@@ -102,9 +102,12 @@ function QuestionField({
 			{options.map((option, index) => {
 				const on = chosen.has(option.label);
 				/* THE RECOMMENDATION IS AN INDEX, not a flag (see `AskQuestion`): the
-				   runtime hoists the recommended option to 0 and states the position,
-				   because the harness option model has no boolean to read. */
-				const recommended = question.recommended === index && index === 0;
+				   runtime hoists the recommended option to 0 and STATES the position,
+				   because the harness option model has no boolean to read. Any index
+				   is honoured — the wire, the type and the TUI all treat it as a
+				   position, and pinning it to 0 would badge nothing the day the
+				   runtime stops hoisting (agent review round 2, N1). */
+				const recommended = question.recommended === index;
 				return (
 					<button
 						key={option.label}
@@ -198,10 +201,16 @@ export function AskCard({
 	/* FUNCTIONAL, so two picks in one tick compose instead of overwriting (see
 	   `useAskDraft`); the options of two different questions are the normal case. */
 	const patchDraft = (patch: (current: AskDraft) => Partial<AskDraft>) =>
-		setDraft((current) => ({
-			answers: patch(current).answers ?? current.answers,
-			skipped: patch(current).skipped ?? current.skipped,
-		}));
+		setDraft((current) => {
+			/* The patch runs ONCE per update (agent review round 2, N3): calling it
+			   in both fields was harmless only because every caller passes a pure
+			   function, which is not a property this signature can promise. */
+			const next = patch(current);
+			return {
+				answers: next.answers ?? current.answers,
+				skipped: next.skipped ?? current.skipped,
+			};
+		});
 
 	/** Whether every still-open question carries a usable cell.
 	 *
