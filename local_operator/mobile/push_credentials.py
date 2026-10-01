@@ -52,7 +52,8 @@ render the stored flag while the report derived.
 **The wire is behind one seam, deliberately, and it is BOUND — not provisional.**
 Every machine→cloud name this module needs is spelled once, in the constants
 below, and those constants are the ADR §3.2 freeze at
-``damianvtran/local-operator-mobile`` **``b03aeb1``** (§3.2's three literals and
+``damianvtran/local-operator-mobile``
+**``b03aeb15fcbff64c5bbd0c4117713a0285c28554``** (§3.2's three literals and
 its field table). The state machine, the bounds and the batching are testable
 without a network because the transport is an injected callable: the tests pass a
 recorder, and part 2 passes the cloud call. What is NOT in this module, by scope,
@@ -88,7 +89,8 @@ CARRIER_HEARTBEAT = "heartbeat"
 # route; §3.1 and the cloud ops note both freeze the emit's spelling and say in
 # as many words that S3 must not freeze two, so these are copied from the freeze
 # rather than paraphrased. The pin is `damianvtran/local-operator-mobile`
-# `b03aeb1` and `tests/unit/mobile/test_push_credentials.py` asserts every string
+# `b03aeb15fcbff64c5bbd0c4117713a0285c28554`, and
+# `tests/unit/mobile/test_push_credentials.py` asserts every string below against
 # below against it, because a wire name is the one thing a later edit can change
 # without anything here breaking.
 #
