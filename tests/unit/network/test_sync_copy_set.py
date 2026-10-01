@@ -251,6 +251,18 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``runtime.log``, the agent home): the directories a session lives UNDER",
     ),
     "local_operator/config.py": (1, "``config.yml``, the store's configuration file"),
+    # ``STORE_DIRNAME``/``_SESSIONS_DIRNAME`` are the store ROOT's name and the
+    # conversations subtree under it, not entries inside a session: they are the
+    # names ``paths.py`` declares for the same directories (see the entry above),
+    # held here as literals only so ``search_guard`` stays a stdlib-only leaf that
+    # can be reasoned about without the config layer. A session directory
+    # travelling between devices carries neither.
+    "local_operator/tools/search_guard.py": (
+        2,
+        "``STORE_DIRNAME``/``_SESSIONS_DIRNAME``: the store ROOT's name "
+        "(``.local-operator``) and its conversations subtree (``sessions``) — the "
+        "directories a session lives UNDER, the same values ``paths.py`` declares",
+    ),
     "local_operator/config_watch.py": (1, "the same file, watched"),
     "local_operator/config_migrations.py": (1, "the marker recording which migrations ran"),
     "local_operator/logger.py": (1, "the process log at the store root"),

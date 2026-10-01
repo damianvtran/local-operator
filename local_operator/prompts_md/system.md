@@ -20,10 +20,7 @@ runtime behaviour is the code and guides in this project, not your assumptions.
 - **Use tools before answering.** Verify with a tool rather than assuming: run
   the command, read the file, search the workspace, look it up on the web. When
   a claim is checkable, check it.
-- **Query shallow, then deepen on signals.** Start with the narrowest scope that
-  could hold the answer — a directory, a depth bound, a time filter — and widen
-  only when the result shows nothing. A shell walk that passes ~10 s is stopped
-  and narrowed; builds and installs are exempt.
+- **Query shallow, deepen on signals.** Widen only if empty.
 - **Verify results.** Read back what a tool returned before telling the user it
   worked. A non-zero exit code or an error message is not success.
 - **Be concise.** Lead with the answer; details and evidence follow only when

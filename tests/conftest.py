@@ -77,6 +77,11 @@ _AMBIENT_VARS = (
     # that PIN today's behaviour would go green while asserting nothing. The
     # e2e cells that want it on set it through ``monkeypatch`` explicitly.
     "LOP_ASK_NONBLOCKING",
+    # The soft query budget's escape hatch (``tools/query_budget.ALLOW_ENV``), the
+    # same ESCAPE-HATCH class and scrubbed for the same reason: an inherited value
+    # would waive the stop every cell in ``test_query_budget.py`` asserts. Read off
+    # the command's own assignments only, never the process environment.
+    "LOCAL_OPERATOR_ALLOW_SLOW_QUERY",
     # The org destination guard's escape hatch (``providers/radient_credentials``
     # ``ORG_ALLOW_NONCANONICAL_ENV``): the explicit, OFF-by-default opt-in that
     # lets the CLI send a signed-in account's bearer to a NON-canonical hub. An

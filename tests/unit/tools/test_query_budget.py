@@ -36,7 +36,8 @@ MEASURED_LOOP = (
 )
 
 #: Commands that ARE a filesystem query. The block list is where a miss is
-#: expensive, so it includes a loop body, a substitution, a bare walk and `du`.
+#: expensive, so it includes a loop body, a substitution, a bare walk, `du`, and
+#: the wrappers an agent reaches for when it already suspects the search is slow.
 QUERY_SHAPED = [
     MEASURED_LOOP,
     "grep -rn p .",
@@ -44,16 +45,45 @@ QUERY_SHAPED = [
     "du -sh ~/Downloads",
     "rg -n p src/",
     'for f in *.ts; do du -sh "$f"; done',
-    'while read f; do grep -q x "$f"; done',
-    "if grep -q x f; then echo y; fi",
+    'while read f; do grep -rn x "$f"; done',
     'echo "$(find . -maxdepth 1)"',
     "FOO=$(du -sh .) echo hi",
     "git commit -m 'fix' && grep -rn p src/",
+    # Wrappers (review m2): each carries a real walk and must be seen through.
+    "timeout 300 find / -name x",
+    "timeout -s KILL 300 find / -name x",
+    "sudo find / -name x",
+    "env X=1 grep -rn p .",
+    "time grep -rn p .",
+    "nice -n 5 find / -name x",
+    "command rg -n p",
+    "nohup du -sh .",
+    # `bash -c` is parsed, not skipped (review Q3).
+    "bash -c 'grep -rn x .'",
+    "sh -c 'find / -name x'",
+    # A piped grep that CARRIES a recursion flag still walks.
+    "cat x | grep -rn p .",
+    # A wrapper around a recursed grep is still a query: this classifier judges
+    # the command's SHAPE (the static guard owns the root), and `timeout 300`
+    # changes nothing about what the grep does.
+    "timeout 300 grep -rn p src/",
 ]
 
 #: Commands that are NOT. Each one is ordinary shell the model writes daily, and
-#: a false positive here would put a budget on a build.
+#: a false positive here would put a 60 s budget on a build or a test run — which
+#: is the expensive direction (review M2).
 NOT_QUERY_SHAPED = [
+    # The measured M2 twins: a long-runner ANYWHERE vetoes the class, because the
+    # elapsed second the budget measures belongs to the suite, not the grep.
+    "python3 -c 'time.sleep(4)'; grep -c x f.txt",
+    "python3 -c 'import time; time.sleep(4)' && echo built && find . -maxdepth 1 -name f.txt",
+    "until grep -q ready log.txt; do sleep 1; done",
+    "make -j8 && find build -name '*.so'",
+    "pytest tests -x; grep -c ok log",
+    "npm run build && grep -q ok out.txt",
+    "cargo build; du -sh target",
+    # …and the plain shapes: a grep with no recursion flag reads files it names,
+    # a piped stage reads stdin, and a build is a build.
     "pytest | grep fail",
     "pytest -q tests/unit",
     "make build",
@@ -65,6 +95,9 @@ NOT_QUERY_SHAPED = [
     "echo '$(find .)'",
     "ls -la | head",
     'while read f; do cat "$f"; done',
+    'while read f; do grep -q x "$f"; done',
+    "if grep -q x f; then echo y; fi",
+    "git grep -n x origin/main",
     "sleep 30",
     "true",
     "",
@@ -101,14 +134,45 @@ def test_a_piped_stage_reading_stdin_is_not_a_query() -> None:
     assert qb.is_query_shaped("echo x | head $(find . -maxdepth 1 | wc -l)")
 
 
-def test_the_grant_is_read_per_segment_and_never_from_the_environment(
+def test_the_grant_is_never_read_from_the_process_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv(qb.ALLOW_ENV, "1")
     assert not qb.allow_slow_query(MEASURED_LOOP), "the process env must not grant"
-    assert qb.allow_slow_query(f"{qb.ALLOW_ENV}=1 {MEASURED_LOOP}")
+    assert not qb.allow_slow_query("du -sh .")
+
+
+def test_the_grant_works_on_the_search_itself() -> None:
+    """The forms a SIMPLE command can carry: a leading assignment, or an `env`
+    prefix (review Q1)."""
+    assert qb.allow_slow_query(f"{qb.ALLOW_ENV}=1 grep -rn p .")
     assert qb.allow_slow_query(f"{qb.ALLOW_ENV}=true find . -maxdepth 1")
+    assert qb.allow_slow_query(f"env {qb.ALLOW_ENV}=1 find . -maxdepth 1")
     assert not qb.allow_slow_query(f"{qb.ALLOW_ENV}=0 find . -maxdepth 1")
+
+
+def test_the_grant_works_on_a_compound_command() -> None:
+    """The forms a LOOP can carry (review Q1).
+
+    `ALLOW=1 for f in …` is a bash SYNTAX ERROR — bash rejects an assignment in
+    front of a `for` — so the inline prefix cannot be the only advertised form.
+    A standalone statement, an `export`, and a `bash -c` wrapper all work, and all
+    three are what the stop message now names.
+    """
+    assert qb.allow_slow_query(f"{qb.ALLOW_ENV}=1; {MEASURED_LOOP}")
+    assert qb.allow_slow_query(f"export {qb.ALLOW_ENV}=1; {MEASURED_LOOP}")
+    assert qb.allow_slow_query(f"{qb.ALLOW_ENV}=1 bash -c '{MEASURED_LOOP}'")
+    assert not qb.allow_slow_query(MEASURED_LOOP)
+
+
+def test_a_grant_on_an_unrelated_segment_does_not_disarm_the_guard() -> None:
+    """review Q2: the grant must sit on a WALK-ISH segment, on a standalone
+    statement, or on an `env` prefix of a walk — otherwise `X=1 echo hi` beside a
+    loop would waive the budget for the loop."""
+    assert not qb.allow_slow_query(f"{qb.ALLOW_ENV}=1 echo hi; {MEASURED_LOOP}")
+    assert not qb.allow_slow_query(f"{qb.ALLOW_ENV}=1 echo hi")
+    # …while the standalone statement, which is a deliberate act, does.
+    assert qb.allow_slow_query(f"{qb.ALLOW_ENV}=1; echo hi; {MEASURED_LOOP}")
 
 
 # ---------------------------------------------------------------------------
@@ -155,9 +219,16 @@ def test_the_stop_message_states_the_stop_and_every_way_out() -> None:
     msg = qb.stop_message(63.4, "`find`")
     assert msg.startswith("STOPPED AT SOFT QUERY BUDGET (63s)")
     assert "`find`" in msg  # the class reason travels into the message
-    for hint in ("maxdepth", "-mmin", "max-count", "sessions", "/resume", "/settings"):
+    for hint in ("maxdepth", "max-count", "sessions", "/resume", "/settings"):
         assert hint in msg, hint
     assert qb.ALLOW_ENV in msg
+    # review m1: the WORKING forms, not a generic "prefix" — the prefix does not
+    # parse in front of a `for` loop, so the message names the statement form too.
+    assert f"{qb.ALLOW_ENV}=1;" in msg
+    assert "for f in" in msg
+    # …and it says who this budget does NOT apply to, so a stopped model does not
+    # conclude that builds are budgeted too.
+    assert "installs" in msg and "test runs" in msg
 
 
 def test_the_advisory_names_the_elapsed_time_and_the_budget() -> None:
@@ -232,6 +303,12 @@ def _loop_over(work_dir: str, files: int, per_file: float) -> str:
     return f'for f in $(find {work_dir} -maxdepth 1 -name "*.txt"); ' f"do sleep {per_file}; done"
 
 
+#: Printed by a run that reaches the end. A granted run asserts on this rather
+#: than on the absence of a message: "no stop line" is also what a command that
+#: never started produces, which would let a broken grant pass (review Q1).
+_SENTINEL = "GRANTED-RUN-COMPLETED"
+
+
 @pytest.mark.slow
 @pytest.mark.asyncio
 async def test_a_query_is_stopped_at_the_budget_while_its_twins_are_not(
@@ -276,11 +353,66 @@ async def test_a_query_is_stopped_at_the_budget_while_its_twins_are_not(
     assert "STOPPED AT SOFT QUERY BUDGET" not in ordinary.text
     assert not (ordinary.details or {}).get("query_budget_stopped")
 
-    # 3. The granted twin: the same query, allowed to run, advisory still shown.
+    # 3. The granted twin — NON-VACUOUS (review Q1): the granted run must prove
+    # it RAN TO COMPLETION past a budget shorter than its own duration, or a
+    # missing grant mechanism would pass this test. The grant is the statement
+    # form, which is the one a loop can actually carry.
+    sentinel = f"echo {_SENTINEL}"
     granted = await builtin.execute_bash(
-        "qb-3", {"command": f"{qb.ALLOW_ENV}=1 {command}"}, None, None, context
+        "qb-3",
+        {"command": f"{qb.ALLOW_ENV}=1; {command}; {sentinel}"},
+        None,
+        None,
+        context,
     )
     assert "STOPPED AT SOFT QUERY BUDGET" not in granted.text
+    assert not (granted.details or {}).get("query_budget_stopped")
+    assert _SENTINEL in granted.text, "the granted run did not finish: " + granted.text
+    # …and the SAME command WITHOUT the grant is stopped, so deleting the grant
+    # mechanism fails here rather than silently passing.
+    ungranted = await builtin.execute_bash(
+        "qb-3b", {"command": f"{command}; {sentinel}"}, None, None, context
+    )
+    assert ungranted.is_error is True, ungranted.text
+    assert _SENTINEL not in ungranted.text
+
+
+@pytest.mark.slow
+@pytest.mark.asyncio
+async def test_a_query_behind_bash_c_is_classified_and_stoppable(
+    tmp_path: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """review Q3: `bash -c '<loop>'` is the natural way to write a compound
+    command AND the only way to hang a grant on one, so it must be parsed rather
+    than skipped — and the grant on the wrapper must carry into the inner one."""
+    from pathlib import Path
+
+    config_dir = Path(str(tmp_path)) / "config"
+    _write_config(config_dir, "      seconds: 2\n")
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+
+    work = Path(str(tmp_path)) / "work"
+    work.mkdir()
+    for index in range(6):
+        (work / f"f{index}.txt").write_text("x")
+    context = ToolContext(cwd=str(work))
+
+    inner = _loop_over(str(work), 6, 0.5)
+    wrapped = f"bash -c '{inner}'"
+    assert qb.is_query_shaped(wrapped), "the wrapper must not hide the loop"
+
+    stopped = await builtin.execute_bash("qb-5", {"command": wrapped}, None, None, context)
+    assert stopped.is_error is True, stopped.text
+    assert stopped.text.splitlines()[0].startswith("STOPPED AT SOFT QUERY BUDGET")
+
+    granted = await builtin.execute_bash(
+        "qb-6",
+        {"command": f"{qb.ALLOW_ENV}=1 {wrapped}; echo {_SENTINEL}"},
+        None,
+        None,
+        context,
+    )
+    assert _SENTINEL in granted.text, granted.text
     assert not (granted.details or {}).get("query_budget_stopped")
 
 
@@ -290,12 +422,17 @@ async def test_the_advisory_reaches_the_live_card_and_the_result(
     tmp_path: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """At 10 s the model gets a line it can act on — on the live card while the
-    command runs, and in the result afterwards. A budget of 30 s keeps the
-    command alive past the advisory without the run costing 30 s."""
+    command runs, and in the result afterwards.
+
+    The budget is 120 s rather than just above the run (review m5): the command
+    needs 24 x 0.5 s of work to cross the 10 s mark, and on a loaded host the loop
+    overhead could otherwise push it past a tight budget and turn the case into a
+    stop — a false fail. It costs nothing, because the command ends by itself.
+    """
     from pathlib import Path
 
     config_dir = Path(str(tmp_path)) / "config"
-    _write_config(config_dir, "      seconds: 30\n")
+    _write_config(config_dir, "      seconds: 120\n")
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
 
     work = Path(str(tmp_path)) / "work"
@@ -318,7 +455,7 @@ async def test_the_advisory_reaches_the_live_card_and_the_result(
     assert "QUERY BUDGET" in seen[0]
     assert qb.ALLOW_ENV in seen[0]
     assert "QUERY BUDGET" in result.text, "the advisory was not carried into the result"
-    # The run finished INSIDE its 30 s budget, so the receipt is the advisory and
-    # not a stop — the two must never be confused in the result.
+    # The run finished INSIDE its budget, so the receipt is the advisory and not a
+    # stop — the two must never be confused in the result.
     assert result.is_error is False, result.text
     assert "STOPPED AT SOFT QUERY BUDGET" not in result.text
