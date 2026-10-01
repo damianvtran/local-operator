@@ -393,9 +393,12 @@ from local_operator.tui.widgets.projects_view import (
     ProjectsViewDismissed,
     ProjectsViewFormSubmitted,
     ProjectsViewJumpRequested,
+    ProjectsViewComposeChanged,
     ProjectsViewMilestoneToggled,
     ProjectsViewRefreshRequested,
+    ProjectsViewSendRequested,
 )
+from local_operator.tui.widgets.projects_send import SendTarget, compose_band
 from local_operator.tui.widgets.reasoning import DEFAULT_REASONING, ReasoningBlock
 from local_operator.tui.widgets.session_picker import (
     AIDA_MARKER,
@@ -23163,6 +23166,14 @@ class OperatorApp(App[None]):
         a task yields the pump, and the aside/shell/slash branches would
         interleave with the next message.
         """
+        # Quick-send FIRST (P5a): while the projects page is composing, the
+        # text is a message to the chosen target, NOT a slash command — a body
+        # that happens to start with `/` is still something a person typed to
+        # send (spec §7.5.2), and running it as a verb would be the page
+        # executing the reader's message.
+        projects_view = self._projects_view
+        if projects_view is not None and projects_view.submit_compose(message.text):
+            return
         if self.composer_submission_blocked(message.text, shell=message.shell):
             # Enter is normally intercepted inside Editor before it clears. Keep
             # this second boundary for mouse/programmatic submits: the event may
@@ -24485,7 +24496,13 @@ class OperatorApp(App[None]):
         if self._close_settings_view():
             return
         # The projects page sits at the same precedence, and owns no ladder of
-        # its own: Esc on it means exactly one thing — leave the page.
+        # its own: Esc on it means exactly one thing — leave the page. Its
+        # quick-send surfaces are the exception (P5a): the composer holds the
+        # caret while composing, so the key arrives HERE rather than at the
+        # page's own binding, and closing the page instead would throw away a
+        # draft the band promises to keep (`esc cancel`).
+        if self._projects_view is not None and self._projects_view.escape_surface():
+            return
         if self._close_projects_view():
             return
         if not self._allow_source_command():
@@ -32894,6 +32911,10 @@ class OperatorApp(App[None]):
         # back, almost always the composer.
         self._projects_focus_restore = self.focused
         page = ProjectsView()
+        # The manager row is injected, never derived by the page (P5a): only
+        # the app can read the registry, and a page that guessed would offer a
+        # target nobody answers to.
+        page.set_manager_target(self._projects_manager_target())
         self._projects_view = page
         self._transcript_view().display = False
         self.screen.mount(page, before=self.query_one("#input-dock"))
@@ -33108,6 +33129,150 @@ class OperatorApp(App[None]):
             updated_at=_time.time(),
             own_session=self._own_session_id(),
         )
+
+    def _projects_manager_target(self) -> SendTarget | None:
+        """This session's MANAGER, when it has one (P5a, spec §7.5.1).
+
+        Resolved the way peer-send resolves the parent: walk the process
+        ancestry (bounded by ``_ANCESTRY_MAX_HOPS``) and take the first hop
+        that IS a live session record. In a lop team the manager is the session
+        that spawned this one, so the first recorded ancestor is it; when
+        nothing resolves, the row is ABSENT rather than dead — a row nobody
+        answers to is worse than no row at all.
+        """
+        from local_operator.mobile import peer_send
+
+        pid = os.getpid()
+        for _ in range(peer_send._ANCESTRY_MAX_HOPS):
+            parent = peer_send._parent_pid(pid)
+            if not parent or parent <= 1:
+                return None
+            pid = parent
+            record = peer_send._record_for_pid(pid)
+            if record is None:
+                continue
+            session_id = str(getattr(record, "session_id", "") or "")
+            if not session_id or session_id == self._own_session_id():
+                continue
+            name = str(getattr(record, "conversation_name", "") or "") or "manager"
+            return SendTarget(
+                kind="manager",
+                session_id=session_id,
+                label=name,
+                state="live",
+                live=True,
+            )
+        return None
+
+    def on_projects_view_compose_changed(self, message: ProjectsViewComposeChanged) -> None:
+        """Give the composer to the page, or take it back (P5a, spec §7.5.2).
+
+        The dock belongs to the APP, so compose mode is entered and left here:
+        the page reports which target it is writing to and the app is the only
+        side that can reach the composer. The recipient strip REPLACES the
+        resting placeholder, so the dock keeps one voice about what the next
+        submit will do.
+        """
+        message.stop()
+        target = message.target
+        if target is None:
+            self._set_composer_read_only(True)
+            return
+        self._set_composer_read_only(False)
+        try:
+            editor = self._editor()
+        except Exception:
+            return  # a stripped harness with no composer
+        editor.placeholder = compose_band(target)
+        try:
+            # Focus is what makes it a composer rather than a picture of one;
+            # the caret is what the reader aims at.
+            editor.focus()
+        except Exception:
+            pass
+
+    def on_projects_view_send_requested(self, message: ProjectsViewSendRequested) -> None:
+        """Deliver one quick-send off the loop (P5a, spec §7.5.3).
+
+        The SAME core the `send` tool uses — resolution, the body validator and
+        `deliver_peer_message_outcome` — and no second send path, which is what
+        keeps the two from disagreeing about what "sent" means.
+        """
+        message.stop()
+        view = self._projects_view
+        if view is None:
+            return
+        self.run_worker(
+            self._quick_send_worker(view, message.target, message.text),
+            exclusive=False,
+            exit_on_error=False,
+        )
+
+    async def _quick_send_worker(
+        self, view: ProjectsView, target: SendTarget, text: str
+    ) -> None:
+        """Resolve, validate, deliver — and report the outcome as a VALUE.
+
+        `mailbox`/`unconfirmed` are honest amber states, not failures, so the
+        receipt is read off `DeliveryOutcome` rather than derived from an
+        exception type; only `RuntimeError` means the peer REFUSED before
+        anything was minted, and only `is_error` is painted as a refusal.
+        """
+        from local_operator.mobile import peer_send
+
+        sender: dict[str, object] = {}
+        try:
+            sender = await peer_send.peer_sender_identity_async(os.getpid())
+        except Exception:  # noqa: BLE001 — identity is advisory, never blocks
+            sender = {}
+        if not sender:
+            # The reduced-host fallback: the card still has to name somebody.
+            sender = {"session_id": self._own_session_id()}
+        body_error = peer_send.validate_peer_body(text)
+        if body_error:
+            view.compose_receipt(body_error, ok=False)
+            return
+        try:
+            record, _candidates, error = await asyncio.to_thread(
+                peer_send.resolve_peer_target,
+                target=None,
+                pid=None,
+                session=target.session_id,
+                pid_hint="a pid",
+                session_hint="a session id",
+                include_wedged=True,
+                require_started=True,
+            )
+        except Exception as exc:  # noqa: BLE001 — the resolver owns its refusal
+            view.compose_receipt(f"could not send: {exc}", ok=False)
+            return
+        if record is None:
+            view.compose_receipt(
+                f"could not send: {error or f'{target.label} is no longer available'}",
+                ok=False,
+            )
+            return
+        if record.pid == os.getpid():
+            view.compose_receipt("that target is this session", ok=False)
+            return
+        try:
+            outcome = await peer_send.deliver_peer_message_outcome(
+                record,
+                session_id=str(getattr(record, "session_id", "") or target.session_id),
+                text=text,
+                mode="mailbox",
+                wake=True,
+                sender=sender,
+            )
+        except RuntimeError as exc:
+            # A PRE-DELIVERY REFUSAL: the peer answered no, nothing was minted.
+            view.compose_receipt(f"could not send: {exc}", ok=False)
+            return
+        except (ConnectionError, OSError, ValueError) as exc:
+            # Unclassifiable transport fault: honest, and never the confident arm.
+            view.compose_receipt(f"delivery unconfirmed — the send faulted ({exc})", ok=False)
+            return
+        view.compose_receipt(outcome.text, ok=not outcome.is_error)
 
     def on_projects_view_form_submitted(self, message: ProjectsViewFormSubmitted) -> None:
         """`ctrl+s` on the create form: write through the SAME core the tool uses.
