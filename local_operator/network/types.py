@@ -755,8 +755,6 @@ INNER_OP_CAPABILITY: dict[str, str] = {
     # refuses while another viewer is attached.
     "retire_now": "stop",
     "refresh_if_idle": "stop",
-    "retire_now": "stop",
-    "refresh_if_idle": "stop",
     # ``queue_move`` is ``retire_now`` DEFERRED (mesh slice (d), the queued
     # move): it installs a durable intent that retires this runtime at the next
     # turn boundary — the actor that may retire NOW may certainly schedule the
