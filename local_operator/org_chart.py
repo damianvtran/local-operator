@@ -43,7 +43,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 from local_operator.agent_profiles import classify_name
-from local_operator.teams import MAX_ORG_DEPTH, Team, TeamRegistry
+from local_operator.teams import MAX_ORG_DEPTH, Team, TeamRegistry, display_form
 
 #: The kinds a node can be. ``team``/``manager`` describe the org structure;
 #: ``role``/``specialist``/``seed`` are resolved agent leaves; the last three
@@ -138,17 +138,32 @@ def _team_node(
     here; a team whose id is in it is a cycle and stops. ``depth`` guards the
     absolute nesting limit independently, so the tree is bounded even if a
     cycle somehow slipped the path check.
+
+    The label a resolved team node carries comes from the shared display
+    rule (``display_form``; D2/D6): the raw name when a derived default adds
+    nothing (``lopdev``), the label alone when it carries information
+    (``Data Quality``), and ``label (name)`` for a chosen label. The key
+    stays visible where it is needed: the title row paints the charted
+    team's own display form, and every command that addresses a team takes
+    the key.
     """
 
     if depth > MAX_ORG_DEPTH:
         # Past the limit: a visible truncation marker rather than more
         # recursion. Carries the team_id so a reader can still see WHICH team
         # was cut, and the renderer draws it as a "⋯" node.
-        return OrgNode(team.name, "depth", detail="depth limit", team_id=team.id)
+        return OrgNode(
+            display_form(team.name, team.label), "depth", detail="depth limit", team_id=team.id
+        )
     if team.id in path:
         # Second visit to a team already on this branch: a cycle. Stop with a
         # leaf — NO recursion — so A→B→A terminates instead of looping.
-        return OrgNode(team.name, "cycle", detail="already shown above", team_id=team.id)
+        return OrgNode(
+            display_form(team.name, team.label),
+            "cycle",
+            detail="already shown above",
+            team_id=team.id,
+        )
     path2 = path | {team.id}
     children: list[OrgNode] = []
     # 1) the manager is the FIRST child of the team boundary, always present
@@ -174,7 +189,7 @@ def _team_node(
             node = _agent_node(member.role, agents, count=member.count)
         children.append(node)
     return OrgNode(
-        team.name,
+        display_form(team.name, team.label),
         "team",
         detail=_team_detail(team),
         children=tuple(children),

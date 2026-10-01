@@ -138,6 +138,13 @@ evaluate" to zero reports a failure the agent did not commit, which is score
 deflation; the harness expresses "we could not score this" as an `unscored`
 outcome decided by the runner, never as an adapter-returned zero.
 
+The capture above is what makes a scoring-side failure legible *after* the fact;
+it is diagnostics, not prevention. The four defects the campaign measured on
+that side — a judge the apparatus cannot construct, an evaluator that read the
+wrong browser tab, a provider-prefix re-billing class, and the boundary of what
+these records can classify at all — are recorded under
+[Measured scoring-side defects](#measured-scoring-side-defects) in section 8.
+
 ### Step budget
 
 The step budget here is a harness parameter, not the benchmark's. Upstream's
@@ -1131,9 +1138,17 @@ route's catalogue prices ($0.22/M in, $0.66/M out) was estimated at
 $0.05–0.30, capped at $0.50. For scale on a full suite: prior uncapped
 500-step samples measured ~$0.27–0.32 of AWS per episode.
 
-**These are estimates from a staging document, not measurements**, and the one
-paid episode cost $0.00 in model spend (it ended before any call was billed),
-so per-task cost has never actually been measured end to end.
+**Those figures are estimates from a staging document, not measurements.** The
+model side of that is no longer an estimate: the campaign's sealed usage records
+now measure per-episode model spend directly. Arm 1830's ten r1 episodes — same
+arm, same route, same budgets — cost **$0.5597 to $14.3239 each, ≈$35.26 for the
+ten** (a floor, since the provider reported a price on only some calls: 49 of
+193 on `task_005`, 93 of 166 on `task_016`). That is roughly an order of
+magnitude above the $0.05–0.30 per episode the staging document predicted for
+the model, and the top of the range is the cache re-billing defect recorded
+below, not task difficulty. AWS infrastructure cost remains outside the bundle
+and is still only estimated; the one early paid episode cost $0.00 in model
+spend because it ended before any call was billed.
 
 ## 8. Status and honest limitations
 
@@ -1149,7 +1164,17 @@ so per-task cost has never actually been measured end to end.
   rescue inbox empty and the canary values absent from every byte under the
   run root.
 - **One paid episode** (`~/worktrees/osworld/runs/proof-20260902-081937`,
-  bundle `evidence/ep-6ea01a117eee`), task_001, 25 steps.
+  bundle `evidence/ep-6ea01a117eee`), task_001, 25 steps. This is the 2026-09-02
+  baseline the dated records below describe, not the current episode count.
+- **The ten-task developmental set has since been run repeatedly on real paid
+  infrastructure** — arms 1748, 1796 and 1830 and their control repeats, all
+  under `~/worktrees/osworld/runs/a<arm>-*`, each episode scored by the task's
+  own `evaluate()` and sealed as a bundle. In arm 1830's ten r1 episodes, nine
+  ended in a real `finish` and the tenth (task_004) ended `agent_stop`; two
+  scored exact binary completion (`task_001` and `task_010`, both
+  `partial_ppm=1000000`), four more recorded a non-zero partial, and four
+  scored zero — of which `task_003` and `task_009` are scoring-side zeros
+  recorded in "Measured scoring-side defects" below, not capability readings.
 
 ### What that one paid episode actually showed
 
@@ -1169,20 +1194,32 @@ It produced #542 (the frame-id contract, plus the bytecode-proof digest) and
 ### What has NOT been done
 
 - **No full 108-task run.** Not once, not partially. There is no aggregate
-  score, no per-task score, and no measured suite cost or wall time.
-- **No successful paid episode.** One paid episode exists and it failed on
-  turn one. No episode has ever reached `scoring_result` against a real model.
+  score and no measured suite cost or wall time. Per-task scores do exist now
+  (arms 1748, 1796, 1830 — see "What has been done"), so the older statement
+  that no episode had reached `scoring_result` against a real model no longer
+  holds.
+- **No repeat count that separates variance from a capability change.** Single
+  episodes are not evidence here: same-build, same-route repeats of task_010,
+  task_004 and task_017 moved 0 → 1,000,000, 0 → 700,000 and 143k → 571k ppm
+  (`~/worktrees/osworld/scripts/logs/CONTROL-repeat-1796.md`). The same
+  caveat rode on a documented −46% arm-to-arm delta that the control repeat
+  put inside within-build variance (`TRANCHE-arm-1796.md`).
 - **No live kill-and-rescue drill.** The drill — SIGKILL the parent mid-episode,
   confirm the audit is non-empty, sweep, confirm it returns to `[]` — was
   staged and still pending at the time of writing. #548's fix was verified
   against a copy of the real descriptor whose instance was already terminated,
   which proves the code path executes but not that it terminates a live
   leaked instance.
-- **No judged tasks.** Tasks whose evaluator imports the LLM judge are refused
-  at preflight and again at `reset_start` without the judge credential, rather
-  than silently scoring zero (upstream's `llm_metrics` returns `0.0` on any
-  exception; a previous pilot scored ~17% of its suite as silent zeros that
-  way). Wiring the judge with a receipt is later work.
+- **No judged task has been scored correctly.** The refusal gate still holds
+  for a judge reference that is *absent* — refused at preflight and again at
+  `reset_start` rather than silently scoring zero (upstream's `llm_metrics`
+  returns `0.0` on any exception, and a previous pilot scored ~17% of its suite
+  as silent zeros that way). It does **not** cover a judge that is configured
+  but **unusable**: task_003 ran judged in arm 1830, its judge could not be
+  constructed, and the episode reported `LLM: False` behind a swallowed
+  `ValueError` — a guaranteed hard 0 in every arm. See "Measured scoring-side
+  defects" below. Wiring the judge with a receipt is later work; making an
+  unusable judge fail loudly is PR #1887.
 - **No infeasible-task support.** The runner returns on a `finish` batch
   without calling `execute`, so the adapter never sees the terminal action and
   cannot push `DONE`/`FAIL` into OSWorld's `action_history`, which
@@ -1190,6 +1227,143 @@ It produced #542 (the frame-id contract, plus the bytecode-proof digest) and
   such a task infeasible would score 0. Fabricating a `FAIL` the agent never
   sent would be score fraud, so `reset_start` instead raises
   `InfeasibleTaskExcluded` before allocating anything.
+
+### Measured scoring-side defects
+
+Four defects on the *scoring* side were measured during the campaign — three of
+them run records under `~/worktrees/osworld/scripts/logs/` (the cache defect
+carries both a controlled probe and a cost-forensics analysis), and one a
+property of the evidence format itself. None is a hypothesis
+and none is repaired by this document. They matter to any reader deciding
+whether a zero, or a dollar figure, from this apparatus means what it appears
+to say: where one of these is the cause, the number is a statement about the
+apparatus, not about the model, and it must be excluded from a capability rate
+the same way the environment- and provider-attributable failures already are.
+
+**A judge that is present but unusable scores a silent zero.** The refusal gate
+recorded above refuses an episode when the judge *reference* is missing. It does
+not catch a judge that is configured but cannot be constructed. The campaign
+driver pins `OSWORLD_EVAL_MODEL_PROVIDER=openrouter` on every episode, and the
+vendored evaluator backend registry accepts only
+`anthropic, bedrock, claude, gemini, google, openai, openai_compatible` — so
+`create_backend()` raises **before the call is attempted**, and the task's own
+`_llm_judge()` swallows it in a bare `except Exception: return False`:
+
+```
+$ PYTHONPATH=prepared venvs/1830/venv/bin/python3.12 -c \
+  "from desktop_env.evaluators.backends import create_backend, BackendConfig; \
+   create_backend(BackendConfig(provider='openrouter', model='qwen/qwen3.8-max-0902', api_key='k'))"
+ValueError: Unknown provider 'openrouter'. Available providers: anthropic, bedrock,
+claude, gemini, google, openai, openai_compatible
+```
+
+task_003 requires `LLM: True` on both of its image halves, so it is a
+**guaranteed hard 0 in every arm** — it scored 0 in arms 1748, 1796 and 1830
+alike. In arm 1830 every **mechanical** sub-check passed and only the judge
+failed — the failure is visible in the episode's own `score.details`:
+
+```
+[EVAL] Hard checks passed. rainy_slides=[5], snowy_slides=[6]
+[EVAL] Rainy slide 5 alpha: 0.6
+[EVAL] Rainy Details -> City: True, Filter: True, LLM: False, Transp: True
+[EVAL] Rainy Image: FAILED (0.0)
+[EVAL] Snowy slide 6 alpha: 0.6
+[EVAL] Snowy Details -> City: True, Filter: True, LLM: False, Transp: True
+[EVAL] Snowy Image: FAILED (0.0)
+[EVAL] ========== FINAL: 0.0 ==========
+```
+
+The episode's captured evaluator stderr carries the `desktopenv.setup` and
+`desktopenv.getters.*` lines but **no `[EvalModel]` line** — the judge's own log
+line, emitted immediately before the network call, never fired, which is the
+difference between "the judge answered NO" and "no judge call was made". The
+judge's inputs *were* present (`task_003_golden_rainy.png`, 2,583,926 B and
+`task_003_golden_snowy.png`, 2,795,118 B fetched; both result backgrounds
+extracted), and its key was wired, so this is not a missing credential — it is an
+unusable provider **value**. Scope is not task_003: 18 of the 108 tasks — those
+whose evaluator imports `desktop_env.evaluators.model_client` — are affected
+identically, because the provider is a single global value. **The general
+lesson is the class, not the task: "presents but unusable" must fail as loudly
+as "absent" already did.** A fix that resolves the provider value against the
+registry — normalising `openrouter` to `openai_compatible` plus
+`https://openrouter.ai/api/v1`, and raising `JudgeUnavailable` **by name before
+allocation** for anything unrecognised — is in review as PR #1887 (which
+also discloses the spend surface, since an enabled judge now spends the call it
+was always configured for).
+
+**An evaluator can read the wrong browser tab and score the task 0.** task_009's
+evaluator selects a tab by `tab_prefix`, which for that task is the **bare
+directory** `file:///home/user/Desktop/HKU-RIMS-System/`; the getter takes the
+**first** Playwright page whose URL starts with it. A Chrome tab at exactly that
+URL — a directory listing, titled
+`Index of /home/user/Desktop/HKU-RIMS-System/` — matched. A directory listing
+runs no page scripts, so `getJSON`, the helper the task's own
+`HKU-RIMS-System/common.js` defines and every real app page loads, was undefined
+there. The evaluator's captured stderr shows the match and the failure:
+
+```
+INFO:desktopenv.getters.chrome:[ACTIVATE_TAB_JSON] Matched tab url 'file:///home/user/Desktop/HKU-RIMS-System/'
+ERROR:desktopenv.getters.chrome:[ACTIVATE_TAB_JSON] getJSON is not defined in target page
+```
+
+The model's real app tabs — `research-form.html`, `research-output.html` — were
+open in the same window and do define `getJSON`; the run's final frame shows
+both, alongside the directory tab. The honest limit must be stated with it:
+this proves the **zero came from the wrong page**, it does **not** prove the
+model's answers were right — the evaluator never read the app page, so the
+episode is "not evaluated as intended", not "verified wrong", and no claim in
+either direction can be made from it. No fix has landed at the time of writing;
+the repair shape is to pin the prefix to the page that holds the submitted data,
+or to prefer a prefix match whose page can answer (`typeof getJSON === 'function'`).
+
+**Appending to the context re-writes the provider's cached prefix.** A cost
+defect, measured with a controlled nine-case prefix probe on this apparatus —
+`probe_rule4.py`, whose per-case rows read `cached_tokens` and
+`cache_write_tokens` back out of the provider's own response: an **identical**
+prefix re-sent reads back cached, while **appending** content re-bills it.
+
+```
+identical prefix re-sent:  prompt 18572, cached 18566, write 0
+appending content:         prompt 18575, cached     0, write 18569
+```
+
+An action/observation turn appends frames to the message list, so it is the
+second shape. Arm 1830's task_003 cost **$14.3239** at a
+**53.6%** cache-read rate over 86 calls (`cache_write` 5,022,937 tokens; 40 of
+the 86 calls re-sent an uncached prefix over 15k tokens), where sibling episodes
+of the same arm, model and route ran at **~97% cached for $0.56–1.68**
+(task_013 at $0.5597 to task_009 at $1.6833). task_016
+is the milder instance — **$6.10**, `cache_write` 1.69M — and that episode
+finished and scored 0.83, so the class is not confined to failures. It
+pre-dates the arm's own fixes: arm **1796-c1-004**, built without them, shows
+the identical signature (111 calls, 58.0% read, `cache_write` 6,023,682,
+$17.1957). It is not cache TTL expiry (re-write gaps of 33–180 s sit far below a
+5-minute TTL) and not retries or provider fallback (`model_change=0`;
+`provider_turn_start` 87 against 86 calls). The probe ran against **Alibaba**,
+so whether the effect is provider-specific is not yet settled. A fix — appending
+the observation frame so the cached prefix survives an action turn — is a
+candidate, not a change.
+
+**What these records can and cannot settle.** The diagnostics block bounds what
+any post-hoc analysis of these bundles can conclude, and the boundary is worth
+stating plainly:
+
+- **scored vs unscored is always distinguishable** — every scored episode
+  carries a score artifact with `evaluator_result`, and "we could not score" is
+  an `unscored` outcome the runner decides, never an adapter zero;
+- **ran vs did not run is usually distinguishable** from the diagnostics block,
+  which captures the evaluator's `stdout`/`stderr`, its log records and a
+  manifest of the state it fetched;
+- **why it failed often is not.** task_013 returned a bare float (`0.0`) that
+  names no failing checkpoint. Its diagnostics show the state getter completing
+  and both files present (`state_gt.json`, 20,823 B expected answers;
+  `state_fetched.json`, 3,879 B from the guest) — so the comparison ran and the
+  result was wrong, which is a capability miss — but the *cause* is not
+  recoverable from the record.
+
+So a zero from this apparatus can be classified as ran-and-failed more often
+than it can be classified as to cause, and a reader should not expect the
+records to name a failing checkpoint when the evaluator never named one itself.
 
 ### Known limitations and residual risks
 

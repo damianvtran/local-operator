@@ -264,7 +264,40 @@ AUDIT_DONE = "session.handoff.done"
 #:                     end acts on: open it on ``to_device``.
 #: * ``done``        — the source confirmed its cleanup. Best-effort: a move that
 #:                     stops at ``committed`` is complete from the user's side.
-SessionMovePhase = Literal["prepared", "handing_off", "committed", "done"]
+#: The phases a move passes through, in order. MONOTONE: a result never reports
+#: an earlier phase than one already reported for the same move.
+#:
+#: * ``prepared``    — the source retired its runtime and journalled the move;
+#:                     nothing is copied yet and a rollback is still free.
+#: * ``handing_off`` — the destination verified the copy and asked to commit; the
+#:                     source is writing its tombstone. Not yet safe to open.
+#: * ``committed``   — the DESTINATION OWNS THE SESSION. This is the phase a front
+#:                     end acts on: open it on ``to_device``.
+#: * ``done``        — the source confirmed its cleanup. Best-effort: a move that
+#:                     stops at ``committed`` is complete from the user's side.
+#:
+#: AND THE QUEUED MOVE'S FIVE, an ADDITIVE extension of the same vocabulary
+#: (design note §5.4; the record's own words, ``network/move_queue.py``):
+#:
+#: * ``queued``      — accepted, no state change: the source holds the intent.
+#: * ``finishing``   — waiting for the current writer to reach a safe point (a
+#:                     turn in flight, a parked gate, a lease holder). The design
+#:                     refuses to drain turns; this IS the wait.
+#: * ``paused``      — quiesced: the runtime latched its admission refusal and
+#:                     announced the pending move to attached clients.
+#: * ``copying``     — the retire happened; the handoff/copy is running.
+#: * ``resumed``     — the conversation lives at the destination.
+SessionMovePhase = Literal[
+    "prepared",
+    "handing_off",
+    "committed",
+    "done",
+    "queued",
+    "finishing",
+    "paused",
+    "copying",
+    "resumed",
+]
 
 MOVE_RESULT_PHASES: tuple[SessionMovePhase, ...] = (
     "prepared",
@@ -272,6 +305,11 @@ MOVE_RESULT_PHASES: tuple[SessionMovePhase, ...] = (
     "committed",
     "done",
 )
+
+#: The queued move's phase sequence, in order (the additive half of the
+#: vocabulary above). The receipt of a queued request reports its CURRENT phase
+#: from this set, and the source record's history uses it too.
+MOVE_QUEUE_PHASES: tuple[str, ...] = ("queued", "finishing", "paused", "copying", "resumed")
 
 #: Phases after which the session is usable at its destination.
 MOVE_OPENABLE_PHASES: frozenset[str] = frozenset({"committed", "done"})
@@ -326,6 +364,28 @@ class MovePhaseStamp(TypedDict):
     at: float  # unix seconds, the reporting device's clock
 
 
+class MoveQueueBlock(TypedDict, total=False):
+    """A queued move's record, projected onto the receipt (design note §5.4).
+
+    ``total=False`` on purpose: this is a projection of a file the source owns
+    and may extend, and a reader must tolerate a missing key rather than treat
+    the receipt as a schema error. ``phase`` is one of :data:`MOVE_QUEUE_PHASES`
+    or a terminal (``cancelled``/``failed``/``resumed``); ``phases`` is the
+    record's own history; ``detail``/``code`` carry a fold's refusal verbatim
+    (the ``_source_refused`` discipline).
+    """
+
+    session_id: str
+    request_id: str
+    to_device: str
+    to_name: str
+    phase: str
+    phases: list[dict[str, Any]]
+    detail: str
+    code: str
+    updated_at: float
+
+
 class SessionMoveResult(TypedDict):
     """``lop sessions move --json`` on success (exit status 0).
 
@@ -352,6 +412,15 @@ class SessionMoveResult(TypedDict):
     #: Present ONLY when the move was asked to engage on arrival
     #: (``--engage-on-arrival``); absent otherwise.
     engagement: NotRequired[MoveEngagement]
+    #: Present ONLY on a QUEUED receipt (``--queue``): the source's queue record.
+    #: The second addition to this shape since the contract was frozen, made for
+    #: the same reason as ``engagement`` — a queued request is a SUCCESS (the
+    #: intent is durable) whose state a caller renders from this block, and the
+    #: ``phase`` field alone would say "queued" with nothing to show about it.
+    #: Absent — not null — for every caller that did not queue, so existing
+    #: readers parse the identical document (``test_slow_ops`` pins the set and
+    #: was updated in the same commit that added this key).
+    queue: NotRequired[MoveQueueBlock]
 
 
 class MoveEngagement(TypedDict):
@@ -716,7 +785,9 @@ def _audit(server: "RelayServer", event: str, session_id: str, peer: str, **deta
 
 class _RetireOutcome(TypedDict):
     #: ``cold`` (nothing was running), ``retired``, ``busy`` (the runtime kept
-    #: itself) or ``viewed`` (another attach client is present).
+    #: itself), ``viewed`` (another attach client is present) or ``too_old``
+    #: (an owner that cannot honour the fence — a distinct state so the refusal
+    #: can carry ``not_implemented`` rather than claiming a viewer exists).
     result: str
     #: The runtime's own words, verbatim, when it kept itself.
     sentence: str
@@ -764,7 +835,7 @@ def _retire_local_runtime(
         # flag and retire under a live viewer, which is the one thing the fence
         # exists to prevent. A move is worth a /reload.
         return {
-            "result": "viewed",
+            "result": "too_old",
             "sentence": "this session's runtime is too old to be moved safely; reload it first",
         }
 
@@ -798,12 +869,26 @@ def _retire_local_runtime(
             return {
                 "result": "busy",
                 "sentence": (
-                    "this session's runtime is still shutting down, so nothing was moved; "
+                    "this conversation is still shutting down, so nothing was changed; "
                     "try again in a moment"
                 ),
             }
         return {"result": "retired", "sentence": ""}
     sentence = answer[len("kept:") :].strip() if answer.startswith("kept:") else answer
+    from local_operator.session.runtime.types import VIEWED_MOVE_REFUSAL
+
+    if sentence.startswith(VIEWED_MOVE_REFUSAL):
+        # THE VIEWER BLOCKER, TOLD APART FROM BUSY-NESS (QA round 1, Q1; §5.4).
+        # The runtime refused ONLY because another attach client is present —
+        # its exclusive branch answers with this one sentence — and the outcome
+        # vocabulary already names that case ``viewed``. The wire carries the
+        # token as ``viewed_elsewhere``, which is what lets a notice offer
+        # Queue ("move at the next safe point") instead of "wait for the
+        # turn" for a blocker waiting cannot clear. The match is against the
+        # SHARED constant the runtime writes
+        # (``session/runtime/types.py``), so rewording either side cannot
+        # silently collapse this back into ``busy``.
+        return {"result": "viewed", "sentence": _busy_sentence(sentence)}
     return {"result": "busy" if sentence else "retired", "sentence": _busy_sentence(sentence)}
 
 
@@ -1081,6 +1166,47 @@ def _manifest_digest(plan_id: str, transcript_digest: str) -> str:
     return "sha256:" + hashlib.sha256(f"{plan_id}|{transcript_digest}".encode()).hexdigest()
 
 
+def _queued_receipt(
+    session_id: str,
+    queue: dict[str, Any],
+    *,
+    keep: bool,
+    from_block: MoveDevice,
+    to_block: MoveDevice,
+) -> SessionMoveResult:
+    """A queued accept as a receipt — SUCCESS, carrying the queue's own phase.
+
+    ONE constructor for both routes (the offload's and the recall's) so the shape
+    cannot drift; the phase reported is the RECORD's current phase, defaulting to
+    ``queued`` for a projection older than the key (additive-read discipline).
+
+    ``phases`` prefers the record's own history: the record is the durable truth
+    and its stamps are exactly what a surface shows for "where is my move". The
+    fallback is one synthetic ``queued`` stamp so the field is never empty.
+    """
+    phase = str(queue.get("phase") or "queued")
+    history = queue.get("phases")
+    stamps: list[MovePhaseStamp] = (
+        [cast(MovePhaseStamp, item) for item in history if isinstance(item, dict)]
+        if isinstance(history, list) and history
+        else [{"phase": "queued", "at": time.time()}]
+    )
+    return cast(
+        SessionMoveResult,
+        {
+            "ok": True,
+            "session_id": session_id,
+            "new_session_id": session_id,
+            "mode": "keep" if keep else "move",
+            "from_device": from_block,
+            "to_device": to_block,
+            "phase": phase,
+            "phases": stamps,
+            "queue": queue,
+        },
+    )
+
+
 def _destination_move(
     server: "RelayServer",
     session_id: str,
@@ -1094,6 +1220,9 @@ def _destination_move(
     adopt_under_id: str = "",
     engage_on_arrival: bool = False,
     unattended: bool = False,
+    queue: bool = False,
+    request_id: str = "",
+    resume_queued: bool = False,
 ) -> tuple[SessionMoveResult | None, SessionMoveRefusal | None, str]:
     """Pull ``session_id`` from its owner and adopt it here. THE destination path.
 
@@ -1212,6 +1341,22 @@ def _destination_move(
                     "mode": "keep" if keep else "move",
                     "resume": bool(pending),
                     "have": {},
+                    # THE QUEUE REQUEST rides the prepare, additively: an owner
+                    # older than the key ignores it and answers ``busy`` exactly as
+                    # before — so ``--queue`` against a pre-queue fleet degrades to
+                    # today's refusal rather than to a promise nobody keeps. The
+                    # REQUEST ID is what makes a re-delivery idempotent (the same
+                    # request re-probes; a different one gets ``in_progress``),
+                    # and the requester is who asked, kept for the record.
+                    "queue": bool(queue),
+                    "request_id": request_id,
+                    "requester": me,
+                    # THE QUEUE'S OWN COMMIT (§5.4). This device is pulling
+                    # because the owner's queue record invited it back; the
+                    # field is the source's proof that this particular prepare
+                    # is the record's own transfer and not a third party's
+                    # second move — see ``_source_prepare``'s queue guard.
+                    "resume_queued": bool(resume_queued),
                 }
             )
         except Moved as refusal:
@@ -1225,6 +1370,32 @@ def _destination_move(
                     continue
             code = refusal.code if refusal.code in MOVE_REFUSAL_CODES else "refused"
             return None, _move_refusal(session_id, code, refusal.message), ""
+        if str(prepared.get("result") or "") == "queued":
+            # THE SOURCE ACCEPTED THE QUEUE (design note §5.4) — the conversation is
+            # NOT coming now: the owner holds the intent durably and will invite THIS
+            # device back when its writer reaches a safe point. Report the queue's
+            # own phase as the move's (the additive half of the vocabulary) with the
+            # record's projection, so a receipt can render it and a UI can offer
+            # cancel. NOTE what is deliberately absent: no manifest, no staging, no
+            # adopt — the copy has not started, and a caller that treated "queued"
+            # as "prepared" would resume against a plan nobody wrote.
+            #
+            # Bound once and handed to the receipt: a second ``prepared.get``
+            # call would be a fresh ``Any`` to a type checker even though the
+            # value cannot differ.
+            raw_queue = prepared.get("queue")
+            queue_block = dict(raw_queue) if isinstance(raw_queue, dict) else {}
+            return (
+                _queued_receipt(
+                    session_id,
+                    queue_block,
+                    keep=keep,
+                    from_block=_device_block(server, owner_device, owner_name),
+                    to_block=_own_block(server),
+                ),
+                None,
+                "",
+            )
         lease_epoch = str(prepared.get("lease_epoch") or "")
         manifest_raw = prepared.get("manifest")
         manifest: dict[str, Any] = manifest_raw if isinstance(manifest_raw, dict) else {}
@@ -1814,6 +1985,29 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> bool:
         from local_operator.session.archived import set_archived
 
         set_archived(server.root, target_id, True)
+    # THE STATE CARRY-OVER, at the integrate (design note §5.3's ``promote`` step).
+    # The session's derived indexes — ``wakes/<sid>.json``, ``monitors/<sid>.json``
+    # — live OUTSIDE the session directory and were never part of the copy; the
+    # transcript that just landed carries the source of truth (its
+    # ``wake_schedules``/``monitor_schedules`` custom entries), so this cold
+    # rebuild re-derives both from it — and that is what makes a carried daily
+    # wake visible to THIS device's supervisor rather than only after someone
+    # opens the session. Best effort by construction: a rebuild that failed
+    # leaves indexes that self-heal on the next open, while raising here would
+    # strand a verified copy mid-promote (see ``network/carry.py`` for the whole
+    # ordering contract, including the named ``[commit → promote-rebuild]`` gap).
+    try:
+        from local_operator.network import carry
+
+        report = carry.rebuild_indexes(server.root, target_id)
+        if int(report.get("wakes") or 0) > 0:
+            # §5.3's ``ensure`` step: a carried wake needs the supervisor on THIS
+            # device to fire with no runtime open. Only wakes need it — monitors
+            # are armed by a running scheduler, not by the supervisor.
+            report["supervisor"] = carry.ensure_supervisor(server.root)
+        logger.info("mobility: rebuilt derived state for %s: %s", target_id, report)
+    except Exception:  # noqa: BLE001 — the indexes self-heal; a promote must not fail here
+        logger.warning("mobility: could not rebuild derived state for %s", target_id, exc_info=True)
     return True
 
 
@@ -1917,10 +2111,10 @@ def _source_refused(
     files say. That rule breaks for a REFUSAL, which writes nothing here — so the
     inviter sat out its whole budget and answered "the outcome is unconfirmed" for a
     move that never happened. Measured on 2026-09-24 with the desktop's own view
-    holding the session: this device's refusal ("This session is open in another
-    terminal or attached client. Disconnect that client, then move again.") was
-    produced in 3 ms and reached the user 9 times out of 9 as a 60 s timeout reading
-    "the request was sent, so the move may have happened".
+    holding the session: this device's refusal — the viewer sentence
+    (``VIEWED_MOVE_REFUSAL``) — was produced in 3 ms and reached the user 9 times out
+    of 9 as a 60 s timeout reading "the request was sent, so the move may have
+    happened".
 
     NOTHING IS TRUSTED BEYOND WHICH WAY THE WAIT ENDS. It changes no state and
     survives no further than the waiting call: the refusal is recorded in memory for
@@ -1946,6 +2140,196 @@ def _source_refused(
         from_device=str(getattr(link, "device_id", "") or ""),
     )
     return {"result": "recorded", "session_id": session_id}
+
+
+def _queue_projection(root: Path, session_id: str) -> dict[str, Any] | None:
+    """The queued move's record for status answers, or ``None`` (tolerant).
+
+    A status answer must not fail on a corrupt record: the read's own contract
+    already treats unreadable as absent, and this wrapper only keeps the import
+    and any surprise out of the answer path.
+    """
+    try:
+        from local_operator.network import move_queue
+
+        return move_queue.payload(move_queue.read_record(root, session_id))
+    except Exception:  # noqa: BLE001 — see the docstring
+        logger.debug("mobility: could not read the queue record for %s", session_id, exc_info=True)
+        return None
+
+
+def _after_source_commit(root: Path, session_id: str) -> None:
+    """The derived-state cleanup that belongs to a SUCCESSFUL source commit.
+
+    ONE function for the two places a commit completes — ``_source_commit``'s
+    happy path and ``_complete_handoff``'s crash recovery — so the F5 ordering
+    (§5.3: prune only after the directory is really gone) cannot drift between
+    them, and so the queue record folds to ``resumed`` on the same step that
+    observes the commit. Best effort: the commit has landed either way, and the
+    indexes self-heal on the next open (``network/carry.py``).
+    """
+    try:
+        from local_operator.network import carry, move_queue
+
+        carry.prune_after_commit(root, session_id)
+        move_queue.note_committed(root, session_id)
+    except Exception:  # noqa: BLE001 — derived state; the commit already landed
+        logger.warning(
+            "mobility: could not clear derived state for %s after its commit",
+            session_id,
+            exc_info=True,
+        )
+
+
+def _source_cancel_queue(
+    server: "RelayServer", link: "PeerLink", frame: dict[str, Any]
+) -> dict[str, Any]:
+    """``--cancel-queued`` reached the source: cancel under the record's lock.
+
+    The cancel ALWAYS runs on the record's device (a request from the other end
+    is forwarded by its relay's local verb), so there is one implementation of
+    the terminal decision and the same flock serialises it with the driver's
+    transitions and the runtime's pause claim (§2.3 F3, frozen).
+    """
+    from local_operator.network import move_queue
+
+    session_id = str(frame["session_id"])
+    record, outcome = move_queue.cancel(server.root, session_id)
+    answer = _queue_cancel_answer(session_id, record, outcome)
+    if answer.get("result") == "cancelled":
+        _audit(server, AUDIT_PREPARE, session_id, link.device_id, mode="queue-cancel")
+    return answer
+
+
+def _queue_cancel_answer(
+    session_id: str, record: dict[str, Any] | None, outcome: str
+) -> dict[str, Any]:
+    """One cancel outcome, spoken once: the wire answer and the local verb both use it.
+
+    ``outcome`` is :func:`move_queue.cancel`'s own vocabulary: ``cancelled``
+    (the wanted state), ``already`` (terminal; a second press of a cancelled
+    queue is reported as done, not as an error), ``too_late`` (past
+    ``paused``: the runtime owns the outcome), ``absent`` (no record here).
+    """
+    from local_operator.network import move_queue
+
+    phase = str((record or {}).get("phase") or "")
+    if outcome == "cancelled" or (outcome == "already" and phase == "cancelled"):
+        return {
+            "result": "cancelled",
+            "phase": "cancelled",
+            "queue": move_queue.payload(record),
+            "session_id": session_id,
+        }
+    if outcome == "too_late":
+        return {
+            "result": "refused",
+            "code": "in_progress",
+            "message": (
+                f"the move of {session_id} has already started (phase: {phase or 'paused'}); "
+                "it cannot be cancelled now"
+            ),
+            "session_id": session_id,
+        }
+    if outcome == "absent":
+        return {
+            "result": "refused",
+            "code": "no_holder",
+            "message": f"no queued move of {session_id} is pending on this device",
+            "session_id": session_id,
+        }
+    return {
+        "result": "refused",
+        "code": "in_progress",
+        "message": (
+            f"the queued move of {session_id} already finished (phase: {phase or 'unknown'}); "
+            "there is nothing to cancel"
+        ),
+        "session_id": session_id,
+    }
+
+
+def _cancel_refusal(session_id: str, code: str, message: str) -> dict[str, Any]:
+    """``_move_refusal`` widened for the cancel verb's mixed shapes.
+
+    ``_cancel_queued`` answers with several receipt shapes beside refusals — a
+    cancel receipt, a forwarded word from the owner — so its own annotation is
+    the plain dict every caller already parses. This is the ONE place that
+    widening is spelled (a TypedDict is not a ``dict`` to a type checker), so
+    the six return sites read exactly like the rest of the family.
+    """
+    return {**_move_refusal(session_id, code, message)}
+
+
+def _cancel_queued(server: "RelayServer", session_id: str) -> dict[str, Any]:
+    """The local verb's ``cancel_queue``: cancel here, or forward to the owner.
+
+    A cancel is reachable from EITHER end of a move (the recalling device has no
+    record — the record is the source's), so the forwarding is not a special
+    case: it is the normal path for a recall, exactly as the cancel is local for
+    an offload. Both end in the same :func:`_queue_cancel_answer` word.
+    """
+    from local_operator.network import move_queue
+
+    record, outcome = move_queue.cancel(server.root, session_id)
+    if outcome != "absent":
+        answer = _queue_cancel_answer(session_id, record, outcome)
+        if answer.get("result") == "cancelled":
+            return {
+                "ok": True,
+                "session_id": session_id,
+                "phase": "cancelled",
+                "queue": answer.get("queue") or {},
+            }
+        return _cancel_refusal(
+            session_id,
+            str(answer.get("code") or "refused"),
+            str(answer.get("message") or "the queued move could not be cancelled"),
+        )
+
+    try:
+        owner_device, owner_name = resolve_remote_owner(server, session_id)
+    except Moved as refusal:
+        if refusal.code == "already_local":
+            # Ours, and no record: this device is the source and nothing is
+            # queued for the id — the honest answer is that there is nothing to
+            # cancel anywhere this device can see.
+            return _cancel_refusal(
+                session_id,
+                "no_holder",
+                f"no queued move of {session_id} is pending here or on any device that holds it",
+            )
+        return _cancel_refusal(session_id, refusal.code, refusal.message or "nothing was changed")
+    if not owner_device or owner_device == server.identity.device_id:
+        return _cancel_refusal(
+            session_id,
+            "no_holder",
+            f"no queued move of {session_id} is pending here or on any device that holds it",
+        )
+    link = _link_for_move(server, owner_device, owner_name)
+    transport = LinkTransport(server, link, session_id)
+    try:
+        answer = transport.ask(
+            {
+                "op": "net_session_move",
+                "phase": "cancel_queue",
+                "session_id": session_id,
+            }
+        )
+    except Moved as refusal:
+        return _cancel_refusal(session_id, refusal.code, refusal.message or "nothing was changed")
+    if str(answer.get("result") or "") == "cancelled":
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "phase": "cancelled",
+            "queue": answer.get("queue") if isinstance(answer.get("queue"), dict) else {},
+        }
+    return _cancel_refusal(
+        session_id,
+        str(answer.get("code") or "refused"),
+        str(answer.get("message") or "the queued move could not be cancelled"),
+    )
 
 
 def _source_status(
@@ -1995,6 +2379,11 @@ def _source_status(
             # session (review round 1, MINOR 1).
             "archived": session_id in archived_ids(server.root),
             "pending": entry,
+            # THE QUEUE RECORD, when one is pending for this id (additive, §5.4):
+            # the requesting surface reads the same record its own device cannot
+            # see — this answer is the one path it has to it. ``None`` when
+            # there is no queued move, which is every ordinary session.
+            "queue": _queue_projection(server.root, session_id),
             "session_id": session_id,
         }
     tombstone = _tombstone(server.root, session_id)
@@ -2107,6 +2496,55 @@ def _source_prepare(
                 ),
                 "session_id": session_id,
             }
+    # A QUEUED MOVE IS A PENDING HANDOFF TOO (§5.4), so it is checked before
+    # anything else can start a second copy. The SAME request is idempotently
+    # accepted (a re-delivery, a ``--wait`` re-probe); a DIFFERENT one is refused
+    # with the record's own state — two queued copies of one id is the same
+    # double-writer class the journal check above refuses. ``--queue`` with
+    # ``--keep`` is deliberately a no-op: a keep copy does not retire the source,
+    # so there is no safe point to wait for and the copy proceeds as today.
+    queue_requested = bool(frame.get("queue") or False)
+    request_id = str(frame.get("request_id") or "")
+    from local_operator.network import move_queue
+
+    try:
+        queued = move_queue.read_record(server.root, session_id)
+    except Exception:  # noqa: BLE001 — the read's own contract: unreadable is absent
+        queued = None
+    if queued is not None and not move_queue.is_terminal(queued):
+        same_request = bool(request_id) and request_id == str(queued.get("request_id") or "")
+        # THE DRIVER'S OWN COMMIT (§5.4): the source relay that owns this queue
+        # record re-enters the ordinary move machinery to start the copy, and it
+        # is the ONLY prepare allowed past this guard while the record is live.
+        # Two conditions fence it: the record's OWN request id (the transfer
+        # key, so a fresh id cannot claim this door) and a phase at or past the
+        # safe point — before ``paused`` the session still serves, and a copy
+        # then would be the double-writer INV-1 forbids.
+        phase_now = str(queued.get("phase") or "")
+        resuming = bool(frame.get("resume_queued") or False) and phase_now in (
+            move_queue.QUEUE_PHASE_PAUSED,
+            move_queue.QUEUE_PHASE_COPYING,
+        )
+        if not (same_request and resuming):
+            if same_request:
+                # A re-delivery, a ``--wait`` re-probe: the SAME request is
+                # idempotently answered with the record's current state.
+                return {
+                    "result": "queued",
+                    "phase": phase_now or "queued",
+                    "queue": move_queue.payload(queued),
+                    "session_id": session_id,
+                }
+            return {
+                "result": "refused",
+                "code": "in_progress",
+                "message": (
+                    f"a move of {session_id} is already queued for the next safe point "
+                    f"(phase: {phase_now or 'queued'}); cancel the queued move first "
+                    "if you meant a different one"
+                ),
+                "session_id": session_id,
+            }
     if keep:
         # ``--keep`` MUTATES NOTHING here: no retirement, no journal, no tombstone.
         # The destination mints its own id and copies; the source keeps running, so
@@ -2177,10 +2615,76 @@ def _source_prepare(
     )
     outcome = _retire_local_runtime(server.root, session_id)
     if outcome["result"] != "retired" and outcome["result"] != "cold":
+        if queue_requested and outcome["result"] != "too_old":
+            # THE QUEUED MOVE (design note §5.4): instead of today's refusal, record
+            # the intent DURABLY ON THIS DEVICE — the record must survive the
+            # requester's window closing, so its writer is this relay — and start
+            # the driver that takes it the rest of the way: deliver the intent to
+            # the runtime, wait for the boundary, then run the copy as today.
+            #
+            # ``too_old`` is deliberately NOT queued: the runtime cannot hold the
+            # intent, so the queue would be a promise nobody keeps. It falls
+            # through to the refusal below, whose code names the reload.
+            #
+            # ORDERING (F5, §5.3): nothing durable about the handoff exists yet —
+            # no journal entry, no copy, no deletion — so an enqueue that fails is
+            # a clean refusal, and the queue record itself is the only state this
+            # step creates. The prune of the derived indexes happens at a
+            # SUCCESSFUL commit, never here.
+            try:
+                record, _created = move_queue.enqueue(
+                    server.root,
+                    session_id,
+                    to_device=to_device,
+                    to_name=server._member_name(to_device),  # noqa: SLF001
+                    request_id=request_id or f"move-{session_id}-{int(time.time() * 1000)}",
+                    requested_by=str(frame.get("requester") or link.device_id),
+                    engage_on_arrival=bool(frame.get("engage_on_arrival") or False),
+                )
+            except Exception as exc:  # noqa: BLE001 — a record that cannot be written is a refusal
+                return {
+                    "result": "refused",
+                    "code": "refused",
+                    "message": (
+                        f"the move could not be queued ({exc}), so nothing was changed; "
+                        "try again"
+                    ),
+                    "session_id": session_id,
+                }
+            if request_id and str(record.get("request_id") or "") != request_id:
+                # Lost the enqueue race to a different request: same refusal as the
+                # pre-check, with the winner's state named.
+                return {
+                    "result": "refused",
+                    "code": "in_progress",
+                    "message": (
+                        f"a move of {session_id} is already queued for the next safe "
+                        f"point (phase: {str(record.get('phase') or 'queued')})"
+                    ),
+                    "session_id": session_id,
+                }
+            move_queue.start_driver(server, session_id)
+            progress_for(server).note(session_id, "queued")
+            _audit(server, AUDIT_PREPARE, session_id, link.device_id, mode="queue")
+            return {
+                "result": "queued",
+                "phase": str(record.get("phase") or "queued"),
+                "queue": move_queue.payload(record),
+                "session_id": session_id,
+            }
         return {
             "result": "refused",
-            "code": "busy",
-            "message": outcome["sentence"] or "this session is busy, so nothing was moved",
+            # THE REFUSAL TAXONOMY SPLIT (scout-state-ui Q3): ``viewed_elsewhere`` is
+            # the reserved code this producer never emitted — a front end could not
+            # offer "Queue vs Wait" for the two different blockers because both read
+            # ``busy``. ``busy`` (a turn) keeps "Wait for the turn to finish";
+            # ``viewed_elsewhere`` (a viewer or a lease holder) gains "Move at the
+            # next step"; ``not_implemented`` names the reload an old runtime needs.
+            "code": {
+                "viewed": "viewed_elsewhere",
+                "too_old": "not_implemented",
+            }.get(str(outcome["result"]), "busy"),
+            "message": outcome["sentence"] or "this conversation is busy, so nothing was changed",
             "session_id": session_id,
         }
     if not sync_mod.stamps_valid(
@@ -2441,6 +2945,15 @@ def _source_commit(
     removed = _remove_handed_away(Path(server.root), session_id, to_device)
     if removed:
         clear_handoff_entry(server.root, session_id)
+        # THE PRUNE, AND ONLY AFTER A SUCCESSFUL COMMIT (F5, design note §5.3).
+        # The commit is the instant this conversation stops living here, so this
+        # device's DERIVED state for it goes with it — and the queue record folds
+        # to ``resumed`` in the same step (terminal is write-once; the driver's
+        # own tombstone poll is an idempotent second observer). Guarded by
+        # ``removed`` because a commit that could not delete its directory is not
+        # done cleaning: pruning then would strand a session whose only copy is
+        # still here, and its wakes would not come back until somebody opened it.
+        _after_source_commit(Path(server.root), session_id)
     else:
         # THE TOMBSTONE IS WHAT GOVERNS THE ID, so the move IS complete and the
         # destination may promote. What is left is this device's own cleanup, and
@@ -2515,6 +3028,16 @@ def _destination_invite(
     # carries. The DESTINATION's runtime re-checks the grant at engage, so this
     # bit only ever decides whether that check is asked at all.
     unattended = bool(frame.get("unattended") or False)
+    # THE QUEUE FLAG AND ITS REQUEST ID, carried like ``wait_s`` and for the same
+    # reason: the step they configure runs on the SOURCE (the queue record is the
+    # source's), so a flag that stopped at the inviter would be a promise nobody
+    # keeps. Absent reads False/"" — the older-peer half of the contract.
+    queue = bool(frame.get("queue") or False) and not keep
+    request_id = str(frame.get("request_id") or "")
+    # THE QUEUE'S OWN COMMIT (§5.4): the source relay that owns the record sends
+    # this invite to START the copy it promised; the flag rides with the id so
+    # the source's guard admits exactly this pull (see ``_source_prepare``).
+    resume_queued = bool(frame.get("resume_queued") or False)
     owner_device = link.device_id
     owner_name = server._member_name(owner_device)  # noqa: SLF001
     if not keep and _owned_here(server, session_id):
@@ -2557,9 +3080,35 @@ def _destination_invite(
                 adopt_under_id=new_id,
                 engage_on_arrival=engage_on_arrival,
                 unattended=unattended,
+                queue=queue,
+                request_id=request_id,
+                resume_queued=resume_queued,
             )
         except Exception:  # noqa: BLE001 — the inviter polls durable state, not this
             logger.debug("mobility: invited pull of %s failed", session_id, exc_info=True)
+            return
+        if result is not None and str(result.get("phase") or "") in MOVE_QUEUE_PHASES:
+            # THE QUEUE ACCEPTED IT: nothing is staged here and the copy has not
+            # started. Clear the destination journal entry written above — leaving a
+            # ``prepared`` destination entry would make this device's engage guard
+            # refuse an id whose bytes are still entirely the source's, and it would
+            # outlive a CANCELLED queue (the entry has no timeout). The queue's own
+            # record is the pending state, and it lives on the source.
+            from local_operator.session.placement import (
+                clear_handoff_entry,
+                handoff_in_flight,
+            )
+
+            try:
+                entry = handoff_in_flight(server.root, session_id) or {}
+            except Exception:  # noqa: BLE001 — worst case the reconcile sweeps it
+                entry = {}
+            if (
+                str(entry.get("role") or "") == "destination"
+                and str(entry.get("phase") or "") == HANDOFF_PHASE_PREPARED
+                and str(entry.get("instance_id") or "") == str(server.instance_id)
+            ):
+                clear_handoff_entry(server.root, session_id)
             return
         # NOTHING IS SIGNALLED *LOCALLY*, and that is still right: the inviter watches
         # its OWN durable progress (the tombstone, or this device's `done` handler),
@@ -3049,6 +3598,9 @@ def _complete_handoff(root: Path, session_id: str, entry: dict[str, Any]) -> dic
     removed = _remove_handed_away(root, session_id, to_device)
     if removed:
         clear_handoff_entry(root, session_id)
+        # The same post-commit cleanup as the ordinary path, and for the same
+        # F5 reason: the directory is gone, so the derived state goes with it.
+        _after_source_commit(root, session_id)
     return {
         "session_id": session_id,
         "action": "completed" if removed else "cleanup_pending",
@@ -3235,6 +3787,13 @@ def make_handler(
             # than touching the journal, so reconciling for it would be recovery work
             # done for a move that was refused.
             return _source_refused(server, link, frame)
+        if phase == "cancel_queue":
+            # THE QUEUE'S CANCEL, and it runs before the reconcile for the same
+            # reason ``refused`` does: it is a durable-RECORD op and must be able
+            # to answer "no queued move is pending" without recovery work for a
+            # move that never was. It reaches a device that still owns the id, so
+            # the ordinary ownership rule already scoped it.
+            return _source_cancel_queue(server, link, frame)
         # ONE TARGETED RECONCILE, before anything else: this is where a
         # destination's post-crash retry completes an interrupted commit on this
         # side, and where a stale `prepared` is cleared so the retry can proceed.
@@ -3286,6 +3845,12 @@ def local_move_handler(server: "RelayServer") -> Any:
         session_id = str(frame.get("session_id") or "")
         if not session_id:
             return _move_refusal(session_id, "not_owner", "no conversation was named")
+        if action == "cancel_queue":
+            # THE QUEUE'S LOCAL VERB: cancel here when the record is here (the
+            # offload case) or forward to the owner (the recall case) — see
+            # ``_cancel_queued``. Handled before the reconcile below so a cancel
+            # never pays recovery work: it touches one record, not a journal.
+            return _cancel_queued(server, session_id)
         keep = bool(frame.get("keep"))
         wait_s = float(frame.get("wait_s") or 0.0)
         # THE FLAG IS READ AS ``bool``, so a client older than it sends nothing and an
@@ -3295,6 +3860,13 @@ def local_move_handler(server: "RelayServer") -> Any:
         # not a direction to engage either — the same reading every other optional
         # field on this frame gets.
         engage_on_arrival = bool(frame.get("engage_on_arrival") or False)
+        # THE QUEUE FLAG AND ITS ID, read as ``bool``/``str`` with the same
+        # absent-reads-false contract as ``engage_on_arrival`` above.
+        queue = bool(frame.get("queue") or False)
+        request_id = str(frame.get("request_id") or "")
+        # The queue record's own commit rides in the same shape (§5.4); a bare
+        # move never sets it, so its absence is exactly today's behaviour.
+        resume_queued = bool(frame.get("resume_queued") or False)
         to = str(frame.get("to") or "local")
         try:
             reconcile(server.root, server=server, only=session_id)
@@ -3302,7 +3874,14 @@ def local_move_handler(server: "RelayServer") -> Any:
             logger.debug("mobility: reconcile before a move failed", exc_info=True)
         if to == "local":
             return _recall(
-                server, session_id, keep=keep, wait_s=wait_s, engage_on_arrival=engage_on_arrival
+                server,
+                session_id,
+                keep=keep,
+                wait_s=wait_s,
+                engage_on_arrival=engage_on_arrival,
+                queue=queue,
+                request_id=request_id,
+                resume_queued=resume_queued,
             )
         return _offload(
             server,
@@ -3311,6 +3890,8 @@ def local_move_handler(server: "RelayServer") -> Any:
             keep=keep,
             wait_s=wait_s,
             engage_on_arrival=engage_on_arrival,
+            queue=queue,
+            request_id=request_id,
         )
 
     return _handle
@@ -3323,6 +3904,9 @@ def _recall(
     keep: bool,
     wait_s: float,
     engage_on_arrival: bool = False,
+    queue: bool = False,
+    request_id: str = "",
+    resume_queued: bool = False,
 ) -> SessionMoveResult | SessionMoveRefusal:
     """``--to local``: this device is the destination and pulls.
 
@@ -3387,6 +3971,9 @@ def _recall(
         owner_device=owner_device,
         owner_name=owner_name,
         engage_on_arrival=engage_on_arrival,
+        queue=queue,
+        request_id=request_id,
+        resume_queued=resume_queued,
     )
     return result or refusal or _move_refusal(session_id, "unreachable", "the move did not finish")
 
@@ -3490,6 +4077,8 @@ def _offload(
     keep: bool,
     wait_s: float,
     engage_on_arrival: bool = False,
+    queue: bool = False,
+    request_id: str = "",
 ) -> SessionMoveResult | SessionMoveRefusal:
     """``--to <peer>``: this device owns the session and asks the peer to pull.
 
@@ -3572,6 +4161,13 @@ def _offload(
                 # off — the older-peer half of the contract, which is what
                 # ``request_move`` sends the same field for on the way in.
                 "engage_on_arrival": engage_on_arrival,
+                # THE QUEUE REQUEST, carried to the destination because the step it
+                # configures runs on the SOURCE through the destination's prepare
+                # frame: the pull IS how the source learns of a queued move from
+                # this route (`_source_prepare` records the intent). Absent reads
+                # False for an older peer.
+                "queue": bool(queue) and not keep,
+                "request_id": request_id,
                 "to_device": target_device,
                 # THE SESSION'S AUTO AUTHORITY TRAVELS WITH THE INVITE, for the same
                 # reason as the two fields above: the runtime it would be applied at
@@ -3585,6 +4181,21 @@ def _offload(
     new_id = str(accepted.get("new_session_id") or "")
     budget = move_bound_s(wait_s, keep=keep)
     outcome, refusal = _await_own_progress(server, session_id, budget=budget, invited=target_device)
+    if outcome == "queued":
+        # THIS DEVICE (the source) QUEUED IT (design note §5.4): the pull ran, the
+        # prepare answered "queued", and the durable intent now lives here. Read
+        # the record back for the receipt rather than inventing a placeholder — it
+        # was written before the answer went out.
+        from local_operator.network import move_queue
+
+        queued_record = move_queue.payload(move_queue.read_record(server.root, session_id)) or {}
+        return _queued_receipt(
+            session_id,
+            queued_record,
+            keep=keep,
+            from_block=_own_block(server),
+            to_block=_device_block(server, target_device, target_name),
+        )
     if outcome == "done":
         phases = _move_phases(server, session_id)
         # THE HISTORY IS RENDERED, NEVER DRESSED UP (the false-success fix, 2026-09-29).
@@ -3709,16 +4320,21 @@ def _await_own_progress(
     anybody: the invite's whole design is that the destination drives, so the only
     thing the source can honestly report is what its own files say.
 
-    THREE OUTCOMES, AND THE MIDDLE ONE IS WHY THIS RETURNS A WORD (QA round 1, Q1).
-    ``"done"`` is the destination's frame that says it PROMOTED, which is the only
-    answer that means the conversation is openable there. ``"committed"`` is this
-    device having retired its copy and tombstoned the id to a peer that never
-    confirmed: the bytes are in that peer's staging and the move is unfinished.
-    ``"none"`` is nothing happened here. Answering the second as if it were the first
-    is how a receipt came to claim a finished move for a conversation the destination
-    never opened — measured on the two-device rig 2026-09-27: with the receiver
-    SIGKILLed after its ``ready`` (so the owner commits) the answer was ``phase: done``
-    for an id that was then on NO device's listing, with its only copy in staging.
+    FOUR OUTCOMES, and the middle two are why this returns a word rather than a
+    bool (QA round 1, Q1, plus the queue). ``"done"`` is the destination's frame
+    that says it PROMOTED, which is the only answer that means the conversation is
+    openable there. ``"committed"`` is this device having retired its copy and
+    tombstoned the id to a peer that never confirmed: the bytes are in that peer's
+    staging and the move is unfinished. ``"queued"`` is the SOURCE having accepted
+    a queued move (``--queue``): the intent is durable on this device and the copy
+    has not started, so the caller renders the queue's receipt rather than either
+    of the other two claims (design note §5.4; the marker is noted by
+    ``_source_prepare``'s enqueue branch, in this process). ``"none"`` is nothing
+    happened here. Answering ``committed`` as if it were ``done`` is how a receipt
+    came to claim a finished move for a conversation the destination never opened —
+    measured on the two-device rig 2026-09-27: with the receiver SIGKILLed after
+    its ``ready`` (so the owner commits) the answer was ``phase: done`` for an id
+    that was then on NO device's listing, with its only copy in staging.
 
     THE TOMBSTONE NO LONGER ENDS THE WAIT BY ITSELF — it starts the confirmation
     window the bound already carries: ``move_bound_s`` is ``wait_s +
@@ -3744,6 +4360,14 @@ def _await_own_progress(
     progress = progress_for(server)
     committed_at: float | None = None
     while True:
+        if progress.wait_for(session_id, "queued", 0.0):
+            # THE SOURCE QUEUED IT (design note §5.4): the intent is durable here
+            # and the copy has not started — a DISTINCT word, so the caller
+            # renders the queued receipt rather than claiming a finished move or
+            # reporting that nothing happened. Non-blocking: the marker is set by
+            # ``_source_prepare`` in this same process before the pull's answer
+            # was written, so there is no race to lose.
+            return "queued", None
         if progress.wait_for(session_id, "done", 0.05 if committed_at else 0.2):
             return "done", None
         now = time.monotonic()
@@ -3892,6 +4516,7 @@ def request_move(
     root: Path | None = None,
     from_replica: bool = False,
     engage_on_arrival: bool = False,
+    queue: bool = False,
 ) -> SessionMoveResult | SessionMoveRefusal:
     """Move (or with ``keep``, copy) ``session_id`` to the device named by ``to``.
 
@@ -3904,6 +4529,15 @@ def request_move(
     soon as the copy lands, so it is live there without a first prompt (the engage is
     a separate act on a move that has already committed; see
     ``_arrival_engagement``). Default off, and it changes nothing when off.
+
+    ``queue`` asks the SOURCE to accept the move of a busy session as a durable
+    QUEUED move (design note §5.4) instead of refusing: the owner holds the intent,
+    waits for its writer's next safe point, announces attached clients, and runs the
+    copy itself. The receipt reports phase ``queued`` with the record in its
+    ``queue`` block, and the move continues even after this CLI exits. Its request
+    id is minted HERE and travels with the request, so a retried command is the same
+    request rather than a second queue entry. Ignored with ``keep`` (a copy does not
+    retire the source, so it has no safe point to wait for).
 
     RUN THROUGH THIS DEVICE'S RELAY, not by opening a peer link here: the relay
     owns the links and is the only process that speaks the mesh, and a second
@@ -3946,6 +4580,13 @@ def request_move(
         # key and a false one the same way (off), and a frame whose shape depends on a
         # boolean is one a future reader has to prove is not load-bearing.
         engage_on_arrival=bool(engage_on_arrival),
+        # THE QUEUE FLAG, same contract, PLUS A REQUEST ID minted here — the
+        # outbound half of the idempotence seam (`--queue` twice is one intent;
+        # a second attempt after a failure gets a new id). Never sent with
+        # ``keep``: the source ignores it there, and an honest frame does not
+        # carry a flag the other end must know to disregard.
+        queue=bool(queue) and not keep,
+        request_id=(f"cli-{session_id}-{int(time.time() * 1000)}" if (queue and not keep) else ""),
     )
     if reply is None:
         return _relay_refusal(session_id, "relay_unavailable", _relay_message())
@@ -3967,6 +4608,56 @@ def request_move(
         "changed": bool(detail.get("changed", False)),
     }
     return shaped
+
+
+def request_move_cancel(
+    session_id: str, *, root: Path | None = None
+) -> SessionMoveResult | SessionMoveRefusal:
+    """``lop sessions move --cancel-queued <id>``: stop a not-yet-started queue.
+
+    Works from EITHER end of a move: the local verb cancels on the device that
+    holds the record, and forwards to the owner when asked from the other side
+    (a recall has no local record), so the caller never has to know which device
+    it is on. Idempotent: cancelling a cancelled queue answers with the state the
+    caller wanted, not an error.
+
+    Refused once the move is past ``paused`` (the design's point of no return:
+    the runtime has latched and announced; the conversation is leaving) — the
+    refusal names the phase. Runs through this device's relay for the same
+    reason :func:`request_move` does.
+    """
+    from local_operator.network import relay, store
+
+    resolved = Path(root) if root is not None else None
+    record = store.find_own_relay(resolved)
+    if record is None:
+        return _relay_refusal(session_id, "relay_unavailable", _relay_message())
+    reply = relay.control_request(
+        record,
+        "session_move",
+        timeout=max(60.0, MOVE_OP_DEADLINE_S),
+        action="cancel_queue",
+        session_id=session_id,
+    )
+    if reply is None:
+        return _relay_refusal(session_id, "relay_unavailable", _relay_message())
+    detail = reply.get("detail")
+    if reply.get("op") != "ack" or not isinstance(detail, dict):
+        return _relay_refusal(
+            session_id,
+            str(reply.get("code") or "relay_refused"),
+            str(reply.get("message") or "this device's relay refused to cancel the queued move"),
+        )
+    if detail.get("ok"):
+        return detail  # type: ignore[return-value]
+    return {
+        "ok": False,
+        "code": str(detail.get("code") or "relay_refused"),
+        "message": str(detail.get("message") or "the queued move could not be cancelled"),
+        "session_id": session_id,
+        "phase_reached": detail.get("phase_reached"),  # type: ignore[typeddict-item]
+        "changed": bool(detail.get("changed", False)),
+    }
 
 
 def _relay_refusal(session_id: str, code: str, message: str) -> SessionMoveRefusal:
@@ -4067,8 +4758,27 @@ def install(server: "RelayServer") -> None:
             "net_session_move": MOVE_OP_DEADLINE_S,
             "net_session_lifecycle": LIFECYCLE_OP_DEADLINE_S,
         },
-        on_start={"mobility-recovery": lambda: recover_on_start(server)},
+        on_start={"mobility-recovery": lambda: _start_recovery(server)},
     )
+
+
+def _start_recovery(server: "RelayServer") -> list[dict[str, Any]]:
+    """The relay-start hook: journal recovery, then the move queue's drivers.
+
+    ORDER IS DELIBERATE: ``recover_on_start`` settles half-moved journals first, so
+    a session a queued move is about to touch is not also being recovered; the
+    queue reconciliation then restarts drivers for records that were live when the
+    relay died — §5.4's "the record survives, and re-arms" — which is what makes a
+    queued move outlive the window that asked for it, and the relay process.
+    """
+    from local_operator.network import move_queue
+
+    recovered = recover_on_start(server)
+    try:
+        move_queue.reconcile_on_start(server)
+    except Exception:  # noqa: BLE001 — a queue that cannot reconcile must not stop recovery
+        logger.warning("mobility: could not reconcile the move queue", exc_info=True)
+    return recovered
 
 
 def recover_on_start(server: "RelayServer") -> list[dict[str, Any]]:

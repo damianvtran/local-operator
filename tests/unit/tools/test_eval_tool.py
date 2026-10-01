@@ -442,6 +442,74 @@ async def test_eval_tool_bridge_uses_this_calls_dispatch(context) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_failed_bridged_tool_call_reaches_the_result_text(context) -> None:
+    """The incident's invisible-failure shape: the cell ignores the dict.
+
+    ``tool()`` keeps returning the is_error dict — probes must still work —
+    and the eval result now states the failure itself: count, tool name and
+    the result's own error text, so an agent cannot miss it without reading a
+    dict it already ignored once.
+    """
+
+    async def dispatch(name, arguments):
+        return {
+            "is_error": True,
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        "invalid arguments: `timeout_ms` is not a sessions parameter. "
+                        "`resume` takes: session|target|pid, prompt, background."
+                    ),
+                }
+            ],
+        }
+
+    context.dispatch_tool = dispatch
+    result = await _call(context, "r = tool('sessions', op='resume', timeout_ms=1)")
+
+    # The CELL succeeded; the tool call inside it did not — and both facts are
+    # visible without the caller inspecting r.
+    assert not result.is_error
+    assert "1 tool() call in this cell returned is_error" in result.text
+    assert "sessions: invalid arguments: `timeout_ms` is not a sessions parameter." in result.text
+    assert "do not read the cell's output as success" in result.text
+    assert (result.details or {}).get("tool_failures") == 1
+
+
+@pytest.mark.asyncio
+async def test_an_expected_failure_probe_keeps_working_beside_the_note(context) -> None:
+    """Probing is not broken: the dict is returned unchanged and the note is a
+    second copy, not a substitute — a cell that handles the failure still can."""
+
+    async def dispatch(name, arguments):
+        return {
+            "is_error": True,
+            "content": [{"type": "text", "text": "missing path"}],
+        }
+
+    context.dispatch_tool = dispatch
+    result = await _call(context, "r = tool('read', path='no')\nprint('handled:', r['is_error'])")
+
+    assert not result.is_error
+    assert "handled: True" in result.text
+    assert "1 tool() call in this cell returned is_error" in result.text
+    assert "missing path" in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_clean_cell_carries_no_failure_note(context) -> None:
+    """Zero failures: the result is exactly what the cell printed — the note
+    exists only when there is something to say."""
+
+    result = await _call(context, "print('all good')")
+
+    assert not result.is_error
+    assert "tool() call" not in result.text
+    assert "all good" in result.text
+
+
+@pytest.mark.asyncio
 async def test_session_dispose_retires_idle_kernel(context) -> None:
     await _call(context, "n = 1")
     kernel = eval_tool._KERNELS[context.session_id]

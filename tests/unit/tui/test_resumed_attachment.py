@@ -178,6 +178,9 @@ async def test_the_band_names_the_team_and_agent_a_resume_restored(tmp_path) -> 
     async with app.run_test(size=(120, 24)) as pilot:
         await _adopted(app, pilot, resumed)
         assert app._status is not None
+        # The band paints the shared display form: a derived default that
+        # adds nothing over the key paints the RAW NAME (D2), while a custom
+        # label would paint itself.
         assert app._status._team == "lopdev"
         assert app._status._agent_profile == "auditor"
 
@@ -298,7 +301,7 @@ async def test_the_takeover_adopt_paints_the_restored_attachment(tmp_path) -> No
         await app._adopt_takeover_session(_session(tmp_path, agents, teams))
         for _ in range(6):
             await pilot.pause()
-        assert app._status._team == "lopdev"
+        assert app._status._team == "lopdev"  # the shared form, as on resume
         assert app._status._agent_profile == "auditor"
 
 

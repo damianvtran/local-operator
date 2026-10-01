@@ -1572,7 +1572,16 @@ def test_the_relay_never_becomes_a_session_owner() -> None:
 #: NEW session directory. ``tests/unit/network/test_mobility.py`` pins that, and
 #: ``tests/unit/session/test_no_session_deletion.py`` allow-lists every rename and
 #: rmtree in them at the call site.
-_MOVE_WRITERS: frozenset[str] = frozenset({"mobility.py", "sync.py"})
+#:
+#: ``carry.py`` joined for the OTHER half of the move (mesh slice (d), where the
+#: bare-name rule below reads THIS set): it REBUILDS the derived wake/monitor
+#: indexes FROM the transcript at the destination's promote, so naming the
+#: transcript is its job exactly as it is ``sync.py``'s — its filename is a local
+#: literal cross-checked against ``session.transcript`` by ``test_carry.py`` so
+#: the relay process does not import the session stack for one string. It writes
+#: no session state (its per-call rows live in ``test_no_session_deletion``'s
+#: allow-list with reasons), so this is a NAME exemption, not a write grant.
+_MOVE_WRITERS: frozenset[str] = frozenset({"mobility.py", "sync.py", "carry.py"})
 
 #: The ONE module exempt from the bare-name rule below, and the reason: the copy
 #: module IS the thing that names a transcript, because naming it is its job. Every

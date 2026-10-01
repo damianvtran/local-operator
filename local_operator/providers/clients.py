@@ -2421,6 +2421,102 @@ def _openai_response_error(payload: Mapping[str, Any]) -> ProviderError:
     )
 
 
+def _part_holds_frame(part: Any, image_part_types: tuple[str, ...]) -> bool:
+    """Whether one rendered content part carries a frame.
+
+    A frame reaches the wire either as a top-level part or nested inside a
+    ``tool_result`` block's ``content`` -- the shape the Anthropic renderer
+    produces for every screenshot a tool returns, and therefore the ONLY shape
+    a screenshot-heavy Anthropic session sends. Scanning the top level alone
+    finds no frame at all in those sessions, which is why the scan has to
+    descend: the block this policy would otherwise leave in place is the
+    churning tool_result itself.
+    """
+    if not isinstance(part, dict):
+        return False
+    if part.get("type") in image_part_types:
+        return True
+    nested = part.get("content")
+    return isinstance(nested, list) and any(
+        isinstance(inner, dict) and inner.get("type") in image_part_types for inner in nested
+    )
+
+
+def _targets_cover(targets: list[dict[str, Any]], block: dict[str, Any]) -> bool:
+    """Whether ``block`` is already in ``targets`` -- by IDENTITY, not equality.
+
+    A content part compares equal to any other part carrying the same bytes,
+    and consecutive screenshots of an unchanged screen render byte-identical
+    frames. Value equality therefore drops the settled marker whenever the
+    newest frame repeats the one before it: the turn goes out with the system
+    head and the last message only, and the provider's backward lookback has
+    nothing to find -- the collapse this policy exists to prevent, reached
+    non-deterministically. Two distinct parts are two distinct blocks, and
+    both deserve their marker.
+    """
+    return any(existing is block for existing in targets)
+
+
+def _settled_cache_target(
+    messages: list[dict[str, Any]], image_part_types: tuple[str, ...]
+) -> dict[str, Any] | None:
+    """The content block whose cached prefix ends BEFORE the newest frame.
+
+    Frame-heavy sessions cross the wire budget and start re-rendering old
+    screenshots -- the fit walk keeps the newest frame at full size and
+    downsizes the rest -- so the newest image-bearing message's bytes change
+    again on a later turn. Prompt caches are prefix-anchored: a breakpoint
+    covering re-rendered bytes stops matching, and providers only find a
+    cached block again by walking backward from the request's remaining
+    markers (observed: ~20 content blocks), so a breakpoint buried in a long
+    conversation silently drops out of the hit set and the read collapses to
+    the system head, re-billing the conversation at write price.
+
+    Measured on the 005 benchmark renders behind task_003's cost forensics.
+    The 9,850 / $0.2079 and 90,360 / $0.0203 numbers are a REPLAY of that
+    turn's real call shape through both marker layouts (offline, real renders,
+    real route) -- not a recorded episode row, so nobody reads them later as
+    an arm measurement: the live run's own rows are 005a's call 52
+    (121,417 / 115,889 / 5,522) followed by call 53 (108,320 / 25,543 /
+    82,771), and 003's call 27 (103,896 / 102,015 / 1,875) followed by call 28
+    (99,279 / 25,543 / 73,730). Both layouts read token-identical prompts.
+
+    The boundary is the message immediately before the newest image-bearing
+    message (its block excludes the frame that re-renders next turn). A
+    message that cannot carry a block falls through to the second-newest
+    frame -- the frame that was newest on the previous request and was
+    re-encoded in THIS render, so it is not settled yet: its bytes hold only
+    from the next request on, and the measured recovery came from the
+    provider's lookback reaching the marker again, not from that block having
+    been final when it was placed. ``None`` when the history has no usable
+    frame, in which case callers keep their historical placement.
+
+    The frame scan descends into a part's nested ``content``; see
+    :func:`_part_holds_frame` for the Anthropic ``tool_result`` shape that
+    makes a top-level-only scan find nothing on a screenshot session.
+    """
+    image_indices = [
+        i
+        for i, message in enumerate(messages)
+        if isinstance(message.get("content"), list)
+        and any(_part_holds_frame(part, image_part_types) for part in message["content"])
+    ]
+    if not image_indices:
+        return None
+    candidates: list[dict[str, Any]] = []
+    if image_indices[-1] > 0:
+        candidates.append(messages[image_indices[-1] - 1])
+    if len(image_indices) >= 2:
+        candidates.append(messages[image_indices[-2]])
+    for message in candidates:
+        content = message.get("content")
+        if isinstance(content, str) and content:
+            message["content"] = content = [{"type": "text", "text": content}]
+        if isinstance(content, list) and content and isinstance(content[-1], dict):
+            return content[-1]
+    return None
+
+
 class OpenAICompatClient:
     """Stream OpenAI-compatible chat/completions or OpenAI Responses.
 
@@ -2816,13 +2912,21 @@ class OpenAICompatClient:
         return out
 
     def _message_cache_markers(self, messages: list[dict[str, Any]]) -> None:
-        """Mark the final message (and the previous user turn) for caching.
+        """Mark the final message and the settled boundary for caching.
 
         Same economics as the Anthropic client: system-only markers stop the
         warm prefix before the conversation. OpenAI-compatible pools that
         honor ``cache_control`` on content parts (OpenRouter BYOK) then keep
         the previous request's prefix warm; providers that ignore the field
         are unaffected. Only applied when the model reports prompt caching.
+
+        The second marker sits at the settled boundary -- the last message
+        before the newest frame -- rather than on an earlier user turn: an
+        older turn's block is stable but sits hundreds of content blocks deep
+        once frames start re-rendering, where the provider's backward lookback
+        can no longer find it (see ``_settled_cache_target`` for the measured
+        cost). With no usable frame in the history the previous user turn is
+        marked instead, the historical layout for text-only sessions.
         """
         targets: list[dict[str, Any]] = []
         if messages:
@@ -2833,15 +2937,22 @@ class OpenAICompatClient:
                 content = last["content"]
             if isinstance(content, list) and content:
                 targets.append(content[-1])
-        user_indices = [i for i, m in enumerate(messages) if m.get("role") == "user"]
-        if len(user_indices) >= 2:
-            prev = messages[user_indices[-2]]
-            content = prev.get("content")
-            if isinstance(content, str):
-                prev["content"] = [{"type": "text", "text": content}]
-                content = prev["content"]
-            if isinstance(content, list) and content and content[-1] not in targets:
-                targets.append(content[-1])
+        settled = _settled_cache_target(messages, ("image_url",))
+        if settled is not None:
+            if not _targets_cover(targets, settled):
+                targets.append(settled)
+        else:
+            user_indices = [i for i, m in enumerate(messages) if m.get("role") == "user"]
+            if len(user_indices) >= 2:
+                prev = messages[user_indices[-2]]
+                content = prev.get("content")
+                if isinstance(content, str):
+                    prev["content"] = [{"type": "text", "text": content}]
+                    content = prev["content"]
+                if isinstance(content, list) and content:
+                    prev_block = content[-1]
+                    if not _targets_cover(targets, prev_block):
+                        targets.append(prev_block)
         for block in targets:
             if isinstance(block, dict):
                 block["cache_control"] = {"type": "ephemeral"}
@@ -3861,8 +3972,13 @@ class AnthropicClient:
         markers stop the cached prefix before the first message, so the
         growing conversation (every tool result, every assistant turn) is
         re-processed at full price on every request. Mark the last content
-        block of the final message and of the second-to-last user turn so
-        the previous prefix stays warm across turns.
+        block of the final message and the settled boundary -- the message
+        immediately before the newest frame -- so the second breakpoint's
+        block survives the frame re-renders that long screenshot sessions
+        perform (see ``_settled_cache_target`` for the measured cost of the
+        older placement). With no usable frame in the history the previous
+        user turn is marked instead, the historical layout for text-only
+        sessions.
 
         Budget: MAX_CACHE_BREAKPOINTS total. System markers are counted
         first; when the sum would exceed the cap the LOWEST-value system
@@ -3880,14 +3996,19 @@ class AnthropicClient:
             last = messages[-1]
             if isinstance(last.get("content"), list) and last["content"]:
                 message_targets.append(last["content"][-1])
-        # Second-to-last USER turn keeps the previous request's prefix warm.
-        user_indices = [i for i, m in enumerate(messages) if m.get("role") == "user"]
-        if len(user_indices) >= 2:
-            prev_user = messages[user_indices[-2]]
-            if isinstance(prev_user.get("content"), list) and prev_user["content"]:
-                block = prev_user["content"][-1]
-                if block not in message_targets:
-                    message_targets.append(block)
+        settled = _settled_cache_target(messages, ("image",))
+        if settled is not None:
+            if not _targets_cover(message_targets, settled):
+                message_targets.append(settled)
+        else:
+            # Second-to-last USER turn keeps the previous request's prefix warm.
+            user_indices = [i for i, m in enumerate(messages) if m.get("role") == "user"]
+            if len(user_indices) >= 2:
+                prev_user = messages[user_indices[-2]]
+                if isinstance(prev_user.get("content"), list) and prev_user["content"]:
+                    block = prev_user["content"][-1]
+                    if not _targets_cover(message_targets, block):
+                        message_targets.append(block)
         if not message_targets:
             return
         budget = self.MAX_CACHE_BREAKPOINTS - len(message_targets)
@@ -3976,9 +4097,11 @@ class AnthropicClient:
         # System-only breakpoints stop the cached prefix before the first
         # message: the entire growing conversation would be re-processed at
         # full price on every request. Mark the last content block of the
-        # final message and the second-to-last user turn so the previous
-        # prefix stays warm across turns, within MAX_CACHE_BREAKPOINTS by
-        # dropping the lowest-value system breakpoint.
+        # final message and the settled boundary (the message before the
+        # newest frame; the previous user turn when there is none) so the
+        # second breakpoint's block survives frame re-renders, within
+        # MAX_CACHE_BREAKPOINTS by dropping the lowest-value system
+        # breakpoint.
         self._message_cache_breakpoints(messages, body, ttl=ttl)
         if request.tools:
             # Safe default: unmapped values fall back to auto (PR-22).

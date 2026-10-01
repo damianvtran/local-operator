@@ -676,7 +676,13 @@ async def test_exec_supervisor_approval_ui(exec_server, tmp_path, approve):
 
 
 @pytest.mark.parametrize(
-    "termination,expected", [("term", "cancelled"), ("kill", "interrupted"), ("stop", "cancelled")]
+    "termination,expected",
+    # `term` is an UNSANCTIONED SIGTERM (a bare os.kill, no stop marker), which is
+    # deliberately NOT a cancellation any more: nobody asked for it, and the ledger says
+    # so (`interrupted` + `stop_class: unattributed-signal`). `stop` is the supervisor's
+    # own control op and stays `cancelled`. `kill` is uncatchable, so the worker leaves
+    # no row and reconcile classifies it `unattributed-death`.
+    [("term", "interrupted"), ("kill", "interrupted"), ("stop", "cancelled")],
 )
 def test_exec_loop_lifecycle_outcomes(exec_server, termination, expected):
     import signal
@@ -708,13 +714,31 @@ def test_exec_loop_lifecycle_outcomes(exec_server, termination, expected):
         # Only the worker created by THIS fixture, under its private config,
         # is signalled. Never target ambient session discovery or cmux state.
         os.kill(status["pid"], signal.SIGTERM if termination == "term" else signal.SIGKILL)
-    deadline = time.monotonic() + 15
+    # THE WAIT IS CHEAP, AND LONG ENOUGH FOR THE POLL ITSELF (QA round 1, Q1).
+    # ``job_status(reconcile=True)`` shells out to ``ps`` to prove the owner is
+    # gone, and under fleet load one call measured 2.8-14 s — which is how a 15 s
+    # deadline lost to the very poll it was waiting on, on a ledger that was
+    # already correct. So the wall clock is generous, and only the ``kill`` case
+    # (whose answer IS produced by that reconciliation) asks for the fork at all.
+    deadline = time.monotonic() + 90
+    reconciled = 0
     while time.monotonic() < deadline:
-        status = job_status(job_id)
+        reconcile = termination == "kill" and reconciled < 10
+        status = job_status(job_id, reconcile=reconcile)
         if status["status"] not in ("starting", "running"):
             break
+        if reconcile:
+            reconciled += 1
         time.sleep(0.05)
     assert status["status"] == expected
+    assert (
+        status.get("stop_class")
+        == {
+            "term": "unattributed-signal",
+            "kill": "unattributed-death",
+            "stop": "deliberate",
+        }[termination]
+    ), status
     before = len(requests)
     assert json.loads(run("exec", "--status", job_id, stdin="").stdout)["status"] == expected
     assert len(requests) == before, "Status/reconciliation must never restart iterations"

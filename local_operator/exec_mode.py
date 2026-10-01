@@ -345,20 +345,90 @@ def read_job_records() -> list[dict[str, Any]]:
     return records
 
 
-def update_job_exit(job_id: str, exit_code: int) -> None:
+#: Exit codes that mean "stopped by a signal/interrupt" (128 + SIGINT, 128 + SIGTERM).
+_STOP_EXIT_CODES = (130, 143)
+
+
+def classify_exit(exit_code: int, stop: dict[str, Any] | None) -> tuple[str, dict[str, Any]]:
+    """``(status, detail)`` for a worker's exit: the ledger's stop vocabulary.
+
+    WHY 130/143 IS NO LONGER JUST ``cancelled``. Exit 130 is shared by a stop a
+    person or supervisor asked for and a SIGTERM nobody explained; mapping both to
+    ``cancelled`` is what made twelve unexplained terminations on 2026-09-30 read
+    as twelve cancellations. So the status follows the EVIDENCE the worker carried
+    (``stop``, filled by ``exec_worker``):
+
+    * a supervisor ``stop`` (``via == "control-stop"``) or a SIGTERM that paired to
+      a covering DELIBERATE stop marker -> ``cancelled``, ``stop_class: deliberate``;
+    * a SIGTERM paired to a covering involuntary marker (``deliberate: false``)
+      -> ``interrupted``, ``stop_class: attributed-involuntary`` — someone named
+      themselves, but nobody asked for the stop;
+    * a SIGTERM with no covering marker, or an interrupt with none ->
+      ``interrupted``, ``stop_class: unattributed-signal``. The sender is
+      unknowable on this platform and the row says so rather than claiming a
+      cancellation.
+
+    A clean exit (0) or an ordinary failure carries no detail at all. The mapping
+    is deliberately ONE function: reverting to the old vocabulary is a one-line
+    change here.
+    """
+    if exit_code == 0:
+        return "succeeded", {}
+    if exit_code not in _STOP_EXIT_CODES:
+        return "failed", {}
+    from local_operator.session.runtime import signal_receipt
+
+    facts = stop or {}
+    entry = facts.get("signal") if isinstance(facts.get("signal"), dict) else None
+    detail: dict[str, Any] = {}
+    if facts.get("via") == "control-stop":
+        stop_class = signal_receipt.CLASS_DELIBERATE
+    elif entry is not None:
+        stop_class = signal_receipt.stop_class_of(entry)
+    else:
+        stop_class = signal_receipt.CLASS_UNATTRIBUTED_SIGNAL
+    marker = entry.get("stop_marker") if entry is not None else None
+    stop_obj: dict[str, Any] = {"via": facts.get("via") or ("signal" if entry else "exit-code")}
+    if entry is not None:
+        stop_obj["signal"] = {
+            key: entry.get(key) for key in ("name", "number", "at", "sender", "sanction")
+        }
+    if isinstance(marker, dict):
+        stop_obj["marker"] = marker
+        if marker.get("sweep_id"):
+            detail["sweep_id"] = marker["sweep_id"]
+    detail["stop_class"] = stop_class
+    detail["stop"] = stop_obj
+    status = "cancelled" if stop_class == signal_receipt.CLASS_DELIBERATE else "interrupted"
+    return status, detail
+
+
+def update_job_exit(job_id: str, exit_code: int, stop: dict[str, Any] | None = None) -> None:
     """Append the terminal record for ``job_id`` (CL-09): ``finished_at`` +
     ``exit_code``. Append-only keeps this race-free; consumers take the
-    latest record per id, so the terminal record supersedes the spawn one."""
+    latest record per id, so the terminal record supersedes the spawn one.
+
+    ``stop`` is what the worker learned about how it was stopped; see
+    :func:`classify_exit` for how it shapes ``status`` and the additive
+    ``stop_class`` / ``stop`` / ``sweep_id`` keys. Optional so older callers are
+    unchanged; a normal exit writes none of those keys.
+    """
     jobs_path = _ensure_logs_dir() / JOBS_FILE
+    try:
+        status, detail = classify_exit(exit_code, stop)
+    except Exception:  # noqa: BLE001 — classification must never cost the terminal row
+        status = (
+            "succeeded" if exit_code == 0 else "cancelled" if exit_code in (130, 143) else "failed"
+        )
+        detail = {}
     update = {
         "id": job_id,
         "finished_at": datetime.now().astimezone().isoformat(),
         "exit_code": exit_code,
         "pid": os.getpid(),
         "process_generation": _process_generation(os.getpid()),
-        "status": (
-            "succeeded" if exit_code == 0 else "cancelled" if exit_code in (130, 143) else "failed"
-        ),
+        "status": status,
+        **detail,
     }
     try:
         fd = os.open(str(jobs_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND | O_BINARY, 0o600)
@@ -434,9 +504,15 @@ def job_status(job_id: str, *, reconcile: bool = True) -> dict[str, Any]:
         generation = result.get("process_generation")
         pid = result.get("pid")
         if pid and generation and _owner_is_dead(pid, generation) is True:
+            # ``stop_class`` names WHICH interruption this is: the owner is dead
+            # and left no terminal row, so nothing — not even a catchable signal —
+            # was recorded by the worker. That is the SIGKILL-class bucket (kill -9,
+            # crash, OOM, power loss), distinct from ``unattributed-signal``, where
+            # the worker was alive to say it had been signalled.
             update = {
                 "id": job_id,
                 "status": "interrupted",
+                "stop_class": "unattributed-death",
                 "finished_at": datetime.now().astimezone().isoformat(),
             }
             _append_job_update(update)

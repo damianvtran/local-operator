@@ -64,7 +64,16 @@ from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Se
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, BinaryIO, Literal, NamedTuple, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    BinaryIO,
+    Literal,
+    NamedTuple,
+    cast,
+    get_args,
+    get_origin,
+)
 from urllib.parse import urlsplit
 
 from pydantic import (
@@ -189,6 +198,7 @@ from local_operator.tools.spill import (
     get_store,
     parse_handle,
 )
+from local_operator.tools.tool_docs import register_tool_doc_renderer
 
 logger = logging.getLogger(__name__)
 
@@ -13338,6 +13348,18 @@ async def _arm_send_patience(
 
 _SESSIONS_CLI: tuple[str, ...] = ("-m", "local_operator.cli")
 
+#: The two environment prefixes a spawned child must never inherit from the
+#: caller. Both are read by the CHILD PRODUCT rather than only by a terminal:
+#: ``LOP_RUNTIME_ADOPT_SESSION`` relaxes resume into adopt
+#: (``session_factory``), ``LOP_RUNTIME_DEFER_MATERIALISE`` defers the
+#: transcript's materialisation, ``LOP_MOBILE_CHILD_RESUME`` makes the child
+#: claim the CALLER's session id to anything reading a process's environment
+#: (``reclaim.session_id_of``), and ``CMUX_*`` steers terminal integration. The
+#: set mirrors ``sdk._scoped_process_env``'s child strip and
+#: ``session.runtime.standby.CONTRACT_KEYS``'s contract: a child ends up in
+#: exactly the state a cold child starts in.
+_SESSIONS_STRIPPED_ENV_PREFIXES: tuple[str, ...] = ("CMUX_", "LOP_")
+
 #: Bound on the ``--background`` launcher subprocess. The launcher itself
 #: waits at most 5 s for readiness (``exec_mode._spawn_background``) and then
 #: prints its receipt and exits; this is the fence for a wedged launcher, not
@@ -13346,12 +13368,22 @@ _SESSIONS_CLI: tuple[str, ...] = ("-m", "local_operator.cli")
 SESSIONS_LAUNCH_TIMEOUT_S = 120.0
 
 #: How long a ``starting`` job is polled for its ``running`` record after the
-#: launcher returns, before the receipt honestly reports the session id and
-#: pid as not yet published. The launcher already waited its own 5 s grace
+#: launcher returns. The launcher already waited its own 5 s grace
 #: (``exec_mode._spawn_background``), and this second window is deliberately
 #: the SAME length rather than a shorter one (review round 1, R-3): a worker
 #: whose session booted just past the launcher's deadline still gets a full
 #: window, and a job that never publishes is bounded the same way.
+#:
+#: WHAT THE WINDOW'S END MEANS (2026-09-30, the resume-honesty fix). The grace
+#: is a DISPLAY deadline, not a guarantee, so the receipt is now decided by
+#: what the ledger actually says when it ends: a published session/pid or a
+#: running/succeeded status renders the reopen receipt; a still-``starting``
+#: job renders an explicit "reopen requested … still starting — follow with
+#: ``--status``" line; a failed/cancelled/interrupted job (or one with no
+#: ledger record at all) is a LOUD error naming the log and the CLI fallback.
+#: A job that boots slower than this window gets the honest starting line and
+#: is never claimed live — the fix is on the receipt, so extending the window
+#: buys nothing and is deliberately not done.
 SESSIONS_READY_GRACE_S = 5.0
 _SESSIONS_READY_POLL_S = 0.1
 
@@ -13365,21 +13397,11 @@ _SESSIONS_READY_POLL_S = 0.1
 #: start of a line.
 _SESSIONS_JOB_LINE_RE = re.compile(r"^Background job ([^:\s]+):", re.MULTILINE)
 
-#: The tool's description — a module constant so the builder, the budget
-#: guard and the PR's measurement all read the same bytes (design note §3.4).
-_SESSIONS_TOOL_DESCRIPTION = (
-    "Manage OTHER local `lop` sessions (top-level and stored; subagents are"
-    " `hub`'s). `list` shows what is running — add `include_stored` or `query`;"
-    " `info` describes one (state, directory, origin, sidebar visibility); `spawn`"
-    " opens a parallel session for work the USER asked to run separately — it is a"
-    ' listed workstream by default (use `visibility="ephemeral"` only for a'
-    " throwaway run the operator did not ask to see); `resume` reopens a"
-    " stored/stopped session headlessly; `stop` ends a running session gracefully;"
-    " `peek` reads a bounded transcript window (tail/head/cursor/search, or a"
-    " `digest`). Address a session with exactly one of `session` (exact id),"
-    " `target` (name/cwd substring) or `pid`. Steering mid-turn is `send` with"
-    " now=True."
-)
+# The tool's description is DERIVED from the per-op tables further down (see
+# ``_sessions_tool_description``): a hand-written copy beside them is exactly
+# the drift the incident's "the advertisement never said what each op accepts"
+# is made of. It is still a module constant so the builder, the budget guard,
+# the drift test and the PR's measurement all read the same bytes (§3.4).
 
 
 # The single flat schema (the ``hub``/``send`` precedent) with the ops as one
@@ -13396,10 +13418,10 @@ class SessionsParams(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    op: Literal["list", "info", "spawn", "resume", "stop", "peek"] = Field(
+    op: Literal["list", "info", "spawn", "resume", "stop", "peek", "help"] = Field(
         description=(
-            "list; info; spawn (only work the USER asked to run separately; listed by "
-            "default); resume; stop; peek a transcript."
+            "list; info; spawn (USER-requested work; listed by default); resume;"
+            " stop; peek; help (per-op reference)."
         )
     )
     session: str | None = Field(
@@ -13471,13 +13493,294 @@ _SESSIONS_OP_FIELDS: dict[str, frozenset[str]] = {
     "resume": frozenset({"op", "session", "target", "pid", "prompt", "background"}),
     "stop": frozenset({"op", "session", "target", "pid"}),
     "peek": frozenset({"op", "session", "target", "pid", "query"}) | _SESSIONS_PEEK_FIELDS,
+    # ``help`` reads nothing: the reference is static, so an address or a
+    # `prompt` beside it is a misspelled intent like any other stray field.
+    "help": frozenset({"op"}),
 }
 
 _SESSIONS_ADDRESS_FIELDS = ("session", "target", "pid")
 
 #: Ops that address ONE existing session. ``spawn`` creates one; ``list`` reads
-#: the set; the shared resolver runs for these.
+#: the set; ``help`` renders the reference; the shared resolver runs for these.
 _SESSIONS_TARGET_OPS = frozenset({"info", "resume", "stop", "peek"})
+
+#: The ops in their advertised order — the field table's own insertion order, so
+#: a new op lands in the description, the ``op`` literal's text, the validation
+#: clauses and the ``help`` reference without a second list to update.
+_SESSIONS_OP_ORDER: tuple[str, ...] = tuple(_SESSIONS_OP_FIELDS)
+
+
+def _sessions_op_accepted_fields(op: str) -> tuple[str, ...]:
+    """The op's accepted inputs, in one canonical reading order (no ``op``).
+
+    The address fields lead as a group (``session|target|pid``, the order the
+    resolver's refusals already list them in), then the rest follow the params
+    model's OWN field order — derived, so a field added to ``SessionsParams``
+    and the table appears here without anyone remembering this function.
+    """
+    accepted = _SESSIONS_OP_FIELDS[op] - {"op"}
+    addresses = tuple(field for field in _SESSIONS_ADDRESS_FIELDS if field in accepted)
+    rest = tuple(
+        name
+        for name in SessionsParams.model_fields
+        if name in accepted and name not in _SESSIONS_ADDRESS_FIELDS
+    )
+    return addresses + rest
+
+
+def _sessions_op_accepted_text(op: str) -> str:
+    """``session|target|pid, prompt, background`` — the op's accepted set as one
+    phrase. Empty when the op takes no inputs beyond ``op`` itself.
+
+    ONE rendering function for the description, the validation refusals and the
+    ``help`` reference (the same bytes wherever the set is named), and the
+    spelling the refusal message promises: what the caller is told it may pass
+    is what the tool actually accepts, because both read the one table.
+    """
+    fields = _sessions_op_accepted_fields(op)
+    addresses = [field for field in fields if field in _SESSIONS_ADDRESS_FIELDS]
+    parts: list[str] = ["|".join(addresses)] if addresses else []
+    parts.extend(field for field in fields if field not in _SESSIONS_ADDRESS_FIELDS)
+    return ", ".join(parts)
+
+
+def _sessions_accepted_clause(op: str) -> str:
+    """One sentence naming what ``op`` takes, for a refusal to append."""
+    text = _sessions_op_accepted_text(op)
+    if text:
+        return f"`{op}` takes: {text}."
+    return f"`{op}` takes no extra params."
+
+
+#: The one pointer every refusal appends. The full reference is on demand
+#: (``op='help'``) rather than in the always-loaded description, so a refusal is
+#: where a caller learns that route exists.
+_SESSIONS_HELP_POINTER = "Call op='help' for the full per-op reference."
+
+
+def _sessions_stray_field_refusal(op: str, sentence: str) -> str:
+    """A stray-field refusal, suffixed with the op's accepted set.
+
+    The incident's second half: a refusal said only that ONE field was not
+    allowed, so the caller had to guess the rest of the surface. Every refusal
+    that rejects a field now names what the op DOES take, from the same table
+    the description and the ``help`` reference read, and points at the full
+    reference — a caller that gets it wrong once can get it right without
+    another probe.
+    """
+    return f"{sentence} {_sessions_accepted_clause(op)} {_SESSIONS_HELP_POINTER}"
+
+
+def _sessions_tool_description() -> str:
+    """The always-loaded description, DERIVED from the op table (§3.4).
+
+    The incident this text answers: thirteen ``resume`` calls carried a
+    ``timeout_ms`` the tool never had, and nothing in the advertisement said
+    which inputs each op accepts — so the summary below is generated from
+    ``_SESSIONS_OP_FIELDS`` (never hand-copied; the drift test pins the
+    description against the table) and either every accepted input is named or
+    the caller learns, in the same breath, where the full reference is.
+    """
+    summary = "; ".join(
+        f"{op}: {_sessions_op_accepted_text(op) or 'none'}" for op in _SESSIONS_OP_ORDER
+    )
+    return (
+        "Manage OTHER local `lop` sessions (top-level and stored; subagents are"
+        " `hub`'s)."
+        f" Inputs per op (anything else is refused) — {summary}."
+        " `spawn` opens a listed workstream for USER-requested work"
+        " (`visibility='ephemeral'` hides a throwaway run); `resume` reopens a"
+        " stored/stopped session headlessly; `stop` ends gracefully; `peek` reads a"
+        " transcript window. Address exactly one of `session` (id), `target`"
+        " (name/cwd) or `pid`. Steering mid-turn: `send` now=True."
+    )
+
+
+#: The tool's description — one module constant so the builder, the budget
+#: guard, the drift test and the PR's measurement all read the same bytes (§3.4).
+_SESSIONS_TOOL_DESCRIPTION = _sessions_tool_description()
+
+
+def _sessions_peek_bounds_refusal() -> str:
+    """The reference's one enumerable bound, derived from the code constant.
+
+    A lazy import, like ``_sessions_peek_validation_error``'s: the renderer
+    must not make ``builtin``'s import pay for ``harness.comms``, and this
+    text is only ever asked for by ``op='help'`` (or the audit lane's reader).
+    """
+    from local_operator.harness.comms import PEEK_MAX_STEPS
+
+    return f"a window is bounded (max {PEEK_MAX_STEPS} steps — page with `before_id`)."
+
+
+class _SessionsOpDoc(NamedTuple):
+    """One op's entry in the ``help`` reference (prose only — the param lists
+    are generated from ``SessionsParams`` + ``_SESSIONS_OP_FIELDS``)."""
+
+    summary: str
+    example: str
+    refusals: tuple[str, ...] = ()
+
+
+#: Hand-written prose per op, kept apart from the generated parameter lists on
+#: purpose: what an op DOES, one example that parses, and the refusals a caller
+#: hits — none of which is derivable from a schema. Everything enumerable
+#: (which fields exist, their types and defaults) is generated.
+_SESSIONS_OP_DOCS: dict[str, _SessionsOpDoc] = {
+    "list": _SessionsOpDoc(
+        summary="show what is running; `include_stored` widens the listing to"
+        " stored (not running) sessions and `query` searches them.",
+        example="sessions(op='list', include_stored=True)",
+        refusals=("takes no address and no `prompt`/`name`.",),
+    ),
+    "info": _SessionsOpDoc(
+        summary="describe one session: state, directory, origin, sidebar visibility.",
+        example="sessions(op='info', session='a1b2c3d4e5f6')",
+        refusals=(
+            "needs exactly one address; a miss reports that both the live and"
+            " stored searches ran, and an ambiguous `target` returns the candidates.",
+        ),
+    ),
+    "spawn": _SessionsOpDoc(
+        summary="open a NEW parallel session for work the USER asked to run"
+        " separately; listed as a workstream by default.",
+        example="sessions(op='spawn', prompt='audit the release', name='release audit')",
+        refusals=(
+            "needs `prompt`; `background=false` is unsupported (v1 always detaches);"
+            " `visibility='ephemeral'` hides a throwaway run.",
+        ),
+    ),
+    "resume": _SessionsOpDoc(
+        summary="reopen a stored/stopped session headlessly and report what was"
+        " opened; the receipt names the session, job and pid once published.",
+        example="sessions(op='resume', session='a1b2c3d4e5f6', prompt='continue')",
+        refusals=(
+            "needs an address and `prompt`; a session already open elsewhere is"
+            " refused by its lease; the calling session cannot resume itself;"
+            " `visibility` is fixed at creation and cannot be re-stamped.",
+        ),
+    ),
+    "stop": _SessionsOpDoc(
+        summary="end a running session gracefully (the graceful ladder only — this"
+        " tool never SIGKILLs).",
+        example="sessions(op='stop', session='a1b2c3d4e5f6')",
+        refusals=(
+            "needs an address; a stored (not running) session is refused; the"
+            " calling session cannot stop itself.",
+        ),
+    ),
+    "peek": _SessionsOpDoc(
+        summary="read a bounded transcript window (tail/head/cursor/search) or a" " `digest` fold.",
+        example="sessions(op='peek', session='a1b2c3d4e5f6', steps=12)",
+        refusals=(
+            "one window at a time (`steps`/`head`/`before_id`/`around_id` are"
+            " mutually exclusive); `digest` folds the newest rows alone; `regex`"
+            " needs `query`.",
+            # The step bound is DERIVED from ``comms.PEEK_MAX_STEPS`` by the
+            # renderer (agent review round 1, M3) — a surface whose selling
+            # point is "everything enumerable is generated" must not keep the
+            # last hard copy of a constant; see ``_sessions_peek_bounds_refusal``.
+        ),
+    ),
+    "help": _SessionsOpDoc(
+        summary="return this reference; no address, nothing beyond `op`.",
+        example="sessions(op='help')",
+        refusals=("takes no other inputs.",),
+    ),
+}
+
+
+def _sessions_annotation_text(annotation: Any) -> str:
+    """A field's type as one short phrase (``str``, ``int``, ``'a'|'b'``)."""
+    args = get_args(annotation)
+    if args and type(None) in args:
+        rest = [arg for arg in args if arg is not type(None)]
+        if len(rest) == 1:
+            return _sessions_annotation_text(rest[0])
+    origin = get_origin(annotation)
+    if origin is Literal:
+        return "|".join(f"'{value}'" for value in get_args(annotation))
+    name = getattr(annotation, "__name__", None)
+    return str(name) if name else str(annotation)
+
+
+def _sessions_field_brief(name: str) -> str:
+    """``str`` / ``bool, default True`` — type and default, from the model."""
+    field = SessionsParams.model_fields[name]
+    text = _sessions_annotation_text(field.annotation)
+    if field.is_required() or field.default is None:
+        return text
+    return f"{text}, default {field.default!r}"
+
+
+def _sessions_reference_body() -> str:
+    """Render the full per-op reference; pure, deterministic, no I/O."""
+    lines: list[str] = [
+        "sessions — manage OTHER local `lop` sessions (top-level and stored;"
+        " subagents are `hub`'s).",
+        "Address a session with exactly one of `session` (exact id), `target`"
+        " (name/id/cwd substring; live, then stored) or `pid`. Anything outside"
+        " the accepted set below is refused, and the refusal names the set.",
+        "",
+    ]
+    for op in _SESSIONS_OP_ORDER:
+        doc = _SESSIONS_OP_DOCS[op]
+        inputs = ", ".join(
+            f"{name} ({_sessions_field_brief(name)})" for name in _sessions_op_accepted_fields(op)
+        )
+        lines.append(f"`{op}` — {doc.summary}")
+        lines.append(f"  inputs: {inputs or '(none)'}")
+        lines.append(f"  example: {doc.example}")
+        refusals = list(doc.refusals)
+        if op == "peek":
+            # The one enumerable bound, appended from the code constant
+            # (agent review round 1, M3) instead of hand-copied beside the
+            # static refusals above.
+            refusals.append(_sessions_peek_bounds_refusal())
+        for refusal in refusals:
+            lines.append(f"  refusal: {refusal}")
+        lines.append("")
+    lines.append(
+        "A validation failure names the called op's accepted set and points here;"
+        " this reference is the same text the `help` op returns."
+    )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_sessions_reference(tool: AgentTool | None = None) -> str:
+    """The full ``sessions`` reference — ONE renderer, two entry points.
+
+    Here is the ``help`` op's payload; the audit lane's ``read tool://sessions``
+    serves the same call, which is why this is a public function and not inline
+    text in the executor. PURE and deterministic by contract: no I/O, no clock,
+    no ids, fixed op/field order — the same call renders byte-identical text in
+    every process, so a test can pin the two entry points equal.
+
+    NEVER raises. Building from live objects (a model schema, a field table) is
+    what makes the text drift-proof, and it is also the one place a future
+    refactor could break: a failure degrades to the tool's own name and
+    description with an explicit marker rather than surfacing into a tool
+    result. ``tool`` is optional and read only by that fallback.
+    """
+    try:
+        return _sessions_reference_body()
+    except Exception:  # noqa: BLE001 — degradation, not a raise; see docstring
+        name = str(getattr(tool, "name", "") or "sessions")
+        description = str(getattr(tool, "description", "") or _SESSIONS_TOOL_DESCRIPTION)
+        return (
+            f"{name} — {description}\n\n"
+            "reference unavailable: this build could not render the per-op reference."
+        )
+
+
+# ``read tool://sessions`` must serve THIS function's bytes — the same call
+# the ``help`` op returns (the two-entry-point contract above) — instead of
+# the generic schema render. Module-level so the registration is import-time:
+# every startup path that can build or read the sessions tool has already run
+# it. The edge is one-way (``tool_docs`` imports no tools module), so no import
+# cycle rides on it, and ``tool_docs`` consults the registry at RESOLVE time,
+# so import order cannot matter.
+register_tool_doc_renderer("sessions", render_sessions_reference)
 
 
 def _sessions_peek_validation_error(params: SessionsParams, given: set[str]) -> str | None:
@@ -13569,35 +13872,41 @@ def _sessions_validation_error(params: SessionsParams) -> str | None:
                 "is not a tool call."
             )
     elif "prompt" in given:
-        return "`prompt` applies to spawn/resume only."
+        return _sessions_stray_field_refusal(op, "`prompt` applies to spawn/resume only.")
 
     if op == "resume" and "visibility" in given:
         # The immutability sentence (§5.3): origin.json is written once, at
         # creation, and this tool never writes it — so a resumed session keeps
         # whatever visibility it had, and the remedy for a hidden one is a new
         # workstream, not an edit.
-        return (
+        return _sessions_stray_field_refusal(
+            op,
             "visibility is set at creation and never re-stamped: origin.json is "
             "written once and immutable, so resume cannot change it — spawn a new "
-            "workstream instead (that is the default)."
+            "workstream instead (that is the default).",
         )
 
     allowed = _SESSIONS_OP_FIELDS[op]
     for field in sorted(given - allowed):
         if field in _SESSIONS_ADDRESS_FIELDS:
             if op == "spawn":
-                return (
+                return _sessions_stray_field_refusal(
+                    op,
                     f"spawn creates a new session, so it takes no `{field}` — drop it, "
-                    "or address an existing session with info/resume/stop."
+                    "or address an existing session with info/resume/stop.",
                 )
-            return f"`{field}` does not apply to op='{op}' — it takes no address."
+            return _sessions_stray_field_refusal(
+                op, f"`{field}` does not apply to op='{op}' — it takes no address."
+            )
         if field == "background":
-            return "`background` applies to spawn/resume only."
+            return _sessions_stray_field_refusal(op, "`background` applies to spawn/resume only.")
         if field in _SESSIONS_PEEK_FIELDS:
-            return f"`{field}` applies to op='peek' only."
+            return _sessions_stray_field_refusal(op, f"`{field}` applies to op='peek' only.")
         if op == "list":
-            return f"`{field}` applies to other ops; list takes no `{field}`."
-        return f"`{field}` applies to op='spawn' only."
+            return _sessions_stray_field_refusal(
+                op, f"`{field}` applies to other ops; list takes no `{field}`."
+            )
+        return _sessions_stray_field_refusal(op, f"`{field}` applies to op='spawn' only.")
 
     if op == "peek":
         refusal = _sessions_peek_validation_error(params, given)
@@ -13621,13 +13930,14 @@ def _sessions_validation_error(params: SessionsParams) -> str | None:
 def _sessions_tier(args: dict[str, Any]) -> Literal["read", "write", "exec"]:
     """Per-call approval tier: the guard is per TOOL, the tier is per OP.
 
-    ``list``/``info`` are reads and must not prompt; ``spawn``/``resume`` ask
-    the user for the same commitment `task` does (a session is being started);
-    ``stop`` ends a process and keeps the tool's static ``exec``. An unknown op
-    keeps ``exec`` — a tier must never downgrade on a guess.
+    ``list``/``info``/``peek``/``help`` are reads and must not prompt;
+    ``spawn``/``resume`` ask the user for the same commitment `task` does (a
+    session is being started); ``stop`` ends a process and keeps the tool's
+    static ``exec``. An unknown op keeps ``exec`` — a tier must never downgrade
+    on a guess.
     """
     op = str(args.get("op") or "")
-    if op in ("list", "info", "peek"):
+    if op in ("list", "info", "peek", "help"):
         return "read"
     if op in ("spawn", "resume"):
         return "write"
@@ -14976,11 +15286,33 @@ def _sessions_open_env(context: object | None) -> dict[str, str]:
     THIS session runs; a spawned session is a different identity that
     resolves its own credentials from the store, and the frozen design
     enumerates the injections without it (§6.2).
+
+    The inherited ``CMUX_*``/``LOP_*`` prefixes are STRIPPED BEFORE the
+    deliberate injections (a pre-filtered ``parent``, not an exclude list, so
+    the grants above still win). A live desktop-engaged session's environment
+    — measured 2026-09-30 — carries ``LOP_RUNTIME_ADOPT_SESSION=1``,
+    ``LOP_RUNTIME_DEFER_MATERIALISE=1`` and ``LOP_MOBILE_CHILD_RESUME=<its
+    own id>``, and every one of them silently steers the spawned CLI: adopt
+    skips the resume strictness, defer skips materialisation, and the RESUME
+    value makes the child claim the caller's session to any environment
+    reader. This is the same strip the SDK makes for its children
+    (``sdk._scoped_process_env(for_child=True)``: "CMUX_* and LOP_* are
+    stripped — the two prefixes a lop parent exports that are read by the
+    CHILD product") and the same posture ``standby.CONTRACT_KEYS`` pins for
+    the warm pool. Nothing the child needs is lost: its roots travel as
+    ``LOCAL_OPERATOR_CONFIG_DIR``/``LOCAL_OPERATOR_AGENT_HOME`` (a different
+    prefix), and the child contract is injected above from THIS process's
+    decisions, never inherited from it.
     """
     injections: dict[str, str] = dict(NON_INTERACTIVE_ENV)
     injections.update(may_delegate_env_injection(context))
     injections.update(scratchpad_env_injection(ensure_scratchpad_dir(scratchpad_dir_of(context))))
-    return shell_env.child_environment(injections=injections)
+    parent = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.startswith(_SESSIONS_STRIPPED_ENV_PREFIXES)
+    }
+    return shell_env.child_environment(parent=parent, injections=injections)
 
 
 async def _sessions_launch(
@@ -15130,6 +15462,24 @@ def _sessions_open_body(params: SessionsParams, details: Mapping[str, Any]) -> s
             opened_by += f" from session {opener['session']}"
         opened_by += "."
     if params.op == "resume":
+        if details.get("readiness") == "starting":
+            # The bounded grace expired before a published session or a running
+            # run appeared, and the ledger still says ``starting`` — so the
+            # ONLY true sentence is that the reopen was REQUESTED. A receipt
+            # that said "reopened" here was the silent no-op this path exists
+            # to make visible (see ``SESSIONS_READY_GRACE_S``).
+            requested = f"reopen requested {named}" if named else "reopen requested"
+            text = (
+                f"{requested}{where} — the exec job is still starting, so the session "
+                "is not confirmed live yet; follow it with "
+                f"`lop exec --status {details.get('job_id')}` (or `lop sessions`)."
+            )
+            if details.get("sidebar_visibility") == "hidden":
+                text += (
+                    " A hidden session stays hidden; spawn a new workstream instead if "
+                    "this work should be visible."
+                )
+            return text
         origin = details.get("origin") or "not recorded"
         visibility = details.get("sidebar_visibility") or "unknown"
         # The lead carries the space ``named`` needs and nothing in the
@@ -15171,6 +15521,57 @@ def _sessions_open_body(params: SessionsParams, details: Mapping[str, Any]) -> s
             f"route back is `lop exec --resume {details['session_id']}`."
         )
     return text
+
+
+def _sessions_dead_job_error(
+    tool_call_id: str,
+    job_id: str,
+    status: str,
+    state: Mapping[str, Any],
+    resume_id: str,
+) -> ToolResult:
+    """The loud refusal for a launch whose job is gone before it went live.
+
+    Reached when the ledger says the job failed/cancelled/interrupted, or
+    holds no record at all, and no live session was ever published. The
+    receipt that used to follow this state said "reopened" anyway — the
+    silent no-op class the incident was made of. This names the job, reads
+    the worker's own last log line, and gives the exact retry: for a resume,
+    the CLI's ``--resume <id>`` fallback; for a spawn, the status verb,
+    because there is no id to reopen.
+    """
+    log_path = str(state.get("log") or "")
+    reason = ""
+    if log_path:
+        try:
+            # The same read ``exec_mode._worker_failure`` performs — imported
+            # rather than copied so the two receipts cannot pick different
+            # lines, and best-effort for the same reason its docstring gives.
+            from local_operator.exec_mode import _worker_failure
+
+            reason = _worker_failure(Path(log_path))
+        except Exception:  # noqa: BLE001 — never lose the refusal to a log read
+            reason = ""
+    outcome = status or "no ledger record"
+    detail = f" Last line: {reason}" if reason else ""
+    # The verb follows what the fallback IS: a resume retries the same session
+    # (``--resume``), while a spawn has nothing to retry — ``--status`` reads
+    # the dead job's ledger entry, so the sentence says "follow up" (agent
+    # review round 1, N1).
+    if resume_id:
+        fallback = f"`lop exec --resume {resume_id} --background`"
+        verb = "Retry with"
+    else:
+        fallback = f"`lop exec --status {job_id}`"
+        verb = "Follow up with"
+    return _error(
+        tool_call_id,
+        "sessions",
+        f"the exec job {job_id} did not become a live session ({outcome}){detail}. "
+        f"Log: {log_path or '(not recorded)'}. {verb} {fallback} — and check "
+        "`lop sessions` for what is actually running.",
+        details={"job_id": job_id, "log_path": log_path or None, "resume_id": resume_id or None},
+    )
 
 
 async def _sessions_open(
@@ -15254,9 +15655,28 @@ async def _sessions_open(
         await asyncio.sleep(_SESSIONS_READY_POLL_S)
         state = await asyncio.to_thread(job_status, job_id, reconcile=False)
     state = await asyncio.to_thread(job_status, job_id)
+    status = str(state.get("status") or "")
+    pid = _sessions_published_pid(state)
+    # LIVENESS IS THE RECEIPT'S HONESTY CONDITION. A reopen may be claimed only
+    # when the ledger shows a live run — a published session id or pid, or a
+    # running/succeeded status. The id parsed from ARGV is NOT evidence: for a
+    # resume we supplied it ourselves, so it is merged in below for display
+    # only. A job that died (or never got a ledger record) is a LOUD error; a
+    # job the ledger still calls ``starting`` gets the honest starting line.
+    went_live = (
+        bool(pid)
+        or bool(state.get("session_id"))
+        or status
+        in (
+            "running",
+            "succeeded",
+            "completed",
+        )
+    )
+    if not went_live and status != "starting":
+        return _sessions_dead_job_error(tool_call_id, job_id, status, state, resume_id)
 
     session_id = str(state.get("session_id") or "") or resume_id
-    pid = _sessions_published_pid(state)
     disk = (
         await asyncio.to_thread(_sessions_disk_facts, session_id)
         if session_id
@@ -15279,6 +15699,7 @@ async def _sessions_open(
         "job_id": job_id,
         "name": name or None,
         "state": str(state.get("status") or "starting"),
+        "readiness": "live" if went_live else "starting",
         "origin": origin,
         "sidebar_visibility": visibility,
         "opener": disk.opener,
@@ -15288,6 +15709,53 @@ async def _sessions_open(
     if params.op == "resume":
         details["visibility_changed"] = False
     return _text(tool_call_id, "sessions", _sessions_open_body(params, details), details=details)
+
+
+def _sessions_params_error(
+    tool_call_id: str, args: Mapping[str, Any], exc: ValidationError
+) -> ToolResult:
+    """A pydantic refusal that names the op's accepted inputs (the incident).
+
+    ``timeout_ms`` was refused with "Extra inputs are not permitted" and
+    nothing said what WAS permitted, so the caller retried blind. An
+    ``extra_forbidden`` error is the only class that gets the guided message —
+    a wrong type or a bad literal keeps ``_validation_error``'s rendering,
+    which already names the problem. The accepted set comes from the same
+    table the description and ``help`` read, and the op is read from the RAW
+    args: if ``op`` itself is missing or invalid, naming one op's set would be
+    a guess, so the clause degrades to the op list.
+    """
+    extras = sorted(
+        {
+            str(error["loc"][0])
+            for error in exc.errors()
+            if error.get("type") == "extra_forbidden" and error.get("loc")
+        }
+    )
+    if not extras:
+        return _validation_error(tool_call_id, "sessions", exc)
+    if len(extras) == 1:
+        head = f"`{extras[0]}` is not a sessions parameter."
+    else:
+        head = "`" + "`, `".join(extras) + "` are not sessions parameters."
+    op = str(args.get("op") or "")
+    if op in _SESSIONS_OP_FIELDS:
+        guidance = f"{head} {_sessions_accepted_clause(op)} {_SESSIONS_HELP_POINTER}"
+    else:
+        ops = ", ".join(_SESSIONS_OP_ORDER)
+        guidance = f"{head} The ops are {ops}. {_SESSIONS_HELP_POINTER}"
+    others = [error for error in exc.errors() if error.get("type") != "extra_forbidden"]
+    if not others:
+        return _invalid_arguments(tool_call_id, "sessions", guidance)
+    # Mixed errors: the other problems keep the generic rendering and the
+    # guidance follows, so neither half hides the other.
+    lines = [
+        f"- {'.'.join(str(part) for part in error['loc']) or '<root>'}: {error['msg']}"
+        for error in exc.errors()
+    ]
+    return _invalid_arguments(
+        tool_call_id, "sessions", "invalid arguments:\n" + "\n".join(lines) + "\n" + guidance
+    )
 
 
 async def execute_sessions(
@@ -15301,12 +15769,16 @@ async def execute_sessions(
     try:
         params = SessionsParams(**args)
     except ValidationError as exc:
-        return _validation_error(tool_call_id, "sessions", exc)
+        return _sessions_params_error(tool_call_id, args, exc)
 
     refusal = _sessions_validation_error(params)
     if refusal is not None:
         return _error(tool_call_id, "sessions", refusal)
 
+    if params.op == "help":
+        # Read-tier, no address, no I/O: the reference is the renderer's own
+        # output, so ``read tool://sessions`` and this op cannot disagree.
+        return _text(tool_call_id, "sessions", render_sessions_reference())
     if params.op == "list":
         return await _sessions_list(tool_call_id, params, context)
     if params.op == "info":

@@ -5621,3 +5621,32 @@ def test_the_suggestion_detail_never_paints_a_partial_window_word(monkeypatch) -
         note = _suggestion_detail(row, label=label, room=room)
         assert note.endswith("$0.15/0.6"), note
         assert note[: -len("$0.15/0.6")] in allowed_prefixes, note
+
+
+@pytest.mark.asyncio
+async def test_settings_team_rows_paint_label_first_with_the_key(tmp_path: Path) -> None:
+    """The pane's first line is the label-first display; the key rides beside it.
+
+    The facts and the summary keep their existing sources (the picker's own
+    choices), so the pane cannot drift from what ``/team`` offers.
+    """
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    session = FakeSession()
+    registry = TeamRegistry(tmp_path)
+    registry.create_team(
+        TeamEditFields(
+            name="data-quality",
+            label="Data Quality",
+            description="Finds issues",
+            manager="manager",
+        )
+    )
+    session.team_registry = registry
+
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        rows = app._settings_team_rows()
+
+    assert rows == [("Data Quality", "0 members", "Finds issues")]

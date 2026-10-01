@@ -20,7 +20,8 @@ serialized state fits ``values.classification.maxStateChars``:
 
 1. drop ``context`` entirely;
 2. trim each candidate line to 120 chars, then to 60;
-3. drop the lowest-priority candidate kind (``project`` → ``mcp`` → ``guide`` → ``skill``);
+3. drop the lowest-priority candidate kind (``project`` → ``tool`` → ``mcp`` →
+   ``guide`` → ``skill``);
 4. truncate ``request`` to the remaining budget, appending a truncation marker.
 
 The order is the contract and it is also the right order: the context line is
@@ -83,7 +84,7 @@ from typing import Any, Literal, Protocol, TypeVar, cast, runtime_checkable
 
 from local_operator.classification.cascade import classification_section
 
-ResourceKind = Literal["skill", "guide", "mcp", "project"]
+ResourceKind = Literal["skill", "guide", "mcp", "project", "tool"]
 
 
 @runtime_checkable
@@ -132,8 +133,14 @@ CANDIDATE_LINE_LIMITS: tuple[int, ...] = (120, 60)
 #: Rung 3's drop order — lowest priority first. Projects drop first: a
 #: missing project line is the least costly absence — the request itself
 #: still names the work being done, and the roster rebuilds the row the
-#: moment the store changes.
-KIND_DROP_ORDER: tuple[ResourceKind, ...] = ("project", "mcp", "guide", "skill")
+#: moment the store changes. The tool kind drops next, for the same shape of
+#: reason one step weaker: a tool line points at a tool the session ALREADY
+#: holds (its schema is loaded on every request), while an MCP/guide/skill
+#: line points at content the model would otherwise not read at all — so the
+#: tool line is the cheapest thing to give back after the project rows.
+#: ``recommend.QUESTION_KIND_ORDER`` is this tuple's exact reverse and the
+#: mirror is pinned by ``tests/unit/classification/test_recommend.py``.
+KIND_DROP_ORDER: tuple[ResourceKind, ...] = ("project", "tool", "mcp", "guide", "skill")
 
 #: How each kind is keyed on the wire. The plural/`mcp_servers` spelling is the
 #: contract's (§5), matched rather than "improved": the model's rubric comes
@@ -143,6 +150,8 @@ KIND_TO_STATE_KEY: dict[ResourceKind, str] = {
     "guide": "guides",
     "mcp": "mcp_servers",
     "project": "projects",
+    # The session-management tools this session holds (``tool://`` rows).
+    "tool": "tools",
 }
 
 #: The inverse, for filtering a cached roster by dropped kind.

@@ -470,6 +470,121 @@ def test_the_roster_is_the_routers_own_view_with_harness_owned_text() -> None:
     assert roster[3].description == session_factory._MCP_DEFAULT_CAPABILITY
 
 
+class _StubComms:
+    """``subagent_comms``' one read at build time: ``is_child``."""
+
+    def is_child(self, job_id: str | None) -> bool:
+        return False
+
+
+class _StubJobs:
+    """The three reads ``JobManagerProtocol``'s runtime check looks for."""
+
+    def get(self, job_id: str, *, registrant_id: str | None = None) -> Any:
+        return None
+
+    def list(self, *, registrant_id: str | None = None) -> list[Any]:
+        return []
+
+    async def cancel(self, job_id: str, *, registrant_id: str | None = None) -> bool:
+        return False
+
+
+def _session_management_tools() -> list[Any]:
+    """The six session-management tools, from the REAL ``createIf`` table.
+
+    The roster's availability gate is "is the tool in this session's built
+    list", so the test builds through the same table the session uses: a
+    context with exactly the three surfaces the gates read (a launcher,
+    subagent comms, a jobs registry) and nothing else.
+    """
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools.registry import create_tools
+
+    context = ToolContext(
+        subagent_launcher=lambda label, prompt, *, agent="task", effort=None: "job-x",
+        subagent_comms=_StubComms(),
+        jobs=_StubJobs(),
+    )
+    return create_tools(context, ["sessions", "send", "hub", "task", "wait", "jobs"])
+
+
+def test_the_tool_roster_is_the_sessions_own_built_tools() -> None:
+    """Rows for the six, described by the TOOLS' own registration text (§6)."""
+    tools = _session_management_tools()
+
+    rows = session_factory._tool_roster_rows(tools)
+
+    assert [(row.kind, row.name, row.resource_url) for row in rows] == [
+        ("tool", "sessions", "tool://sessions"),
+        ("tool", "send", "tool://send"),
+        ("tool", "hub", "tool://hub"),
+        ("tool", "task", "tool://task"),
+        ("tool", "wait", "tool://wait"),
+        ("tool", "jobs", "tool://jobs"),
+    ]
+    sessions_tool = next(tool for tool in tools if tool.name == "sessions")
+    # The description is the tool's OWN text — first sentence — never a prose
+    # copy kept beside the roster that a tool rewrite could drift from.
+    assert rows[0].description == (
+        "Manage OTHER local `lop` sessions (top-level and stored; subagents are `hub`'s)."
+    )
+    assert sessions_tool.description.startswith(rows[0].description)
+    assert all(
+        len(row.description) <= session_factory._TOOL_ROSTER_DESCRIPTION_LIMIT for row in rows
+    )
+
+
+def test_tool_rows_gate_on_what_the_session_actually_holds() -> None:
+    """A context without the delegation surfaces yields only what it holds."""
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools.registry import create_tools
+
+    bare = create_tools(ToolContext(), ["sessions", "send", "hub", "task", "wait", "jobs"])
+
+    rows = session_factory._tool_roster_rows(bare)
+
+    # ``send`` is the one unconditional builder; the other five are createIf-
+    # gated, so a session that cannot delegate or track jobs offers none of
+    # them and the roster can never point at a capability it lacks.
+    assert [row.name for row in rows] == ["send"]
+
+
+def test_the_roster_carries_tool_rows_and_appends_them() -> None:
+    """The wiring half: hooks with tool rows, and the neighbours unmoved."""
+    index = _FakeIndex(
+        [_skill("alpha", "Alpha skill."), _skill("tunnel", "Tunnel guide.", kind="guide")]
+    )
+    hooks = _hooks(index, servers=("hubspot",))
+    hooks.tool_roster = session_factory._tool_roster_rows(_session_management_tools())
+
+    roster = session_factory._classification_roster(hooks)
+
+    assert [(row.kind, row.name) for row in roster] == [
+        ("skill", "alpha"),
+        ("guide", "tunnel"),
+        ("mcp", "hubspot"),
+        ("tool", "sessions"),
+        ("tool", "send"),
+        ("tool", "hub"),
+        ("tool", "task"),
+        ("tool", "wait"),
+        ("tool", "jobs"),
+    ]
+    # And the request the seam receives carries them: the tool kind is in the
+    # roster the classifier is offered, so the state/enumeration paths see it.
+    request = session_factory._classification_request(hooks, "resume the stopped sessions")
+    assert {item.name for item in request.candidates} >= {"sessions", "send"}
+
+
+def test_a_hooks_object_without_tool_rows_is_byte_identical_to_before() -> None:
+    """The kind costs nothing when the session holds none of the tools."""
+    hooks = _hooks(_FakeIndex([_skill("alpha", "Alpha skill.")]), servers=("hubspot",))
+    assert hooks.tool_roster == ()
+    roster = session_factory._classification_roster(hooks)
+    assert all(row.kind != "tool" for row in roster)
+
+
 def test_a_warm_request_only_carries_the_message_and_the_cached_roster() -> None:
     """The request the seam receives reuses the roster object, per message."""
     hooks = _hooks(classifier=None, servers=("hubspot",))

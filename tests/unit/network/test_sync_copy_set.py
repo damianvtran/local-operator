@@ -77,6 +77,7 @@ def _entry_owners() -> dict[str, str]:
     )
     from local_operator.session.runtime.inbox import INBOX_NAME
     from local_operator.session.runtime.registry import (
+        SIGNAL_RECEIPT_NAME,
         STOP_MARKER_NAME,
         TURN_JOURNAL_NAME,
     )
@@ -94,6 +95,7 @@ def _entry_owners() -> dict[str, str]:
         CREATED_AT_NAME: "session.creation",
         TURN_JOURNAL_NAME: "session.runtime.registry",
         STOP_MARKER_NAME: "session.runtime.registry",
+        SIGNAL_RECEIPT_NAME: "session.runtime.registry",
         INBOX_NAME: "session.runtime.inbox",
         FORK_BOUNDARY_NAME: "fork",
         DESKTOP_MARKER_NAME: "session.retention",
@@ -249,6 +251,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         5,
         "the store's own roots and log file (``~/.local-operator``, ``logs``, "
         "``runtime.log``, the agent home): the directories a session lives UNDER",
+    ),
+    "local_operator/session/runtime/stop_ledger.py": (
+        1,
+        "``SWEEPS_FILE``: the machine-level stop-sweep ledger under ``<config>/logs`` "
+        "(beside ``exec-jobs.jsonl``), history about a SWEEP, never a file in a session",
     ),
     "local_operator/config.py": (1, "``config.yml``, the store's configuration file"),
     # ``STORE_DIRNAME``/``_SESSIONS_DIRNAME`` are the store ROOT's name and the
@@ -429,6 +436,12 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         2,
         "``network`` again and the handoff journal inside it: both outside ``sessions/``",
     ),
+    "local_operator/network/move_queue.py": (
+        1,
+        "``QUEUE_DIRNAME``: the queued move's directory under ``network/queue/`` — the "
+        "relay-owned record keyed by session id (design note §5.4), deliberately "
+        "outside ``sessions/`` and never copied",
+    ),
     "local_operator/session/runtime/presence.py": (
         3,
         "the delivery record and its directory under ``run/desktop``: per-device runtime "
@@ -459,6 +472,19 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/tools/builtin.py": (1, "the ripgrep excludes file under the agent home"),
     "local_operator/wakes/store.py": (1, "``wakes`` under the store root"),
     "local_operator/wakes/deliveries.py": (1, "``deliveries`` under ``wakes/``"),
+    # The rescue ledger (`session/runtime/rescue.py`) is the supervisor's own
+    # state at the CONFIG ROOT — `<config>/rescue/<session-id>.json`, a sibling of
+    # `wakes/` rather than a child of it, because the wake index globs *.json in
+    # its own directory and must never pick a rescue record up. It is this
+    # INSTALL's record of a recovery episode (attempts, backoff, breaker
+    # history), not an entry of a session directory: a session travelling to
+    # another device carries none of it, and the destination's own supervisor
+    # builds its own.
+    "local_operator/session/runtime/rescue.py": (
+        1,
+        "``RESCUE_LEDGER_DIRNAME``: the rescue ledger under the store root, beside "
+        "``sessions/`` and never inside one",
+    ),
     "local_operator/wakes/spooled.py": (1, "``spooled`` under ``wakes/``"),
     "local_operator/wakes/triggers/__init__.py": (
         4,

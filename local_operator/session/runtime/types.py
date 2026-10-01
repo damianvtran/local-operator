@@ -92,6 +92,44 @@ DESKTOP_WATCH_LEASE_S = 45.0
 #: fence promises a re-check at that latch and a reduced handle cannot honour it.
 EXCLUSIVE_MOVE_CAPABILITY = "exclusive-move-v1"
 
+#: Additive attach capability: this owner accepts ``queue_move`` — the queued /
+#: deferred move (``network/move_queue.py``, design note §5.4). The owner holds
+#: the intent as a FLAG (never the exclusivity fence above: holding the fence
+#: refuses attach admission, and the queued move's whole point is to announce
+#: attached clients and give them a window, not lock them out), watches for the
+#: turn boundary itself, announces ``move_pending``, holds the bounded attach
+#: window, and retires with ``reason: "moved"``.
+#:
+#: WHY A CAPABILITY. A runtime that never learned the op would answer
+#: ``unknown op`` — the relay reads that as a failure and retries forever —
+#: and, worse, a runtime whose handle cannot unwind a latched retire
+#: (``end_retire``: the record-claim race in ``move_queue.claim_pause``) would
+#: commit a departure it may have to abandon, leaving a serving runtime that
+#: refuses every admission. So the capability is advertised only by a handle
+#: that carries BOTH latches, and the relay fails closed on an owner that does
+#: not advertise it (fold the queue, name ``/reload``).
+QUEUED_MOVE_CAPABILITY = "queued-move-v1"
+
+#: The runtime's refusal sentence for an EXCLUSIVE move while another attach
+#: client is present. A CONSTANT because two layers read it and neither may
+#: re-spell it: the runtime writes it (``server.py``'s ``retire_now`` exclusive
+#: branch and its in-latch re-check, where the refusal is checked-and-reserved
+#: under the admission fence) and the mesh's producer CLASSIFIES the reply with
+#: it (``mobility._retire_local_runtime`` maps it to the ``viewed`` outcome,
+#: which the wire carries as ``viewed_elsewhere`` — §5.4's Queue-vs-Wait split,
+#: so a front end does not read this blocker as a turn it could wait out).
+#:
+#: The classifier matches THIS string as a PREFIX (``startswith``), so an
+#: appended clause stays safe; the words themselves are what a person reads,
+#: and the design delta (D2) requires the queue be named as the remedy — the
+#: sentence alone used to point at the manual workaround only. Both producers
+#: derive from this one constant, so rewording here can never silently collapse
+#: the split back into ``busy``.
+VIEWED_MOVE_REFUSAL = (
+    "This conversation is open in another window or app. Close that window and "
+    "try again, or queue the move to run at the next safe point."
+)
+
 #: Additive attach capability: this owner accepts ``event_mute``/``event_unmute``
 #: ops, which stop and resume DELTA-GRADE frames on an attach connection that
 #: already subscribed to the raw event relay (``"events": true``).
