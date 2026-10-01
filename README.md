@@ -142,8 +142,8 @@ LaunchAgent is installed.
   <img src="./static/tui-welcome.png" alt="The Local Operator welcome screen with rotating tips and the composer ready for a first prompt" width="720">
 </p>
 
-<p align="center"><i>The version line in this splash is the version of the build the frame
-was captured from, which is not the version you will install.</i></p>
+<p align="center"><i>The main view of the Local Operator TUI: the splash, the keybinding hints,
+and the composer where you start your first prompt.</i></p>
 
 Prefer a local model? A 7–14B model needs roughly 10–16 GB of RAM or VRAM.
 Start [LM Studio](https://lmstudio.ai), load a chat model, and enable its
