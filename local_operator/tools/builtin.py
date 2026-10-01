@@ -13684,8 +13684,9 @@ _SESSIONS_OP_DOCS: dict[str, _SessionsOpDoc] = {
         summary="reopen a stored/stopped session headlessly and report what was"
         " opened; the receipt names the session, job and pid once published. Or"
         " reopen a SET — `paused` (interrupted/retired), `failed` (error), `all`"
-        " (every stored, non-live session; capped by `limit`) — as a bounded"
-        " batch with a per-session ok/fail outcome; `dry_run` previews the set.",
+        " (every stored, non-live session; capped by `limit`; the widest reading —"
+        " given with the other two it wins) — as a bounded batch with a"
+        " per-session ok/fail outcome; `dry_run` previews the set.",
         example="sessions(op='resume', session='a1b2c3d4e5f6', prompt='continue')",
         refusals=(
             "the single form needs an address and `prompt`; the set form takes no"
@@ -14056,15 +14057,19 @@ def _describe_sessions_approval(args: dict[str, Any], cwd: str) -> str:
     if op == "stop":
         return f"stop {address}: ends its current run and releases the session lease"
     if op == "resume":
-        sets_selected = [
-            label
-            for flag, label in (
-                ("paused", "paused"),
-                ("failed", "failed"),
-                ("all", "all stored"),
-            )
-            if args.get(flag)
-        ]
+        # All wins (review round 1, m3): `all` is the widest reading, so a
+        # combination is described by the selection it actually performs.
+        if args.get("all"):
+            sets_selected = ["all stored"]
+        else:
+            sets_selected = [
+                label
+                for flag, label in (
+                    ("paused", "paused"),
+                    ("failed", "failed"),
+                )
+                if args.get(flag)
+            ]
         if sets_selected:
             # The batch form: say what it will do to how many, so the prompt
             # can be decided in one glance (a batch starts one runtime per
@@ -15853,15 +15858,20 @@ async def _sessions_resume_batch(
     )
 
     root = config_dir()
-    sets_name = "+".join(
-        name
-        for name, on in (
-            ("paused", params.paused),
-            ("failed", params.failed),
-            ("all", params.all),
+    # All wins (review round 1, m3): the name must be the selection the
+    # selector actually made, or the summary is a claim the behaviour
+    # contradicts.
+    if params.all:
+        sets_name = "all"
+    else:
+        sets_name = "+".join(
+            name
+            for name, on in (
+                ("paused", params.paused),
+                ("failed", params.failed),
+            )
+            if on
         )
-        if on
-    )
 
     def _select() -> ResumeSelection:
         return select_resume_candidates(

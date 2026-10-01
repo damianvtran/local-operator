@@ -201,6 +201,42 @@ def test_the_default_message_is_the_continuation(
     assert captured["message"] == bulk_resume.DEFAULT_RESUME_MESSAGE
 
 
+def test_all_wins_in_the_header_and_the_selection(
+    store: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    """m3 (review round 1): `--paused --all` resolves to all and SAYS all.
+
+    The header used to print "paused+all" while the selector intersected to
+    the narrower set — a claim the behaviour contradicted. One story now:
+    the widest reading wins, and the header names it.
+    """
+    _seed_session(store, "sess-a01", "one")
+    captured: dict[str, Any] = {}
+
+    def fake_select(root: Path, **kwargs: Any) -> ResumeSelection:
+        captured.update(kwargs)
+        return _selection([("sess-a01", 1.0)])
+
+    async def fake_run(rows: Any, **kwargs: Any) -> list[ResumeOutcome]:
+        return [
+            ResumeOutcome(session_id="sess-a01", name="one", ok=True, status="running", job_id="j1")
+        ]
+
+    _no_setup(monkeypatch)
+    monkeypatch.setattr(bulk_resume, "live_session_ids", lambda root: set())
+    monkeypatch.setattr(bulk_resume, "select_resume_candidates", fake_select)
+    monkeypatch.setattr(bulk_resume, "resume_sessions", fake_run)
+
+    rc = cli_module.sessions_resume_command(_args(paused=True, all_sessions=True))
+    out = capsys.readouterr().out
+    assert rc == 0
+    # The full-widening flags reach the shared selector (which defines
+    # all-wins); the header prints the selection that was actually made.
+    assert captured["all_sessions"] is True and captured["paused"] is True
+    assert "(all, newest first)" in out
+    assert "paused+all" not in out
+
+
 def test_any_failed_session_makes_the_exit_code_nonzero(
     store: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
 ) -> None:

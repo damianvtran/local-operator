@@ -1953,6 +1953,12 @@ def test_the_batch_approval_description_names_the_sets_and_the_commitment(
     )
     dry = _describe_sessions_approval({"op": "resume", "all": True, "dry_run": True}, str(root))
     assert dry == "review the all stored session set: resumes nothing (dry run)"
+    # All wins (review round 1, m3): the approval names the selection the
+    # selector actually makes, not the combination that was passed.
+    combined = _describe_sessions_approval({"op": "resume", "paused": True, "all": True}, str(root))
+    assert combined == (
+        "resume the all stored session set: starts one headless run per selected session"
+    )
     # The single form's sentence is untouched.
     single = _describe_sessions_approval(
         {"op": "resume", "session": "aaaa11112222", "prompt": "go"}, str(root)
@@ -2002,6 +2008,30 @@ async def test_the_batch_summary_renders_per_session_outcomes(
     details = result.details or {}
     assert details["batch"] is True and details["count"] == 2
     assert details["sessions"][1]["session_id"] == "sess-bad"
+
+
+@pytest.mark.asyncio
+async def test_a_dry_run_beside_all_names_the_all_selection(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """m3 (review round 1): the tool's dry-run text follows the selection."""
+
+    def fake_select(*args: Any, **kwargs: Any) -> ResumeSelection:
+        return ResumeSelection(sessions=(("sess-x", 1.0),), matched=1, kinds=frozenset())
+
+    monkeypatch.setattr(bulk_resume, "select_resume_candidates", fake_select)
+    monkeypatch.setattr(bulk_resume, "live_session_ids", lambda root: set())
+
+    result = await execute_sessions(
+        "t",
+        {"op": "resume", "failed": True, "all": True, "dry_run": True},
+        None,
+        None,
+        _context(root),
+    )
+    assert not result.is_error, result.text
+    assert "resume set (all)" in result.text
+    assert "failed+all" not in result.text
 
 
 @pytest.mark.asyncio

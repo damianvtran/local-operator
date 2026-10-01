@@ -1121,12 +1121,17 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # THE SETS ARE THE LISTING'S OWN WORDS (FAILED_OUTCOME_KINDS /
     # PAUSED_OUTCOME_KINDS in info/collect.py, the constants behind
     # `lop sessions --paused/--failed`): `--paused` is {interrupted, retired},
-    # `--failed` is {error}, given together they are the union, and each is a
-    # complete selection on its own (the listing's "implies --all" reading —
-    # these flags never need an accompanying --all). `--all` widens to every
-    # stored, non-live session. Live sessions are excluded by the selection
-    # itself (the same rule the stored listing uses), so a running session is
-    # never a candidate.
+    # `--failed` is {error}, and given together they are the union. `--all`
+    # WINS over them (review round 1, m3): it widens to every stored, non-live
+    # session, and `--paused --all` is all — the widest reading, which is what
+    # the header, the approval description and the help now all say.
+    #
+    # THE LIVE EXCLUSION IS THE REGISTRY'S ANSWER: sessions with a live or
+    # wedged record are never candidates. That answer is comprehensive for
+    # RECORD-HOLDING runtimes, but a session whose owner holds no registry
+    # record (a marker-only runtime — the live-marker cell QA ran) can still
+    # be SELECTED; the exec path's own lease check then refuses it loudly per
+    # session. The selection narrows what is offered; the child guard decides.
     #
     # THE DEFAULT CAP IS DELIBERATE: a bare `--all` on a well-used store can
     # match thousands of directories, and resuming is an ACTION, so the
@@ -1138,7 +1143,8 @@ def build_cli_parser() -> argparse.ArgumentParser:
         description=(
             "Resume stored sessions without a shell loop: `--paused` (the "
             "interrupted/retired pair), `--failed` (error), or `--all` (every "
-            "stored, non-live session). Newest first, capped at 20 unless "
+            "stored, non-live session — the widest reading, so given with the "
+            "other selectors it wins). Newest first, capped at 20 unless "
             "--limit is given. Each session is reopened headlessly as `lop exec "
             "--resume <id> --background` with --message (default: a continuation). "
             "Children run with bounded concurrency (6 at a time) and print one "
@@ -1165,7 +1171,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "--all",
         action="store_true",
         dest="all_sessions",
-        help="select every stored, non-live session (newest first, capped)",
+        help=(
+            "select every stored, non-live session (newest first, capped); the "
+            "widest reading — given with --paused/--failed it wins"
+        ),
     )
     resume_parser.add_argument(
         "--dry-run",
@@ -5091,13 +5100,17 @@ def sessions_resume_command(args: argparse.Namespace) -> int:
     # a sound substitute for a cache.
     setup_cross_platform_environment()
 
-    sets = []
-    if paused:
-        sets.append("paused")
-    if failed:
-        sets.append("failed")
+    # All wins (review round 1, m3): the name printed here must be the
+    # selection the selector actually made, or the header is a claim the
+    # behaviour contradicts.
     if all_sessions:
-        sets.append("all")
+        sets = ["all"]
+    else:
+        sets = []
+        if paused:
+            sets.append("paused")
+        if failed:
+            sets.append("failed")
     print(
         f"resuming {len(rows)} session(s) ({'+'.join(sets)}, newest first){capped} "
         f"— {RESUME_BATCH_CONCURRENCY} at a time, message: {message!r}",
