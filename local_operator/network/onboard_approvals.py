@@ -166,6 +166,19 @@ def _refuse_missing(approval_id: str) -> MeshRefusal:
     )
 
 
+def _who(view: ApprovalView) -> str:
+    """The device name a reader knows — never a bare record id (design D3)."""
+    return str((view.record.get("device") or {}).get("name") or "this device")
+
+
+def _human_expiry(expires_at: float) -> str:
+    """The window's end on the reader's own clock (design round 1, D3: an epoch
+    is not a sentence). Local time, minute precision, no timezone lecture."""
+    if not expires_at:
+        return "an unknown time"
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(float(expires_at)))
+
+
 def require_step_allowed(
     approval_id: str, *, now: float | None = None, run_id: str = ""
 ) -> ApprovalView:
@@ -188,19 +201,23 @@ def require_step_allowed(
     if state == "denied":
         raise MeshRefusal(
             "approval_denied",
-            f"request {approval_id} was denied; nothing further will run for it",
+            f"request {approval_id} was denied, so nothing further will run for it; "
+            f"ask Local Operator to file a new onboarding request for {_who(view)} "
+            "if it should still be set up",
         )
     if state == "connected":
         raise MeshRefusal(
             "approval_already_connected",
-            f"request {approval_id} is already connected; a terminal record is never "
-            "re-run, because one approval is one onboarding",
+            f"request {approval_id} already finished — {_who(view)} is connected; one "
+            "approval is one onboarding, so ask Local Operator to file a new request "
+            "if anything needs to change",
         )
     if state == "expired" or (view.expires_at and moment >= view.expires_at):
         raise MeshRefusal(
             "approval_expired",
-            f"request {approval_id} expired at {int(view.expires_at)}; the window is "
-            "fixed by the signed record, so a retry needs a fresh request",
+            f"request {approval_id} expired at {_human_expiry(view.expires_at)}; one "
+            f"approval covers one window, so ask Local Operator to file a new "
+            f"onboarding request for {_who(view)}",
         )
     if state not in ("approved", "connecting"):
         # ``requested`` (not yet signed for), ``failed`` mid-step (the caller
@@ -242,8 +259,9 @@ def begin_run(approval_id: str, *, now: float | None = None) -> ApprovalView:
     if view.expires_at and moment >= view.expires_at:
         raise MeshRefusal(
             "approval_expired",
-            f"request {approval_id} expired at {int(view.expires_at)}; the window is "
-            "fixed by the signed record, so a retry needs a fresh request",
+            f"request {approval_id} expired at {_human_expiry(view.expires_at)}; one "
+            f"approval covers one window, so ask Local Operator to file a new "
+            f"onboarding request for {_who(view)}",
         )
     if view.state not in RUNNABLE_STATES:
         # Reuse the per-step gate's refusals so "why can't this start" answers

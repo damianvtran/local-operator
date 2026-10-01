@@ -408,8 +408,8 @@ def resolve_credential(
         if not path.exists():
             raise MeshRefusal(
                 "credential_missing",
-                "the key file this request names is not on this machine; supply the key "
-                "again or pick a reference that exists",
+                "the key file this request names isn't on this machine; supply the key "
+                "again, or choose a key file that exists",
             )
         return ResolvedCredential(
             kind="file",
@@ -454,8 +454,8 @@ def resolve_credential(
             # value, but the discipline is that refusals quote nothing).
             raise MeshRefusal(
                 "credential_unresolved",
-                "the secret store has no usable key under the name this request "
-                "carries; store the key again or point the request at a key file",
+                "no usable key is stored under the name this request carries; store the "
+                "key again, or use a key file instead",
             )
         payload = result.stdout
         if isinstance(payload, str):
@@ -579,15 +579,17 @@ class SshTransport:
         if not expected_fingerprint:
             raise MeshRefusal(
                 "host_key_unpinned",
-                "the request carries no host-key fingerprint, so this connection cannot "
-                "be pinned to what was approved",
+                "the request doesn't say which host key to expect, so this connection "
+                "can't be checked against what was approved",
             )
         if found.host_key_fp != expected_fingerprint:
             raise MeshRefusal(
                 "host_key_changed",
                 f"the host key at {self.host}:{self.port} is {found.host_key_fp or 'unreadable'}, "
-                "not the fingerprint this request was approved against; nothing was contacted "
-                "with a credential",
+                "not the one this request was approved against; nothing was contacted with "
+                "a credential. That machine may have been rebuilt, or something else may "
+                "be answering at that address — it is your call whether to approve a "
+                "fresh request for it",
             )
         seed = Path(tempfile.mkdtemp(prefix="lop-onboard-hosts-"))
         os.chmod(seed, 0o700)
@@ -958,7 +960,7 @@ class OnboardRun:
                     "check": "host_key_fp",
                     "approved": "",
                     "observed": "",
-                    "why": "the request carries no host-key fingerprint to pin to",
+                    "why": "the request does not say which host key to expect",
                 },
                 "the request does not carry the host-key fingerprint it was approved "
                 "against, so the connection cannot be pinned",
@@ -1011,7 +1013,7 @@ class OnboardRun:
             tail = (result.stderr or result.stdout or "").strip().splitlines()
             return _StepOutcome(
                 False,
-                "the credentialed pre-read did not complete: "
+                "the setup checks on the other machine did not complete: "
                 + (tail[-1][:200] if tail else "no output"),
             )
         self.facts = _facts_from(result.stdout)
@@ -1020,7 +1022,7 @@ class OnboardRun:
             finding = findings[0]
             raise self._contradiction(
                 finding,
-                "the credentialed pre-read contradicted what was approved "
+                "the other machine does not match what was approved "
                 f"({finding['why']}); nothing state-changing ran",
             )
         return _StepOutcome(
@@ -1124,7 +1126,7 @@ class OnboardRun:
                     "check": "sudo",
                     "approved": "the anchor install was approved",
                     "observed": "no sudo on the machine",
-                    "why": "the one privileged step cannot run without sudo",
+                    "why": "the admin approval cannot be raised on this machine",
                 }
             )
         return findings
@@ -1137,9 +1139,11 @@ class OnboardRun:
             except MeshRefusal:
                 refiled = None
         suffix = (
-            f" A fresh request {refiled} now carries the corrected facts."
+            f" A new request {refiled} now carries the corrected facts — ask Local "
+            "Operator to take it to approval."
             if refiled
-            else " A fresh request is needed before anything runs."
+            else " A new request is needed before anything runs — ask Local Operator "
+            "to file one."
         )
         return OnboardContradiction(sentence + "." + suffix, finding=finding, refiled=refiled)
 
@@ -1189,7 +1193,7 @@ class OnboardRun:
             tail = (result.stderr or result.stdout or "").strip().splitlines()
             return _StepOutcome(
                 False,
-                f"the build install failed ({method}): "
+                "the approved build could not be installed: "
                 + (tail[-1][:200] if tail else "no output"),
                 {"tag": tag, "method": method},
             )
@@ -1204,7 +1208,8 @@ class OnboardRun:
             )
         return _StepOutcome(
             True,
-            f"installed build {tag} via {method} (was {node_version or 'absent'})",
+            f"installed the approved build {tag} on the other machine "
+            f"(was {node_version or 'absent'})",
             {"tag": tag, "method": method, "from": node_version, "to": installed},
         )
 
@@ -1464,9 +1469,16 @@ class OnboardRun:
                 + (tail[-1][:200] if tail else "no output"),
                 {"device_id": mac.device_id, "capabilities": caps},
             )
+        # D7: the receipt is where a person confirms what they handed over, so
+        # it says it in the sentences the card showed — not in capability tokens.
+        human = {
+            "approve": "answer approval prompts for sessions",
+            "unattended": "start sessions without approval prompts",
+        }
+        granted = " and ".join(human.get(cap, cap) for cap in caps)
         return _StepOutcome(
             True,
-            f"granted {', '.join(caps)} to {mac.device_id} on {network_name}",
+            f"granted to this device on {network_name}: {granted}",
             {
                 "device_id": mac.device_id,
                 "network": network_name,
@@ -1507,8 +1519,8 @@ class OnboardRun:
                 return _StepOutcome(
                     False,
                     f"the relay restart did not complete ({detail}); the relay itself "
-                    "still answers, so retry this step once the old process is stopped "
-                    "or the service can start",
+                    "still answers. If an old process is holding the connection, ask "
+                    "Local Operator to stop it and retry this step",
                     {"action": "restart", "relay_answer": True},
                 )
             return _StepOutcome(
@@ -1529,8 +1541,8 @@ class OnboardRun:
             linger = (recheck.stdout or "").strip() or linger
         if linger != "yes" and self.facts.get("systemctl") == "yes":
             caveat = (
-                "lingering is off for this login, so the relay stops at logout "
-                "until it is enabled on that machine"
+                "the relay will stop when that machine's login session ends; keeping "
+                "it running after logout is not enabled there yet"
             )
         return _StepOutcome(
             True,
@@ -1586,8 +1598,8 @@ class OnboardRun:
                 ]
                 return _StepOutcome(
                     False,
-                    "the readiness report still has failing rows"
-                    + (f": {', '.join(failing)}" if failing else ""),
+                    "the machine is not ready yet"
+                    + (f" — these checks still fail: {', '.join(failing)}" if failing else ""),
                     {"peer": peer, "ready": {"ok": ready.get("ok")}},
                 )
         else:
@@ -1598,9 +1610,7 @@ class OnboardRun:
             )
         return _StepOutcome(
             True,
-            "verified: readiness is green"
-            + (" for " + name if name else "")
-            + f"; doctor rows: {len((doctor or {}).get('rows') or [])}",
+            "every readiness check passed" + (" for " + name if name else ""),
             {
                 "peer": name or device_id,
                 "ready_ok": bool(ready and ready.get("ok")),

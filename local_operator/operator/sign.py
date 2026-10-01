@@ -245,7 +245,7 @@ def issue_device_cert(
     return cert.encode(signature=signer.sign(cert.payload()))
 
 
-def describe_level(handle: KeyHandle) -> str:
+def describe_level(handle: KeyHandle, *, with_remedy: bool = True) -> str:
     """One line, for ``lop operator init``'s output, that does not overclaim.
 
     The presence branch names the protection class the ladder ACHIEVED (agent review
@@ -253,6 +253,11 @@ def describe_level(handle: KeyHandle) -> str:
     the difference between a key the OS will only use when the device has a passcode and
     one it will use whenever it is unlocked — a fact an operator deserves, and the one
     field of the helper's ``create`` reply that had no reader.
+
+    ``with_remedy=False`` drops the file-only remedy for RECEIPT surfaces (remote
+    onboarding slice (b), design round 1 D5): the darwin remedy names a terminal
+    command, and §2.9's frozen rule bans one in a receipt row. The description half —
+    the honest level itself — is exactly what those surfaces need.
     """
     if handle.presence:
         achieved = f" [{handle.rung}]" if handle.rung else ""
@@ -292,11 +297,12 @@ def describe_level(handle: KeyHandle) -> str:
             if sys.platform == "darwin"
             else "Pair a phone to authorise a session from another device."
         )
-        return (
+        description = (
             "file-only: the key is a 0600 file under your config dir, so ANY "
             "process running as you can sign for you. This is NOT a boundary — "
-            "it is reported as a lower level rather than counted as protection. " + remedy
+            "it is reported as a lower level rather than counted as protection."
         )
+        return f"{description} {remedy}" if with_remedy else description
     return f"{handle.backend}: reported as-is; this build makes no claim about it"
 
 

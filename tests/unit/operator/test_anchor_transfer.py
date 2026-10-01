@@ -91,7 +91,9 @@ def test_anchor_export_says_the_product_action_when_nothing_is_set_up(
 
     assert handlers._anchor(Namespace(anchor_command="export", file="", json=False)) == 1
     message = capsys.readouterr().err
-    assert "approve setup" in message
+    # D2 (design round 1): #1877's settled wording — the interim agent action,
+    # because no surface raises the setup card at this head.
+    assert "ask Local Operator to set it up for you" in message
     assert "`lop " not in message, "no refusal may name a terminal command"
 
 
@@ -110,7 +112,7 @@ def test_install_from_refuses_non_canonical_bytes(
     code = handlers.install_anchor_from(source, tmp_path / "config", print_only=True)
 
     assert code == 1
-    assert "canonical" in capsys.readouterr().err
+    assert "fresh export" in capsys.readouterr().err
 
 
 def test_install_from_accepts_canonical_bytes_and_prints_the_privileged_step(
@@ -134,7 +136,7 @@ def test_install_from_refuses_garbage(tmp_path: Path, capsys: pytest.CaptureFixt
     source.write_bytes(b"not json at all")
 
     assert handlers.install_anchor_from(source, tmp_path / "config", print_only=True) == 1
-    assert "not a valid statement" in capsys.readouterr().err
+    assert "not one this build recognises" in capsys.readouterr().err
 
 
 def _setup_fakes(
@@ -167,6 +169,8 @@ def _setup_fakes(
             key_id=anchor.key_id,
             spki=anchor.spki,
             backend="file-only",
+            presence=False,
+            rung=None,
             reused=False,
             close=lambda: None,
         ),
@@ -217,7 +221,39 @@ def test_setup_records_a_failed_admin_gesture_as_not_installed(
     installed = [row for row in payload["receipts"] if row["step"] == "installed"]
     assert installed and installed[0]["ok"] is False
     assert payload["state"] == "not_installed"
-    assert "stays not set up" in installed[0]["detail"]
+    assert "not installed yet" in installed[0]["detail"]
+
+
+def test_setup_without_an_admin_tool_never_prints_the_by_hand_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D1 (design round 1): no admin tool is a receipt, not a sudo dump.
+
+    The reproduction: `_setup` on a machine where `sudo` does not exist printed
+    "Run this by hand:" plus two commands that cannot be followed there, above the
+    receipts, and marked the consent row `[ok]` while its own sentence said nothing
+    would be installed. Set up must instead report consent as blocked and the
+    install as not done, in the reader's words, and never reach the direct verb's
+    by-hand block.
+    """
+    _setup_fakes(monkeypatch, tmp_path)
+    monkeypatch.setattr(handlers.shutil, "which", lambda name: None)
+    monkeypatch.setattr(
+        handlers,
+        "install_anchor",
+        lambda *a, **k: pytest.fail("must not run when no admin tool exists"),
+    )
+
+    code = handlers._setup(Namespace(json=False, sudo_secret=""))
+
+    assert code == 1
+    captured = capsys.readouterr()
+    assert "by hand" not in captured.out and "by hand" not in captured.err
+    assert "sudo" not in captured.out
+    assert "[blocked] consent:" in captured.out
+    assert "no administrator tool" in captured.out
+    assert "[blocked] installed:" in captured.out
+    assert "not trusted yet" in captured.out
 
 
 def test_setup_is_idempotent_on_an_installed_machine(
@@ -234,7 +270,9 @@ def test_setup_is_idempotent_on_an_installed_machine(
     monkeypatch.setattr(
         handlers,
         "_existing_key",
-        lambda root, preference: SimpleNamespace(key_id=anchor.key_id, close=lambda: None),
+        lambda root, preference: SimpleNamespace(
+            key_id=anchor.key_id, presence=False, backend="file-only", rung=None, close=lambda: None
+        ),
     )
     monkeypatch.setattr(
         handlers, "install_anchor", lambda *a, **k: pytest.fail("must not reinstall")

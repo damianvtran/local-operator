@@ -2213,26 +2213,29 @@ def _cmd_join(args: argparse.Namespace) -> int:
         # device's own code, and the other flag asks a PERSON to do that same job.
         if bool(getattr(args, "park", False)):
             print(
-                "--automated sends the code itself; --park waits for a person to send it",
+                "--automated sends the code itself; --park waits for a person to send "
+                "it — use one or the other",
                 file=sys.stderr,
             )
             return 2
         if getattr(args, "emit_sas", False):
             print(
-                "--automated never stops to print a code; --emit-sas prints one and waits",
+                "--automated never stops to print a code; --emit-sas prints one and "
+                "waits — use one or the other",
                 file=sys.stderr,
             )
             return 2
         if getattr(args, "sas_stdin", False):
             print(
-                "--sas-stdin is answered by a prompt; --automated has no prompt",
+                "--sas-stdin is answered by a prompt; --automated has no prompt — "
+                "use one or the other",
                 file=sys.stderr,
             )
             return 2
         if getattr(args, "verify", False):
             print(
                 "--verify asks a person to compare a fingerprint; --automated has no "
-                "person here",
+                "person here — use one or the other",
                 file=sys.stderr,
             )
             return 2
@@ -2241,10 +2244,17 @@ def _cmd_join(args: argparse.Namespace) -> int:
         # cannot mean one thing at the same time, and silently dropping one of the two
         # would leave the caller believing the other had been honoured.
         if getattr(args, "sas_stdin", False):
-            print("--park waits for `--confirm`; --sas-stdin answers a prompt", file=sys.stderr)
+            print(
+                "--park waits for `--confirm`; --sas-stdin answers a prompt — use one "
+                "or the other",
+                file=sys.stderr,
+            )
             return 2
         if getattr(args, "emit_sas", False):
-            print("--park prints the code itself; --emit-sas does not park", file=sys.stderr)
+            print(
+                "--park prints the code itself; --emit-sas does not park — use one or " "the other",
+                file=sys.stderr,
+            )
             return 2
 
     from local_operator.network import invite as invite_mod
