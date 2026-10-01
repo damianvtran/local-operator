@@ -970,7 +970,7 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: of it this change — while the tiers-configured reading sits above by the
 #: same documented 762-char config gap, not by anything here.
 #:
-#: LOWERED 37,756 -> 34,713 for the slimming wave (audit items 2+3,
+#: LOWERED 37,756 -> 34,746 for the slimming wave (audit items 2+3,
 #: ``feat/tool-slimming-1001``): the JSON schema descriptions of the eight
 #: top-offender tools (project, console, browser, ask, hub, agent, network,
 #: task) and the ``## Tools`` section of ``system.md`` gave up detail that now
@@ -982,34 +982,36 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: (absent from the wire bytes AND present in the doc render), and every
 #: cue/boundary the audit named as keep-here stayed put (C1, C4, the
 #: ``tool://`` cue, the query-discipline bullet, the send/console/browser
-#: prohibitions). The arithmetic, THIS script, this machine, BOTH arms,
-#: deterministic char counts on each side (the clean arm — isolated config —
-#: is what CI renders and the binding reading):
+#: prohibitions).
 #:
-#:   clean arm        before 104,809 chars = ~37,701   after 96,388 = ~34,672
-#:   configured arm   before 105,571 chars = ~37,975   after 97,150 = ~34,946
+#: RE-DERIVED 2026-10-01 after the fold onto ``origin/main`` ``0dac063b9``
+#: (#1837/#1901 moved the base): same machine, the base in a detached
+#: worktree of that commit, the clean arm via ``env -i`` (the arm CI
+#: renders), both arms of THIS script, deterministic char counts each side:
+#:
+#:   clean arm        before 104,810 chars = ~37,701   after 96,442 = ~34,691
+#:   configured arm   before 105,572 chars = ~37,976   after 97,204 = ~34,965
 #:
 #: (The configured arm still sits exactly the +762-char subagents-tiers delta
 #: above the clean arm that the entries above document; the gap is expected
 #: and not this change's.)
 #:
-#: The saving is 8,421 clean-arm chars = 3,029 billed, split:
+#: The saving is 8,368 clean-arm chars = 3,010 billed, split:
 #:
-#:   + tool_schemas    68,826 -> 63,475 = -5,351 chars = -1,925 billed
-#:     (project -622, browser -1,136, console -708, ask -697, hub -988,
-#:      agent -823, task -329, network -58; the bash `eval` boundary clause
-#:      ADDS +38 back; every other tool byte-identical. Components come from
-#:      a compact-JSON ruler; the total is this script's own ``tool_schemas``
-#:      counter, so the parts close to 5,323 — 28 chars of JSON/escape
-#:      skeleton apart, the same floor-vs-total convention the console entry
-#:      above records.)
+#:   + tool_schemas    68,827 -> 63,529 = -5,298 chars = -1,906 billed
+#:     (project -579, browser -1,136, console -708, ask -697, hub -996,
+#:      agent -828, task -334, network -58; the bash `eval` boundary clause
+#:      ADDS +38 back. Per-tool figures use this script's own per-tool
+#:      formula — ``len(name) + len(description) + len(json.dumps(parameters))``
+#:      — so they sum EXACTLY to the -5,298 total; every other tool is
+#:      byte-identical.)
 #:   + instructions    34,971 -> 31,901 = -3,070 chars = -1,104 billed
 #:     (the ``## Tools`` section; the content pins in
 #:      ``tests/unit/test_prompts_api.py``, ``test_prompts_console_flags.py``
 #:      and ``tests/unit/guides`` are what floor this number)
 #:
 #: Target was ~-3.7k billed (the audit's -15% of the tool schemas); the
-#: actual is -3,029, and the gap is the pins rather than the effort: the
+#: actual is -3,010, and the gap is the pins rather than the effort: the
 #: ask-tool and browser/console description phrases are asserted at the
 #: PHRASE level by their own suites, the effort-tier mappings are
 #: config-bound (their tests pin the rendered bytes in both arms), and the
@@ -1018,11 +1020,15 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: revisited, not another copy edit.
 #:
 #: The ceiling is the measured clean head plus the 55-token band this file
-#: keeps = 34,713. A local configured run reads 233 over (34,946 vs 34,713)
-#: — the recorded gap minus the band — as every configured local run has
-#: since the tiers delta existed; CI renders the clean arm and is the binding
-#: reading. If any reading disagrees, the script wins.
-BUDGET_BILLED_TOKENS = 34_713
+#: keeps: 34,691 + 55 = 34,746. (The first cut of this constant left 41 and
+#: then 22 of slack — the item-7 bash clause and the #1837 fold each moved
+#: the head after the constant was written; this re-derivation applies the
+#: band exactly, so every term closes to the token.) A local configured run
+#: reads 219 over (34,965 vs 34,746) — the recorded +762 config gap minus
+#: the band — as every configured local run has since the tiers delta
+#: existed; CI renders the clean arm and is the binding reading. If any
+#: reading disagrees, the script wins.
+BUDGET_BILLED_TOKENS = 34_746
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

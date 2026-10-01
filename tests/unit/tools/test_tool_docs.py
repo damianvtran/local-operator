@@ -107,13 +107,17 @@ _WALK_DEPTH_CAP = 2
 #: machine. Every other entry is byte-identical to #1862's table.
 #:
 #: RE-MEASURED 2026-10-01 by the slimming wave (audit items 2+3): the EIGHT
-#: worked tools moved — ``project`` 967 -> 1067, ``browser`` 1050 -> 1069,
+#: worked tools moved — ``project`` 968 -> 1077, ``browser`` 1050 -> 1069,
 #: ``console`` 1006 -> 1141, ``ask`` 837 -> 948, ``hub`` 638 -> 675,
 #: ``agent`` 687 -> 826, ``network`` 697 -> 742, ``task`` 422 -> 505 — and
 #: the item-7 failure-semantics notes added ``bash`` 271 -> 313, ``eval``
 #: 348 -> 379, ``grep`` 237 -> 346, ``jobs`` 339 -> 365, ``monitor`` 369 ->
 #: 420, ``read`` 312 -> 358, ``todo`` 463 -> 498 and ``write`` 100 -> 144.
-#: Every other entry is byte-identical. These
+#: Every other entry is byte-identical. Re-derived again after the fold onto
+#: ``origin/main`` ``0dac063b9`` (#1837): ``project`` alone moved vs the
+#: pre-fold reading, 1067 -> 1077, because that lane re-joined its
+#: description contract to the wire and keeps the dynamic cap — so the
+#: wave's pin for this tool rests on the milestone-rationale phrase. These
 #: docs grew ON PURPOSE: prose cut from the always-loaded wire (descriptions
 #: and parameter schemas, the
 #: ledger the context-budget guard measures) moved HERE, where it costs
@@ -138,7 +142,7 @@ MEASURED_TOKENS: dict[str, int] = {
     "monitor": 420,
     "network": 742,
     "patience": 361,
-    "project": 1067,
+    "project": 1077,
     "project_delete": 98,
     "read": 358,
     "read_variable": 74,
@@ -526,10 +530,14 @@ MOVED_WIRE_DETAIL: dict[str, tuple[str, ...]] = {
         "Several ids address several subagents",
     ),
     "network": ("required by create/engage/stop/delete",),
-    "project": (
-        "derived, not stored",
-        "multiple paragraphs, headings, lists and code",
-    ),
+    # Project's second candidate phrase, "multiple paragraphs, headings, lists
+    # and code", was dropped from this map by the #1837 fold: that lane
+    # deliberately keeps it on the wire (its description contract is built
+    # from DESCRIPTION_MAX and pinned by
+    # test_project_tool.py::test_the_schema_text_names_the_cap_the_refusal_enforces),
+    # so the both-ways assertion cannot hold for it. The milestone-rationale
+    # phrase stays as this tool's representative move.
+    "project": ("derived, not stored",),
     "task": ("a registered profile or a packaged starter",),
 }
 
