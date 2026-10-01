@@ -61,6 +61,7 @@ from local_operator.mobile import push_handles
 from local_operator.mobile.auth import (
     COOKIE_NAME,
     check_password,
+    cookie_expiry,
     sign_cookie,
     verify_cookie,
 )
@@ -5050,7 +5051,7 @@ def build_app(daemon: MobileDaemon):
 
     # -- push device registry (push/ack-sync S4, ADR 0006 §3.1) -----------------
 
-    async def _push_call(fn: Callable[..., dict[str, Any]], *args: Any) -> Response:
+    async def _push_call(fn: Callable[..., dict[str, Any]], *args: Any, **kwargs: Any) -> Response:
         """Run one registry call off-loop; a refusal answers its JSON body.
 
         ``mobile_push_devices``' refusals are typed, and the ORDER below is the
@@ -5059,9 +5060,13 @@ def build_app(daemon: MobileDaemon):
         422 the sibling routes answer, and a store that cannot be read or written
         is an internal fault (500) whose sentence names it — never a silent empty
         registry.
+
+        ``**kwargs`` exists for the credential facts a route reads off the request
+        rather than out of the body (``register``'s ``credential_expires_at``):
+        they are per-call evidence, so they cannot live in the stored body shape.
         """
         try:
-            payload = await asyncio.to_thread(fn, *args)
+            payload = await asyncio.to_thread(fn, *args, **kwargs)
         except mobile_push_devices.PushDeviceStateRefusal as exc:
             return JSONResponse(
                 {"code": exc.code, "error": exc.message}, status_code=exc.status_code
@@ -5131,6 +5136,76 @@ def build_app(daemon: MobileDaemon):
             status_code=403,
         )
 
+    def presented_cookie_expiry(request: Request) -> int | None:
+        """The expiry the request's own cookie carries, or ``None`` when it has none.
+
+        ``None`` covers three cases that a caller must not distinguish between: no
+        cookie at all, a daemon with no password configured (nothing can verify a
+        cookie then), and a cookie that does not verify. None of them is evidence
+        of a lapse, and none of them may be read as one.
+        """
+        if not daemon.password:
+            return None
+        return cookie_expiry(request.cookies.get(COOKIE_NAME), daemon.password)
+
+    async def _note_device_credential(request: Request, config: Path) -> dict[str, Any] | None:
+        """Apply ONE authenticated request's credential evidence to ITS device.
+
+        ADR §4 rule 2's evaluation, and the relay is where it lives because the
+        relay is the only component that sees the ``lop_mobile`` cookie. The two
+        headers are the proof and the claim (``X-Lop-Device`` names the
+        ``install_id``; ``X-Lop-Device-Key`` carries the key minted for that device
+        at registration), and ``push_devices.note_credential`` is the rule.
+
+        WHY THE EARLY RETURN IS LOAD-BEARING, and the reason this is not simply a
+        call: a request WITHOUT the key moves no device's state, so this returns
+        before reading the cookie or the store at all. The registry is a file on
+        the request path of every phone call, and a key-less caller (the desktop
+        app, the CLI, a paired harness — all of which hold the computer's cookie
+        and none of which is a device) must not pay a disk read for evidence it
+        cannot supply. It is also what makes the discrimination testable at all:
+        the key-less branch has no write to reach.
+
+        Blocking file IO goes through ``asyncio.to_thread`` for the same reason
+        ``_push_call`` does: this daemon serves a 2 s SSE repaint loop, and a
+        registry write on the event loop is a stall every streamed session feels.
+
+        Returns what moved, or ``None`` — the return is not used by the routes
+        (a credential evaluation never fails a request: a device whose report
+        cannot be recorded still gets its sessions), it exists so the caller and
+        the loopback drive can tell an evaluation apart from a no-op.
+        """
+        install_id = request.headers.get(mobile_push_devices.DEVICE_HEADER)
+        device_key = request.headers.get(mobile_push_devices.DEVICE_KEY_HEADER)
+        if not install_id or not device_key:
+            return None
+        presented = presented_cookie_expiry(request)
+        if presented is None:
+            # Nothing a request can present: it is authenticated off something
+            # other than a cookie (a test client with a stubbed gate), and an
+            # absent presented expiry is not evidence of a lapse.
+            return None
+        try:
+            return await asyncio.to_thread(
+                mobile_push_devices.note_credential,
+                config,
+                install_id=install_id,
+                device_key=device_key,
+                credential_expires_at=presented,
+            )
+        except (mobile_push_devices.PushRegistryCorrupt, OSError) as exc:
+            # Logged and swallowed, deliberately, and it is NOT the refusal path:
+            # delivery state is a side effect of a request that is otherwise
+            # entitled to succeed, so a store this process cannot read must not
+            # cost a phone its session list. The lapse keeps standing in the store
+            # until the next request that can write it.
+            logger.warning(
+                "push credential not recorded at %s: %s",
+                mobile_push_devices.store_path(config),
+                exc,
+            )
+            return None
+
     async def api_push_register(request: Request) -> Response:
         """Record this phone's registration; idempotent on (install_id, platform).
 
@@ -5140,6 +5215,19 @@ def build_app(daemon: MobileDaemon):
         that would hand it to the cloud is future work (S7); the store module
         carries the full citation. The response also mints and returns this
         device's ``device_key``, once per call — see ``push_devices.register``.
+
+        TWO WRITES, IN THIS ORDER, and the order is the design:
+
+        1. ``_note_device_credential`` — the credential evidence, evaluated
+           BEFORE the registration overwrites the key. A re-registering app
+           presents the key it still holds, which is the one on the row at this
+           moment; evaluating afterwards would compare the NEW key against an
+           OLD header and silently move nothing.
+        2. ``register``, with the expiry the request PRESENTED (ADR §4 rule 2,
+           round 7 Q-F15 / R8-m1: the registering row is the device that held the
+           cookie, and ``/login`` knows no device). Register is also the act that
+           clears a lapse, so a device that authenticated and then registered
+           ends this call live whatever step 1 found.
         """
         denied = gate(request)
         if denied is not None:
@@ -5150,7 +5238,14 @@ def build_app(daemon: MobileDaemon):
             body = None
         from local_operator.paths import config_dir
 
-        return await _push_call(mobile_push_devices.register, config_dir(), body)
+        config = config_dir()
+        await _note_device_credential(request, config)
+        return await _push_call(
+            mobile_push_devices.register,
+            config,
+            body,
+            credential_expires_at=presented_cookie_expiry(request),
+        )
 
     async def api_push_devices(request: Request) -> Response:
         """The devices registered for this computer — what Settings renders."""
@@ -5159,7 +5254,9 @@ def build_app(daemon: MobileDaemon):
             return denied
         from local_operator.paths import config_dir
 
-        return await _push_call(mobile_push_devices.list_devices, config_dir())
+        config = config_dir()
+        await _note_device_credential(request, config)
+        return await _push_call(mobile_push_devices.list_devices, config)
 
     async def api_push_device_delete(request: Request) -> Response:
         """REVOKE one device by id — any device in this registry, not just ours.
@@ -5179,9 +5276,11 @@ def build_app(daemon: MobileDaemon):
             return denied
         from local_operator.paths import config_dir
 
+        config = config_dir()
+        await _note_device_credential(request, config)
         return await _push_call(
             mobile_push_devices.revoke,
-            config_dir(),
+            config,
             str(request.path_params["device_id"]),
         )
 
