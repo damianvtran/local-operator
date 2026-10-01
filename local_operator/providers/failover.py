@@ -3267,19 +3267,22 @@ def _pinned_exhaustion_error(
 ) -> ProviderError:
     """The legible failure a pinned route raises when the walk ends unserved.
 
-    Names the pin, the cause and the remedies, because a bare provider error
+    Names the pin, the state and the remedies, because a bare provider error
     would leave the operator to guess that the failure is the policy working
     as designed rather than a misconfiguration. The copy is policy-aware,
-    because the two policies fail for different reasons: under the strict
+    because the policies fail for different reasons: under the strict
     ``retry.pinnedFallback: same-family`` opt-in a silent model substitution
     is deliberately converted into a VISIBLE pinned-child refusal (and the
     refusal names the cross-vendor hops it declined), while under the default
     the walk served nothing because every configured hop was tried and could
     not — so the message names those hops, or says that none is configured,
-    or that fallback is switched off. ``kind="unknown"`` is explicit: the
-    text quotes a provider message, and letting the classifier re-derive a
-    kind from that quote could dress the refusal as the provider's own quota
-    error.
+    or that fallback is switched off. The non-strict arms label the quoted
+    error ``Last failure:`` rather than ``Cause:``: the walk's most
+    diagnostic error can come from a HOP, so the strict copy's attribution
+    would misstate the default's (design review round 1, D4). ``kind="unknown"``
+    is explicit: the text quotes a provider message, and letting the
+    classifier re-derive a kind from that quote could dress the refusal as the
+    provider's own quota error.
 
     THE FIRST SENTENCE IS THE ACTIONABLE HALF, and that is a measured layout
     constraint rather than a style choice: the failed child's dock row paints
@@ -3288,7 +3291,11 @@ def _pinned_exhaustion_error(
     state and the ways out LEAD, and the diagnostics follow. Wording speaks
     the vocabulary of the ``/settings`` page that owns these terms — "hop",
     "allow cross-vendor" — never "target" and never the raw stored value
-    (design round 1, D5).
+    (design round 1, D5); the disabled arm names its switch by the row's
+    LABEL, looked up from the registry with the stored key only as a
+    fallback, for the same reason (design review round 1, D2). Each arm's
+    remedy phrase is asserted to land within those leading cells for a
+    typical pin.
 
     The STRICT branch's ``same_family_available`` distinguishes its three
     exhaustion shapes so the note never lies about what was configured:
@@ -3296,7 +3303,10 @@ def _pinned_exhaustion_error(
     or neither configured — the last one reachable in its natural no-chain
     shape (review round 1, F3). The default branch reads ``hops_tried``
     (selectors, deduped, in walk order) and ``fallback_off`` — the tail's
-    facts, passed in rather than re-derived here.
+    facts, passed in rather than re-derived here. The retry-disabled fast
+    paths in the walk raise this same error with ``fallback_off="retry.enabled"``
+    for a pinned child, because with the cascade switched off the tail is
+    never reached (agent review round 1, F1; QA round 1, Q-1).
     """
     if reported is None:
         cause = "every route that could serve it failed"
@@ -3325,11 +3335,26 @@ def _pinned_exhaustion_error(
             kind="unknown",
         )
     if fallback_off is not None:
+        # Name the switch by the LABEL its /settings row wears, not the raw
+        # stored key: the page's vocabulary is what the operator acts on
+        # (design review round 1, D2). Function-local import, in the idiom of
+        # `model.effort`'s ladder read, so this provider module does not drag
+        # the settings facade onto the routing stack's import graph; any
+        # failure leaves the key standing in.
+        switch = fallback_off
+        try:
+            from local_operator import settings_io
+
+            setting = settings_io.resolve_key(fallback_off)
+            if setting is not None:
+                switch = setting.label
+        except Exception:  # noqa: BLE001 — the copy degrades to the raw key
+            switch = fallback_off
         return ProviderError(
             None,
-            f"Pin {pin_selector} failed; fallback is disabled ({fallback_off} is off)."
-            f" Cause: {cause}."
-            f" Fix: fix the pinned model, or re-enable {fallback_off} in /settings.",
+            f"Pin {pin_selector} failed; turn fallback on in /settings ({switch}),"
+            " or fix the pinned model."
+            f" Last failure: {cause}.",
             retryable=False,
             kind="unknown",
         )
@@ -3337,21 +3362,43 @@ def _pinned_exhaustion_error(
         return ProviderError(
             None,
             f"Pin {pin_selector} failed; add a hop to retry.fallbackChains."
-            f" Cause: {cause}."
-            " No fallback hop is configured."
-            " Fix: add a hop to retry.fallbackChains.",
+            f" Last failure: {cause}."
+            " No fallback hop is configured.",
             retryable=False,
             kind="unknown",
         )
     return ProviderError(
         None,
-        f"Pin {pin_selector} failed; add another hop or fix its credentials."
-        f" Cause: {cause}."
+        f"Pin {pin_selector} failed; add another hop or fix credentials."
+        f" Last failure: {cause}."
         " Every configured hop was tried and could not serve it:"
         f" {', '.join(hops_tried)}."
         " Fix: check the hops' credentials, or add another hop to retry.fallbackChains.",
         retryable=False,
         kind="unknown",
+    )
+
+
+def _pinned_fallback_disabled_error(pin_selector: str, error: ProviderError) -> ProviderError:
+    """The legible failure for a pinned child with the cascade switched OFF.
+
+    ``retry.enabled: false`` raises from the retry-disabled fast paths INSIDE
+    the attempt loop, before the walk's tail — so the tail's ``fallback_off``
+    argument alone could never serve a pinned child there, and the raw
+    provider error surfaced instead of the copy this module promises (agent
+    review round 1, F1; QA round 1, Q-1). Both fast-path raises call this for
+    a pinned route; unpinned routes keep their exact pre-existing raises. The
+    chain was never expanded — that expansion is gated on ``retry.enabled`` —
+    so the policy flags passed here are the constants by construction.
+    """
+    return _pinned_exhaustion_error(
+        pin_selector,
+        error,
+        (),
+        False,
+        strict=False,
+        hops_tried=(),
+        fallback_off="retry.enabled",
     )
 
 
@@ -4596,6 +4643,15 @@ async def stream_with_failover(
                     # re-raises the ORIGINAL exception object, silently
                     # dropping that diagnosis on the one path where the retry
                     # policy (not the ladder) declined the recovery.
+                    #
+                    # PINNED children get the legible failure instead: "never
+                    # a bare provider error for a pinned child" holds even
+                    # with the cascade switched off, and this fast path is
+                    # where that shape raises (the walk tail is unreachable
+                    # once `retry.enabled` is false — agent review round 1,
+                    # F1).
+                    if pinned and pin_selector is not None:
+                        raise _pinned_fallback_disabled_error(pin_selector, exc) from exc
                     raise exc
                 if _same_credential_retry_allowed(
                     exc,
@@ -4726,6 +4782,11 @@ async def stream_with_failover(
                     server_fault_requests += 1
                     server_faults_by_target[route_key] = server_fault_requests
                 if not retry.enabled:
+                    # Same pinned-child contract as the ProviderError arm's
+                    # fast path above: the legible failure, never the bare
+                    # transport error (agent review round 1, F1).
+                    if pinned and pin_selector is not None:
+                        raise _pinned_fallback_disabled_error(pin_selector, wrapped) from wrapped
                     raise wrapped from exc
                 # Same budget rule as the ProviderError arm above, asked the same
                 # way. This branch used to test `retry.max_retries` directly,
