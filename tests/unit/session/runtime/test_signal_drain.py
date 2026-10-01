@@ -861,6 +861,9 @@ async def test_a_signalled_turn_that_keeps_making_progress_rides_through(
     the same clean exit an unsignalled turn would take.
     """
     monkeypatch.setattr(process, "SIGNAL_DRAIN_S", 0.15)
+    # A tight loop tick, so each cell observes the bound within a bound or two
+    # even on a loaded runner.
+    monkeypatch.setattr(process, "REAP_CHECK_S", 0.02)
     stop = asyncio.Event()
     handle = _SessionHandle(busy=True, moving=True)
     runtime = _RecordingRuntime()
@@ -894,6 +897,7 @@ async def test_a_turn_with_no_progress_and_no_step_is_reaped_at_the_bound(
     the reaping message naming what was actually measured.
     """
     monkeypatch.setattr(process, "SIGNAL_DRAIN_S", 0.15)
+    monkeypatch.setattr(process, "REAP_CHECK_S", 0.02)
     stop = asyncio.Event()
     handle = _SessionHandle(busy=True, moving=False)
 
@@ -924,6 +928,7 @@ async def test_a_quiet_turn_held_open_by_a_step_is_spared_and_says_so(
     never the reap.
     """
     monkeypatch.setattr(process, "SIGNAL_DRAIN_S", 0.15)
+    monkeypatch.setattr(process, "REAP_CHECK_S", 0.02)
     stop = asyncio.Event()
     handle = _SessionHandle(busy=True, moving=False, stepping=True)
 
