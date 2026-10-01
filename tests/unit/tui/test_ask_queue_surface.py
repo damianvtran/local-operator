@@ -29,11 +29,13 @@ from local_operator.tui.widgets.ask_queue import (
     ASK_BAR_CHEVRON_COLLAPSED,
     ASK_BAR_CHEVRON_EXPANDED,
     ASK_MARKER,
+    ASK_TOGGLE_KEY,
     STATUS_OPEN,
     AskBar,
     AskQueueList,
     ask_rows,
 )
+from local_operator.tui.widgets.editor import Editor
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 # The whole module drives the real app through Textual's pilot, so every test
@@ -87,6 +89,7 @@ class _AskSession(FakeSession):
         self.declined: list[tuple[str, str]] = []
         self.dismissed: list[tuple[str, str]] = []
         self.refusals: dict[str, str] = {}
+        self.dismiss_refusals: dict[str, str] = {}
 
     def respond_ask(self, ask_id, answers, *, by="unknown"):
         self.answered.append((ask_id, dict(answers), by))
@@ -99,7 +102,8 @@ class _AskSession(FakeSession):
 
     def dismiss_ask(self, ask_id, *, by="unknown"):
         self.dismissed.append((ask_id, by))
-        return {"ok": True}
+        error = self.dismiss_refusals.get(ask_id)
+        return {"ok": not error, **({"error": error} if error else {})}
 
 
 @pytest.fixture
@@ -566,3 +570,336 @@ async def test_an_incomplete_answer_is_never_submitted_and_a_complete_one_is():
         await _settle(pilot)
         assert session.answered and session.answered[0][0] == "a1"
         assert session.answered[0][1] == {"q1": ["Yes"]}
+
+
+# -- round 1 remediation: the flows the four reviews actually walked ---------
+#
+# One test per finding, driven through the real app the same way the reviewers
+# drove it. The findings are named in each docstring, because the value of the
+# test is not the assertion — it is knowing which defect it stands in front of.
+
+
+async def test_the_chat_draft_survives_picking_an_ask_out_of_the_list(enabled):
+    """BLOCKER-1: the list→card swap used to destroy the conversation draft.
+
+    The n>1 path is the one the list exists for, and it was the path that lost
+    the user's draft: ``_mount_ask_card`` collapsed with ``restore_draft=False``,
+    which CLEARS the stash rather than restoring it. The suite covered n=1 only,
+    so nothing caught it.
+    """
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        editor = app.query_one(Editor)
+        editor.load_text("a chat draft in progress")
+        await _settle(pilot)
+        app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?"), _row("a2", "Which region?")]))
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        assert app._ask_chat_draft == "a chat draft in progress"
+        app.on_ask_queue_list_picked(AskQueueList.Picked("a2"))
+        await _settle(pilot)
+        # The draft is STILL stashed, not silently thrown away...
+        assert app._ask_chat_draft == "a chat draft in progress"
+        # ...and it comes back intact when the surface finally closes.
+        app._collapse_asks()
+        await _settle(pilot)
+        assert editor.text == "a chat draft in progress"
+
+
+async def test_the_list_state_does_not_promise_the_ask_route(enabled):
+    """U1 / review MAJOR-2: the placeholder and the route read ONE condition.
+
+    With the LIST up the composer used to say "Enter sends it to the ask" while
+    ``on_editor_submitted`` sent the text to the CONVERSATION — the copy
+    promised a routing the code did not perform.
+    """
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        editor = app.query_one(Editor)
+        app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?"), _row("a2", "Which region?")]))
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        assert app.query(AskQueueList)
+        assert app._composer_placeholder_for(editor) != ASK_ANSWER_PLACEHOLDER
+        # ...and what Enter does matches what the placeholder said: chat.
+        editor.load_text("this is a chat message")
+        editor.focus()
+        await _settle(pilot)
+        await pilot.press("enter")
+        await _settle(pilot)
+        assert session.aborts == []
+        assert [p for p in session.prompts if "chat message" in str(p)]
+        assert session.answered == []
+        # On a CARD the same two sites agree the other way.
+        app.on_ask_queue_list_picked(AskQueueList.Picked("a1"))
+        await _settle(pilot)
+        assert app._composer_placeholder_for(editor) == ASK_ANSWER_PLACEHOLDER
+        editor.load_text("eu-west-1")
+        await _settle(pilot)
+        await pilot.press("enter")
+        await _settle(pilot)
+        assert session.answered and session.answered[0][0] == "a1"
+
+
+async def test_escape_from_the_composer_collapses_and_does_not_stop(enabled):
+    """QA Q2: Esc from the answer surface's own composer aborted the turn.
+
+    The state the user is in while typing an answer is the composer-focused one,
+    so the key most likely to be pressed there fell through the whole stop
+    ladder — from a surface whose footer says "esc collapse".
+    """
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        editor = app.query_one(Editor)
+        app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?")]))
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        editor.focus()
+        await _settle(pilot)
+        await pilot.press("escape")
+        await _settle(pilot)
+        assert app._ask_mode is False
+        assert app._ask_card is None
+        assert session.aborts == [], "Esc collapsed the surface but still stopped the turn"
+
+
+async def test_escape_out_of_a_card_returns_to_the_list_at_the_same_row(enabled):
+    """UX U6: a back-out from a card opened OUT of the list is not a leave.
+
+    Collapsing to minimized made the user re-expand and re-hunt for their place,
+    because the list was rebuilt with the highlight back at row 1.
+    """
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(
+            ask_rows(
+                [_row("a1", "Deploy now?"), _row("a2", "Which region?"), _row("a3", "Roll back?")]
+            )
+        )
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        await pilot.press("down")
+        await pilot.press("down")
+        await pilot.press("enter")
+        await _settle(pilot)
+        assert app._ask_mounted_id == "a3"
+        await pilot.press("escape")
+        await _settle(pilot)
+        listing = app.query_one(AskQueueList)
+        assert listing.is_attached, "Esc out of a card left the list behind entirely"
+        assert [row.ask_id for row in listing.rows][listing.index] == "a3"
+        assert app._ask_mode is True
+
+
+async def test_a_click_on_a_row_opens_that_ask(enabled):
+    """UX U2: the list was mouse-dead, and the click handed the composer the caret."""
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?"), _row("a2", "Which region?")]))
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        # Row 0 is the header, so offset y=2 is the SECOND ask.
+        await pilot.click(AskQueueList, offset=(4, 2))
+        await _settle(pilot)
+        assert app._ask_mounted_id == "a2"
+        assert app.focused is not app.query_one("Editor"), "the click gave the composer the caret"
+
+
+async def test_the_key_route_reaches_the_surface_from_the_composer(enabled):
+    """UX U5: nothing reached the bar from the keyboard, so a queued ask was mouse-only.
+
+    The key is asserted to be one the composer does NOT claim, which is the
+    reason it is not f7: Textual's ``TextArea`` binds f6/f7 itself, so the key
+    this row would naturally suggest is swallowed by the one surface that most
+    needs the route.
+    """
+    from textual.widgets import TextArea
+
+    # `getattr`, not `.key`: a `BINDINGS` entry may be written as a tuple, and
+    # the check is about the keys that exist, not about their spelling.
+    composer_keys = {str(getattr(binding, "key", binding)) for binding in TextArea.BINDINGS}
+    assert (
+        ASK_TOGGLE_KEY not in composer_keys
+    ), f"{ASK_TOGGLE_KEY} is claimed by the composer, so it can never reach the app"
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        app.query_one("Editor").focus()
+        app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?"), _row("a2", "Which region?")]))
+        await _settle(pilot)
+        await pilot.press(ASK_TOGGLE_KEY)
+        await _settle(pilot)
+        assert app._ask_mode is True
+        assert app.query(AskQueueList)
+        await pilot.press(ASK_TOGGLE_KEY)
+        await _settle(pilot)
+        assert app._ask_mode is False
+
+
+async def test_the_open_list_follows_the_wire(enabled):
+    """QA Q3 / design D4: the list was built once and never refreshed."""
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(
+            ask_rows(
+                [_row("a1", "Deploy now?"), _row("a2", "Which region?"), _row("a3", "Roll back?")]
+            )
+        )
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        listing = app.query_one(AskQueueList)
+        assert len(listing.rows) == 3
+        # a3 is answered from the phone: the panel must drop it, not keep a
+        # stale, answerable-looking row.
+        app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?"), _row("a2", "Which region?")]))
+        await _settle(pilot)
+        assert [row.ask_id for row in listing.rows] == ["a1", "a2"]
+        assert listing.index == 0
+
+
+async def test_a_late_answer_leaves_the_answerable_surfaces(enabled):
+    """UX U3 / design D6: a late answer was still painted "timed out — still
+    answerable", counted as owed, and had an answer box opened for it."""
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(
+            ask_rows([_row("a1", "Deploy now?", status="late"), _row("a2", "Which region?")])
+        )
+        await _settle(pilot)
+        assert [row.ask_id for row in app._ask_rows] == ["a2"]
+        assert "1 question waiting" in app.query_one(AskBar).render().plain
+        assert "timed out" not in app.query_one(AskBar).render().plain
+
+
+async def test_the_bar_and_the_list_speak_one_count(enabled):
+    """UX U4 / QA Q4 / design D7: two totals for one queue, three rows apart."""
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(
+            ask_rows([_row("a1", "Deploy now?"), _row("a2", "Which region?", status="timed_out")])
+        )
+        await _settle(pilot)
+        bar_text = app.query_one(AskBar).render().plain
+        app._expand_asks()
+        await _settle(pilot)
+        header = app.query_one(AskQueueList).render().plain.splitlines()[0]
+        # The SAME count words, from one function, on both surfaces.
+        counts = "1 question waiting · 1 ask timed out"
+        assert counts in bar_text, bar_text
+        assert counts in header, header
+
+
+async def test_the_bar_keeps_its_chevron_at_eighty_columns(enabled):
+    """Design D5/D9 + UX U10: at 80x24 the bar overflowed and lost the chevron.
+
+    The head question is what gives way, and the expiry words it also paints are
+    the second half of the finding: urgency used to be carried by hue alone
+    because the countdown never rendered at all (design D8).
+    """
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(
+            ask_rows(
+                [
+                    _row(
+                        "a1",
+                        "Which rollout should the stale-row migration take tonight?",
+                        expires_at=1_000_000 + 120_000,
+                    )
+                ]
+            )
+        )
+        await _settle(pilot)
+        bar = app.query_one(AskBar)
+        text = bar.render().plain
+        assert text.rstrip().endswith(ASK_BAR_CHEVRON_COLLAPSED), repr(text)
+        assert len(text) <= bar.size.width, (len(text), bar.size.width)
+        assert bar.size.width <= 80
+
+
+async def test_the_card_title_never_claims_the_agent_is_waiting(enabled):
+    """Design D1 (blocker) + UX U9: the queued card said the agent was WAITING.
+
+    In the queued model the tool returned a receipt and the agent moved on, so
+    the old string misstated both the machine's state and the cost of the user's
+    silence. The timeout case is the second half: the card kept the same line
+    after the bar beside it had begun saying "timed out".
+    """
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?")]))
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        card = app.query_one(AskPickerScreen)
+        assert "waiting" not in card._title, card._title
+        assert "moved on" in card._title
+        # The ask times out UNDER the open card: the card must follow the wire.
+        app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?", status="timed_out")]))
+        await _settle(pilot)
+        card = app.query_one(AskPickerScreen)
+        assert "waiting" not in card._title, card._title
+        assert "timed out" in card._title, card._title
+
+
+def test_the_timeout_receipt_keeps_the_warning_ink():
+    """Review MINOR-3: the comment claimed an ink the shared builder dropped.
+
+    Both receipts painted their summary in ``dim``, so the deadline that fired
+    read exactly like the answer that arrived — while the comment beside them
+    argued they were different facts.
+    """
+    from local_operator.tui.widgets.transcript import AskResponseBlock
+
+    timeout = AskResponseBlock({"text": "…"}, kind="timeout")
+    answered = AskResponseBlock({"text": "…"}, kind="response")
+    assert timeout._summary_ink() == "warning"
+    assert timeout._summary_ink() != answered._summary_ink()
+    # And the receipt renders with the flag OFF: rendering a stored row is not
+    # gated, only producing one is (this file's MINOR-4 note).
+    assert AskResponseBlock({"text": "…"}, kind="response")._build_content(80).plain
+
+
+async def test_a_refused_dismiss_reports_at_the_gesture(enabled):
+    """UX U8: a refused ``x`` reported into the transcript, which is scrolled
+    away while the dock has the user's attention — so the row looked dead."""
+    from local_operator.tui.widgets.toast import Toast
+
+    session = _AskSession()
+    session.dismiss_refusals["a1"] = "only a timed-out ask can be dismissed; it is still open."
+    app = _app(session)
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _settle(pilot)
+        app._sync_ask_surface(ask_rows([_row("a1", "Deploy now?")]))
+        await _settle(pilot)
+        app._dismiss_ask("a1")
+        await _settle(pilot)
+        # The toast owns the message while it is up; the transcript is untouched.
+        assert "still open" in str(app.query_one(Toast)._message)

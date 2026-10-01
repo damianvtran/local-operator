@@ -58,12 +58,19 @@ policy.NONBLOCKING_ASK = True
 
 
 def _row(
-    ask_id: str, question: str, *, status: str = "open", urgent: bool = False
+    ask_id: str,
+    question: str,
+    *,
+    status: str = "open",
+    urgent: bool = False,
+    expires_at: int | None = None,
 ) -> dict[str, Any]:
     return {
         "ask_id": ask_id,
         "created_at": 1_700_000_000_000,
-        "expires_at": 1_700_003_600_000,
+        # Overridable so a frame can show a deadline the client clock can still
+        # measure; the fixed value is the "expiring" case, which is honest too.
+        "expires_at": 1_700_003_600_000 if expires_at is None else expires_at,
         "timeout_s": 3600,
         "urgent": urgent,
         "status": status,
@@ -88,9 +95,33 @@ def _row(
     }
 
 
+#: The queue the frames show, with deadlines relative to NOW rather than to a
+#: fixed epoch: the list paints a countdown from ``expires_at`` against the
+#: client's clock, so a frozen constant renders "expiring" for every row on
+#: every machine and the frame would be evidence of nothing (design D8's fix is
+#: only visible with a deadline that is still in the future).
+_DEADLINE_MIN = 42
+_URGENT_MIN = 4
+
+
+def _deadline(minutes: int) -> int:
+    import time
+
+    return int(time.time() * 1000) + minutes * 60_000
+
+
 THREE = [
-    _row("a1", "Which rollout should the stale-row migration take?"),
-    _row("a2", "Rotate the deploy key before the cutover?", urgent=True),
+    _row(
+        "a1",
+        "Which rollout should the stale-row migration take?",
+        expires_at=_deadline(_DEADLINE_MIN),
+    ),
+    _row(
+        "a2",
+        "Rotate the deploy key before the cutover?",
+        urgent=True,
+        expires_at=_deadline(_URGENT_MIN),
+    ),
     _row("a3", "Which region do we fail over to?", status="timed_out"),
 ]
 
@@ -187,6 +218,37 @@ async def main() -> None:
             app._sync_ask_surface(ask_rows(THREE))
             await pilot.pause()
             app._expand_asks()
+        elif mode == "list-late":
+            # Round 1's late-answer state (round 1: UX U3 / design D6): the
+            # first ask was answered AFTER its deadline, so the surfaces must
+            # not offer it an answer box. Captured to show it is gone from the
+            # list and from the bar's count while the open ask remains.
+            # TWO asks stay open, so the frame shows the LIST — the surface
+            # whose count and rows the late answer must not appear in — rather
+            # than collapsing to a single ask's card.
+            app._sync_ask_surface(ask_rows([dict(THREE[0], status="late"), THREE[1], THREE[2]]))
+            await pilot.pause()
+            app._expand_asks()
+        elif mode == "list-refreshed":
+            # Round 1's stale-list state (QA Q3 / design D4): the panel used to
+            # keep a row the wire had dropped. The frame is the AFTER half — the
+            # list is fed a shorter snapshot while it is up, which is exactly
+            # what used to leave "3 open asks" over a bar saying "1 question
+            # waiting".
+            app._sync_ask_surface(ask_rows(THREE))
+            await pilot.pause()
+            app._expand_asks()
+            await pilot.pause()
+            app._sync_ask_surface(ask_rows(THREE[:1]))
+        elif mode == "card-timeout":
+            # Round 1 (UX U9): the card kept saying the agent was waiting after
+            # the ask's own deadline had fired. The status changes UNDER the
+            # mounted card here, which is the case the title hook exists for.
+            app._sync_ask_surface(ask_rows([THREE[0]]))
+            await pilot.pause()
+            app._expand_asks()
+            await pilot.pause()
+            app._sync_ask_surface(ask_rows([dict(THREE[0], status="timed_out")]))
         elif mode == "card":
             app._sync_ask_surface(ask_rows([THREE[0]]))
             await pilot.pause()

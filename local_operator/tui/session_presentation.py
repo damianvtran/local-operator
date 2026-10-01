@@ -1262,10 +1262,14 @@ def project_settled_rows(
                 # scanning the transcript; what is new is that the row opens
                 # onto the questions and the answers behind it.
                 #
-                # The `warning`/`notice` ink the notice used to carry is
-                # unchanged and now comes from the block's own summary copy —
-                # the DEADLINE still reads as a warning (the user must know the
-                # agent stopped waiting) while an ANSWER stays a receipt.
+                # The DEADLINE still reads as a warning (the user must know
+                # the agent stopped waiting) while an ANSWER stays a receipt,
+                # and the ink now comes from the block's own `_summary_ink`
+                # hook rather than from this call site. Round 1 (MINOR-3) caught
+                # this comment claiming the ink was "unchanged" when the shared
+                # row builder painted both rows `dim`: the claim is true again,
+                # one layer down, and the two rows differ by ink as well as by
+                # wording.
                 details = getattr(message, "details", None) or {}
                 is_timeout = getattr(message, "custom_type", None) == ASK_TIMEOUT_CUSTOM_TYPE
                 self._append_block(

@@ -6,14 +6,14 @@ Two widgets for one feature, and the split is the interaction model rather than
 a filing convention:
 
 * :class:`AskBar` — the **MINIMIZED** state: one line above the composer that
-  says how many questions are waiting and expands on a click. It is the default
-  presentation of a queued ask, so it must exist while the answer surface is
-  NOT mounted: it is a child of the composer's own panel, never of
+  says how many asks are waiting and expands on a click or ``f7``. It is the
+  default presentation of a queued ask, so it must exist while the answer
+  surface is NOT mounted: it is a child of the composer's own panel, never of
   ``#prompt-host`` (which reserves rows only while a card is in it).
 * :class:`AskQueueList` — the **list** the bar opens when more than one ask is
-  open. One row per ask (status glyph, first question, expiry), Enter mounts
-  that ask's picker. It is mounted in ``#prompt-host`` beside the picker,
-  because both are the *expanded* state and only one of them is ever up.
+  open. One row per ask (status glyph, first question, expiry), a click or
+  Enter mounts that ask's picker. It is mounted in ``#prompt-host`` beside the
+  picker, because both are the *expanded* state and only one is ever up.
 
 WHY THE BAR IS NOT THE NOTICE IT REPLACES. A queued ask used to surface as a
 one-line transcript notice. A notice scrolls away, is not clickable, and
@@ -24,6 +24,18 @@ replaces the notice with this bar rather than painting both.
 COLOUR IS PERSISTENT, NEVER ANIMATED. §5.0 is explicit: the accent is a fixed
 colour on the glyph. A pulse would be the focus-steal this design exists to
 avoid, expressed in colour instead of keys, so nothing here owns a timer.
+
+INK IS CHOSEN AGAINST THE GROUND IT REALLY SITS ON, and that is a review
+outcome rather than a preference (design round 1, D2/D3). The first cut painted
+the bar's own message in ``dim`` on ``raised`` (3.81:1 dark, 3.09:1 LIGHT —
+under the palette gate's 3.4:1 dim floor) and the list's rows in ``dim`` on
+``overlay`` (3.43:1 dark, 2.72:1 light). The gate checks ``bg``/``surface``
+only, which is exactly how both slipped through: a new surface has to solve its
+own pairs. So the bar's ground is the composer's ``surface`` (the gate's own
+ground, where ``fg`` 13.76/13.86, ``muted`` 7.93/6.58 and ``dim`` 4.18/3.46 all
+clear their floors, and the accent glyph reads 8.02/4.43) and the list's rows
+avoid ``dim`` entirely on ``overlay`` (``fg`` 11.30/10.92, ``muted`` 6.51/5.18,
+``warning`` 7.09/4.78).
 """
 
 from __future__ import annotations
@@ -31,8 +43,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
+from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
+from textual import events
 from textual.binding import Binding
 from textual.message import Message
 from textual.widget import Widget
@@ -49,6 +63,18 @@ ASK_MARKER = "?"
 #: The chevron at the bar's right edge. Two glyphs, one meaning each: the
 #: direction the click will move the surface, exactly like the transcript's
 #: expand affordance.
+#: The key that reaches the ask surface without a mouse, named ONCE so the bar's
+#: copy cannot advertise a key the app does not bind.
+#:
+#: A FUNCTION key, continuing the app's f8/f9/f10 row, because the composer owns
+#: the letters: ``TextArea`` binds ctrl+a/e/w/d/x/k/u/z/y/c/v and, measured in
+#: Textual 8.2.8, ``f6``/``f7`` as well — so f7, the obvious neighbour, is
+#: swallowed by the focused composer and never reaches an app binding (found by
+#: driving the key in a pilot, round 1 remediation). f8/f9/f10 are the app's.
+#: f5 is avoided too: ``editor.py``'s note claims TextArea binds f5 as a
+#: selection chord, and a dispute about one key is not worth winning.
+ASK_TOGGLE_KEY = "f4"
+
 ASK_BAR_CHEVRON_COLLAPSED = "⌄"
 ASK_BAR_CHEVRON_EXPANDED = "⌃"
 
@@ -59,15 +85,25 @@ STATUS_TIMED_OUT = "timed_out"
 STATUS_LATE = "late"
 STATUS_ANSWERED = "answered"
 
+#: Statuses a SURFACE drops, because the user has nothing left to do about
+#: them. ``answered`` and ``declined`` are settled; ``late`` joins them because
+#: it is the same settlement one deadline later — the agent was told, the
+#: receipt is in the transcript, and offering an answer box for it can only be
+#: refused (design round 1, D6/U3: ``late`` was painted "timed out — still
+#: answerable" and stayed in the answerable set).
+SETTLED_STATUSES = frozenset({STATUS_ANSWERED, STATUS_LATE, "declined", "dismissed"})
+#: ...which is to say: everything the reader must not be asked to answer. Kept
+#: as an explicit set so a new status has to decide, rather than defaulting in.
+_ANSWERABLE = (STATUS_OPEN, STATUS_TIMED_OUT)
+
 #: Closed-set glyphs for the list's status column. Deliberately NOT a spinner
 #: and not an animated set: a queued ask is not doing anything, it is waiting.
 #: ``●`` open, ``◷`` timed out but still answerable (the wake glyph's meaning —
-#: "a clock decided something"), ``↩`` answered late.
+#: "a clock decided something"). A settled row has no glyph because it has no
+#: row: see :data:`SETTLED_STATUSES`.
 STATUS_MARKS: dict[str, str] = {
     STATUS_OPEN: "●",
     STATUS_TIMED_OUT: "◷",
-    STATUS_LATE: "↩",
-    STATUS_ANSWERED: "✓",
 }
 
 
@@ -99,7 +135,7 @@ class AskRow:
 
         Empty rather than a placeholder: the list falls back to the ask id in
         its own copy, because a surface that invented a question would be
-        showing the user words the model never wrote.
+        telling the reader something the model never said.
         """
         for question in self.questions:
             text = str(question.get("question") or "").strip()
@@ -107,50 +143,86 @@ class AskRow:
                 return text
         return ""
 
+    @property
+    def answerable(self) -> bool:
+        """Whether the user can still do something about this row."""
+        return self.status in _ANSWERABLE
 
-def _read(row: Any, key: str, default: Any = None) -> Any:
-    """One field off either a wire model or a plain mapping."""
+    @property
+    def waiting(self) -> bool:
+        """Whether anyone is still WAITING for this row's answer.
+
+        Narrower than :attr:`answerable`, and the distinction is the copy's: a
+        timed-out ask is answerable (the user may still reply, and the agent is
+        told) but nobody is waiting on it — the agent moved on.
+        """
+        return self.status == STATUS_OPEN
+
+
+def _value(row: Any, key: str) -> Any:
+    """Read one field from a wire model OR a plain mapping."""
     if isinstance(row, Mapping):
-        return row.get(key, default)
-    return getattr(row, key, default)
+        return row.get(key)
+    return getattr(row, key, None)
 
 
 def ask_rows(rows: Iterable[Any] | None) -> list[AskRow]:
-    """Flatten wire rows, DROPPING the ones no surface may show.
+    """Flatten the wire's asks into the surface view-model, dropping settled ones.
 
-    ``answered`` and ``declined`` are terminal for the USER's purpose: the
-    response card in the transcript is where they belong, and a list that kept
-    them would make "how many questions are waiting for me" unanswerable —
-    which is the list's only job. ``expired`` is dropped for §5.0's own reason:
-    an expiry is not a failure and must not sit in a queue claiming attention.
+    ``None`` and ``[]`` both mean "no queued asks" — the wire is ABSENT, not
+    empty, while the feature is dark (§4/N2), so a caller that mistook absence
+    for a list would be rendering a feature the runtime does not have.
     """
     out: list[AskRow] = []
     for row in rows or ():
-        status = str(_read(row, "status", STATUS_OPEN) or STATUS_OPEN)
-        if status in ("answered", "declined", "dismissed", "expired"):
+        status = str(_value(row, "status") or STATUS_OPEN)
+        if status in SETTLED_STATUSES or status not in _ANSWERABLE:
             continue
-        questions = _read(row, "questions", None) or ()
+        questions = _value(row, "questions") or ()
         out.append(
             AskRow(
-                ask_id=str(_read(row, "ask_id", "") or ""),
+                ask_id=str(_value(row, "ask_id") or ""),
                 status=status,
-                created_at=int(_read(row, "created_at", 0) or 0),
-                expires_at=int(_read(row, "expires_at", 0) or 0),
-                urgent=bool(_read(row, "urgent", False)),
+                created_at=int(_value(row, "created_at") or 0),
+                expires_at=int(_value(row, "expires_at") or 0),
+                urgent=bool(_value(row, "urgent")),
                 questions=tuple(q for q in questions if isinstance(q, Mapping)),
             )
         )
     return out
 
 
+def queue_headline(open_count: int, timed_out_count: int) -> str:
+    """The queue's count, in ONE vocabulary for the bar and the list header.
+
+    Two totals used to describe one queue: the bar counted the OPEN asks
+    ("2 questions waiting") while the list header counted every row it drew
+    ("3 open asks", the timed-out one included), and a reader with both on
+    screen saw two numbers three rows apart (design D7 / UX U4 / QA Q4). The
+    words are here, once, so the two surfaces cannot disagree about what they
+    are counting — and the no-timed-out case keeps §5's own copy verbatim.
+    """
+    parts: list[str] = []
+    if open_count:
+        noun = "question" if open_count == 1 else "questions"
+        parts.append(f"{open_count} {noun} waiting")
+    if timed_out_count:
+        noun = "ask" if timed_out_count == 1 else "asks"
+        parts.append(f"{timed_out_count} {noun} timed out")
+    return " · ".join(parts)
+
+
 class AskBar(Widget):
-    """The minimized ask affordance: one line, click to expand or collapse.
+    """The minimized ask affordance: one line, click or ``f7`` to expand.
 
     Focusable so a keyboard can reach it, but it never TAKES focus on its own:
     §5.0's no-auto-mount/no-focus-steal rule covers this widget too. Clicking
     it focuses it as a side effect of the click (Textual focuses a focusable
     widget under a press), and Enter then toggles — so the pointer is the
-    primary path and the keyboard is available without a second gesture.
+    primary path and the keyboard is available without a second gesture. The
+    app's own ``f7`` binding is the route that does not need focus at all (UX
+    round 1, U5: the bar's own Enter binding was unreachable, because nothing
+    focuses a bar the user cannot see is focusable).
     """
 
     can_focus = True
@@ -158,23 +230,27 @@ class AskBar(Widget):
     class Toggled(Message):
         """The user asked to expand or collapse the answer surface."""
 
-    # The action is NOT named ``toggle``: Textual's ``DOMNode`` already owns an
-    # ``action_toggle(attribute_name)`` (it toggles a CSS class), and pyright
-    # rejects the override as an incompatible signature. A name that says what
-    # this one does is clearer than a shadowing one anyway.
+    #: NOT named ``toggle``: Textual's ``DOMNode`` already owns an
+    #: ``action_toggle(attribute_name)`` (it toggles a CSS class), and pyright
+    #: rejects the override as an incompatible signature. A name that says what
+    #: this one does is clearer than a shadowing one anyway.
     BINDINGS = [Binding("enter", "expand_or_collapse", "Expand/collapse", show=False)]
+
+    #: The most of the head question the bar will ever spend, however wide the
+    #: terminal is (design D9 named the old fixed 48 as truncating with ~38
+    #: cells spare at 130 columns; the cap that remains is a *ceiling* on how
+    #: much of a model-authored sentence this row is worth, not the budget).
+    HEAD_CEILING = 48
 
     def __init__(self, widget_id: str = "ask-bar") -> None:
         super().__init__(id=widget_id)
         self._count = 0
+        self._timed_out = 0
         self._head = ""
         self._expanded = False
         self._urgent = False
         #: Whether there is anything to open at all — see `set_state`.
         self._present = False
-        #: How many of those are timed out (only meaningful while ``_count`` is
-        #: 0, which is the one state where the two differ).
-        self._timed_out = 0
         self.display = False
 
     @property
@@ -189,19 +265,19 @@ class AskBar(Widget):
         self,
         *,
         count: int,
+        timed_out: int = 0,
         head: str = "",
         expanded: bool,
         urgent: bool = False,
         present: bool | None = None,
-        timed_out: int = 0,
     ) -> None:
         """Repaint for the current queue.
 
         ``head`` is the first question, drawn as a dim trailing hint so the bar
         names WHAT is waiting without becoming a second list. It is clipped by
-        the caller to a length the narrowest supported terminal can hold; this
-        widget never truncates the label itself, because a bar whose meaning
-        ("3 questions waiting") can be cut is a bar that lies at 40 columns.
+        THIS widget, against the width the row really has (design D5: a fixed
+        clip plus a tail appended after it overflowed a 76-cell bar at 80x24
+        and lost the chevron entirely).
 
         ``count`` is what the user still OWES — the OPEN asks — while
         ``present`` says whether there is anything at all to open. The two
@@ -211,21 +287,21 @@ class AskBar(Widget):
         ``count == 0`` would make them unreachable from the TUI.
         """
         if present is None:
-            present = count > 0
+            present = count > 0 or timed_out > 0
         changed = (
             count != self._count
+            or timed_out != self._timed_out
             or head != self._head
             or expanded != self._expanded
             or urgent != self._urgent
             or present != self._present
-            or timed_out != self._timed_out
         )
         self._count = count
+        self._timed_out = timed_out
         self._head = head
         self._expanded = expanded
         self._urgent = urgent
         self._present = present
-        self._timed_out = timed_out
         # Nothing to open means no bar at all — not an empty one. A row of
         # blank chrome above the composer would push the dock down for nothing.
         self.display = present
@@ -237,7 +313,7 @@ class AskBar(Widget):
     def action_expand_or_collapse(self) -> None:
         self.post_message(self.Toggled())
 
-    def on_click(self, event) -> None:  # type: ignore[no-untyped-def]
+    def on_click(self, event: events.Click) -> None:  # type: ignore[override]
         """A click anywhere on the bar toggles, chevron included.
 
         ``event.stop()`` for §5.0's overlay rule's sibling: a press that
@@ -247,81 +323,113 @@ class AskBar(Widget):
         self.post_message(self.Toggled())
 
     def render(self) -> Text:
-        # Explicit `Style(color=...)` rather than Rich markup names: a bare word
-        # like "accent" is not a Rich style, and Rich silently drops what it
-        # cannot parse — a colour that never paints and never errors. The theme
-        # module is the one authority for the semantic colours, exactly as the
-        # transcript blocks read it.
+        """The bar, laid out against the width it actually has.
+
+        Explicit ``Style(color=...)`` rather than Rich markup names: a bare word
+        like "accent" is not a Rich style, and Rich silently drops what it
+        cannot parse — a colour that never paints and never errors.
+
+        THE SACRIFICE ORDER IS DELIBERATE and is what design D5 asked for: the
+        chevron is reserved first (it is the only thing saying which way this
+        control goes), then the count, then the affordance words, and the head
+        QUESTION is what gives way — it is the one part that is also available
+        by expanding, while a bar with no chevron or no count is a bar that
+        stopped being a control.
+        """
         accent = Style(color=theme_mod.semantic_color("accent"))
+        fg = Style(color=theme_mod.semantic_color("fg"))
         dim = Style(color=theme_mod.semantic_color("dim"))
         warning = Style(color=theme_mod.semantic_color("warning"))
-        text = Text(no_wrap=True, overflow="ellipsis")
-        text.append(ASK_MARKER, style=Style(bold=True) + (warning if self._urgent else accent))
-        if self._count:
-            noun = "question waiting" if self._count == 1 else "questions waiting"
-            text.append(f" {self._count} {noun}")
-        else:
-            # Only timed-out asks are left. Their count is not a count of what
-            # anyone is waiting for, so it is not spelled as one — the row says
-            # what the state actually is (see `set_state`).
-            noun = "ask" if self._timed_out == 1 else "asks"
-            text.append(f" {self._timed_out} {noun} timed out")
-        if self._head:
-            text.append(" · ", style=dim)
-            text.append(self._head, style=dim)
-        if self._expanded:
-            verb = " — click to collapse"
-        else:
-            verb = " — click to answer"
-        text.append(verb, style=dim)
-        # The chevron sits at the RIGHT EDGE, per §5.0. Read from `self.size`
-        # rather than assumed: a bar rendered before its first layout pass has
-        # width 0, and padding to a negative width would raise out of a paint.
+        glyph_style = Style(bold=True) + (warning if self._urgent else accent)
+
+        # Read from `self.size` rather than assumed: a bar rendered before its
+        # first layout pass has width 0.
+        width = max(0, int(getattr(self.size, "width", 0) or 0))
         chevron = ASK_BAR_CHEVRON_EXPANDED if self._expanded else ASK_BAR_CHEVRON_COLLAPSED
-        width = getattr(self.size, "width", 0) or 0
-        used = text.cell_len
-        if width > used + 1:
-            text.append(" " * (width - used - 1))
+        # One cell for the chevron and one of separation from the copy; a bar
+        # too narrow for both keeps the glyph and the count and drops the rest
+        # rather than butting the chevron against its own words (UX U10).
+        avail = width - 2
+        if avail <= 1:
+            text = Text(no_wrap=True, overflow="ellipsis")
+            text.append(ASK_MARKER, style=glyph_style)
+            return text
+        base = f"{ASK_MARKER} {queue_headline(self._count, self._timed_out)}"
+        verb = "collapse" if self._expanded else "answer"
+        tail = f" — {ASK_TOGGLE_KEY} or click to {verb}"
+        head_part = f" · {self._head}" if self._head else ""
+        used = cell_len(base)
+        if head_part and used + cell_len(tail) + 8 <= avail:
+            room = min(self.HEAD_CEILING, avail - used - cell_len(tail) - 3)
+            head_part = f" · {_clip_cells(self._head, room)}" if room >= 8 else ""
+        else:
+            head_part = ""
+        if used + cell_len(head_part) + cell_len(tail) > avail:
+            tail = ""
+        text = Text(no_wrap=True, overflow="ellipsis")
+        text.append(ASK_MARKER, style=glyph_style)
+        text.append(f" {queue_headline(self._count, self._timed_out)}", style=fg)
+        if head_part:
+            text.append(head_part, style=fg)
+        if tail:
+            text.append(tail, style=dim)
+        padding = width - 1 - cell_len(text.plain)
+        if padding > 0:
+            text.append(" " * padding)
         text.append(chevron, style=Style(bold=True) + accent)
         return text
 
 
+def _clip_cells(text: str, room: int) -> str:
+    """``text`` clipped to ``room`` cells with an ellipsis, cheaply.
+
+    The local spelling of ``tool_card.truncate_cells`` rather than an import:
+    this module is on the dock's paint path and the tool-card module is not
+    otherwise needed here. Both agree on the ellipsis and the cell count.
+    """
+    if room <= 0:
+        return ""
+    if cell_len(text) <= room:
+        return text
+    if room == 1:
+        return "…"
+    clipped = ""
+    for char in text:
+        if cell_len(clipped + char) > room - 1:
+            break
+        clipped += char
+    return clipped + "…"
+
+
 class AskQueueList(Widget):
-    """The open asks, newest-first with the still-open ones in front.
+    """The open-ask list: one row per ask, Enter or a click to answer one.
 
-    Mounted in ``#prompt-host`` — the same slot the picker uses, because both
-    are the EXPANDED state and only one is ever up. It takes focus (the answer
-    keys are ordinary characters the composer would otherwise swallow), and
-    every path out of it hands focus back: Escape collapses, Enter opens an ask
-    and the picker owns the keyboard from there.
-
-    Movement CLAMPS rather than wraps. The wheel/clamp rule in AGENTS.md is
-    written for a picker over a screen the user is still looking at; this list
-    is short and ordered by arrival, so wrapping would teleport a reader who
-    pressed ``up`` on the first row to the oldest ask in the queue.
+    A ``Widget`` rather than a ``Container`` of rows: the rows are painted from
+    state and hit-tested by line, which is what keeps a queue of eight asks one
+    widget instead of eight focusable children competing for the tab order.
     """
 
     can_focus = True
 
     class Picked(Message):
-        """The user chose an ask to answer."""
+        """The user chose one ask to answer."""
 
         def __init__(self, ask_id: str) -> None:
             super().__init__()
             self.ask_id = ask_id
 
     class Collapse(Message):
-        """The user asked to collapse back to the minimized bar."""
+        """The user closed the surface."""
 
     class Decline(Message):
-        """``d`` — decline the highlighted ask. Explicit, never an Escape side effect."""
+        """The user declined one ask — terminal, so it is an explicit action."""
 
         def __init__(self, ask_id: str) -> None:
             super().__init__()
             self.ask_id = ask_id
 
     class Dismiss(Message):
-        """``x`` — take a TIMED-OUT ask out of the view. Injects nothing."""
+        """The user dismissed one TIMED-OUT ask from the view."""
 
         def __init__(self, ask_id: str) -> None:
             super().__init__()
@@ -338,11 +446,17 @@ class AskQueueList(Widget):
         Binding("x", "dismiss", "Dismiss", show=False),
     ]
 
-    def __init__(self, rows: Sequence[AskRow], widget_id: str = "ask-queue-list") -> None:
+    #: The header occupies the first painted line; a click on it selects
+    #: nothing, which is what `_row_at` returns for it.
+    HEADER_ROWS = 1
+
+    def __init__(
+        self, rows: Sequence[AskRow], widget_id: str = "ask-queue-list", now_ms: int = 0
+    ) -> None:
         super().__init__(id=widget_id, classes="prompt-slot")
         self._rows: list[AskRow] = list(rows)
         self._index = 0
-        self._now_ms = 0
+        self._now_ms = now_ms
 
     @property
     def rows(self) -> list[AskRow]:
@@ -354,6 +468,11 @@ class AskQueueList(Widget):
 
     def set_rows(self, rows: Sequence[AskRow], *, now_ms: int = 0) -> None:
         """Replace the list, keeping the highlight on the same ASK where it can.
+
+        Called from the app's frontend-snapshot writer, which is what makes the
+        panel follow the wire: without it an ask answered on another surface
+        kept its row (and its answerability) until the user collapsed and
+        re-expanded (QA Q3 / design D4).
 
         By ask id and not by index: a queue that answered one ask and dropped
         another would otherwise slide the highlight onto a different question
@@ -369,14 +488,25 @@ class AskQueueList(Widget):
         )
         self.refresh(layout=True)
 
+    def select(self, index: int) -> None:
+        """Put the cursor on a row by index, clamped — used to hand a card's
+        user back to the row they came from (UX round 1, U6, where Escaping a
+        card reset the highlight to row 1 and made them hunt for their place)."""
+        self._index = max(0, min(len(self._rows) - 1, index)) if self._rows else 0
+        self.refresh()
+
     def current(self) -> AskRow | None:
         if not self._rows:
             return None
         return self._rows[min(self._index, len(self._rows) - 1)]
 
+    # -- keys ----------------------------------------------------------------
+
     def action_move(self, delta: int) -> None:
         if not self._rows:
             return
+        # Clamped, not wrapped: the list is short, overlaid, and a wrap would
+        # throw the user from the last row to the first under a held key.
         self._index = max(0, min(len(self._rows) - 1, self._index + delta))
         self.refresh()
 
@@ -398,65 +528,130 @@ class AskQueueList(Widget):
         if row is not None:
             self.post_message(self.Dismiss(row.ask_id))
 
+    # -- the pointer ---------------------------------------------------------
+
+    def _row_at(self, y: int) -> int | None:
+        """The row index under a widget-relative y, or ``None`` for the header.
+
+        Read off the RENDERED line index rather than a row height constant, so
+        a header that wraps (or a row that grows) cannot silently shift every
+        hit by one.
+        """
+        index = y - self.HEADER_ROWS
+        if 0 <= index < len(self._rows):
+            return index
+        return None
+
+    def on_click(self, event: events.Click) -> None:  # type: ignore[override]
+        """A click on a row selects it and opens it; a click elsewhere is inert.
+
+        Without this the list was mouse-dead AND worse than dead: Textual's own
+        click-to-focus walked up from the row and landed on the composer, so a
+        click both failed to choose and disarmed the keyboard the list was
+        using (UX round 1, U2 — `down`/`enter` stopped moving the highlight
+        while `❯` was still painted, so the panel read as live).
+        """
+        event.stop()
+        row = self._row_at(int(event.y))
+        if row is None:
+            return
+        self._index = row
+        self.refresh()
+        self.post_message(self.Picked(self._rows[row].ask_id))
+
+    def on_mouse_move(self, event: events.MouseMove) -> None:  # type: ignore[override]
+        """Hover moves the highlight, so the row under the pointer is the one
+        a click would take — the picker card's own rule."""
+        row = self._row_at(int(event.y))
+        if row is None or row == self._index:
+            return
+        self._index = row
+        self.refresh()
+
+    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:  # type: ignore[override]
+        event.stop()
+        self.action_move(1)
+
+    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:  # type: ignore[override]
+        event.stop()
+        self.action_move(-1)
+
+    # -- paint ---------------------------------------------------------------
+
     def render(self) -> Text:
-        accent = Style(color=theme_mod.semantic_color("accent"))
-        dim = Style(color=theme_mod.semantic_color("dim"))
+        fg = Style(color=theme_mod.semantic_color("fg"))
+        muted = Style(color=theme_mod.semantic_color("muted"))
+        warning = Style(color=theme_mod.semantic_color("warning"))
         bold = Style(bold=True)
+        waiting = sum(1 for row in self._rows if row.waiting)
         text = Text()
-        count = len(self._rows)
-        text.append(f"{ASK_MARKER} {count} open ask")
-        text.append("s" if count != 1 else "")
-        text.append("  ·  enter answer · esc collapse\n", style=dim)
-        now = self._now_ms
+        text.append(f"{ASK_MARKER} {queue_headline(waiting, len(self._rows) - waiting)}", style=fg)
+        text.append("  ·  enter answer · d decline · x dismiss · esc collapse\n", style=muted)
         for index, row in enumerate(self._rows):
             selected = index == self._index
             mark = STATUS_MARKS.get(row.status, "●")
             line = Text(no_wrap=True, overflow="ellipsis")
-            line.append("❯ " if selected else "  ", style=bold if selected else dim)
-            line.append(f"{mark} ", style=dim)
+            line.append("❯ " if selected else "  ", style=bold if selected else muted)
+            line.append(f"{mark} ", style=warning if row.urgent else muted)
+            # The SELECTED question is `fg` and not `accent`: accent on this
+            # panel's ground reads 3.49:1 in the light ramp, under the 4.0 the
+            # palette gate sets for a state hue (design D3). Selection is
+            # carried by the `❯` marker and the weight instead, which is also
+            # the one cue that survives NO_COLOR.
             line.append(
-                row.head_question or f"(ask {row.ask_id})", style=accent if selected else None
+                row.head_question or f"(ask {row.ask_id})",
+                style=(bold + fg) if selected else muted,
             )
-            expiry = _expiry_text(row, now)
+            expiry = expiry_text(row, self._now_ms)
             if expiry:
-                line.append(f"  {expiry}", style=dim)
+                line.append(f"  {expiry}", style=warning if row.urgent else muted)
             text.append(line)
-            if index + 1 < count:
+            if index + 1 < len(self._rows):
                 text.append("\n")
         return text
 
 
-def _expiry_text(row: AskRow, now_ms: int) -> str:
-    """``expires in 42m`` / ``timed out`` — one honest word per state.
+def expiry_text(row: AskRow, now_ms: int) -> str:
+    """``expires in 42m`` / ``timed out`` / ``urgent`` — one honest word per state.
 
     Derived from ``expires_at`` against the client's own clock, which is what
     §5 says the countdown is: the server states a deadline, the client decides
     how long that is from here. A row with no deadline says nothing rather than
     ``in 0s``.
+
+    URGENCY CARRIES WORDS, not only the amber glyph (design D8): the bar's `?`
+    turning amber is invisible to a reader who cannot see the hue and to a
+    transcript, so the row says ``urgent`` too.
     """
-    if row.status == STATUS_TIMED_OUT or row.status == STATUS_LATE:
+    if row.status == STATUS_TIMED_OUT:
         return "timed out — still answerable"
-    if not row.expires_at:
-        return ""
-    if not now_ms:
-        return ""
+    if not row.expires_at or not now_ms:
+        return "urgent" if row.urgent else ""
     remaining_s = int((row.expires_at - now_ms) // 1000)
     if remaining_s <= 0:
-        return "expiring"
+        return "urgent · expiring" if row.urgent else "expiring"
     if remaining_s < 60:
-        return f"expires in {remaining_s}s"
-    if remaining_s < 3600:
-        return f"expires in {remaining_s // 60}m"
-    return f"expires in {remaining_s // 3600}h"
+        left = f"{remaining_s}s"
+    elif remaining_s < 3600:
+        left = f"{remaining_s // 60}m"
+    else:
+        left = f"{remaining_s // 3600}h"
+    return f"urgent · expires in {left}" if row.urgent else f"expires in {left}"
 
 
 __all__ = [
     "ASK_BAR_CHEVRON_COLLAPSED",
     "ASK_BAR_CHEVRON_EXPANDED",
     "ASK_MARKER",
+    "ASK_TOGGLE_KEY",
+    "SETTLED_STATUSES",
     "STATUS_MARKS",
+    "STATUS_OPEN",
+    "STATUS_TIMED_OUT",
     "AskBar",
     "AskQueueList",
     "AskRow",
     "ask_rows",
+    "expiry_text",
+    "queue_headline",
 ]
