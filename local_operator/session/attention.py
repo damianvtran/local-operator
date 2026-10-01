@@ -1022,20 +1022,14 @@ def _classify_orphaned_run(
 
         receipt = _durable_signal_receipt(directory)
         if receipt is not None and signal_receipt.covers_run(receipt, directory.name, dead):
-            from local_operator.incidents import render_signal_receipt_detail
-
             latest = receipt["signals"][-1]
-            detail = render_signal_receipt_detail(
-                signal_name=str(latest.get("name") or ""),
-                at=latest.get("at"),
-                unsanctioned=latest.get("sanction") != "marker",
-                count=int(receipt.get("count") or 1),
-            )
-            return (
-                "error",
-                "runtime-shutdown",
-                render_cut_off_reason("runtime-shutdown", detail=detail),
-            )
+            # The SAME discriminator the in-process writer uses, so a death narrated
+            # here and a live row for the same signal cannot disagree. ``None`` is a
+            # deliberate stop the marker arms above already answered.
+            verdict = signal_receipt.cut_off_verdict(latest)
+            if verdict is not None:
+                cause, detail = verdict
+                return ("error", cause, render_cut_off_reason(cause, detail=detail))
     except Exception:  # noqa: BLE001 — an unreadable receipt degrades to the rungs below
         logger.debug("signal receipt unreadable for %s", directory.name, exc_info=True)
     if _stopped_marker(directory):
