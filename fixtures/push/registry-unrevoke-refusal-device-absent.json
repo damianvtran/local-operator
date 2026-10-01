@@ -1,0 +1,27 @@
+{
+  "provenance": {
+    "kind": "synthetic",
+    "adr_ref": "damianvtran/local-operator-mobile@b03aeb15fcbff64c5bbd0c4117713a0285c28554 docs/adr/0006-push-and-ack-sync.md",
+    "core_ref": "damianvtran/local-operator@b77fec9d4",
+    "sections": [
+      "§3.1"
+    ],
+    "how": "constructed from the ADR's literals at the pinned ref and cross-checked against the core's own builders (tests/unit/mobile/test_push_wire_contract.py); not captured from a running relay, because no relay route emits the machine-side shapes yet"
+  },
+  "shape": "unrevoke-refusal",
+  "route": "/api/push/devices/{device_id}/unrevoke",
+  "method": "POST",
+  "status": 404,
+  "body_required": {
+    "code": "str",
+    "error": "str"
+  },
+  "example": {
+    "code": "device_absent",
+    "error": "no device 3f1c9a7b2d4e506182a3b4c5d6e7f809 in this computer's push registry"
+  },
+  "notes": [
+    "Raised only by the operator's unrevoke, never by revoke: 'there is no such device' is information an operator command needs, while a retried revoke must not report a failure it did not have.",
+    "The sentence names the id asked about; the error text is bounded before it is answered."
+  ]
+}

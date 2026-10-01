@@ -1,0 +1,44 @@
+{
+  "provenance": {
+    "kind": "synthetic",
+    "adr_ref": "damianvtran/local-operator-mobile@b03aeb15fcbff64c5bbd0c4117713a0285c28554 docs/adr/0006-push-and-ack-sync.md",
+    "core_ref": "damianvtran/local-operator@b77fec9d4",
+    "sections": [
+      "§3.1"
+    ],
+    "how": "constructed from the ADR's literals at the pinned ref and cross-checked against the core's own builders (tests/unit/mobile/test_push_wire_contract.py); not captured from a running relay, because no relay route emits the machine-side shapes yet"
+  },
+  "shape": "register-response",
+  "route": "/api/push/register",
+  "method": "POST",
+  "status": 200,
+  "required": {
+    "ok": "bool",
+    "device_id": "str",
+    "device_key": "str",
+    "registered_at": "int"
+  },
+  "optional": {},
+  "forbidden": [
+    "token",
+    "install_id",
+    "platform",
+    "environment",
+    "app_version",
+    "name",
+    "device_key_matches",
+    "operator_key"
+  ],
+  "example": {
+    "ok": true,
+    "device_id": "3f1c9a7b2d4e506182a3b4c5d6e7f809",
+    "device_key": "kJ8xQ2mN7pR4sT1uV6wY9zA3bC5dE0fG2hI4jK6lM8n",
+    "registered_at": 1789000000
+  },
+  "notes": [
+    "device_key is minted and returned by EVERY register call, so this response is its only delivery path; a re-register re-mints it (registry-register-rotation.json).",
+    "registered_at is the RECORD's stamp, not the request's clock: the app re-registers on every launch and a value that moved under it would make 'registered' unanchored.",
+    "token is validated and dropped by the machine (no push token is stored); it must never be echoed here. install_id is the app's identity, not the machine's wire.",
+    "forbidden[] is the store's other fields, not a second vocabulary: the response is the contract, not the record's dump."
+  ]
+}

@@ -1,0 +1,82 @@
+{
+  "provenance": {
+    "kind": "synthetic",
+    "adr_ref": "damianvtran/local-operator-mobile@b03aeb15fcbff64c5bbd0c4117713a0285c28554 docs/adr/0006-push-and-ack-sync.md",
+    "core_ref": "damianvtran/local-operator@b77fec9d4",
+    "sections": [
+      "§3.2",
+      "§3.4"
+    ],
+    "how": "constructed from the ADR's literals at the pinned ref and cross-checked against the core's own builders (tests/unit/mobile/test_push_wire_contract.py); not captured from a running relay, because no relay route emits the machine-side shapes yet"
+  },
+  "shape": "emit-body/completion",
+  "route": "/v1/tunnels/{tunnel_id}/push/events",
+  "method": "POST",
+  "required_headers": {
+    "Idempotency-Key": "emit-idempotency-keys.json"
+  },
+  "payload_required": {
+    "v": "int",
+    "type": "str",
+    "computer": "str",
+    "conversation": "str",
+    "completion_token": "str",
+    "kind": "str",
+    "emit_id": "str",
+    "count": "int"
+  },
+  "payload_optional": {},
+  "payload_version": 1,
+  "kinds": [
+    "complete",
+    "error",
+    "interrupted",
+    "closed",
+    "retired"
+  ],
+  "report_block_required": {
+    "device_id": "str",
+    "credential_live": "bool"
+  },
+  "report_block_optional": {
+    "credential_expires_at": "int",
+    "last_authenticated_at": "int"
+  },
+  "payload": {
+    "v": 1,
+    "type": "completion",
+    "computer": "VZ8kQ1mT4pR7sW2xY6bN9c",
+    "conversation": "jH3kL9mN2pQ5rS8tU1vW4x",
+    "completion_token": "9f5d1d6e-6b1a-4c6e-9b3a-7a1c2f3d4e5f",
+    "kind": "complete",
+    "emit_id": "6b1e2d3c4a5f60718293a4b5c6d7e8f9",
+    "count": 2
+  },
+  "body": {
+    "v": 1,
+    "type": "completion",
+    "computer": "VZ8kQ1mT4pR7sW2xY6bN9c",
+    "conversation": "jH3kL9mN2pQ5rS8tU1vW4x",
+    "completion_token": "9f5d1d6e-6b1a-4c6e-9b3a-7a1c2f3d4e5f",
+    "kind": "complete",
+    "emit_id": "6b1e2d3c4a5f60718293a4b5c6d7e8f9",
+    "count": 2,
+    "devices": [
+      {
+        "device_id": "3f1c9a7b2d4e506182a3b4c5d6e7f809",
+        "credential_live": true,
+        "credential_expires_at": 1791592000,
+        "last_authenticated_at": 1789099000
+      }
+    ]
+  },
+  "notes": [
+    "THE ROUTE IS THE FROZEN ONE and there is no second spelling: the devices block rides a call that already exists rather than a route of its own.",
+    "The body IS the payload object plus the devices block (the registration forward and the heartbeat carry the same block; their routes are cloud-side proposals).",
+    "conversation is the per-machine opaque handle (S2), never a session id, and it is what makes apns-collapse-id / notification.tag collapse per conversation.",
+    "kind is the STORE's vocabulary — complete, error, interrupted, closed, retired — not the composer's set, which is missing 'closed'.",
+    "count is the machine's unread count at composition time: the one aggregate the design discloses to the cloud on purpose.",
+    "emit_id is the machine's identity for one emit (dedupe, and the cloud's delivery record). It replaces the revision counters the earlier draft carried — an opaque uuid cannot be read as activity volume.",
+    "There is no aps envelope and no badge here: what the phone receives is the cloud's fan-out, and aps.badge is never sent (payload-forbidden-fields.json)."
+  ]
+}

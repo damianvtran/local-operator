@@ -1,0 +1,29 @@
+{
+  "provenance": {
+    "kind": "synthetic",
+    "adr_ref": "damianvtran/local-operator-mobile@b03aeb15fcbff64c5bbd0c4117713a0285c28554 docs/adr/0006-push-and-ack-sync.md",
+    "core_ref": "damianvtran/local-operator@b77fec9d4",
+    "sections": [
+      "§3.1",
+      "§4"
+    ],
+    "how": "constructed from the ADR's literals at the pinned ref and cross-checked against the core's own builders (tests/unit/mobile/test_push_wire_contract.py); not captured from a running relay, because no relay route emits the machine-side shapes yet"
+  },
+  "shape": "unrevoke-refusal",
+  "route": "/api/push/devices/{device_id}/unrevoke",
+  "method": "POST",
+  "status": 403,
+  "body_required": {
+    "code": "str",
+    "error": "str"
+  },
+  "example": {
+    "code": "machine_only",
+    "error": "a device cannot restore itself — use the computer or your account"
+  },
+  "notes": [
+    "Means exactly one thing: the request did not present this machine's operator key. It is NOT a locality test and must not be described as one — the relay authenticates /api/ with one cookie check, so a phone and the CLI look identical to it.",
+    "This is the sentence the APP renders. The CLI, which runs on the machine already, reports the fact its reader can act on instead: a mismatched key is named as one.",
+    "The key is minted on the machine and never given to a device, and the tunnel gateway rebuilds request headers from a fixed allowlist, so the header cannot survive the Radient hop (QA row Q31 is the regression guard on that allowlist)."
+  ]
+}
