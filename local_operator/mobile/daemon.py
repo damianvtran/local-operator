@@ -1416,6 +1416,35 @@ def _bootstrap_mobile_attention() -> None:
             bootstrap_transcript(Transcript(directory, defer_materialise=True))
 
 
+def _slash_receipt_text(outcome: Any, command: str) -> str:
+    """One line of words for a routed slash outcome, for the phone's notice.
+
+    The runtime's ``text`` when it has one — it is already written for a person
+    and is what every other surface prints. A ``block`` outcome (``/context``, the
+    team/goal listings) carries rows in ``data.items`` instead, which are folded
+    into one line rather than dropped: a command that ran and said nothing reads
+    as a dead tap. ``noop`` outcomes (``/agent`` bare: the list is drawn by the
+    frontend from its own profile resolver) have nothing to say, so they get the
+    same ``ran /…`` fallback the runtime's own receipt uses.
+    """
+    if not isinstance(outcome, dict):
+        return f"ran /{command}"
+    text = str(outcome.get("text") or "").strip()
+    if text:
+        return text
+    data = outcome.get("data")
+    items = data.get("items") if isinstance(data, dict) else None
+    if isinstance(items, list):
+        pairs = [
+            f"{row[0]}: {row[1]}"
+            for row in items
+            if isinstance(row, (list, tuple)) and len(row) == 2
+        ]
+        if pairs:
+            return " · ".join(pairs)
+    return f"ran /{command}"
+
+
 def _entry_for_session(daemon: "MobileDaemon", session_id: str) -> SessionEntry | None:
     """Select the newest live generation without exposing its pid publicly."""
     candidates = [
@@ -3625,13 +3654,38 @@ class MobileDaemon:
     # -- slash command catalogue ----------------------------------------------------
 
     def slash_commands(self) -> list[dict[str, Any]]:
-        """The phone's slash sheet. Imported lazily (the TUI registry pulls
-        the app's command table) and cached — the registry is static."""
+        """The phone's slash sheet: ONLY the commands the phone can run end to end.
+
+        THE SCOPE COMES FROM THE ONE PLACE THAT CLASSIFIES IT, not from a second
+        name list here. ``_slash_capabilities`` marks every registry command
+        ``FRONTEND_LOCAL`` (the process drawing the widgets runs it: pickers,
+        clipboard, session lifecycle, theme...) or ``AUTHORITATIVE_SESSION`` (the
+        session's owner runs it, so any attached surface can). The phone is a
+        remote surface with no terminal and no local handler for the first class,
+        so offering it meant a tap that died with "terminal-only here" (issue
+        #1869: 35 of the 46 entries it listed). The second class is exactly what
+        the routed ``slash_result`` op reaches, which is what the composer sends;
+        ``tests/unit/session/runtime/test_capability_surface.py`` pins that every
+        one of those is dispatched by the runtime, so the sheet cannot offer a
+        command the route does not run. A command that later gains structured
+        phone behaviour (issue #1598) joins by changing its scope, not this list.
+
+        Imported lazily (the TUI registry pulls the app's command table) and
+        cached — the registry is static.
+        """
         if self._slash_commands is None:
+            from local_operator.session.frontend_state import (
+                CommandScope,
+                _slash_capabilities,
+            )
             from local_operator.slash_commands import SLASH_COMMANDS
             from local_operator.tui.autocomplete import ArgumentMode
 
-            excluded = {"exit", "quit", "clear"}  # TUI chrome, meaningless on a phone
+            routed = {
+                capability.command
+                for capability in _slash_capabilities()
+                if capability.scope is CommandScope.AUTHORITATIVE_SESSION
+            }
             self._slash_commands = [
                 {
                     "name": cmd.name,
@@ -3644,7 +3698,7 @@ class MobileDaemon:
                     ),
                 }
                 for cmd in SLASH_COMMANDS
-                if cmd.name not in excluded
+                if cmd.name in routed
             ]
         return self._slash_commands
 
@@ -4442,6 +4496,24 @@ def build_app(daemon: MobileDaemon):
             return JSONResponse(body, status_code=422)
         except RuntimeError as exc:
             return JSONResponse({"error": str(exc)}, status_code=422)
+        if op == "slash_result" and reply.get("op") == "result":
+            # A ROUTED command (``slash_result``) answers with a typed outcome, not
+            # an ack, so ``detail`` was always "" and the phone could not say what a
+            # command DID. The text is read from the outcome here, the one place
+            # that knows this is a phone-shaped answer, rather than asking each
+            # command to grow a second wording.
+            outcome = reply.get("data")
+            if isinstance(outcome, dict) and outcome.get("kind") == "error":
+                # An error outcome is a refusal, so it travels as one (422 + the
+                # runtime's own sentence) instead of a 200 the composer would paint
+                # as a success. Built here rather than raised: this line sits past
+                # the ``try`` that maps exceptions to responses.
+                return JSONResponse(
+                    {"error": str(outcome.get("text") or "command failed")}, status_code=422
+                )
+            return JSONResponse(
+                {"ok": True, "detail": _slash_receipt_text(outcome, str(body.get("command", "")))}
+            )
         return JSONResponse({"ok": True, "detail": reply.get("detail", "")})
 
     async def api_operator_challenge(request: Request) -> Response:

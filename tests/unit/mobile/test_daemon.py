@@ -1495,16 +1495,39 @@ def test_image_bytes_reads_attachment_from_transcript(tmp_path, monkeypatch) -> 
     assert _image_bytes(record, "nope", 0) is None
 
 
-def test_slash_catalogue_excludes_terminal_chrome() -> None:
+def test_the_slash_sheet_offers_only_what_the_routed_seam_runs() -> None:
+    """Issue #1869: the sheet must not promise a command the phone cannot execute.
+
+    The catalogue was the whole registry minus three names, and 35 of the 46
+    entries it offered were ``FRONTEND_LOCAL`` — commands whose effect belongs to
+    the terminal drawing the widgets, which a phone has no handler for. The set
+    the phone can run is the ``AUTHORITATIVE_SESSION`` one (the owner executes it,
+    so any attached surface can), and it is read from the same capability table
+    the terminal's follower routes by, so this asserts AGREEMENT with that table
+    rather than a second list that would be edited by the same hand that adds a
+    command.
+    """
+    from local_operator.session.frontend_state import CommandScope, _slash_capabilities
+    from local_operator.slash_commands import SLASH_COMMANDS
+
     daemon = MobileDaemon(port=0, password="pw123")
-    names = [c["name"] for c in daemon.slash_commands()]
-    assert "model" in names
-    assert "effort" in names
-    assert "resume" in names
-    # TUI chrome never leaves the terminal.
-    assert "exit" not in names
-    assert "quit" not in names
-    assert "clear" not in names
+    offered = {c["name"] for c in daemon.slash_commands()}
+    routed = {
+        cap.command
+        for cap in _slash_capabilities()
+        if cap.scope is CommandScope.AUTHORITATIVE_SESSION
+    }
+    assert offered == routed, (
+        f"sheet offers {sorted(offered - routed)} the route does not run and hides "
+        f"{sorted(routed - offered)} it does"
+    )
+    assert offered, "an empty sheet would pass the equality above for the wrong reason"
+    # The commands the issue named as already working must survive the filter...
+    assert {"goal", "compact", "mcp", "model", "approvals", "context"} <= offered
+    # ...and the terminal-only majority must be gone, chrome included.
+    for dead in ("exit", "clear", "resume", "new", "copy", "help", "theme", "usage"):
+        assert dead in {c.name for c in SLASH_COMMANDS}, f"{dead} left the registry"
+        assert dead not in offered, dead
 
 
 def test_oversized_control_frames_report_the_rate_not_each_frame(caplog, monkeypatch) -> None:
@@ -2442,3 +2465,67 @@ async def test_the_relay_presents_the_capability_for_a_runtime_it_started(
             dial.cancel()
     finally:
         registrant.close()
+
+
+def test_a_routed_slash_answer_carries_its_words_to_the_phone(tmp_path, monkeypatch) -> None:
+    """The ``slash_result`` ack the composer now depends on: text, rows, refusal.
+
+    ``detail`` was always ``""`` for this op (the runtime answers a typed outcome,
+    not an ack), so a command that ran said nothing. Driven through the real
+    ``/command`` route and the real ``daemon.request`` writer, with the runtime's
+    ``result`` frame stood in for the one thing a unit cannot own: the socket.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    daemon = MobileDaemon(port=0, password="pw123")
+    record = SessionRecord(
+        pid=4343,
+        kind="tui",
+        session_id="slash-answer",
+        conversation_name="x",
+        cwd="/tmp",
+        model_label="m",
+        control_port=1,
+        control_key="k",
+    )
+    entry = SessionEntry(record)
+    daemon.table.entries[record.pid] = entry
+    outcomes: list[dict[str, Any]] = []
+
+    class Writer:
+        def write(self, payload: bytes) -> None:
+            frame = json.loads(payload.decode())
+            daemon._pending_reqs[(record.pid, frame["req"])].set_result(
+                {"op": "result", "req": frame["req"], "data": outcomes.pop(0)}
+            )
+
+        async def drain(self) -> None:
+            return None
+
+    entry.writer = Writer()  # type: ignore[assignment]
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+
+    def run(command: str, args: str = "") -> Any:
+        return client.post(
+            "/api/sessions/slash-answer/command",
+            json={"op": "slash_result", "command": command, "args": args, "images": []},
+        )
+
+    outcomes.append({"kind": "notice", "text": "goal set", "style": "info", "data": {}})
+    said = run("goal", "ship it")
+    assert said.status_code == 200 and said.json() == {"ok": True, "detail": "goal set"}
+
+    outcomes.append(
+        {"kind": "block", "text": "", "data": {"items": [["Messages", "~0"], ["Total", "~4k"]]}}
+    )
+    assert run("context").json()["detail"] == "Messages: ~0 · Total: ~4k"
+
+    outcomes.append({"kind": "noop", "text": "", "data": {"type": "agent_list"}})
+    assert run("agent").json()["detail"] == "ran /agent"
+
+    # A refusal travels as one: 422 and the runtime's own sentence, not a 200.
+    outcomes.append({"kind": "error", "text": "A loop is already running", "data": {}})
+    refused = run("loop", "x")
+    assert refused.status_code == 422
+    assert refused.json() == {"error": "A loop is already running"}
+
