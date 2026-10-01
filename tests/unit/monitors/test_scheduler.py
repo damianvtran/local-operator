@@ -1164,3 +1164,100 @@ async def test_a_silent_stall_episode_never_announces_a_recovery(tmp_path: Any) 
         assert delivered == []
     finally:
         harness.scheduler.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_retro_announced_disable_keeps_the_instants_that_are_true(tmp_path: Any) -> None:
+    """R3: the retro-announce used "now" as the disable instant and the strike
+    count as its cause — so a legacy row read "was DISABLED at <now> after 5
+    consecutive failed checks" for a 24-hour unreachable episode that charged no
+    strike at all, and "after 0 consecutive failed checks" when a file carried
+    no count.
+    """
+    from local_operator.monitors.delivery import format_monitor_notice_text
+
+    harness = Harness(tmp_path)
+    try:
+        harness.scheduler.load([spec()])
+        disabled_at = harness.now_ms - 600_000
+        monitor_state.write_counters(
+            harness.config_dir,
+            "sess",
+            "m1",
+            {
+                "schema": 1,
+                "monitor_id": "m1",
+                "disabled": True,
+                "disabled_kind": "unreachable",
+                "disabled_reason": "tool unavailable for 24h",
+                "last_check_at": disabled_at,
+                "checks": 7,
+                "deliveries": 0,
+                "next_due_at": None,
+            },
+        )
+
+        reopened = Harness(tmp_path)
+        try:
+            reopened.scheduler.load([spec()])
+            assert await reopened.scheduler.announce_unannounced_disables() == 1
+            notice = reopened.notices[0]
+            assert notice.kind == "disabled"
+            assert notice.failure_kind == "unreachable"
+            # The clock is the last check, not the announcement.
+            assert notice.at_ms == disabled_at
+            text = format_monitor_notice_text(notice)
+            assert "consecutive failed check" not in text
+            assert "stayed unreachable for 24 hours" in text
+        finally:
+            reopened.scheduler.dispose()
+    finally:
+        harness.scheduler.dispose()
+
+
+def test_disabled_clause_covers_every_cause_the_counters_can_describe() -> None:
+    """R15: ``disabled_clause`` renders four causes; the folded banner and the
+    kept sentence were pinned through the surfaces, the other two were not.
+    """
+    from local_operator.monitors.store import disabled_clause
+
+    # A raw multi-line banner is replaced by the counters' own cause.
+    assert (
+        disabled_clause(
+            {
+                "disabled_reason": "invalid arguments:\n- path: Extra inputs are not permitted",
+                "consecutive_failures": 5,
+            }
+        )
+        == "5 consecutive failed checks"
+    )
+    # No count left in the counters file: state the fact without a number.
+    assert disabled_clause(
+        {"disabled_reason": "invalid arguments:\n- x", "consecutive_failures": 0}
+    ) == ("repeated failed checks")
+    # The kind is used only when the reason is a raw banner, and it is the
+    # closest honest cause for a 24-hour episode.
+    assert (
+        disabled_clause({"disabled_reason": "banner\nsecond line", "disabled_kind": "unreachable"})
+        == "its tool stayed unreachable for 24 hours"
+    )
+    assert (
+        disabled_clause({"disabled_reason": "banner\nsecond line", "disabled_kind": "fatal"})
+        == "a check that cannot succeed"
+    )
+    # A reason that already reads as a sentence is kept, with its whitespace
+    # folded — a single line is what the table cell can hold.
+    assert disabled_clause({"disabled_reason": "the tool  stopped   being read-only."}) == (
+        "the tool stopped being read-only."
+    )
+    assert disabled_clause(
+        {"disabled_reason": 'monitor can\'t watch "mcp__x": it is not in this tool set.'}
+    ) == ('monitor can\'t watch "mcp__x": it is not in this tool set.')
+    # Multi-line is never kept, whatever it says: the table has one row line.
+    assert (
+        disabled_clause(
+            {"disabled_reason": "not in this tool set.\nand more", "consecutive_failures": 2}
+        )
+        == "2 consecutive failed checks"
+    )
+    assert disabled_clause({}) == "repeated failed checks"
