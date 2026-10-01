@@ -9,6 +9,12 @@ match wins (manager decisions, 2026-09-28):
    means.
 2. ``provider_stt_elevenlabs`` — a stored ElevenLabs key exists.
 3. ``provider_stt_openai`` — a stored OpenAI key exists.
+
+"Stored" means PERSISTED ROWS ONLY for all three rungs (cascade-lane sign-off,
+2026-10-01): OAuth and ``api_key`` rows in the encrypted store, and never a
+runtime/config override, the process environment or the fallback resolver. See
+:func:`_probe_key` and ``AuthStore.has_persisted_credential``. This binds the
+probe only; the executor's call-time key fetch keeps the full cascade.
 4. ``provider_stt_superwhisper`` — reserved; ALWAYS unavailable, and no code
    path returns it (unit-pinned).
 5. ``model_audio_sidecar`` — the selected model accepts audio input.
@@ -49,7 +55,10 @@ from local_operator.clients._http import APIError
 from local_operator.clients.radient import RadientClient
 from local_operator.env import resolve_radient_api_base_url
 from local_operator.providers.auth_store import AuthStore
-from local_operator.providers.radient_credentials import resolve_radient_credential
+from local_operator.providers.radient_credentials import (
+    has_persisted_radient_credential,
+    resolve_radient_credential,
+)
 from local_operator.stt import (
     AudioPath,
     AudioPathResolution,
@@ -137,19 +146,26 @@ def _ensure_store(config_dir: Path | None, store: AuthStore | None) -> tuple[Aut
 
 
 async def _probe_key(store: AuthStore, provider: str, session_id: str | None) -> bool:
-    """Whether ``provider`` has a key, without letting a probe take the mic down.
+    """Whether ``provider`` is LOGGED IN, without letting a probe take the mic down.
 
-    ``read_only=True`` so the probe decides nothing (see module docstring). A
-    store failure (a refresh it cannot confirm, a locked db) means this rung
-    cannot be used right now, which is exactly what "unavailable" says; the
-    exception is logged and the answer is ``False``.
+    PERSISTED ROWS ONLY (cascade-lane sign-off, 2026-10-01): the question this
+    answers is "advertise this rung?", and the 7-tier ``get_api_key`` it used to
+    call answers a different one -- "what would a request authenticate with?" --
+    so a runtime/config override or an exported ``OPENAI_API_KEY`` lit a rung the
+    user never signed in to. :meth:`AuthStore.has_persisted_credential` reads
+    stored rows (OAuth and ``api_key``) only, is ``read_only`` (the probe decides
+    nothing, see module docstring) and never raises; the guard below is for a
+    non-``AuthStore`` seam, and means the same thing: cannot tell -> unavailable.
+
+    ONLY this probe changed. The executor's call-time fetch
+    (``_run_*_rung`` -> ``store.get_api_key``) keeps the full cascade, so an
+    operator's own export still runs a call that a signed-in rung would.
     """
     try:
-        value = await store.get_api_key(provider, session_id, read_only=True)
+        return await store.has_persisted_credential(provider, session_id)
     except Exception:
         logger.warning("stt probe for %s failed; reporting the rung unavailable", provider)
         return False
-    return bool(value)
 
 
 def _model_capable(model: object | None) -> bool:
@@ -176,8 +192,11 @@ async def resolve_audio_path(
     store, owned = _ensure_store(config_dir, store)
     try:
         try:
-            credential = await resolve_radient_credential(config_dir, radient_base, store=store)
-            radient_available = bool(credential.get_secret_value())
+            # Persisted-only, like rungs 2-3 below (see ``_probe_key``): the
+            # call-time ``resolve_radient_credential`` stays the executor's.
+            radient_available = await has_persisted_radient_credential(
+                config_dir, radient_base, store=store
+            )
         except Exception:
             logger.warning("stt probe for radient failed; reporting the rung unavailable")
             radient_available = False
