@@ -25863,10 +25863,7 @@ class OperatorApp(App[None]):
                 except Exception:  # noqa: BLE001 - a dead transport is not a lost answer
                     logger.warning("could not deliver a queued answer", exc_info=True)
                     outcome = {"ok": False, "error": "the answer could not be delivered"}
-                if not outcome.get("ok"):
-                    self._system_notice(
-                        str(outcome.get("error") or "the answer was refused"), "warning"
-                    )
+                self._handle_ask_outcome(outcome, toast=False)
             self._ask_drafts.pop(ask_id, None)
         elif self._ask_from_list and self._ask_list is None:
             # A PARTIAL map means the user Escaped mid-walk (§5.0/D5: a
@@ -25914,8 +25911,51 @@ class OperatorApp(App[None]):
         if not callable(reader):
             return
         outcome: Any = reader(ask_id, by="terminal")
-        if not outcome.get("ok"):
-            self._ask_gesture_refusal(str(outcome.get("error") or "the ask was refused"))
+        self._handle_ask_outcome(outcome, toast=True)
+
+    def _handle_ask_outcome(self, outcome: Any, *, toast: bool) -> None:
+        """Report a queued-ask op's verdict, whether it arrived sync or on the wire.
+
+        The three ops the surfaces drive are read off whichever session holds
+        the ask, and there are two kinds of holder: the OWNER, whose ops are
+        synchronous and return the verdict dict, and a VIEWER (``AttachedSession``),
+        whose ops cross the wire and are therefore ``async``. Ignoring the second
+        kind is how this surface used to work on a viewer and silently do
+        NOTHING — the probe returned ``None``, the ``callable`` check declined,
+        and the row looked answered (QA round 4, Q1; the same shape the
+        viewer-protocol guard exists to catch).
+
+        The awaitable rides a worker rather than blocking the key: the desktop
+        is not the owner, so a refusal that comes back has to arrive as a
+        notice, exactly as the owner's does.
+        """
+        if inspect.isawaitable(outcome):
+            self.run_worker(
+                self._await_ask_outcome(outcome, toast=toast),
+                exclusive=False,
+                exit_on_error=False,
+            )
+            return
+        self._ask_refusal(outcome, toast=toast)
+
+    async def _await_ask_outcome(self, pending: Any, *, toast: bool) -> None:
+        """Await a viewer's ask op and report it in the owner's words."""
+        try:
+            outcome = await pending
+        except Exception as exc:  # noqa: BLE001 — a dead transport is not a lost answer
+            logger.warning("a queued-ask op failed on the wire", exc_info=True)
+            outcome = {"ok": False, "error": str(exc) or "the ask was refused"}
+        self._ask_refusal(outcome, toast=toast)
+
+    def _ask_refusal(self, outcome: Any, *, toast: bool) -> None:
+        """The one place a refused ask op becomes words on screen."""
+        if outcome.get("ok"):
+            return
+        text = str(outcome.get("error") or "the ask was refused")
+        if toast:
+            self._ask_gesture_refusal(text)
+        else:
+            self._system_notice(text, "warning")
 
     def _ask_gesture_refusal(self, text: str) -> None:
         """Report a refused `d`/`x` where the gesture happened, not in the transcript.
@@ -25938,8 +25978,7 @@ class OperatorApp(App[None]):
         if not callable(reader):
             return
         outcome: Any = reader(ask_id, by="terminal")
-        if not outcome.get("ok"):
-            self._ask_gesture_refusal(str(outcome.get("error") or "the ask was refused"))
+        self._handle_ask_outcome(outcome, toast=True)
 
     def on_ask_bar_toggled(self, message: AskBar.Toggled) -> None:
         """A click or Enter on the minimized bar: expand, or collapse if already up."""
@@ -52491,7 +52530,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 136
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 139
     public members, and a positive ``isinstance`` walks every one of them.
     (The figure is RECOMPUTED with ``len(typing._get_protocol_attrs(...))`` at
     the time of measurement rather than adjusted by the size of one's own
