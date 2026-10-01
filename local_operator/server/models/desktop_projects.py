@@ -12,11 +12,20 @@ its ``target_date`` has passed, else ``upcoming``. The derivation is
 and every other reader calls — so a chip on a card and a line in a tool result
 cannot disagree about which milestone is late.
 
-**``progress_stale`` is server-computed**, from the one staleness constant in
-:mod:`local_operator.projects` — four hours, and only for the in-flight rows
-(``planning``/``active``/``qa``/``validation``; settled records never read
-stale) — so the UI's stale badge and the completion check can never disagree
-about one record.
+**``progress_stale`` is server-computed**, from the staleness window in
+:mod:`local_operator.projects` (``projects.stale_after_hours``, four hours by
+default, and only for the in-flight rows (``planning``/``active``/``qa``/
+``validation``; settled records never read stale) — so the UI's stale badge and
+the completion check can never disagree about one record. The refresher side of
+the same pair (``progress_refreshed_at``/``progress_refreshed_by``) crosses for
+the "refreshed … — no new content since …" annotation; ``progress_stale`` does
+NOT clear on a refresh (the badge tells the truth about content age).
+
+**``coordination_sessions``** is the "filed by" provenance list (schema 2):
+``ProjectSummary`` carries its COUNT (mirroring how ``sessions`` is a count
+there) and ``ProjectView`` the ids. It is never counted as a working link —
+``sessions`` IS the work set — and a composition shows every coordination id
+as a session row with ``role="coordination"`` and NO runtime facts at all.
 
 **``extra="allow"`` on the view models**, matching the other desktop payloads: a
 field added by a later build crosses additively and an older renderer ignores
@@ -90,10 +99,17 @@ class ProjectView(BaseModel):
     progress: str = ""
     progress_updated_at: float | None = None
     progress_reported_by: str = ""
-    #: Computed from the single staleness constant, never stored (see above).
+    #: The refresh assertion pair (schema 2): when a writer last checked the
+    #: line still describes reality, and who. Renders the "refreshed …"
+    #: annotation; never a freshness claim (see the module docstring).
+    progress_refreshed_at: float | None = None
+    progress_refreshed_by: str = ""
+    #: Computed from the configured staleness window, never stored (see above).
     progress_stale: bool
     tags: list[str] = Field(default_factory=list)
     sessions: list[str] = Field(default_factory=list)
+    #: "Filed by" provenance ids (schema 2) — never work, never liveness.
+    coordination_sessions: list[str] = Field(default_factory=list)
     created_at: float = 0.0
     updated_at: float = 0.0
     start_date: str | None = None
@@ -136,8 +152,12 @@ class ProjectSummary(BaseModel):
     milestones_total: int = 0
     sessions: int = 0
     live_sessions: int = 0
+    #: Filing count only — never added to ``sessions``/``live_sessions``.
+    coordination_sessions: int = 0
     progress_stale: bool = True
     progress_updated_at: float | None = None
+    progress_refreshed_at: float | None = None
+    progress_refreshed_by: str = ""
     updated_at: float = 0.0
 
 
@@ -149,16 +169,24 @@ class LinkedSessionView(BaseModel):
     one of ``live`` / ``wedged`` / ``stale`` / ``stopped``; ``stopped`` means no
     runtime record at all, which is the common case for a session the operator
     finished with.
+
+    ``role`` separates the two lists (schema 2): ``work`` rows carry every
+    liveness fact; ``coordination`` rows ("filed by") carry NONE — no
+    ``runtime``, no ``subagents``, no ``todos`` — so a renderer that gates its
+    liveness chrome on the presence of those fields cannot paint a filing as a
+    worker. ``runtime=None`` is therefore the wired shape of a coordination
+    row, not an error.
     """
 
     model_config = ConfigDict(extra="allow")
 
     session_id: str
+    role: Literal["work", "coordination"] = "work"
     exists: bool
     title: str | None = None
     created_at: float | None = None
     archived: bool = False
-    runtime: dict[str, Any]
+    runtime: dict[str, Any] | None = None
     subagents: dict[str, Any] | None = None
     todos: dict[str, Any] | None = None
 
@@ -273,7 +301,7 @@ class MilestoneMutation(_Request):
     completed: bool | None = None
 
 
-def project_view(project: Project) -> ProjectView:
+def project_view(project: Project, *, window: float | None = None) -> ProjectView:
     """The full wire view of one row, with derived milestone statuses."""
 
     return ProjectView(
@@ -287,9 +315,12 @@ def project_view(project: Project) -> ProjectView:
         progress=project.progress,
         progress_updated_at=project.progress_updated_at,
         progress_reported_by=project.progress_reported_by,
-        progress_stale=progress_is_stale(project),
+        progress_refreshed_at=project.progress_refreshed_at,
+        progress_refreshed_by=project.progress_refreshed_by,
+        progress_stale=progress_is_stale(project, window=window),
         tags=list(project.tags),
         sessions=list(project.sessions),
+        coordination_sessions=list(project.coordination_sessions),
         created_at=project.created_at,
         updated_at=project.updated_at,
         start_date=project.start_date,
@@ -327,7 +358,9 @@ def project_view(project: Project) -> ProjectView:
     )
 
 
-def project_summary(project: Project, *, live_sessions: int) -> ProjectSummary:
+def project_summary(
+    project: Project, *, live_sessions: int, window: float | None = None
+) -> ProjectSummary:
     """The compact wire row, with the counts the list/board render."""
 
     return ProjectSummary(
@@ -348,8 +381,11 @@ def project_summary(project: Project, *, live_sessions: int) -> ProjectSummary:
         milestones_total=len(project.milestones),
         sessions=len(project.sessions),
         live_sessions=live_sessions,
-        progress_stale=progress_is_stale(project),
+        coordination_sessions=len(project.coordination_sessions),
+        progress_stale=progress_is_stale(project, window=window),
         progress_updated_at=project.progress_updated_at,
+        progress_refreshed_at=project.progress_refreshed_at,
+        progress_refreshed_by=project.progress_refreshed_by,
         updated_at=project.updated_at,
     )
 

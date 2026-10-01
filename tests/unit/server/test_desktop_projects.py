@@ -21,6 +21,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from local_operator.config import ConfigManager
+from local_operator.projects import PROJECT_SCHEMA
 from local_operator.server.routes import capabilities, desktop_projects
 
 pytestmark = pytest.mark.asyncio
@@ -75,7 +76,7 @@ async def test_create_read_patch_delete_round_trip(api) -> None:
 
     # The store is the row on disk, not a cache in the route.
     on_disk = json.loads((root / "projects" / f"{project_id}.json").read_text())
-    assert on_disk["name"] == "payments-migration" and on_disk["schema"] == 1
+    assert on_disk["name"] == "payments-migration" and on_disk["schema"] == PROJECT_SCHEMA
 
     by_name = await client.get("/v1/desktop/projects/payments-migration")
     assert by_name.status_code == 200
@@ -247,7 +248,7 @@ async def test_a_row_from_a_newer_build_is_readable_but_refuses_mutation(api) ->
     project_id = created.json()["result"]["id"]
     path = root / "projects" / f"{project_id}.json"
     payload = json.loads(path.read_text())
-    payload["schema"] = 2
+    payload["schema"] = PROJECT_SCHEMA + 1
     payload["future_field"] = True
     # A linked session, so the unlink route reaches the mutation (and therefore
     # the guard) rather than stopping at its membership check.
@@ -280,9 +281,9 @@ async def test_a_row_from_a_newer_build_is_readable_but_refuses_mutation(api) ->
         assert detail["code"] == "project_schema_newer", detail
         assert "update this build" in detail["message"]
 
-    # ... and none of them wrote: the row still exists, still schema 2.
+    # ... and none of them wrote: the row still exists, still at the newer schema.
     still_there = json.loads(path.read_text())
-    assert still_there["schema"] == 2 and still_there["sessions"] == [SESSION_A]
+    assert still_there["schema"] == PROJECT_SCHEMA + 1 and still_there["sessions"] == [SESSION_A]
 
 
 async def test_lock_contention_answers_503(api, monkeypatch) -> None:
@@ -399,3 +400,44 @@ def test_status_rank_covers_the_lifecycle_in_order() -> None:
         "done",
         "archived",
     ]
+
+
+async def test_the_wire_counts_work_only_and_carries_the_filing_and_refresh(api) -> None:
+    """Schema 2 on the wire: the summary's ``sessions``/``live_sessions`` are the
+    WORK set (a filing gets its own count), the view carries the ids and each
+    link's ``role``, and the refreshed pair crosses while ``progress_stale``
+    keeps the content clock's truth (a refresh never clears the badge)."""
+    from local_operator.projects import ProjectEdit, ProjectRegistry
+
+    client, root = api
+    session_b = "abcdef012345"
+    created = await client.post("/v1/desktop/projects", json={"name": "alpha"})
+    project_id = created.json()["result"]["id"]
+
+    store = ProjectRegistry(root)
+    store.link_session(project_id, SESSION_A)
+    store.link_session(project_id, session_b, role="coordination")
+    store.update_project(project_id, ProjectEdit(progress="still true"), reporter="operator")
+    path = root / "projects" / f"{project_id}.json"
+    payload = json.loads(path.read_text())
+    payload["progress_updated_at"] = time.time() - 5 * 3600
+    path.write_text(json.dumps(payload))
+    store = ProjectRegistry(root)  # a fresh reader sees the backdate
+    store.refresh_project(project_id, reporter=session_b)
+
+    listed = (await client.get("/v1/desktop/projects")).json()["result"]["projects"]
+    summary = next(row for row in listed if row["id"] == project_id)
+    assert summary["sessions"] == 1 and summary["live_sessions"] == 0
+    assert summary["coordination_sessions"] == 1
+    assert summary["progress_stale"] is True
+    assert summary["progress_refreshed_at"] is not None
+    assert summary["progress_refreshed_by"] == session_b
+
+    detail = (await client.get(f"/v1/desktop/projects/{project_id}")).json()["result"]
+    assert detail["project"]["sessions"] == [SESSION_A]
+    assert detail["project"]["coordination_sessions"] == [session_b]
+    links = {row["session_id"]: row for row in detail["links"]}
+    assert links[SESSION_A]["role"] == "work"
+    filed = links[session_b]
+    assert filed["role"] == "coordination"
+    assert filed["runtime"] is None and filed["subagents"] is None and filed["todos"] is None

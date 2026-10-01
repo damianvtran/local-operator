@@ -614,10 +614,28 @@ class ProjectDetailPage(VerticalScroll):
         for line in detail_todo_lines(view, own_session=own_session, style_for=self._style_for):
             rows.append(DetailTodoRow(line))
 
-        sessions = view.get("sessions") if isinstance(view.get("sessions"), list) else []
-        rows.append(
-            DetailHeadingRow("sessions", str(len(sessions)) if sessions else None, self._style_for)
-        )
+        sessions_value = view.get("sessions")
+        sessions: list[Any] = sessions_value if isinstance(sessions_value, list) else []
+        working = [
+            row
+            for row in sessions
+            if not (isinstance(row, dict) and row.get("role") == "coordination")
+        ]
+        filed = [
+            row for row in sessions if isinstance(row, dict) and row.get("role") == "coordination"
+        ]
+        # The count is the split's, in the same words the canvases and the
+        # footer strip use: a filing must never be read as one of the count's
+        # working sessions.
+        if not sessions:
+            count = None
+        elif working and filed:
+            count = f"{len(working)} working · {len(filed)} filed"
+        elif filed:
+            count = f"{len(filed)} filed"
+        else:
+            count = str(len(working))
+        rows.append(DetailHeadingRow("sessions", count, self._style_for))
         if sessions:
             for session_row in sessions:
                 if not isinstance(session_row, dict):
