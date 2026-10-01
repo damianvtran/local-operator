@@ -441,20 +441,29 @@ transcripts diverge from there.
 OTHER FLAGS. `--wait [SECONDS]` re-checks a conversation whose turn is in flight
 every five seconds, up to the design's thirty minutes (a bare `--wait`). A session
 with a turn in flight is otherwise REFUSED rather than interrupted, and the refusal
-changes nothing. `--from-replica` recovers THIS device's last synced copy of a
-conversation as a NEW session — the path when the device that held it is gone;
+changes nothing. `--queue` is the alternative to waiting, for exactly the sessions
+a plain move refuses: an attached-or-busy conversation records a durable intent on
+the source (`queued`), which runs the move itself at the conversation's next safe
+point and tells attached windows first (`move_pending`) so they can follow or be
+disconnected. `--json` reports the record in `queue` with its phase (`queued`,
+`finishing`, `paused`, `copying`, `resumed`); cancel before it starts with
+`lop sessions move --cancel-queued <id>` (from `paused` on it is too late — the
+runtime owns the outcome). `--from-replica` recovers THIS device's last synced copy
+of a conversation as a NEW session — the path when the device that held it is gone;
 `lop sessions sync <id>` is what keeps that copy fresh.
 
-IN THE TUI the same act is `/move [<id>] --to <peer|local> [--keep]`: it runs the
-CLI and renders its phase transcript. **TWO DIFFERENT THINGS ANSWER TO `/move`**
+IN THE TUI the same act is `/move [<id>] --to <peer|local> [--keep] [--queue]`: it
+runs the CLI and renders its phase transcript or the queue's receipt. **TWO
+DIFFERENT THINGS ANSWER TO `/move`**
 and they must not be confused: bare `/move` opens the working-directory picker and
 `/move <path>` moves the SESSION'S DIRECTORY, both frontend-local. The mobility
 form is discriminated by `--to` and by nothing else (`mesh-ui.md` §1.7 — an id can
 look like a directory name and a directory name like an id, so the first token
-never decides). That surface takes `--keep` and no other flag: there is no `--wait`
-there, and a busy conversation is refused there too. Moving the session you are IN
-leaves it first, because a move cannot retire a runtime this terminal is attached
-to.
+never decides). That surface takes `--keep` and `--queue` and no other flag: there
+is no `--wait` there (the refusal names the shell route for it), and the queue is
+how an attached-or-busy conversation moves from the composer. Moving the session
+you are IN leaves it first, because a move cannot retire a runtime this terminal is
+attached to.
 
 WHAT MOBILITY IS NOT. The desktop app has no mesh surface yet (`mesh-ui.md` §2 is
 `local-operator-ui`'s). And the design's rule still holds: a session with a strong
@@ -564,8 +573,31 @@ Diagnose in this order, and stop at the first answer that explains it:
    either device.
 6. A session on a peer is waiting for approval and it cannot be allowed from
    here — `lop network ready --peer <device>`: its `operator_authority` row says
-   whether anything there can allow; the fix is `lop operator install` on that
-   device (one privileged step). Denying works from any attached viewer.
+   whether anything there can allow, and SETTING THAT UP IS SELF-INSTALLABLE:
+   offer to do it rather than handing the user a terminal step.
+   - **On THIS machine**, run `lop operator setup --json` — receipts `proposed →
+     consent → generated → installed → verified`, all in product words — then
+     `lop operator status` for the level achieved (`operator-presence` where the
+     host offers a presence store, `operator-file-only` where it does not). The
+     one admin prompt can be answered in the terminal it runs in; when there is
+     none, the user supplies their admin password ONCE through the credential
+     prompt (`/credential`) and it travels as `--sudo-secret <name>` — never
+     printed, never logged.
+   - **On a PEER**, file the request — `lop network approvals request --host
+     <host> --user <user> --network <name> --json` — show the user the card
+     (`lop network approvals list --json`, then `show <id> --json`), let THEM
+     answer it (`lop network approvals approve <id>` signs with the operator
+     key, Touch ID where the host offers it; never approve on their behalf, and
+     `deny <id>` is ordinary), then run `lop network approvals run <id> --json`:
+     installs/updates the build on it, lands the operator's public anchor
+     root-owned, joins the member, writes the grants and supervises the relay.
+     Receipts, in order: `invite`, `pre_read`, `install`, `join`, `anchor`,
+     `grants`, `relay`, `verify`. A pre-read that CONTRADICTS the card halts the
+     run and files a fresh request carrying the corrected facts — take that one
+     to approval; never proceed on the wrong facts.
+     Filing needs an operator key on THIS machine to name on the card, so on a
+     fresh machine the local bullet above comes first.
+   Denying a parked session works from any attached viewer.
 
 Two things that look like failures and are not: a peer that is unreachable is
 **not** an error and its sessions are simply not reachable from here; a network
@@ -681,6 +713,22 @@ lop network confirm --list          # a pairing parked on THIS device, with both
 lop network confirm <invite-id>     # answer it (--decline refuses; needs a TTY)
 lop network member rm <network> <device> --json
 
+# approvals (remote onboarding: the card, the decision, the run)
+lop network approvals list --json
+lop network approvals show <id> --json
+lop network approvals request --host <host> --user <user> --json
+lop network approvals approve <id> --json   # signs with the operator key (their gesture)
+lop network approvals deny <id> --json
+lop network approvals run <id> --json
+
+# operator authority (this machine)
+lop operator setup --json    # the agent-runnable self-install: key, one admin prompt,
+                             # anchor installed root-owned, verified
+lop operator status          # the level achieved (`operator-presence`/`operator-file-only`)
+
+lop sessions move <id> --to <peer> --queue --json   # queued move: runs at the next safe point
+lop sessions move --cancel-queued <id> --json       # cancel before the safe point passes
+
 # incident
 lop network disconnect [<network>] --json
 lop network panic [<network>] --json
@@ -709,12 +757,14 @@ existing:
 
 - The DESKTOP half of the mesh surfaces (`mesh-ui.md` §2) — the networks-and-
   devices view belongs to `local-operator-ui`, not to this build. The TUI half
-  (§1) is built: `/network`, `/network peers`, `/new remote <peer>` and
-  `/move --to` (see "Moving a session between devices").
+  (§1) is built: `/network` (including `/network approvals` — the approval cards
+  are readable and answerable from the composer), `/network peers`, `/new remote
+  <peer>` and `/move --to` (see "Moving a session between devices").
 - `--peer` on `lop exec` and on `lop send` (see "Which device should run this
   session").
-- `--wait` on the TUI's `/move --to`: the slash takes `--keep` only, so a busy
-  conversation is refused there and waited for through the CLI.
+- `--wait` on the TUI's `/move --to`: the slash takes `--keep` and `--queue`, so a
+  busy or attached conversation is queued at the next safe point (`--queue`) or
+  waited for through the CLI (`--wait`).
 
 Session mobility (`mesh-session-mobility.md`) and credential brokering
 (`mesh-credentials.md`) are BOTH in this build, as described above — they are

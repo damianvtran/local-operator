@@ -14,6 +14,7 @@ import asyncio
 import json
 import os
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
@@ -53,12 +54,19 @@ def test_the_phase_order_is_the_contracts() -> None:
         ("9f3ac1e0b7d2 --to local", MoveTo(session_id="9f3ac1e0b7d2", to="local")),
         ("--to=build-box --keep", MoveTo(to="build-box", keep=True)),
         ("--keep 9f3ac1e0b7d2 --to local", MoveTo("9f3ac1e0b7d2", "local", True)),
+        # The queued form (§5.4): a bare flag, anywhere, in either spelling —
+        # and combinable with ``--keep``, which the CLI answers by ignoring the
+        # queue (a copy retires nothing, so there is no safe point to wait for).
+        ("--to pixel-8 --queue", MoveTo(to="pixel-8", queue=True)),
+        ("--queue --to=build-box", MoveTo(to="build-box", queue=True)),
+        ("--queue 9f3ac1e0b7d2 --to local", MoveTo("9f3ac1e0b7d2", "local", queue=True)),
+        ("--queue --keep --to local", MoveTo(to="local", keep=True, queue=True)),
         # Refusals, each by name.
         ("--to", MoveTo(error="--to needs a device: /move --to <peer|local>")),
         ("~/src --to pixel-8", MoveTo(error=AMBIGUOUS_MOVE)),
         ("./x --to local", MoveTo(error=AMBIGUOUS_MOVE)),
         ("a b --to local", MoveTo(error=AMBIGUOUS_MOVE)),
-        ("--to x --force", MoveTo(error="/move --to takes only --keep, not '--force'")),
+        ("--to x --force", MoveTo(error="/move --to takes only --keep and --queue, not '--force'")),
         # ``--wait`` is refused BY NAME, naming the shell route that can honour it:
         # the producer's busy sentence sends readers to a shell for this flag, and a
         # bare "unknown flag" here would be the papercut one surface over.
@@ -314,7 +322,9 @@ async def test_moving_the_current_session_leaves_it_first_then_reopens_it_remote
     """
     order: list[str] = []
 
-    def fake_move(session_id: str, to: str, *, keep: bool = False) -> dict[str, Any]:
+    def fake_move(
+        session_id: str, to: str, *, keep: bool = False, queue: bool = False
+    ) -> dict[str, Any]:
         order.append(f"move {session_id} {to} keep={keep}")
         return dict(_COMMITTED)
 
@@ -425,7 +435,9 @@ async def test_a_refused_move_of_the_current_session_puts_the_user_back_on_it(
     (``committed_id``), not on calls this test made itself.
     """
 
-    def fake_move(session_id: str, to: str, *, keep: bool = False) -> dict[str, Any]:
+    def fake_move(
+        session_id: str, to: str, *, keep: bool = False, queue: bool = False
+    ) -> dict[str, Any]:
         return {
             "ok": False,
             "code": code,
@@ -468,7 +480,9 @@ async def test_a_refused_move_of_the_current_session_puts_the_user_back_on_it(
 async def test_a_refused_move_says_so_and_reopens_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fake_move(session_id: str, to: str, *, keep: bool = False) -> dict[str, Any]:
+    def fake_move(
+        session_id: str, to: str, *, keep: bool = False, queue: bool = False
+    ) -> dict[str, Any]:
         return {
             "ok": False,
             "code": "busy",
@@ -507,7 +521,8 @@ async def test_a_busy_refusal_names_the_shell_route_its_wait_belongs_to(
 
     The papercut (2026-09-29): mid-turn ``/move … --to`` printed "…try again when
     the turn finishes, or pass --wait <seconds> to re-check" — and typing that
-    flag at this composer refused it (``/move --to`` takes only ``--keep``), so
+    flag at this composer refused it (the composer carries only ``--keep`` and
+    ``--queue``), so
     the printed remedy was one this surface could not run. The refusal is the
     PRODUCER's sentence (``mobility._busy_sentence``) rendered verbatim, so the
     frame is where the fix has to hold: this cell feeds the real producer's
@@ -516,7 +531,9 @@ async def test_a_busy_refusal_names_the_shell_route_its_wait_belongs_to(
     """
     from local_operator.network import mobility
 
-    def fake_move(session_id: str, to: str, *, keep: bool = False) -> dict[str, Any]:
+    def fake_move(
+        session_id: str, to: str, *, keep: bool = False, queue: bool = False
+    ) -> dict[str, Any]:
         return {
             "ok": False,
             "code": "busy",
@@ -554,7 +571,9 @@ async def test_a_move_of_a_session_this_tui_holds_in_the_sidebar_is_refused(
     """
     ran: list[str] = []
 
-    def fake_move(session_id: str, to: str, *, keep: bool = False) -> dict[str, Any]:
+    def fake_move(
+        session_id: str, to: str, *, keep: bool = False, queue: bool = False
+    ) -> dict[str, Any]:
         ran.append(session_id)
         return {**_COMMITTED, "session_id": session_id, "new_session_id": session_id}
 
@@ -583,6 +602,190 @@ async def test_a_move_of_a_session_this_tui_holds_in_the_sidebar_is_refused(
             if ran:
                 break
         assert ran == ["held1"]
+
+
+# ---------------------------------------------------------------------------
+# the queued move (§5.4)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _QueuedFake:
+    """A ``run_session_move`` stand-in answering the queued receipt.
+
+    The payload mirrors ``mobility._queued_receipt``'s shape — a SUCCESS that
+    carries the record in ``queue`` and the queue's own phases — because that
+    block is exactly what ``_publish_move_result`` tells the two apart by.
+    """
+
+    calls: list[dict[str, Any]] = field(default_factory=list)
+
+    def __call__(
+        self, session_id: str, to: str, *, keep: bool = False, queue: bool = False
+    ) -> dict[str, Any]:
+        self.calls.append({"session_id": session_id, "to": to, "keep": keep, "queue": queue})
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "new_session_id": session_id,
+            "mode": "move",
+            "from_device": {"device_id": "d_me", "name": "laptop"},
+            "to_device": {"device_id": "d_peer", "name": "pixel-8"},
+            "phase": "queued",
+            "phases": [{"phase": "queued", "at": 0.0}],
+            "queue": {
+                "phase": "queued",
+                "phases": [{"phase": "queued", "at": 0.0}],
+                "to_device": "d_peer",
+                "to_name": "pixel-8",
+                "detail": "",
+                "code": "",
+                "request_id": "cli-rq-1",
+                "updated_at": 0.0,
+            },
+        }
+
+
+@pytest.mark.asyncio
+async def test_a_queued_move_passes_the_flag_and_renders_the_queue_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--queue`` travels, and the receipt is the queue's own (§5.4).
+
+    The queued answer is a SUCCESS that commits nothing: the notice must say the
+    move runs at the next safe point, name the cancel route, and must NOT paint
+    the move's phase row as if steps had been walked.
+    """
+    fake = _QueuedFake()
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", fake)
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        reopened: list[str] = []
+        app._select_sidebar_session = reopened.append  # type: ignore[method-assign]
+        app._run_slash_command("/move other1 --to pixel-8 --queue")
+        for _ in range(30):
+            await pilot.pause()
+            if any("Queued a move" in n for n in _notices(app)):
+                break
+        assert fake.calls == [
+            {"session_id": "other1", "to": "pixel-8", "keep": False, "queue": True}
+        ]
+        shown = " ".join(_notices(app))
+        assert "Queued a move of other1 to pixel-8 — waiting for a safe point." in shown, shown
+        assert "lop sessions move --cancel-queued other1" in shown, shown
+        assert reopened == []
+        # No phase row: a queued move has walked no move phase yet.
+        assert not any(n.startswith("moving other1") for n in _notices(app)), _notices(app)
+
+
+@pytest.mark.asyncio
+async def test_a_queued_move_stands_the_live_turn_guard_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--queue`` answers the guard instead of tripping it (§5.4).
+
+    Without the flag the same request is refused by "a turn is still running";
+    the queue is the shape that WAITS the turn out, so a request carrying it must
+    travel — the merged queue path converts exactly this blocker into a durable
+    intent (``mobility._source_prepare``'s enqueue branch).
+    """
+    fake = _QueuedFake()
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", fake)
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        monkeypatch.setattr(type(app._session), "session_id", "sess1", raising=False)
+        order: list[str] = []
+
+        async def leave() -> None:
+            order.append("leave")
+
+        app._leave_for_move = leave  # type: ignore[method-assign]
+        app._turn_is_live = lambda: True  # type: ignore[method-assign]
+        app._run_slash_command("/move --to pixel-8 --queue")
+        for _ in range(30):
+            await pilot.pause()
+            if fake.calls:
+                break
+        # THE QUEUED REQUEST STILL LEAVES FIRST (the runtime cannot be retired
+        # from under this viewer) — the guard stood down, the leave did not.
+        assert order == ["leave"], order
+        assert fake.calls == [
+            {"session_id": "sess1", "to": "pixel-8", "keep": False, "queue": True}
+        ]
+        assert not any("a turn is still running" in n for n in _notices(app)), _notices(app)
+
+
+@pytest.mark.asyncio
+async def test_a_queued_move_stands_the_sidebar_hold_guard_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hold that refuses the bare move is WAITED OUT with ``--queue``.
+
+    A sidebar source is an attached viewer; the queue accepts a viewed source
+    and announces clients at the safe point, so refusing a queued request here
+    would dead-end the flag's own use case (the cell above covers the bare
+    refusal, which must stay).
+    """
+    fake = _QueuedFake()
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", fake)
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        app._select_sidebar_session = lambda _sid: None  # type: ignore[method-assign]
+
+        class Held:
+            retired = False
+
+        app._sidebar_sources["held1"] = Held()  # type: ignore[assignment]
+        app._run_slash_command("/move held1 --to pixel-8 --queue")
+        for _ in range(30):
+            await pilot.pause()
+            if fake.calls:
+                break
+        assert fake.calls == [
+            {"session_id": "held1", "to": "pixel-8", "keep": False, "queue": True}
+        ]
+        assert any("Queued a move of held1" in n for n in _notices(app)), _notices(app)
+
+
+@pytest.mark.asyncio
+async def test_a_viewed_refusal_offers_the_queue_spelling_this_surface_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``viewed_elsewhere`` gains "Move at the next step" (§5.4).
+
+    The producer's own sentence says "queue the move"; this surface must then
+    spell the flag IT runs — the papercut the ``--wait`` clause was fixed for,
+    one code over.
+    """
+    from local_operator.session.runtime.types import VIEWED_MOVE_REFUSAL
+
+    def fake_move(
+        session_id: str, to: str, *, keep: bool = False, queue: bool = False
+    ) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "code": "viewed_elsewhere",
+            "message": VIEWED_MOVE_REFUSAL,
+            "session_id": session_id,
+            "phase_reached": None,
+            "changed": False,
+        }
+
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", fake_move)
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        app._run_slash_command("/move other1 --to pixel-8")
+        for _ in range(30):
+            await pilot.pause()
+            if any("Could not move" in n for n in _notices(app)):
+                break
+        shown = " ".join(_notices(app))
+        assert VIEWED_MOVE_REFUSAL in shown, shown
+        assert "To queue it from here: /move other1 --to pixel-8 --queue." in shown, shown
 
 
 @pytest.mark.asyncio

@@ -90,6 +90,14 @@ SESSION_COPY_FLAG = "--copy"
 #: offered-but-broken defect ``/mobile``'s entry records. Add it here the day the
 #: parser lands, not before.
 NETWORK_SUBCOMMANDS: tuple[str, ...] = (
+    # THE APPROVAL CARDS (remote-onboarding §2.3; slice (e) row: "TUI cards for
+    # approvals"). `list`/`show` are the badge reads and `approve`/`deny` the
+    # two decisions — approve through the same presence-gated signing call
+    # every other surface runs, so the gesture is the OS key agent's. `request`
+    # and `run` are deliberately absent: filing a card and executing it are the
+    # agent's path (long, credentialed work), and the handler's usage line
+    # names what this surface carries.
+    "approvals",
     "disconnect",
     "doctor",
     "invite",
@@ -136,6 +144,9 @@ NETWORK_SUBCOMMANDS: tuple[str, ...] = (
 #: help says so, because the vocabulary is one token per entry and the row is the
 #: only place the fuller spelling can live.
 NETWORK_SUBCOMMAND_HELP: dict[str, str] = {
+    # The fuller spelling lives here because the vocabulary is one token per
+    # entry (`member rm` above states the same rule).
+    "approvals": "Onboarding cards: list, show, approve, deny",
     "disconnect": "Leave; stop trusting; close links",
     "doctor": "Diagnose a link",
     "invite": "Mint a single-use invite",
