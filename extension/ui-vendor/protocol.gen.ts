@@ -2,7 +2,7 @@
 // Vendored copy for local-operator-ui: protocol.gen.ts (wire declarations).
 // Source of truth: local-operator local_operator/browser_bridge/protocol.py + gen_ts.py + extension/src/driver/*.ts (11 modules: access-flow.ts, access-queue.ts, ax-compact.ts, deadline.ts, errors.ts, file-transfer-policy.ts, file-transfer.tables.gen.ts, geometry-read.ts, origin-policy.ts, psl.gen.ts, scroll-expressions.ts)
 // PROTO_VERSION: 1
-// Inputs sha256: 984f838cab49d39a1abb2d48b9298b5d165bb03d4bd38734cb2f023f7213b72b
+// Inputs sha256: b8bb1689bee930faa5fa551848cda96a68afe2a3265750a2ea9b6660fc88c0d5
 // An INPUT hash, never a git SHA: a stamp over commits would go red on every
 // commit that touched nothing this generator reads, and a gate that cries wolf
 // gets deleted. Regenerate with `python -m local_operator.browser_bridge.gen_ts`;
