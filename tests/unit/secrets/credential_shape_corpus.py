@@ -557,6 +557,10 @@ SECRET_REFERENCE_PLACEHOLDER = "NA" + "ME"
 #: throwaway; nothing here is a stored secret.
 STORE_ENTRY_NAME = "_".join(["OPENROUTER", "API", "KEY", "DEV"])
 
+#: A value spelled like a store NAME (caps, digits, an underscore) that is, for the
+#: R1-1 residual rows, a stand-in for a real password. Throwaway; built from parts.
+RELEASED_CAPS_UNDERSCORE_VALUE = "_".join(["ADMIN", "PASS", "2024"])
+
 #: The refusal footer's sentence as ``harness/secret_sinks.py`` renders it.
 SECRET_NAME_REFUSAL_FOOTER = (
     "or use `lop secret run "
@@ -1809,6 +1813,29 @@ NEGATIVE_CASES: tuple[Case, ...] = (
     Case(
         "secret" + ': "' + STORE_ENTRY_NAME + '"',
         "the quoted spelling of the same line reaches the same verdict",
+    ),
+    # --- 2026-10-01, R1-1: the ACCEPTED RESIDUAL of the name release ------------
+    # These rows pin the released class so a later round has something to argue
+    # against rather than a silent hole. A value spelled exactly like a store NAME
+    # (caps, digits, at least one underscore) is read as a NAME on the assignment
+    # surfaces too, not only after a flag: the same judgement the flag arms already
+    # take (a ``--token`` argument of that spelling is a pinned negative above).
+    # Measured against ``origin/main``, every row below MASKED; none does now, and
+    # nothing is registered for containment. Rules that do not consult the value
+    # proof (DSN, bearer, vendor, query, header) still mask the same spelling in
+    # place. The lowercase/mixed-case boundary is pinned on the other side by
+    # ``IDENTIFIER_ARM_VALUES`` in the POSITIVE half, which keeps masking.
+    *(
+        Case(
+            _arm_spelling(name, spelling, RELEASED_CAPS_UNDERSCORE_VALUE),
+            f"{spelling}: R1-1 accepted residual, a caps+underscore value is read as a NAME",
+        )
+        for name, spelling in (
+            ("PASSWORD", "assignment"),
+            ("db_password", "docker-compose"),
+            ("SECRET_KEY", "export-prefixed"),
+            ("password", "JSON field"),
+        )
     ),
 )
 
