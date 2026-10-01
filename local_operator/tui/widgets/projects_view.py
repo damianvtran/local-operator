@@ -1252,7 +1252,9 @@ class ProjectsView(Vertical):
                 state=False,
             ),
             rung(
-                leads_of(list_hint, board_hint, timeline_hint, nxt, create_hint, detail_hint),
+                leads_of(
+                    list_hint, board_hint, timeline_hint, nxt, create_hint, msg_hint, detail_hint
+                ),
                 "back",
                 state=False,
             ),
