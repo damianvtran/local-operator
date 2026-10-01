@@ -682,13 +682,25 @@ class AskQueueList(Widget):
             # palette gate sets for a state hue (design D3). Selection is
             # carried by the `❯` marker and the weight instead, which is also
             # the one cue that survives NO_COLOR.
-            line.append(
-                row.head_question or f"(ask {row.ask_id})",
-                style=(bold + fg) if selected else muted,
-            )
+            # THE QUESTION GIVES WAY, not the row's tail, and the cut is made
+            # HERE rather than left to the widget's overflow: a row that is
+            # wider than the box is hard-cropped by the painter (no glyph), and
+            # because the expiry is appended last it was the expiry — the
+            # per-row WORD for urgency, which design D13 added so meaning did
+            # not rest on hue alone — that fell off the end (agent review round
+            # 4, MINOR-1). Clipping the question to the room the tail leaves
+            # puts the cut where it belongs and paints the ellipsis that says
+            # something was cut.
             expiry = expiry_text(row, self._now_ms)
-            if expiry:
-                line.append(f"  {expiry}", style=warning if row.urgent else muted)
+            tail = f"  {expiry}" if expiry else ""
+            fixed = 4 + cell_len(tail)  # two marker cells, two state-glyph cells
+            question = _clip_cells(
+                row.head_question or f"(ask {row.ask_id})",
+                max(1, self.content_size.width - fixed),
+            )
+            line.append(question, style=(bold + fg) if selected else muted)
+            if tail:
+                line.append(tail, style=warning if row.urgent else muted)
             text.append(line)
             if index + 1 < len(self._rows):
                 text.append("\n")

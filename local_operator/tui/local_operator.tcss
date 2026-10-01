@@ -658,9 +658,10 @@ AskQueueList {
      * SECOND painted line — and the pointer hit test, which counts one line per
      * ask, then opened the wrong ask and left the last ones inert (review round
      * 3: reproduced with 90-character questions, clicked through the real event
-     * path). `nowrap` + `ellipsis` is the lever that actually paints: a 49-cell
-     * question is cut with `…` instead of wrapping, which is also what the
-     * ledger's other rows do. The hit test is only valid while this holds, so
+     * path). `nowrap` is the lever that actually paints; it is a ONE-LINE
+     * guarantee only — the painter hard-crops a row that is still too wide and
+     * draws no glyph of its own, so the widget's `render` clips the QUESTION
+     * against the room its tail leaves and paints the `…` itself. The hit test is only valid while this holds, so
      * the surface test asserts `virtual_size.height == header + rows` at three
      * widths with long questions. */
     text-wrap: nowrap;

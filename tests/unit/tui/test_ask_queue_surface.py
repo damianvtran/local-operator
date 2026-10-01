@@ -1220,3 +1220,36 @@ async def test_a_viewer_refusal_reaches_the_screen_in_the_owners_words(enabled):
         await _drain(pilot)
         assert session.wire == [("decline", "a1", {}, "terminal")], session.wire
         assert "already answered by phone." in str(app.query_one(Toast)._message)
+
+
+async def test_a_row_too_wide_for_the_box_keeps_its_expiry_and_shows_the_cut(enabled):
+    """Agent review round 4, MINOR-1: the painter hard-crops, so the TAIL went.
+
+    A row wider than the content box is cropped by Textual without a glyph, and
+    because the expiry is appended last it was the expiry that fell off — the
+    per-row word for urgency that design D13 added so meaning did not rest on
+    hue alone. The question is clipped against the room the tail leaves, so the
+    cut is painted and the tail survives.
+    """
+    session = _AskSession()
+    app = _app(session)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle(pilot)
+        # TWO asks, because one expands straight to its card — the list is what
+        # this test is about.
+        app._sync_ask_surface(
+            ask_rows(
+                [
+                    _row("a1", LONG_QUESTION, urgent=True, expires_at=1_700_003_600_000),
+                    _row("a2", "Which region?"),
+                ]
+            )
+        )
+        await _settle(pilot)
+        app._expand_asks()
+        await _settle(pilot)
+        listing = app.query_one(AskQueueList)
+        row = next(line for line in listing.render().plain.splitlines() if "Which rollout" in line)
+        assert "…" in row, row
+        assert "expiring" in row or "expires in" in row, row
+        assert cell_len(row) <= listing.content_size.width, row
