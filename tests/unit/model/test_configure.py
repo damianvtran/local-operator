@@ -5467,9 +5467,11 @@ def test_build_model_spec_carries_a_stated_audio_capability_and_defaults_closed(
 #
 # ``_first_available_fallback``'s ``different_provider`` preference is
 # ADVISORY beneath the pin policy: a pinned route's candidates are ordered
-# family-first and, under the default ``retry.pinnedFallback: same-family``,
-# cross-vendor targets are refused outright — with a notice, because "no
-# fallback" would otherwise read as "configure one" while one IS configured.
+# family-first, and under the explicit strict ``retry.pinnedFallback:
+# same-family`` opt-in cross-vendor targets are refused outright — with a
+# notice, because "no fallback" would otherwise read as "configure one"
+# while one IS configured. Under the shipped default the cross-vendor target
+# is entered as the announced last resort instead.
 
 
 @pytest.mark.asyncio
@@ -5520,9 +5522,57 @@ async def test_a_pinned_preflight_activates_the_same_family_target_not_the_chain
 async def test_a_pinned_preflight_with_no_same_family_target_announces_instead_of_crossing(
     tmp_path,
 ) -> None:
-    """T6/P3: pinned + strict + no same-family target = announce, do not
-    cross. The cross-vendor fallback from the same chain must remain
-    un-activated, and the notice must name the pin and the remedy."""
+    """T6/P3 (STRICT opt-in, pinned explicitly below): pinned + strict + no
+    same-family target = announce, do not cross. The cross-vendor fallback
+    from the same chain must remain un-activated, and the notice must name
+    the pin and the remedy. The default's cross-vendor activation is pinned
+    by the test beside this one."""
+    store = AuthStore(tmp_path / "auth.db")
+    account = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
+    store.block_credential(account.id, "anthropic", block_ms=60_000)
+    store.upsert_credential("openai", {"key": "sk-openai", "source": "login"})
+    stream = create_stream_fn(
+        store,
+        {
+            "retry": {
+                "usageAwareFallback": True,
+                "pinnedFallback": "same-family",
+                "fallbackChains": {"default": ["openai/gpt-5.3-codex"]},
+            }
+        },
+        session_id="session-a",
+    )
+    stream._route_state.launch_pin = "anthropic/claude-opus-5"
+    notices: list[str] = []
+    stream.set_notice_handler(lambda text, kind: notices.append(text))
+
+    try:
+        with patch(
+            "local_operator.providers.usage.fetch_usage",
+            side_effect=lambda *_args, **_kwargs: _anthropic_usage(100.0),
+        ):
+            await stream.preflight_usage(ModelSpec(provider="anthropic", model_id="claude-opus-5"))
+
+        assert store.is_blocked(account.id, "anthropic")
+        assert stream._route_state.active is None
+        assert any(
+            "pinned model anthropic/claude-opus-5" in notice and "retry.pinnedFallback" in notice
+            for notice in notices
+        ), notices
+    finally:
+        await stream.close()
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_preflight_under_the_default_activates_a_cross_vendor_target(
+    tmp_path,
+) -> None:
+    """The SHIPPED default descends cross-vendor as the last resort — at the
+    quota boundary too. With no same-family hop configured the preflight
+    ACTIVATES the cross-vendor target (family-first ordering does not FILTER
+    it), and the strict strand notice must NOT fire: under the default there
+    is no refusal to explain, and "no configured fallback" would be false."""
     store = AuthStore(tmp_path / "auth.db")
     account = store.upsert_credential("anthropic", _oauth("oauth-a", "account-a"))
     store.block_credential(account.id, "anthropic", block_ms=60_000)
@@ -5549,11 +5599,8 @@ async def test_a_pinned_preflight_with_no_same_family_target_announces_instead_o
             await stream.preflight_usage(ModelSpec(provider="anthropic", model_id="claude-opus-5"))
 
         assert store.is_blocked(account.id, "anthropic")
-        assert stream._route_state.active is None
-        assert any(
-            "pinned model anthropic/claude-opus-5" in notice and "retry.pinnedFallback" in notice
-            for notice in notices
-        ), notices
+        assert stream._route_state.active == FallbackTarget("openai/gpt-5.3-codex")
+        assert not any("will not cross vendors" in notice for notice in notices), notices
     finally:
         await stream.close()
         store.close()

@@ -4223,9 +4223,9 @@ class SessionStreamFn:
         await self._notice(text, kind)
 
     async def _announce_pinned_strand(self, selector: str, lead: str, pin: str) -> None:
-        """Announce that a PINNED route has no same-family fallback to move to.
+        """Announce that a STRICT pinned route has no same-family fallback to move to.
 
-        The strict default (``retry.pinnedFallback: same-family``) refuses
+        The explicit ``retry.pinnedFallback: same-family`` opt-in refuses
         cross-vendor fallbacks, so "no fallback" for a pinned route must say
         WHY: the generic "no configured model fallback" line reads as
         "configure one", while one may be configured and refused by policy.
@@ -4512,10 +4512,11 @@ class SessionStreamFn:
         candidates = self._fallback_targets(model)
         pin = self._route_state.launch_pin
         if pin is not None:
-            # A PINNED route orders (and, by default, FILTERS) this boundary's
-            # candidates exactly as the stream walk does — one predicate, two
-            # entry points, so a same-family target activated here is the one
-            # the walk would have walked to. The ``different_provider``
+            # A PINNED route orders (and, under the strict opt-in, FILTERS)
+            # this boundary's candidates exactly as the stream walk does —
+            # one predicate, two entry points, so a target activated here is
+            # the one the walk would have walked to: same-family first,
+            # cross-vendor last under the default. The ``different_provider``
             # preference is ADVISORY beneath the policy: descending to a
             # same-provider sibling model is the point of the pin, so the
             # preference yields rather than forcing the hop across vendors.
@@ -4865,9 +4866,10 @@ class SessionStreamFn:
                         self._route_state.launch_pin is not None
                         and retry.pinned_fallback == PINNED_FALLBACK_SAME_FAMILY
                     ):
-                        # A pinned route with no same-family target ANNOUNCES
-                        # and stays put: entering a cross-vendor target is
-                        # exactly what the pin marker exists to prevent.
+                        # Pinned + the explicit same-family opt-in: a route
+                        # with no same-family target ANNOUNCES and stays put;
+                        # entering a cross-vendor target is exactly what this
+                        # policy exists to prevent.
                         await self._announce_pinned_strand(
                             selector,
                             f"{model.provider} credentials temporarily unavailable",
@@ -5081,10 +5083,11 @@ class SessionStreamFn:
                         self._route_state.launch_pin is not None
                         and retry.pinned_fallback == PINNED_FALLBACK_SAME_FAMILY
                     ):
-                        # Pinned + strict: a fallback may in fact be configured
-                        # and refused by the pin policy, so the generic "no
-                        # configured model fallback" line would be false —
-                        # announce the strand instead of the generic line.
+                        # Pinned + the same-family opt-in (strict): a fallback
+                        # may in fact be configured and refused by the pin
+                        # policy, so the generic "no configured model fallback"
+                        # line would be false — announce the strand instead of
+                        # the generic line.
                         await self._announce_pinned_strand(
                             selector,
                             f"{model.provider} {condition}{remaining} for {model.model_id}",
@@ -5351,9 +5354,10 @@ class SessionStreamFn:
                 self._route_state.launch_pin is not None
                 and retry.pinned_fallback == PINNED_FALLBACK_SAME_FAMILY
             ):
-                # Pinned + strict: a fallback may be configured and refused by
-                # the pin policy, so the generic line below would be false for
-                # the one reader it exists for — announce the strand instead.
+                # Pinned + the same-family opt-in (strict): a fallback may be
+                # configured and refused by the pin policy, so the generic
+                # line below would be false for the one reader it exists for
+                # — announce the strand instead.
                 await self._announce_pinned_strand(
                     selector,
                     f"{model.provider} {condition}{remaining}",

@@ -85,35 +85,51 @@ The same predicate orders and filters **both** entry points — the cascade walk
 two opinions about which target may serve a pinned child; the preflight's
 `different_provider` preference is advisory beneath the policy.
 
-### 3. `retry.pinnedFallback` — the disposition when no same-family target can serve
+### 3. `retry.pinnedFallback` — the disposition when the walk ends unserved
 
 | value | behaviour |
 |---|---|
-| `same-family` (**default**) | a pinned child does **not** enter a cross-vendor target. After probation and every same-family candidate are spent it **fails**, with a refusal that LEADS with the actionable half — the failed child's dock row paints only its leading cells (a `77 - len(label) - len(role)` span, ~48-58 for typical labels) — and names the pin, the cause, and both remedies in the `/settings` page's own vocabulary: "add a same-family hop to `retry.fallbackChains`", "set `retry.pinnedFallback` to allow cross-vendor". A pinned child with NO chain takes the same legible path rather than surfacing a bare provider error (review round 1, D4/D5/F3). At a quota boundary the same disposition is **announced** (a notice) instead of activated. |
-| `cross-family` | the opt-in: cross-vendor targets remain available as the **last** resort, still after family-first ordering, and a descent states itself in the settle reason/report ("cross-vendor descent for pinned …"). |
+| `same-family` (strict opt-in) | a pinned child does **not** enter a cross-vendor target. After probation and every same-family candidate are spent it **fails**, with a refusal that LEADS with the actionable half — the failed child's dock row paints only its leading cells (a `77 - len(label) - len(role)` span, ~48-58 for typical labels) — and names the pin, the cause, and both remedies in the `/settings` page's own vocabulary: "add a same-family hop to `retry.fallbackChains`", "set `retry.pinnedFallback` to allow cross-vendor". A pinned child with NO chain takes the same legible path rather than surfacing a bare provider error (review round 1, D4/D5/F3). At a quota boundary the same disposition is **announced** (a notice) instead of activated. |
+| `cross-family` (**default**) | cross-vendor targets remain available as the **last** resort, still after family-first ordering, and a descent states itself in the settle reason/report ("cross-vendor descent for pinned …") — and, live, on every disclosure surface §4 lists, so the substitution is announced even while the child keeps running. If the walk still ends unserved, the child fails LEGIBLY, never with a bare provider error: the message names the pin, the cause, and the hops that were tried and could not serve it ("Every configured hop was tried and could not serve it: …") — or that no hop is configured, or that fallback is switched off, each with its remedy. |
 
-Junk or absent values degrade to the default (`same-family`), matching the
+#### Why the default flipped (2026-09-30 fleet incident)
+
+With `same-family` as the shipped default, a pinned child whose credential was
+unusable failed **instantly** — naming the cross-vendor hop it was forbidden to
+take — even when the operator's chain held a working one. During the Anthropic
+quota outage that killed pinned sonnet roles fleet-wide: the operator's chain
+was deepseek-only, so the whole chain was filtered and the walk refused. The
+strict default's *point* is "a substitution must not be silent"; probation and
+the disclosure surfaces already carry that point on their own, so the refusal
+was re-scoped to the one case it still describes: an operator who explicitly
+wants the child to die on its pin rather than continue on another vendor.
+Cross-vendor descent is allowed by default, ordered last, and disclosed.
+
+Junk or absent values degrade to the default (`cross-family`), matching the
 fail-safe contract of the other `retry.*` readers. The key is read **per
 call**, so the ~2 s live-reload rule applies with no `/reload`. It is
 registered in the `/settings` registry (`retry.pinnedFallback`, ENUM) with its
 default pinned to `DEFAULT_PINNED_FALLBACK` by
 `tests/unit/test_settings_io.py::_consumer_defaults`.
 
-**The trade-off, stated plainly:** the strict default trades *silent
+**The trade-off, stated plainly:** the strict policy trades *silent
 downgrades* for *visible pinned-child failures* while a chain has no
-same-family target. A machine whose `fallbackChains` resolve only to
-cross-vendor targets will now see pinned children FAIL (with the remedies in
-the error) instead of quietly running on another vendor's model. That is the
-point — a failed review is recoverable; a review that silently ran on the
-wrong model is not. `cross-family` restores the old reach for operators who
-prefer it.
+same-family target — and that is now the opt-in shape it remains useful for.
+The shipped default trades a **disclosed** cross-vendor descent for the dead
+end: a review that runs on a disclosed substitute model is recoverable (the
+substitution is on the row, the notice, and the completion record), while a
+pinned child that dies instantly beside a working configured hop is not — it
+just burns the run the pin was protecting. A machine whose `fallbackChains`
+resolve only to cross-vendor targets runs pinned children on those hops as the
+announced last resort; an operator who prefers the old refusal sets
+`same-family` and keeps the legible failure.
 
 ### 4. Observability — the reason travels
 
 - The walk computes the settle reason from the error it holds
   (`settle_reason_for_target`: "provider failure: quota HTTP 429", plus the
-  cross-vendor clause under the opt-in) and the preflight records its
-  `condition`.
+  "(cross-vendor descent for pinned …)" clause when the hop crossed vendors)
+  and the preflight records its `condition`.
 - `Session._on_route_settled` keeps the reason and
   `_persist_active_route` writes it as an **additive** `reason` key in the
   `active_model_route` row — older rows lack it, older readers ignore it.
