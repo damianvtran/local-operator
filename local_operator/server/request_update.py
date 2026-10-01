@@ -364,6 +364,14 @@ def _sent_sentence(
             "reach its sessions."
         )
     if failed == total and all(row["detail"] == NEVER_STARTED_DETAIL for row in sessions):
+        # Singularised at N=1: the pluralising forms disagree with themselves
+        # ("The 1 linked sessions have not started yet"), and the UI lane pins
+        # this branch's wording byte-for-byte, so the two must match.
+        if total == 1:
+            return (
+                "The linked session has not started yet — it becomes a recipient "
+                "after its first message."
+            )
         return (
             f"The {total} linked sessions have not started yet — they become "
             "recipients after their first message."

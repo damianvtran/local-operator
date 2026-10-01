@@ -519,11 +519,32 @@ async def test_a_never_started_linked_session_is_named_not_silently_dropped(api)
         assert row["detail"] == NEVER_STARTED_DETAIL
         assert result["counts"]["failed"] == 1
         assert response.json()["message"] == (
-            "The 1 linked sessions have not started yet — they become recipients "
-            "after their first message."
+            "The linked session has not started yet — it becomes a recipient "
+            "after its first message."
         )
         # A pure refusal does NOT start the cooldown: nothing was handed off.
         assert result["requested_at"] is None
+    finally:
+        targets.close()
+
+
+async def test_the_all_never_started_sentence_pluralises_for_two_or_more(api) -> None:
+    """N>1 keeps the plural form; only N=1 singularises (the UI lane pins both)."""
+    client, _root = api
+    project_id = await _project_with(client, SESSION_A, SESSION_B)
+    targets = await _start_targets()
+    try:
+        targets.publish(SESSION_A, index=0, started=False)
+        targets.publish(SESSION_B, index=1, started=False)
+        await _wait_live(SESSION_A, SESSION_B)
+        response = await client.post(f"/v1/desktop/projects/{project_id}/request-update", json={})
+        result = response.json()["result"]
+        assert result["counts"] == {"total": 2, "delivered": 0, "unconfirmed": 0, "failed": 2}
+        assert all(row["detail"] == NEVER_STARTED_DETAIL for row in result["sessions"])
+        assert response.json()["message"] == (
+            "The 2 linked sessions have not started yet — they become recipients "
+            "after their first message."
+        )
     finally:
         targets.close()
 
