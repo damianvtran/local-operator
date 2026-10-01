@@ -24,10 +24,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from starlette.testclient import TestClient
 
 from local_operator.mobile import daemon as daemon_module
 from local_operator.mobile import push_worker as worker_module
-from local_operator.mobile.daemon import MobileDaemon
+from local_operator.mobile.daemon import MobileDaemon, build_app
 from local_operator.mobile.push_payload import (
     ALERT_BODY_FIELD,
     ALERT_FIELD,
@@ -48,10 +49,17 @@ from local_operator.mobile.push_worker import (
     PushWorker,
     state_path,
 )
+from local_operator.paths import config_dir
 from local_operator.session.attention import AttentionStore, provisional_anchor
 from local_operator.tui.notify import APP_NAME, BODIES
 
 COMPUTER = "computer-handle"
+
+#: The two synthetic devices the harness hands the worker (§2.3 gate 4). Two of
+#: them because the attention emit's exclusion needs a device that ACTED and a
+#: device that is still waiting to be told.
+DEVICE_A = "device-a"
+DEVICE_B = "device-b"
 
 #: The daemon's scan cadence, for the passes a test counts rather than waits for
 #: (``daemon.SCAN_INTERVAL_S``, spelled here so this file's arithmetic does not
@@ -110,13 +118,20 @@ class Presence:
 
 
 class Devices:
-    """§2.3 gate 4: whether any device of this computer may be delivered to."""
+    """§2.3 gate 4, and §3.2's exclusion: the devices this machine may deliver
+    to, BY ID.
+
+    An id list rather than a yes/no, because S6 has two questions for the one
+    read: is there a device at all, and — once a nudge has named the one that
+    acked — is there one LEFT to correct. Two ids by default, so a test can watch
+    one of them act and the other be told.
+    """
 
     def __init__(self, live: bool = True) -> None:
-        self.live = live
+        self.ids: list[str] = [DEVICE_A, DEVICE_B] if live else []
 
-    def __call__(self) -> bool:
-        return self.live
+    def __call__(self) -> list[str]:
+        return list(self.ids)
 
 
 class Harness:
@@ -159,7 +174,7 @@ class Harness:
             computer=COMPUTER,
             clock=self.clock,
             presence=self.presence,
-            live_device=self.devices,
+            live_devices=self.devices,
         )
 
     def restart(self) -> PushWorker:
@@ -171,6 +186,30 @@ class Harness:
         import json
 
         return json.loads(state_path(self.root).read_text())
+
+    def nudge(self, device_id: str | None) -> None:
+        """The ``/seen`` route's S6 half: this device acked, and the worker is told.
+
+        Nothing else happens here on purpose — the receipt is the route's own
+        write (the tests call ``store.acknowledge`` for it) and the worker's
+        next pass reads the store to see the move.
+        """
+        self.worker.note_ack(device_id=device_id)
+
+    def receipts(self) -> list[tuple[Any, ...]]:
+        """The ``receipts`` table, read raw: the read highwater from outside."""
+        return self._table("receipts")
+
+    def deliveries(self) -> list[tuple[Any, ...]]:
+        """The ``deliveries`` table, read raw: what the worker must never touch."""
+        return self._table("deliveries")
+
+    def _table(self, table: str) -> list[tuple[Any, ...]]:
+        connection = sqlite3.connect(self.root / "attention.db")
+        try:
+            return sorted(connection.execute(f"SELECT * FROM {table}").fetchall())
+        finally:
+            connection.close()
 
     def publish(
         self,
@@ -281,7 +320,7 @@ def test_a_computer_with_no_live_device_emits_nothing(harness: Harness) -> None:
     """Gate 4 is a SKIP, not a deferral: there is no device the event could
     reach, and holding the cursor for a device that may never pair would both
     block the position and push a backlog the ADR forbids."""
-    harness.devices.live = False
+    harness.devices.ids = []
     harness.publish("nobody-to-tell")
 
     assert harness.worker.tick() == []
@@ -794,6 +833,146 @@ def test_a_restart_does_not_re_emit_a_past_ack(harness: Harness) -> None:
     assert len(harness.plane.calls) == 1
 
 
+# -- the /seen nudge: the correction, and who it must not wake (S6) -----------
+#
+# S6 is the half of the attention emit that needs to know WHO acted. The emit
+# itself, the sequence key and the tick-detected path are S5's and stay here; the
+# cells below are the acting-device exclusion and the two rules that make it a
+# correction rather than a second acknowledgement.
+
+
+def test_a_relay_ack_emits_one_silent_correction_excluding_the_actor(
+    harness: Harness,
+) -> None:
+    """Q3, the headline scenario: device A clears a completion and B is told to
+    re-read. ONE emit for the change, silent (§3.2: no alert), addressed at the
+    devices that are still stale with A left out — and carrying nothing a tap
+    could resolve, because an attention push is a badge correction.
+    """
+    token = harness.publish("shared")
+    assert [record.kind for record in harness.worker.tick()] == ["completion"]
+    assert len(harness.plane.calls) == 1
+
+    # The route's order: the receipt first (the read really moved), then the
+    # nudge naming the device that made it move.
+    harness.store.acknowledge("session/shared", token)
+    harness.nudge(DEVICE_A)
+    records = harness.worker.tick()
+
+    assert [record.kind for record in records] == ["attention"]
+    assert len(harness.plane.calls) == 2, "one emit per change"
+    key, body = harness.plane.calls[1]
+    assert key == attention_emit_key(1), "the attention key is the emit sequence"
+    assert body["type"] == "attention"
+    assert body["exclude"] == [DEVICE_A]
+    assert "alert" not in body, "a silent correction must not carry a banner"
+    for field in ("conversation", "completion_token", "kind"):
+        assert field not in body, f"an attention push deep-links nowhere ({field})"
+    assert body["count"] == 0
+
+
+def test_an_ack_with_no_other_device_emits_nothing(harness: Harness) -> None:
+    """The correction exists FOR the other devices. When the device that acted is
+    the only one this machine may deliver to, there is nobody left to correct, so
+    no emit is raised — and the change is CONSUMED all the same: a held position
+    would re-emit it on the next pass.
+    """
+    harness.devices.ids = [DEVICE_A]
+    token = harness.publish("alone")
+    harness.worker.tick()
+    assert len(harness.plane.calls) == 1
+
+    harness.store.acknowledge("session/alone", token)
+    harness.nudge(DEVICE_A)
+    assert harness.worker.tick() == []
+    assert len(harness.plane.calls) == 1
+    assert harness.worker.tick() == [], "the change was left in the detector state"
+
+
+def test_a_nudge_is_not_carried_onto_a_later_change(harness: Harness) -> None:
+    """The hint belongs to the change the pass READS. A nudge with nothing to
+    correct is spent, so a later acknowledgement that names no device — the TUI's
+    or the desktop's, which write straight into the store — does not silently
+    exclude a device that never acted.
+    """
+    harness.nudge(DEVICE_A)
+    assert harness.worker.tick() == []
+
+    token = harness.publish("desk-ack")
+    harness.worker.tick()
+    harness.store.acknowledge("session/desk-ack", token)
+    assert [record.kind for record in harness.worker.tick()] == ["attention"]
+
+    _key, body = harness.plane.calls[-1]
+    assert "exclude" not in body, "a desk ack excludes nobody"
+
+
+def test_a_duplicate_ack_does_not_double_emit(harness: Harness) -> None:
+    """A re-delivered receipt converges on the same read state, so the second pass
+    finds no change to correct. The nudge does not give it one: it describes a
+    change, and there is none.
+    """
+    token = harness.publish("retry")
+    harness.worker.tick()
+
+    harness.store.acknowledge("session/retry", token)
+    harness.nudge(DEVICE_A)
+    assert len(harness.worker.tick()) == 1
+
+    harness.store.acknowledge("session/retry", token)
+    harness.nudge(DEVICE_A)
+    assert harness.worker.tick() == []
+    assert len(harness.plane.calls) == 2, "the duplicate ack doubled the emit"
+
+
+def test_a_heal_and_a_nudged_ack_in_one_pass_emit_once_each(harness: Harness) -> None:
+    """Q17: a heal and an ack in one pass are two changes and two emits — the
+    heal on the supersede cursor, the ack as the silent correction — and the
+    completion goes first, so the phone hears about the work before it is asked
+    to re-read.
+    """
+    healed = str(uuid.uuid4())
+    harness.store.publish("session/healed", healed, provisional_anchor(healed), "interrupted")
+    other = harness.publish("acked")
+    assert len(harness.worker.tick()) == 2
+
+    harness.store.publish("session/healed", healed, "entry-heal", "complete")
+    harness.store.acknowledge("session/acked", other)
+    harness.nudge(DEVICE_A)
+    records = harness.worker.tick()
+
+    assert [record.kind for record in records] == ["completion", "attention"]
+    assert _types(harness.plane.calls[2:]) == ["completion", "attention"]
+    assert harness.plane.calls[-1][1]["exclude"] == [DEVICE_A]
+
+
+def test_the_emit_path_writes_no_receipt_and_no_delivery(harness: Harness) -> None:
+    """NOTHING AUTO-ACKS. The route writes the receipt; the worker's emit is a
+    consequence of that read moving, so it must leave ``receipts`` and
+    ``deliveries`` exactly as it found them — the second of those is the mobile
+    half of "the phone is not a rung of the local banner ladder" (§2.3).
+
+    An UNREAD conversation is left sitting there on purpose: a receipt write is
+    idempotent for a conversation that is already read, so a cell that only
+    watched the acked one would stay green under an emit path that acknowledged
+    everything it could see.
+    """
+    token = harness.publish("no-auto-ack")
+    harness.publish("still-unread")
+    assert len(harness.worker.tick()) == 2
+    deliveries = harness.deliveries()
+
+    harness.store.acknowledge("session/no-auto-ack", token)
+    after_the_route = harness.receipts()
+    harness.nudge(DEVICE_A)
+    records = harness.worker.tick()
+
+    assert [record.kind for record in records] == ["attention"], "a stale completion re-emitted"
+    assert harness.receipts() == after_the_route, "the emit path acknowledged something"
+    assert harness.deliveries() == deliveries, "the emit path claimed a delivery"
+    assert harness.store.state("session/still-unread")["unseen"] is True, "a read was invented"
+
+
 # -- the durable position -----------------------------------------------------
 
 
@@ -990,3 +1169,62 @@ def test_a_worker_fault_costs_one_tick_and_not_the_loop(tmp_path: Path) -> None:
 
     daemon = MobileDaemon(port=0, password="pw", push_worker=Exploding())  # type: ignore[arg-type]
     asyncio.run(daemon._scan_once())
+
+
+# -- the route's half of S6 ---------------------------------------------------
+
+
+def test_the_seen_route_nudges_the_worker_with_the_acting_device() -> None:
+    """The route ACKS and then says which device acted — a nudge, not a second
+    acknowledgement path. The worker here is a recorder: what this cell proves is
+    the route's own contract (§3.1's additive ``device_id``), which the worker
+    cells above then read as §3.2's ``exclude``. The ``device_id`` field is
+    optional and stays optional: a body without it acks exactly as it always has,
+    which is the desk/TUI case, and one that sends a non-string does not fail a
+    read over a field the read does not need.
+    """
+    sid = "nudge123456"
+    directory = config_dir() / "sessions" / sid
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "transcript.jsonl").write_text("")
+
+    class Recorder:
+        """The ``note_ack`` surface, and nothing else."""
+
+        def __init__(self) -> None:
+            self.nudged: list[str | None] = []
+
+        def note_ack(self, *, device_id: str | None = None) -> None:
+            self.nudged.append(device_id)
+
+    recorder = Recorder()
+    daemon = MobileDaemon(
+        port=0, password="pw-nudge", push_worker=recorder  # type: ignore[arg-type]
+    )
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    assert client.post("/login", data={"password": "pw-nudge"}).status_code in (200, 303)
+
+    store = AttentionStore()
+    token = str(uuid.uuid4())
+    store.publish(f"session/{sid}", token, "entry-nudge", "complete")
+    route = f"/api/sessions/{sid}/seen"
+
+    named = client.post(route, json={"completion_token": token, "device_id": DEVICE_A})
+    assert named.status_code == 200
+    assert named.json()["attention"]["unseen"] is False
+    assert recorder.nudged == [DEVICE_A]
+
+    # The next completion, acknowledged from a surface that is not a device.
+    second = str(uuid.uuid4())
+    store.publish(f"session/{sid}", second, "entry-nudge-2", "complete")
+    assert client.post(route, json={"completion_token": second}).status_code == 200
+    assert client.post(route, json={"completion_token": second, "device_id": 17}).status_code == 200
+    assert recorder.nudged == [DEVICE_A], "the desk path nudged somebody"
+
+    # Q7: what the app's foreground refetch reads is the MACHINE's truth — the
+    # conversation is read, the badge is zero, and there is no ghost row left
+    # behind by the correction. The push is a doorbell; the read is the record.
+    badge = client.get("/api/attention/unread")
+    assert badge.status_code == 200
+    assert badge.json()["count"] == 0, "the refetch disagrees with the machine"
+    assert store.state(f"session/{sid}")["unseen"] is False
