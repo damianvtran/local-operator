@@ -1,0 +1,79 @@
+{
+  "provenance": {
+    "kind": "synthetic",
+    "adr_ref": "damianvtran/local-operator-mobile@b03aeb15fcbff64c5bbd0c4117713a0285c28554 docs/adr/0006-push-and-ack-sync.md",
+    "core_ref": "damianvtran/local-operator@b77fec9d4",
+    "sections": [
+      "§3.1",
+      "§4"
+    ],
+    "how": "constructed from the ADR's literals at the pinned ref and cross-checked against the core's own builders (tests/unit/mobile/test_push_wire_contract.py); not captured from a running relay, because no relay route emits the machine-side shapes yet"
+  },
+  "shape": "devices-list-response",
+  "route": "/api/push/devices",
+  "method": "GET",
+  "status": 200,
+  "required": {
+    "devices": "list[object]",
+    "precedence": "str"
+  },
+  "optional": {},
+  "device_required": {
+    "device_id": "str",
+    "platform": "str",
+    "app_version": "str",
+    "registered_at": "int",
+    "last_seen_at": "int",
+    "state": "str"
+  },
+  "device_optional": {
+    "name": "str",
+    "credential_live": "bool",
+    "last_authenticated_at": "int"
+  },
+  "states": [
+    "live",
+    "expired",
+    "unpaired",
+    "revoked"
+  ],
+  "precedence": "revoked > unpaired > expired",
+  "forbidden": [
+    "token",
+    "device_key",
+    "install_id",
+    "environment",
+    "operator_key"
+  ],
+  "example": {
+    "devices": [
+      {
+        "device_id": "3f1c9a7b2d4e506182a3b4c5d6e7f809",
+        "platform": "ios",
+        "app_version": "1.0.0 (12)",
+        "registered_at": 1789000000,
+        "last_seen_at": 1789100000,
+        "state": "live",
+        "name": "Damian's iPhone",
+        "credential_live": true,
+        "last_authenticated_at": 1789099000
+      },
+      {
+        "device_id": "8a7b6c5d4e3f201928374650a1b2c3d4",
+        "platform": "android",
+        "app_version": "1.0.0 (12)",
+        "registered_at": 1789000000,
+        "last_seen_at": 1789100000,
+        "state": "revoked"
+      }
+    ],
+    "precedence": "revoked > unpaired > expired"
+  },
+  "notes": [
+    "Absence is the truth rather than a null: the three optional keys are present only when the record carries them, and the second example row (revoked, nameless, no credential fact) is the case that shows it.",
+    "environment and install_id are deliberately NOT here: the record carries them for the cloud's routing, the phone renders them nowhere, and the wire is a contract, not the store's dump.",
+    "NOTHING SECRET LEAVES THIS ROUTE — not the push token (never stored here), not the per-device device_key (the register response that mints it is its only carrier), not the machine's operator key.",
+    "``name`` HERE IS THE DEVICE'S LABEL, not a conversation name: the app supplies it at register time and Settings renders it. It shares a spelling with a field the PAYLOAD deny list forbids (payload-forbidden-fields.json, which is scoped to the emits) because a phone's label and a conversation's name are different facts on different shapes — not the same field spelled twice.",
+    "state and precedence are ONE vocabulary: the state is the shared precedence resolver's answer on that row, and the precedence string is rendered from the same table, so no two surfaces can read one row as two states."
+  ]
+}
