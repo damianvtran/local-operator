@@ -70,6 +70,14 @@ rail capture's SURFACE documents after a caller sent a state name into THEME
     fork-open  the same, with `fork.mode` expanded into its choices
     fork-placement       the cmux placement row, scrolled into view
     fork-placement-open  the same, expanded into workspace/surface
+    pinned     the `retry.pinnedFallback` row highlighted, its section around
+               it on screen — the row as it rests before expansion
+    pinned-open  the same row activated: both choices with their descriptions,
+               and the `(default)` marker on the now-default `cross-family`
+               choice. The marker spends ~9 cells of that row's description
+               field (17 of 26 at 60x20), so a description that fits untagged
+               can clip only under the marker — the only state in which the
+               design round's D1 (the clipped choice hint) is checkable
     subagents  the Subagents section scrolled into view. Named by its SECTION
                rather than by one of its keys on purpose: this is the state the
                before/after pair around `subagents.model_choice` is captured
@@ -295,6 +303,16 @@ async def main() -> None:
             save_capture(app, out)
         elif state == "fork-placement-open":
             _select(view, "fork.cmux_placement")
+            view.action_activate()
+            await pilot.pause()
+            save_capture(app, out)
+        elif state == "pinned":
+            _select(view, "retry.pinnedFallback")
+            await pilot.pause()
+            save_capture(app, out)
+        elif state == "pinned-open":
+            _select(view, "retry.pinnedFallback")
+            await pilot.pause()
             view.action_activate()
             await pilot.pause()
             save_capture(app, out)
