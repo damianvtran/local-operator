@@ -20,7 +20,8 @@ serialized state fits ``values.classification.maxStateChars``:
 
 1. drop ``context`` entirely;
 2. trim each candidate line to 120 chars, then to 60;
-3. drop the lowest-priority candidate kind (``project`` → ``mcp`` → ``guide`` → ``skill``);
+3. drop the lowest-priority candidate kind (``project`` → ``tool`` → ``mcp`` →
+   ``guide`` → ``skill``);
 4. truncate ``request`` to the remaining budget, appending a truncation marker.
 
 The order is the contract and it is also the right order: the context line is
