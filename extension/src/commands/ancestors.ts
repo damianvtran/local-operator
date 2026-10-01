@@ -1,6 +1,6 @@
 import { BridgeCommandError, requireSurface } from "../cdp";
 import { ancestors as ancestorsInPage } from "../driver/geometry-read";
-import { SCRIPTING_DEADLINE_MS, deadline } from "../settle";
+import { runGeometry } from "./geometry-run";
 
 /** The chain bound the page function applies when `depth` is absent, mirrored
  *  here so the value sent over the wire is already sane. The page function
@@ -15,8 +15,10 @@ const MAX_DEPTH = 16;
  *
  * `depth` bounds the walk (default 12, hard cap 16). The shared driver function
  * (driver/geometry-read.ts) runs in the page's isolated world and owns the
- * cap; this handler validates + pre-clamps the number and maps the function's
- * `null` (no match) to the typed `element_not_found`.
+ * cap; this handler validates + pre-clamps the number and hands execution to
+ * `runGeometry`, which maps the function's `null` (no match) to the typed
+ * `element_not_found` — and a selector that is not valid CSS to the app host's
+ * exact "is not valid" copy.
  */
 export async function ancestors(params: Record<string, unknown>): Promise<Record<string, unknown>> {
   const surface = await requireSurface(params.tab);
@@ -27,14 +29,8 @@ export async function ancestors(params: Record<string, unknown>): Promise<Record
       ? Math.floor(params.depth)
       : DEFAULT_DEPTH;
   const depth = Math.max(1, Math.min(MAX_DEPTH, raw));
-  const results = await deadline(chrome.scripting.executeScript({
-    target: { tabId: surface.tabId },
-    func: ancestorsInPage,
-    args: [selector, depth],
-  }), SCRIPTING_DEADLINE_MS, `chrome.scripting.executeScript(${surface.tabId})`);
-  const value = results[0]?.result;
-  if (value === null || value === undefined) {
-    throw new BridgeCommandError("element_not_found", `selector ${selector} matched nothing`);
-  }
-  return value as Record<string, unknown>;
+  return runGeometry(surface, ancestorsInPage, [selector, depth], {
+    selector,
+    missing: `selector ${selector} matched nothing`,
+  });
 }

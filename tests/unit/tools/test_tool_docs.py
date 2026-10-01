@@ -141,12 +141,15 @@ _WALK_DEPTH_CAP = 2
 #: the wire deliberately carries as verb NAMES only (the caps, the viewport-
 #: pixel semantics and the no-match behaviour live here and in
 #: ``guide://browser``). Measured through this file's own renderer; every
-#: other entry is byte-identical.
+#: other entry is byte-identical. Review round 1 then moved 1363 -> 1365:
+#: the ``properties`` field copy widened to name underscores (R1-2, ``_`` is
+#: a legal ident character), and this doc's parameters panel quotes the field
+#: copy, so the +11 chars are the panel's, counted rather than assumed.
 MEASURED_TOKENS: dict[str, int] = {
     "agent": 826,
     "ask": 948,
     "bash": 313,
-    "browser": 1363,
+    "browser": 1365,
     "console": 1141,
     "edit": 372,
     "eval": 379,

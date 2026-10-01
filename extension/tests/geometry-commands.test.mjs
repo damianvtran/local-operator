@@ -185,3 +185,71 @@ test("ancestors pre-clamps depth and maps no-match to element_not_found", async 
     await close();
   }
 });
+
+/** What Chrome does when the injected page function throws: the executeScript
+ *  promise REJECTS with the page-side error in its message (deadline passes
+ *  rejections through unchanged), and an unhandled one falls to the worker's
+ *  last gate as `internal`. The wording below mirrors a real Chrome rejection. */
+function scriptedRejection(message) {
+  return async () => {
+    throw new Error(message);
+  };
+}
+
+const SYNTAX_REJECTION =
+  "Error in invocation of scripting.executeScript(): Error: SyntaxError: " +
+  "Failed to execute 'querySelectorAll' on 'Document': '.card[' is not a valid selector.";
+
+test("an invalid selector is the app host's typed refusal, not INTERNAL (m1)", async () => {
+  // The parity contract: the same caller input must get the same answer on
+  // both hosts. The app host maps this rejection to element_not_found with
+  // 'selector X is not valid' (its INVALID_SELECTOR at page.ts); the extension
+  // now answers identically instead of falling through to `internal`.
+  const stylesRun = await loadWith("src/commands/styles.ts", null);
+  try {
+    globalThis.chrome.scripting.executeScript = scriptedRejection(SYNTAX_REJECTION);
+    await assert.rejects(
+      () => stylesRun.loaded.styles({ tab: SURFACE, selector: ".card[" }),
+      (error) =>
+        error.code === "element_not_found" && error.message === "selector .card[ is not valid",
+    );
+    // A rejection that is NOT the caller's selector still passes through
+    // unchanged (the worker's last gate owns it) — the mapping must not
+    // swallow host faults.
+    globalThis.chrome.scripting.executeScript = scriptedRejection("boom: host fault");
+    await assert.rejects(
+      () => stylesRun.loaded.styles({ tab: SURFACE, selector: ".card" }),
+      (error) => error.message === "boom: host fault" && error.code !== "element_not_found",
+    );
+  } finally {
+    await stylesRun.close();
+  }
+
+  const ancestorsRun = await loadWith("src/commands/ancestors.ts", null);
+  try {
+    globalThis.chrome.scripting.executeScript = scriptedRejection(SYNTAX_REJECTION);
+    await assert.rejects(
+      () => ancestorsRun.loaded.ancestors({ tab: SURFACE, selector: ".card[" }),
+      (error) =>
+        error.code === "element_not_found" && error.message === "selector .card[ is not valid",
+    );
+  } finally {
+    await ancestorsRun.close();
+  }
+
+  // hit_test has no selector: its inputs are numbers, so a page-side rejection
+  // has no selector to name and must rethrow UNCHANGED rather than invent one.
+  const hitRun = await loadWith("src/commands/hit-test.ts", null);
+  try {
+    const thrown = new Error(SYNTAX_REJECTION);
+    globalThis.chrome.scripting.executeScript = async () => {
+      throw thrown;
+    };
+    await assert.rejects(
+      () => hitRun.loaded.hitTest({ tab: SURFACE, x: 10, y: 20 }),
+      (error) => error === thrown,
+    );
+  } finally {
+    await hitRun.close();
+  }
+});

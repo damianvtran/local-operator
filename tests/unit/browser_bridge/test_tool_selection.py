@@ -2203,6 +2203,9 @@ def test_read_actions_are_advertised_actions() -> None:
         ({}, False),  # the action names an element, so the selector is mandatory
         ({"selector": ".card"}, True),
         ({"selector": ".card", "properties": ["background-color", "--brand", "Z9"]}, True),
+        # `_` is a legal CSS ident character, and custom properties use it:
+        # `--brand_color` must be readable, not refused (review R1-2).
+        ({"selector": ".card", "properties": ["--brand_color", "my_prop"]}, True),
         # A dot is not a CSS property-name character; refusing beats a silent "".
         ({"selector": ".card", "properties": ["font.size"]}, False),
         # Over the cap is REFUSED, not silently clipped: a result that looks

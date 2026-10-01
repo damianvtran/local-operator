@@ -1083,7 +1083,9 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: billed, EXACTLY the fold delta (96,947 -> 97,393). The two new fields are
 #: the feature's floor, so the raise is not a wording trade: with their
 #: descriptions trimmed to empty the delta shrinks by ~75 chars and the
-#: feature would still sit outside the old band.
+#: feature would still sit outside the old band. Review round 1 (R1-2) then
+#: widened the ``properties`` copy to name underscores: +13 chars, head
+#: re-read at 97,406 = ~35,038, still inside the band (50 left).
 BUDGET_BILLED_TOKENS = 35_088
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
