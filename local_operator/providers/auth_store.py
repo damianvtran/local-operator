@@ -3559,8 +3559,18 @@ class AuthStore:
         model_id: str = "",
         exclude_keys: Collection[str] | None = None,
         exclude_credential_ids: Collection[int] | None = None,
+        persisted_only: bool = False,
     ) -> tuple[str | None, StoredCredential | None]:
         """The 7-step cascade; returns ``(key, winning row or None)``.
+
+        ``persisted_only`` runs ONLY the tiers that read stored rows (3 OAuth,
+        4 login api_key, 6 stored api_key) and skips the four that do not: the
+        runtime override (1), the config override (2), the env tier (5) and the
+        fallback resolver (7). It exists for one question -- "is this provider
+        LOGGED IN" -- which :meth:`has_persisted_credential` answers; an
+        availability probe that let an ambient ``OPENAI_API_KEY`` or a ``--api-key``
+        flag answer it would advertise a speech rung the user never signed in to.
+        Every other caller leaves it ``False`` and sees the cascade unchanged.
 
         ``ignore_demotions`` runs the cascade as if no credential were demoted.
         It is set only by this method's own second pass (see the tail), where
@@ -3597,12 +3607,12 @@ class AuthStore:
 
         # 1. Runtime override
         runtime = self._runtime_overrides.get(provider)
-        if runtime:
+        if runtime and not persisted_only:
             return runtime, None
 
         # 2. Config override
         config = self._config_overrides.get(provider)
-        if config:
+        if config and not persisted_only:
             return config, None
 
         # 3. OAuth credential
@@ -3663,7 +3673,7 @@ class AuthStore:
 
         # 5. Env var tier (the process environment; the plaintext credentials.env
         # file is no longer read here, PR2a).
-        env_key = self._env_api_key(provider)
+        env_key = None if persisted_only else self._env_api_key(provider)
         if env_key:
             return env_key, None
 
@@ -3690,7 +3700,7 @@ class AuthStore:
                 pin(row.id)
                 return key, row
         # 7. Fallback resolver
-        resolver = self._fallback_resolvers.get(provider)
+        resolver = None if persisted_only else self._fallback_resolvers.get(provider)
         if resolver is not None:
             return resolver(provider), None
 
@@ -3722,9 +3732,67 @@ class AuthStore:
                 model_id=model_id,
                 exclude_keys=exclude_keys,
                 exclude_credential_ids=exclude_credential_ids,
+                persisted_only=persisted_only,
             )
 
         return None, None
+
+    async def has_persisted_credential(self, provider: str, session_id: str | None = None) -> bool:
+        """Whether ``provider`` is LOGGED IN, judged from persisted rows alone.
+
+        The ONE availability probe for features that must advertise a rung only
+        when the user actually signed in (the STT and TTS cascades). It answers
+        from the encrypted store's rows -- OAuth rows, stored ``api_key`` rows
+        (login-written or not) and the provider-class store row ``lop credential``
+        writes -- and from nothing else: not the runtime override, not the config
+        override, not the process environment (nor the plaintext
+        ``credentials.env`` the env tier once read), and not the fallback
+        resolver. An exported ``OPENAI_API_KEY`` therefore never lights
+        a rung, which is the mobile contract's "never advertised from ambient
+        state" rule.
+
+        Why this is a separate method and not ``bool(await get_api_key(...))``:
+        ``get_api_key`` is the CALL-time resolver, and its tiers 1, 2 and 5 are
+        correct THERE (an operator's export should run a request). Reusing it for
+        availability is what made the STT probe light on an env-only key. The
+        call-time fetch keeps the full cascade; only the question "is this a
+        login" is narrowed.
+
+        ``read_only`` is fixed on: a probe must not move session stickiness, block
+        a row whose refresh it could not confirm, or otherwise decide routing.
+
+        FAIL-CLOSED and NEVER RAISES. A locked or unreadable store, a refresh the
+        row cannot complete, or any other failure is "not available right now",
+        which is exactly what the caller advertises; an exception from a probe
+        would take the mic or the voice picker down with it. Logged at WARNING
+        without the exception text (a store error can quote row data).
+        """
+        try:
+            key, _row = await self._resolve(
+                provider, session_id, read_only=True, persisted_only=True
+            )
+            if key:
+                return True
+            # The STORE half of the env tier: the encrypted provider-class row
+            # (``LOP_PROVIDER_<ENV_NAME>``, what ``lop credential`` writes). It is a
+            # persisted store row -- the mobile availability filter
+            # (``mobile/stt.py::_stored_byo_credential``) already counts it as one,
+            # and the legacy-gateway Radient branch is defined as exactly this --
+            # while ``provider_env_key``'s second leg, ``os.environ``, is NOT read
+            # here. Only that process-environment leg is "ambient".
+            from local_operator.providers.registry import (
+                credential_provider_id,
+                env_key_names,
+                provider_secret_value,
+            )
+
+            names = env_key_names(provider) or env_key_names(credential_provider_id(provider))
+            return any(provider_secret_value(name, base=self._config_dir) for name in names)
+        except Exception:  # noqa: BLE001 - a probe must never take its caller down
+            logger.warning(
+                "persisted-credential probe for %s failed; reporting not logged in", provider
+            )
+            return False
 
     def _env_api_key(self, provider: str) -> str | None:
         # The env leg resolves through the SHARED store-first reader
