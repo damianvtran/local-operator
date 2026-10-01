@@ -1398,6 +1398,41 @@ def _record_signal_receipt(
         return None
 
 
+def _note_signal_cut_off(handle: object, receipt: dict[str, Any] | None) -> None:
+    """Say, BEFORE ``stop`` is set, why a signal that cuts a turn is cutting it. Best-effort.
+
+    THE IDLE-BRANCH HALF OF THE WAVE-B FIX (2026-09-30 20:00). ``_work_in_flight`` and
+    ``Session.disposal_cuts_a_turn`` are different questions, and a turn can be live
+    for the second while the first says "idle" (a ``wait`` tool in flight). That turn
+    gets no drain: ``stop.set()`` runs the dispose at once, which aborts it, and
+    whichever rung notes first decides the row. Unnoted, that was ``disposed`` (seven
+    rows) with no mention of the signal that caused it. Here the receipt's pairing —
+    through the SAME discriminator the exec worker and the boot reader use
+    (``signal_receipt.cut_off_verdict``) — adds the signal story to the cut.
+
+    Scoped as narrowly as the evidence: only when THIS disposal will abort a live turn
+    (so nothing is armed on an idle session, where an armed cause could brand a later
+    run), and only for an UNSANCTIONED signal or an involuntary marker — a covering
+    deliberate marker reads exactly as before, and the drain branch is untouched (its
+    ``runtime-shutdown`` is written at the dispose by ``serving``). Never raises.
+    """
+    try:
+        from local_operator.session.runtime import signal_receipt
+
+        if not receipt or not receipt.get("signals"):
+            return
+        verdict = signal_receipt.cut_off_verdict(receipt["signals"][-1])
+        if verdict is None:
+            return
+        session = getattr(handle, "_session", None)
+        cuts = getattr(session, "disposal_cuts_a_turn", None)
+        note = getattr(session, "note_cut_off", None)
+        if callable(cuts) and callable(note) and cuts():
+            note(*verdict)
+    except Exception:  # noqa: BLE001 — a signal path must never fail on bookkeeping
+        logger.debug("could not note the signal's cut-off cause", exc_info=True)
+
+
 def _note_journal_exit(handle: object, cause: str) -> None:
     """Tell the turn journal why this runtime is leaving. Best-effort.
 
@@ -4683,6 +4718,7 @@ async def amain(operator_cap: bytes | None = None) -> int:
         )
         trigger.setdefault("why", sig.name)
         if not _work_in_flight(handle):
+            _note_signal_cut_off(handle, signal_receipts[-1])
             stop.set()
             return
         if draining is None:
