@@ -37,7 +37,13 @@ from textual.widgets import Input, Static
 #: of every list (spec §7.5.1). It is a ROW rather than a hint because it is
 #: advice about what to do next, not a key this card implements — `s` belongs
 #: to the page, and a card that swallowed it would be a lie about its own keys.
-NO_TARGET_FOOTER = "no target? s starts a session"
+#: The card's empty state. It names the two things that DO work today —
+#: ``esc`` closes the card, and the project detail is where a link is made —
+#: rather than the spec's ``s starts a session``, which is P5b's binding and is
+#: not on this slice: a card pointing at a dead key is the one failure this
+#: footer exists to prevent (agent review round 1, U1). P5b rebinds it to the
+#: real start-session flow.
+NO_TARGET_FOOTER = "no targets — esc closes · link a session from the project detail"
 
 #: How many of a session id's characters name it in a row. The row also carries
 #: the conversation name when there is one, so this is only the fallback handle
@@ -88,17 +94,24 @@ class SendTarget:
 def _session_state(row: dict[str, Any]) -> tuple[str, bool]:
     """``(state word, is_live)`` for one linked-session payload row.
 
-    The payload's own vocabulary, not a second one: ``exists`` false means the
-    session directory is gone (the detail page's "missing" row), and ``live``
-    is the app's live-session flag. A row that can be neither dialled nor
-    woken still gets a row — dropping it silently would make a linked session
-    invisible and the count wrong.
+    Read from the payload the app ACTUALLY builds, not from a convenient key:
+    ``build_project_view`` puts liveness under ``runtime.state`` (the values
+    ``scan_runtime_states`` produces — ``live``/``wedged``/``stale``), and
+    ``exists is False`` is the stale link the detail page already calls
+    ``missing``. An earlier revision read a bare ``row["live"]`` flag, which
+    only ever existed in this module's own fixtures — so the picker's
+    live-first order and its ``[live]`` ink were both untested against real
+    output (agent review round 1, F2; QA Q1).
     """
     if row.get("exists") is False:
         return ("missing", False)
-    if row.get("live"):
-        return ("live", True)
-    return ("stopped", False)
+    runtime_value = row.get("runtime")
+    runtime: dict[str, Any] = runtime_value if isinstance(runtime_value, dict) else {}
+    state = str(runtime.get("state") or "stopped")
+    # Only `live` is dialable-now: a `wedged` record still has a process but
+    # refused the last ack, and it must not outrank a healthy peer in the
+    # order the reader is choosing from.
+    return (state, state == "live")
 
 
 def send_targets(

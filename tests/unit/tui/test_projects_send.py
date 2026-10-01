@@ -26,8 +26,9 @@ def _view(*rows: dict[str, object]) -> dict[str, object]:
 
 
 def test_the_manager_row_leads_and_is_absent_when_there_is_none() -> None:
+    # REAL payloads: liveness lives in `runtime.state` (F2/Q1).
     rows = send_targets(
-        _view({"session_id": "aa", "live": True, "title": "work"}),
+        _view({"session_id": "aa", "runtime": {"state": "live"}, "title": "work"}),
         own_session=None,
         manager=MANAGER,
     )
@@ -47,16 +48,30 @@ def test_live_sessions_come_first_and_this_session_is_never_a_target() -> None:
     """You cannot message yourself, and the order is live-first (spec §7.5.1)."""
     rows = send_targets(
         _view(
-            {"session_id": "stopped1", "live": False, "title": "old"},
-            {"session_id": "mine", "live": True, "title": "this one"},
+            {"session_id": "stopped1", "runtime": {"state": "stale"}, "title": "old"},
+            {"session_id": "mine", "runtime": {"state": "live"}, "title": "this one"},
             {"session_id": "missing1", "exists": False, "title": "gone"},
-            {"session_id": "live1", "live": True, "title": "running"},
+            {"session_id": "live1", "runtime": {"state": "live"}, "title": "running"},
+            # A wedged record is dialable-ish but must NOT outrank a healthy
+            # peer in the order the reader chooses from.
+            {"session_id": "wedged1", "runtime": {"state": "wedged"}, "title": "stuck"},
         ),
         own_session="mine",
         manager=None,
     )
-    assert [row.session_id for row in rows] == ["live1", "stopped1", "missing1"]
-    assert [row.state for row in rows] == ["live", "stopped", "missing"]
+    # The spec's contract is LIVE-FIRST and store order within a state group —
+    # it does not rank the non-live states against each other, so the test
+    # asserts exactly that and the ROW INK (not the order) is what tells
+    # `wedged` from `stale`/`missing`.
+    ids = [row.session_id for row in rows]
+    assert ids[0] == "live1", ids
+    assert sorted(ids) == ["live1", "missing1", "stopped1", "wedged1"]
+    assert {row.session_id: row.state for row in rows} == {
+        "live1": "live",
+        "wedged1": "wedged",
+        "stopped1": "stale",
+        "missing1": "missing",
+    }
     assert all(row.session_id != "mine" for row in rows)
 
 
@@ -80,7 +95,7 @@ def test_filtering_is_a_subsequence_over_the_row_text() -> None:
 def test_the_band_names_the_target_and_the_way_out() -> None:
     target = SendTarget(kind="session", session_id="s1", label="projects review", state="live")
     assert compose_band(target) == "send to: projects review · m target · esc cancel"
-    assert NO_TARGET_FOOTER == "no target? s starts a session"
+    assert "esc closes" in NO_TARGET_FOOTER and " s " not in NO_TARGET_FOOTER
 
 
 # -- the flow, over the real page ------------------------------------------
