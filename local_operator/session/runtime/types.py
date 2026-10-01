@@ -491,8 +491,8 @@ HEARTBEAT_TIMEOUT_S = 45.0
 #: its own cadence must still not find a stamp expired that a timely beat set.
 LIVE_FRESHNESS_BUDGET_S = HEARTBEAT_INTERVAL_S
 
-#: How long a session runtime with WORK IN FLIGHT may defer its own disposal
-#: after a termination signal, before it disposes anyway (the drain in
+#: How long a signalled session runtime may show NO PROGRESS — no movement the
+#: work reports and no step executing — before it disposes anyway (the drain in
 #: :func:`~local_operator.session.runtime.process._drain_for_signal`).
 #:
 #: WHY A RUNTIME DEFERS AT ALL: SIGTERM is catchable, so a runtime that receives
@@ -502,12 +502,20 @@ LIVE_FRESHNESS_BUDGET_S = HEARTBEAT_INTERVAL_S
 #: runtimes within 6 ms and cut 32 turns off that way. The graceful paths were
 #: always work-aware (``may_refresh``); the signal path was the gap.
 #:
-#: WHY THE DEFERRAL IS BOUNDED, and never an unbounded wait: a wedged or runaway
-#: runtime must stay killable, and "that process ignores SIGTERM" is a worse
-#: failure than losing one turn. On expiry the runtime disposes exactly as it
-#: did before this constant existed. SIGKILL, power loss and a crash are outside
-#: its reach — nothing catchable happens there — and the durable outcome already
-#: reports those honestly.
+#: WHY IT IS A SILENCE BOUND, NOT A DEADLINE (2026-10-01, wave C). The bound
+#: used to be a deadline on the WHOLE wait, so it cut any turn merely longer
+#: than it: on wave C an install-adjacent SIGTERM cost nine fleet sessions their
+#: open turns at exactly this constant, because an unattached turn never reached
+#: a boundary inside it. Work that keeps reporting movement
+#: (``process._work_motion``) or keeps a step executing
+#: (``process._step_in_flight``) is now NEVER cut by this bound, however long it
+#: runs — it leaves at its turn boundary — and only work that reports nothing
+#: AND has no step in flight for the whole bound is reaped. That is the
+#: killability this constant was always for, no longer paid for with honest
+#: work. ``process._SignalDrainBound`` owns the rule, its stated residuals and
+#: the reduced-host fallback that keeps the old deadline. POWER LOSS, a crash
+#: and a SIGKILL are outside this constant's reach — nothing catchable happens
+#: there — and the durable outcome reports those honestly.
 #:
 #: WHY IT LIVES HERE, in a module neither side owns: the runtime child
 #: (:mod:`~local_operator.session.runtime.process`) obeys it and the kill ladder
@@ -687,15 +695,18 @@ def bound_text(seconds: float) -> str:
 #:
 #: WHY THE BOUND IS IN THE SENTENCE. The row that carries this is the one the
 #: operator reads most (``lop sessions``' trailing column), and on its own the
-#: sentence promises a boundary the 120 s bound can take away: a turn longer
-#: than ``SIGNAL_DRAIN_S`` does not reach its boundary, it is cut, and after
-#: that the row simply disappears — the honest cause is only visible by
-#: reopening the session. ``lop refresh``'s receipt already carried
-#: ``(up to 2 min)``; every other surface that shows the drain now says it too,
-#: because they all read this one phrase (UX round 2, U9). The bound is
-#: rendered from the constant beside it (``bound_text``), never typed, so it
-#: cannot drift from the wait it describes.
-LEAVING_ON_SIGNAL = f"signalled; leaving when its turn ends (up to {bound_text(SIGNAL_DRAIN_S)})"
+#: sentence promises a boundary the bound can take away: a turn that STOPS
+#: MAKING PROGRESS does not reach its boundary — it is cut after
+#: ``SIGNAL_DRAIN_S`` of silence — and after that the row simply disappears,
+#: the honest cause visible only by reopening the session. The parenthetical
+#: states that rule in the row's own space, and the compact form in
+#: ``tui.widgets.info_panel`` spells the same wait (every surface reads this
+#: one phrase; UX round 2, U9, is why they all carry the bound at all). IT WAS
+#: REWRITTEN WITH THE 2026-10-01 FIX: the old "(up to 2 min)" described the
+#: deadline the fix removed, and a bound that moves must move in the words too.
+#: The number still comes from the constant beside it (``bound_text``), never
+#: typed, so it cannot drift from the wait it describes.
+LEAVING_ON_SIGNAL = f"signalled; finishing its turn (cut if silent {bound_text(SIGNAL_DRAIN_S)})"
 
 #: What a runtime publishes when the departure was forced by THE BUILD ON DISK
 #: rather than by a signal: it has committed to leaving and is finishing the
@@ -705,7 +716,8 @@ LEAVING_ON_SIGNAL = f"signalled; leaving when its turn ends (up to {bound_text(S
 #:
 #: NO BOUND IS NAMED HERE, and that is the one substantive difference from
 #: ``LEAVING_ON_SIGNAL``: the build drain waits for this runtime's work and
-#: nothing else — the signal path is cut by ``SIGNAL_DRAIN_S`` and says so — and a
+#: nothing else — the signal path is capped by ``SIGNAL_DRAIN_S`` of silence
+#: and says so — and a
 #: bound in this sentence would promise a wait nothing imposes on an ordinary
 #: handover. It stays the phrase for the ordinary case even after the backstop
 #: below exists, because the backstop does not change what the drain promises: it
@@ -1334,9 +1346,10 @@ class SessionRecord:
     #: (``process._drain_for_signal``) and never cleared, because a drain always
     #: ends in an exit.
     #:
-    #: WHY IT IS ON THE RECORD. The drain is bounded by ``SIGNAL_DRAIN_S``, so a
-    #: signalled-but-working runtime stays alive — and, before this field, stayed
-    #: ORDINARY — for up to two minutes. Every surface an operator reads
+    #: WHY IT IS ON THE RECORD. The drain is bounded by ``SIGNAL_DRAIN_S`` OF
+    #: SILENCE, so a signalled-but-working runtime stays alive — and, before
+    #: this field, stayed ORDINARY — for as long as its turn keeps making
+    #: progress, up to the whole turn. Every surface an operator reads
     #: (``lop sessions``, a picker, a peer's ``lop stop``) saw an unremarkable
     #: ``live`` row throughout, so the honest reading of that window was
     #: impossible and the natural remedy was destructive: a plain stop against a

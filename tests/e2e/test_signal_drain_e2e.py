@@ -77,9 +77,9 @@ pytestmark = pytest.mark.e2e
 
 #: The mock provider's ``[bash:N]`` marker caps N at 60 s (``_mock_bash_sleep``),
 #: so this is the longest turn the harness can park — and it is also why the
-#: drain bound has to be minutes rather than seconds: a real turn runs longer
-#: than anything the mock can hold, and the bound exists to cover the tail of
-#: one, not to fit this test.
+#: cells that exercise the drain bound must INJECT a short one: the bound reaps
+#: SILENCE, so a working turn outlives any bound the harness could afford, and
+#: the injected crossing is what makes the rule observable inside its budget.
 PARK_S = 60
 
 #: The reply the mock streams AFTER a tool result — the observable that says the
@@ -564,7 +564,7 @@ def _install_marker(prefix: Path, ref: str, version: str) -> None:
 
 
 #: A child that lowers ``SIGNAL_DRAIN_S`` before running the production entry
-#: point, for the ONE arm the real constant cannot reach on this harness.
+#: point, so one cell can cross the bound inside the harness's budget.
 #:
 #: ``SIGNAL_DRAIN_S`` is read by the runtime when the drain starts, so patching
 #: the module attribute before ``main()`` is enough — and it keeps the knob in
@@ -572,12 +572,12 @@ def _install_marker(prefix: Path, ref: str, version: str) -> None:
 #: code for the convenience of one cell.
 #:
 #: WHY IT IS NEEDED: the mock provider caps a turn at 60 s (``_mock_bash_sleep``)
-#: and the shipped bound is 120 s, so "work too long to save is cut by the
-#: bound" — half of the cost this design states — could only be established by
-#: READING the deadline (``deadline = loop.time() + SIGNAL_DRAIN_S``, an absolute
-#: deadline, and an unconditional ``stop.set()``) rather than by running it (Q2,
-#: PR #1141). A 3 s bound against a 60 s turn exercises the same path: same
-#: absolute deadline, same unconditional exit, same label.
+#: and the shipped bound is 120 s, so the crossover — a turn that outlives the
+#: bound — could only be established by READING the constant rather than by
+#: running it (Q2, PR #1141). A 3 s bound against a 60 s turn runs the same
+#: crossover for real, and the 2026-10-01 fix is what flipped its meaning: the
+#: old code disposed at 3 s, and the progress gate must keep the turn to its
+#: own end (``test_a_turn_that_outlives_the_bound_rides_through``).
 _DRAIN_BOUND_DRIVER = """
 import sys
 
@@ -880,48 +880,55 @@ async def test_a_signalled_runtime_publishes_its_pending_exit_and_keeps_its_turn
 
 
 # ---------------------------------------------------------------------------
-# The bound EXPIRES: a turn too long to save is cut, and labelled honestly
+# The bound is CROSSED: a working turn outlives it, and rides through
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_a_turn_that_outlives_the_bound_is_cut_at_the_bound(
+async def test_a_turn_that_outlives_the_bound_rides_through(
     headless_tui_env: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The other half of the stated cost, BY EXECUTION: the bound cuts.
+    """The wave-C regression, BY EXECUTION: crossing the bound no longer cuts.
 
-    The design says work admitted inside the drain is not refused, so work that
-    outlives ``SIGNAL_DRAIN_S`` is cut by the bound and classified
-    honestly. On the real constant that arm was unreachable here — the mock
-    caps a turn at 60 s against a 120 s bound — so it was verified by reading
-    the deadline and the unconditional ``stop.set()``, not by running them (Q2,
-    PR #1141). This cell runs it: a 3 s bound, a real 60 s turn parked in the
-    real tool, one signal.
+    Wave C (2026-10-01): an install-adjacent SIGTERM reached unattached fleet
+    sessions holding long turns, and ``SIGNAL_DRAIN_S`` — a WALL-CLOCK bound on
+    the whole wait — disposed each one mid-turn ~120 s after the signal (the
+    gap between the signal and the ``disposed`` rows IS the bound). The fix
+    makes the bound a bound on SILENCE: a turn that keeps making progress is
+    never cut by it, however far past it the turn runs, and it leaves at its
+    own boundary. This cell crosses the bound for real — a 3 s bound under a
+    real 60 s turn parked in the real tool, one signal, the viewer detached
+    (the wave-C shape) — and asserts the turn COMPLETES, the runtime leaves
+    cleanly after it, and the reaping exit's own line never appears.
 
-    Asserted: the runtime leaves at the BOUND (not at the end of the turn) with
-    the expiry line naming that bound; the turn never completes; and the durable
-    outcome a successor reads is an ERROR rather than a silent disappearance —
-    the message names the cut when the cut wins the race, but the token is not
-    pinned (see the comment at the assertion: the classifier deliberately
-    prefers a real tool error over its own generic cause).
+    The reap half of the new rule — nothing moving and no step executing —
+    cannot be driven from this harness: the only long-turn shape the mock can
+    park holds a tool batch open for its whole duration, which is exactly the
+    state the fix spares. It is pinned at unit level instead (see
+    ``test_signal_drain.py::test_a_turn_with_no_progress_and_no_step_is_reaped_at_the_bound``).
     """
     config = headless_tui_env
     bound_s = 3.0
     rig = _Rig(config)
     try:
-        with bounded(240, "signal drain: the bound cuts a turn too long to save"):
+        with bounded(240, "signal drain: a turn outliving the bound rides through"):
             session_id = "drainbound01"
             rig.directories[session_id] = _seed(config, session_id)
             rig.children[session_id] = _spawn_with_drain_bound(config, session_id, bound_s)
             directory = rig.directories[session_id]
-            await rig.park(session_id)
+            viewer = await rig.park(session_id)
             record = await _wait_record(config, session_id, busy=True)
             assert record.busy is True
+            # THE WAVE-C SHAPE: the turn runs UNATTACHED. A viewer leaving does
+            # not touch the turn — that is the survival rule this lane exists
+            # for — and the drain must not need one watching.
+            rig.viewers.pop(session_id, None)
+            await viewer.dispose()
             log_before = len(_runtime_log(config))
 
             started = time.monotonic()
             os.kill(rig.children[session_id].pid, signal.SIGTERM)
-            code = rig.children[session_id].wait(timeout=PARK_S + 60)
+            code = rig.children[session_id].wait(timeout=PARK_S + 90)
             elapsed = time.monotonic() - started
             appended = _runtime_log(config)[log_before:]
 
@@ -933,38 +940,19 @@ async def test_a_turn_that_outlives_the_bound_is_cut_at_the_bound(
                     f"cut_offs={_cut_off_causes(directory)}\n"
                     f"{appended[-1200:]}"
                 )
-            # THE BOUND decided, and it was the INJECTED one: the line names it.
-            assert f"drain bound ({bound_s:.0f}s) expired" in appended, appended[-3000:]
-            # ...and it really cut a turn that had a minute to run: the runtime
-            # was gone long before the work ended.
-            assert elapsed < PARK_S * 0.5, f"the turn ended on its own after {elapsed:.1f}s"
+            # THE SIGNAL TOOK THE DRAIN PATH, not the idle fast branch: the
+            # commit line is what proves the turn was waited on.
+            assert "arrived with work in flight" in appended, appended[-3000:]
+            # THE TURN DECIDED, not the bound: it ran to its end well past the
+            # injected 3 s, and the runtime left by itself afterwards.
+            assert (
+                elapsed >= PARK_S * 0.8
+            ), f"the runtime left after {elapsed:.1f}s — the bound cut a working turn"
             assert code == 0, appended[-2000:]
-            # The turn did NOT finish, and the durable record says why — the
-            # same classification the pre-fix immediate kill produced, which is
-            # the honest label for an aborted turn either way.
-            assert TURN_COMPLETED not in _transcript(directory)
-            session = await _successor_boot(directory)
-            try:
-                from local_operator.session.attention import (
-                    AttentionStore,
-                    conversation_identity,
-                )
-
-                state = AttentionStore().state(conversation_identity(directory))
-                # THE CAUSE TOKEN IS NOT GUARANTEED, and asserting it made this
-                # cell flake under load (F1, QA round 2).
-                # ``Session._classify_cut_off`` leaves an event that already
-                # carries a real error untouched — the tool's OWN teardown error
-                # is a more specific diagnosis than "the runtime went away" — so
-                # ``runtime-shutdown`` is attached only when the abort wins the
-                # race against that error. Both shapes are honest and neither
-                # claims the turn succeeded, so what is asserted is the property
-                # that actually holds: an ERROR whose turn never completed, on a
-                # run that really did leave at the bound (asserted above, from
-                # the log line and the elapsed time).
-                assert state.get("kind") == "error", state
-                assert state.get("cause") in ("", "runtime-shutdown"), state
-            finally:
-                await session.dispose()
+            assert TURN_COMPLETED in _transcript(directory), "the turn did not survive"
+            assert _cut_off_causes(directory) == [], "a cut-off was journaled for a saved turn"
+            # The reap's own sentence must not appear for a turn that kept
+            # progressing — the same assertion the pending-exit cell makes.
+            assert "drain bound" not in appended, appended[-3000:]
     finally:
         await rig.aclose()

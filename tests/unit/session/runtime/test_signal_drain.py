@@ -769,3 +769,181 @@ def test_the_ways_out_are_armed_before_the_record_makes_this_process_addressable
     )
     assert hoisted["construct"] > hoisted["install"]
     assert hoisted["construct"] > hoisted["socket_hook"]
+
+
+# --- the progress clock: a beating turn is never cut (wave C, 2026-10-01) -----
+#
+# The bound used to be a wall-clock deadline on the whole wait, so any turn
+# longer than it was disposed mid-turn — on wave C an install-adjacent SIGTERM
+# cost nine unattached fleet sessions their open turns at exactly this constant.
+# It is now a bound on SILENCE, and these cells are its two halves plus the
+# spared middle: a turn that keeps making progress outlives it (the regression
+# Aida filed), a turn that reports nothing and has no step executing is still
+# reaped (the killability the constant was always for), and a quiet turn with a
+# step in flight is spared AND says so in its own log.
+
+
+class _Entry:
+    """The one field of a transcript row the motion clock reads."""
+
+    def __init__(self, id_: str) -> None:
+        self.id = id_
+        self.ts = 0.0
+
+
+class _TranscriptDouble:
+    """A transcript whose newest row advances exactly while the session moves."""
+
+    def __init__(self, session: "_SessionDouble") -> None:
+        self._session = session
+        #: The spool term reads this and answers -1 when absent, never movement.
+        self.directory = None
+
+    def latest_entry(self, kind: str) -> _Entry:
+        if self._session.moving:
+            self._session.reads += 1
+            return _Entry(f"{kind}:{self._session.reads}")
+        return _Entry(f"{kind}:fixed")
+
+
+class _JobsDouble:
+    def list(self) -> "list[object]":
+        return []
+
+
+class _SessionDouble:
+    """The session fields the two progress probes read, and nothing else.
+
+    ``moving`` drives the motion term: while True the transcript's newest row
+    advances on every read, which is what a stepping turn's committed rows do.
+    ``stepping`` drives the step term through ``_compacting`` — the first
+    attribute ``_step_in_flight`` reads, and a plain boolean on the real
+    Session — while the probe's other terms (``_stream_fn``, the tool tail,
+    the child lanes) are absent and answer False, exactly as a real session
+    between steps answers.
+    """
+
+    def __init__(self, *, moving: bool = False, stepping: bool = False) -> None:
+        self.moving = moving
+        self._compacting = stepping
+        self.reads = 0
+        self.transcript = _TranscriptDouble(self)
+        self.jobs = _JobsDouble()
+        self._subagent_roster_generation = 0
+
+
+class _SessionHandle(_WorkHandle):
+    """A handle whose session the progress probes can read at all.
+
+    A handle with NO session is the reduced-host fallback and keeps the old
+    total-duration deadline (``_SignalDrainBound``'s docstring), which is why
+    every OTHER cell in this file — all of them session-less doubles — still
+    exercises the deadline arms unchanged.
+    """
+
+    def __init__(self, *, busy: bool = True, moving: bool = False, stepping: bool = False) -> None:
+        super().__init__(busy=busy)
+        self._session = _SessionDouble(moving=moving, stepping=stepping)
+
+
+@pytest.mark.asyncio
+async def test_a_signalled_turn_that_keeps_making_progress_rides_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WAVE C, in one cell: crossing the bound no longer disposes a working turn.
+
+    The wave-C shape exactly — an UNATTACHED signalled turn whose next boundary
+    is well past the bound — with the bound shortened so the crossing happens
+    inside a test: the turn reports movement for several bounds' worth and then
+    reaches its boundary. What must NOT happen is the old time-based exit (the
+    bound deciding, leaving ``retires`` empty and ``stop`` set while the turn
+    was still running); what must happen is the retirement at the boundary —
+    the same clean exit an unsignalled turn would take.
+    """
+    monkeypatch.setattr(process, "SIGNAL_DRAIN_S", 0.15)
+    stop = asyncio.Event()
+    handle = _SessionHandle(busy=True, moving=True)
+    runtime = _RecordingRuntime()
+
+    task = asyncio.ensure_future(_drain_for_signal(handle, runtime, stop, sig_name="SIGTERM"))
+    try:
+        await asyncio.sleep(0.15 * 4)  # four bounds of progress: the turn outlives it
+        assert not stop.is_set(), "a moving turn was cut by the bound"
+        assert handle.retires == [], "nothing is latched while the turn still runs"
+        handle.busy = False  # the turn reaches its boundary
+        await asyncio.wait_for(task, timeout=5)
+    finally:
+        if not task.done():
+            task.cancel()
+
+    assert stop.is_set()
+    assert handle.retires == [
+        ("runtime-shutdown", "SIGTERM: drained to the end of the turn in flight")
+    ], "the boundary exit is the retirement, not the bound's disposal"
+
+
+@pytest.mark.asyncio
+async def test_a_turn_with_no_progress_and_no_step_is_reaped_at_the_bound(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The other half: silence AND idleness together still dispose at the bound.
+
+    This is the killability the constant was always for — a turn that reports
+    nothing and has no step executing is, as far as anything here can see, not
+    coming back — and the bound reaps it exactly as the old expiry did, with
+    the reaping message naming what was actually measured.
+    """
+    monkeypatch.setattr(process, "SIGNAL_DRAIN_S", 0.15)
+    stop = asyncio.Event()
+    handle = _SessionHandle(busy=True, moving=False)
+
+    with caplog.at_level(logging.WARNING, logger=process.__name__):
+        await asyncio.wait_for(
+            _drain_for_signal(handle, _RecordingRuntime(), stop, sig_name="SIGTERM"), timeout=5
+        )
+
+    assert stop.is_set()
+    assert handle.retires == [], "the bound's exit is not a retirement"
+    assert any(
+        "drain bound" in record.message and "no progress" in record.message
+        for record in caplog.records
+    ), caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_turn_held_open_by_a_step_is_spared_and_says_so(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A step executing is progress: the bound spares it, and the log says why.
+
+    This is the shape the e2e harness's only long turn takes (a tool batch open
+    for its whole duration), so it is the residual the fix must keep alive
+    rather than reap: no movement reported, a step executing, the runtime keeps
+    waiting — and says so once per bound of silence, so a spared hold is not
+    silent. Clearing the step AND the work then takes the clean boundary exit,
+    never the reap.
+    """
+    monkeypatch.setattr(process, "SIGNAL_DRAIN_S", 0.15)
+    stop = asyncio.Event()
+    handle = _SessionHandle(busy=True, moving=False, stepping=True)
+
+    with caplog.at_level(logging.WARNING, logger=process.__name__):
+        task = asyncio.ensure_future(
+            _drain_for_signal(handle, _RecordingRuntime(), stop, sig_name="SIGTERM")
+        )
+        try:
+            await asyncio.sleep(0.5)  # several bounds of silence, held by the step
+            assert not stop.is_set(), "a step in flight keeps the runtime"
+            assert any(
+                "holding for a step in flight" in record.message for record in caplog.records
+            ), caplog.text
+            # The step finishes and the turn ends: the boundary exit, not a reap.
+            handle._session._compacting = False
+            handle.busy = False
+            await asyncio.wait_for(task, timeout=5)
+        finally:
+            if not task.done():
+                task.cancel()
+
+    assert stop.is_set()
+    assert handle.retires, "the boundary exit is a retirement"
