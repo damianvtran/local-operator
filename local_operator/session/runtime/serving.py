@@ -811,6 +811,14 @@ class ServingSessionHandle(SessionHandle):
         self._background_tasks: set[asyncio.Future[Any]] = set()
         # request_id -> Future the gate/ask call is parked on.
         self._pending_futures: dict[str, asyncio.Future[Any]] = {}
+        # request_id -> (monotonic instant, settled value) for gates that LANDED
+        # recently. The desktop answer path retries ONCE under the same id when an
+        # acknowledgement is lost, so a repeat that finds no parked future is a
+        # repeat of an answer that already succeeded — not a refusal. Bounded by
+        # both an age and a count so it can never become a second store of gate
+        # state: the queue stays the single owner of settled state and this map
+        # only answers "did MY OWN id already settle, just now".
+        self._settled_futures: dict[str, tuple[float, Any]] = {}
         # request_id -> the AskQuestion.id the harness is waiting on (the
         # answer map's key — see ask_gate).
         self._pending_question_ids: dict[str, str] = {}
@@ -2588,6 +2596,27 @@ class ServingSessionHandle(SessionHandle):
         self._pending_futures.clear()
         return denied
 
+    #: How long a settled gate id is remembered, and how many at most. The retry
+    #: window is one control request (`DESKTOP_CONTROL_ATTACH_S` plus one ack
+    #: envelope), so a few minutes is far longer than any repeat can arrive; the
+    #: cap is what keeps the map bounded on a long session with many prompts.
+    _SETTLED_FUTURE_TTL_S = 300.0
+    _SETTLED_FUTURE_MAX = 64
+
+    def _record_settled_future(self, request_id: str, value: Any) -> None:
+        """Remember that ``request_id`` settled, with the value it settled to.
+
+        Called only from the loop-thread ``settle`` closure below, so it needs no
+        lock of its own (the same ordering ``_pending_futures`` relies on).
+        """
+        now = time.monotonic()
+        settled = self._settled_futures
+        settled[request_id] = (now, value)
+        for key in [k for k, (at, _) in settled.items() if now - at > self._SETTLED_FUTURE_TTL_S]:
+            settled.pop(key, None)
+        while len(settled) > self._SETTLED_FUTURE_MAX:
+            settled.pop(min(settled, key=lambda k: settled[k][0]), None)
+
     async def _resolve_pending(self, request_id: str, value: Any) -> None:
         """Atomically reserve and settle one gate on its owning event loop."""
         # THE GATE PATH NEEDS THE REFUSAL TOO (review round 2, UX U8). This is the
@@ -2604,6 +2633,22 @@ class ServingSessionHandle(SessionHandle):
         def settle() -> None:
             future = self._pending_futures.pop(request_id, None)
             if future is None or future.done():
+                settled = self._settled_futures.get(request_id)
+                if settled is not None and settled[1] == value:
+                    # A REPEAT OF AN ANSWER THAT LANDED, WITH THE SAME VALUE. The
+                    # desktop answer path re-issues once under the same id after a
+                    # lost acknowledgement (`session/attached.py::answer_gate`);
+                    # without this the owner answered "no longer waiting" to the
+                    # press it had already honoured. Success is the truthful report.
+                    #
+                    # THE VALUE MUST MATCH, and that is what keeps the
+                    # single-winner rule intact: a second front end answering the
+                    # SAME id with a DIFFERENT decision is still refused
+                    # (`test_concurrent_gate_answers_have_one_authoritative_winner`),
+                    # because reporting a choice the owner did not make would be a
+                    # worse lie than the refusal this change exists to fix.
+                    receipt.set_result(None)
+                    return
                 receipt.set_exception(ValueError("that prompt is no longer waiting"))
                 return
             try:
@@ -2611,6 +2656,7 @@ class ServingSessionHandle(SessionHandle):
             except (InvalidStateError, TypeError):
                 receipt.set_exception(ValueError("that prompt is no longer waiting"))
                 return
+            self._record_settled_future(request_id, value)
             receipt.set_result(None)
 
         self._loop.call_soon_threadsafe(settle)
