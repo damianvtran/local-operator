@@ -2527,12 +2527,12 @@ def _join_one(
             )
         elif getattr(args, "automated", False):
             # NO HUMAN AT THIS END (design §2.6; M4). The value that crosses the
-            # wire is THIS device's own derivation — exactly what a person would
-            # have transcribed from the other screen — and the inviter's compare
-            # (relay.py's ``sas_matches``) is untouched: a mismatch refuses,
-            # spends the attempt and audits ``sas_mismatch`` exactly as a typed
-            # digit does. Nothing here may ever grow into a bless that skips the
-            # compare.
+            # wire is THIS device's own derivation — the value a person at this
+            # end would have typed from their own screen (§5.2) — and the
+            # inviter's compare (relay.py's ``sas_matches``) is untouched: a
+            # mismatch refuses, spends the attempt and audits ``sas_mismatch``
+            # exactly as a typed digit does. Nothing here may ever grow into a
+            # bless that skips the compare.
             typed = result.sas
         else:
             print(
@@ -3474,8 +3474,9 @@ def _autostart() -> str:
     """Start the relay after ``init``/``join`` unless it is already up.
 
     Pairing must not require knowing that a daemon exists, so the streamlined
-    install/deploy/pair path starts it; a machine without launchd degrades to a
-    sentence naming the command to run in the foreground.
+    install/deploy/pair path starts it; a machine with no user service supervisor
+    (launchctl, or systemctl --user) degrades to a sentence naming the foreground
+    fallback — no terminal command in it, §2.9.
     """
     relay_mod = _import_relay()
     if relay_mod.health() is not None:
