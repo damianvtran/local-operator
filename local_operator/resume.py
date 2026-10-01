@@ -3202,6 +3202,134 @@ def fork_haystack(row: SessionRow) -> str:
     return f"{FORK_HAYSTACK} {row.name}" if row.forked else row.name
 
 
+#: One file's stat key: ``(st_ino, st_mtime_ns, st_size, st_mode)``; ``None``
+#: for a file that is genuinely ABSENT (a stable fact — see :func:`_stat_key`).
+_StatKey = tuple[int, int, int, int]
+
+#: ``str(sessions root) -> {session id: entry}`` for :data:`_TITLE_MEMO` and
+#: :data:`_OPENER_MEMO`, the two stat-keyed memos :func:`stored_session_title`
+#: and :func:`_opening_message` answer through.
+#:
+#: WHY A MEMO. ``recent_session_rows`` runs on the desktop chat search and on
+#: every sidebar listing, and asks :func:`session_name` once per row; each call
+#: opened the row's title sidecar and its transcript — twice, for the opener —
+#: for files a previous call had already read and nothing had touched since.
+#: Measured on a 15,441-directory store: 24,293 ``open()`` calls per call
+#: (~3/row), 2.0 s of a 2.5 s scan, all of it re-reads. The memo answers the
+#: same question from one or two ``stat`` calls while the files are unchanged.
+#:
+#: STAT BEFORE READ, keyed on the file's own ``(st_ino, st_mtime_ns, st_size,
+#: st_mode)``: the same discipline as ``session.catalog``'s birth memo, with the
+#: mode carried too because READABILITY IS PART OF THE ANSWER this memo caches:
+#: an entry read while the file was readable must miss once it is not, or the
+#: hit path would serve a name an uncached call would fall back from. A file
+#: rewritten between its stat and its read lands its NEW content under the OLD
+#: key, so the next call's stat misses and re-reads — the race resolves toward
+#: a re-read, never toward serving a stale answer. The accepted blind spot is
+#: the same one that memo takes, one term wider: a rewrite that keeps the
+#: inode, the size, the mode AND restores the nanosecond mtime.
+#:
+#: ABSENT IS CACHEABLE; UNREADABLE IS NOT. :func:`session_origin` draws this
+#: module's line: a genuinely absent file is a fact about CONTENT, and its
+#: ``None`` key is stable (the moment the file appears, the stat misses); a
+#: read that failed for any other reason is a fact about the MOMENT — ``EMFILE``
+#: under the descriptor pressure a 30,000-directory scan creates, a permissions
+#: blip — and memoising it would pin a wrong verdict for the process's life. So
+#: a stat that raises anything but ``FileNotFoundError``, and a read that fails
+#: while its file exists, both decline to store; the answer is still returned.
+#:
+#: BOUNDED in two directions, mirroring ``session.catalog``'s birth memo: at
+#: most :data:`_SESSION_MEMO_ROOTS` stores are remembered (oldest evicted
+#: first), so a process that lists many stores — the test suite — cannot grow
+#: these without limit; and a FULL scan (:func:`recent_session_rows` with
+#: ``limit=None``, the one call that sees the whole store) prunes each map to
+#: the sessions it just saw, so entries for deleted sessions drop out and a
+#: long-lived backend is bounded by the store it HAS, not by every session it
+#: has ever listed.
+_SESSION_MEMO_ROOTS = 4
+
+_TITLE_MEMO: dict[str, dict[str, tuple[_StatKey | None, bool, _StatKey | None, str]]] = {}
+_OPENER_MEMO: dict[str, dict[str, tuple[_StatKey | None, str]]] = {}
+
+
+def _session_memo_for(memo: dict[str, dict[str, Any]], session_dir: Path) -> dict[str, Any]:
+    """This store's map in ``memo``, created (oldest root evicted) on first use.
+
+    One map per sessions ROOT — the session directory's parent — so a full
+    scan and a single session's boot path reach the same map, and at most
+    :data:`_SESSION_MEMO_ROOTS` stores are remembered, exactly as
+    ``session.catalog``'s memos bound themselves and for the same reason.
+    """
+    root = memo.get(str(session_dir.parent))
+    if root is None:
+        # SNAPSHOT, AND GUARDED. The desktop lists from worker threads, so a
+        # second caller can evict or insert between an iterator and its first
+        # read, and CPython raises ``RuntimeError("dictionary changed size
+        # during iteration")`` for exactly that — which would escape
+        # ``session_name`` into a listing or a search. Standing down is safe
+        # because the root count is only a bound: a lost race costs one call
+        # with an extra store remembered, and the next call re-checks and
+        # evicts it, while raising would cost the caller its scan.
+        while len(memo) >= _SESSION_MEMO_ROOTS:
+            try:
+                oldest = next(iter(list(memo)))
+            except (StopIteration, RuntimeError):
+                break
+            memo.pop(oldest, None)
+        root = memo.setdefault(str(session_dir.parent), {})
+    return root
+
+
+def _prune_session_scan_memos(sessions_root: Path, keep: set[str]) -> None:
+    """Drop memo entries for sessions a FULL scan did not see.
+
+    Called only by :func:`recent_session_rows`' untruncated scan: a bounded
+    listing sees a subset of the store, and pruning to THAT would evict entries
+    the next call needs, while the full scan is the one call that knows the
+    store as it is now. ``keep`` may hold ids ``session_name`` was never called
+    on, which only makes the sweep conservative — it can never evict a live
+    entry, because every session the scan saw keeps its entry.
+
+    ``keep`` comes from the scan's OWN filters, and one of them is worth
+    naming: a full scan with ``include_archived=False`` (the desktop search's
+    default) never emits archived ids, so an archived session's entry is evicted
+    with the rest. That is accepted — the cost is one re-read the next time a
+    listing touches that session, and threading the archive predicate through
+    the prune would cost more than the re-read it saves. Wrongness is not on
+    the table: a pruned entry only ever means a re-read.
+    """
+    key = str(sessions_root)
+    for memo in (_TITLE_MEMO, _OPENER_MEMO):
+        root = memo.get(key)
+        if root is None:
+            continue
+        for stale in root.keys() - keep:
+            root.pop(stale, None)
+
+
+def _stat_key(path: Path) -> tuple[_StatKey | None, bool]:
+    """``((ino, mtime_ns, size, mode) | None, cacheable)`` for one file.
+
+    ``None`` is the ABSENT key, and it is stable: a file that is not there is a
+    fact about content, and the moment it appears its stat yields a key that
+    misses. The mode rides in the key because a permission change is a change
+    of what a reader would see (a mode-0 sidecar falls back to the transcript),
+    and it is free here — the stat that supplies the rest supplies it too.
+    Anything else that keeps the key from being trusted — an ``EACCES``, an
+    ``EMFILE``, a path that is not a plain file — clears the second element,
+    and callers decline to memoise on it: see :data:`_TITLE_MEMO` for why the
+    two states must not be conflated, and :func:`session_origin` for the same
+    distinction pressed into a bool.
+    """
+    try:
+        info = os.stat(path)
+    except FileNotFoundError:
+        return None, True
+    except OSError:
+        return None, False
+    return (info.st_ino, info.st_mtime_ns, info.st_size, info.st_mode), True
+
+
 def stored_session_title(session_dir: Path) -> str:
     """The title this session was last named, or ``""`` when it has none.
 
@@ -3236,11 +3364,45 @@ def stored_session_title(session_dir: Path) -> str:
     is invisible to the two windows but sits in the sidecar. The scan below
     remains the fallback for sessions written before the sidecar existed and
     not yet reached by :func:`backfill_session_titles`.
+
+    THE ANSWER IS MEMOISED, keyed on the two files' stats — see
+    :data:`_TITLE_MEMO`. Every repeat call on an unchanged session is one
+    ``stat`` of the sidecar, plus one of the transcript only when the cached
+    answer came from the transcript scan; the scan itself reruns only when one
+    of the files that produced the answer has moved. The answer is unchanged:
+    the sidecar still wins when it has text and the window scan is still the
+    fallback, and an answer read from a file that exists but could not be
+    opened is never memoised.
     """
+    memo = _session_memo_for(_TITLE_MEMO, session_dir)
+    name = session_dir.name
+    sidecar_key, sidecar_stable = _stat_key(session_dir / TITLE_SIDECAR_NAME)
+    if sidecar_stable:
+        cached = memo.get(name)
+        if cached is not None:
+            cached_sidecar, from_sidecar, cached_transcript, cached_title = cached
+            if cached_sidecar == sidecar_key:
+                if from_sidecar:
+                    # The sidecar answered; the transcript was never consulted,
+                    # so its stat cannot invalidate this.
+                    return cached_title
+                transcript_key, transcript_stable = _stat_key(session_dir / TRANSCRIPT_NAME)
+                if transcript_stable and transcript_key == cached_transcript:
+                    return cached_title
     sidecar = _read_title_sidecar(session_dir)
+    # A sidecar that EXISTS but did not parse — or could not be opened — is
+    # left un-memoised: malformed content and a transient unreadable look the
+    # same from here, and re-reading a file of a few hundred bytes is cheaper
+    # than pinning either. A sidecar that appeared between the stat and the
+    # read (``sidecar_key`` None while the parse succeeded) is a third such
+    # case: the disagreement itself says the file moved under this call.
+    sidecar_memoizable = sidecar_stable and ((sidecar_key is None) == (sidecar is None))
     if sidecar is not None and sidecar.text:
+        if sidecar_memoizable:
+            memo[name] = (sidecar_key, True, None, sidecar.text)
         return sidecar.text
     transcript = session_dir / TRANSCRIPT_NAME
+    transcript_key, transcript_stable = _stat_key(transcript)
     try:
         with transcript.open("rb") as handle:
             handle.seek(0, os.SEEK_END)
@@ -3264,7 +3426,15 @@ def stored_session_title(session_dir: Path) -> str:
                 # exists to prevent.
                 handle.seek(0)
                 head = tail = handle.read()
+    except FileNotFoundError:
+        # Genuinely absent, which is stable: a file that is not there holds no
+        # window, so "" is the same answer every scan gives.
+        if sidecar_memoizable and transcript_key is None:
+            memo[name] = (sidecar_key, False, None, "")
+        return ""
     except OSError:
+        # A file that exists but could not be READ is a fact about this moment,
+        # not about the transcript; answer, never memoise.
         return ""
     # The tail is searched FIRST and wins: a rename made late in a long session
     # is the newest title, and the head can only hold older ones.
@@ -3272,16 +3442,20 @@ def stored_session_title(session_dir: Path) -> str:
         matches = _TITLE_ROW_RE.findall(window.decode("utf-8", errors="replace"))
         if matches:
             break
-    if not matches:
-        return ""
-    try:
-        # Through the JSON decoder rather than a manual unescape, so a title
-        # holding a quote, a backslash or a \uXXXX escape reads back as the
-        # characters the user actually saw.
-        title = json.loads(f'"{matches[-1]}"')
-    except ValueError:
-        return ""
-    return " ".join(str(title).split())
+    value = ""
+    if matches:
+        try:
+            # Through the JSON decoder rather than a manual unescape, so a title
+            # holding a quote, a backslash or a \uXXXX escape reads back as the
+            # characters the user actually saw.
+            title = json.loads(f'"{matches[-1]}"')
+        except ValueError:
+            title = None
+        if title is not None:
+            value = " ".join(str(title).split())
+    if sidecar_memoizable and transcript_stable and transcript_key is not None:
+        memo[name] = (sidecar_key, False, transcript_key, value)
+    return value
 
 
 def session_name(
@@ -3301,12 +3475,50 @@ def session_name(
     running, or corrupt yields ``""`` and a nameless row rather than taking
     the picker down. The scan also stops at the first user message and at
     :data:`NAME_SCAN_CHARS`, so it costs one short read per session instead of
-    a full parse of a file that can be hundreds of kilobytes.
+    a full parse of a file that can be hundreds of kilobytes. Both reads are
+    memoised on the stats of the files that produced them (see
+    :data:`_TITLE_MEMO` and :func:`_opening_message`), so a repeated scan of an
+    unchanged store pays a stat, not a read.
     """
     stored = stored_session_title(session_dir)
     if stored:
         return _condense(stored, max_chars) if condense else stored
+    opening = _opening_message(session_dir)
+    if not opening:
+        return ""
+    # ``condense=False`` returns the opening text with its line breaks intact,
+    # which the backfill needs: the role preamble it matches is
+    # ``[role: <name>]\n``, and condensing flattens that newline into a space
+    # before the pattern could ever see it.
+    return _condense(opening, max_chars) if condense else opening
+
+
+def _opening_message(session_dir: Path) -> str:
+    """The opening user message's raw text — ``session_name``'s fallback, memoised.
+
+    Split out of :func:`session_name` so the fallback half can carry its own
+    memo (:data:`_OPENER_MEMO`): it is consulted for every session whose stored
+    title is empty — most of a real store — and it re-reads the transcript head
+    on every scan. The memo is stat-keyed like :func:`stored_session_title`'s,
+    and it returns the SAME text the scan would, BEFORE :func:`_condense`:
+    ``max_chars`` and ``condense`` are the caller's arguments, not facts about
+    the file, so condensing stays :func:`session_name`'s per-call step.
+
+    Tolerance is unchanged, and so is its rationale: a transcript that is
+    truncated, half-written by a session still running, or unreadable yields
+    ``""`` and a nameless row rather than taking the picker down, and the scan
+    is bounded exactly as this module documents (one short read, stopping at
+    the first user message and at :data:`NAME_SCAN_CHARS`). Absent memoises,
+    unreadable does not — see :data:`_TITLE_MEMO`.
+    """
+    memo = _session_memo_for(_OPENER_MEMO, session_dir)
+    name = session_dir.name
     transcript = session_dir / TRANSCRIPT_NAME
+    transcript_key, transcript_stable = _stat_key(transcript)
+    if transcript_stable:
+        cached = memo.get(name)
+        if cached is not None and cached[0] == transcript_key:
+            return cached[1]
     try:
         with transcript.open("r", encoding="utf-8", errors="replace") as handle:
             # ONE bounded read, not `for line in handle`. Iterating the file
@@ -3318,6 +3530,10 @@ def session_name(
             # first makes the bound real.
             head = handle.read(NAME_SCAN_CHARS)
     except OSError:
+        # Absent is stable and "" is the answer every scan gives; a file that
+        # exists but could not be opened is not stable, and is not memoised.
+        if transcript_stable and transcript_key is None:
+            memo[name] = (None, "")
         return ""
     # A final line with no newline after it is HELD BACK from the strict parse
     # only when the window was actually filled — i.e. the read stopped because
@@ -3354,18 +3570,19 @@ def session_name(
             continue
         text = _first_text(payload.get("content"))
         if text:
-            # ``condense=False`` returns the opening text with its line
-            # breaks intact, which the backfill needs: the role preamble it
-            # matches is ``[role: <name>]\n``, and condensing flattens that
-            # newline into a space before the pattern could ever see it.
-            return _condense(text, max_chars) if condense else text
+            if transcript_stable and transcript_key is not None:
+                memo[name] = (transcript_key, text)
+            return text
     # The window held no COMPLETE line, so the opener is a fragment. Dropping
     # it (which is all this used to do) left every session that begins with a
     # pasted screenshot permanently nameless: one base64 image puts the first
     # line past the cap, and the picker then showed `(unnamed session)` for the
     # rest of that conversation's life. Measured on two real sessions whose
     # first lines were 115,289 and 733,034 chars.
-    return _condense(_text_from_fragment(fragment), max_chars) if fragment else ""
+    value = _text_from_fragment(fragment) if fragment else ""
+    if transcript_stable and transcript_key is not None:
+        memo[name] = (transcript_key, value)
+    return value
 
 
 def _text_from_fragment(fragment: str) -> str:
@@ -3626,9 +3843,11 @@ def recent_session_rows(
     archived conversation at all.
     """
     rows: list[SessionRow] = []
+    seen_ids: set[str] = set()
     for session_id, mtime, origin, archived in _recent_sessions_with_origin(
         config_dir, limit, strict=strict, include_archived=include_archived
     ):
+        seen_ids.add(session_id)
         session_dir = config_dir / "sessions" / session_id
         rows.append(
             SessionRow(
@@ -3652,6 +3871,12 @@ def recent_session_rows(
                 ),
             )
         )
+    if limit is None:
+        # A full scan is the one call that sees the store as it is, so it is
+        # the call that prunes the title/opener memos to it (see
+        # _SESSION_MEMO_ROOTS). A bounded listing sees a subset, and pruning to
+        # THAT would evict entries the next call needs.
+        _prune_session_scan_memos(config_dir / "sessions", seen_ids)
     return rows
 
 
