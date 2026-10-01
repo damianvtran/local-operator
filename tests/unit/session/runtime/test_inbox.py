@@ -891,13 +891,22 @@ def test_rows_without_a_wake_id_are_untouched(tmp_path: Path) -> None:
 
 
 def test_a_single_fire_is_not_rewritten(tmp_path: Path) -> None:
-    """One fire is not a flood: no note, no count, the same object back."""
+    """One fire is not a flood: no note, no count, the same object back.
+
+    The shape is asserted rather than a substring, because "no note" is a claim
+    about the row's segments: a lone fire delivers envelope-then-message, with
+    nothing between them, exactly as it did before this fix.
+    """
     only = _fire_row("standup", occurrence=4)
     merged = coalesce_wake_rows([only])
     assert merged == [only]
     assert merged[0] is only, "the row's bytes are handed on untouched"
     assert merged[0].text == _wake_text("standup", occurrence=4)
-    assert "fired" not in merged[0].text
+
+    envelope, _, message = merged[0].text.partition("\n\n")
+    assert envelope.startswith("(alarm) Scheduled wake w1 (4,")
+    assert message == "standup", "the message is the second segment; no note was inserted"
+    assert "This wake fired" not in merged[0].text
 
 
 def test_a_non_wake_row_with_a_wake_id_is_not_a_fire(tmp_path: Path) -> None:
@@ -928,6 +937,36 @@ def test_a_re_coalesce_replaces_the_note_instead_of_nesting_it() -> None:
     assert "This wake fired 6 times" in again[0].text
     # And the replacement lands in the SAME place, so the envelope is still first.
     assert again[0].text.startswith("(alarm) Scheduled wake w1 (23,")
+
+
+def test_a_message_opening_with_the_note_sentence_survives_the_first_merge() -> None:
+    """The strip runs only on a row that was ALREADY coalesced (review round 2).
+
+    A merge is the only writer of a note and a merge always leaves
+    ``wake_fires > 1``, so a single-fire row cannot be carrying one — and without
+    that gate a wake whose own first paragraph happens to be that sentence loses
+    the paragraph on the very first merge. The count tests could not see it: they
+    assert the note's presence, never the message's survival.
+    """
+    sentence = (
+        "(This wake fired 3 times while the runtime was being replaced; the latest is below.)"
+    )
+    quoted = f"{sentence}\n\nthen the real instructions"
+
+    first = coalesce_wake_rows([_fire_row("earlier"), _fire_row(quoted, occurrence=2)])[0]
+    assert quoted in first.text, "the message's own opening paragraph is not the stripper's"
+    assert first.text.count(sentence) == 1, "and no second note was written over it"
+
+    # The gate must not disable the strip where it is needed. A batch whose LAST
+    # row is itself an already-coalesced one — the deferral re-spool's shape when
+    # another row follows the merged position — still replaces rather than nests.
+    again = coalesce_wake_rows([_fire_row("third", occurrence=3), first])[0]
+    assert again.wake_fires == 3
+    envelope, _, rest = again.text.partition("\n\n")
+    note, _, message = rest.partition("\n\n")
+    assert envelope.startswith("(alarm) Scheduled wake w1 (2,"), "the re-spooled row leads"
+    assert note.startswith("(This wake fired 3 times"), "ONE note, replaced in place"
+    assert message == quoted, "and the user's paragraph survives the re-merge"
 
 
 def test_a_note_shaped_string_in_the_message_is_not_stripped() -> None:
