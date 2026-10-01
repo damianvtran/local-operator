@@ -1230,9 +1230,10 @@ It produced #542 (the frame-id contract, plus the bytecode-proof digest) and
 
 ### Measured scoring-side defects
 
-Four defects on the *scoring* side were measured during the campaign — two of
-them run records under `~/worktrees/osworld/scripts/logs/`, one a controlled
-probe, and one a property of the evidence format itself. None is a hypothesis
+Four defects on the *scoring* side were measured during the campaign — three of
+them run records under `~/worktrees/osworld/scripts/logs/` (the cache defect
+carries both a controlled probe and a cost-forensics analysis), and one a
+property of the evidence format itself. None is a hypothesis
 and none is repaired by this document. They matter to any reader deciding
 whether a zero, or a dollar figure, from this apparatus means what it appears
 to say: where one of these is the cause, the number is a statement about the
@@ -1279,8 +1280,8 @@ difference between "the judge answered NO" and "no judge call was made". The
 judge's inputs *were* present (`task_003_golden_rainy.png`, 2,583,926 B and
 `task_003_golden_snowy.png`, 2,795,118 B fetched; both result backgrounds
 extracted), and its key was wired, so this is not a missing credential — it is an
-unusable provider **value**. Scope is not task_003: any of the 108 tasks whose
-evaluator imports `desktop_env.evaluators.model_client` is affected
+unusable provider **value**. Scope is not task_003: 18 of the 108 tasks — those
+whose evaluator imports `desktop_env.evaluators.model_client` — are affected
 identically, because the provider is a single global value. **The general
 lesson is the class, not the task: "presents but unusable" must fail as loudly
 as "absent" already did.** A fix that resolves the provider value against the
@@ -1316,7 +1317,9 @@ the repair shape is to pin the prefix to the page that holds the submitted data,
 or to prefer a prefix match whose page can answer (`typeof getJSON === 'function'`).
 
 **Appending to the context re-writes the provider's cached prefix.** A cost
-defect, measured with a controlled probe on this apparatus: an **identical**
+defect, measured with a controlled nine-case prefix probe on this apparatus —
+`probe_rule4.py`, whose per-case rows read `cached_tokens` and
+`cache_write_tokens` back out of the provider's own response: an **identical**
 prefix re-sent reads back cached, while **appending** content re-bills it.
 
 ```
@@ -1328,7 +1331,8 @@ An action/observation turn appends frames to the message list, so it is the
 second shape. Arm 1830's task_003 cost **$14.3239** at a
 **53.6%** cache-read rate over 86 calls (`cache_write` 5,022,937 tokens; 40 of
 the 86 calls re-sent an uncached prefix over 15k tokens), where sibling episodes
-of the same arm, model and route ran at **~97% cached for $1.03–2.25**. task_016
+of the same arm, model and route ran at **~97% cached for $0.56–1.68**
+(task_013 at $0.5597 to task_009 at $1.6833). task_016
 is the milder instance — **$6.10**, `cache_write` 1.69M — and that episode
 finished and scored 0.83, so the class is not confined to failures. It
 pre-dates the arm's own fixes: arm **1796-c1-004**, built without them, shows
