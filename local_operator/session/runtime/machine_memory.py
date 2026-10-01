@@ -52,7 +52,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Callable, Sequence
 
 from local_operator import memory_guard
 from local_operator.mobile.resources import direct_ppid_pgid, session_resource_usage
@@ -230,12 +230,18 @@ def machine_memory_pass(
     kill: Callable[[memory_guard.Fragment], bool] | None = None,
     total_mb: int | None = None,
     identity_probe: "IdentityProbe | None" = None,
+    in_cooldown: Callable[[memory_guard.Fragment], bool] | None = None,
+    notify: "OwnerNotifier | None" = None,
 ) -> MemoryPassReport:
     """Run one aggregate pass; blocking, and the caller hands it to a thread.
 
     ``apply=False`` measures and grades but never kills (the ``--once`` shape).
-    ``kill_allowed=False`` is the seat's cooldown rung: the pass still warns,
-    and still names a fragment it WOULD have ended. ``total_mb`` is the host
+    ``kill_allowed=False`` withholds every stop, and ``in_cooldown`` withholds the
+    stop of ONE candidate: the seat's cooldown rung, scoped to the fragment (see
+    ``wakes.supervisor._MachineMemorySweep.in_cooldown``). Either way the pass
+    still warns, and still names the fragment it WOULD have ended.
+    ``notify`` tells the owning session about a stop that was delivered
+    (:func:`notify_owner_of_kill`). ``total_mb`` is the host
     probe's test seam; production leaves it ``None`` and the verdict measures.
 
     The kill walks the fragment's SUBTREE (``Fragment.pids``) through
@@ -396,7 +402,7 @@ def machine_memory_pass(
             top=top,
             reason=verdict.reason + f"; this pass does not apply (would end pid {candidate.pid})",
         )
-    if not kill_allowed:
+    if not kill_allowed or (in_cooldown is not None and in_cooldown(candidate)):
         return MemoryPassReport(
             state="act",
             fleet_mb=fleet_mb,
@@ -441,6 +447,23 @@ def machine_memory_pass(
         "es" if count != 1 else "",
         delivered,
     )
+    if delivered:
+        owner_pid = _owner_runtime_pid(candidate, rows_by_pid, roots)
+        event = KillEvent(
+            fragment=candidate,
+            owner_runtime_pid=owner_pid,
+            fleet_mb=fleet_mb,
+            act_mb=verdict.act_mb,
+            total_mb=verdict.total_mb,
+            measured=len(closure) - unmeasured,
+            unmeasured=unmeasured,
+            cause="fleet footprint at or above the act line; largest non-runtime fragment",
+        )
+        _log_kill_event(event)
+        try:
+            (notify or notify_owner_of_kill)(config_dir, event)
+        except Exception:  # noqa: BLE001 — telling the owner must never undo a stop
+            logger.warning("machine memory: the owner notification raised", exc_info=True)
     return MemoryPassReport(
         state="act",
         fleet_mb=fleet_mb,
@@ -451,6 +474,205 @@ def machine_memory_pass(
         killed=candidate if delivered else None,
         reason=verdict.reason,
     )
+
+
+@dataclass(frozen=True)
+class KillEvent:
+    """Who / what / when / how big for one delivered stop, in the shape a log line
+    and an owner notice both need — built once so the two cannot disagree."""
+
+    fragment: memory_guard.Fragment
+    #: The session runtime the fragment ran under, or ``None`` when the walk up
+    #: the process table did not reach one (a fragment is rooted below a runtime
+    #: by construction, so ``None`` means the table changed under the pass).
+    owner_runtime_pid: int | None
+    fleet_mb: int
+    act_mb: int
+    total_mb: int | None
+    measured: int
+    unmeasured: int
+    cause: str
+    at: float = 0.0
+
+
+#: Tells the owning session about a delivered stop. Injectable so a test asserts
+#: the event without a registry or a socket.
+OwnerNotifier = Callable[[Path, KillEvent], None]
+
+
+def _owner_runtime_pid(
+    fragment: memory_guard.Fragment,
+    rows_by_pid: dict[int, tuple[int, int]],
+    roots: Sequence[int],
+) -> int | None:
+    """The runtime above ``fragment``: the first ancestor that is one of ``roots``.
+
+    Walks the snapshot's ``ppid`` links, bounded by the table's size so a cycle in
+    a torn read cannot spin it. A fragment is by construction rooted below a root,
+    so the usual answer is its direct parent.
+    """
+    root_set = set(roots)
+    pid = fragment.ppid
+    for _hop in range(len(rows_by_pid) + 1):
+        if pid in root_set:
+            return pid
+        row = rows_by_pid.get(pid)
+        if row is None or row[0] == pid or row[0] <= 0:
+            return None
+        pid = row[0]
+    return None
+
+
+def _log_kill_event(event: KillEvent) -> None:
+    """ONE structured line per delivered stop: who, what, how big, why.
+
+    ``key=value`` pairs so an operator can grep a runtime pid or a footprint out
+    of the supervisor log. The counts are the pass's own measured/unmeasured split
+    (the same honesty the verdict's reason line keeps), because a sum that
+    under-counts should say so on the line that justifies a kill.
+    """
+    fragment = event.fragment
+    logger.warning(
+        "machine memory kill: owner_runtime_pid=%s fragment_pid=%s pids=%s footprint_mb=%s "
+        "fleet_mb=%s act_mb=%s total_mb=%s measured=%s unmeasured=%s cause=%r",
+        event.owner_runtime_pid,
+        fragment.pid,
+        list(fragment.pids),
+        fragment.mb,
+        event.fleet_mb,
+        event.act_mb,
+        event.total_mb,
+        event.measured,
+        event.unmeasured,
+        event.cause,
+    )
+
+
+def owner_notice_text(event: KillEvent) -> str:
+    """What the owning session's model is told. One paragraph, plain text.
+
+    Names the numbers (so the retry can be sized), the cause (so it is not read
+    as a bug in the command) and the way out; it is NOT a throttle notice — the
+    process was ended, not slowed.
+    """
+    fragment = event.fragment
+    gb = fragment.mb / 1024
+    count = len(fragment.pids)
+    fleet = (
+        f"{event.fleet_mb / 1024:.0f} GB of {event.total_mb / 1024:.0f} GB"
+        if event.total_mb
+        else (f"{event.fleet_mb / 1024:.0f} GB")
+    )
+    return (
+        f"MEMORY GUARD: your process group (pid {fragment.pid}, {count} "
+        f"process{'es' if count != 1 else ''}, {gb:.1f} GB footprint) was ended by the "
+        f"memory guard. The machine's sessions together held {fleet}, over the "
+        f"guard's act line, and yours was the largest command tree. The session is "
+        f"fine; the command was not completed. Reduce its peak memory (stream or "
+        f"chunk the input, lower the batch size, cap the runtime's heap) and bound any "
+        f"test rig you start before retrying."
+    )
+
+
+#: Deadline for dialling a live owner. The pass is on a worker thread once a
+#: minute, so seconds are free; a runtime that does not answer in this window is
+#: spooled to instead, which loses nothing.
+OWNER_DIAL_DEADLINE_S = 5.0
+
+
+def notify_owner_of_kill(config_dir: Path, event: KillEvent) -> bool:
+    """Tell the session that owns a killed fragment. ``True`` when it was delivered.
+
+    **WHY THIS EXISTS.** A machine-pass kill reached the supervisor's log and
+    nowhere else (2026-09-30: seven runaway waves, the owning sessions never
+    learned why their command vanished). The per-command guard already tells its
+    owner in the tool result; this is the machine pass's equivalent.
+
+    **TRANSPORT.** Two steps, both existing mechanisms (no new marker format; the
+    stop-attribution marker ``control.note_involuntary_stop`` is for ending a
+    RUNTIME's run and does not fit ending a child while its runtime lives):
+
+    1. the runtime is live, so DIAL it (``peer_client.send_peer_message``, the
+       ``peer_message`` control op) — the same path ``lop send`` uses. The
+       spool is not enough here on its own: ``inbox.drain_inbox`` runs at runtime
+       boot and once at the first turn, so a row appended to a LIVE runtime's
+       spool is not read until it next restarts.
+    2. when the dial fails (wedged, refused, no answer), SPOOL the row with
+       ``inbox.append_inbox`` under ``sessions/<session_id>/`` so the next open
+       drains it.
+
+    Quiet (``wake=False``): the owner reads it at its next turn boundary rather
+    than a turn being started on its behalf.
+
+    Never raises: a failed notice is logged and costs the notice, never the stop
+    that already happened.
+
+    # COORD: 54427b7ef091 — the stop-attribution lane may supply a richer path
+    # (a typed "child ended" marker). Swap the body here; the adapter's name and
+    # signature are the contract the pass depends on.
+    """
+    owner = event.owner_runtime_pid
+    if owner is None:
+        logger.warning(
+            "machine memory: no owning runtime found for fragment pid %s; the owner was not told",
+            event.fragment.pid,
+        )
+        return False
+    try:
+        from local_operator.session.runtime import registry
+
+        record = None
+        for candidate, state in registry.scan(config_dir, reap=False):
+            if getattr(candidate, "pid", None) == owner and state != "stale":
+                record = candidate
+                break
+        if record is None:
+            logger.warning(
+                "machine memory: runtime pid %s has no live record; owner not told", owner
+            )
+            return False
+        session_id = str(getattr(record, "session_id", "") or "")
+        if not session_id:
+            return False
+        text = owner_notice_text(event)
+        sender = {"conversation_name": "machine memory guard"}
+
+        import asyncio
+
+        from local_operator.mobile.peer_client import send_peer_message
+
+        try:
+            asyncio.run(
+                send_peer_message(
+                    record,
+                    text=text,
+                    mode="mailbox",
+                    wake=False,
+                    sender=sender,
+                    deadline_s=OWNER_DIAL_DEADLINE_S,
+                )
+            )
+            logger.info(
+                "machine memory: told session %s its fragment was ended (dialled)", session_id
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001 — fall through to the spool
+            logger.info("machine memory: dial of session %s failed (%s); spooling", session_id, exc)
+
+        from local_operator.session.runtime.inbox import InboxLine, append_inbox
+
+        written = append_inbox(
+            config_dir / "sessions" / session_id,
+            InboxLine(text=text, sender=sender, mode="mailbox", written_at=time.time()),
+        )
+        if written:
+            logger.info(
+                "machine memory: told session %s its fragment was ended (spooled)", session_id
+            )
+        return written
+    except Exception:  # noqa: BLE001 — a notice never undoes or fails a stop
+        logger.warning("machine memory: could not notify the owner of pid %s", owner, exc_info=True)
+        return False
 
 
 def _fragment_refusal(
