@@ -1392,3 +1392,140 @@ async def test_an_abandoned_drain_gives_deliveries_back(tmp_path: Path) -> None:
 
     assert len(stream.requests) == 1, "exactly one batched turn, as before the latch"
     await session.dispose()
+
+
+# -- the cancel purge (the wake-spool flood, part 2) -----------------------------
+
+
+class CancelHost:
+    """``Session``'s cancel-purge methods over a stub transcript and a real queue.
+
+    The purge is reached in the product through ``WakeScheduler.update``'s
+    ``on_removed`` hook, so the test wires the REAL scheduler to the REAL session
+    methods rather than calling the handler directly: the hook site is half of what
+    is being pinned (every removal path — the tool's cancel, the desktop route, the
+    ask-deadline retire, the patience sweep — goes through ``update``).
+    """
+
+    retire_wakes_to_inbox = Session.retire_wakes_to_inbox
+    _spool_wake_to_inbox = Session._spool_wake_to_inbox
+    _queue_wake_rearm = Session._queue_wake_rearm
+    _purge_removed_wakes = Session._purge_removed_wakes
+    _drop_queued_wake_deliveries = Session._drop_queued_wake_deliveries
+
+    _wake_rearms: list[Any]
+
+    def __init__(self, directory: Path) -> None:
+        self._transcript = SimpleNamespace(directory=directory)
+        self._wake_deliver_hook: Any = None
+        self._steering_queue: asyncio.Queue[Any] = asyncio.Queue()
+        self._courtesy_wake_count = 0
+        self._wake: Any = None
+
+    def _missed_delivery_note(self, _due: Any) -> None:
+        return None
+
+    async def _persist_wake_schedules(self, schedules: list[Any]) -> None:
+        return None
+
+    def refresh_frontend_state(self) -> None:
+        return None
+
+
+def _queued_wake(wake_id: str) -> Any:
+    from local_operator.harness.types import CustomMessage
+    from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
+
+    return CustomMessage(
+        custom_type=WAKE_PROMPT_MESSAGE_TYPE,
+        attribution="user",
+        details={"wake_id": wake_id, "text": "standup"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_wake_spooled_while_draining_carries_its_schedule_id(tmp_path: Path) -> None:
+    """The id is what lets the successor tell one schedule's fires apart without
+    parsing their text, and what the cancel purge matches on."""
+    host = CancelHost(tmp_path)
+    host.retire_wakes_to_inbox()
+    await host._spool_wake_to_inbox(_due())
+
+    rows = peek_inbox(tmp_path)
+    assert len(rows) == 1
+    assert rows[0].wake_id == "w1"
+    assert rows[0].wake_fires == 1, "one fire is one fire, not a coalesced row"
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_schedule_purges_its_spool_and_queued_delivery(
+    tmp_path: Path,
+) -> None:
+    """The reported straggler: a cancel that stops the schedule but not its tail.
+
+    A draining runtime had spooled three rows for ``w1``, and a courtesy delivery
+    for the same wake was already riding the steering queue. Cancelling must take
+    BOTH out — and must leave the unrelated queued item alone, which is what makes
+    this a purge rather than a queue flush.
+    """
+    from local_operator.harness.types import CustomMessage
+    from local_operator.harness.wake import WakeScheduler
+
+    host = CancelHost(tmp_path)
+    host.retire_wakes_to_inbox()
+    for _ in range(3):
+        await host._spool_wake_to_inbox(_due())
+    assert len(peek_inbox(tmp_path)) == 3, "precondition: the drain left its tail behind"
+
+    host._steering_queue.put_nowait(_queued_wake("w1"))
+    host._courtesy_wake_count += 1
+    host._steering_queue.put_nowait(
+        CustomMessage(custom_type="peer_message", attribution="user", details={"text": "hi"})
+    )
+
+    scheduler = WakeScheduler(
+        now=lambda: 0,
+        deliver=lambda due: None,  # type: ignore[arg-type,return-value]
+        persist=host._persist_wake_schedules,
+        on_removed=host._purge_removed_wakes,
+    )
+    host._wake = scheduler
+    await scheduler.update([WakeSchedule(id="w1", message="standup", next_due_at=1)])
+    await scheduler.update([])
+
+    assert peek_inbox(tmp_path) == [], "the cancelled schedule's rows must not deliver"
+    assert host._steering_queue.qsize() == 1, "only the wake delivery went"
+    assert host._steering_queue.get_nowait().custom_type == "peer_message"
+    assert host._courtesy_wake_count == 0, (
+        "the courtesy count is what _has_urgent_steering subtracts; leaving it "
+        "inflated after a drop would cost a real steer its interrupt"
+    )
+    scheduler.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_update_that_removes_nothing_purges_nothing(tmp_path: Path) -> None:
+    """Removal is by ID: re-writing a row in place is not a cancellation.
+
+    ``patience``'s ``armed_after`` flush rewrites the same rows through this same
+    ``update``; the hook firing there would purge the spool of a live schedule.
+    """
+    from local_operator.harness.wake import WakeScheduler
+
+    host = CancelHost(tmp_path)
+    host.retire_wakes_to_inbox()
+    await host._spool_wake_to_inbox(_due())
+
+    scheduler = WakeScheduler(
+        now=lambda: 0,
+        deliver=lambda due: None,  # type: ignore[arg-type,return-value]
+        persist=host._persist_wake_schedules,
+        on_removed=host._purge_removed_wakes,
+    )
+    host._wake = scheduler
+    row = WakeSchedule(id="w1", message="standup", next_due_at=1)
+    await scheduler.update([row])
+    await scheduler.update([row.model_copy(update={"message": "standup (edited)"})])
+
+    assert len(peek_inbox(tmp_path)) == 1, "an edit is not a cancel"
+    scheduler.dispose()
