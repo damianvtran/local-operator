@@ -90,12 +90,12 @@ def isolated_network_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     ``LOCAL_OPERATOR_CONFIG_DIR`` here is what keeps a test from writing a device
     identity, a network record or an audit line into the operator's own store.
     ``PATH`` is narrowed to this interpreter's directory for the second reason:
-    ``lop network init`` starts the relay under a LaunchAgent when there is
-    launchd to do it with, and a test must not install a plist and load a job
-    into the operator's real launchd domain. Without ``launchctl`` on PATH the
-    child takes its own documented "no launchd here: run `lop network serve` in
-    the foreground" branch, which is the same code path with the side effect
-    removed.
+    ``lop network init`` starts the relay under the platform's user supervisor
+    when there is one to do it with, and a test must not install a plist or a
+    systemd unit and load it into the operator's real session. Without
+    ``launchctl``/``systemctl`` on PATH the child takes its own documented "no
+    user service supervisor here: run `lop network serve` in the foreground"
+    branch, which is the same code path with the side effect removed.
     """
     root = tmp_path / "config"
     root.mkdir()

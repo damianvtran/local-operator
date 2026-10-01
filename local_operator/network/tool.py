@@ -699,7 +699,7 @@ def _render(action: str, payload: dict[str, Any]) -> list[str]:
             relay_line = "not running"
         lines = [
             f"installed: {'yes' if payload.get('installed') else 'no'}"
-            + ("" if payload.get("supported") else "  (no launchd on this platform)"),
+            + ("" if payload.get("supported") else "  (no user service supervisor here)"),
             f"identity:  {'present' if payload.get('identity_present') else 'missing'}",
             f"relay:     {relay_line}",
         ]
