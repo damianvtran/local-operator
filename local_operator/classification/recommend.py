@@ -107,9 +107,10 @@ QUESTION_ID_PREFIX = "recommend_"
 
 #: Kinds in the order their questions are asked (skills first: they are the most
 #: specific kind, and a model reading top-down spends its attention there;
-#: projects last — the kind the state's ladder drops first, so the reading order
-#: and the budget order agree, see ``context.KIND_DROP_ORDER``).
-QUESTION_KIND_ORDER: tuple[ResourceKind, ...] = ("skill", "guide", "mcp", "project")
+#: tools next to last and projects last — each is the exact reverse of
+#: ``context.KIND_DROP_ORDER``, so the reading order and the budget order agree:
+#: a kind the state's ladder gives back first is a kind asked about last).
+QUESTION_KIND_ORDER: tuple[ResourceKind, ...] = ("skill", "guide", "mcp", "tool", "project")
 
 _OPTION_ID_SAFE = re.compile(r"[^A-Za-z0-9_.:-]+")
 
@@ -270,6 +271,7 @@ def build_questions(
             "guide": "guide",
             "mcp": "MCP server",
             "project": "project",
+            "tool": "tool",
         }[kind]
         questions.append(
             Question(

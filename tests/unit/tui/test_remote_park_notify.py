@@ -160,7 +160,11 @@ async def test_a_park_is_announced_once_and_withdrawn_when_it_clears() -> None:
             toast.message.splitlines()[0] == "Backfill the audit log"
         ), "the card must name the conversation so two parks on one device differ"
         assert "Waiting for approval on demo-laptop" in toast.message
-        assert "lop network ready --peer demo-laptop" in toast.message
+        # The repaved tail (D3): the card keeps the older-build DIAGNOSIS and drops
+        # the two backticked verbs, so the pin names the product action instead of
+        # the retired `lop network ready --peer …` shape (Q7).
+        assert "updating it is what fixes that" in toast.message
+        assert "ask Local Operator to set up operator authority there" in toast.message
 
         # The same episode, polled again: `show` re-arms its own dismissal
         # timer, so re-raising on every tick would hold the card forever.

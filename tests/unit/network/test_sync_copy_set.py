@@ -402,6 +402,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``_ROTATION_MARKER`` (``.gz``): the suffix a rotated audit file carries under "
         "``network/audit`` — a store file, never a session entry",
     ),
+    "local_operator/network/approvals.py": (
+        2,
+        "the approval store under ``<config>/network/approvals`` (``APPROVALS_DIRNAME``, "
+        "``INDEX_FILENAME``): a DEVICE-LOCAL record store beside ``sessions/``, never an "
+        "entry of one and never carried in one — a card records THIS device's consent, "
+        "so a move must not transport it",
+    ),
     "local_operator/network/types.py": (
         1,
         "``PEERS_RUN_DIRNAME`` (``run/peers``): the mesh's run directory under the store root",
@@ -421,6 +428,12 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/session/placement.py": (
         2,
         "``network`` again and the handoff journal inside it: both outside ``sessions/``",
+    ),
+    "local_operator/network/move_queue.py": (
+        1,
+        "``QUEUE_DIRNAME``: the queued move's directory under ``network/queue/`` — the "
+        "relay-owned record keyed by session id (design note §5.4), deliberately "
+        "outside ``sessions/`` and never copied",
     ),
     "local_operator/session/runtime/presence.py": (
         3,

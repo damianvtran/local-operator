@@ -177,7 +177,7 @@ different sites and the Python diagnosis table
 | verification failed | its signature does not verify as ours, or it carries no profile | `key agent : the key agent failed verification` + `fix :` |
 | killed by signal | the kernel refused its entitlement: the profile is missing, stale or does not authorize its application identifier | `key agent : the key agent was killed: bad or missing embedded profile` + `fix :` |
 | keychain call refused | the key agent ran but the OS refused its keychain call, or the helper declined the request itself | `key agent : the key agent refused its keychain call: <the helper's own sentence naming the cause>` + `fix :` |
-| no key stored | no operator key on this host: run `lop operator init` | `reason : no key on this host` |
+| no key stored | no operator key on this host: ask Local Operator to set up operator authority (one approval and one admin password prompt) | `reason : no key on this host` |
 | key stored | the level it achieved, with the protection class `[kSecAttrAccessible…]` | `private-half backend : operator-secure-enclave`, `presence per signature : True` |
 
 **The key agent's fault STANDS BESIDE the authority reason, never in place of it**

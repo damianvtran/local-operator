@@ -372,6 +372,87 @@ async def test_picker_second_slot_reoffers_teams_feeding_the_chart() -> None:
 
 
 @pytest.mark.asyncio
+async def test_picker_rows_keep_the_key_and_enrich_the_description() -> None:
+    """The name column stays the typeable KEY; only a CHOSEN-and-different
+    label leads the description (D2), and an alias shows its key tail (D5)."""
+    session = FakeSession()
+    session.team_registry = _registry(
+        TeamEditFields(
+            name="data-quality",
+            label="Data Quality",
+            description="Finds issues",
+            manager="manager",
+            members=[TeamMember(role="coder")],
+        ),
+        TeamEditFields(
+            name="ops",
+            label="Platform Reliability",
+            description="Keeps the lights on",
+            aliases=["pl"],
+        ),
+    )
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        app.query_one(Editor).focus()
+        await _type(pilot, "/team ")
+        editor = app.query_one(Editor)
+        rows = [(c.name, c.detail, c.description) for c in editor.picker._choices]
+    # The derived default does NOT lead the description: the name column
+    # already says it.
+    assert ("data-quality", "1 member", "Finds issues") in rows
+    # A chosen label leads it; the alias tail names the other keys.
+    assert (
+        "ops",
+        "0 members",
+        "Platform Reliability · Keeps the lights on (alias: pl)",
+    ) in rows
+
+
+@pytest.mark.asyncio
+async def test_alias_prefix_surfaces_the_team_in_the_picker() -> None:
+    """D5: `/team radia` finds `radient-net` by its alias; the row and the
+    insertion stay the canonical NAME, and the tail names the alias."""
+    session = FakeSession()
+    session.team_registry = _registry(
+        TeamEditFields(name="radient-net", aliases=["radiant"]),
+    )
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        app.query_one(Editor).focus()
+        await _type(pilot, "/team radia")
+        editor = app.query_one(Editor)
+        rows = [(c.name, c.description) for c in editor.picker._choices]
+    assert any(name == "radient-net" for name, _ in rows), rows
+    description = next(desc for name, desc in rows if name == "radient-net")
+    assert "(alias: radiant)" in description, description
+
+
+@pytest.mark.asyncio
+async def test_chart_title_and_nodes_share_the_display_rule() -> None:
+    """D6: the title line and the node labels paint the same shared form."""
+    session = FakeSession()
+    session.team_registry = _registry(
+        TeamEditFields(name="data-quality", manager="director"),
+    )
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(110, 34)) as pilot:
+        await _boot(pilot, app)
+        app._open_org_chart_view("data-quality")
+        await pilot.pause()
+        await pilot.pause()
+        view = app._org_chart_view
+        assert view is not None
+        title = view._title_text.plain
+        root = view._root
+    # The derived default is informative (space vs hyphen), so both paint it,
+    # and neither restates the key.
+    assert title.startswith("team Data Quality"), title
+    assert root is not None and root.label == "Data Quality"
+
+
+@pytest.mark.asyncio
 async def test_mode_does_not_scroll_the_screen_and_esc_restores() -> None:
     session = FakeSession()
     session.team_registry = _nested_registry()

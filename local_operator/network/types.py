@@ -156,9 +156,16 @@ def peer_whole_int(value: Any, *, default: int = 0, maximum: int | None = None) 
 # Capabilities and roles
 # ---------------------------------------------------------------------------
 
-#: The ONE capability vocabulary (convergence round, authoritative): ten
+#: The ONE capability vocabulary (convergence round, authoritative): twelve
 #: names, no synonyms. ``broker:request``, ``broker:grant`` and ``member:admin``
 #: were draft names and are not implemented.
+#:
+#: ``approve`` and ``unattended`` joined in the remote-onboarding slice (a):
+#: ``approve`` gates who may ATTEMPT an allow for a session on this device (ask
+#: for a signing challenge; the signature still decides admission), and
+#: ``unattended`` is the right to start sessions here without a per-card gate.
+#: Both are GRANTABLE-ONLY (no role carries them) — see
+#: :data:`GRANTABLE_CAPABILITIES`.
 CAPABILITIES: frozenset[str] = frozenset(
     {
         "list",
@@ -170,6 +177,8 @@ CAPABILITIES: frozenset[str] = frozenset(
         "delete",
         "move",
         "broker_credential",
+        "approve",
+        "unattended",
         "admin",
     }
 )
@@ -411,8 +420,27 @@ MOVE_PHASES_AFTER_HANDOFF: frozenset[str] = frozenset({"status", "ready", "done"
 #: what ``credential share`` writes on the owner (§2.2) — but only by a device
 #: whose own row holds ``admin``, which is the "stays admin-only" rule: the
 #: capability is never in a non-admin ROLE, and only an admin may hand it out.
+#:
+#: ``approve`` and ``unattended`` are grantable and, like ``broker_credential``,
+#: are in no ROLE: they are the onboarding scopes the operator ticks on the
+#: approval card ("grant: approve", "trust: unattended sessions"), and a role
+#: that carried them silently would widen every existing member the day this
+#: table changed. ``approve`` gates who may ATTEMPT an allow; ``unattended``
+#: gates a session that starts with no card at all.
 GRANTABLE_CAPABILITIES: frozenset[str] = frozenset(
-    {"list", "view", "prompt", "steer", "stop", "slash", "delete", "move", "broker_credential"}
+    {
+        "list",
+        "view",
+        "prompt",
+        "steer",
+        "stop",
+        "slash",
+        "delete",
+        "move",
+        "broker_credential",
+        "approve",
+        "unattended",
+    }
 )
 
 #: What each capability lets the peer DO, in words, for ``member grant/revoke``'s
@@ -428,6 +456,8 @@ CAPABILITY_WORDS: dict[str, str] = {
     "delete": "archive or delete a session here",
     "move": "move sessions to or from this device",
     "broker_credential": "borrow this device's logins",
+    "approve": "answer approval prompts for sessions here",
+    "unattended": "start sessions here without approval prompts",
     "admin": "administer the network",
 }
 
@@ -517,6 +547,15 @@ INNER_OP_CAPABILITY: dict[str, str] = {
     # prompt — "start/continue a turn, answer an approval or an ask"
     "prompt": "prompt",
     "approval_answer": "prompt",
+    # THE MATERIAL A REMOTE ALLOW IS MADE FROM (remote-onboarding §2.8). The
+    # challenge is what a surface SIGNS with, so the member that may ask for one
+    # is the member that may ATTEMPT an allow on this device — hence ``approve``,
+    # a capability name of its own rather than ``prompt``: a viewer able to send
+    # prompts must not thereby be handed signing material. This row is what the
+    # RELAY checks; the runtime still refuses a signature-less allow, and the
+    # signature decides admission. It replaces the deliberate absence this table
+    # recorded before slice (a) — see the tail note below.
+    "operator_challenge": "approve",
     "ask_answer": "prompt",
     # The QUEUED ask's three verbs (asks/, design ``docs/design/ask-nonblocking.md``
     # §2.4). ``ask_respond`` is the blocking ``ask_answer`` verb under its new
@@ -716,9 +755,28 @@ INNER_OP_CAPABILITY: dict[str, str] = {
     # refuses while another viewer is attached.
     "retire_now": "stop",
     "refresh_if_idle": "stop",
-    # DELIBERATELY ABSENT, and therefore refused: ``operator_challenge``. It
-    # produces material a surface uses to SIGN as the operator, and no capability
-    # in the transport's set grants a peer that authority.
+    # ``queue_move`` is ``retire_now`` DEFERRED (mesh slice (d), the queued
+    # move): it installs a durable intent that retires this runtime at the next
+    # turn boundary — the actor that may retire NOW may certainly schedule the
+    # same retirement for later, and the frame is the source relay's follow-
+    # through of a move the source already accepted (the relay holds the queue
+    # record and names the destination on the frame). Same authority as the
+    # immediate verb beside it; without a row the relay refuses it
+    # ``unknown_op`` and CLOSES the stream, which would break the intent's
+    # re-delivery after a runtime restart — the one property (idempotent
+    # re-arm) the queue exists for.
+    "queue_move": "stop",
+    # AN OP WITH NO ROW IS REFUSED WHEN FORWARDED, and that is the
+    # deliberate-absence mechanism this table used for ``operator_challenge``
+    # until slice (a): "it produces material a surface uses to SIGN as the
+    # operator, and no capability in the transport's set grants a peer that
+    # authority." The row above now admits it on ``approve``, because a remote
+    # ALLOW cannot be made AT ALL without a challenge crossing the mesh for a
+    # signature. What keeps the original concern closed is admission rather
+    # than transport: the signature is verified locally against the anchor,
+    # challenges are single-use and count-bounded, and a member without
+    # ``approve`` cannot be handed one. A future op that mints signing material
+    # gets the same decision explicitly, here or nowhere.
 }
 
 

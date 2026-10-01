@@ -71,6 +71,7 @@ from local_operator.harness.types import (
 )
 from local_operator.incidents import format_cut_off_notice
 from local_operator.mobile.attach_client import (
+    MOVED_REASON,
     RETIRING_REASON,
     STOPPED_REASON,
     AttachClient,
@@ -532,6 +533,29 @@ _DEGRADED_RESYNC_RETRY_CAP_S = 8.0
 #: where the most likely truth is a busy authoritative loop. This says what is
 #: actually known.
 _SYNC_UNRESPONSIVE_REASON = "the runtime is not responding"
+
+#: The slack one answer ATTEMPT leaves for its response to travel and be painted
+#: before the caller's own deadline fires. Without it the backend and the client
+#: would race to the same instant and the client would win, which is the whole
+#: failure `answer_gate`'s deadline exists to avoid (agent review round 1, MAJOR-1).
+_ANSWER_DEADLINE_MARGIN_S = 0.5
+
+#: The acknowledgement envelope the FIRST attempt holds back for the retry. The
+#: two attempts share the caller's window, so the first is shortened by this — the
+#: alternative is that the retry exists only for callers with budget to spare, and
+#: the lost-ack case (the one it was written for) is the one that has least.
+_ANSWER_RETRY_RESERVE_S = 2.0
+
+#: Below this much remaining budget the retry is ABANDONED rather than shortened.
+#: The owner's settle path is a loop hop, so a retry that has any real room lands
+#: at once or is not going to; spending the last of the window on a second envoy
+#: only pushes the answer past the client's deadline, where the disposition this
+#: retry exists to deliver is exactly what gets lost.
+_ANSWER_RETRY_MIN_S = 1.0
+
+#: The floor under a single attempt's envelope, so a nearly-spent budget still
+#: gives the owner's instant path an honest chance rather than a zero-length wait.
+_ANSWER_ATTEMPT_FLOOR_S = 0.5
 
 
 class RuntimeUnresponsiveError(ConnectionError):
@@ -1119,6 +1143,12 @@ class AttachedSession:
         #: shows the cold state for a refresh the user did not ask for. See
         #: ``_go_cold(refresh=True)``.
         self._refresh_callback: Callable[[], Any] | None = None
+        #: The device a MOVE took this conversation to, learned from the
+        #: ``retiring`` frame's own reason (``MOVED_REASON``) — the disconnect
+        #: handler's one output about where the viewer's conversation now
+        #: lives. Empty until a move retires this viewer; a surface reads it
+        #: via :attr:`moved_to`.
+        self._moved_to: str = ""
         #: Told the moment the ``retiring`` frame ARRIVES (not at the close),
         #: and only when the runtime says it is DRAINING. The refresh callback
         #: above is the end of the handover and owns the re-engage; this one is
@@ -2881,6 +2911,18 @@ class AttachedSession:
                     # it. Passing None made that token unreachable from this arm
                     # (review round 2, NIT-2).
                     self._note_read_cold_reason(self._runtime_record, self._runtime_pid)
+                # AND A CONTROL CALLER PROCEEDS DELIBERATELY. An earlier revision
+                # of this arm awaited the retained dial's sync for CONTROL callers
+                # too, on the theory that a connected-but-unsynced facade is not a
+                # served control call. It was removed because that theory does not
+                # survive contact with the callers: ``acquire(read=False)`` is the
+                # one door every control route uses, so making it wait (and then
+                # refuse) would have taken a ``/messages`` send that works fine
+                # over the live retained dial (`admit_prompt` needs the socket, not
+                # canonical state) and answered it a retryable 503 instead
+                # (agent review round 1 / QA round 1, Q1). Who needs canonical
+                # state — the answer route's epoch and gate reads — is a fact about
+                # the ROUTE, not about the socket, and belongs there.
                 return False
             # THE OWNER SEAM, NOT THE LOCAL REGISTRY (mesh slice DB2). This asked
             # ``find_runtime_record`` directly, which is a scan of THIS machine's
@@ -3161,13 +3203,45 @@ class AttachedSession:
         value: str | None = None,
         approved: bool | None = None,
         question_index: int | None = None,
+        deadline: float | None = None,
     ) -> str:
         """Answer the current owner gate without a terminal-local prompt task.
 
         The owner validates again across the socket. This early identity check
         prevents a stale desktop popup from accidentally answering a newer gate
         while a reconnect or a multi-question ask advances in another window.
+
+        ONE BOUNDED RETRY, and it is here rather than in a route so every attached
+        surface inherits it (desktop, the mobile relay, any viewer): a control
+        envelope that expires against an owner which is ALIVE usually means the
+        answer landed and only the acknowledgement was lost, so the honest thing
+        to do is ask once more under the same id rather than report a transport
+        failure over a question the operator can no longer see. The retry is
+        duplicate-safe by construction — it requires the SAME request id and the
+        same connected client, and the owner's settle is idempotent (a repeat
+        answers with the value the first attempt recorded). Anything the retry
+        refuses is read against the gate's OWN state: if the gate is gone, the
+        first attempt settled it and the receipt is a success; if it is still
+        parked, the refusal is real and travels unchanged.
+
+        ``deadline`` is the CALLER'S budget, a ``time.monotonic()`` instant by
+        which this call must have returned, and it is what keeps the retry from
+        spending a SECOND full acknowledgement envelope. The desktop answer route
+        passes it because its renderer abandons the request at its own per-op
+        deadline (20 s): two 15 s envelopes plus the control attach is ~33 s, so in
+        the double-timeout case the CLIENT gave up first and the ``retryable``
+        disposition the retry exists to deliver never reached the screen (agent
+        review round 1, MAJOR-1). Given a deadline the attempts SHARE it — the
+        first is shortened so the retry keeps its reserve — and the retry is
+        abandoned outright when too little is left to be worth issuing. ``None``
+        (a caller with no such window) keeps the previous shape: one full envelope
+        per attempt, at most two.
         """
+        # Lazily imported, the constraint the two other ``mobile`` imports in this
+        # file observe: ``mobile.projects`` reaches ``server.models``, so a
+        # module-scope import here would make ``session`` depend on ``mobile``.
+        from local_operator.mobile.attach_client import ACK_TIMEOUT_S, OwnerAckTimeout
+
         pending = self.pending_gate
         client = self._client
         if (
@@ -3177,11 +3251,97 @@ class AttachedSession:
             or not client.connected
         ):
             raise ValueError("this question is no longer pending")
-        if pending.kind == "approval" and type(approved) is bool:
-            return await client.approval_answer(request_id, approved)
-        if pending.kind == "ask" and value is not None and question_index == pending.question_index:
-            return await client.ask_answer(request_id, value, question_index=question_index)
-        raise ValueError("the answer does not match the current question")
+
+        def _remaining() -> float | None:
+            """Seconds this call may still spend, or ``None`` when it has no budget."""
+            if deadline is None:
+                return None
+            return deadline - time.monotonic() - _ANSWER_DEADLINE_MARGIN_S
+
+        def _ack_budget(reserve: float) -> float:
+            """The acknowledgement envelope for ONE attempt.
+
+            ``reserve`` is what the caller wants held back for a later attempt, so
+            the two share one window instead of each claiming a fresh one.
+            """
+            left = _remaining()
+            if left is None:
+                return ACK_TIMEOUT_S
+            return max(min(ACK_TIMEOUT_S, left - reserve), _ANSWER_ATTEMPT_FLOOR_S)
+
+        async def _issue(ack_budget: float) -> str:
+            if pending.kind == "approval" and type(approved) is bool:
+                return await client.approval_answer(request_id, approved, deadline_s=ack_budget)
+            if (
+                pending.kind == "ask"
+                and value is not None
+                and question_index == pending.question_index
+            ):
+                return await client.ask_answer(
+                    request_id, value, question_index=question_index, deadline_s=ack_budget
+                )
+            raise ValueError("the answer does not match the current question")
+
+        try:
+            return await _issue(_ack_budget(_ANSWER_RETRY_RESERVE_S))
+        except OwnerAckTimeout:
+            # The owner did not acknowledge inside the envelope. It may still have
+            # settled the gate while the ack was in flight, so before spending the
+            # retry ask the fact rather than the clock.
+            if not self._gate_answer_still_pending(request_id, client):
+                return _settled_gate_receipt(pending, approved)
+            left = _remaining()
+            if left is not None and left < _ANSWER_RETRY_MIN_S:
+                # NO ROOM INSIDE THE CALLER'S WINDOW. Spending the last of the
+                # budget on a doomed second envelope would push the response past
+                # the client's own deadline, which is the very failure the budget
+                # exists to prevent — so the first attempt's timeout travels.
+                raise
+        try:
+            return await _issue(_ack_budget(0.0))
+        except OperatorAuthorityRequired:
+            # A REFUSAL rather than a settlement: the card is STILL parked and
+            # this connection is not the console that may clear it (the route
+            # answers this one 422 with ``still_pending``). Re-raised so the
+            # retry can never turn it into a receipt.
+            raise
+        except (OwnerAckTimeout, ValueError, RuntimeError) as error:
+            # NARROW ON PURPOSE (agent review round 1, MINOR-1). These are the
+            # classes a SETTLED gate arrives as — the runtime's own
+            # ``ValueError`` in process, the client's ``RuntimeError`` for an error
+            # frame that crossed the wire, and a second timeout. Anything else
+            # (``AttributeError``, ``TypeError``, a client defect) is not evidence
+            # about the gate and propagates as the bug it is.
+            #
+            # ``RuntimeUnresponsiveError`` is deliberately NOT in this list even
+            # though the retry's purpose is the same class of hazard: it is raised
+            # by THIS facade's bind, never by the client seam below (agent review
+            # round 1, NIT-2).
+            if self._gate_answer_still_pending(request_id, client):
+                raise
+            logger.info(
+                "answer gate %s settled under this caller; reporting the receipt (%s)",
+                request_id,
+                error,
+            )
+        return _settled_gate_receipt(pending, approved)
+
+    def _gate_answer_still_pending(self, request_id: str, client: Any) -> bool:
+        """Is ``request_id``'s gate still parked on this facade, over a live socket?
+
+        The retry's discriminator between "the owner settled it and the ack was
+        lost" and "the owner is genuinely not answering". It reads the folded
+        state rather than the error: the settle travels as a pending-gate update
+        on the same pump the lost ack would have used, so by the time the retry
+        has returned, a gate that settled is gone from ``pending_gate``. A gate
+        still holding the same id says the refusal was real.
+        """
+        return (
+            client is not None
+            and client.connected
+            and self.pending_gate is not None
+            and self.pending_gate.request_id == request_id
+        )
 
     async def ask_respond(
         self,
@@ -6855,6 +7015,21 @@ class AttachedSession:
         # the cases the local flag cannot: another TUI's /stop all, or a shell
         # `lop stop`, hitting a session THIS viewer merely watches — including
         # a session with no wakes, which leaves no on-disk marker to consult.
+        if reason == MOVED_REASON:
+            # THE QUEUED MOVE'S RETIREMENT, and it is deliberately NOT the
+            # refresh arm below. A refresh owes a successor HERE; a move means
+            # the conversation is leaving, so re-engaging from this viewer
+            # would spawn a local runtime for a session mid-handoff — the
+            # second-writer window INV-1 exists to close, and the race the
+            # queued move's attach window is designed around (design note
+            # §5.4: announce, window, then proceed; a client that could not
+            # follow is disconnected, not re-engaged). Go cold WITHOUT the
+            # refresh callback, and keep the destination the frame named so a
+            # surface can say where it went.
+            client = self._client
+            self._moved_to = str(getattr(client, "moved_to", "") or "")
+            self._go_cold(refresh=False)
+            return
         if reason == RETIRING_REASON:
             # A planned refresh, not owner death and not a stop: the runtime
             # left so the next engage runs the build now on disk. Nothing to
@@ -7327,8 +7502,26 @@ class AttachedSession:
         The viewer re-engages at once (``OperatorApp._on_runtime_refreshed``);
         the conversation is untouched and no notice is painted — the band's
         ``starting…`` state covers the ~1 s the re-engage takes.
+
+        NOT told for a MOVE's retirement: that departure arrives as
+        ``MOVED_REASON`` and goes cold through ``set_went_cold_callback``
+        instead, because a re-engage would spawn a runtime for a session that
+        is leaving (see ``_on_disconnected``).
         """
         self._refresh_callback = callback
+
+    @property
+    def moved_to(self) -> str:
+        """The device a move took this conversation to, or ``""``.
+
+        Set when a ``retiring`` frame carrying ``reason: "moved"`` reaches
+        this viewer (delivered during the move's attach window, before the
+        socket closes); persists on the cold viewer so a surface opened after
+        the move can name the destination. The UI slice renders it; the core
+        promises only that it is remembered in the same step that refuses to
+        re-engage locally.
+        """
+        return self._moved_to
 
     def set_drain_callback(self, callback: Callable[..., Any] | None) -> None:
         """Told when the runtime announces a departure that is REFUSING work.
@@ -9585,6 +9778,30 @@ async def _await_handler(result: Any) -> None:
     sync-or-async handler contract without weakening types at the call site.
     """
     await result
+
+
+def _settled_gate_receipt(pending: Any, approved: bool | None) -> str:
+    """The receipt for a gate whose answer LANDED even though its ack did not.
+
+    The owner's own vocabulary, spelled once here rather than at the retry site:
+    an approval settles as ``approved``/``denied`` and a question as ``answered``
+    (``session/runtime/serving.py::approval_answer``/``ask_answer``). Returning it
+    is what lets the retry report the SETTLEMENT the operator caused instead of a
+    transport error over a card that is already gone from their screen.
+
+    THE VALUE IS THIS CALLER'S, AND THAT IS EARNED RATHER THAN ASSUMED. A gate
+    that settled under a COMPETING front end would have refused this caller's
+    attempt outright — the owner's ``_resolve_pending`` finds no parked future and
+    the client raises. Reaching here means the attempt was SENT and then TIMED OUT,
+    i.e. the owner still held the gate when it arrived, so this caller's value is
+    the one that was applied. The folded state cannot name the winning value
+    (``pending_gate`` is gone by the time the retry returns), so if that reasoning
+    is ever weakened the receipt must be re-derived rather than trusted (agent
+    review round 1, MINOR-4).
+    """
+    if getattr(pending, "kind", "") == "approval":
+        return "approved" if approved else "denied"
+    return "answered"
 
 
 def _journal_witnessed_cut_off(transcript: Any, store: Any, cause: str) -> None:

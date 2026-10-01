@@ -11602,7 +11602,7 @@ class OperatorApp(App[None]):
             # attached profile/team restores it here, so the band names it
             # immediately instead of only after the next attach.
             agent_profile=str(getattr(session, "active_agent", "") or ""),
-            team=str(getattr(session, "active_team_name", "") or ""),
+            team=self._team_band_text(str(getattr(session, "active_team_name", "") or "")),
             context_window=_context_window(session),
             conversation_name=session.conversation_name,
             # A fork that has not named itself yet wears the PARENT's identity
@@ -11912,7 +11912,7 @@ class OperatorApp(App[None]):
             effort=_effort_label(state),
             fast=_fast_label(state),
             agent_profile=str(getattr(state, "active_agent", "") or ""),
-            team=str(getattr(state, "active_team", "") or ""),
+            team=self._team_band_text(str(getattr(state, "active_team", "") or "")),
             cwd=str(getattr(state, "cwd", "") or ""),
             context_tokens=getattr(state, "context_tokens", None),
             context_is_estimate=getattr(state, "context_is_estimate", None),
@@ -12190,7 +12190,7 @@ class OperatorApp(App[None]):
             # `_adopt_session` does, so a reduced facade without the accessors
             # cannot raise here.
             agent_profile=str(getattr(session, "active_agent", "") or ""),
-            team=str(getattr(session, "active_team_name", "") or ""),
+            team=self._team_band_text(str(getattr(session, "active_team_name", "") or "")),
             context_window=_context_window(session),
             conversation_name=session.conversation_name,
             # As in `_adopt_session`: the replacement session may itself be an
@@ -18563,18 +18563,90 @@ class OperatorApp(App[None]):
     def _known_team_names(self) -> list[str]:
         """The team names the create form's hint lists.
 
-        The SAME registry `/team`'s argument list reads (``_team_registry``), so
-        the form cannot offer a vocabulary the team store does not have; an
-        absent registry or a read failure leaves the hint's honest fallback
+        The SAME registry `/team`'s argument list reads (``_team_registry``)
+        and the same name reader its rows are built from
+        (``_team_name_label``), so the form cannot offer a vocabulary the team
+        store does not have and cannot name a team differently from the picker.
+        An absent registry or a read failure leaves the hint's honest fallback
         rather than failing a keypress.
         """
         registry = self._team_registry()
         if registry is None or not hasattr(registry, "list_teams"):
             return []
         try:
-            return [str(getattr(team, "name", "") or "") for team in registry.list_teams()]
+            return [self._team_name_label(team)[0] for team in registry.list_teams()]
         except Exception:  # noqa: BLE001 — a hint must never fail a keypress
             return []
+
+    @staticmethod
+    def _team_name_label(team: Any) -> tuple[str, str]:
+        """``(name, label)`` off any Team-or-double, best-effort.
+
+        Defensive like the rest of the picker builder: this list is built from
+        whatever the session's registry yields, and a reduced double must
+        degrade to a row rather than break a keystroke.
+        """
+        return (
+            str(getattr(team, "name", "") or ""),
+            str(getattr(team, "label", "") or ""),
+        )
+
+    @classmethod
+    def _team_display_form(cls, team: Any) -> str:
+        """The shared display rule's form for any Team-or-double (D2).
+
+        ONE reader for every surface in this app, so two of them cannot
+        disagree about how a team reads -- the rule itself, and why each of
+        its four cases exists, lives in
+        :func:`local_operator.teams.display_form`.
+        """
+        from local_operator.teams import display_form
+
+        return display_form(*cls._team_name_label(team))
+
+    @classmethod
+    def _team_listing_form(cls, team: Any) -> str:
+        """The BOUNDED display form the listing family paints (N1).
+
+        ``teams.bounded_display_form`` caps the composed form so an over-long
+        custom label ellipsizes instead of wrapping the key onto a second
+        line; the local block and the wire's first slot both call it here, so
+        both terminals paint the same bytes.
+        """
+        from local_operator.teams import bounded_display_form
+
+        return bounded_display_form(*cls._team_name_label(team))
+
+    def _team_band_text(self, name: str) -> str:
+        """The band's active-team text, through the shared display rule (D2/D4).
+
+        The segment's value is whatever the SESSION carries -- a key -- while
+        the band is a display, so it paints the shared form: ``Data Quality``
+        for a label that adds information, the raw key for a derived default
+        that adds none. Resolution is best-effort and cheap: the session's own
+        attached Team first (no I/O), then the same metadata snapshot the
+        picker reads, then the raw key. Never raises: a broken registry must
+        not take the band down.
+        """
+        if not name:
+            return ""
+        from local_operator.teams import display_form
+
+        label = ""
+        attached = getattr(self._session, "active_team", None)
+        if attached is not None and str(getattr(attached, "name", "") or "") == name:
+            label = str(getattr(attached, "label", "") or "")
+        if not label:
+            registry = self._team_registry()
+            if registry is not None and hasattr(registry, "list_teams"):
+                try:
+                    for row in registry.list_teams():
+                        if str(getattr(row, "name", "") or "").casefold() == name.casefold():
+                            label = str(getattr(row, "label", "") or "")
+                            break
+                except Exception:  # noqa: BLE001 — a broken registry must not break the band
+                    logger.debug("team band: registry lookup failed", exc_info=True)
+        return display_form(name, label)
 
     def _team_choices(self) -> list[ArgumentChoice]:
         """Teams the ``/team`` argument list offers, one row per name."""
@@ -18605,6 +18677,27 @@ class OperatorApp(App[None]):
             counter = getattr(team, "member_count", None)
             slots = counter() if callable(counter) else len(getattr(team, "members", ()) or ())
             description = (getattr(team, "description", "") or "").strip() or "no description"
+            # FROZEN display rule (D2): only a CHOSEN-and-different label earns
+            # the description prefix (``enrichment_label``) -- a derived
+            # default restating the name column, or a label casefolding to it,
+            # is noise in the one slot answering "which team is this". NOT the
+            # detail column, either: detail is reserved and the description is
+            # what gets dropped first, and widening detail is what silenced
+            # descriptions between 76 and 123 columns (see the D1 note below).
+            from local_operator.teams import enrichment_label
+
+            label = enrichment_label(str(team.name), str(getattr(team, "label", "") or ""))
+            if label:
+                description = f"{label} · {description}"
+            # D5: an alias is an addressing key, and this picker MATCHES on it
+            # (``ArgumentChoice.names`` carries the tuple and ``match_choices``
+            # scores every name), so the row must say the team answers to one
+            # -- until now no TUI surface named them at all. Painted whenever
+            # a team HAS aliases, so the row reads the same whether it was
+            # found by name or by alias.
+            aliases = tuple(str(alias) for alias in (getattr(team, "aliases", ()) or ()))
+            if aliases:
+                description = f"{description} (alias: {', '.join(aliases)})"
             choices.append(
                 ArgumentChoice(
                     team.name,
@@ -18632,6 +18725,7 @@ class OperatorApp(App[None]):
                     # ordinary terminal sits in. The manager is one keystroke
                     # away in the listing and the chart; the description is the
                     # only thing telling the user which team this IS.
+                    aliases=aliases,
                     detail=f"{slots} {'member' if slots == 1 else 'members'}",
                 )
             )
@@ -19023,7 +19117,12 @@ class OperatorApp(App[None]):
             # and a multi-count slot was collapsed to one. The listing, the
             # picker and the org chart must agree.
             slots = team.member_count()
-            rows.append(Padding(Text(team.name, style=heading), (0, 0, 0, 2)))
+            # The shared display rule, bounded for this row (N1): a long
+            # custom label ellipsizes so the KEY keeps its place on the line
+            # -- `/team <name>` and the footer both address by the key, so the
+            # row must show what to type.
+            display = self._team_listing_form(team)
+            rows.append(Padding(Text(display, style=heading), (0, 0, 0, 2)))
             # "members", matching the number (R6) — see the picker's note. This
             # row names the manager separately ("Led by <manager> · N
             # members"), so calling the roster count "roles" also double-counted
@@ -19492,7 +19591,10 @@ class OperatorApp(App[None]):
         self._sync_team_band()
         if not request:
             notice(
-                f"team {team.name} is ready. {team.manager} leads it. "
+                # The prose names the team as every surface paints it (D4);
+                # the addressing instruction keeps the raw NAME -- it is what
+                # the user types.
+                f"team {self._team_display_form(team)} is ready. {team.manager} leads it. "
                 f"Send a request with /team {team.name} <message>."
             )
             return
@@ -19506,7 +19608,7 @@ class OperatorApp(App[None]):
         # and sends them — the marker sits in the request tail the user typed
         # around, so a pasted screenshot reaches the manager as pixels, not a
         # dead ``[Image #N]`` marker.
-        notice(f"sending to {team.name}. {team.manager} is coordinating.")
+        notice(f"sending to {self._team_display_form(team)}. {team.manager} is coordinating.")
         self._submit_command_prompt(request, attachments)
 
     def _cmd_team_chart(self, name: str, registry: Any, notice: NoticeFn) -> None:
@@ -19816,11 +19918,15 @@ class OperatorApp(App[None]):
 
         Mirror of :meth:`_sync_agent_band` for the roster: read straight off
         ``active_team_name`` so an attach (and, when one exists, a detach) both
-        flow through the same one-line sync.
+        flow through the same one-line sync. The name is resolved through
+        :meth:`_team_band_text` -- the segment is a display, so a team
+        attached by its slug reads as its label.
         """
         if self._status is None or self._session is None:
             return
-        self._status.update(team=str(getattr(self._session, "active_team_name", "") or ""))
+        self._status.update(
+            team=self._team_band_text(str(getattr(self._session, "active_team_name", "") or ""))
+        )
 
     def _cmd_agent_class(self, rest: str, notice: NoticeFn) -> None:
         """``/agent class <name> [proactive|reactive]`` — the class switch (R36).
@@ -25926,7 +26032,8 @@ class OperatorApp(App[None]):
             return ""
         return (
             "; but operator authority is not installed on this machine yet: neither can run "
-            "until `lop operator install` has run there (one privileged step)"
+            "until it is set up here — ask Local Operator to set up operator authority for "
+            "you (one approval and one admin password prompt)"
         )
 
     def _configured_approvals_mode(self) -> str | None:
@@ -32561,11 +32668,42 @@ class OperatorApp(App[None]):
         second layout for a second registry. Never raises: an unreadable
         registry renders as an empty pane, and a settings page that crashed on
         a broken team file would be unreachable exactly when it is needed.
+
+        The first line is the shared display form (D2). The summary is the
+        team's OWN description, raw (D1/R1-2): the first line already carries
+        whatever display form the team earns, so reusing the picker's
+        label-prefixed description here would spend a 34-cell row restating
+        it -- measured, the prefix left 11 of ~18 description cells, and a
+        team with no description read \"Org · no description\" under \"Org\".
+        Aliases join the FACTS line (D5): the pane is where a reader checks
+        what a team answers to, and no other TUI surface named them.
         """
         rows: list[tuple[str, str, str]] = []
         try:
+            from local_operator.teams import display_form
+
+            details: dict[str, tuple[str, str, str]] = {}
+            registry = self._team_registry()
+            if registry is not None and hasattr(registry, "list_teams"):
+                try:
+                    for row in registry.list_teams():
+                        name = str(getattr(row, "name", "") or "")
+                        aliases = tuple(str(alias) for alias in (getattr(row, "aliases", ()) or ()))
+                        details[name.casefold()] = (
+                            display_form(name, str(getattr(row, "label", "") or "")),
+                            (getattr(row, "description", "") or "").strip() or "no description",
+                            f"alias: {', '.join(aliases)}" if aliases else "",
+                        )
+                except Exception:  # noqa: BLE001 — labels are optional, rows are not
+                    logger.debug("settings: team labels unavailable", exc_info=True)
             for team in self._team_choices():
-                rows.append((team.name, team.detail or "team", team.description or ""))
+                display, summary, alias_fact = details.get(
+                    team.name.casefold(), (team.name, team.description or "", "")
+                )
+                facts = team.detail or "team"
+                if alias_fact:
+                    facts = f"{facts} · {alias_fact}"
+                rows.append((display, facts, summary))
         except Exception:  # noqa: BLE001 — a bad registry must not break the page
             logger.debug("settings: team rows unavailable", exc_info=True)
         return rows
@@ -47087,9 +47225,14 @@ class OperatorApp(App[None]):
             # terminal disagree with another about the same team. The plural
             # is keyed to the number actually shown, which `len(members) == 0`
             # was not.
+            # The first slot is painted VERBATIM by ``_team_listing_block`` on
+            # the viewer, so it carries the same BOUNDED display form the
+            # local listing paints (``_team_listing_form``): one rule, one
+            # cap, or the two terminals would disagree about how one team
+            # reads (the D2 rule and the N1 cap, applied to the row).
             items = [
                 (
-                    team.name,
+                    self._team_listing_form(team),
                     f"Led by {team.manager} · {team.member_count()} "
                     f"{'member' if team.member_count() == 1 else 'members'}",
                     (team.description or "").strip(),
@@ -47175,10 +47318,13 @@ class OperatorApp(App[None]):
         return SlashResult(
             kind="notice",
             text=(
-                f"team {team.name} is ready. {team.manager} leads it. "
+                # The prose uses the shared display form (D4); the addressing
+                # instruction and the receipt `data` keep the raw NAME.
+                f"team {self._team_display_form(team)} is ready. {team.manager} leads it. "
                 f"Send a request with /team {team.name} <message>."
                 if not request
-                else f"sending to {team.name}. {team.manager} is coordinating."
+                else f"sending to {self._team_display_form(team)}. "
+                f"{team.manager} is coordinating."
             ),
             style="info",
             data={

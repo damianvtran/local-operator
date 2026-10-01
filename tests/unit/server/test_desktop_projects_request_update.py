@@ -1,0 +1,813 @@
+"""``POST /v1/desktop/projects/{key}/request-update`` against a REAL registrant.
+
+The route's own behaviour is what lives here: the frozen check-in text and its
+substitutions, the mailbox+wake wire semantics, the strictly sequential loop, the
+three-way per-session outcome mapping, and the per-project cooldown. Delivery is
+exercised end to end through the shared peer-send core, not mocked — the target
+is a real ``RuntimeServer`` publishing a real discovery record, dialled over its
+real loopback control socket, exactly as ``tests/unit/tools/test_send_tool.py``
+does for the ``send`` tool.
+
+A project row may only link a 12-character hex session id, and the registrant's
+own record carries the handle's non-hex ``s1``, so each deliverable target is an
+ALIAS record published under a live pid that is NOT this process's (the parent's)
+pointing at the registrant's socket — the same alias trick the send-tool suite
+uses, and it also keeps the route's resolve off a self-record.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+import pytest
+import pytest_asyncio
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
+
+from local_operator.config import ConfigManager
+from local_operator.server.request_update import (
+    NEVER_STARTED_DETAIL,
+    REQUEST_UPDATE_TEMPLATE,
+    reset_cooldowns,
+)
+from local_operator.server.routes import capabilities, desktop_projects
+from local_operator.session.runtime import registry
+from local_operator.session.runtime.server import RuntimeServer
+from tests.unit.session.runtime.test_server import FakeHandle
+
+pytestmark = pytest.mark.asyncio
+
+TOKEN = "projects-desktop-token"
+SESSION_A = "4e92693767fa"
+SESSION_B = "7b31c0d4a9e2"
+SESSION_C = "1f0a55e83b7c"
+
+#: The frozen check-in text, pinned LITERALLY here rather than derived from the
+#: implementation's own ``REQUEST_UPDATE_TEMPLATE``: a value built from that
+#: constant would track any drift silently, so a reworded sentence or a lost
+#: newline would keep the suite green. This literal is the authority; the
+#: delivery tests compare the wire body against it, and
+#: ``test_the_implementation_template_matches_the_frozen_literal`` checks the
+#: implementation still equals it (and its byte-exact digest).
+FROZEN_TEXT = (
+    'Status check-in for project "{display}" (key: {name}), requested from the Projects view.\n'
+    "\n"
+    "Please post a progress update for it now:\n"
+    '1. Call the `project` tool with op="update", name="{name}" and progress set to ONE dated '
+    "line that starts with {today}: what has changed since your last update, what is in flight, "
+    "and any blocker. Report only what is true; if nothing changed, say so in that line.\n"
+    "2. If the project's status no longer fits (planning, active, qa, validation, paused, done, "
+    'archived), change it in the same call with status="<new status>". Leave it unchanged if it '
+    'still fits; use "done" only when every requirement is closed.\n'
+    "3. Then reply with one short sentence confirming what you posted. Do not start new work "
+    "because of this message.\n"
+    "\n"
+    "If you are not working on this project, reply saying so and do not post an update."
+)
+
+#: sha256 of ``FROZEN_TEXT`` (bytes, utf-8) — the byte-exact pin a reviewer can
+#: recompute without reading the implementation at all.
+FROZEN_TEXT_SHA256 = "93be68ac9ebc05a6650695453435370da8dd5e414c45a5258c131fd150a62689"
+
+
+class _RecordingHandle(FakeHandle):
+    """Records each peer delivery and whether any two overlapped.
+
+    ``max_active`` is the sequential-loop assertion that does not depend on a
+    clock: the route dials one target at a time, so a real sequential loop never
+    lets two ``receive_peer_message`` calls be in flight together, while a
+    ``gather``-shaped bug would. The tiny in-flight sleep widens that window so
+    the reading is structural rather than accidental.
+    """
+
+    def __init__(self, *, delay: float = 0.01) -> None:
+        super().__init__()
+        self.active = 0
+        self.max_active = 0
+        self.delay = delay
+
+    async def receive_peer_message(  # noqa: ANN001, ANN202
+        self, text, *, mode="mailbox", wake=False, sender=None
+    ) -> str:
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        try:
+            self.calls.append(
+                ("receive_peer_message", (text,), {"mode": mode, "wake": wake, "sender": sender})
+            )
+            await asyncio.sleep(self.delay)
+            return "delivered to the mailbox (will be read on the next turn)"
+        finally:
+            self.active -= 1
+
+
+@pytest.fixture(autouse=True)
+def _fresh_cooldowns() -> None:
+    """The cooldown map is process-global; every test starts from a clean one."""
+    reset_cooldowns()
+
+
+@pytest_asyncio.fixture
+async def api(tmp_path: Path, monkeypatch):
+    for name in list(os.environ):
+        if name.startswith("CMUX_") or name.startswith("LOP_"):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", TOKEN)
+    monkeypatch.delenv("LOCAL_OPERATOR_DESKTOP_ORIGINS", raising=False)
+    app = FastAPI()
+    app.state.config_manager = ConfigManager(tmp_path)
+    app.include_router(desktop_projects.router)
+    app.include_router(capabilities.router)
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    ) as client:
+        yield client, tmp_path
+
+
+async def _project_with(client: AsyncClient, *session_ids: str, name: str = "payments") -> str:
+    """Create a project and link ``session_ids``; return its id."""
+    created = await client.post("/v1/desktop/projects", json={"name": name})
+    assert created.status_code == 200
+    project_id = created.json()["result"]["id"]
+    for session_id in session_ids:
+        linked = await client.post(
+            f"/v1/desktop/projects/{project_id}/links", json={"session_id": session_id}
+        )
+        assert linked.status_code == 200
+    return project_id
+
+
+class _Targets:
+    """One real registrant plus the socket its aliases point at.
+
+    A registry record is keyed by PID (one file per pid), so distinct aliases
+    need distinct LIVE pids. ``sleepers`` are child processes this test owns and
+    reaps in :meth:`close`: stable, alive for the whole test, and never this
+    process — unlike an inherited ancestor pid, whose lifetime we do not control
+    and which flaked when one exited mid-test.
+    """
+
+    def __init__(
+        self,
+        registrant: RuntimeServer,
+        handle: _RecordingHandle,
+        port: int,
+        key: str,
+        sleepers: "list[subprocess.Popen[bytes]]",
+    ):
+        self.registrant = registrant
+        self.handle = handle
+        self.port = port
+        self.key = key
+        self.sleepers = sleepers
+
+    def publish(self, session_id: str, *, index: int = 0, started: bool = True) -> None:
+        registry.publish(
+            registry.SessionRecord(
+                pid=self.sleepers[index].pid,
+                kind="tui",
+                session_id=session_id,
+                conversation_name=session_id,
+                cwd="/tmp",
+                model_label="test/model",
+                control_port=self.port,
+                control_key=self.key,
+                started=started,
+            )
+        )
+
+    def close(self) -> None:
+        self.registrant.close()
+        for proc in self.sleepers:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except Exception:  # noqa: BLE001 — a stuck reaper must not mask the result
+                proc.kill()
+
+
+def _sleeper_procs(count: int) -> "list[subprocess.Popen[bytes]]":
+    """``count`` child processes we own and reap; their pids are live anchors."""
+    return [
+        subprocess.Popen(  # noqa: S603 — a fixed interpreter invocation, no shell
+            [sys.executable, "-c", "import time; time.sleep(120)"]
+        )
+        for _ in range(count)
+    ]
+
+
+async def _wait_live(*session_ids: str, deadline_s: float = 30.0) -> None:
+    """Block until every session is visible as a LIVE record.
+
+    ``registry.publish`` writes the record synchronously, but the resolver's
+    scan classifies by pid liveness (a ``ps`` probe), which is slow enough under
+    fleet load that a route call firing immediately after a publish can race the
+    first classification. Waiting here makes the delivery tests deterministic
+    instead of dependent on host load.
+    """
+    wanted = set(session_ids)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + deadline_s
+    while loop.time() < deadline:
+        seen = {rec.session_id for rec, state in registry.scan() if state == "live"}
+        if wanted <= seen:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"records never went live: {sorted(wanted)}")
+
+
+async def _own_record(deadline_s: float = 30.0) -> registry.SessionRecord:
+    """The registrant's own live record, waiting out a loaded host."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + deadline_s
+    while loop.time() < deadline:
+        for rec, state in registry.scan():
+            if state == "live":
+                return rec
+        await asyncio.sleep(0.05)
+    raise AssertionError("runtime never published a live record")
+
+
+async def _start_targets(*, delay: float = 0.01) -> _Targets:
+    handle = _RecordingHandle(delay=delay)
+    registrant = RuntimeServer(handle, kind="tui")
+    registrant.start()
+    sleepers = _sleeper_procs(2)
+    try:
+        # A fresh RuntimeServer starts ``started=False`` and its OWN record is
+        # what the receive-side gate reads, so a delivery to it would be refused
+        # as unengaged. Flip it the way a real first turn would.
+        registrant.set_record_started(True)
+        own = await _own_record()
+        return _Targets(registrant, handle, own.control_port, own.control_key, sleepers)
+    except BaseException:
+        registrant.close()
+        for proc in sleepers:
+            proc.kill()
+        raise
+
+
+class _Dropper:
+    """A raw loopback listener that reads a request then closes WITHOUT acking.
+
+    This is the UNCONFIRMED case produced honestly: the transport fails after
+    the message has been handed to the kernel, so nothing can say whether it
+    landed — the class the route must report as ``unconfirmed``, never
+    ``delivered``.
+
+    ``connections`` counts the dials this socket actually handled, and it is
+    load-bearing for the test: ``delivered`` can only come from a peer that
+    ACKED, so if resolution ever picked a different record (another listener at
+    some other port) the count stays 0 and the assertion fails on the real
+    fact — the dial never arrived here — instead of a mis-classification being
+    silently accepted. ``read_bytes`` records how much of the request arrived
+    before the close, so a future failure shows whether the dial got as far as
+    writing its frames.
+    """
+
+    def __init__(self, server: asyncio.Server, port: int) -> None:
+        self.server = server
+        self.port = port
+        self.connections = 0
+        self.read_bytes = 0
+
+    @classmethod
+    async def start(cls) -> "_Dropper":
+        holder: dict[str, "_Dropper"] = {}
+
+        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            self = holder["self"]
+            self.connections += 1
+            try:
+                chunk = await asyncio.wait_for(reader.read(4096), timeout=10)
+                self.read_bytes += len(chunk or b"")
+            except Exception:  # noqa: BLE001 — a torn-down reader is the point
+                pass
+            # Close WITHOUT writing a byte: an unacked dial, by construction.
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:  # noqa: BLE001
+                pass
+
+        server = await asyncio.start_server(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        dropper = cls(server, port)
+        holder["self"] = dropper
+        return dropper
+
+    async def close(self) -> None:
+        self.server.close()
+        await self.server.wait_closed()
+
+
+def _last_delivery(handle: _RecordingHandle) -> dict[str, Any]:
+    name, args, kwargs = handle.calls[-1]
+    assert name == "receive_peer_message"
+    return {"text": args[0], **kwargs}
+
+
+async def test_delivery_sends_the_frozen_text_as_a_waking_mailbox_drop(api) -> None:
+    from datetime import date
+
+    client, _root = api
+    project_id = await _project_with(client, SESSION_A)
+    targets = await _start_targets()
+    try:
+        targets.publish(SESSION_A)
+        await _wait_live(SESSION_A)
+        response = await client.post(f"/v1/desktop/projects/{project_id}/request-update", json={})
+        assert response.status_code == 200
+        result = response.json()["result"]
+        assert result["state"] == "sent"
+        assert result["counts"] == {"total": 1, "delivered": 1, "unconfirmed": 0, "failed": 0}
+        (row,) = result["sessions"]
+        assert row["outcome"] == "delivered"
+        assert row["session_id"] == SESSION_A
+        assert result["requested_at"] is not None
+        assert response.json()["message"] == "Requested an update from 1 session on payments."
+
+        delivery = _last_delivery(targets.handle)
+        assert delivery["text"] == FROZEN_TEXT.format(
+            display="payments", name="payments", today=date.today().isoformat()
+        )
+        # Mailbox drop with wake=True — the `send` tool's own default, NOT a steer.
+        assert delivery["mode"] == "mailbox"
+        assert delivery["wake"] is True
+        assert delivery["sender"]["conversation_name"] == "Projects"
+    finally:
+        targets.close()
+
+
+async def test_two_targets_are_dialled_strictly_sequentially(api) -> None:
+    client, _root = api
+    project_id = await _project_with(client, SESSION_A, SESSION_B)
+    targets = await _start_targets()
+    try:
+        targets.publish(SESSION_A, index=0)
+        targets.publish(SESSION_B, index=1)
+        await _wait_live(SESSION_A, SESSION_B)
+        response = await client.post(f"/v1/desktop/projects/{project_id}/request-update", json={})
+        result = response.json()["result"]
+        assert result["counts"] == {"total": 2, "delivered": 2, "unconfirmed": 0, "failed": 0}
+        assert [row["session_id"] for row in result["sessions"]] == [SESSION_A, SESSION_B]
+        # Two dials, one at a time: a concurrent loop would overlap here.
+        assert len(targets.handle.calls) == 2
+        assert targets.handle.max_active == 1
+    finally:
+        targets.close()
+
+
+async def test_an_empty_project_dials_nothing_and_says_so(api) -> None:
+    client, _root = api
+    project_id = await _project_with(client)  # no links
+    response = await client.post(f"/v1/desktop/projects/{project_id}/request-update", json={})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["result"]["state"] == "empty"
+    assert body["result"]["sessions"] == []
+    assert body["result"]["counts"]["total"] == 0
+    assert body["message"] == "No linked sessions to ask. Link a session to payments first."
+
+
+async def test_a_second_press_inside_the_window_dials_nothing_and_says_so(api) -> None:
+    client, _root = api
+    project_id = await _project_with(client, SESSION_A)
+    targets = await _start_targets()
+    try:
+        targets.publish(SESSION_A)
+        await _wait_live(SESSION_A)
+        first = await client.post(f"/v1/desktop/projects/{project_id}/request-update", json={})
+        assert first.json()["result"]["state"] == "sent"
+        dials_after_first = len(targets.handle.calls)
+
+        second = await client.post(f"/v1/desktop/projects/{project_id}/request-update", json={})
+        assert second.status_code == 200
+        body = second.json()
+        assert body["result"]["state"] == "cooldown"
+        assert body["result"]["cooldown_remaining_s"] == 60
+        assert body["result"]["sessions"] == []
+        # The numbers are whole seconds rounded up (the frozen rule), so the
+        # elapsed figure can be 0 or 1 on a fast machine; the shape is fixed.
+        assert body["message"].startswith("Update already requested ")
+        assert body["message"].endswith(" on payments. Try again in 60 s.")
+        assert " s ago" in body["message"]
+        # No second dial.
+        assert len(targets.handle.calls) == dials_after_first
+    finally:
+        targets.close()
+
+
+async def test_the_implementation_template_matches_the_frozen_literal() -> None:
+    """The route's own template must equal the literal pin, byte for byte.
+
+    The delivery tests compare the wire body against :data:`FROZEN_TEXT`, a
+    literal that does not move with the implementation — so this is the other
+    half of the pin: it fails if ``REQUEST_UPDATE_TEMPLATE`` is edited away from
+    the frozen wording, and the digest lets a reviewer verify the literal itself
+    without re-reading either side.
+    """
+    import hashlib
+
+    assert REQUEST_UPDATE_TEMPLATE == FROZEN_TEXT
+    assert hashlib.sha256(FROZEN_TEXT.encode("utf-8")).hexdigest() == FROZEN_TEXT_SHA256
+
+
+async def test_a_titled_project_uses_its_title_as_the_display_name(api) -> None:
+    """``{display}`` is the title when set; ``{name}`` stays the key.
+
+    The key is kept in the message even when a title exists, because the
+    ``project`` tool addresses rows by key — so only ``{display}`` follows the
+    title-else-key rule. This exercises that branch, which the untitled project
+    every other test uses cannot reach.
+    """
+    from datetime import date
+
+    client, _root = api
+    created = await client.post("/v1/desktop/projects", json={"name": "payments"})
+    project_id = created.json()["result"]["id"]
+    titled = await client.patch(
+        f"/v1/desktop/projects/{project_id}", json={"title": "Payments migration"}
+    )
+    assert titled.status_code == 200
+    linked = await client.post(
+        f"/v1/desktop/projects/{project_id}/links", json={"session_id": SESSION_A}
+    )
+    assert linked.status_code == 200
+
+    targets = await _start_targets()
+    try:
+        targets.publish(SESSION_A)
+        await _wait_live(SESSION_A)
+        response = await client.post(f"/v1/desktop/projects/{project_id}/request-update", json={})
+        assert response.status_code == 200
+        # The governing sentence names the DISPLAY name (the title).
+        assert response.json()["message"] == (
+            "Requested an update from 1 session on Payments migration."
+        )
+        delivery = _last_delivery(targets.handle)
+        assert delivery["text"] == FROZEN_TEXT.format(
+            display="Payments migration", name="payments", today=date.today().isoformat()
+        )
+    finally:
+        targets.close()
+
+
+async def test_a_call_during_an_in_flight_request_waits_then_re_evaluates(api) -> None:
+    """A concurrent call takes the project lock, waits, and then sees the stamp.
+
+    The per-project lock is what makes two presses safe: the second call cannot
+    dial alongside the first (concurrent daemon-class dials evict) and, once the
+    first stamps the cooldown, re-evaluates against it and refuses. Only the
+    POST-STAMP refusal is covered by the test above; this one drives the lock
+    branch — a second request entering while the first is still dialling.
+    """
+    client, _root = api
+    project_id = await _project_with(client, SESSION_A)
+    # A slow delivery keeps the first call inside its critical section long
+    # enough for the second to arrive and queue on the lock.
+    targets = await _start_targets(delay=0.4)
+    try:
+        targets.publish(SESSION_A)
+        await _wait_live(SESSION_A)
+        url = f"/v1/desktop/projects/{project_id}/request-update"
+        first, second = await asyncio.gather(client.post(url, json={}), client.post(url, json={}))
+        states = sorted([first.json()["result"]["state"], second.json()["result"]["state"]])
+        assert states == ["cooldown", "sent"], states
+        # Exactly ONE dial: the waiter re-evaluated and refused rather than
+        # dialling a second time.
+        assert len(targets.handle.calls) == 1
+    finally:
+        targets.close()
+
+
+async def test_an_unconfirmed_delivery_is_its_own_outcome(api, monkeypatch) -> None:
+    client, root = api
+    project_id = await _project_with(client, SESSION_A)
+    dropper = await _Dropper.start()
+    (sleeper,) = _sleeper_procs(1)
+    # A spy on the delivery call, so a recurrence NAMES the mechanism instead of
+    # only showing the outcome: it records whether the peer layer RETURNED (the
+    # only way `delivered` can be reached) or RAISED, and on which branch.
+    import local_operator.mobile.peer_send as peer_send
+
+    calls: list[tuple[Any, ...]] = []
+    real_deliver = peer_send.deliver_peer_message_outcome
+
+    async def _spy(record: Any, **kwargs: Any) -> Any:
+        try:
+            outcome = await real_deliver(record, **kwargs)
+        except BaseException as exc:  # noqa: BLE001 — recorded, then re-raised
+            calls.append(("raised", record is None, type(exc).__name__, str(exc)[:120]))
+            raise
+        calls.append(("returned", record is None, outcome.state, str(outcome.detail)[:80]))
+        return outcome
+
+    monkeypatch.setattr(peer_send, "deliver_peer_message_outcome", _spy)
+
+    # A second spy, on the WIRE call: it records the port each dial used and
+    # whether it returned or raised. That is what separates the two candidate
+    # mechanisms for a `delivered` — a real client that returned on an unacked
+    # socket, or a dial to a DIFFERENT peer than the dropper.
+    import local_operator.mobile.peer_client as peer_client
+
+    dials: list[tuple[Any, ...]] = []
+    real_op = peer_client.send_control_op
+
+    async def _dial_spy(op_record: Any, op: str, fields: dict[str, Any], **kwargs: Any) -> str:
+        port = getattr(op_record, "control_port", None)
+        try:
+            detail = await real_op(op_record, op, fields, **kwargs)
+        except BaseException as exc:  # noqa: BLE001 — recorded, then re-raised
+            dials.append((port, "raised", type(exc).__name__))
+            raise
+        dials.append((port, "returned", str(detail)[:80]))
+        return detail
+
+    monkeypatch.setattr(peer_client, "send_control_op", _dial_spy)
+    try:
+        # A live record whose socket accepts then closes without acking: the
+        # message may have landed, so this is "unconfirmed", never "could not
+        # reach".
+        registry.publish(
+            registry.SessionRecord(
+                pid=sleeper.pid,
+                kind="tui",
+                session_id=SESSION_A,
+                conversation_name=SESSION_A,
+                cwd="/tmp",
+                model_label="test/model",
+                control_port=dropper.port,
+                control_key="0" * 64,
+                started=True,
+            )
+        )
+        await _wait_live(SESSION_A)
+        # The resolution must land on the DROPPER's record, not some other live
+        # listener: this is what makes a `delivered` outcome impossible here,
+        # because the dropper never writes an ack. The rig also requires that no
+        # session directory exists, so the cold/engage fallback (a DIFFERENT peer
+        # answering a DIFFERENT question) cannot stand in for the dropper.
+        assert not (root / "sessions" / SESSION_A).exists(), (
+            "the cold/engage fallback is reachable: a session directory exists for the "
+            "linked id, so an unacked dial could be replaced by a different peer"
+        )
+        record, state = next(
+            (rec, st) for rec, st in registry.scan() if rec.session_id == SESSION_A
+        )
+        assert state == "live" and record.control_port == dropper.port
+
+        response = await client.post(f"/v1/desktop/projects/{project_id}/request-update", json={})
+        result = response.json()["result"]
+        (row,) = result["sessions"]
+        diagnostics = (
+            f"calls={calls} dials={dials} dropper.port={dropper.port} "
+            f"dropper.connections={dropper.connections} "
+            f"dropper.read_bytes={dropper.read_bytes} "
+            f"session_dir={(root / 'sessions' / SESSION_A).exists()} "
+            f"outcome={row['outcome']!r} detail={row['detail']!r}"
+        )
+        # The invariant FIRST, so a recurrence fails on the RULE rather than on a
+        # downstream expectation: a peer this test proved never acked must never
+        # be reported delivered. The diagnostics name the mechanism in one line.
+        assert row["outcome"] != "delivered", f"an unacked dial was called delivered: {diagnostics}"
+        # The dial MUST have reached the dropper.
+        assert dropper.connections == 1, f"the dial never reached the dropper: {diagnostics}"
+        assert row["outcome"] == "unconfirmed", diagnostics
+        assert row["detail"] == "delivery could not be confirmed"
+        assert result["counts"] == {"total": 1, "delivered": 0, "unconfirmed": 1, "failed": 0}
+        # Unconfirmed STARTS the cooldown: it may have landed.
+        assert result["requested_at"] is not None
+        assert response.json()["message"] == (
+            "Could not confirm delivery on payments — the requests may still reach its sessions."
+        )
+    finally:
+        await dropper.close()
+        sleeper.terminate()
+        try:
+            sleeper.wait(timeout=5)
+        except Exception:  # noqa: BLE001
+            sleeper.kill()
+
+
+async def test_the_real_client_never_returns_success_for_an_unacked_dial() -> None:
+    """The REAL transport, pinned: a peer that closes without acking raises.
+
+    The taxonomy test below swaps ``deliver_peer_message``, so it pins only the
+    exception CLASSES the route maps — it could not catch a change that made the
+    real client RETURN a detail with no ack, which is the one shape that would
+    reach ``_deliver``'s success arm and be called `delivered`. This drives
+    ``send_control_op`` itself against a dropper, so "no ack ⇒ no success
+    return" is asserted at the wire rather than inferred from the mapping.
+    """
+    from local_operator.mobile.peer_client import send_control_op
+
+    dropper = await _Dropper.start()
+    try:
+        record = registry.SessionRecord(
+            pid=os.getpid(),
+            kind="tui",
+            session_id=SESSION_A,
+            conversation_name=SESSION_A,
+            cwd="/tmp",
+            model_label="test/model",
+            control_port=dropper.port,
+            control_key="0" * 64,
+            started=True,
+        )
+        returned: list[str] = []
+        raised: list[str] = []
+        for _ in range(5):
+            try:
+                returned.append(
+                    await send_control_op(
+                        record,
+                        "peer_message",
+                        {"text": "x", "mode": "mailbox", "wake": True, "sender": {}},
+                        deadline_s=5.0,
+                        default_detail="delivered",
+                        default_error="delivery failed",
+                    )
+                )
+            except (ConnectionError, OSError, TimeoutError) as exc:
+                raised.append(type(exc).__name__)
+        assert returned == [], f"an unacked dial returned a receipt: {returned!r}"
+        assert len(raised) == 5, raised
+        assert dropper.connections == 5, dropper.connections
+    finally:
+        await dropper.close()
+
+
+async def test_the_unacked_dial_taxonomy_is_pinned_without_a_socket(api, monkeypatch) -> None:
+    """The outcome mapping, deterministically: an unacked dial is never `delivered`.
+
+    The E2E above is the smoke; this pins the taxonomy itself, because the one
+    decision that turns a dial result into an outcome is ``_deliver``'s mapping,
+    and a socket whose timing a loaded runner can vary is the wrong place to pin
+    it. ``deliver_peer_message_outcome`` is swapped at its own module (the route
+    imports it per call), so each peer-layer STATE is exercised exactly —
+    including the amber states, which RETURN a sentence rather than raising and
+    are the whole reason this table exists.
+    """
+    import local_operator.mobile.peer_send as peer_send
+    from local_operator.mobile.peer_send import (
+        DELIVERY_DELIVERED,
+        DELIVERY_FAILED,
+        DELIVERY_MAILBOX,
+        DELIVERY_UNCONFIRMED,
+        DeliveryOutcome,
+    )
+
+    client, _root = api
+    project_id = await _project_with(client, SESSION_A)
+    (sleeper,) = _sleeper_procs(1)
+    try:
+        # A LIVE record so resolution dials rather than refusing; the port is
+        # never opened because every arm replaces the delivery call.
+        registry.publish(
+            registry.SessionRecord(
+                pid=sleeper.pid,
+                kind="tui",
+                session_id=SESSION_A,
+                conversation_name=SESSION_A,
+                cwd="/tmp",
+                model_label="test/model",
+                control_port=9,
+                control_key="0" * 64,
+                started=True,
+            )
+        )
+        await _wait_live(SESSION_A)
+        url = f"/v1/desktop/projects/{project_id}/request-update"
+
+        def _returns(state: str, detail: str = "a receipt"):
+            async def _impl(*_args: Any, **_kwargs: Any) -> Any:
+                return DeliveryOutcome(state, detail, "peer-test", "requested", 1, "", "live", "x")
+
+            return _impl
+
+        def _raiser(exc: type[BaseException]):
+            async def _impl(*_args: Any, **_kwargs: Any) -> Any:
+                raise exc("dial failed")
+
+            return _impl
+
+        # Each peer-layer STATE -> the route's three-way vocabulary. The amber
+        # states RETURN a sentence, so this table is what catches a mapping that
+        # infers the outcome from "did it raise?" (the defect this pins).
+        for state, expected in (
+            (DELIVERY_DELIVERED, "delivered"),
+            # A durable mailbox row whose wake went unacknowledged: the DELIVERY
+            # is confirmed, so it is a delivery — never the unconfirmed class.
+            (DELIVERY_MAILBOX, "delivered"),
+            (DELIVERY_UNCONFIRMED, "unconfirmed"),
+            (DELIVERY_FAILED, "failed"),
+        ):
+            reset_cooldowns()
+            monkeypatch.setattr(peer_send, "deliver_peer_message_outcome", _returns(state))
+            row = (await client.post(url, json={})).json()["result"]["sessions"][0]
+            assert row["outcome"] == expected, (state, row)
+
+        # Every OSError-family fault raised outside the classifier means the ack
+        # never arrived: unconfirmed (an `asyncio.TimeoutError` is an OSError).
+        for exc in (ConnectionError, TimeoutError, OSError):
+            reset_cooldowns()
+            monkeypatch.setattr(peer_send, "deliver_peer_message_outcome", _raiser(exc))
+            row = (await client.post(url, json={})).json()["result"]["sessions"][0]
+            assert row["outcome"] == "unconfirmed", (exc.__name__, row)
+            assert row["detail"] == "delivery could not be confirmed"
+
+        # A pre-delivery refusal (the unengaged gate, an engage that could not
+        # start) mints no id: nothing was delivered.
+        reset_cooldowns()
+        monkeypatch.setattr(peer_send, "deliver_peer_message_outcome", _raiser(RuntimeError))
+        row = (await client.post(url, json={})).json()["result"]["sessions"][0]
+        assert row["outcome"] == "failed", row
+    finally:
+        sleeper.terminate()
+        try:
+            sleeper.wait(timeout=5)
+        except Exception:  # noqa: BLE001
+            sleeper.kill()
+
+
+async def test_a_never_started_linked_session_is_named_not_silently_dropped(api) -> None:
+    client, _root = api
+    project_id = await _project_with(client, SESSION_A)
+    targets = await _start_targets()
+    try:
+        # A live record that has not run a turn yet: the unengaged gate refuses it.
+        targets.publish(SESSION_A, started=False)
+        await _wait_live(SESSION_A)
+        response = await client.post(f"/v1/desktop/projects/{project_id}/request-update", json={})
+        result = response.json()["result"]
+        (row,) = result["sessions"]
+        assert row["outcome"] == "failed"
+        assert row["detail"] == NEVER_STARTED_DETAIL
+        assert result["counts"]["failed"] == 1
+        assert response.json()["message"] == (
+            "The linked session has not started yet — it becomes a recipient "
+            "after its first message."
+        )
+        # A pure refusal does NOT start the cooldown: nothing was handed off.
+        assert result["requested_at"] is None
+    finally:
+        targets.close()
+
+
+async def test_the_all_never_started_sentence_pluralises_for_two_or_more(api) -> None:
+    """N>1 keeps the plural form; only N=1 singularises (the UI lane pins both)."""
+    client, _root = api
+    project_id = await _project_with(client, SESSION_A, SESSION_B)
+    targets = await _start_targets()
+    try:
+        targets.publish(SESSION_A, index=0, started=False)
+        targets.publish(SESSION_B, index=1, started=False)
+        await _wait_live(SESSION_A, SESSION_B)
+        response = await client.post(f"/v1/desktop/projects/{project_id}/request-update", json={})
+        result = response.json()["result"]
+        assert result["counts"] == {"total": 2, "delivered": 0, "unconfirmed": 0, "failed": 2}
+        assert all(row["detail"] == NEVER_STARTED_DETAIL for row in result["sessions"])
+        assert response.json()["message"] == (
+            "The 2 linked sessions have not started yet — they become recipients "
+            "after their first message."
+        )
+    finally:
+        targets.close()
+
+
+async def test_a_session_that_no_longer_exists_is_reported(api) -> None:
+    client, _root = api
+    # Linked, but neither a live record nor a session directory exists.
+    project_id = await _project_with(client, SESSION_C)
+    response = await client.post(f"/v1/desktop/projects/{project_id}/request-update", json={})
+    result = response.json()["result"]
+    (row,) = result["sessions"]
+    assert row["outcome"] == "failed"
+    assert row["detail"] == "no longer exists"
+
+
+async def test_an_unknown_project_is_a_404(api) -> None:
+    client, _root = api
+    response = await client.post("/v1/desktop/projects/does-not-exist/request-update", json={})
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "project_not_found"
+
+
+async def test_the_capability_key_is_advertised(api) -> None:
+    client, _root = api
+    caps = await client.get("/v1/capabilities")
+    assert caps.status_code == 200
+    features: dict[str, Any] = caps.json()["result"]["features"]
+    assert features.get("projects_request_update", 0) >= 1
+    # The sibling key is untouched — this is its OWN key, not a bump.
+    assert features.get("projects") == 1

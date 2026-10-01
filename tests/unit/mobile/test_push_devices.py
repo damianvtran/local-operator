@@ -997,16 +997,23 @@ def test_unrevoke_is_operators_only_and_clears_the_markers() -> None:
     assert push_devices.device_state(_stored_records()[0]) == push_devices.STATE_LIVE
 
 
-def test_unrevoke_clears_every_marker_the_row_carries() -> None:
-    """EVERY marker, not just the strongest (the mobile lane's follow-up, option (a)).
+def test_unrevoke_clears_every_restorable_marker() -> None:
+    """every RESTORABLE marker (``revoked_at``, ``unpaired_at``), not just the
+    strongest — and not ``expired_at``, which only a register clears.
 
-    A row can carry both — a device revoked, and then its computer unpaired — and
-    ADR 0006 §3.1/§4 (that record lives in the mobile repository,
+    A row can carry both restorable ones — a device revoked, and then its computer
+    unpaired — and ADR 0006 §3.1/§4 (that record lives in the mobile repository,
     ``damianvtran/local-operator-mobile``) says the verb clears "the marker that
     is set", which names the two STATES a row can be in rather than a licence to
     leave the weaker one behind. Restoring a device and leaving it unpaired would
     refuse its next registration for a reason nobody chose, and would make one
     operator intent take two commands.
+
+    The narrowed wording is deliberate, and the test NAME carries it too: the
+    vocabulary has a third marker, so a name that claimed all of them would be a
+    licence this function does not implement — a lapse is not a decision about the
+    device, and signing in again is what clears it (the mobile lane's wording
+    round; the sibling cell below asserts that exclusion).
 
     Pinned here because the claim is about the ARTIFACT, not about a projection of
     it. A state assertion does redden under the one-marker shape — the row then
@@ -1605,3 +1612,45 @@ def test_the_revoke_route_evaluates_the_device_that_names_itself() -> None:
     row = _stored(PAYLOAD["install_id"])
     assert row.get("revoked_at") is not None, "the route still revokes"
     assert row.get("last_authenticated_at"), "and it evaluated on the way"
+
+
+def test_unrevoke_does_not_clear_the_lapse_marker() -> None:
+    """``expired_at`` is not a RESTORABLE marker, and ``unrevoke`` says so.
+
+    The operator can give a revoked or unpaired device back; it cannot give a
+    LAPSED credential back, because a lapse is not a decision about the device —
+    its way back is the one every lapse has, signing in and registering again
+    (ADR §4 rule 2). Pinned because the sentence in ``unrevoke``'s docstring is a
+    claim about behaviour, and an unasserted claim is what review round 1 found
+    elsewhere on this branch.
+    """
+    client = _client()
+    registered = client.post("/api/push/register", json=PAYLOAD).json()
+    device_id = registered["device_id"]
+    key = push_devices.operator_key(config_dir())
+    assert isinstance(key, str) and key
+    # The row where "which markers does the way back clear" is a real question: it
+    # is revoked AND lapsed at once, so the precedence rule reads it as revoked.
+    _plant(
+        [
+            _record(
+                device_id=device_id,
+                revoked_at=STAMP,
+                expired_at=STAMP,
+                credential_live=False,
+                device_key=registered["device_key"],
+            )
+        ],
+        **{push_devices.OPERATOR_KEY_FIELD: key},
+    )
+
+    response = client.post(
+        f"/api/push/devices/{device_id}/unrevoke",
+        headers={push_devices.OPERATOR_KEY_HEADER: key},
+    )
+
+    assert response.status_code == 200, response.text
+    record = _stored_records()[0]
+    assert "revoked_at" not in record, "the restorable marker went"
+    assert record["expired_at"] == STAMP, "the lapse stands: only a register clears it"
+    assert push_devices.device_state(record) == push_devices.STATE_EXPIRED

@@ -278,11 +278,18 @@ class OrgChartView(Vertical):
     def _paint_chrome(self) -> None:
         muted = Style(color=theme_mod.semantic_color("muted"))
         dim = Style(color=theme_mod.semantic_color("dim"))
-        # `team <name> · org chart · zoom: <tier>` — the tier is always stated so
-        # an auto-collapsed small terminal explains itself.
+        # `team <display form> · org chart · zoom: <tier>` -- the tier is
+        # always stated so an auto-collapsed small terminal explains itself.
+        # The name comes from the ROOT node's label (D6): the node painter
+        # computes it through the shared display rule, so the title and the
+        # boxes below it cannot disagree (for a charted name with no team row,
+        # the root is the unresolved node and its label IS the raw name).
+        # `on_resize` can repaint before the page is loaded, so the raw charted
+        # name stands in until a root exists.
+        charted = self._root.label if self._root is not None else self._team_name
         title = Text(no_wrap=True, overflow="ellipsis")
         head = Style(color=theme_mod.semantic_color("fg"), bold=True)
-        title.append(f"team {self._team_name}", style=head)
+        title.append(f"team {charted}", style=head)
         title.append(" · org chart", style=muted)
         title.append(f" · zoom: {_TIER_NAME[self._tier]}", style=dim)
         if self._expand_all:

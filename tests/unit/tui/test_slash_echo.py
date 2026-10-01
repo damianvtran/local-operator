@@ -437,7 +437,9 @@ async def test_bare_team_lists_without_a_user_row() -> None:
         rows = _user_rows(app)
         painted = _painted(app)
     assert rows == [], rows
-    assert "feature-release" in painted, painted
+    # The shared display rule: the derived default paints alone (title case
+    # nobody chose is noise), and the key is not restated in parentheses.
+    assert "Feature Release" in painted, painted
     # D2/R6: `member_count()` with the label that matches it. One roster member
     # is "1 member" — the manager is named by "Led by" in the same line and is
     # deliberately not in the count, exactly as the org chart badges it. The
@@ -448,6 +450,55 @@ async def test_bare_team_lists_without_a_user_row() -> None:
     assert "Ship a change" in painted, painted
     assert "Send: /team <name> <message>" in painted, painted
     assert "manager=" not in painted, painted
+
+
+@pytest.mark.asyncio
+async def test_band_paints_the_custom_label_and_falls_back_to_the_name() -> None:
+    """The band is a display: a labelled team reads as its label (resolved from
+    the registry when the session carries only the key); an unresolvable name
+    stays exactly what it was handed."""
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    session = FakeSession()
+    registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    registry.create_team(TeamEditFields(name="data-quality", label="Data Quality"))
+    session.team_registry = registry
+
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/team data-quality ship it")
+        band = _band_text(app)
+        # The two fallbacks, exercised where they live.
+        assert app._team_band_text("no-such-team") == "no-such-team"
+        assert app._team_band_text("") == ""
+
+    assert "Data Quality" in band, band
+    assert "data-quality" not in band, band
+
+
+@pytest.mark.asyncio
+async def test_attach_notices_paint_the_display_form_and_keep_the_key_for_addresses() -> None:
+    """D4: the prose names the team as the surfaces do; the instruction and the
+    addressing text keep the raw key the user types."""
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    session = FakeSession()
+    registry = TeamRegistry(Path(tempfile.mkdtemp()))
+    registry.create_team(TeamEditFields(name="ops", label="Platform Reliability"))
+    session.team_registry = registry
+
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/team ops")
+        painted = _painted(app)
+        await _submit(pilot, app, "/team ops ship it")
+        painted_again = _painted(app)
+
+    assert "Platform Reliability (ops) is ready." in painted, painted
+    assert "Send a request with /team ops <message>." in painted, painted
+    assert "sending to Platform Reliability (ops)." in painted_again, painted_again
 
 
 @pytest.mark.asyncio
@@ -475,8 +526,10 @@ async def test_team_request_attaches_and_sends() -> None:
     assert session.attached_teams[0].name == "feature-release"
     assert session.prompts == ["ship the dashboard"]
     assert rows == ["ship the dashboard"], rows
-    # U2: the band names the active roster after the attach.
-    assert "feature-release" in band, band
+    # U2: the band names the active roster after the attach -- as the team's
+    # DISPLAY label (the derived default here), the form the label-first
+    # surfaces paint; the key stays the addressing form everywhere else.
+    assert "Feature Release" in band, band
 
 
 @pytest.mark.asyncio
@@ -1370,7 +1423,7 @@ def test_agent_and_team_listing_headers_outrank_their_entries() -> None:
             name="feature-release", manager="manager", members=[TeamMember(role="coder")]
         )
     )
-    _assert_header_outranks(app._team_list_block([team]), "teams", "feature-release")
+    _assert_header_outranks(app._team_list_block([team]), "teams", "Feature Release")
 
 
 @pytest.mark.asyncio

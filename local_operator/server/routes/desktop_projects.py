@@ -1,6 +1,7 @@
 """``/v1/desktop/projects*`` — the desktop CRUD, links and milestones surface.
 
-Seven + two routes over the project store (:mod:`local_operator.projects`):
+Seven + two + one routes over the project store (:mod:`local_operator.projects`;
+request-update is the one that also dials — see below):
 
 - ``GET    /v1/desktop/projects``                        — the listing (summaries)
 - ``POST   /v1/desktop/projects``                        — create
@@ -11,6 +12,7 @@ Seven + two routes over the project store (:mod:`local_operator.projects`):
 - ``DELETE /v1/desktop/projects/{key}/links/{sid}``      — unlink one session
 - ``POST   /v1/desktop/projects/{key}/milestones``       — add-or-update one
 - ``DELETE /v1/desktop/projects/{key}/milestones/{name}``— remove one
+- ``POST   /v1/desktop/projects/{key}/request-update``   — ask the linked sessions for an update
 
 **The store is the only writer.** Every route calls the same
 :class:`~local_operator.projects.ProjectRegistry` methods the ``project`` tool
@@ -34,9 +36,13 @@ a newer build (the write guard); 422 a body or value the store refuses (the
 same sentence the tool receives, via ``projects.readable_error``); 503 the
 store lock timed out, which is retryable.
 
-**This module talks to no session.** No route mutates a session directory, and
-no route dials a runtime: the linked-session rows are read from files, exactly
-as the tool's view is.
+**One route talks to other sessions.** ``POST .../{key}/request-update`` is the
+single exception to the rule below: it hands each linked session one check-in
+through the shared peer-send core (:mod:`local_operator.server.request_update`)
+and answers only after every dial has settled, so the sends complete even if the
+UI closes. It mutates no session directory — the receive side owns that — and
+every other route here still talks to no session: their linked-session rows are
+read from files, exactly as the tool's view is.
 """
 
 from __future__ import annotations
@@ -78,6 +84,7 @@ from local_operator.server.models.desktop_projects import (
     project_view,
 )
 from local_operator.server.models.schemas import CRUDResponse
+from local_operator.server.request_update import request_updates
 from local_operator.server.routes.desktop_sessions import errors, reply
 
 router = APIRouter(tags=["Desktop projects"], dependencies=[Depends(require_desktop)])
@@ -418,3 +425,35 @@ async def milestone_remove(key: str, name: str, request: Request) -> CRUDRespons
             return project_view(project, window=_window(registry))
 
         return reply(await asyncio.to_thread(mutate))
+
+
+@router.post("/v1/desktop/projects/{key}/request-update", response_model=CRUDResponse)
+async def request_update(key: str, request: Request) -> CRUDResponse[Any]:
+    """Ask the project's LINKED sessions to post a progress update.
+
+    One check-in per linked session (``project.sessions`` only — never the
+    coordination half), delivered through the shared peer-send core as a
+    mailbox drop with ``wake=True``, strictly sequentially, and awaited here so
+    the sends complete even if the UI closes (design freeze). Per-session
+    outcomes are three-way (``delivered``/``unconfirmed``/``failed``); a batch
+    never fails whole. A 60 s per-project cooldown refuses a repeat, with the
+    same sentence the UI shows. See :mod:`local_operator.server.request_update`
+    for the loop, the frozen message and the outcome vocabulary.
+
+    ``message`` is the governing sentence for the state, so the response is
+    built here rather than through ``reply()``: its fixed session-flavoured
+    line would replace a cooldown refusal the client must read character for
+    character.
+    """
+    async with errors(request):
+        registry = _registry(request)
+
+        def resolve() -> Project:
+            found = _find(registry, key)
+            if found is None:
+                raise _not_found(registry, key)
+            return found
+
+        project = await asyncio.to_thread(resolve)
+        message, result = await request_updates(registry, project)
+        return CRUDResponse(status=200, message=message, result=result)

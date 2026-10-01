@@ -620,6 +620,28 @@ def feature_flags() -> dict[str, Any]:
         # never hears of this word.
         "aida": 1,
         "projects": 1,
+        # THE ONBOARDING APPROVAL SURFACE: GET /v1/desktop/approvals plus the two
+        # decision posts (POST /v1/desktop/approvals/{id}/approve|deny). ONE key
+        # for the family because it is one contract revision and one flow: a
+        # renderer that can draw the card is the renderer that can answer it.
+        #
+        # WHY A KEY AT ALL: the routes are ADDITIVE (an old renderer never calls
+        # one), so this gates nothing on an old client — it is how a renderer
+        # learns the surface EXISTS before it builds a Mesh-tab affordance whose
+        # POST would 404 on a backend without it. Absent, the tab simply has no
+        # approval affordance, which is the pre-onboarding state.
+        "approvals": 1,
+        # THE ONE DIAL on the projects surface: `POST
+        # /v1/desktop/projects/{key}/request-update`, which asks the linked
+        # sessions for a progress update through the same peer-send core the
+        # `send` tool uses (mailbox drop + wake). ITS OWN KEY, not a bump of
+        # `projects`, by the rule that entry states above: a renderer that
+        # does not see it keeps working against a backend without the route —
+        # the tab, its CRUD and its picker rows are untouched — it simply
+        # shows no request-update action. Absent ⇒ no action anywhere; a
+        # client that shows one against an older backend would be offering a
+        # route that 404s.
+        "projects_request_update": 1,
         # THE SILENT INPUT-METADATA CARRIAGE: `input_mode`/`input_path` on a
         # message body (`POST /v1/desktop/sessions/{id}/messages`) and onto the
         # durable user row. ONE key un-gates BOTH fields, because they landed

@@ -471,11 +471,12 @@ async def test_a_bare_approvals_reports_a_divergence_against_the_file(
     ), refused
     assert capable == approvals_default_notice(may_loosen=True), capable
     # ...and the OTHER host's sentence is pinned here rather than left to whichever
-    # machine runs the suite: the install step is named instead of the two levers
-    # being offered as if they worked.
+    # machine runs the suite: the SETUP ACTION is named instead of the two levers
+    # being offered as if they worked (copy rule §2.9: a remedy names a product
+    # action, never a terminal command).
     both = approvals_default_notice(may_loosen=False, anchor_unusable=True)
-    assert "lop operator install" in both, both
-    assert "authority is not installed on this machine" in both, both
+    assert "one approval and one admin password prompt" in both, both
+    assert "authority is not installed here" in both, both
     assert len(both) <= 400, len(both)
     await handle.dispose()
 
@@ -600,3 +601,66 @@ async def test_dispose_unsubscribes_and_follow_config_is_idempotent(tmp_path) ->
     _write_elsewhere(watcher.config_dir, "tool_approval_mode", "auto")
     watcher.poll_now()
     assert handle._auto_approve is False
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_answer_is_a_settlement_not_a_refusal(tmp_path) -> None:
+    """The desktop answer path retries ONCE under the same id when its ack is lost.
+
+    ``AttachedSession.answer_gate`` re-issues rather than report a transport
+    failure over a card the operator already cleared, and that is only safe
+    because a repeat here is a SETTLEMENT: without this the owner answered "that
+    prompt is no longer waiting" to the very press it had already honoured, and the
+    retrying caller read a refusal where the truth was a receipt.
+    """
+    handle, _session, _watcher, _emitted = _handle(tmp_path, auto_approve=False)
+    parked = asyncio.ensure_future(handle._approval_gate("bash", "rm -rf build/"))
+    await asyncio.sleep(0)
+    pending = handle._fold.projection.pending
+    assert pending is not None, "the gate did not park, so there is nothing to repeat"
+
+    first = await handle.approval_answer(pending.request_id, True, False)
+    repeat = await handle.approval_answer(pending.request_id, True, False)
+
+    assert repeat == first, (first, repeat)
+    assert await parked is True
+    await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_id_that_never_settled_is_still_refused(tmp_path) -> None:
+    """The idempotence is keyed on THIS id having settled, not on the gate being open.
+
+    An unknown request id has nothing recorded against it, so it keeps the
+    developer-worded refusal it always had — the retry cannot turn a wrong id into
+    a success.
+    """
+    handle, _session, _watcher, _emitted = _handle(tmp_path, auto_approve=False)
+
+    with pytest.raises(ValueError, match="no longer waiting"):
+        await handle.approval_answer("never-issued", True, False)
+
+    await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_repeat_with_a_different_decision_is_still_refused(tmp_path) -> None:
+    """The retry is idempotent under the SAME value, and only under it.
+
+    A second front end that answers the same gate differently is not a repeat of
+    anything — it is a competing decision — so it keeps the refusal it always had.
+    Reporting success for a choice the owner did not make would be a worse lie
+    than the lost-acknowledgement refusal this change fixes.
+    """
+    handle, _session, _watcher, _emitted = _handle(tmp_path, auto_approve=False)
+    parked = asyncio.ensure_future(handle._approval_gate("bash", "rm -rf build/"))
+    await asyncio.sleep(0)
+    pending = handle._fold.projection.pending
+    assert pending is not None
+
+    assert await handle.approval_answer(pending.request_id, True, False) == "approved"
+    with pytest.raises(ValueError, match="no longer waiting"):
+        await handle.approval_answer(pending.request_id, False, False)
+
+    assert await parked is True
+    await handle.dispose()
