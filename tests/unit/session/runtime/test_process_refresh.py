@@ -11,7 +11,11 @@ driven without a Session.
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
+import os
 import time
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -347,3 +351,96 @@ async def test_stagger_is_bounded_by_build_stagger_s(disk, monkeypatch) -> None:
     assert draws == [(0, 0.25)], "one draw, over [0, BUILD_STAGGER_S]"
     assert elapsed >= 0.25, "the retirement waited out the full stagger"
     assert stop.is_set()
+
+
+# -- 8. the fleet gate (2026-10-01, wave C) -------------------------------------
+#
+# The random stagger spreads ONE runtime's exit; it cannot serialise a FLEET,
+# which is how a fresh generation turned sixteen runtimes into a wave. The gate
+# consults the registry — the existing namespace where a runtime states what it
+# is doing — and defers to a sibling that is already inside its update window.
+
+
+def _write_update_record(root: Path, *, pid: int, updating: str) -> None:
+    """A real session record on disk, heartbeating now (so it reads ``live``)."""
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import SessionRecord
+
+    record = SessionRecord(
+        pid=pid,
+        kind="tui",
+        session_id=f"s-{pid}",
+        conversation_name=f"c-{pid}",
+        cwd="/",
+        model_label="mock",
+        control_port=0,
+        control_key="k",
+        updating=updating,
+        heartbeat_at=time.time(),
+    )
+    path = registry.record_path(pid, root=root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record.to_json()), encoding="utf-8")
+
+
+def test_the_fleet_gate_reads_only_live_other_movers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate's own seam: another LIVE record mid-window, and nothing else.
+
+    Four populations are planted and the gate must name exactly one of them: a
+    live mover (counts), a live idle runtime (does not), a dead mover (does
+    not — a corpse cannot pin the fleet lane), and this process itself (does
+    not). The registry is read in READER mode (nothing may be swept) and
+    liveness is patched, because the pids are synthetic.
+    """
+    from local_operator.session.runtime import registry
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(registry, "pid_alive", lambda pid, check_zombie=False: pid != 4003)
+
+    assert child_mod._another_move_in_flight() is None, "an empty namespace holds no gate"
+
+    _write_update_record(tmp_path, pid=4002, updating="")
+    _write_update_record(tmp_path, pid=4003, updating="a → b")
+    _write_update_record(tmp_path, pid=os.getpid(), updating="a → b")
+    _write_update_record(tmp_path, pid=4001, updating="0.1 → 0.2")
+
+    assert child_mod._another_move_in_flight() == 4001
+
+    _write_update_record(tmp_path, pid=4001, updating="")
+    assert child_mod._another_move_in_flight() is None, "the lane frees when the mover is done"
+
+
+@pytest.mark.asyncio
+async def test_a_fleet_mate_mid_update_defers_this_move(
+    disk, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A holder defers the move without touching state; a freed lane proceeds.
+
+    The gate sits between the stagger and the window: nothing is announced and
+    no window opens while a fleet mate is moving, and the very next check —
+    once the lane is free — takes the ordinary exit.
+    """
+    monkeypatch.setattr(child_mod, "REAP_CHECK_S", 0.01)
+    monkeypatch.setattr(child_mod, "BUILD_CHECK_S", 0.02)
+    monkeypatch.setenv("LOP_BUILD_STAGGER_S", "0.02")
+    monkeypatch.setenv("LOP_SESSION_GRACE_S", "60")
+    gate: dict[str, int | None] = {"pid": 4242}
+    monkeypatch.setattr(child_mod, "_another_move_in_flight", lambda: gate["pid"])
+    reg = FakeRegistrant()
+    handle = FakeHandle()
+    stop = asyncio.Event()
+
+    with caplog.at_level(logging.INFO, logger=child_mod.__name__):
+        task = asyncio.ensure_future(_reaper(handle, reg, stop))
+        await asyncio.sleep(0.3)
+        assert reg.retiring == [], "a fleet mate mid-move must defer this runtime's move"
+        assert not stop.is_set() and not handle.disposed
+        assert any(
+            "already inside its update window" in record.message for record in caplog.records
+        ), caplog.text
+        gate["pid"] = None  # the mate's window closed
+        await _run_until(stop)
+        assert stop.is_set() and reg.retiring and handle.disposed
+    await task

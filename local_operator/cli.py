@@ -7465,8 +7465,8 @@ WHY_COLUMN_WIDTH = 48
 #: Width of `lop sessions`' trailing LEAVING column, in display CELLS.
 #:
 #: A phrase, not an enum: the field's whole purpose is to say what is happening
-#: in the words the operator needs (``signalled; leaving when its turn ends (up
-#: to 2 min)``), so it is bounded like WHY rather than abbreviated to a token
+#: in the words the operator needs (``signalled; finishing its turn (cut if
+#: silent 2 min)``), so it is bounded like WHY rather than abbreviated to a token
 #: nobody could read. Wide enough for the shipped phrase in full, so the common
 #: case is not cut and a cut one is visibly marked (`_fit_cell`). The column
 #: appears only when some row carries a value, exactly like WHY and LAST_ACTIVE
@@ -7479,9 +7479,10 @@ WHY_COLUMN_WIDTH = 48
 #: machine reads to say something only a person needs.
 #:
 #: WIDENED FROM 40 when the phrase grew the drain's bound (UX round 2, U9): the
-#: row that carries this is the one the operator reads most, and
-#: ``signalled; leaving when its turn ends`` promised a boundary the 120 s bound
-#: can take away. The number is the phrase's own cell width, pinned against it by
+#: row that carries this is the one the operator reads most, and a phrase that
+#: omits the bound promises a boundary the bound can take away — true of the
+#: wording this widened for and of the 2026-10-01 reword that replaced it. The
+#: number is the phrase's own cell width, pinned against it by
 #: ``tests/unit/info/test_sessions_extraction.py`` rather than imported — this
 #: module keeps session internals out of its module scope on purpose (see the
 #: header) — so a reword of the phrase fails loudly there instead of silently

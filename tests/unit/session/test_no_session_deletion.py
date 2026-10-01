@@ -545,9 +545,12 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
         "local_operator/network/relay.py::uninstall",
         "<path>.unlink",
-        "Removes the relay's own LaunchAgent plist FILE (<home>/Library/LaunchAgents/"
-        "<label>.plist) — a HOME path, not a config one — and only when `is_supported()` "
-        "and the plist is the one this real home owns",
+        "Removes the relay's own service FILE — the LaunchAgent plist "
+        "(<home>/Library/LaunchAgents/<label>.plist) on macOS, the systemd user unit "
+        "(<home>/.config/systemd/user/local-operator-network.service) on Linux — a "
+        "HOME path either way, not a config one, and only when `is_supported()` and "
+        "the file is the one this real home owns",
+        2,
     ),
     (
         "local_operator/network/tool.py::execute_network",
@@ -575,6 +578,40 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Sweeps terminal queue records past the TTL out of <config>/network/queue/ "
         "(the glob's own move-*.json matches); the directory is a sibling of sessions/",
+    ),
+    # -- the onboarding runner's OWN temp dirs -------------------------------
+    # Every target below is a `tempfile.mkdtemp` directory this code created
+    # moments earlier — a random name under the system temp, held only as long as
+    # one run needs it — so none can name a path under sessions/: nothing in
+    # these call sites derives from a session id, a config dir, or caller input.
+    (
+        "local_operator/network/onboard.py::resolve_credential",
+        "shutil.rmtree",
+        "Both sites are failure paths of the `lop secret get` call around the 0600 "
+        'key temp this function JUST created via `tempfile.mkdtemp(prefix="lop-onboard-'
+        'key-")`; the material never left the system temp',
+        2,
+    ),
+    (
+        "local_operator/network/onboard.py::release_credential",
+        "shutil.rmtree",
+        "The run's `finally`: removes that same mkdtemp dir (the credential's "
+        "`cleanup_dir`, set only by `resolve_credential`) once the transport is done "
+        "with it",
+    ),
+    (
+        "local_operator/network/onboard.py::SshTransport.close",
+        "shutil.rmtree",
+        "Removes the connection's own mkdtemp'd known_hosts seed dir (a random "
+        "system-temp name created in `connect()`), which exists only to carry the "
+        "pinned host key for this one connection",
+    ),
+    (
+        "local_operator/network/onboard.py::OnboardRun.step_anchor",
+        "shutil.rmtree",
+        'The anchor step\'s own `tempfile.mkdtemp(prefix="lop-onboard-anchor-")` '
+        "staging dir, in a `finally`, after the statement it held was copied to the "
+        "peer",
     ),
     # -- the session STAMP: `sessions/<id>/mesh.json` ------------------------
     # THE ONE MESH FILE THAT REALLY IS INSIDE A SESSION DIRECTORY, so it is argued

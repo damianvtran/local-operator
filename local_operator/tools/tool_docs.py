@@ -108,7 +108,355 @@ class ToolDocNotes:
 #: while this mapping costs nothing until a ``tool://`` read looks it up. A
 #: drift test flags a key that is not a real tool name. Promote to a field
 #: only if it ever grows beyond reference prose.
-TOOL_NOTES: dict[str, ToolDocNotes] = {}
+#:
+#: The wave-1 slimming entries (audit items 2+3, 2026-10-01) are the paid-for
+#: side of a binding trade: prose was REMOVED from the always-loaded tool
+#: surface (parameter descriptions, per-op field descriptions, class
+#: docstrings that pydantic copies into the schema), and it must be reachable
+#: HERE, or the cut loses teaching the model needed at the moment of a call.
+#: Each moved block keeps the original constraint wording wherever the shape
+#: of the sentence allowed it — ``test_cut_wire_prose_moved_into_the_tool_doc``
+#: pins one representative phrase per tool BOTH ways (present in the render,
+#: absent from the wire), so a later "cleanup" that deletes a note fails there
+#: with the phrase named, instead of silently re-opening the gap.
+TOOL_NOTES: dict[str, ToolDocNotes] = {
+    # -- agent --------------------------------------------------------------
+    # Wire cut: the op field's per-op exegesis (~360 chars, every request);
+    # kind/action_class tails. The tool description and the enum literals stay.
+    "agent": ToolDocNotes(
+        ops=(
+            ToolDocOp(op="list", blurb="What exists: every role and specialist."),
+            ToolDocOp(
+                op="show",
+                blurb=(
+                    "What a role says; also prints the packaged text when an "
+                    "installed role has diverged from it."
+                ),
+            ),
+            ToolDocOp(op="search", blurb="Find a role by meaning."),
+            ToolDocOp(op="install", blurb="Add a packaged starter."),
+            ToolDocOp(
+                op="reset",
+                blurb=(
+                    "Restore a role over an edited one to its packaged version, "
+                    "reporting what it replaced."
+                ),
+            ),
+            ToolDocOp(
+                op="sync",
+                blurb="Pull the latest for installed roles (merges hub updates with local edits).",
+            ),
+            ToolDocOp(
+                op="create/update",
+                blurb="Author or fix a role, or a specialist profile.",
+            ),
+        ),
+        notes=(
+            "Detail moved off the wire in the slimming wave (audit item 2):\n"
+            "\n"
+            "- ``action_class``: 'proactive' lets a profile attach hidden "
+            "patience waits and run proactive deliveries — set it ONLY when the "
+            "user clearly asked for a proactive use case (companion agents are "
+            "the canonical one); it can message them unprompted, so it is "
+            "sparing by default.\n"
+            "- ``kind``: a 'role' is a reusable delegation target tagged for "
+            "``task(agent=...)``; a 'specialist' is a durable named agent with "
+            "its own instruction set, and can sit on a team roster without "
+            "being a role. Ignored on update: a profile cannot change kind.\n"
+            "- A specialist is the reusable base a team layers collaboration "
+            "and project briefs on top of; a role is launched with "
+            "``task(agent='<name>')``.\n"
+            "- When a role's guidance proves wrong, fix it with the `agent` "
+            "tool rather than patching one prompt."
+        ),
+    ),
+    # -- ask ----------------------------------------------------------------
+    # Wire cut: the restraint constant's mechanics half (lettered options,
+    # recommendation hoisting, the free-text channel, one-call batching,
+    # credential storage detail) — the RESTRAINT pins themselves stay on the
+    # wire because the ask-tool tests assert them there.
+    "ask": ToolDocNotes(
+        notes=(
+            "Mechanics moved off the wire in the slimming wave (audit item 2):\n"
+            "\n"
+            "- A question buried in a report is not seen and nothing waits on "
+            "it, so writing one and continuing means you decided anyway. If you "
+            "are not going to stop for an answer, do not phrase it as a "
+            "question — state the decision and what would change it.\n"
+            "- When you do ask, do it here INSTEAD of writing lettered options "
+            "into your reply and waiting. Give each question at least two "
+            "options, put the consequence of each in its description, and mark "
+            "the one you recommend (it is moved to the top of the list and "
+            "preselected).\n"
+            "- Every question also offers the user a free-text answer, so the "
+            "options do not have to be exhaustive.\n"
+            "- Ask everything you need in ONE call; large option lists and "
+            "calibration all live in the field descriptions below.\n"
+            "- Credentials: set ``secret=true`` on that question (options "
+            "empty, id is the env-var name). The value is stored in session "
+            "memory and injected into ``bash``; you will only ever see the key "
+            "name. Add ``persist=true`` when the credential will be needed "
+            "again after this session, and it is also saved to the operator's "
+            "encrypted long-term store."
+        ),
+    ),
+    # -- browser ------------------------------------------------------------
+    # Wire cut: the action field's inline action dictionary (~490 chars) and
+    # the lifecycle/file-transfer/tab clauses from the description. The
+    # description keeps the persistence, tab-ownership and never-install pins
+    # the browser tests assert.
+    "browser": ToolDocNotes(
+        ops=(
+            ToolDocOp(op="open", blurb="Start a surface at a URL."),
+            ToolDocOp(op="goto", blurb="Navigate the session's existing surface."),
+            ToolDocOp(op="read", blurb="The page's text."),
+            ToolDocOp(op="snapshot", blurb="Accessibility tree with click refs."),
+            ToolDocOp(op="screenshot", blurb="Capture the page to a file."),
+            ToolDocOp(op="click", blurb="Click a selector or snapshot ref."),
+            ToolDocOp(op="type", blurb="Type text into a field."),
+            ToolDocOp(op="scroll", blurb="Move the viewport."),
+            ToolDocOp(op="logs", blurb="Console + errors."),
+            ToolDocOp(op="tabs", blurb="List agent-driven tabs."),
+            ToolDocOp(
+                op="request_access",
+                blurb="Raise the site-approval prompt for a not-yet-allowed origin.",
+            ),
+            ToolDocOp(op="await_access", blurb="Wait for the user's decision."),
+            ToolDocOp(op="cancel_access", blurb="Cancel YOUR pending exact-origin request."),
+            ToolDocOp(op="recover", blurb="Recover YOUR tab."),
+            ToolDocOp(op="retain", blurb="Hold it."),
+            ToolDocOp(op="release", blurb="End that hold."),
+            ToolDocOp(op="close", blurb="End YOUR tab."),
+        ),
+        notes=(
+            "Moved off the wire in the slimming wave (audit item 2):\n"
+            "\n"
+            "- 'scroll', 'logs' and 'tabs' need a non-cmux host (cmux says so).\n"
+            "- On a non-cmux host, 'download' saves what the page offers into "
+            "this session's private download directory, and 'upload' attaches "
+            "local files to a page's file input.\n"
+            "- Tab ownership: 'tabs' lists every agent-driven tab including "
+            "other sessions' (handles are redacted), and a redacted handle is "
+            "not yours to drive.\n"
+            "- The full playbook — hosts, setup, per-site approvals, what each "
+            "error means — is ``guide://browser``."
+        ),
+    ),
+    # -- console ------------------------------------------------------------
+    # Wire cut: the method field's ten-method dictionary (~290 chars) and the
+    # reveal/surface/keys/on tails. The description keeps the five jobs its
+    # test asserts (bash contrast, con: handle, user-opened surfaces, guide
+    # pointer, no 'approval' claim).
+    "console": ToolDocNotes(
+        ops=(
+            ToolDocOp(
+                op="list",
+                blurb=(
+                    "Surface handles; includes surfaces the USER opened — read "
+                    "those rather than asking the user to repeat their output."
+                ),
+            ),
+            ToolDocOp(op="create", blurb="Start a pty (command, args, cwd, env, cols, rows)."),
+            ToolDocOp(op="status", blurb="Where a surface and its process stand."),
+            ToolDocOp(op="read", blurb="Text: viewport (default) or scrollback."),
+            ToolDocOp(op="screenshot", blurb="Write a PNG of the grid."),
+            ToolDocOp(op="input", blurb="Type text, or a stored secret via 'secret_ref'."),
+            ToolDocOp(op="keys", blurb="Send named keys; spellings and synonyms: guide://console."),
+            ToolDocOp(op="resize", blurb="Set cols/rows."),
+            ToolDocOp(op="secure", blurb="Turn the surface's do-not-capture span on/off."),
+            ToolDocOp(op="close", blurb="Ask the process to exit, or kill it."),
+        ),
+        notes=(
+            "Moved off the wire in the slimming wave (audit item 2):\n"
+            "\n"
+            "- ``reveal`` values: none (default, pane untouched) | session "
+            "(open the pane only if the app is showing THIS session) | open "
+            "(claim and focus the pane, only when the app's window is already "
+            "focused). No value raises the OS window; a downgrade comes back "
+            "as revealed=false.\n"
+            "- A console handle starts with 'con:': a terminal in another "
+            "window has none and is not readable by this tool.\n"
+            "- `bash` cannot wedge on a prompt or leave a process running "
+            "behind the turn (that is what the console is for), and the "
+            "surface outlives the call — which is also why it is NOT for "
+            "ordinary commands.\n"
+            "- The user can toggle the same secure switch from the pane."
+        ),
+    ),
+    # -- hub ----------------------------------------------------------------
+    # Wire cut: the op field's per-op exegesis (~1,100 chars — the single
+    # biggest field on the surface at audit time) and the to-field's fan-out
+    # sentence. The tool description keeps the verb vocabulary and the
+    # quiet-child punchline; the ops table below carries each verb's contract.
+    "hub": ToolDocNotes(
+        ops=(
+            ToolDocOp(
+                op="list",
+                blurb=(
+                    "Every subagent you launched with its status and whether it "
+                    "can be resumed — including finished, failed and paused ones "
+                    "the 'jobs' tool no longer shows."
+                ),
+            ),
+            ToolDocOp(
+                op="peek",
+                blurb=(
+                    "READ the subagent's transcript (ranged, cheap) to see its "
+                    "current progress without spending its attention — the fast "
+                    "way to check on a running child."
+                ),
+            ),
+            ToolDocOp(op="send", blurb="A note, no reply waited for."),
+            ToolDocOp(op="ask", blurb="A question; blocks for the subagent's answer."),
+            ToolDocOp(
+                op="steer",
+                blurb="Change what it is doing (becomes part of its instructions).",
+            ),
+            ToolDocOp(op="pause", blurb="Stop it now but keep it resumable."),
+            ToolDocOp(op="cancel", blurb="Stop it for good."),
+            ToolDocOp(
+                op="resume",
+                blurb=(
+                    "Relaunch a stopped, paused or failed subagent against its "
+                    "own transcript so it continues where it left off; names "
+                    "several targets to fan one message out to a whole batch at once."
+                ),
+            ),
+        ),
+        notes=(
+            "Moved off the wire in the slimming wave (audit item 2):\n"
+            "\n"
+            "- Several ids address several subagents; 'ask' and 'peek' take "
+            "exactly one; 'resume' fans one message out to every target you "
+            "name, so a batch of failed subagents can be resumed in a single call.\n"
+            "- ``peek`` is usually the last few steps when neither `range` nor "
+            "`steps` is given."
+        ),
+    ),
+    # -- network ------------------------------------------------------------
+    # Wire cut: three field-tail clauses (the expires example, peer's
+    # requirement list, the ready-clause phrasing). Small by design: this
+    # schema was already tight, and its playbook is ``guide://network``.
+    "network": ToolDocNotes(
+        notes=(
+            "Moved off the wire in the slimming wave (audit item 2):\n"
+            "\n"
+            "- ``peer`` is required by create/engage/stop/delete.\n"
+            "- ``expires`` takes a duration such as 30m or 2h (default 10m).\n"
+            "- The full playbook is ``guide://network``."
+        ),
+    ),
+    # -- eval / todo (system-prompt cuts, audit item 3) ---------------------
+    "eval": ToolDocNotes(
+        notes=(
+            "Reading ten files, filtering them, and summarizing is one `eval` "
+            "call that prints the summary — not ten `read` calls."
+        ),
+    ),
+    "todo": ToolDocNotes(
+        notes=(
+            "`block` a pending item with a reason naming the decision or "
+            "service it is waiting on; `add` a mid-turn requirement instead of "
+            "rewriting the list."
+        ),
+    ),
+    # -- project ------------------------------------------------------------
+    # Wire cut: the ProjectMilestone model docstring's 'derived, not stored'
+    # rationale (pydantic copies it into $defs on every request) and several
+    # field tails (status enum recital, progress edge cases, description's
+    # markdown shape). The enum literals still render from the schema itself.
+    "project": ToolDocNotes(
+        notes=(
+            "Moved off the wire in the slimming wave (audit item 2):\n"
+            "\n"
+            "- Milestone status (completed / overdue / upcoming) is deliberately "
+            "NOT stored: it is derived at render from ``completed_at`` and "
+            '``target_date`` — the same "derived, not stored" rule the view '
+            "composer applies to session liveness — so a stored status can "
+            "never drift from the dates that contradict it.\n"
+            "- ``description`` may be markdown: multiple paragraphs, headings, "
+            "lists and code.\n"
+            "- ``progress``: an identical re-send records a refresh that keeps "
+            "the freshness clock; a near-identical line is NEW — it appends. "
+            "Write a line only for real movement.\n"
+            "- Deleting a project is its own tool, ``project_delete`` (write "
+            "tier); delete artifacts are never touched."
+        ),
+    ),
+    # -- task ---------------------------------------------------------------
+    # Wire cut: the TaskItem model docstring (prompt text on every request —
+    # see the comment at its definition in builtin.py) and the tasks-field
+    # tail. The effort field's config-sensitive descriptions stay on the wire
+    # because their tests assert the rendered bytes there.
+    "task": ToolDocNotes(
+        notes=(
+            "Moved off the wire in the slimming wave (audit item 2):\n"
+            "\n"
+            "- ``agent`` names the ROLE the child runs as — a registered "
+            "profile or a packaged starter (reviewer, coder, architect, "
+            "manager, designer, scout); the role supplies standing guidance "
+            "and may restrict the child's tools.\n"
+            "- ``subagents.model_choice=model`` is the operator's switch that "
+            "hands the child's model back; ``effort`` swaps the child's MODEL "
+            "(not its reasoning level), and omitting it inherits this session's "
+            "model and reasoning effort."
+        ),
+    ),
+    # -- item-7 notes (failure semantics + the system-prompt cuts) ----------
+    # These are the tools the self-presentation audit flagged as carrying no
+    # failure semantics anywhere. The clauses live HERE rather than on the
+    # wire because the wave's budget goal is a net REDUCTION; each states a
+    # refusal or bound that is already enforced in code and pinned by that
+    # tool's own tests, so the doc teaches it before the call instead of the
+    # caller learning it from an error.
+    "bash": ToolDocNotes(
+        notes=(
+            "For multi-step Python work, one `eval` call with a compact digest "
+            "beats a chain of shell round-trips; see `tool://eval`."
+        ),
+    ),
+    "grep": ToolDocNotes(
+        notes=(
+            "Detail moved off the wire in the slimming wave (audit items 2+7):\n"
+            "\n"
+            "- `context_lines` adds surrounding lines per match (like `grep "
+            "-C`); `skip` pages past the first 200 matches.\n"
+            "- `grep` and `glob` both respect the project's ignore files.\n"
+            "- Failure semantics: a scan that hits its wall-clock deadline "
+            "returns what it has so far, and the display caps at 200 matches "
+            "with the rest written to a `spill://` handle you can search."
+        ),
+    ),
+    "jobs": ToolDocNotes(
+        notes=(
+            "Failure semantics: an unknown job id is refused (`unknown job "
+            "<id>`), never silently treated as still running."
+        ),
+    ),
+    "monitor": ToolDocNotes(
+        notes=(
+            "Failure semantics: a non-read-only target is refused with the "
+            'reason (e.g. `monitor can\'t watch "eval": arbitrary code.`); a '
+            "`create` also needs the tool name for the same reason it cannot "
+            "watch a writer."
+        ),
+    ),
+    "read": ToolDocNotes(
+        notes=(
+            "From the system prompt's tool note (moved off the wire, slimming "
+            "wave): reading a Python file whole returns its declaration "
+            "outline with line ranges — re-read the exact ranges you need "
+            "instead of the whole file."
+        ),
+    ),
+    "write": ToolDocNotes(
+        notes=(
+            "Failure semantics: a path with an unrecognised scheme is refused "
+            "rather than treated as a relative path, so `notes://x.py` cannot "
+            "silently create a `notes:` directory in the working directory."
+        ),
+    ),
+}
 
 #: Tool-specific renderers for surfaces that must be BYTE-IDENTICAL to another
 #: view of the same information (the sessions pilot's ``op='help'``). Consulted

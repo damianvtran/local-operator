@@ -601,6 +601,15 @@ def feature_flags() -> dict[str, Any]:
         # backend does not know what a project is. Its own key rather
         # than a bump of anything above it, by the rule every neighbour
         # states — nothing on an existing surface changes shape here.
+        #
+        # 2 ADDS THE SERVER-SIDE SEARCH AND TIMELINE DOCS
+        # (``GET .../projects/search``, ``GET .../projects/timeline``).
+        # ADDITIVE by every rule above: every version-1 call keeps its
+        # exact behaviour, so a client gates ONLY the two new calls on
+        # ``>= 2`` — a version-1 client never asks them, and a version-1
+        # backend answers nothing a version-2 client needs by leaving it
+        # its local matcher and its per-row fan-out (the documented
+        # degraded modes, never 404 loops).
         # AIDA (the built-in chief of staff): the sidebar row, the
         # `/aida` command handling, and the `/v1/desktop/aida` routes
         # — design §4's frozen pair (capability + route contract).
@@ -619,7 +628,7 @@ def feature_flags() -> dict[str, Any]:
         # command surface changes shape — an older renderer simply
         # never hears of this word.
         "aida": 1,
-        "projects": 1,
+        "projects": 2,
         # THE ONBOARDING APPROVAL SURFACE: GET /v1/desktop/approvals plus the two
         # decision posts (POST /v1/desktop/approvals/{id}/approve|deny). ONE key
         # for the family because it is one contract revision and one flow: a

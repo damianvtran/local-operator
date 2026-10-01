@@ -40,6 +40,7 @@ TWO FURTHER CONSEQUENCES, STATED RATHER THAN GLOSSED:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -341,6 +342,17 @@ def load_anchor(uid: int | str | None = None) -> AnchorLoad:
 def anchor_bytes(anchor: OperatorAnchor) -> bytes:
     """The exact bytes ``lop operator install`` writes."""
     return json.dumps(anchor.to_json(), indent=2, sort_keys=True).encode("utf-8") + b"\n"
+
+
+def statement_digest(anchor: OperatorAnchor) -> str:
+    """``sha256:<hex>`` of :func:`anchor_bytes` — the F4b provenance value.
+
+    ONE builder, so the digest an approval mints, the digest the runner
+    re-derives before planting, and the digest a receipt records are the same
+    computation over the same bytes rather than three agreements in prose.
+    """
+    digest = hashlib.sha256(anchor_bytes(anchor)).hexdigest()
+    return f"sha256:{digest}"
 
 
 def staging_path(config_root: Path) -> Path:

@@ -6,13 +6,18 @@ reach for ``cryptography`` or the OS keychain. The verbs live in
 :mod:`local_operator.operator.handlers`, imported only once an ``operator`` verb
 has actually been dispatched.
 
-The verb set is ``init | trust | install | sign | status``:
+The verb set is ``init | trust | install | anchor export | setup | sign | status``:
 
 * ``init``    — create the operator's private key in the best store this host
   offers and stage the anchor; it reports the LEVEL it achieved rather than
   assuming the ladder reached the top;
 * ``install`` — the ONE privileged step: move the staged anchor to the
-  root-owned path the runtime reads;
+  root-owned path the runtime reads (``--from`` installs a statement received
+  from another machine, verified as canonical first);
+* ``anchor export`` — emit the PUBLIC statement for transfer to a peer that will
+  hold it as a verify-only root;
+* ``setup``   — the agent-runnable self-install for THIS machine (§3.7):
+  init → consent → install → verify, with the receipts that name each;
 * ``trust``   — show whether the installed anchor is trusted (root-owned, ours)
   and exit non-zero when it is not;
 * ``sign``    — the one signing entry point every surface uses, on the wire
@@ -54,6 +59,55 @@ def add_parser(subparsers: Any) -> None:
         "--print-only",
         action="store_true",
         help="Print the privileged command instead of running it",
+    )
+    # INSTALL FROM A TRANSFERRED STATEMENT (remote onboarding §3.3 step 7, F4b):
+    # the public anchor statement arrives from the operator's own machine, and
+    # the bytes that land must be exactly the bytes whose digest the approval
+    # minted — so this path refuses a file that is not the canonical form rather
+    # than re-serialising it into something "equivalent".
+    install_parser.add_argument(
+        "--from",
+        dest="from_file",
+        default="",
+        metavar="PATH",
+        help=(
+            "Install a public anchor statement RECEIVED from the operator's machine "
+            "(the file `lop operator anchor export` writes); verified as canonical "
+            "before the privileged step"
+        ),
+    )
+
+    anchor_parser = actions.add_parser(
+        "anchor", help="The PUBLIC anchor statement, for transfer to another machine"
+    )
+    anchor_actions = anchor_parser.add_subparsers(dest="anchor_command")
+    anchor_export = anchor_actions.add_parser(
+        "export", help="Write the public anchor statement for transfer"
+    )
+    anchor_export.add_argument(
+        "--file",
+        default="",
+        metavar="PATH",
+        help="Write the statement to this path (public data; mode 0644)",
+    )
+    anchor_export.add_argument("--json", action="store_true")
+
+    setup_parser = actions.add_parser(
+        "setup",
+        help=(
+            "Set up operator authority on THIS machine end to end: create the key, "
+            "raise the one admin gesture, install the anchor, verify"
+        ),
+    )
+    setup_parser.add_argument("--json", action="store_true")
+    setup_parser.add_argument(
+        "--sudo-secret",
+        default="",
+        metavar="NAME",
+        help=(
+            "A secret-store name holding this user's admin password, used ONCE for "
+            "the privileged step when sudo cannot prompt (never printed or logged)"
+        ),
     )
 
     actions.add_parser("trust", help="Show whether the installed anchor is trusted")

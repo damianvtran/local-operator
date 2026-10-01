@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -59,7 +60,8 @@ async def test_empty_listing_and_the_capability_gate(api) -> None:
 
     caps = await client.get("/v1/capabilities")
     assert caps.status_code == 200
-    assert caps.json()["result"]["features"]["projects"] == 1
+    # 2 = the CRUD surface plus the derived search/timeline reads (additive).
+    assert caps.json()["result"]["features"]["projects"] == 2
 
 
 async def test_create_read_patch_delete_round_trip(api) -> None:
@@ -478,3 +480,133 @@ async def test_the_wire_counts_work_only_and_carries_the_filing_and_refresh(api)
     filed = links[session_b]
     assert filed["role"] == "coordination"
     assert filed["runtime"] is None and filed["subagents"] is None and filed["todos"] is None
+
+
+async def test_search_ranks_echoes_and_stays_ahead_of_a_project_named_search(api) -> None:
+    client, _root = api
+    await client.post(
+        "/v1/desktop/projects", json={"name": "alpha", "description": "payment pipeline"}
+    )
+    gamma = (await client.post("/v1/desktop/projects", json={"name": "gamma"})).json()["result"][
+        "id"
+    ]
+    await client.patch(
+        f"/v1/desktop/projects/{gamma}", json={"title": "Improve ADM Classifier Throughput"}
+    )
+    # A project NAMED "search" must not swallow the static sibling: the sibling
+    # is declared before ``/{key}``, which is the load-bearing order.
+    await client.post("/v1/desktop/projects", json={"name": "search"})
+
+    answer = await client.get("/v1/desktop/projects/search", params={"q": "Throughput classifer"})
+    assert answer.status_code == 200
+    result = answer.json()["result"]
+    assert result["query"] == "Throughput classifer"  # the echo the client checks
+    assert result["count"] == len(result["projects"]) == 1
+    (hit,) = result["projects"]
+    assert hit["id"] == gamma and hit["fields"] == ["name"]
+    assert hit["name"] == "Improve ADM Classifier Throughput"  # the display name
+    assert hit["score"] == 16.0  # 2 tokens x 8; the phrase is not contiguous
+
+
+async def test_search_bounds_echo_and_the_empty_query_pass_through(api) -> None:
+    client, _root = api
+    await client.post("/v1/desktop/projects", json={"name": "alpha"})
+    await client.post("/v1/desktop/projects", json={"name": "beta"})
+
+    too_long = await client.get("/v1/desktop/projects/search", params={"q": "x" * 257})
+    assert too_long.status_code == 422
+    low = await client.get("/v1/desktop/projects/search", params={"limit": 0})
+    assert low.status_code == 422
+    high = await client.get("/v1/desktop/projects/search", params={"limit": 201})
+    assert high.status_code == 422
+    edge = await client.get("/v1/desktop/projects/search", params={"q": "x", "limit": 200})
+    assert edge.status_code == 200
+
+    empty = (await client.get("/v1/desktop/projects/search", params={"q": "  "})).json()["result"]
+    listing = (await client.get("/v1/desktop/projects")).json()["result"]["projects"]
+    # The empty box is not a search: every row, in the LISTING's own order.
+    assert [hit["id"] for hit in empty["projects"]] == [row["id"] for row in listing]
+    assert empty["query"] == "  "
+    assert all(hit["score"] == 0.0 and hit["fields"] == [] for hit in empty["projects"])
+
+
+async def test_search_limit_truncates_after_ranking(api) -> None:
+    client, _root = api
+    for index in range(4):
+        await client.post(
+            "/v1/desktop/projects", json={"name": f"proj-{index}", "description": "keyword"}
+        )
+    result = (
+        await client.get("/v1/desktop/projects/search", params={"q": "keyword", "limit": 2})
+    ).json()["result"]
+    assert result["count"] == len(result["projects"]) == 2
+
+
+async def test_timeline_is_one_document_with_derived_statuses(api) -> None:
+    client, _root = api
+    alpha = (await client.post("/v1/desktop/projects", json={"name": "alpha"})).json()["result"][
+        "id"
+    ]
+    beta = (await client.post("/v1/desktop/projects", json={"name": "beta"})).json()["result"]["id"]
+    for body in (
+        {"name": "beta cut", "target_date": "2099-01-01"},
+        {"name": "audit", "target_date": "2020-01-01"},
+        {"name": "ship", "completed": True},
+    ):
+        added = await client.post(f"/v1/desktop/projects/{alpha}/milestones", json=body)
+        assert added.status_code == 200
+
+    doc = (await client.get("/v1/desktop/projects/timeline")).json()["result"]
+    entries = {entry["id"]: entry for entry in doc["projects"]}
+    assert set(entries) == {alpha, beta}
+    assert entries[beta]["milestones"] == []  # every row appears, empty list included
+    statuses = {m["name"]: m["status"] for m in entries[alpha]["milestones"]}
+    assert statuses == {"beta cut": "upcoming", "audit": "overdue", "ship": "completed"}
+
+    listing = (await client.get("/v1/desktop/projects")).json()["result"]["projects"]
+    assert [entry["id"] for entry in doc["projects"]] == [row["id"] for row in listing]
+
+    # The same derived status the milestone routes answer with: one rule.
+    detail = (await client.get(f"/v1/desktop/projects/{alpha}")).json()["result"]["project"]
+    detail_status = {m["name"]: m["status"] for m in detail["milestones"]}
+    assert detail_status["audit"] == statuses["audit"] == "overdue"
+
+
+async def test_the_two_new_reads_run_off_the_event_loop(api, monkeypatch) -> None:
+    """Structural, not timing: both handlers hand store work to ``to_thread``.
+
+    Records the thread inside the real call each route makes and asserts it is
+    never the loop thread — the same shape as the repo's maintenance-callback
+    spy; it fails deterministically the day a handler drops its
+    ``asyncio.to_thread``.
+    """
+
+    client, _root = api
+    await client.post("/v1/desktop/projects", json={"name": "alpha", "description": "keyword"})
+
+    loop_thread = threading.get_ident()
+    search_threads: list[int] = []
+    timeline_threads: list[int] = []
+    real_search = desktop_projects.search_projects
+    real_entry = desktop_projects.project_timeline_entry
+
+    def spy_search(rows, query, *, limit=None):
+        search_threads.append(threading.get_ident())
+        return real_search(rows, query, limit=limit)
+
+    def spy_entry(project):
+        timeline_threads.append(threading.get_ident())
+        return real_entry(project)
+
+    monkeypatch.setattr(desktop_projects, "search_projects", spy_search)
+    monkeypatch.setattr(desktop_projects, "project_timeline_entry", spy_entry)
+
+    search = await client.get("/v1/desktop/projects/search", params={"q": "keyword"})
+    timeline = await client.get("/v1/desktop/projects/timeline")
+    assert search.status_code == 200 and timeline.status_code == 200
+    # Per route: each spy must have run, and each must have run off the loop —
+    # a bare ``assert seen`` would let one route carry the other.
+    assert search_threads, "the search route stopped calling search_projects"
+    assert timeline_threads, "the timeline route stopped calling project_timeline_entry"
+    assert all(ident != loop_thread for ident in search_threads)
+    assert all(ident != loop_thread for ident in timeline_threads)

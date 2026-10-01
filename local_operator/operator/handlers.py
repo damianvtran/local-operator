@@ -23,6 +23,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -31,17 +32,21 @@ from local_operator.operator import (
     LEVEL_OPERATOR_FILE_ONLY,
     LEVEL_OPERATOR_PRESENCE,
     LEVEL_SPAWN_ONLY,
+    OperatorAnchor,
     anchor_bytes,
     anchor_path,
     create_key,
     install_commands,
+    key_id_for,
     load_anchor,
+    load_staged_anchor,
     operator_authority_report,
     sign_challenge,
     staging_path,
 )
 from local_operator.operator.keychain import FILE_ONLY, SECURE_ENCLAVE, KeyBackendError
 from local_operator.operator.sign import anchor_for_handle, describe_level
+from local_operator.operator.verify import spki_fp
 from local_operator.paths import config_dir
 
 
@@ -51,6 +56,10 @@ def dispatch(args: argparse.Namespace) -> int:
         return _init(args)
     if command == "install":
         return _install(args)
+    if command == "anchor":
+        return _anchor(args)
+    if command == "setup":
+        return _setup(args)
     if command == "trust":
         return _trust()
     if command == "status":
@@ -61,7 +70,10 @@ def dispatch(args: argparse.Namespace) -> int:
         from local_operator.operator.pair_handlers import describe_devices
 
         return describe_devices(args)
-    print("usage: lop operator {init|trust|install|sign|status|devices}", file=sys.stderr)
+    print(
+        "usage: lop operator {init|install|anchor|setup|trust|sign|status|devices}",
+        file=sys.stderr,
+    )
     return 2
 
 
@@ -97,13 +109,15 @@ def stage_anchor(root: Path, anchor: Any) -> Path:
     return staged
 
 
-def install_anchor(root: Path, *, print_only: bool = False) -> int:
+def install_anchor(root: Path, *, print_only: bool = False, sudo_secret: str = "") -> int:
     """The ONE privileged step: move the staged anchor to where the runtime reads it.
 
     Returns a process exit code rather than raising, because every caller is a
     CLI verb whose contract is an exit status. ``print_only`` is what
     ``lop operator install --print-only`` prints, unchanged from when this lived
-    inline in that verb.
+    inline in that verb. ``sudo_secret`` is the INTERIM ask-sudo path (design
+    §3.7/OQ15): the admin password is resolved in place from the secret store and
+    fed to ``sudo -S`` on stdin for this one step, never printed or logged.
     """
     staged = staging_path(root)
     target = anchor_path()
@@ -132,8 +146,10 @@ def install_anchor(root: Path, *, print_only: bool = False) -> int:
                 file=sys.stderr,
             )
             return 1
+        if sudo_secret:
+            return _install_with_sudo_stdin(command, sudo_secret)
         print(
-            "installing the anchor as root — this is the ONE privileged step, and sudo "
+            "installing the anchor as root — this is the one privileged step, and sudo "
             "will ask for your password:",
             file=sys.stderr,
         )
@@ -147,6 +163,116 @@ def install_anchor(root: Path, *, print_only: bool = False) -> int:
         print(f"  the runtime will NOT trust it: {loaded.reason}", file=sys.stderr)
         return 1
     return 0
+
+
+def _resolve_secret_bytes(name: str) -> bytes | None:
+    """Resolve a secret-store name to bytes, IN PLACE, in memory only.
+
+    ``lop secret get`` is the documented in-place reader (``guide://credentials``);
+    the CLI is located the way self-invocations in this tree locate it — ``which``
+    first, else this interpreter running the same entry point — so a checkout's
+    editable venv and an installed tool both work. Nothing here prints the value.
+    """
+    cli = shutil.which("lop")
+    argv = (
+        [cli]
+        if cli
+        else [
+            sys.executable,
+            "-c",
+            "import sys; from local_operator.cli import main; sys.exit(main())",
+        ]
+    )
+    try:
+        proc = subprocess.run([*argv, "secret", "get", name], capture_output=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0 or not proc.stdout:
+        return None
+    return proc.stdout
+
+
+def _install_with_sudo_stdin(command: list[list[str]], secret_name: str) -> int:
+    """Feed a stored admin password to ``sudo -S`` for the ONE privileged step.
+
+    The password is written only to the child's stdin and never printed, logged
+    or receipted — the receipt names the secret, never a value. ``-p ''``
+    suppresses sudo's own prompt text so a captured transcript cannot look like
+    a fresh ask. It is re-fed per command because a sudo timestamp needs a
+    terminal to be cached, and a terminal is exactly what this path lacks.
+    """
+    password = _resolve_secret_bytes(secret_name)
+    if password is None:
+        print(
+            f"the admin password named by {secret_name} could not be resolved, so "
+            "nothing was installed",
+            file=sys.stderr,
+        )
+        return 1
+    for argv in command:
+        elevated = (
+            [argv[0], "-S", "-p", "", *argv[1:]] if argv and argv[0] == "sudo" else list(argv)
+        )
+        result = subprocess.run(elevated, input=password + b"\n", check=False)
+        if result.returncode != 0:
+            return result.returncode
+    return 0
+
+
+def install_anchor_from(
+    source: Path, root: Path, *, print_only: bool = False, sudo_secret: str = ""
+) -> int:
+    """Install a statement RECEIVED from another machine (remote onboarding §3.3 step 7).
+
+    THE POINT IS THE BYTES. The approval that authorises this install mints the
+    digest of the exact statement the operator's machine holds (F4b), and the
+    runner re-checks that digest before planting — so this path REFUSES anything
+    that is not the canonical form: a re-serialised, reformatted or hand-edited
+    file would land bytes nobody approved. The canonical form is
+    :func:`anchor_bytes`, the same builder the staged install writes.
+    """
+    try:
+        raw = source.read_bytes()
+    except OSError:
+        # DESIGN ROUND 1, D4: no Python errno text in the reader's sentence (the
+        # verb has no ``--json`` detail channel; the action is the sentence).
+        print(
+            f"the anchor statement at {source} could not be read; ask for a fresh "
+            "export from the machine that set it up",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        anchor = OperatorAnchor.from_json(json.loads(raw.decode("utf-8")))
+    except (UnicodeDecodeError, ValueError, TypeError):
+        print(
+            f"the anchor statement at {source} is not one this build recognises; "
+            "nothing was installed — ask for a fresh export from the machine that "
+            "set it up",
+            file=sys.stderr,
+        )
+        return 1
+    if anchor is None:
+        # ``from_json`` refuses by returning None (it is weighted toward
+        # refusal); name that case rather than crashing on it.
+        print(
+            f"the anchor statement at {source} is not one this build recognises; "
+            "nothing was installed — ask for a fresh export from the machine that "
+            "set it up",
+            file=sys.stderr,
+        )
+        return 1
+    if anchor_bytes(anchor) != raw:
+        print(
+            f"the anchor statement at {source} isn't the one the operator's machine "
+            "exported (it looks edited or re-saved), so nothing was installed — ask "
+            "for a fresh export",
+            file=sys.stderr,
+        )
+        return 1
+    staged = stage_anchor(root, anchor)
+    print(f"anchor statement accepted from {source} (staged at {staged})", file=sys.stderr)
+    return install_anchor(root, print_only=print_only, sudo_secret=sudo_secret)
 
 
 def _existing_key(root: Path, preference: str) -> Any:
@@ -305,7 +431,224 @@ def _init(args: argparse.Namespace) -> int:
 
 
 def _install(args: argparse.Namespace) -> int:
+    from_file = str(getattr(args, "from_file", "") or "")
+    if from_file:
+        return install_anchor_from(Path(from_file), config_dir(), print_only=bool(args.print_only))
     return install_anchor(config_dir(), print_only=bool(args.print_only))
+
+
+def _anchor(args: argparse.Namespace) -> int:
+    """``lop operator anchor export [--file P] [--json]`` — the PUBLIC statement.
+
+    THE SOURCE IS THE LOCAL STATEMENT, in trust order: the STAGED statement
+    first (it is the one `init`/`setup` produced and the one install lands), the
+    INSTALLED anchor as the fallback so a machine whose staging area was cleaned
+    can still hand its key to a peer. It never invents a statement: a machine
+    with no operator key says so and points at the product action that creates
+    one, and the sentence names a product action, not a terminal command.
+    """
+    if getattr(args, "anchor_command", None) != "export":
+        print("usage: lop operator anchor export [--file PATH] [--json]", file=sys.stderr)
+        return 2
+    root = config_dir()
+    anchor = load_staged_anchor(root)
+    loaded = load_anchor()
+    if anchor is None:
+        anchor = loaded.anchor
+    if anchor is None:
+        print(
+            "this machine has no operator key yet, so there is nothing to hand to "
+            "another machine — ask Local Operator to set it up for you (one approval "
+            "and one admin password prompt)",
+            file=sys.stderr,
+        )
+        return 1
+    statement = anchor_bytes(anchor)
+    target = str(getattr(args, "file", "") or "")
+    written = ""
+    if target:
+        path = Path(target).expanduser()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(statement)
+            os.chmod(path, 0o644)
+        except OSError as exc:
+            print(f"the statement could not be written to {path} ({exc})", file=sys.stderr)
+            return 1
+        written = str(path)
+    payload: dict[str, Any] = {
+        "ok": True,
+        "path": written,
+        "key_id": key_id_for(anchor.spki),
+        "spki_fp": spki_fp(anchor.spki),
+    }
+    if not target:
+        # NO FILE MEANS STDOUT IS THE TRANSFER FORM, so the bytes ride the stream
+        # (human mode) and the payload too (--json): a --json caller without a
+        # file has nowhere else to read the statement from.
+        payload["statement"] = statement.decode("utf-8")
+    if bool(getattr(args, "json", False)):
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    if target:
+        print(f"anchor statement written to {written}")
+        print(f"  key id     : {payload['key_id']}")
+        # N1 (design round 1): spki_fp is THE value a human compares, so it is
+        # labelled as a fingerprint and the comparison is named.
+        print(
+            f"  fingerprint: {payload['spki_fp']}  (the value to compare before "
+            "this key is set up anywhere else)"
+        )
+    else:
+        sys.stdout.write(statement.decode("utf-8"))
+    return 0
+
+
+def _setup(args: argparse.Namespace) -> int:
+    """The agent-runnable self-install for THIS machine (design §3.7).
+
+    RECEIPTS, IN THE CARD'S OWN VOCABULARY: ``proposed → consent → generated →
+    installed → verified``. The privileged write is the SAME one root-owned file
+    of public data ``init``/``install`` already land; what this verb adds is the
+    agent-usable shape:
+
+    * no step requires the reader to run a command — the consent gesture is the
+      host's own (the sudo prompt here; the desktop sheet is slice (c)), and an
+      admin password CAN be supplied once through the credential store for the
+      one privileged step (``--sudo-secret``), never printed or logged;
+    * a refused or failed gesture leaves the machine exactly as it was, with the
+      outcome recorded on ``installed`` and the state reading not-installed —
+      the "Finish setup" affordance, never a dead end;
+    * the level is reported AS ACHIEVED, so a host whose key is ``file-only`` is
+      told that rather than promised a presence check it cannot deliver.
+    """
+    root = config_dir()
+    receipts: list[dict[str, Any]] = []
+
+    def receipt(step: str, ok: bool, detail: str, **data: Any) -> None:
+        row: dict[str, Any] = {"step": step, "ok": ok, "detail": detail, "at": time.time()}
+        row.update(data)
+        receipts.append(row)
+
+    def finish(code: int, **extra: Any) -> int:
+        report = operator_authority_report()
+        payload: dict[str, Any] = {"ok": code == 0, "receipts": receipts, **extra}
+        payload.setdefault("level", report["level"])
+        if bool(getattr(args, "json", False)):
+            print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+        else:
+            for row in receipts:
+                mark = "ok" if row["ok"] else "blocked"
+                print(f"[{mark}] {row['step']}: {row['detail']}")
+            print(f"level: {payload.get('level')}")
+        return code
+
+    receipt(
+        "proposed",
+        True,
+        # D5 (design round 1): #1877 settled this vocabulary — the same step is
+        # "set up operator authority", not the engineer's account of the files.
+        "set up operator authority for this machine — one approval and one admin "
+        "password prompt",
+    )
+    loaded = load_anchor()
+    existing = _existing_key(root, "auto")
+    if existing is not None and loaded.usable:
+        receipt("consent", True, "nothing to raise: the anchor is already installed")
+        receipt(
+            "generated",
+            True,
+            f"operator key already exists ({existing.key_id}); nothing replaced",
+        )
+        receipt("installed", True, f"anchor already at {loaded.path} (root-owned)")
+        receipt("verified", True, describe_level(existing, with_remedy=False))
+        existing.close()
+        return finish(0, state="installed", anchor=str(loaded.path))
+
+    sudo_secret = str(getattr(args, "sudo_secret", "") or "")
+    # THE ADMIN ROUTE IS COMPUTED ONCE, BEFORE THE CONSENT ROW: it decides both
+    # the row's MARK and whether the privileged step has any way to run at all
+    # (design round 1, D1 — the mark must match the sentence).
+    if _is_privileged():
+        admin_route = "privileged"
+    elif sudo_secret:
+        admin_route = "ask-once"
+    elif shutil.which("sudo") is not None:
+        admin_route = "prompt"
+    else:
+        admin_route = "unavailable"
+    if admin_route == "privileged":
+        consent_line = "this process already holds administrator rights"
+    elif admin_route == "ask-once":
+        consent_line = (
+            f"the admin password is used once, from the secret named {sudo_secret} "
+            "(never printed or logged)"
+        )
+    elif admin_route == "prompt":
+        consent_line = "the admin password will be asked for once, at the install step"
+    else:
+        consent_line = (
+            "this machine needs an admin approval for the anchor, and no "
+            "administrator tool Local Operator can use is available here"
+        )
+    receipt("consent", admin_route != "unavailable", consent_line)
+
+    try:
+        handle = (
+            existing if existing is not None else create_key(config_root=root, preference="auto")
+        )
+    except (KeyBackendError, FileExistsError) as exc:
+        receipt("generated", False, f"the operator key could not be created: {exc}")
+        return finish(1, state="not_installed")
+    anchor = anchor_for_handle(handle, label="")
+    staged = stage_anchor(root, anchor)
+    receipt(
+        "generated",
+        True,
+        f"operator key ready ({handle.key_id}); anchor statement staged at {staged}",
+    )
+    if existing is not None:
+        # The handle was only probed; the key belongs to a previous run and the
+        # staged statement above already carries everything this verb needs.
+        existing.close()
+
+    if admin_route == "unavailable":
+        # D1: setup never shows the direct verb's by-hand block (it cannot be
+        # followed where sudo is absent, and setup is not the documentation
+        # register). The reason is a receipt, in product words.
+        receipt(
+            "installed",
+            False,
+            "this machine has no administrator tool Local Operator can use, so "
+            "nothing was installed. The key exists but is not trusted yet — ask "
+            "Local Operator to finish setup where an admin approval is possible.",
+        )
+        return finish(1, state="not_installed")
+    rc = install_anchor(root, print_only=False, sudo_secret=sudo_secret)
+    if rc != 0:
+        receipt(
+            "installed",
+            False,
+            "the admin approval was not completed, so the anchor is not installed "
+            "yet. The key exists but is not trusted until setup finishes — ask "
+            "Local Operator to run setup again when an admin approval is possible.",
+        )
+        return finish(rc, state="not_installed")
+    receipt("installed", True, f"anchor landed root-owned at {anchor_path()}")
+
+    loaded = load_anchor()
+    verified = bool(loaded.usable)
+    level_line = describe_level(handle, with_remedy=False)
+    receipt(
+        "verified",
+        verified,
+        # D5: the level is REPEATED AS ACHIEVED, in the same sentence `lop operator
+        # status` prints — a file-only host is told what that means. The remedy half
+        # is dropped here because it names a terminal command and this is a receipt
+        # surface (§2.9); the status/init registers keep the full sentence.
+        level_line if verified else f"{level_line.rstrip('.')}; {loaded.reason}",
+    )
+    return finish(0 if verified else 1, state="installed" if verified else "not_installed")
 
 
 def _trust() -> int:

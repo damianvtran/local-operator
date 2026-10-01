@@ -5017,7 +5017,13 @@ def build_bash_tool() -> AgentTool:
             # Interpolated rather than spelled out, so the name the model is told
             # to use and the name both spawn sites export are one constant — a
             # second literal here is how the advice would outlive a rename.
-            f"Own scratch (scripts, logs): ${SCRATCHPAD_PATH_ENV}, not /tmp."
+            f"Own scratch (scripts, logs): ${SCRATCHPAD_PATH_ENV}, not /tmp. "
+            # The eval boundary, stated on the side that a bash-shaped task
+            # reaches first (audit item 7): `eval`'s own description already
+            # says it is "cheaper and safer than bash one-shots", but a model
+            # about to run a chain of shell steps reads THIS description, and
+            # one short clause here is the whole fix.
+            "For multi-step Python, prefer `eval`."
         ),
         parameters=BashParams.model_json_schema(),
         approval_tier="exec",
@@ -16450,18 +16456,14 @@ _BROWSER_URL_SCHEMES = ("http://", "https://")
 class BrowserParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    action: str = Field(
-        description="open (start a surface at a URL) "
-        "| goto | read (page text) | snapshot (accessibility tree with click "
-        "refs) | screenshot | click | type | scroll (move the viewport) | logs "
-        "(console + errors) | tabs (list agent-driven tabs) | request_access "
-        "(raise the site-approval prompt for a not-yet-allowed origin) | "
-        "await_access (wait for the user's decision) | "
-        "cancel_access (cancel YOUR pending exact-origin request) | "
-        "recover (recover YOUR tab) | "
-        "retain (hold it) | release (end that hold) | close (end "
-        "YOUR tab)."
-    )
+    # The per-action breakdown (names in the bare list, what each does) lives
+    # in the tool:// doc's ops table and in guide://browser: this description is
+    # billed on every request of every browser-capable session, and the action
+    # name is the one field a model gets wrong before reading either — the
+    # executor's refusal names the accepted set when it does (`unknown action:
+    # … expected one of …`), which is the self-correction path that makes the
+    # cut safe (slimming wave, audit item 2).
+    action: str = Field(description="The browser action to run.")
     url: str = Field(
         default="",
         description=(
@@ -16471,28 +16473,24 @@ class BrowserParams(BaseModel):
     tab: str = Field(
         default="",
         description=(
-            "'open' only: ADOPT a tab the USER handed to this session, "
-            "named by the FULL handle 'tabs' reported for it. Omit it to create a "
-            "new tab; a redacted handle is not yours to drive."
+            "'open': ADOPT a tab the USER handed to this session (the FULL "
+            "handle 'tabs' reported); omitting it creates a new tab."
         ),
     )
     backend: str = Field(
         default="",
         description=(
-            "'open' only: pick the host for a FRESH surface — '' (default: the "
-            "desktop app's tab first, then the extension, then cmux) | 'ui' | "
-            "'extension' | 'cmux'. 'extension' is the host that carries the "
-            "user's real profile. A held handle or an adoption outranks it; a "
-            "named host that cannot serve refuses instead of falling back."
+            "'open': the host for a FRESH surface — '' (default order), 'ui', "
+            "'extension' (the user's real profile), or 'cmux'. A held handle or "
+            "an adoption outranks it; a host that cannot serve refuses."
         ),
     )
     path: str = Field(default="", description="'screenshot' only: the destination file.")
     selector: str = Field(
         default="",
-        description="CSS selector or a snapshot ref (e5) for 'click'/'type'; "
-        "scopes the text for 'read' (default: body); for 'scroll', the element "
-        "to bring into view; for 'download', the control that starts it; for "
-        "'upload', the file input to fill.",
+        description="CSS selector or a snapshot ref (e5): the click/type "
+        "target, the read scope (default: body), the scroll element, or the "
+        "download/upload control.",
     )
     text: str = Field(default="", description="Text to enter for 'type'; the reason for 'retain'.")
     # One new field for the whole feature (the tool-surface ladder's rung 1):
@@ -16503,9 +16501,9 @@ class BrowserParams(BaseModel):
     paths: list[str] = Field(
         default_factory=list,
         description=(
-            "'upload' only: the local files to attach, one or more. Credential "
-            "files and the harness's own config directory are refused; relative "
-            "paths resolve against the session's working directory."
+            "'upload': the local files to attach, one or more (credential files "
+            "and the harness's own config dir are refused; relative paths "
+            "resolve against the session's cwd)."
         ),
     )
     # scroll params. All optional: with none set, 'scroll' pages one viewport
@@ -16513,8 +16511,8 @@ class BrowserParams(BaseModel):
     # extension/src/commands/scroll.ts).
     x: float | None = Field(
         default=None,
-        description="'scroll' horizontal pixel delta (positive = right). "
-        "Use with 'y' for a precise scrollBy.",
+        description="'scroll': horizontal pixel delta (positive = right); "
+        "with 'y', a precise scrollBy.",
     )
     y: float | None = Field(
         default=None,
@@ -21154,35 +21152,26 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
         description=(
             # Footprint: this description rides in EVERY session's cache prefix, so
             # the per-action detail lives in `guide://browser` (the playbook the
-            # model is pointed at below) and in the parameter descriptions, and
-            # this string carries only what a model needs to CHOOSE the tool and
-            # call it correctly. The context-budget guard measures the whole
-            # surface and it is why the download/upload sentence is one clause
-            # rather than the four the design first drafted (AGENTS.md,
-            # "tool-surface footprint ladder"; see the round-4 remediation).
-            "Drive the user's REAL browser (the Local Operator desktop app's browser "
-            "tab, their paired browser extension, or a cmux browser "
-            "panel — a fresh 'open' prefers the app's tab; pass 'backend' to name "
-            "another host): open/goto a URL, read text, snapshot for click refs, click, type, "
-            "scroll, logs, screenshot, close. Cookies and logins persist across calls and "
-            "across sessions, and the user can sign in by hand when you ask them "
-            "to, so this reaches authenticated pages a throwaway browser cannot. "
-            "Parallel "
-            "sessions each drive their own tab: a fresh 'open' creates one NEW "
-            "tab owned by this session; reuse it because later opens navigate it. "
+            # model is pointed at below) and in the tool:// doc's ops table; this
+            # string carries only what a model needs to CHOOSE the tool and call it
+            # correctly. The context-budget guard measures the whole surface; the
+            # slimming wave (audit item 2) moved the lifecycle/file-transfer clauses
+            # to `read tool://browser`.
+            "Drive the user's REAL browser — the desktop app's tab by default, their "
+            "paired extension, or a cmux panel ('backend' names a host for a fresh "
+            "'open'): open/goto, read, snapshot, click, type, scroll, logs, screenshot, "
+            "tabs, close. Cookies and logins persist across calls and sessions, and "
+            "the user can sign in by hand when you ask them to, so this reaches "
+            "authenticated pages a throwaway browser cannot. "
+            "A fresh 'open' creates one NEW tab owned by this session; reuse it because "
+            "later opens navigate it. "
             "Before your final response, call 'close' unless the user needs it left "
-            "open for a pending interaction. "
-            "'tabs' lists every agent-driven tab including other sessions' "
+            "open for a pending interaction; 'tabs' lists every agent-driven tab "
             "(handles are redacted: awareness-only), and 'close' ends only your own tab. "
-            "'scroll', 'logs' and "
-            "'tabs' need a non-cmux host (cmux says so). On a non-cmux host, "
-            "'download' saves what the page offers into this session's private "
-            "download directory, and 'upload' attaches local files to a page's file "
-            "input. "
             "'open'/'goto' to a site the user has not approved fails with "
             "origin_not_allowed: call 'request_access', NOTIFY the operator to approve "
             "it, and 'await_access' before navigating again. "
-            "Never install or script a browser engine instead."
+            "Never install or script a browser engine instead. Playbook: `guide://browser`."
         ),
         parameters=BrowserParams.model_json_schema(),
         # Navigates and can write a screenshot file, so it rides the write
@@ -21352,26 +21341,21 @@ def _console_key_name(key: str) -> str:
 
 #: One tool with a `method` parameter is ONE schema in the prompt-cache prefix,
 #: where ten tools would be ten — the same shape `BrowserParams` uses for the same
-#: reason. The per-method detail lives in the parameter descriptions below (where a
-#: model reads it while choosing arguments) and in `guide://console`; the class
-#: deliberately carries no docstring: pydantic copies a class docstring into the
-#: emitted schema's ``description``, and that schema ships on every request, so a
-#: rationale paragraph here would be a permanent per-call tax on the sentence a
-#: model reads once.
+#: reason. The per-method detail was moved OUT of the description fields by the
+#: slimming wave (audit item 2): it cost every request while being read once, so
+#: it lives in the tool:// doc's ops table and `guide://console`, and the fields
+#: keep one-liners. The class deliberately carries no docstring: pydantic copies a
+#: class docstring into the emitted schema's ``description``, and that schema ships
+#: on every request, so a rationale paragraph here would be a permanent per-call
+#: tax on the sentence a model reads once.
 class ConsoleParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    method: str = Field(
-        description="list | create | status | read | screenshot | input | keys | resize "
-        "| secure | close. `list` includes surfaces the USER opened; `read` returns text; "
-        "`screenshot` writes a PNG file; `input` types text or a stored secret; `keys` "
-        "sends named keys; `secure` is the user's own do-not-capture switch."
-    )
+    method: str = Field(description="The method to run.")
     surface: str = Field(
         default="",
-        description="The handle from 'list'/'create', e.g. 'con:1:9f2a'. Required for every "
-        "method but 'list'/'create'. A console handle starts with 'con:': a terminal in "
-        "another window has none and is not readable by this tool.",
+        description="The handle from 'list'/'create' (e.g. 'con:1:9f2a'); required for every "
+        "method but 'list'/'create'.",
     )
     cwd: str = Field(
         default="", description="'create': the working directory (default: the user's home)."
@@ -21394,10 +21378,8 @@ class ConsoleParams(BaseModel):
     rows: int | None = Field(default=None, description="'create'/'resize': grid rows (default 30).")
     reveal: str = Field(
         default="",
-        description="'create': none (default, pane untouched) | session (open the pane only "
-        "if the app is showing THIS session) | open (claim and focus the pane, only when "
-        "the app's window is already focused). No value raises the OS window; a downgrade "
-        "comes back as revealed=false.",
+        description="'create': none (default) | session | open; never raises the OS window — "
+        "a downgrade returns revealed=false.",
     )
     retain: bool | None = Field(
         default=None,
@@ -21410,8 +21392,8 @@ class ConsoleParams(BaseModel):
     )
     mode: str = Field(
         default="",
-        description="'read': viewport (default; the visible rows, i.e. what a person looking "
-        "at the pane sees) | scrollback (a history window, positioned by start/count).",
+        description="'read': viewport (default; the visible rows) | scrollback (a history "
+        "window, positioned by start/count).",
     )
     start: int | None = Field(
         default=None, description="'read' scrollback: the first history row to return."
@@ -21428,8 +21410,8 @@ class ConsoleParams(BaseModel):
     secret_ref: str = Field(
         default="",
         description="'input': the NAME of a secret to type instead of 'text' (e.g. "
-        "'SUDO_PASSWORD'). Resolved session-first (the `ask` answer, /credential), then "
-        "the encrypted store; never shown in the result, a trace or a log, and "
+        "'SUDO_PASSWORD'); resolved session-first (the `ask` answer, /credential), then "
+        "the encrypted store; never shown in results, traces or logs, and "
         "registered for redaction.",
     )
     paste: bool = Field(
@@ -21439,16 +21421,14 @@ class ConsoleParams(BaseModel):
     )
     keys: list[str] = Field(
         default_factory=list,
-        description="'keys': named keys in the encoder's spelling — ['ctrl+c'], ['up'], "
-        "['shift+tab'] — with synonyms ('ctrl-c', 'CTRL+C', 'shift-tab', 'esc', "
-        "'pgup') normalised first. The names are in guide://console; an unknown one "
-        "is refused with the accepted set.",
+        description="'keys': named keys — the encoder's spelling (`ctrl+c`, `up`, `shift+tab`), "
+        "synonyms normalised first; an unknown key is refused with the accepted set. "
+        "Names: `guide://console`.",
     )
     on: bool | None = Field(
         default=None,
         description="'secure': true turns the surface's do-not-capture span on (the app then "
-        "refuses reads and screenshots of it), false turns it off. The user can toggle the "
-        "same switch from the pane.",
+        "refuses reads and screenshots of it), false turns it off.",
     )
     kill: bool | None = Field(
         default=None,
@@ -22812,10 +22792,7 @@ def _task_tool_description(model_choice: bool) -> str:
 
 
 class TaskItem(BaseModel):
-    """One slice of a task batch. ``agent`` names the ROLE the child runs as —
-    a registered profile or a packaged starter (reviewer, coder, architect,
-    manager, designer, scout); the role supplies standing guidance and may
-    restrict the child's tools."""
+    """One slice of a task batch."""
 
     # What ``effort`` does is deliberately NOT stated in the docstring above,
     # and the sentence that used to state it ("``effort`` routes to a
@@ -22825,6 +22802,13 @@ class TaskItem(BaseModel):
     # choice — so any sentence here is a claim about a field that may not be
     # present. The field's own description and the tool's description are the
     # two places that know which mode they render for.
+    #
+    # The role wording the docstring used to carry — "``agent`` names the ROLE
+    # the child runs as, a registered profile or a packaged starter … the role
+    # supplies standing guidance and may restrict the child's tools" — moved to
+    # `read tool://task` in the slimming wave (audit item 2); it rides every
+    # request here, and the tool:// doc is the reader that needs it. The
+    # ``agent`` field's own description keeps the call-time contract.
     #
     # It lives here, as a comment, because the docstring above is prompt text:
     # it rides every request and is charged to the context-budget ratchet
@@ -22844,9 +22828,8 @@ class TaskItem(BaseModel):
         default="task",
         description=(
             "Subagent role: 'task' (full child), 'scout' (read-only research), "
-            "any role from the `agent` tool ('reviewer', 'coder', 'architect', "
-            "'manager', 'designer'), or 'team:<name>' (starts that team's "
-            "manager). Roles carry vetted guidance and may restrict tools."
+            "any role from the `agent` tool, or 'team:<name>' (starts that "
+            "team's manager). Roles carry vetted guidance and may restrict tools."
         ),
     )
     # A free string, not a Literal: the valid set is whatever the operator has
@@ -22906,17 +22889,16 @@ class TaskParams(BaseModel):
     context: str = Field(
         default="",
         description=(
-            "Shared context prepended to EVERY task in the batch — the goal, "
-            "constraints, and interfaces every subagent needs. Stated once "
-            "here instead of copy-pasted into each prompt."
+            "Shared context prepended to EVERY task — the goal, constraints "
+            "and interfaces each one needs; stated once instead of per prompt."
         ),
     )
     tasks: list[TaskItem] = Field(
         default_factory=list,
         description=(
             "Batch form: all items launch as CONCURRENT subagents from this "
-            "one call. Independent slices belong here together — one round "
-            "trip instead of one per task."
+            "call; independent slices belong together — one round trip instead "
+            "of one per task."
         ),
     )
 
@@ -24372,19 +24354,14 @@ class HubParams(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    # The per-op breakdown USED to live here (list/peek/send/ask/steer/pause/
+    # cancel/resume, each with its semantics) at ~260 billed tokens on every
+    # request. It moved to the tool:// doc's ops table in the slimming wave
+    # (audit items 2+3): `read tool://hub` renders the same blurbs, and the
+    # tool description above already names every verb at a fraction of the
+    # cost. The enum literals stay, so a reader still learns the op set here.
     op: Literal["list", "peek", "send", "ask", "steer", "pause", "cancel", "resume"] = Field(
-        description=(
-            "list: every subagent you launched with its status and whether it can be "
-            "resumed — including finished, failed and paused ones the 'jobs' tool no "
-            "longer shows. peek: READ the subagent's transcript (ranged, cheap) to see "
-            "its current progress without spending its attention — the fast way to "
-            "check on a running child. send: a note, no reply waited for. ask: a "
-            "question, blocks for the subagent's answer. steer: change what it is doing "
-            "(becomes part of its instructions). pause: stop it now but keep it "
-            "resumable. cancel: stop it for good. resume: relaunch a stopped, paused or "
-            "failed subagent against its own transcript so it continues where it left "
-            "off; names several targets to fan one message out to a whole batch at once."
-        )
+        description="The verb to run."
     )
     # A plain array, NOT ``str | list[str]``: pydantic renders a union as
     # ``anyOf``, and this module's schemas reach Gemini verbatim as
@@ -24401,10 +24378,8 @@ class HubParams(BaseModel):
         default=None,
         description=(
             "Who to address: job ids from 'task'/'jobs'/'hub op=list', subagent "
-            'labels, or ["all"] for every running subagent. Several ids address '
-            "several subagents. 'ask' and 'peek' take exactly one; 'resume' fans one "
-            "message out to every target you name, so a batch of failed subagents can "
-            "be resumed in a single call. Omit for op='list', which addresses nobody."
+            "labels, or [\"all\"] for every running subagent; 'ask' and 'peek' take "
+            "exactly one. Omit for op='list'."
         ),
     )
 
@@ -24439,9 +24414,8 @@ class HubParams(BaseModel):
     range: str | None = Field(
         default=None,
         description=(
-            "op='peek' only: which transcript steps to read, as 'start-end' or "
-            "'start-' (1-based inclusive, stable across peeks). Omit for the last "
-            "few steps; use steps= for 'the last N'."
+            "op='peek': transcript steps to read, as 'start-end' or 'start-' "
+            "(1-based, stable across peeks); steps= reads the last N."
         ),
     )
     steps: int | None = Field(
@@ -25033,8 +25007,7 @@ def build_hub_tool(context: ToolContext) -> AgentTool | None:
             "this to find out whether a quiet child is stuck), steer one onto a "
             "different course, pause one so it can be picked up later, cancel one, or "
             "resume a stopped, paused or failed one (or a whole batch of them at once) "
-            "against its own transcript so it continues where it left off. Address them "
-            'by job id, by label, or "all".'
+            "against its own transcript so it continues where it left off."
             + (
                 # Only a delegating child reads this; the top session's
                 # description (a cache-prefix string) is unchanged.
@@ -25258,25 +25231,16 @@ _ASK_DESCRIPTION_RESTRAINT = (
     "it, or delegate it to a subagent and decide yourself, then report what you "
     "chose. Use this when the action is destructive or irreversible and the "
     "user has not EXPLICITLY approved that action, when the REQUEST ITSELF has "
-    "two plausible readings that send the work in different directions and no "
-    "evidence picks between them, when you need something only the user has (a "
-    "credential, an access decision), or when the answer is genuinely theirs to "
-    "state (a preference, a name, a roster, how they want something delivered). "
+    "two plausible readings and no evidence picks between them, when you need "
+    "something only the user has (a credential, an access decision), or when "
+    "the answer is genuinely theirs to state (a preference, a name, a roster). "
     "Two technical approaches is not ambiguity: weigh them, pick one, and say "
     "why. Work the user already asked for is authorized: do not stop to confirm "
     "it, re-ask what the conversation answered, or seek permission to continue "
     "— but that never extends to an irreversible step by implication. "
-    "Once you HAVE decided a question is needed, this tool is the only channel: "
-    "never put the question in your reply text. A question buried in a report is "
-    "not seen and nothing waits on it, so writing one and continuing means you "
-    "decided anyway. Not stopping for an answer? Then do not phrase it as a "
-    "question — state the decision and what would change it. "
-    "When you do ask, do it here INSTEAD of writing lettered options "
-    "into your reply and waiting. Give each question at least two options, put "
-    "the consequence of each in its description, and mark the one you recommend "
-    "(it is moved to the top of the list and preselected). "
-    "Every question also offers the user a free-text answer, so the options do "
-    "not have to be exhaustive. "
+    "Once you have decided a question is needed, this tool is the only channel: "
+    "never put the question in your reply text. Not stopping for an answer? Then "
+    "do not phrase it as a question; full mechanics are in `read tool://ask`."
 )
 
 #: The tail for a host whose ``ask`` BLOCKS: today's text, byte for byte. The
@@ -25285,11 +25249,11 @@ _ASK_DESCRIPTION_RESTRAINT = (
 _ASK_DESCRIPTION_INLINE = (
     "Ask everything you need in ONE call: the user "
     "answers the questions back to back rather than once per turn. "
-    "If you need a credential, password, or API key, set secret=true on that "
-    "question (options empty, id is the env-var name). The value is stored in "
-    "session memory and injected into bash; you will only ever see the key name. "
-    "Add persist=true when that credential will be needed again after this "
-    "session, and it is also saved to the operator's encrypted long-term store."
+    "For a credential, password or API key, set secret=true on that "
+    "question (options empty, id = the env-var name): the value is stored in "
+    "session memory and injected into bash — you only ever see the key name. "
+    "persist=true also saves it to the operator's encrypted long-term store for "
+    "later sessions."
 )
 
 #: The tail for a host whose ``ask`` QUEUES (design §2.1/§3/§9.1). Three facts a
@@ -25311,12 +25275,11 @@ _ASK_DESCRIPTION_INLINE = (
 #: urgent case needs its own instruction (resolve it another way) because the
 #: timeout notice repeats it.
 _ASK_DESCRIPTION_QUEUED = (
-    "Ask everything you need in ONE call — the ask is answered as a whole, so "
-    "nothing is gained by splitting it across turns. This call returns at once "
+    "Ask everything you need in ONE call. This call returns at once "
     "with a RECEIPT: it confirms the ask is queued and when it will time out. "
     "The ANSWER ARRIVES LATER, as its own turn. A RECEIPT IS NOT CONSENT: do not "
     "run anything the ask was meant to authorise until the answer arrives. "
-    "Continue with work that does not depend on it, and if nothing else remains, "
+    "Continue with work that does not depend on it; if nothing else remains, "
     "end the turn saying what is queued rather than idling. Set `timeout` to how "
     "long this should really wait — 1 h (3600) is routine, 5-10 minutes when "
     "someone is expected to answer now, up to 24 h for something genuinely "
@@ -25328,12 +25291,11 @@ _ASK_DESCRIPTION_QUEUED = (
     "waiting. At most 8 asks can be open at once — do not re-ask a question you "
     "already queued, and a second ask with identical question text, or a second "
     "open secret question for a key already asked for, is refused. "
-    "If you need a credential, password, or API key, set secret=true on that "
-    "question (options empty, id is the env-var name). The value reaches session "
-    "memory when the user answers it and is injected into bash; you will only "
-    "ever see the key name, and it never appears in this conversation. "
-    "Add persist=true when that credential will be needed again after this "
-    "session, and it is also saved to the operator's encrypted long-term store."
+    "For a credential, password or API key, set secret=true on that question "
+    "(options empty, id = the env-var name): the value reaches session memory "
+    "when the user answers it and is injected into bash — only the key name is "
+    "returned, and it never appears in this conversation. persist=true also "
+    "saves it to the operator's encrypted long-term store."
 )
 
 

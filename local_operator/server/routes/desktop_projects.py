@@ -1,9 +1,11 @@
 """``/v1/desktop/projects*`` — the desktop CRUD, links and milestones surface.
 
-Seven + two + one routes over the project store (:mod:`local_operator.projects`;
+Nine + two + one routes over the project store (:mod:`local_operator.projects`;
 request-update is the one that also dials — see below):
 
 - ``GET    /v1/desktop/projects``                        — the listing (summaries)
+- ``GET    /v1/desktop/projects/search``                 — ranked soft matches (``q``, ``limit``)
+- ``GET    /v1/desktop/projects/timeline``               — one milestones document
 - ``POST   /v1/desktop/projects``                        — create
 - ``GET    /v1/desktop/projects/{key}``                  — one project + its links
 - ``PATCH  /v1/desktop/projects/{key}``                  — partial edit
@@ -20,6 +22,15 @@ calls, so the two surfaces cannot validate differently, and the composed view
 (``{project, links}``) comes from the same ``build_project_view`` the tool's
 ``show`` renders — no second derivation of "what are the linked sessions
 doing".
+
+**Two derived reads.** ``search`` ranks over the rows with the ONE ranking
+model (:mod:`local_operator.projects_search`) — soft match, per-field weights
+(name/title > description > updates), a deterministic total order; ``timeline``
+answers the Timeline view's whole document (every row's milestones, statuses
+derived) so the client stops fanning out one ``projects.get`` per row. Both
+static paths are declared BEFORE ``/v1/desktop/projects/{key}`` — FastAPI
+matches in declaration order, and a ``{key}`` route declared first would
+swallow them; the sessions search route carries the same load-bearing note.
 
 **Key resolution.** ``{key}`` is an exact project id first, then a
 case-insensitive name. Ids are ``uuid4().hex`` and names are grammar-limited,
@@ -50,7 +61,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import ValidationError
 
 from local_operator.projects import (
@@ -62,10 +73,12 @@ from local_operator.projects import (
     ProjectRegistryLockTimeout,
     ProjectSchemaGuardError,
     build_project_view,
+    display_name,
     readable_error,
     scan_runtime_states,
     stale_after_s,
 )
+from local_operator.projects_search import search_projects
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.desktop_projects import (
     STATUS_RANK,
@@ -77,10 +90,14 @@ from local_operator.server.models.desktop_projects import (
     ProjectDetail,
     ProjectList,
     ProjectPatch,
+    ProjectSearchHit,
+    ProjectSearchResults,
     ProjectSummary,
+    ProjectTimeline,
     ProjectView,
     linked_session_view,
     project_summary,
+    project_timeline_entry,
     project_view,
 )
 from local_operator.server.models.schemas import CRUDResponse
@@ -178,13 +195,26 @@ def _live_counts(registry: ProjectRegistry, projects: list[Project]) -> dict[str
     }
 
 
+def _listing_order(rows: list[Project]) -> list[Project]:
+    """The listing's own order — status rank, then newest first.
+
+    ONE expression for the listing and its derived siblings: the search
+    route's empty-query pass-through and the timeline document both answer in
+    "the listing's own order, untouched", so they must not grow a second sort
+    that could drift from it.
+    """
+    return sorted(
+        rows, key=lambda project: (STATUS_RANK.get(project.status, 99), -project.updated_at)
+    )
+
+
 @router.get("/v1/desktop/projects", response_model=CRUDResponse)
 async def projects(request: Request) -> CRUDResponse[Any]:
     async with errors(request):
 
         def read() -> ProjectList:
             registry = _registry(request)
-            listed = registry.list_projects()
+            listed = _listing_order(registry.list_projects())
             live = _live_counts(registry, listed)
             rows = [
                 project_summary(
@@ -192,8 +222,81 @@ async def projects(request: Request) -> CRUDResponse[Any]:
                 )
                 for project in listed
             ]
-            rows.sort(key=lambda row: (STATUS_RANK.get(row.status, 99), -row.updated_at))
             return ProjectList(projects=rows)
+
+        return reply(await asyncio.to_thread(read))
+
+
+# NOTE THE DECLARATION ORDER — load-bearing. The two static siblings are
+# declared BEFORE ``/v1/desktop/projects/{key}`` below, because FastAPI
+# matches routes in declaration order: a ``{key}`` route declared first would
+# swallow ``search``/``timeline`` and answer with the snapshot of a project
+# literally named that (a 404, in practice). The sessions search route carries
+# the same load-bearing comment.
+@router.get("/v1/desktop/projects/search", response_model=CRUDResponse)
+async def search(
+    request: Request,
+    q: str = Query(default="", max_length=256),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> CRUDResponse[Any]:
+    """Ranked soft matches over the rows — see :mod:`local_operator.projects_search`.
+
+    The tiers are the session-search contract (casefold + diacritic fold,
+    prefix, bounded typo on 4+ char tokens, order-independent token-AND across
+    fields) with the operator's field weights on top: title/name > description
+    > tags > people > updates > progress. ``q`` is bounded at 256 characters
+    (the sessions precedent) and ``limit`` at 200; the answer echoes the query
+    so the client can apply only the answer whose echo equals the box.
+
+    An EMPTY ``q`` is not a search: the answer is the LISTING's own order
+    truncated to ``limit`` (the same truncation every answer carries), each row
+    with score 0 and no matched fields — mirroring ``search_store``'s empty
+    arm, so a caller can render this answer directly for an empty box without
+    re-ranking anything.
+    """
+    async with errors(request):
+
+        def read() -> ProjectSearchResults:
+            registry = _registry(request)
+            rows = registry.list_projects()
+            if not q.strip():
+                hits = [
+                    ProjectSearchHit(
+                        id=project.id, name=display_name(project), score=0.0, fields=[]
+                    )
+                    for project in _listing_order(rows)[:limit]
+                ]
+            else:
+                hits = [
+                    ProjectSearchHit(
+                        id=match.id,
+                        name=match.name,
+                        score=match.score,
+                        fields=list(match.fields),
+                    )
+                    for match in search_projects(rows, q, limit=limit)
+                ]
+            return ProjectSearchResults(projects=hits, query=q, count=len(hits))
+
+        return reply(await asyncio.to_thread(read))
+
+
+@router.get("/v1/desktop/projects/timeline", response_model=CRUDResponse)
+async def timeline(request: Request) -> CRUDResponse[Any]:
+    """The ONE timeline document: every row's milestones, statuses derived.
+
+    Replaces the Timeline view's per-row fan-out (one ``projects.get`` per row,
+    each of which runs a runtime scan plus per-linked-session reads) with a
+    single read: this route touches no session file and dials no runtime — the
+    milestones are already on the rows the listing parses. Status is derived
+    server-side so the client stays a painter.
+    """
+    async with errors(request):
+
+        def read() -> ProjectTimeline:
+            registry = _registry(request)
+            listed = _listing_order(registry.list_projects())
+            return ProjectTimeline(projects=[project_timeline_entry(project) for project in listed])
 
         return reply(await asyncio.to_thread(read))
 

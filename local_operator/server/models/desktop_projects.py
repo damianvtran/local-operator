@@ -30,6 +30,12 @@ as a session row with ``role="coordination"`` and NO runtime facts at all.
 **``extra="allow"`` on the view models**, matching the other desktop payloads: a
 field added by a later build crosses additively and an older renderer ignores
 it. The listed fields are the frozen contract the UI repo codes against.
+
+**The two DERIVED documents** — ``ProjectSearchResults`` and
+``ProjectTimeline`` — are projections, not records: search hits come from
+:mod:`local_operator.projects_search` (the one ranking model), and the
+timeline's milestone statuses are derived here exactly as every other view's
+are, so a chip on a card and a line in the timeline cannot disagree.
 """
 
 from __future__ import annotations
@@ -218,6 +224,62 @@ class ProjectDeleted(BaseModel):
     deleted: bool = True
 
 
+class ProjectSearchHit(BaseModel):
+    """One ranked row of ``GET /v1/desktop/projects/search``.
+
+    ``fields`` lists which fields the query matched, ordered by weight (name >
+    description > tags > owner > team > updates > progress > id — the search
+    module's canonical order), so a card can chip "why this row". ``score`` is
+    the server's ranking number: comparable WITHIN one answer, never across
+    queries or builds (the weights are tunable). ``name`` is the display name
+    (title when set, else the addressing name) — the same fallback every
+    surface renders.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    name: str
+    score: float
+    fields: list[str] = Field(default_factory=list)
+
+
+class ProjectSearchResults(BaseModel):
+    """``GET /v1/desktop/projects/search`` — the hits plus the echo.
+
+    ``query`` echoes what was asked (the client applies an answer only when
+    the echo equals the box — the sessions-search precedent), and ``count`` is
+    the number of hits in THIS answer (after ``limit``), never the store size.
+    """
+
+    projects: list[ProjectSearchHit] = Field(default_factory=list)
+    query: str = ""
+    count: int = 0
+
+
+class ProjectTimelineEntry(BaseModel):
+    """One row of ``GET /v1/desktop/projects/timeline``: id + milestones."""
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    milestones: list[ProjectMilestoneView] = Field(default_factory=list)
+
+
+class ProjectTimeline(BaseModel):
+    """``GET /v1/desktop/projects/timeline`` — the ONE timeline document.
+
+    Every row of the listing appears, in the listing's own order, with its
+    milestones (possibly empty). The Timeline view stops fanning out one
+    ``projects.get`` per row — each of which runs a runtime scan plus
+    per-linked-session reads — and paints from this single document; status is
+    derived server-side (:func:`project_timeline_entry`) so the client stays a
+    painter.
+    """
+
+    projects: list[ProjectTimelineEntry] = Field(default_factory=list)
+
+
 #: The fixed board order, and therefore both listings' sort: ``archived`` last,
 #: a status the board only draws when non-empty. An unknown status (a row from a
 #: newer build) sorts after them all rather than crashing the sort. ONE copy:
@@ -336,15 +398,7 @@ def project_view(project: Project, *, window: float | None = None) -> ProjectVie
         completed_at=project.completed_at,
         estimate=project.estimate,
         estimate_unit=project.estimate_unit,
-        milestones=[
-            ProjectMilestoneView(
-                name=item.name,
-                target_date=item.target_date,
-                completed_at=item.completed_at,
-                status=milestone_status(item),
-            )
-            for item in project.milestones
-        ],
+        milestones=milestone_views(project),
         updates=[
             ProjectUpdateView(
                 at=entry.at,
@@ -364,6 +418,33 @@ def project_view(project: Project, *, window: float | None = None) -> ProjectVie
             for entry in project.updates
         ],
     )
+
+
+def milestone_views(project: Project) -> list[ProjectMilestoneView]:
+    """The project's milestones as wire views, each status DERIVED once.
+
+    One construction for every reader of a complete milestone list (the detail
+    view and the timeline document): a chip on a card and a line in the
+    timeline cannot disagree about which milestone is late, because both call
+    this, and this calls
+    :func:`local_operator.projects.milestone_status`.
+    """
+
+    return [
+        ProjectMilestoneView(
+            name=item.name,
+            target_date=item.target_date,
+            completed_at=item.completed_at,
+            status=milestone_status(item),
+        )
+        for item in project.milestones
+    ]
+
+
+def project_timeline_entry(project: Project) -> ProjectTimelineEntry:
+    """One timeline row: the id plus every milestone (statuses derived)."""
+
+    return ProjectTimelineEntry(id=project.id, milestones=milestone_views(project))
 
 
 def project_summary(

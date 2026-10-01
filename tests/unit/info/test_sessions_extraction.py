@@ -683,9 +683,10 @@ def test_a_drain_is_published_in_the_rows_and_named_in_the_table(
     assert LEAVING_ON_SIGNAL in out, out
     # ...AND THE BOUND IS INSIDE IT. The row is where an operator decides whether
     # to touch a draining runtime, and the phrase alone promises a boundary the
-    # 120 s bound can take away (U9): the qualified sentence is the shipped one,
-    # and the column has to be wide enough to print it whole.
-    assert "(up to 2 min)" in out, out
+    # bound can take away (U9): a turn that stops making progress is cut after
+    # ``SIGNAL_DRAIN_S`` of silence, so the qualified sentence is the shipped
+    # one, and the column has to be wide enough to print it whole.
+    assert "(cut if silent 2 min)" in out, out
     # The drain does NOT reclassify the row: STATE is liveness (the process IS
     # alive and heartbeating), and the drain is what it is doing — the same
     # division the NEEDS column makes for a parked gate.
