@@ -14,6 +14,7 @@ import type {
 	Directories,
 	ModelEntry,
 	PastSession,
+	PendingAsk,
 	ProjectLinkedSession,
 	ProjectSummary,
 	ProjectView,
@@ -103,6 +104,18 @@ export function getSessions(): Promise<{
 
 export function getCommands(): Promise<{ commands: SlashCommand[] }> {
 	return request("/api/commands");
+}
+
+/** Every queued ask worth showing, across conversations (design §4/§5.3).
+
+    Index-backed on the daemon side and read on demand rather than fed: each row
+    is the frozen `PendingAsk` shape plus `session_id` and `cwd`, because a row
+    drawn under another conversation's name must be answerable against THAT
+    conversation's route. An ask outlives the runtime that queued it, so this
+    answer never needs one — but answering one sent to a session with no live
+    runtime is a refusal naming the reason, not a silent failure. */
+export function getAsks(): Promise<{ asks: PendingAsk[] }> {
+	return request("/api/asks");
 }
 
 export function getModels(): Promise<{ models: ModelEntry[] }> {

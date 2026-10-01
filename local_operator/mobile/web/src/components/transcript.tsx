@@ -10,6 +10,7 @@
  */
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Markdown } from "./markdown"
+import { AskRow } from "./ask-row";
 import { ToolRow } from "./tool-row"
 import { RowBoundary } from "./row-boundary";
 import { followScrollTop } from "../lib/scroll-follow";
@@ -256,6 +257,13 @@ function Entry({ entry, pid }: { entry: TranscriptEntry; pid: string }) {
 		case "notice":
 		case "compaction":
 			return <NoticeRow entry={entry} />;
+		/* THE QUEUED ASK SETTLING (design §4/§5). Both kinds carry structured
+		   details — the Q&A for a response, the notice's own text for a deadline —
+		   so they render through their own card rather than the notice row, which
+		   has nowhere to put a disclosure. */
+		case "ask_response":
+		case "ask_timeout":
+			return <AskRow entry={entry} />;
 		default:
 			return null;
 	}

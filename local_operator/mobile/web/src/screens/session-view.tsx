@@ -24,6 +24,8 @@
  */
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { resumeSession, setSessionPin } from "../api";
+import { AskDock } from "../components/ask-dock";
+import { AsksSheet } from "../components/asks-sheet";
 import { ModelSheet } from "../components/model-sheet";
 import { Composer } from "../components/composer";
 import { GateSheet } from "../components/gate-sheet";
@@ -51,6 +53,7 @@ import {
 	useRouteTitle,
 	useSessions,
 } from "../store";
+import { blockingPending, outstandingAsks } from "../lib/asks";
 import type { SessionProjection } from "../types";
 
 /** The header strip's control box: a real 44x44 target.
@@ -79,9 +82,14 @@ const HEADER_CONTROL =
 function Header({
 	projection,
 	sessionId,
+	onOpenAsks,
 }: {
 	projection: SessionProjection;
 	sessionId: string;
+	/** Summon the asks sheet. The header entry is the SECOND way into the
+	    EXPANDED state (§5.0's "explicit /asks / header action"); the minimized
+	    bar above the composer is the first. */
+	onOpenAsks: () => void;
 }) {
 	const [gateOpen, setGateOpen] = useState(false);
 	/* THE LOOSENING RECEIPT, held HERE rather than in the sheet (design round 6,
@@ -205,20 +213,39 @@ function Header({
 			>
 				{pinned ? "★" : "☆"}
 			</button>
+			{/* THE ASKS ENTRY (§5.0). Present only while this conversation has
+			    something waiting, so the header never grows chrome for a state the
+			    session is not in — and absent at zero, exactly like the minimized
+			    bar. The COUNT is here rather than on the gate control because the
+			    two are different promises: a gate holds the turn, an ask does not. */}
+			{outstandingAsks(projection.asks).length > 0 ? (
+				<button
+					type="button"
+					onClick={onOpenAsks}
+					aria-label={`queued asks in this session (${outstandingAsks(projection.asks).length})`}
+					className={cn(HEADER_CONTROL, "!min-w-0 px-2 text-meta text-accent")}
+				>
+					? asks
+				</button>
+			) : null}
 			{/* THE GATE CONTROL (stage D). On the phone this is the LOOSEN surface:
 			    `/approvals auto` is authority-increasing, so it asks the runtime for a
 			    per-action challenge and signs it with this phone's non-extractable key.
 			    Before the redesign a phone could not loosen in ANY session, and the
 			    refusal told the reader to find "the window that started this session" —
 			    a window a phone cannot become. The label says what the control is about
-			    (approvals) rather than naming the command; the sheet names the command. */}
+			    (approvals) rather than naming the command; the sheet names the command.
+
+			    `blockingPending`, not `projection.pending`: once the runtime publishes
+			    `asks`, a mirrored ask is not a gate and must not make the approvals
+			    control claim this session "needs you" (design §4, client rule N3). */}
 			<button
 				type="button"
 				onClick={() => setGateOpen(true)}
 				aria-label="approvals in this session"
 				className={cn(HEADER_CONTROL, "!min-w-0 px-2 text-meta text-ink-muted")}
 			>
-				{projection.pending ? "needs you" : "approvals"}
+				{blockingPending(projection.pending, projection.asks) ? "needs you" : "approvals"}
 			</button>
 			<GateSheet
 				open={gateOpen}
@@ -402,8 +429,18 @@ export function SessionScreen({
 	 * yet. Read above the `!projection` return because hooks cannot be called
 	 * after it, and resolved against the transcript by id — see `pending-echo.ts`. */
 	const pendingEchoes = usePendingEchoes(sessionId, projection?.transcript);
+	/* THE BLOCKING PENDING REQUEST, with the legacy ask mirror removed (§4's
+	   client rule N3). One derivation, read by the gate control's label, the two
+	   panels' `forceCollapsed` and the card's own render site: an ask that rides
+	   the single-slot mirror must not collapse the panels, must not make the
+	   header say "needs you", and must not be rendered as a second copy of a row
+	   the queued surface already shows. */
+	const blocking = blockingPending(projection?.pending, projection?.asks);
 	const [modelsOpen, setModelsOpen] = useState(false);
 	const [effortOpen, setEffortOpen] = useState(false);
+	/* The asks sheet — the EXPANDED half of R7 (§5.0). Client-local interaction
+	   state with no wire meaning, exactly as the design's §5.0 states. */
+	const [asksOpen, setAsksOpen] = useState(false);
 	const rootRef = useRef<HTMLDivElement>(null);
 	/* THE RUNG'S HEIGHT, MEASURED BECAUSE IT IS THE OVERLAY'S (round 2,
 	   U23 = D7). The ladder is an overlay (round 1, U19/D4) so the column's
@@ -552,7 +589,11 @@ export function SessionScreen({
 			    (the ended strip's resume) opts back in with `pointer-events-auto`.
 			    Sheets are `fixed z-50`; this overlay sits at `z-10`, under them. */}
 			<div className="relative">
-				<Header projection={projection} sessionId={sessionId} />
+				<Header
+					projection={projection}
+					sessionId={sessionId}
+					onOpenAsks={() => setAsksOpen(true)}
+				/>
 				{/* The spend + context glance (phase 1), read-only and self-hiding:
 				    it renders nothing until either reading has something to state. */}
 				<SessionStatus projection={projection} />
@@ -645,18 +686,18 @@ export function SessionScreen({
 			{projection.todos.some((p) => p.items.length > 0) ? (
 				<TodosPanel
 					todos={projection.todos}
-					forceCollapsed={Boolean(projection.pending)}
+					forceCollapsed={Boolean(blocking)}
 				/>
 			) : null}
 			{projection.subagents.length > 0 ? (
 				<SubagentsPanel
 					pid={sessionId}
 					subagents={projection.subagents}
-					forceCollapsed={Boolean(projection.pending)}
+					forceCollapsed={Boolean(blocking)}
 				/>
 			) : null}
 
-			{projection.pending ? (
+			{blocking ? (
 				/* Key the WHOLE card on request_id + question_index so React
 				   remounts it for each question of a multi-part ask. A
 				   multi-question ask keeps the SAME request_id pending and only
@@ -681,12 +722,24 @@ export function SessionScreen({
 				   revisit only if the daemon ever wires `remember` through
 				   to a per-tool store. */
 				<PendingCard
-					key={`${projection.pending.request_id}:${projection.pending.kind}:${projection.pending.question_index}`}
+					key={`${blocking.request_id}:${blocking.kind}:${blocking.question_index}`}
 					pid={sessionId}
-					pending={projection.pending}
+					pending={blocking}
 					count={projection.pending_count}
 				/>
 			) : null}
+
+			{/* THE MINIMIZED ASK BAR (§5.0, R7). It sits directly above the composer
+			    and is the only ask affordance on this screen: tapping it opens the
+			    asks sheet, which is where answering happens. It is absent at zero
+			    asks, and its presence CHANGES NOTHING about the composer beneath it —
+			    with the bar showing, the composer is an ordinary conversation
+			    composer, so a message typed there can never be sent as an answer.
+			    That is the half of §5.0's routing rule this screen enforces; the other
+			    half ("while EXPANDED the composer sends the answer") is enforced by the
+			    sheet being modal over this column: while it is open, the sheet's own
+			    answer fields are the only inputs that can receive a keystroke. */}
+			<AskDock rows={projection.asks} onOpen={() => setAsksOpen(true)} />
 
 			<Composer
 				pid={sessionId}
@@ -702,6 +755,13 @@ export function SessionScreen({
 				onClose={() => setModelsOpen(false)}
 				pid={sessionId}
 				projection={projection}
+			/>
+
+			<AsksSheet
+				open={asksOpen}
+				onClose={() => setAsksOpen(false)}
+				currentSessionId={sessionId}
+				onOpenConversation={(target) => navigate(`/s/${target}`)}
 			/>
 			</>}
 		</div>

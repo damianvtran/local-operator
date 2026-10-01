@@ -31,6 +31,15 @@ Three sessions, each one shaped to isolate one surface:
   case: `forceClosed` dims the header, and a dim above the count's level takes
   the count with it (design D4). No other fixture puts both on screen, which is
   why the dim's cost to that glyph went unmeasured until round 2.
+* ``asks`` — the QUEUED-ASK surface (design
+  ``docs/design/ask-nonblocking.md`` §5.3): five queued asks covering open (one
+  multi-question head), addressed, and TIMED-OUT-and-still-answerable, plus two
+  settled ones; the transcript carries an ``ask_response`` and an
+  ``ask_timeout`` row; and the legacy single-slot mirror is published beside
+  them so a client drawing the ask twice would show it here. The asks are also
+  seeded into the daemon's INDEX, which is what ``GET /api/asks`` reads.
+* ``asks-settled`` — the same surface at ZERO outstanding asks (the bar must be
+  absent), with only the settling rows left in the transcript.
 
 No runtime scanner and no registrant sockets (``dial_registrants=False``), so
 this never touches the operator's live daemon or their sessions. HOME and
@@ -42,13 +51,16 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import time
+from typing import Any
 
 import uvicorn
 
 import scripts.probe_isolation  # noqa: F401  -- must be the first local import
-from local_operator.mobile.daemon import MobileDaemon, SessionEntry, build_app
+from local_operator.mobile.daemon import MobileDaemon, SessionEntry, _dial, build_app
 from local_operator.mobile.types import (
     AskOptionWire,
+    PendingAskWire,
     PendingRequest,
     SessionProjection,
     SessionRecord,
@@ -57,6 +69,7 @@ from local_operator.mobile.types import (
     TodoPhase,
     TranscriptEntry,
 )
+from local_operator.session.runtime.server import RuntimeServer  # noqa: E402
 
 #: The daemon's password for THIS run: the caller's second argument, or a value
 #: generated here.
@@ -438,11 +451,505 @@ def _stale_projection() -> SessionProjection:
     return projection
 
 
+def _question(
+    qid: str,
+    text: str,
+    *,
+    options: list[tuple[str, str]] | None = None,
+    multi: bool = False,
+    secret: bool = False,
+    persist: bool = False,
+) -> dict[str, Any]:
+    """One question in the shape ``asks/queue._question_shape`` stores, which is
+    the shape the wire carries verbatim (design §4: the FULL question rides, so
+    a surface draws a picker without re-deriving the ask)."""
+    return {
+        "id": qid,
+        "question": text,
+        "options": [
+            {"label": label, "description": description} for label, description in (options or [])
+        ],
+        "multi": multi,
+        "recommended": 0 if options else None,
+        "secret": secret,
+        "persist": persist,
+    }
+
+
+def _ask(
+    ask_id: str,
+    *,
+    status: str = "open",
+    created_s: int,
+    expires_in_s: int,
+    timeout_s: int = 900,
+    questions: list[dict[str, Any]],
+    urgent: bool = False,
+    delivered: bool = False,
+    answers: dict[str, list[str]] | None = None,
+    answered_by: str = "",
+) -> PendingAskWire:
+    """One queued ask, in epoch MILLISECONDS (``created_at``/``expires_at`` are
+    ``now_ms()`` on the wire, unlike the seconds every other timestamp uses)."""
+    now = int(time.time() * 1000)
+    return PendingAskWire(
+        ask_id=ask_id,
+        created_at=now + created_s * 1000,
+        expires_at=now + expires_in_s * 1000,
+        timeout_s=timeout_s,
+        urgent=urgent,
+        status=status,
+        delivered=delivered,
+        questions=questions,
+        answers=answers,
+        answered_by={"surface": answered_by} if answered_by else None,
+    )
+
+
+def _queued_ask_projection() -> SessionProjection:
+    """The phone's queued-ask surface with every state that matters on screen.
+
+    Three LIVE asks and two settled ones, in the wire's own order (open first,
+    newest first), because the states are what a reader has to be able to tell
+    apart:
+
+    * ``qa-head`` — the OLDEST open ask (two questions: a picker with a
+      recommended option, and a multi-select), so the bar's head rule and the
+      card's multi-question form are both visible;
+    * ``qa-second`` — a newer open ask, so the count and the list have more than
+      one row;
+    * ``qa-deadline`` — TIMED OUT and still answerable, which is the state the
+      fixed copy exists for ("the agent moved on; you can still answer");
+    * ``qa-settled`` / ``qa-declined`` — terminal, so the card's receipt shape
+      and the honest "no reply was sent" line are in the same frame.
+
+    The transcript also carries the two SETTLING rows (an ``ask_response`` row
+    for a late answer and an ``ask_timeout`` row), because the response card is
+    the other half of this surface and a capture that only ever shows the queue
+    would not look at it.
+    """
+    now = int(time.time() * 1000)
+    asks = [
+        _ask(
+            "qa-second",
+            created_s=5,
+            expires_in_s=600,
+            questions=[
+                _question(
+                    "s1",
+                    "Answer the second ask first?",
+                    options=[
+                        ("yes", "answers the newest row first"),
+                        ("no", "leaves it for the head ask"),
+                    ],
+                )
+            ],
+        ),
+        _ask(
+            "qa-head",
+            created_s=-120,
+            expires_in_s=780,
+            questions=[
+                _question(
+                    "h1",
+                    "Which sequencing should the rollout use?",
+                    options=[
+                        ("layout first", "the smallest diff reaches the wheel"),
+                        ("roster first", "the change the operator reported"),
+                        ("both together", "one patch, one contract to read"),
+                    ],
+                ),
+                _question(
+                    "h2",
+                    "Which surfaces must the verification cover?",
+                    options=[
+                        ("phone", "the bundle that ships in the wheel"),
+                        ("terminal", "the viewer reading the same fold"),
+                        ("desktop", "the third surface on the same wire"),
+                    ],
+                    multi=True,
+                ),
+            ],
+        ),
+        _ask(
+            "qa-deadline",
+            created_s=-900,
+            expires_in_s=-240,
+            status="timed_out",
+            questions=[
+                _question(
+                    "d1",
+                    "The deadline passed — does the answer still hold?",
+                    options=[
+                        ("it holds", "the agent will be told late"),
+                        ("changed", "say what changed"),
+                    ],
+                )
+            ],
+        ),
+        _ask(
+            "qa-settled",
+            created_s=-1800,
+            expires_in_s=600,
+            status="answered",
+            delivered=True,
+            questions=[
+                _question(
+                    "t1",
+                    "Ship the phone surface behind the flag?",
+                    options=[("yes", "dark until the flip"), ("no", "hold the surface too")],
+                )
+            ],
+            answers={"t1": ["yes"]},
+            answered_by="tui",
+        ),
+        _ask(
+            "qa-declined",
+            created_s=-2400,
+            expires_in_s=600,
+            status="declined",
+            questions=[_question("x1", "Take the long route through the relay?")],
+            answered_by="desktop",
+        ),
+    ]
+    projection = SessionProjection(
+        session_id="asks",
+        pid=900010,
+        kind="tui",
+        conversation_name="Queued asks",
+        streaming=False,
+        transcript=[
+            TranscriptEntry(
+                id="q-1",
+                kind="user",
+                text="Ask me before you land the phone surface.",
+            ),
+            TranscriptEntry(
+                id="q-2",
+                kind="assistant",
+                text=(
+                    "Queued three questions; continuing with the parts that do "
+                    "not depend on them."
+                ),
+            ),
+            TranscriptEntry(
+                id="q-3",
+                kind="ask_timeout",
+                text=(
+                    "Timed out after 4m — the agent moved on; you can still answer "
+                    "(ask qa-deadline)"
+                ),
+                details={
+                    "ask_id": "qa-deadline",
+                    "status": "timed_out",
+                    "waited_s": 240,
+                    "urgent": False,
+                    "severity": "warning",
+                    "text": (
+                        "[Ask timed out] No reply to ask qa-deadline arrived within 4m "
+                        "(asked 15m ago). The deadline passed — does the answer still "
+                        "hold?\nProceed without it: use your recommended option or best "
+                        "judgment and state the assumption in your report. The ask stays "
+                        "open for the user; if they answer later you will be told."
+                    ),
+                },
+            ),
+            TranscriptEntry(
+                id="q-4",
+                kind="ask_response",
+                text="Answered late — the agent was told (ask qa-settled)",
+                details={
+                    "ask_id": "qa-settled",
+                    "status": "late",
+                    "severity": "warning",
+                    "questions": [
+                        _question(
+                            "t1",
+                            "Ship the phone surface behind the flag?",
+                            options=[
+                                ("yes", "dark until the flip"),
+                                ("no", "hold the surface too"),
+                            ],
+                        )
+                    ],
+                    "answers": {"t1": ["yes"]},
+                    "at": now - 30_000,
+                    "text": (
+                        "You already proceeded when this ask timed out; reconsider "
+                        "only if the answer changes your work.\n\n"
+                        "The user answered yes."
+                    ),
+                },
+            ),
+        ],
+        version=11,
+    )
+    projection.asks = asks
+    projection.asks_open = 2
+    # THE LEGACY MIRROR IS DELIBERATELY ALSO SET. A real runtime publishes it for
+    # one release so old clients can still answer, and the phone must NOT draw it
+    # a second time (design §4, client rule N3) — so the state that would show the
+    # defect twice is the state the fixture serves.
+    projection.pending = PendingRequest(
+        request_id="qa-head.0",
+        kind="ask",
+        title="Which sequencing should the rollout use?",
+        options=[
+            AskOptionWire(label="layout first", description="the smallest diff reaches the wheel"),
+            AskOptionWire(label="roster first", description="the change the operator reported"),
+            AskOptionWire(label="both together", description="one patch, one contract to read"),
+        ],
+    )
+    projection.pending_count = 0
+    return projection
+
+
+def _settled_ask_projection() -> SessionProjection:
+    """The zero-outstanding state with a HISTORY: a conversation whose asks have
+    all settled. The minimized bar must be absent here (zero asks), while the
+    transcript still carries the settling rows a reader scrolls back to."""
+    projection = SessionProjection(
+        session_id="asks-settled",
+        pid=900011,
+        kind="tui",
+        conversation_name="Asks settled",
+        streaming=False,
+        transcript=[
+            TranscriptEntry(id="s-1", kind="user", text="Answer when you can."),
+            TranscriptEntry(
+                id="s-2",
+                kind="ask_response",
+                text="Answered — delivering (ask sa-answered)",
+                details={
+                    "ask_id": "sa-answered",
+                    "status": "answered",
+                    "severity": "info",
+                    "questions": [
+                        _question(
+                            "a1",
+                            "Ship behind the flag?",
+                            options=[
+                                ("yes", "dark until the flip"),
+                                ("no", "hold the surface too"),
+                            ],
+                        )
+                    ],
+                    "answers": {"a1": ["yes"]},
+                    "at": int(time.time() * 1000) - 60_000,
+                    "text": "The user answered yes.",
+                },
+            ),
+            TranscriptEntry(
+                id="s-3",
+                kind="ask_response",
+                text="Ask sa-declined declined — the agent was told",
+                details={
+                    "ask_id": "sa-declined",
+                    "status": "declined",
+                    "severity": "info",
+                    "questions": [_question("d1", "Take the long route through the relay?")],
+                    "answers": {},
+                    "at": int(time.time() * 1000) - 30_000,
+                    "text": "The user declined; decide yourself.",
+                },
+            ),
+        ],
+        version=2,
+    )
+    # Presence with an EMPTY list is not expressible on this wire (§4's A2
+    # addendum: absence is the empty case), so a session with nothing waiting
+    # publishes NO asks field at all — which is also what an old runtime sends,
+    # and the reason the bar hides on both.
+    projection.asks = None
+    projection.asks_open = None
+    return projection
+
+
+class QueuedAskHarness:
+    """A REAL runtime handle serving the queued-ask surface.
+
+    WHY A LIVE RUNTIME AND NOT ANOTHER SYNTHETIC PROJECTION. The other fixture
+    sessions are static pictures of a state, which is all an overflow capture
+    needs. This one has to be ANSWERABLE: the phone's answer flow (fill the
+    form, send, watch the card become a receipt) only means anything if the
+    frame actually reaches a runtime and the runtime's own fold comes back —
+    a synthetic entry would refuse every answer, and the refusal would be the
+    rig's, not the route's.
+
+    So the answers are recorded here, the projection is re-derived from them
+    (the same ``PendingAsk`` the wire carries, with its status flipped), and the
+    runtime pushes the new projection to the relay — which is also how the
+    capture sees the phone update with no reload: the live-update half of the
+    requirement, through the same path a real session uses.
+    """
+
+    def __init__(self, projection: SessionProjection) -> None:
+        self.projection = projection
+        self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
+        self.answers: dict[str, dict[str, list[str]]] = {}
+        self.declined: list[str] = []
+        self.dismissed: list[str] = []
+        #: Called after every settlement, so the runtime repaints its attached
+        #: readers. A REAL handle has its own event stream driving that push
+        #: (``subscribe_events``); this one has no events, so the fixture wires
+        #: the runtime's own coalesced repaint instead. Without it the answer
+        #: lands on the wire and the phone keeps its pre-answer frame — the
+        #: difference between a capture of the flow and a capture of a stall.
+        self.on_change: Any = None
+
+    # -- the SessionHandle surface the runtime probes ----------------------
+    @property
+    def session_projection_seed(self) -> SessionProjection:
+        return self.projection
+
+    def subscribe(self, on_projection: Any) -> Any:
+        return lambda: None
+
+    async def refresh(self) -> None:
+        return None
+
+    # -- the ORDINARY SessionHandle ops, present so the class satisfies the
+    # -- protocol ``RuntimeServer`` is typed against (pyright checks the
+    # -- argument structurally, and 11 missing methods is a type error even
+    # -- though nothing in this fixture sends one). They RECORD rather than
+    # -- raise, the same shape ``test_daemon.FakeHandle`` uses: a fixture that
+    # -- dies because a future runtime probes an op it does not use would be
+    # -- trading a type error for a worse one.
+    def _record(self, name: str, *args: Any, **kwargs: Any) -> str:
+        self.calls.append((name, args, kwargs))
+        return f"{name} ok"
+
+    async def prompt(self, text: Any, images: Any = None, command_id: Any = None) -> str:
+        return self._record("prompt", text)
+
+    async def steer(self, text: Any, images: Any = None, command_id: Any = None) -> str:
+        return self._record("steer", text)
+
+    async def abort(self) -> str:
+        return self._record("abort")
+
+    async def set_model(self, provider: Any, model_id: Any) -> str:
+        return self._record("set_model", provider, model_id)
+
+    async def set_effort(self, effort: Any) -> str:
+        return self._record("set_effort", effort)
+
+    async def slash(self, command: Any, args: Any) -> str:
+        return self._record("slash", command, args)
+
+    async def new_conversation(self) -> str:
+        return self._record("new_conversation")
+
+    async def resume_session(self, session_id: Any) -> str:
+        return self._record("resume_session", session_id)
+
+    async def approval_answer(self, request_id: Any, approved: Any, remember: Any) -> str:
+        return self._record("approval_answer", request_id, approved, remember)
+
+    async def ask_answer(
+        self, request_id: Any, value: Any, question_index: Any = None
+    ) -> str:
+        return self._record("ask_answer", request_id, value)
+
+    #: The ask whose answer this runtime REFUSES with the queue's own sentence,
+    #: standing in for the single-winner rule (design §2.4): another surface
+    #: settled it first, the phone's screen is one repaint behind, and the copy
+    #: the loser reads is the queue's rather than the client's. It is the one
+    #: refusal a capture can reach deterministically.
+    already_answered_elsewhere = "qa-deadline"
+
+    async def ask_respond(self, ask_id: str, answers: dict[str, list[str]], by: str = "") -> str:
+        if str(ask_id) == self.already_answered_elsewhere:
+            raise ValueError("already answered by desktop.")
+        self.answers[str(ask_id)] = {
+            str(key): [str(item) for item in (values or [])] for key, values in answers.items()
+        }
+        self._settle(str(ask_id), "answered", self.answers[str(ask_id)])
+        return "answered"
+
+    async def ask_decline(self, ask_id: str, by: str = "") -> str:
+        self.declined.append(str(ask_id))
+        self._settle(str(ask_id), "declined", None)
+        return "declined"
+
+    async def ask_dismiss(self, ask_id: str, by: str = "") -> str:
+        self.dismissed.append(str(ask_id))
+        return "dismissed"
+
+    def _publish_index(self) -> None:
+        """Write the derived index the AGGREGATE reads (design §4).
+
+        What a real session's reconcile tick does, and for the same reason: an
+        ask outlives the runtime that asked it, so ``GET /api/asks`` answers from
+        this file rather than from a live fold. Without it the asks sheet would
+        keep showing the pre-answer rows while the session view showed the
+        receipt — two surfaces disagreeing about one ask.
+        """
+        from local_operator.asks.store import write_entry
+        from local_operator.paths import config_dir
+
+        root = config_dir()
+        session_id = self.projection.session_id
+        (root / "sessions" / session_id).mkdir(parents=True, exist_ok=True)
+        write_entry(
+            root,
+            session_id,
+            cwd="/synthetic",
+            asks=[row.to_json() for row in (self.projection.asks or [])],
+        )
+
+    def _settle(self, ask_id: str, status: str, answers: dict[str, list[str]] | None) -> None:
+        """Flip the row the way the queue's fold does, so the pushed projection
+        is the state a real runtime would publish (a settled row, and the open
+        count falling with it)."""
+        for row in self.projection.asks or []:
+            if row.ask_id != ask_id:
+                continue
+            row.status = status
+            row.delivered = True
+            row.answers = answers
+            row.answered_by = {"surface": "phone"}
+        open_rows = [row for row in (self.projection.asks or []) if row.status == "open"]
+        self.projection.asks_open = len(open_rows)
+        self._publish_index()
+        # Mirror the reset the fold's own publisher does: with nothing left to
+        # mirror, the legacy card goes away rather than showing a settled ask.
+        self.projection.pending = None if not open_rows else self.projection.pending
+        self.projection.version += 1
+        if self.on_change is not None:
+            self.on_change()
+
+
+def seed_ask_index(projections: list[SessionProjection]) -> None:
+    """Publish the asks into the daemon's INDEX, the way a live runtime does.
+
+    The aggregate (``GET /api/asks``) is index-backed on purpose (design §4):
+    an ask outlives the runtime that queued it, so the route reads a derived
+    file rather than dialling anything. A fixture that only set the projection
+    would therefore leave the asks sheet empty while the session view showed a
+    full queue — the exact skew the index exists to avoid.
+
+    The session DIRECTORIES are created too, and that is load-bearing rather
+    than cosmetic: ``store.entry_is_stale`` sweeps an entry whose session is
+    gone (nothing could ever answer it), so an index seeded beside no
+    conversation is swept on first read.
+    """
+    from local_operator.asks.store import write_entry
+    from local_operator.paths import config_dir
+
+    root = config_dir()
+    sessions = root / "sessions"
+    for projection in projections:
+        (sessions / projection.session_id).mkdir(parents=True, exist_ok=True)
+        rows = [row.to_json() for row in (projection.asks or [])]
+        write_entry(root, projection.session_id, cwd="/synthetic", asks=rows)
+
+
 async def main() -> None:
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 4187
     password = required_password(sys.argv[2:])
     daemon = MobileDaemon(port=port, password=password, dial_registrants=False)
-    for projection in (
+    projections = [
         _roster_projection(),
         _ask_projection(),
         _approval_projection(),
@@ -452,7 +959,15 @@ async def main() -> None:
         _failures_projection(),
         _failures_pending_projection(),
         _stale_projection(),
-    ):
+        # THE ZERO-ASKS STATE of the same surface (the bar must be absent, and
+        # the settling rows are still in the transcript).
+        _settled_ask_projection(),
+    ]
+    # The ANSWERABLE queued-ask session is not in that list: it is served by a
+    # real runtime below, so its projection arrives over the relay's own dial
+    # rather than being injected into the daemon's table.
+    queued = _queued_ask_projection()
+    for projection in projections:
         record = SessionRecord(
             pid=projection.pid,
             kind="tui",
@@ -467,11 +982,54 @@ async def main() -> None:
         entry.projection = projection
         daemon.session_projections[projection.session_id] = projection
         daemon.table.entries[record.pid] = entry
+    # The aggregate route reads the derived INDEX, not the projections (an ask
+    # outlives the runtime that asked it), so the fixture has to seed it or the
+    # asks sheet would open empty beside a session view showing a full queue.
+    # ``LOP_ASK_FIXTURE_EMPTY_INDEX=1`` serves the OTHER side of the aggregate:
+    # the session directories are still created, but no ask is published into the
+    # index, so ``GET /api/asks`` answers empty while the live runtime still
+    # publishes its own asks to the session view. That skew is real rather than
+    # invented — the runtime writes the index on its reconcile tick, so an ask
+    # can be on the projection a moment before the aggregate carries it — and it
+    # is the only way to photograph the sheet's empty state at all, because at
+    # zero asks a session offers neither the bar nor the header entry to open it.
+    seed_ask_index([] if os.environ.get("LOP_ASK_FIXTURE_EMPTY_INDEX") else [*projections, queued])
+    # THE ANSWERABLE SESSION IS A REAL RUNTIME, not another still picture: the
+    # phone's answer flow is only meaningful if the frame reaches a runtime and
+    # the runtime's own fold comes back (see ``QueuedAskHarness``). The relay
+    # dials it exactly as it dials a terminal session — its record is the real
+    # registry one, and the projection the phone renders is pushed over that
+    # socket rather than injected into the daemon's table.
+    harness = QueuedAskHarness(queued)
+    registrant = RuntimeServer(harness, kind="tui")
+    registrant.start()
+    harness.on_change = registrant._schedule_push
+    dial = None
+    from local_operator.session.runtime import registry
+
+    deadline = asyncio.get_running_loop().time() + 10
+    record = None
+    while asyncio.get_running_loop().time() < deadline:
+        found = [pair for pair in registry.scan() if pair[1] == "live"]
+        if found:
+            record = found[0][0]
+            break
+        await asyncio.sleep(0.05)
+    if record is None:
+        raise SystemExit("the fixture's runtime never registered")
+    entry = SessionEntry(record)
+    daemon.table.entries[record.pid] = entry
+    dial = asyncio.ensure_future(_dial(daemon, entry))
     app = build_app(daemon)
     print(f"Fixture mobile: http://127.0.0.1:{port}", flush=True)
-    await uvicorn.Server(
-        uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
-    ).serve()
+    try:
+        await uvicorn.Server(
+            uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+        ).serve()
+    finally:
+        if dial is not None:
+            dial.cancel()
+        registrant.close()
 
 
 if __name__ == "__main__":

@@ -460,6 +460,29 @@ function SessionCard({
 						{s.todos_open} todo
 					</span>
 				) : null}
+				{/* THE OUTSTANDING-ASKS CHIP (design §4/§5.0). DISTINCT FROM THE APPROVAL
+				    STATE and wearing the accent for exactly that reason: the row's
+				    `needs_attention`/`pending` arm means a decision is holding the run,
+				    while a queued ask is a question the agent keeps working through — a
+				    reader who could not tell them apart would learn to ignore both. The
+				    accent is the same ink the minimized bar's `?` glyph uses, so the two
+				    surfaces name one state with one colour.
+
+				    ABSENT AT ZERO, never a zero badge: the field itself is absent while
+				    the runtime cannot report asks, and `0` is a session with nothing
+				    waiting, which needs no mark. */}
+				{typeof s.asks_open === "number" && s.asks_open > 0 ? (
+					<span
+						className="shrink-0 font-mono text-mono-sm text-accent"
+						aria-label={
+							s.asks_open === 1
+								? "1 question waiting"
+								: `${s.asks_open} questions waiting`
+						}
+					>
+						{s.asks_open} question{s.asks_open === 1 ? "" : "s"}
+					</span>
+				) : null}
 			</div>
 			<div className="flex items-baseline gap-2">
 				<span className="min-w-0 truncate font-mono text-mono-sm text-ink-dim">
