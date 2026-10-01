@@ -33,6 +33,7 @@ live daemon or store.
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import stat
@@ -88,7 +89,7 @@ def _refresh(daemon: MobileDaemon) -> None:
 
 
 def _key_path(cfg: Path) -> Path:
-    return cfg / push_handles.PUSH_HANDLE_KEY_NAME
+    return push_handles.key_path(cfg)
 
 
 def _handle_for(client: TestClient, session_id: str) -> str:
@@ -413,4 +414,61 @@ def test_deleting_the_key_is_the_documented_rotation(
     assert _key_path(cfg).exists(), "the next mint did not create a key"
     assert fresh != old
     assert client.get(f"/api/push/conversation/{old}").status_code == 404
+    assert client.get(f"/api/push/conversation/{fresh}").status_code == 200
+
+
+def test_a_corrupt_key_is_refused_never_replaced_and_logged_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A wrong-width key: no re-mint, one log line, no traceback; recovery by delete.
+
+    The module's third design bullet ("refused rather than silently
+    replaced") is the one a refactor could rot silently -- a catch-and-remint
+    would rotate every outstanding handle with the whole suite green (review
+    round 1, MINOR-1). QA round 1 (Q-1) measured the companion defect in the
+    refusal's LOUDNESS: a full traceback per poll -- so this cell also pins
+    the log hygiene the registry states at ``_push_call``: one bounded
+    WARNING line per refusal, no ``exc_info``, then the documented rotation
+    (delete the file; the next mint is fresh).
+    """
+    cfg, daemon = _fixture(tmp_path, monkeypatch, "aaaaaaaaaaaa")
+    client = _logged_in(daemon)
+    _publish("aaaaaaaaaaaa")
+    _refresh(daemon)
+    old = _handle_for(client, "aaaaaaaaaaaa")
+
+    key_path = _key_path(cfg)
+    key_path.write_bytes(b"QACOR")  # a wrong width, not a rotation
+    os.chmod(key_path, 0o600)
+
+    with caplog.at_level(logging.WARNING, logger="local_operator.mobile"):
+        _refresh(daemon)
+        unread = client.get("/api/attention/unread")
+        body = unread.json()
+        refused = client.get(f"/api/push/conversation/{old}")
+
+    # The refusal stays additive: the read is healthy, the field is missing.
+    assert unread.status_code == 200
+    assert body["degraded"] == []
+    assert body["count"] == 1
+    assert [conversation["session_id"] for conversation in body["conversations"]] == [
+        "aaaaaaaaaaaa"
+    ]
+    assert "push_handle" not in body["conversations"][0]
+    # The previously valid handle is unknown -- a clean 404, never a 500.
+    assert refused.status_code == 404
+    # Refused, NOT repaired: no read may replace or re-mint the key.
+    assert key_path.read_bytes() == b"QACOR"
+
+    # Log hygiene (Q-1): one bounded line per refusal, no traceback storm.
+    refusals = [record for record in caplog.records if "push handle" in record.getMessage()]
+    assert len(refusals) == 2, "one line per refusal: the aggregate build + the resolve"
+    assert all(record.exc_info is None for record in refusals)
+    assert "Traceback" not in caplog.text
+
+    # Recovery is the documented rotation: delete the file; the next build
+    # mints a fresh key and a fresh handle.
+    key_path.unlink()
+    _refresh(daemon)
+    fresh = _handle_for(client, "aaaaaaaaaaaa")
     assert client.get(f"/api/push/conversation/{fresh}").status_code == 200

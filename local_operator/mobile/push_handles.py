@@ -92,6 +92,16 @@ class PushHandleKeyCorrupt(RuntimeError):
     """
 
 
+def key_path(config_dir: Path) -> Path:
+    """The key file's path under one config root.
+
+    Public because the daemon's refusal log names it: "which file" is the
+    first question a reader of that log line asks -- the same rule the device
+    registry states for its ``store_path``.
+    """
+    return config_dir / PUSH_HANDLE_KEY_NAME
+
+
 def handle_for(key: bytes, identity: str) -> str:
     """The mint recipe, pure: ``base64url(HMAC-SHA256(key, identity))[:22]``.
 
@@ -136,13 +146,16 @@ def resolve_conversation(config_dir: Path, handle: str) -> str | None:
         # Cannot be a handle this machine mints; skip the scan entirely.
         return None
     try:
-        key = _read_key(config_dir / PUSH_HANDLE_KEY_NAME)
-    except (PushHandleKeyCorrupt, OSError):
-        # A key this machine cannot use resolves nothing. Warning, not an
-        # error: the route's contract is that an unresolvable handle is
-        # cleanly unknown, and the aggregate read says the same thing by
-        # omitting the field.
-        logger.warning("push handle key could not be read from %s", config_dir, exc_info=True)
+        key = _read_key(key_path(config_dir))
+    except (PushHandleKeyCorrupt, OSError) as exc:
+        # A key this machine cannot use resolves nothing. One bounded line,
+        # no ``exc_info`` -- the log-hygiene rule the device registry states
+        # at ``_push_call`` (QA round 1 Q-1): the sentence
+        # IS the diagnosis, and a retrying client must not add a traceback
+        # per attempt. Warning, not an error: the route's contract is that an
+        # unresolvable handle is cleanly unknown, and the aggregate read says
+        # the same thing by omitting the field.
+        logger.warning("push handle resolution refused at %s: %s", key_path(config_dir), exc)
         return None
     if key is None:
         return None
@@ -156,8 +169,9 @@ def resolve_conversation(config_dir: Path, handle: str) -> str | None:
         # No conversations on this machine at all: the honest answer is that
         # nothing here mints this handle.
         return None
-    except OSError:
-        logger.warning("push handle resolution could not scan %s", root, exc_info=True)
+    except OSError as exc:
+        # One line, no ``exc_info``: the same rule the key refusal states.
+        logger.warning("push handle resolution could not scan %s: %s", root, exc)
         return None
     for name in names:
         if hmac.compare_digest(handle_for(key, conversation_identity(root / name)), handle):
@@ -189,7 +203,7 @@ def _load_or_mint_key(config_dir: Path) -> bytes:
     this process) a single serialized read-or-mint; the ``O_EXCL`` arm covers
     the cross-process case the lock cannot.
     """
-    path = config_dir / PUSH_HANDLE_KEY_NAME
+    path = key_path(config_dir)
     with _LOCK:
         for _ in range(2):
             key = _read_key(path)
