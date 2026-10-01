@@ -1,0 +1,223 @@
+{
+ "before_sheet": [
+  "/helpList",
+  "/copyCopy",
+  "/linksOpen",
+  "/newStart",
+  "/reloadRelaunch",
+  "/updateInstall",
+  "/resumePick",
+  "/aidaOpen",
+  "/moveChange",
+  "/renameName",
+  "/forkBranch",
+  "/archiveHide",
+  "/unarchiveShow",
+  "/deleteDelete",
+  "/modelSwitch",
+  "/effortShow",
+  "/fastToggle",
+  "/themeSwitch",
+  "/providerList",
+  "/settingsChange",
+  "/sidebarShow",
+  "/searchConfigure",
+  "/accountsList",
+  "/failoversShow",
+  "/usageShow",
+  "/contextShow",
+  "/sessionUsage,",
+  "/infoInstall,",
+  "/analyticsAggregated",
+  "/goalSet",
+  "/loopLoop",
+  "/btwAsk",
+  "/compactCompact",
+  "/stopEnd",
+  "/approvalsShow",
+  "/skillsList",
+  "/mcpList",
+  "/login",
+  "/logout",
+  "/notificationsUnread",
+  "/mobileRadient",
+  "/networkNetworks,",
+  "/credentialType",
+  "/teamList",
+  "/agentList",
+  "/projectTrack"
+ ],
+ "before_ended": {
+  "strip": [
+   "session ended \u2014 history kept",
+   "resume reopens it in your home folder",
+   "This session has ended \u2014 tap resume to continue."
+  ],
+  "alert": "This session has ended \u2014 tap resume to continue."
+ },
+ "after_sheet": [
+  "/renameName",
+  "/modelSwitch",
+  "/effortShow",
+  "/fastToggle",
+  "/contextShow",
+  "/goalSet",
+  "/compactCompact",
+  "/approvalsShow",
+  "/mcpList",
+  "/teamList",
+  "/agentList"
+ ],
+ "after_ended": {
+  "strip": [
+   "session ended \u2014 history kept",
+   "a send or resume reopens it in your home folder",
+   "This session has ended and couldn\u2019t be woken just now. Send again, or tap resume to reopen it."
+  ],
+  "alert": "This session has ended and couldn\u2019t be woken just now. Send again, or tap resume to reopen it."
+ },
+ "m1870": {
+  "default": {
+   "loaded": {
+    "meta": "width=device-width, initial-scale=1, viewport-fit=cover",
+    "innerWidth": 390,
+    "clientWidth": 390,
+    "vvScale": 1,
+    "vvWidth": 390,
+    "vvHeight": 844,
+    "dpr": 2,
+    "dataView": null
+   },
+   "after_pinch_out": {
+    "meta": "width=device-width, initial-scale=1, viewport-fit=cover",
+    "innerWidth": 390,
+    "clientWidth": 390,
+    "vvScale": 1,
+    "vvWidth": 390,
+    "vvHeight": 844,
+    "dpr": 2,
+    "dataView": null
+   },
+   "after_pinch_in_back": {
+    "meta": "width=device-width, initial-scale=1, viewport-fit=cover",
+    "innerWidth": 390,
+    "clientWidth": 390,
+    "vvScale": 3.000000476837158,
+    "vvWidth": 129.99998474121094,
+    "vvHeight": 281.3332824707031,
+    "dpr": 2,
+    "dataView": null
+   },
+   "session_loaded": {
+    "meta": "width=device-width, initial-scale=1, viewport-fit=cover",
+    "innerWidth": 390,
+    "clientWidth": 390,
+    "vvScale": 1,
+    "vvWidth": 390,
+    "vvHeight": 844,
+    "dpr": 2,
+    "dataView": null
+   },
+   "column_box": {
+    "w": 390,
+    "h": 844,
+    "styleH": "844px",
+    "vvh": "844px"
+   },
+   "composer_font_px": "16px",
+   "session_after_pinch_out": {
+    "meta": "width=device-width, initial-scale=1, viewport-fit=cover",
+    "innerWidth": 390,
+    "clientWidth": 390,
+    "vvScale": 1,
+    "vvWidth": 390,
+    "vvHeight": 844,
+    "dpr": 2,
+    "dataView": null
+   },
+   "column_box_after_pinch": {
+    "w": 390,
+    "h": 844,
+    "vvh": "844px"
+   }
+  },
+  "wide": {
+   "loaded": {
+    "meta": "width=512, viewport-fit=cover",
+    "innerWidth": 512,
+    "clientWidth": 512,
+    "vvScale": 0.76171875,
+    "vvWidth": 512,
+    "vvHeight": 1108.0205078125,
+    "dpr": 2,
+    "dataView": "wide"
+   },
+   "after_pinch_out": {
+    "meta": "width=512, viewport-fit=cover",
+    "innerWidth": 512,
+    "clientWidth": 512,
+    "vvScale": 0.76171875,
+    "vvWidth": 512,
+    "vvHeight": 1108.0205078125,
+    "dpr": 2,
+    "dataView": "wide"
+   },
+   "after_pinch_in_back": {
+    "meta": "width=512, viewport-fit=cover",
+    "innerWidth": 512,
+    "clientWidth": 512,
+    "vvScale": 2.285156011581421,
+    "vvWidth": 170.66668701171875,
+    "vvHeight": 369.3402099609375,
+    "dpr": 2,
+    "dataView": "wide"
+   },
+   "session_loaded": {
+    "meta": "width=512, viewport-fit=cover",
+    "innerWidth": 512,
+    "clientWidth": 512,
+    "vvScale": 0.76171875,
+    "vvWidth": 512,
+    "vvHeight": 1108.0205078125,
+    "dpr": 2,
+    "dataView": "wide"
+   },
+   "column_box": {
+    "w": 512,
+    "h": 1108,
+    "styleH": "1108.02px",
+    "vvh": "1108.0205078125px"
+   },
+   "composer_font_px": "16px",
+   "session_after_pinch_out": {
+    "meta": "width=512, viewport-fit=cover",
+    "innerWidth": 512,
+    "clientWidth": 512,
+    "vvScale": 0.76171875,
+    "vvWidth": 512,
+    "vvHeight": 1108.0205078125,
+    "dpr": 2,
+    "dataView": "wide"
+   },
+   "column_box_after_pinch": {
+    "w": 512,
+    "h": 1108,
+    "vvh": "1108.0205078125px"
+   }
+  }
+ },
+ "toggle_click": {
+  "probe": {
+   "meta": "width=512, viewport-fit=cover",
+   "innerWidth": 512,
+   "clientWidth": 512,
+   "vvScale": 0.76171875,
+   "vvWidth": 512,
+   "vvHeight": 1108.0205078125,
+   "dpr": 2,
+   "dataView": "wide"
+  },
+  "pressed": "true",
+  "stored": "1"
+ }
+}
