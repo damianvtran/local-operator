@@ -1041,14 +1041,14 @@ async def test_esc_while_pending_cancels_the_handoff(
 
         assert calls == ["create"], f"a cancelled start still ran {calls}"
         assert app._projects_view is not None, "a cancelled start closed the page"
+        # THE TRANSCRIPT keeps the long form: the durable record names the project.
         receipt = " ".join(text for text, _kind in notes)
-        assert STARTED_ID in receipt and "/resume" in receipt
-        # ...AND ON THE PAGE THE READER IS LOOKING AT (UX review round 2, U12):
-        # the transcript copy is the durable record, but the settled page used
-        # to be byte-identical to the pre-start frame, so `s` again was the
-        # reasonable next move. The page's own notice row carries it now.
-        assert view._notice is not None
-        assert STARTED_ID in view._notice and "/resume" in view._notice
+        assert STARTED_ID in receipt and "/resume" in receipt and "linked to alpha" in receipt
+        # ...AND THE PAGE GETS THE ACTION (UX review round 2, U12; QA round 3, Q5):
+        # the settled page used to be byte-identical to the pre-start frame, and
+        # the page's copy has to survive a narrow footer, so it carries the
+        # command rather than the project's name.
+        assert view._notice == f"started {STARTED_ID} · /resume {STARTED_ID} opens it"
 
     project = registry.get_project_by_name("alpha")
     assert project is not None and project.sessions == [STARTED_ID]
@@ -1119,6 +1119,67 @@ async def test_an_unknown_target_gets_the_rows_own_words(
         card.action_choose()
         await _settle(pilot)
         assert card._note == "could not start a session: no team named 'ghost'"
+
+
+@pytest.mark.asyncio
+async def test_the_page_receipt_fits_the_narrowest_footer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 3, Q5: the actionable half has to be on screen at 60 columns.
+
+    The full receipt names the project as well and measures 81 cells with a
+    two-word name, against the 56-cell footer a 60×24 page has — it was
+    ellipsised mid-word (`…; /re…`), so the reader who had just escaped an
+    impatient start could see the id and not the command. Driven at that size on
+    the real app, because the footer's width is a measurement and not a
+    constant.
+    """
+    from rich.cells import cell_len
+
+    session = _ProjectSession()
+    registry = _registry(tmp_path, "alpha")
+    session.project_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    release = asyncio.Event()
+    notes: list[tuple[str, str]] = []
+
+    async def slow_create(cwd: str, target: StartTarget) -> str:
+        await release.wait()
+        return STARTED_ID
+
+    monkeypatch.setattr(app, "_create_project_session", slow_create)
+    monkeypatch.setattr(app, "_kick_off_project_session", lambda *a, **k: _noop())
+    monkeypatch.setattr(app, "_resume_session", lambda *a, **k: None)
+    monkeypatch.setattr(app, "_notice", lambda text, kind="info": notes.append((text, kind)))
+
+    async with app.run_test(size=(60, 24)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        view.set_start_rows(_start_rows())
+        await pilot.press("s")
+        await pilot.pause()
+        card = view._start_card
+        assert card is not None
+        card.action_choose()
+        await pilot.pause()
+        assert card.pending
+        await pilot.press("escape")
+        await pilot.pause()
+        release.set()
+        await _settle(pilot)
+
+        notice = view._notice or ""
+        footer = view._detail.size.width
+        assert "/resume" in notice, notice
+        assert "…" not in notice, notice
+        assert cell_len(notice) <= footer, (notice, footer)
+        # And the durable copy still carries the project's name.
+        receipt = " ".join(text for text, _kind in notes)
+        assert "linked to alpha" in receipt
+
+
+async def _noop() -> None:
+    return None
 
 
 @pytest.mark.asyncio

@@ -34270,17 +34270,20 @@ class OperatorApp(App[None]):
             return bool(view_cancelled())
 
         def receipt() -> None:
-            sentence = (
+            # THE PAGE GETS THE ACTION, THE TRANSCRIPT GETS THE STORY (QA round 3,
+            # Q5). The full sentence names the project as well, which makes it 81
+            # cells with a two-word name — and the page's footer is 56 cells at
+            # 60×24, where it was ellipsised mid-word (`…; /re…`): the reader who
+            # had just escaped an impatient start could see the id but not the
+            # command that opens it. So the page's copy is the ACTION, and it is
+            # short enough to survive the narrowest footer this card can be read
+            # on; the durable transcript copy keeps the project name.
+            announce(f"started {session_id} · /resume {session_id} opens it")
+            self._notice(
                 f"started {session_id} — it is linked to {project.name}; "
-                f"/resume {session_id} opens it"
+                f"/resume {session_id} opens it",
+                "info",
             )
-            # BOTH CHANNELS, on purpose (UX review round 2, U12): the transcript
-            # keeps the durable record, and the page the reader is looking at
-            # gets the sentence that says the start they escaped did happen —
-            # otherwise the page is byte-identical to before and pressing `s`
-            # again is the reasonable next move.
-            announce(sentence)
-            self._notice(sentence, "info")
 
         if cancelled():
             receipt()
