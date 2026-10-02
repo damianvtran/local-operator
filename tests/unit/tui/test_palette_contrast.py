@@ -235,3 +235,30 @@ def test_warning_ink_clears_aa_on_the_card_ground() -> None:
             f"{name}: warning ink reads {ratio:.2f}:1 ({ink} on {ground}) — "
             "the card's warning rows fall under AA on their own ground"
         )
+
+
+def test_the_missing_chip_ink_clears_aa_on_the_card_ground() -> None:
+    """The quick-send card's ``[missing]`` chip rides the card's ground — AA there (R2-1).
+
+    The card's state chips paint on ``overlay`` (and on ``tint-select`` when
+    their row is selected), never on ``bg``/``surface`` — and the chip for a
+    link whose session is gone used to take ``dim``: 3.43:1 (dark) and 2.72:1
+    (light) on ``overlay``, under the 4.5:1 floor for normal text and the exact
+    number D5 moved the modal note ink off. It takes ``muted`` now; this pins
+    the mapping AND the pair, with the ratio in the failure message. The BRAND
+    ramps only, like the pin above.
+    """
+    from local_operator.tui.widgets.projects_send import state_ink_key
+
+    assert (
+        state_ink_key("missing") == "status_done"
+    ), "the card's [missing] chip re-mapped — re-measure its ink on the card ground"
+    for name in ("light", "dark"):
+        ink = theme.semantic_color("muted", name)
+        for ground_token in ("overlay", "tint-select"):
+            ground = theme.semantic_color(ground_token, name)
+            ratio = contrast(ink, ground)
+            assert ratio >= 4.5, (
+                f"{name}: the [missing] chip reads {ratio:.2f}:1 ({ink} on {ground}) — "
+                "under AA on the card's own ground"
+            )

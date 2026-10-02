@@ -1040,6 +1040,8 @@ class ProjectsView(Vertical):
             rungs = self._form_hint_rungs()
         elif self._mode == "compose":
             rungs = self._compose_hint_rungs()
+        elif self._mode == "send":
+            rungs = self._send_hint_rungs()
         width = max(self.size.width - 2, 1)
         chosen = rungs[-1]
         for leads, esc_label in rungs:
@@ -1140,6 +1142,27 @@ class ProjectsView(Vertical):
             return (row, esc_label)
 
         return [rung([], "cancel")]
+
+    def _send_hint_rungs(self) -> list[tuple[list[tuple[HintButton, str, bool]], str]]:
+        """The target picker's ONE rung: ``esc close``, and nothing else (R2-3).
+
+        The same defect the compose rung fixes, one mode over: while the card
+        is up it holds the keyboard, so every other key the canvas ladder
+        advertises — ``1 list``, ``c create``, ``m message``, ``d detail`` —
+        TYPES into the card's filter (reproduced: ``c`` -> filter "c"). The
+        card's own legend carries the picker's grammar; the page row must not
+        contradict it. ``esc`` is the one page key that still means something
+        here — it closes the card — so it keeps the row's only word.
+        """
+
+        def rung(
+            leads: list[tuple[HintButton, str, bool]], esc_label: str
+        ) -> tuple[list[tuple[HintButton, str, bool]], str]:
+            row = list(leads)
+            row.append((self._exit_hint, esc_label, bool(row)))
+            return (row, esc_label)
+
+        return [rung([], "close")]
 
     def _sync_form_hints(self) -> None:
         """Arm the form's hints against what they would act on just now.

@@ -125,6 +125,7 @@ def test_the_band_names_the_target_and_the_way_out() -> None:
 # sends straight to it, anything else asks), and the composer hand-over is a
 # message the app answers.
 
+import asyncio  # noqa: E402
 import os  # noqa: E402
 from pathlib import Path  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
@@ -938,3 +939,145 @@ async def test_a_filter_that_matches_nothing_says_so(tmp_path: Path) -> None:
         await pilot.press("backspace", "backspace", "backspace")
         await pilot.pause()
         assert [row.session_id for row in card.rows] == ["s1"]
+
+
+@pytest.mark.asyncio
+async def test_the_strip_states_the_send_in_flight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-2: the strip is the composer's statement about THIS send — the
+    in-flight line goes up before the outcome exists, and the outcome replaces
+    it rather than the other way round."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    from local_operator.tui.app import OperatorApp
+
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        target = SendTarget(kind="session", session_id="s1", label="work", state="live", live=True)
+        view._send_targets = lambda: [target]  # type: ignore[method-assign]
+        await pilot.press("m")
+        await pilot.pause()
+        card = view._send_card
+        assert card is not None
+        card.action_choose()
+        await pilot.pause()
+
+        record = SimpleNamespace(pid=os.getpid() + 1, session_id="s1")
+        monkeypatch.setattr(
+            "local_operator.mobile.peer_send.resolve_peer_target",
+            lambda **kwargs: (record, [], None),
+        )
+        gate = asyncio.Event()
+
+        async def _slow(*args, **kwargs):  # type: ignore[no-untyped-def]
+            await gate.wait()
+            return DeliveryOutcome(
+                "delivered", "the peer acknowledged it", "mid-1", "acked", 1, "", "live", "s1"
+            )
+
+        monkeypatch.setattr("local_operator.mobile.peer_send.deliver_peer_message_outcome", _slow)
+        editor = app._editor()
+        editor.load_text("first body")
+        await pilot.pause()
+        await pilot.press("enter")
+        # The strip speaks for the send now in flight…
+        assert await _settle(pilot, lambda: _strip(app) == (True, pending_line(target)))
+        # …and the outcome replaces it, not the other way round.
+        gate.set()
+        assert await _settle(pilot, lambda: _strip(app) == (True, sent_line(target, "delivered")))
+
+
+@pytest.mark.asyncio
+async def test_a_second_send_resets_the_strip_and_a_refusal_restores_the_band(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-2: after a delivered first send, a refused second one must not leave
+    `sent to … delivered` standing over the refusal — the band goes back to
+    addressing the kept draft, and the notice carries the refusal."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    from local_operator.tui.app import OperatorApp
+
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        target = SendTarget(kind="session", session_id="s1", label="work", state="live", live=True)
+        view._send_targets = lambda: [target]  # type: ignore[method-assign]
+        await pilot.press("m")
+        await pilot.pause()
+        card = view._send_card
+        assert card is not None
+        card.action_choose()
+        await pilot.pause()
+
+        record = SimpleNamespace(pid=os.getpid() + 1, session_id="s1")
+        monkeypatch.setattr(
+            "local_operator.mobile.peer_send.resolve_peer_target",
+            lambda **kwargs: (record, [], None),
+        )
+
+        async def _delivered(*args, **kwargs):  # type: ignore[no-untyped-def]
+            return DeliveryOutcome(
+                "delivered", "the peer acknowledged it", "mid-1", "acked", 1, "", "live", "s1"
+            )
+
+        monkeypatch.setattr(
+            "local_operator.mobile.peer_send.deliver_peer_message_outcome", _delivered
+        )
+        editor = app._editor()
+        editor.load_text("first body")
+        await pilot.pause()
+        await pilot.press("enter")
+        assert await _settle(pilot, lambda: _strip(app) == (True, sent_line(target, "delivered")))
+
+        async def _refuse(*args, **kwargs):  # type: ignore[no-untyped-def]
+            raise RuntimeError("the peer refused the dial")
+
+        monkeypatch.setattr("local_operator.mobile.peer_send.deliver_peer_message_outcome", _refuse)
+        editor.load_text("second body")
+        await pilot.pause()
+        await pilot.press("enter")
+        assert await _settle(
+            pilot,
+            lambda: view._notice == "could not send to ◆ s1: the peer refused the dial",
+        )
+        # The band hands itself back to the compose state: the kept draft is
+        # addressed to somebody again, and the first send's receipt is gone.
+        assert _strip(app) == (True, compose_band(target))
+        assert editor.text == "second body"
+
+
+@pytest.mark.asyncio
+async def test_the_page_hint_row_stops_advertising_keys_the_card_consumes(
+    tmp_path: Path,
+) -> None:
+    """R2-3: while the card is up it holds the keyboard — the canvas ladder's
+    keys TYPE into its filter (reproduced below: `c` -> filter "c"), so the
+    page row must not advertise them. The compose rung's fix, one mode over."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    from local_operator.tui.app import OperatorApp
+
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        target = SendTarget(kind="session", session_id="s1", label="work", state="live", live=True)
+        view._send_targets = lambda: [target]  # type: ignore[method-assign]
+        await pilot.press("m")
+        await pilot.pause()
+        card = view._send_card
+        assert card is not None
+        painted = " ".join(hint.rendered() for hint in view._hints.children if hint.display)
+        assert "esc" in painted and "close" in painted
+        for word in ("list", "create", "message", "detail", "next", "back"):
+            assert word not in painted, f"the page row still advertises `{word}` under the card"
+        # The repro behind the finding: a printable key lands in the filter,
+        # which is exactly why the ladder was a lie while the card was up.
+        await pilot.press("c")
+        await pilot.pause()
+        assert card.query_one("#projects-send-filter", Input).value == "c"
