@@ -2,40 +2,54 @@
 
 Three layers, split the way the rest of the projects surfaces split them:
 
-* the PURE half — :func:`start_targets` and :func:`filter_start_targets` — is
-  pinned without a terminal, because the rows' order and their addresses are
-  the feature and neither needs a screen to be wrong;
+* the PURE half — :func:`start_targets`, :func:`filter_start_targets`,
+  :func:`match_spans`, :func:`fit_row` and :func:`subject_line` — is pinned
+  without a terminal, because the rows' order, the crop rule and the card's
+  copy are the feature and none of them needs a screen to be wrong;
 * the card's geometry and grammar are driven over the real page (the app is the
   only host that loads the shipped stylesheet);
 * the boot flow is driven through the app's own handler with the creation core
   and the runtime engagement REPLACED, because the real ones spawn a detached
   runtime and write a session directory — what this file can honestly assert is
-  the ORDER and the refusal handling, which is what the slice is.
+  the ORDER, the cancellability and the refusal handling.
 """
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
 import pytest
+from rich.style import Style
 
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.projects_start import (
     AGENT_SECTION,
     NO_AGENT_NOTE,
     NO_MATCH_NOTE,
+    NO_ROOM_NOTE,
     NO_TEAM_NOTE,
+    PLAIN_DETAIL,
+    PLAIN_HEADER,
     PLAIN_LABEL,
+    REFUSAL_MARK,
     START_CARD_CHROME_ROWS,
     START_CARD_ROW_CAP,
     TEAM_SECTION,
     StartPickerCard,
     StartTarget,
     filter_start_targets,
+    fit_row,
+    match_spans,
     start_targets,
+    subject_line,
 )
-from local_operator.tui.widgets.projects_view import ProjectsViewStartRequested
+from local_operator.tui.widgets.projects_view import (
+    ProjectsViewStartRequested,
+    _style_resolver,
+)
+from local_operator.tui.widgets.subagent_view import HintButton
 from tests.unit.tui.test_projects_view import (  # noqa: E402
     _boot,
     _factory,
@@ -49,7 +63,9 @@ from tests.unit.tui.test_projects_view import (  # noqa: E402
 STARTED_ID = "ab12cd34ef56"
 
 
-def _team(name: str, *, manager: str = "manager", counts: tuple[int, ...] = (1, 1)) -> dict:
+def _team(
+    name: str, *, manager: str = "manager", counts: tuple[int, ...] = (1, 1)
+) -> dict[str, Any]:
     return {
         "name": name,
         "label": name.title(),
@@ -58,48 +74,81 @@ def _team(name: str, *, manager: str = "manager", counts: tuple[int, ...] = (1, 
     }
 
 
-def _agent(name: str, description: str = "") -> dict:
+def _agent(name: str, description: str = "") -> dict[str, Any]:
     return {"name": name, "label": name.title(), "description": description}
+
+
+def _start_rows() -> list[StartTarget]:
+    return start_targets(
+        teams=[_team("core"), _team("lopdev")],
+        agents=[_agent("coder", "implements one bounded slice end to end")],
+    )
+
+
+def _row_line(label: str, detail: str = "") -> str:
+    """The painted text of a row, in the card's own ``label · detail`` grammar."""
+    return f"{label} · {detail}" if detail else label
+
+
+def _filter(card: StartPickerCard, needle: str) -> None:
+    """Type ``needle`` into the card's filter, without a terminal.
+
+    The three things ``on_input_changed`` moves, in the same order: the query
+    the paint reads, the rows the filter admits, and the selection the card
+    opens on. Duplicating them here is the cost of asserting the card's PAINT
+    without mounting it — the alternative is a terminal for every note and
+    mark, which the surrounding pure tests exist to avoid.
+    """
+    card._query_text = needle.strip()
+    card._rows = filter_start_targets(card._all, needle)
+    card._index = card._default_index()
+    card._top = 0
 
 
 # -- the pure half ----------------------------------------------------------
 
 
-def test_the_rows_lead_with_teams_then_agents_then_the_plain_session() -> None:
-    """The spec's §7.6.1 order, and the plain row LAST (the honest tail)."""
+def test_the_plain_row_leads_and_the_registries_keep_their_order() -> None:
+    """The plain row FIRST (U4/U5/D5, the parity surface's layout), then the
+    spec's teams and agents in their own order."""
     rows = start_targets(
         teams=[_team("lopdev", counts=(1, 2)), _team("core")],
         agents=[_agent("coder", "implements"), _agent("reviewer", "reviews")],
     )
-    assert [row.kind for row in rows] == ["team", "team", "agent", "agent", "plain"]
-    assert [row.label for row in rows] == ["Lopdev", "Core", "Coder", "Reviewer", PLAIN_LABEL]
+    assert [row.kind for row in rows] == ["plain", "team", "team", "agent", "agent"]
+    assert [row.label for row in rows] == [PLAIN_LABEL, "Lopdev", "Core", "Coder", "Reviewer"]
     # The catalogue's order is preserved — this is NOT a second sort.
-    assert [row.name for row in rows][:2] == ["lopdev", "core"]
+    assert [row.name for row in rows][1:3] == ["lopdev", "core"]
     # A team row names its manager and how many member copies it runs; the
     # manager is excluded from the count (`Team.member_count`).
-    assert rows[0].detail == "manager · 3 roles"
-    assert rows[1].detail == "manager · 2 roles"
+    assert rows[1].detail == "manager · 3 roles"
+    assert rows[2].detail == "manager · 2 roles"
     # An agent row carries the registry's one-line description.
-    assert rows[2].detail == "implements"
-    # The plain row asks the create core for no attachment at all.
-    assert rows[4].name == "" and rows[4].detail == ""
+    assert rows[3].detail == "implements"
+    # The plain row leads, asks the create core for no attachment at all, and
+    # its copy is the parity surface's (U8).
+    assert rows[0].name == ""
+    assert rows[0].detail == PLAIN_DETAIL
 
 
 def test_an_empty_registry_still_offers_a_plain_session() -> None:
     """D7: the feature has to work on a fresh install with nothing registered."""
     rows = start_targets(teams=[], agents=[])
-    assert rows == [StartTarget(kind="plain", name="", label=PLAIN_LABEL)]
+    assert rows == [StartTarget(kind="plain", name="", label=PLAIN_LABEL, detail=PLAIN_DETAIL)]
     card = StartPickerCard(rows)
-    # Both sections still say what is missing rather than vanishing.
+    # Both sections still say what is missing rather than vanishing — and the
+    # plain row has a header of its OWN since U5, so it cannot read as a team.
     painted = [line.text for line in card.painted_lines()]
     assert NO_TEAM_NOTE in painted and NO_AGENT_NOTE in painted
-    assert PLAIN_LABEL in painted
+    assert _row_line(PLAIN_LABEL, PLAIN_DETAIL) in painted
+    assert PLAIN_HEADER in painted
+    assert painted.index(PLAIN_HEADER) < painted.index(_row_line(PLAIN_LABEL, PLAIN_DETAIL))
 
 
 def test_rows_without_a_name_are_dropped() -> None:
     """A target is addressed BY NAME, so a nameless row could only be refused."""
     rows = start_targets(teams=[{"name": "  "}, _team("core")], agents=[{}])
-    assert [row.name for row in rows] == ["core", ""]
+    assert [row.name for row in rows] == ["", "core"]
 
 
 def test_the_filter_is_a_subsequence_over_the_name_and_the_description() -> None:
@@ -122,6 +171,73 @@ def test_the_filter_narrows_the_plain_row_too() -> None:
     assert [row.kind for row in filter_start_targets(rows, "plain")] == ["plain"]
 
 
+def test_match_spans_are_the_cells_the_filter_looked_at() -> None:
+    """One matcher behind the admission and the paint (design D2)."""
+    assert match_spans("core", "Core  · manager · 2 roles") == [(0, 4)]
+    # A run of adjacent characters is ONE span, not one per character.
+    assert match_spans("abc", "xabcy") == [(1, 4)]
+    # Scattered characters are separate spans, and the order is the reader's.
+    assert match_spans("cr", "Core") == [(0, 1), (2, 3)]
+    # Casefolded both ways, and a miss is no spans at all.
+    assert match_spans("CORE", "core") == [(0, 4)]
+    assert match_spans("zzz", "core") == []
+    # An empty needle matches nothing rather than everything: the caller's
+    # "no filter" case is a separate question.
+    assert match_spans("   ", "core") == []
+
+
+def test_the_detail_absorbs_the_crop_and_the_full_width_is_used() -> None:
+    """Design D1: the label is the NAME, so the prose yields first.
+
+    A fixed 28-cell cap cropped the detail at every width and left 104 of 142
+    cells empty at 150×40; the rule is the row's MEASURED width.
+    """
+    label = "Copy Reviewer"
+    detail = (
+        "Review of written copy before it ships: user-visible product copy and prose "
+        "for a general reader, on comprehension, tone, claim support and AI-isms"
+    )
+    wide_label, wide_tail = fit_row(label, detail, 140)
+    assert wide_label == label
+    # The row FILLS the width it was given: the only slack is the cell the
+    # ellipsis stands in for, and the prose is what absorbed the crop.
+    assert len(wide_label) + len(wide_tail) == 140
+    assert wide_tail.endswith("…")
+    # Twice the width, twice as much prose — the crop tracks the MEASURED width
+    # rather than a fixed 28 cells, which is the defect this pins.
+    narrow_label, narrow_tail = fit_row(label, detail, 100)
+    assert len(narrow_label) == len(wide_label)
+    assert len(wide_tail) - len(narrow_tail) == 40
+    # A detail too small to say anything is dropped rather than rendered as a
+    # stub of an ellipsis.
+    assert fit_row(label, detail, len(label) + 4) == (label, "")
+    # The NAME is cropped only when even a bare name cannot fit — the last
+    # resort rather than the rule.
+    assert fit_row("a-very-long-name", "x", 8) == ("a-very-…", "")
+
+
+def test_a_match_past_the_crop_slides_the_window_to_it() -> None:
+    """Design D2: a row admitted for something the paint threw away."""
+    detail = "Read-only research: investigates a question across the workspace"
+    # No filter: the clause starts at the left, as always.
+    _label, tail = fit_row("Scout", detail, 30)
+    assert tail.startswith("  · Read-only")
+    # Filtered on a word deep in the clause: the window slides to it and the
+    # LEADING ellipsis says the text was entered in the middle.
+    _label, matched = fit_row("Scout", detail, 30, query="workspace")
+    assert "workspace" in matched
+    assert matched.split("· ", 1)[1].startswith("…")
+
+
+def test_the_subject_line_names_the_project_and_the_consequence() -> None:
+    """UX U2: the card says what it will do, and for which project."""
+    line = subject_line("parity-spec")
+    assert "parity-spec" in line
+    assert "links to" in line and "starts a turn" in line and "you go there" in line
+    # No project resolved: the sentence degrades without inventing a name.
+    assert "parity-spec" not in subject_line("")
+
+
 # -- the card ---------------------------------------------------------------
 
 
@@ -131,17 +247,37 @@ def test_the_card_paints_a_header_per_section_and_never_selects_one() -> None:
     )
     lines = card.painted_lines()
     assert [line.text for line in lines] == [
+        PLAIN_HEADER,
+        _row_line(PLAIN_LABEL, PLAIN_DETAIL),
         TEAM_SECTION,
         "Core · manager · 2 roles",
         AGENT_SECTION,
         "Coder · implements",
-        PLAIN_LABEL,
     ]
-    # Headers and the plain row's own line: only real rows carry a row index.
-    assert [line.header for line in lines] == [True, False, True, False, False]
-    assert [line.row for line in lines] == [-1, 0, -1, 1, 2]
+    # Headers and section notes carry no row index; only real rows do.
+    assert [line.header for line in lines] == [True, False, True, False, True, False]
+    assert [line.row for line in lines] == [-1, 0, -1, 1, -1, 2]
     # The block is what the card's height is made of: chrome + painted lines.
     assert card._visible_lines == len(lines)
+
+
+def test_the_card_opens_on_the_plain_row() -> None:
+    """UX U4: `s` then `enter` must not commit a roster by accident.
+
+    The first row used to be the alphabetically first TEAM, so two unaimed
+    keystrokes attached a team's worth of tokens; the desktop parity dialog
+    defaults to its plain option, and so does this card.
+    """
+    card = StartPickerCard(
+        start_targets(teams=[_team("core"), _team("lopdev")], agents=[_agent("coder")])
+    )
+    selected = card.selected()
+    assert selected is not None and selected.kind == "plain"
+    assert card.index == 0
+    # And the window starts there rather than sliding anywhere: the default is
+    # reachable without a single `↓`, and the sections below it are on screen.
+    assert 0 in set(card.painted_range())
+    assert card._top == 0
 
 
 def test_the_geometry_the_card_reserves_is_the_block_it_paints() -> None:
@@ -161,8 +297,8 @@ def test_the_window_slides_to_keep_the_selection_painted() -> None:
     rows = start_targets(teams=[_team(f"t{i:02d}") for i in range(8)], agents=[])
     card = StartPickerCard(rows)
     card.set_available(START_CARD_CHROME_ROWS + 3)
-    for _ in range(6):
-        card.action_move(1)
+    for _ in range(3):
+        card.action_move(-1)
     painted = set(card.painted_range())
     assert card.index in painted
     assert card._top > 0
@@ -187,28 +323,113 @@ def test_a_create_in_flight_refuses_a_second_pick() -> None:
     assert [m for m in posted if isinstance(m, StartPickerCard.Chosen)]
 
 
-def test_a_filter_that_matches_nothing_says_so() -> None:
-    """A mistyped filter is a keystroke to take back, not an empty card."""
+def test_a_refusal_does_not_look_like_a_progress_note() -> None:
+    """UX U3: three sentences shared one slot and one ink."""
     card = StartPickerCard(start_targets(teams=[_team("core")], agents=[]))
-    card._rows = filter_start_targets(card._all, "zzz")
+    card.set_pending()
+    pending = card._note_text()
+    card.show_refusal("could not start a session: no runtime")
+    refusal = card._note_text()
+    assert pending.plain != refusal.plain
+    assert refusal.plain.startswith(REFUSAL_MARK)
+    # The refusal takes the app's own refusal ink (`warning`, the pair the
+    # palette pin measures at 7.09:1 dark / 4.78:1 light on this ground) —
+    # not the muted ink the counter and the pending sentence wear.
+    assert refusal.style == card._ink("refusal")
+    assert pending.style == card._ink("muted")
+
+
+def test_a_filter_that_matches_nothing_names_the_right_objects() -> None:
+    """Design D3: the note said `sessions` in a card that has none."""
+    card = StartPickerCard(start_targets(teams=[_team("core")], agents=[]))
+    _filter(card, "zzz")
     assert card._rows == []
-    # Nothing SELECTABLE is painted — a mistyped filter is a keystroke to take
-    # back, and the note row (painted by `_repaint`) is what says so; that
-    # sentence is a DIFFERENT one from the empty-registry notes above (N2's
-    # distinction, one card over).
     assert all(line.row < 0 for line in card.painted_lines())
+    assert card._note_text().plain == NO_MATCH_NOTE
+    assert "session" not in NO_MATCH_NOTE
     assert NO_MATCH_NOTE not in (NO_TEAM_NOTE, NO_AGENT_NOTE)
 
 
-# -- the flow, over the real page -------------------------------------------
+def test_a_ground_with_no_room_says_so_instead_of_counting() -> None:
+    """UX U6: `+N more` promised rows the card could not paint."""
+    card = StartPickerCard(
+        start_targets(teams=[_team(f"t{i}") for i in range(6)], agents=[_agent("coder")])
+    )
+    card.set_available(START_CARD_CHROME_ROWS)
+    assert card._visible == 0
+    assert card._note_text().plain == NO_ROOM_NOTE
 
 
-def _start_rows() -> list[StartTarget]:
-    return start_targets(teams=[_team("core"), _team("lopdev")], agents=[_agent("coder", "impl")])
+def test_the_empty_registry_fact_survives_a_tight_ground() -> None:
+    """Design D4: the section note is the first thing the budget drops."""
+    card = StartPickerCard(start_targets(teams=[], agents=[]))
+    card.set_available(START_CARD_CHROME_ROWS + 1)
+    assert card._with_notes is False
+    note = card._note_text().plain
+    assert NO_TEAM_NOTE in note and NO_AGENT_NOTE in note
+    # With room for them the fact lives in the BLOCK, in its own section, and
+    # the note slot goes back to the counter.
+    card.set_available(START_CARD_CHROME_ROWS + 7)
+    assert card._with_notes is True
+    assert card._note_text().plain == ""
+
+
+def test_the_painted_row_marks_the_cells_the_filter_matched() -> None:
+    """Design D2: an admission the reader cannot audit reads as noise."""
+    card = StartPickerCard(
+        start_targets(teams=[], agents=[_agent("reviewer", "adversarial reading of diffs")]),
+        style_for=_style_resolver(),
+    )
+    _filter(card, "adversarial")
+    card.set_available(START_CARD_CHROME_ROWS + 5)
+    # The row's own painter, at a MEASURED width: an unmounted card has no
+    # content box, and a zero-width row paints nothing to mark.
+    line = next(line for line in card.painted_lines() if line.row >= 0)
+    text = card._row_text(line, line.row == card.index, 60)
+    marked = [span for span in text.spans if isinstance(span.style, Style) and span.style.underline]
+    assert marked, "the matched cells carry no mark"
+    marked_text = "".join(text.plain[span.start : span.end] for span in marked)
+    assert "adversarial" in marked_text
+    # On the SELECTED row the mark composes with the selection band instead of
+    # punching a hole in it (the two set different attributes, and `+` keeps
+    # both), so the cursor's row is not the one place a match is unreadable.
+    selected_row = card._row_text(line, True, 60)
+    for span in selected_row.spans:
+        if isinstance(span.style, Style) and span.style.underline:
+            assert span.style.bgcolor is not None, "the mark dropped the selection band"
+
+
+def test_a_click_on_a_section_header_selects_nothing() -> None:
+    """Agent review F6: `on_click` maps through PAINTED LINES, not row indices."""
+    card = StartPickerCard(
+        start_targets(teams=[_team("core")], agents=[_agent("coder", "implements")])
+    )
+    card.set_available(START_CARD_CHROME_ROWS + 6)
+    lines = card.painted_lines()
+    header_line = next(index for index, line in enumerate(lines) if line.header)
+    before = card.index
+
+    class _Event:
+        def __init__(self, y: int) -> None:
+            self.y = y
+
+        def stop(self) -> None:
+            pass
+
+    card.on_click(_Event(card._row_block_top() + header_line))
+    assert card.index == before, "a header click moved the selection"
+    # The row UNDER that header selects: the mapping is window-relative and
+    # accounts for the header line it just skipped.
+    row_line = next(index for index, line in enumerate(lines) if line.row >= 0)
+    card.on_click(_Event(card._row_block_top() + row_line))
+    assert card.index == lines[row_line].row
+
+
+# -- the page ---------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_s_opens_the_start_card_and_esc_puts_it_away(tmp_path: Path) -> None:
+async def test_s_opens_the_card_and_esc_puts_it_away(tmp_path: Path) -> None:
     session = _ProjectSession()
     session.project_registry = _registry(tmp_path, "alpha")
     app = OperatorApp(lambda: _factory(session))
@@ -222,14 +443,53 @@ async def test_s_opens_the_start_card_and_esc_puts_it_away(tmp_path: Path) -> No
         assert view._mode == "start"
         card = view._start_card
         assert card is not None
-        assert [row.kind for row in card.rows] == ["team", "team", "agent", "plain"]
-        # The card carries the grammar (spec §3.3's picker ladder).
-        legend = view._start_card.query_one("#projects-start-legend").render()
+        assert [row.kind for row in card.rows] == ["plain", "team", "team", "agent"]
+        # The card carries the grammar (spec §3.3's picker ladder) and the
+        # subject line names the project it is about (UX U2).
+        legend = card.query_one("#projects-start-legend").render()
         assert "esc close" in str(legend)
+        subject = card.query_one("#projects-start-subject").render()
+        assert "alpha" in str(subject)
         await pilot.press("escape")
         await pilot.pause()
         assert view._mode == "canvas"
         assert view._start_card is None
+
+
+@pytest.mark.asyncio
+async def test_s_from_the_detail_page_gets_the_full_width_card(tmp_path: Path) -> None:
+    """UX U1 (BLOCKER): the placement read the HIDDEN canvas body.
+
+    In detail mode the canvas is `display=False`, so its region is zero-width
+    and the card rendered 20 cells wide with its rows wrapped over three lines
+    at every terminal size. `s` is one of the two documented entries, so the
+    ground must be the surface that is actually showing.
+    """
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(150, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        view.set_start_rows(_start_rows())
+        await pilot.press("d")
+        await pilot.pause()
+        assert view._mode == "detail"
+        await pilot.press("s")
+        await pilot.pause()
+        await pilot.pause()
+        card = view._start_card
+        assert card is not None
+        assert (
+            card.region.width >= view.size.width - 8
+        ), f"the detail entry rendered a {card.region.width}-cell card"
+        assert card.region.width <= view.size.width
+        # The rows are one line each: the defect wrapped every one of them.
+        for line in card.rows_text().plain.splitlines():
+            assert len(line) <= card.region.width
+        await pilot.press("escape")
+        await pilot.pause()
+        assert view._mode == "detail"
 
 
 @pytest.mark.asyncio
@@ -249,7 +509,7 @@ async def test_the_page_hint_row_is_blank_while_the_card_holds_the_keys(
         painted = [
             hint.rendered()
             for hint in view._hints.children
-            if getattr(hint, "display", False) and hint.rendered().strip()
+            if isinstance(hint, HintButton) and hint.display and hint.rendered().strip()
         ]
         assert painted == [], painted
 
@@ -305,6 +565,8 @@ async def test_choosing_a_row_names_the_project_and_the_target(tmp_path: Path) -
         view.post_message = record  # type: ignore[method-assign]
         card = view._start_card
         assert card is not None
+        # The DEFAULT is the plain row (U4), so move to a team explicitly.
+        card._index = 1
         card.action_choose()
         await pilot.pause()
         requests = [m for m in posted if isinstance(m, ProjectsViewStartRequested)]
@@ -332,6 +594,66 @@ async def test_s_does_nothing_with_nothing_selected(tmp_path: Path) -> None:
         await pilot.press("s")
         await pilot.pause()
         assert view._start_card is None
+
+
+def test_the_start_key_never_displaces_a_shipped_hint() -> None:
+    """Agent review F4: the ladder must not move a shipped row.
+
+    The key rides a one-rung-wider VARIANT of the rows that carry `c create`,
+    never an extra element inside them: the ladder stops at the first rung that
+    fits, so a variant in front of its own base row can only ADD the key. This
+    sweeps every budget from 3 cells to 220 and asserts that whatever the base
+    ladder (the same rungs minus the variants) would paint is still painted,
+    and that no variant is unreachable — a rung behind a wider one is dead.
+    """
+    from local_operator.tui.widgets.projects_view import ProjectsView
+
+    for view_name in ("list", "board", "timeline"):
+        view = ProjectsView()
+        view._view = view_name
+        start_hint = view._start_hint
+        rungs = view._canvas_hint_rungs()
+        head = [(view._measure_hints(plan, esc), plan, esc) for plan, esc in rungs]
+        base = [
+            (view._measure_hints(plan, esc), plan, esc)
+            for plan, esc in rungs
+            if not any(hint is start_hint for hint, _label, _lead in plan)
+        ]
+        # Every variant is strictly narrower than the rung before it, so none is
+        # shadowed by a wider row.
+        previous = None
+        for width, plan, _esc in head:
+            if previous is not None and any(hint is start_hint for hint, _label, _lead in plan):
+                assert (
+                    width < previous
+                ), f"{view_name}: a variant at {width} is shadowed by {previous}"
+            previous = width
+        displaced: list[int] = []
+        for budget in range(3, 221):
+            chosen_head = next((plan for width, plan, _e in head if width <= budget), head[-1][1])
+            chosen_base = next((plan for width, plan, _e in base if width <= budget), base[-1][1])
+            labels_head = {label for _h, label, _l in chosen_head}
+            for _hint, label, _lead in chosen_base:
+                if label.strip() and label not in labels_head:
+                    displaced.append(budget)
+                    break
+        assert not displaced, f"{view_name}: budgets losing a shipped hint: {displaced[:8]}"
+
+
+def test_the_start_hint_carries_the_specs_own_label() -> None:
+    """Agent review F3: the label is `s start`, and the arithmetic that said
+    otherwise was measuring the wrong budget (`size.width - 2`, where
+    `size.width` is terminal − 4)."""
+    from local_operator.tui.widgets.projects_view import ProjectsView
+
+    view = ProjectsView()
+    labels = {label for plan, _esc in view._canvas_hint_rungs() for _hint, label, _lead in plan}
+    assert " start" in labels
+    assert " new" not in labels
+    detail_labels = {
+        label for plan, _esc in view._detail_hint_rungs() for _hint, label, _lead in plan
+    }
+    assert " start" in detail_labels
 
 
 # -- the boot flow (the app's own handler) ----------------------------------
@@ -373,7 +695,10 @@ async def test_the_app_creates_links_kicks_off_and_hands_off(
         view.set_start_rows(_start_rows())
         await pilot.press("s")
         await pilot.pause()
-        view._start_card.action_choose()  # type: ignore[union-attr]
+        card = view._start_card
+        assert card is not None
+        card._index = 0
+        card.action_choose()
         await _settle(pilot)
 
     assert [name for name, _ in calls] == ["create", "kickoff", "resume"]
@@ -386,6 +711,68 @@ async def test_the_app_creates_links_kicks_off_and_hands_off(
     # The auto-link is a WORKING link (the CoS exemption marks a FILING).
     assert project.sessions == [STARTED_ID]
     assert project.coordination_sessions == []
+
+
+@pytest.mark.asyncio
+async def test_esc_while_pending_cancels_the_handoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Agent review F5 / UX: `esc` on `starting session …` used to switch anyway.
+
+    The create is durable and keeps going — what the reader cancelled is being
+    TAKEN somewhere, so no kickoff turn is sent on their behalf either, and the
+    receipt names the id and the way in.
+    """
+    session = _ProjectSession()
+    registry = _registry(tmp_path, "alpha")
+    session.project_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    calls: list[str] = []
+    notes: list[tuple[str, str]] = []
+    release = asyncio.Event()
+
+    async def slow_create(cwd: str, target: StartTarget) -> str:
+        await release.wait()
+        calls.append("create")
+        return STARTED_ID
+
+    async def fake_kickoff(session_id: str, cwd: str, project: Any) -> None:
+        calls.append("kickoff")
+
+    def fake_resume(session_id: str, notice: Any) -> None:
+        calls.append("resume")
+
+    monkeypatch.setattr(app, "_create_project_session", slow_create)
+    monkeypatch.setattr(app, "_kick_off_project_session", fake_kickoff)
+    monkeypatch.setattr(app, "_resume_session", fake_resume)
+    # The receipt is the APP's notice (the transcript's own row), not the
+    # card's — recorded here so the wording can be asserted.
+    monkeypatch.setattr(app, "_notice", lambda text, kind="info": notes.append((text, kind)))
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        view.set_start_rows(_start_rows())
+        await pilot.press("s")
+        await pilot.pause()
+        card = view._start_card
+        assert card is not None
+        card.action_choose()
+        await pilot.pause()
+        assert card.pending, "the create did not enter its pending state"
+        await pilot.press("escape")
+        await pilot.pause()
+        assert view._start_card is None
+        release.set()
+        await _settle(pilot)
+
+        assert calls == ["create"], f"a cancelled start still ran {calls}"
+        assert app._projects_view is not None, "a cancelled start closed the page"
+        receipt = " ".join(text for text, _kind in notes)
+        assert STARTED_ID in receipt and "/resume" in receipt
+
+    project = registry.get_project_by_name("alpha")
+    assert project is not None and project.sessions == [STARTED_ID]
 
 
 @pytest.mark.asyncio
@@ -410,11 +797,11 @@ async def test_a_refused_create_lands_in_the_card_and_nothing_is_written(
         view.set_start_rows(_start_rows())
         await pilot.press("s")
         await pilot.pause()
-        view._start_card.action_choose()  # type: ignore[union-attr]
-        await _settle(pilot)
-
         card = view._start_card
         assert card is not None
+        card.action_choose()
+        await _settle(pilot)
+
         assert card.pending is False
         assert "no team named 'ghost'" in card._note
         # The page never switched and the store never changed.
@@ -424,10 +811,6 @@ async def test_a_refused_create_lands_in_the_card_and_nothing_is_written(
 
     assert handoffs == []
     assert not list((tmp_path / "sessions").glob("*")) if (tmp_path / "sessions").exists() else True
-
-
-async def _raise(error: Exception) -> None:
-    raise error
 
 
 @pytest.mark.asyncio
@@ -449,10 +832,13 @@ async def test_an_unknown_target_gets_the_rows_own_words(
         view.set_start_rows(start_targets(teams=[_team("ghost")], agents=[]))
         await pilot.press("s")
         await pilot.pause()
-        view._start_card.action_choose()  # type: ignore[union-attr]
-        await _settle(pilot)
         card = view._start_card
         assert card is not None
+        # The card OPENS on the plain row (UX U4), so step to the team row the
+        # case is about before choosing.
+        card._index = 1
+        card.action_choose()
+        await _settle(pilot)
         assert card._note == "could not start a session: no team named 'ghost'"
 
 
@@ -488,3 +874,7 @@ async def test_the_desktop_create_core_materialises_the_team_binding(tmp_path: P
     # And the refusal the app turns into a sentence is the core's own.
     with pytest.raises(KeyError):
         await pool.create(str(root), target={"kind": "team", "name": "ghost"})
+
+
+async def _raise(error: Exception) -> None:
+    raise error

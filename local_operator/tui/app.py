@@ -34172,7 +34172,10 @@ class OperatorApp(App[None]):
         # handler's choice, one surface over).
         self.run_worker(
             self._start_project_session_worker(
-                view.start_refusal, message.project_id, message.target
+                view.start_refusal,
+                lambda: view.start_cancelled,
+                message.project_id,
+                message.target,
             ),
             exclusive=False,
             exit_on_error=False,
@@ -34181,6 +34184,7 @@ class OperatorApp(App[None]):
     async def _start_project_session_worker(
         self,
         refuse: Any,
+        view_cancelled: Any,
         project_id: str,
         target: StartTarget,
     ) -> None:
@@ -34200,9 +34204,11 @@ class OperatorApp(App[None]):
         and the reference is what carries the project's title, status,
         description, progress, milestones and todos into the new session as the
         snapshot block rather than as a bare sentence.
-        """
-        import os
 
+        ``view_cancelled`` answers whether the reader dismissed the card while
+        this ran; when they did, the session still stands and the hand-off does
+        not (agent review round 1, F5).
+        """
         registry = self._project_registry()
         project = None
         if registry is not None:
@@ -34214,7 +34220,13 @@ class OperatorApp(App[None]):
             refuse("could not start a session: the project is no longer in the store")
             return
 
-        cwd = os.getcwd()
+        # THE APP'S OWN ANSWER for "the directory this session works in"
+        # (agent review round 1, F7): identical to `os.getcwd()` for a local
+        # session and correct for an attached one, which is the case the fork
+        # path already opens a child in (app.py's `action_fork_aside`). It
+        # feeds BOTH the create's cwd and the `@project:` expansion, so the two
+        # cannot come from different directories.
+        cwd = self.session_cwd()
         try:
             session_id = await self._create_project_session(cwd, target)
         except KeyError:
@@ -34237,6 +34249,29 @@ class OperatorApp(App[None]):
         except Exception as error:  # noqa: BLE001 — reported, never swallowed
             linked, link_reason = False, str(error)
 
+        # ESC MEANS NO, AND THE READER'S ESC OUTRANKS EVERY REMAINING STEP
+        # (agent review round 1, F5 / UX: reproduced — `esc` on `starting
+        # session …` closed the card and the app switched into the new session
+        # anyway). The check sits BEFORE the kickoff as well as before the
+        # hand-off, because both are things done on the reader's behalf: the
+        # create is durable and the session stands — the link follows, since it
+        # costs nothing and makes the session useful — but a cancelled start
+        # sends no turn, takes nobody anywhere, and reports the id and the way
+        # in instead.
+        def cancelled() -> bool:
+            return bool(view_cancelled())
+
+        def receipt() -> None:
+            self._notice(
+                f"started {session_id} — it is linked to {project.name}; "
+                f"/resume {session_id} opens it",
+                "info",
+            )
+
+        if cancelled():
+            receipt()
+            return
+
         try:
             await self._kick_off_project_session(session_id, cwd, project)
         except Exception as error:  # noqa: BLE001 — reported, never swallowed
@@ -34258,6 +34293,10 @@ class OperatorApp(App[None]):
                 f"{link_reason} — /project link adds it",
                 "warning",
             )
+
+        if cancelled():
+            receipt()
+            return
 
         # THE HAND-OFF IS THE APP'S OWN: `_resume_session` is exactly what
         # `/resume` and the sidebar's pick use (the remote-owner guard, the
