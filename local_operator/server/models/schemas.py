@@ -1065,8 +1065,11 @@ class SpeechRequest(BaseModel):
     Attributes:
         input: The text to generate speech from.
         instructions: Additional prompt with instructions for the speech generation.
-        model: The model to use for generation.
-        voice: The voice to use for generation.
+        model: The model to use for generation. OMITTED together with ``voice``
+            selects the descriptor-driven shape: the daemon derives the voice
+            from ``speech.voice.*`` and sends a ``voice_descriptor``, which is
+            what the desktop UI's agent-less fallback posts.
+        voice: The voice to use for generation. See ``model``.
         response_format: The format of the audio response. Default: "mp3".
         speed: The speed of the speech. Default: 1.0.
         provider: The provider to use for generation. Default: "openai".
@@ -1077,8 +1080,12 @@ class SpeechRequest(BaseModel):
     instructions: Optional[str] = Field(
         None, description="Additional prompt with instructions for the speech generation."
     )
-    model: str = Field(..., description="The model to use for generation.")
-    voice: str = Field(..., description="The voice to use for generation.")
+    # Optional as a PAIR: both absent is the descriptor-driven request, and no
+    # client could produce that state while they were required, so making them
+    # optional is additive. One of the two without the other is still a legacy
+    # request and is forwarded as such.
+    model: Optional[str] = Field(None, description="The model to use for generation.")
+    voice: Optional[str] = Field(None, description="The voice to use for generation.")
     response_format: str = Field(
         "mp3", description='The format of the audio response. Default: "mp3".'
     )

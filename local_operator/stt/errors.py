@@ -53,10 +53,20 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 # happened to contain both words. "credit balance is too low" is the provider
 # wording that carries the same meaning -- it is what Anthropic says when the
 # account is empty -- without the false positives.
+#
+# Two of the entries name the vendor's own machine code rather than its prose,
+# added for the speech direction (voicing S2 copy round 1, C1): ElevenLabs
+# reports an exhausted quota as ``status: "quota_exceeded"`` and OpenAI reports
+# one as ``code: "credit_balance_exhausted"``. They survive a translated or
+# reworded message, which matters because these vendors report the condition on
+# a status that says nothing about credit at all (ElevenLabs 401, OpenAI 429),
+# so the body is the only place the classification can come from.
 PROVIDER_CREDIT_MARKERS = (
     "insufficient_quota",
     "insufficient quota",
     "exceeded your current quota",
+    "quota_exceeded",
+    "credit_balance_exhausted",
     "no credits remaining",
     "out of credits",
     "insufficient credits",
