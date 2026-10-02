@@ -22,6 +22,13 @@ from local_operator.server.dependencies import (
 from local_operator.server.models.schemas import AgentSpeechRequest, SpeechRequest
 from local_operator.server.utils.operator import ServerExecutor
 from local_operator.server.utils.speech_utils import determine_voice
+from local_operator.tts.adapters import Legacy
+from local_operator.tts.cascade import (
+    TtsUnavailable,
+    resolve_voice_path,
+    synthesize_speech,
+)
+from local_operator.tts.descriptor import DEFAULT_GENDER, descriptor_from_config
 
 router = APIRouter()
 logger = logging.getLogger("local_operator.server.routes.speech")
@@ -243,7 +250,22 @@ async def create_agent_speech(
         if not agent:
             raise HTTPException(status_code=404, detail=SPEECH_UNKNOWN_AGENT_SENTENCE)
 
-        _require_radient_credential(radient_client)
+        # The resolver decides which rung can run, and it runs FIRST -- before
+        # any model configuration or classifier call -- so the nothing-available
+        # refusal is still cheap and still happens before any work, exactly as
+        # the credential gate it replaces did. Which rung is not this route's
+        # decision: a signed-in Radient account goes through the hub (which owns
+        # its own ElevenLabs→OpenAI cascade and maps the descriptor for
+        # whichever leg serves), and a BYO-only machine maps and calls the
+        # vendor itself.
+        resolution = await resolve_voice_path(
+            config_dir=config_manager.config_dir,
+            base_url=env_config.radient_api_base_url,
+            store=provider_auth_store,
+        )
+        if not resolution.servable:
+            logger.warning("Speech request refused for agent %s: no speech path", agent_id)
+            raise HTTPException(status_code=401, detail=SPEECH_NO_CREDENTIAL_SENTENCE)
 
         hosting = agent.hosting or config_manager.get_config_value("hosting")
         model_name = agent.model or config_manager.get_config_value("model_name")
@@ -306,28 +328,45 @@ async def create_agent_speech(
             agent=agent,
         )
 
-        voice = await determine_voice(agent, executor)
-
-        # The hub's speak-aloud contract: provider named explicitly (ElevenLabs
-        # primary; the OpenAI fallback is decided server-side, and only for
-        # ElevenLabs unavailability), the voice travels as the female/male
-        # ALIAS the hub resolves to a voice id, the model is omitted so the hub
-        # owns model choice, and language_code is forwarded only when set. No
-        # `instructions`: the OpenAI path's persona/delivery prompt has no
-        # ElevenLabs equivalent, and the hub's fallback applies its own neutral
-        # default -- a small delivery loss accepted for native multilingual
-        # pronunciation.
-        audio_data = radient_client.create_speech(
-            input_text=speech_request.input_text,
-            voice=voice,
-            response_format=speech_request.response_format,
-            speed=1.0,
-            provider="elevenlabs",
-            language_code=speech_request.language_code,
+        # The voicing descriptor: the configured dials, with ``gender``
+        # resolved from the classifier ONLY when the setting says ``auto`` (the
+        # hub refuses ``auto`` — it has no agent context to classify with, so
+        # this is the one field the daemon must resolve before sending). A
+        # fixed gender therefore skips the classifier entirely, which is both
+        # faster and the point of setting one.
+        configured_gender = config_manager.get_nested_value(
+            ("speech", "voice", "gender"), DEFAULT_GENDER
         )
+        if configured_gender == "auto":
+            resolved_gender = await determine_voice(agent, executor)
+        else:
+            resolved_gender = str(configured_gender)
+        descriptor = descriptor_from_config(config_manager, resolved_gender=resolved_gender)
 
+        # Which rung actually runs is the resolver's decision, above.
+        outcome = await synthesize_speech(
+            speech_request.input_text,
+            config_dir=config_manager.config_dir,
+            base_url=env_config.radient_api_base_url,
+            store=provider_auth_store,
+            descriptor=descriptor,
+            # Only the CALLER's own per-call language rides the legacy field;
+            # an absent one pins nothing, so the descriptor's language governs.
+            legacy=Legacy(language_code=speech_request.language_code or ""),
+            response_format=speech_request.response_format,
+            resolution=resolution,
+            radient_client=radient_client,
+        )
         media_type = f"audio/{speech_request.response_format}"
-        return Response(content=audio_data, media_type=media_type)
+        # The echoed-actual-path rule: relay the descriptors of the leg that
+        # ACTUALLY served — the hub's own headers on a hub-served call, this
+        # daemon's mapping headers on a BYO one — so a surface can tell what was
+        # honoured without listening to the audio.
+        return Response(
+            content=outcome.audio,
+            media_type=media_type,
+            headers=dict(outcome.speech_headers),
+        )
 
     except HTTPException as http_exc:
         # Routine refusals -- the no-credential 401, the unknown-agent 404 --
@@ -340,6 +379,25 @@ async def create_agent_speech(
         else:
             logger.warning("Speech request refused for agent %s: %s", agent_id, http_exc)
         raise http_exc
+    except TtsUnavailable as unavailable:
+        # The cascade's own refusal, in its three shapes. An ``APIError`` is an
+        # upstream refusal and keeps the per-status sentences the direct route
+        # uses. Anything else is a DEFECT in the leg that was serving, so it
+        # surfaces as the 500 this route has always given that class — with the
+        # real message and a stack, never a misleading "not signed in". And no
+        # failure at all means no rung could run (the resolver reported the
+        # same, so this is the belt to its braces): the sign-in sentence.
+        error = unavailable.error
+        if isinstance(error, APIError):
+            logger.warning("Speech cascade exhausted for agent %s: %s", agent_id, error)
+            raise _speech_refusal(error) from error
+        if error is not None:
+            logger.error(
+                "Failed to generate speech: %s", error, exc_info=error, extra={"agent_id": agent_id}
+            )
+            raise HTTPException(status_code=500, detail=f"Failed to generate speech: {error}")
+        logger.warning("Speech request refused for agent %s: no speech path", agent_id)
+        raise HTTPException(status_code=401, detail=SPEECH_NO_CREDENTIAL_SENTENCE)
     except APIError as upstream_exc:
         # Same classification as the /v1/tools/speech route above: an error
         # Radient reported inside a 200 body is raised as an upstream failure
