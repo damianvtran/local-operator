@@ -517,6 +517,9 @@ async def test_a_delivered_send_receipts_in_the_band_and_clears_the_draft(
         await pilot.press("enter")
         assert await _settle(pilot, lambda: _strip(app) == (True, "sent to ◆ s1 · delivered"))
         assert editor.text == ""
+        # The in-flight line is GONE, not blank: an empty notice would take the
+        # project detail's place in the footer (pass-5 frame catch).
+        assert view._notice is None
 
 
 @pytest.mark.parametrize(

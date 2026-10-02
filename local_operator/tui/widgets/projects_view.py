@@ -739,8 +739,13 @@ class ProjectsView(Vertical):
         reached nobody (U1) — and the footer is the pinned one-row chrome, so
         nothing moves when the line appears. Cleared by the next ``load``, a
         fresh detail entry, or leaving the detail by hand.
+
+        An EMPTY sentence is NO sentence: the footer shows the notice INSTEAD
+        of the project detail while one exists, so ``show_notice("")`` — how
+        the delivered receipt clears the in-flight line — must put the detail
+        back rather than blank the row (caught in the pass-5 frame).
         """
-        self._notice = text
+        self._notice = text or None
         self._paint_chrome()
 
     def _notice_text(self, width: int) -> Text:
