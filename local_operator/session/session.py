@@ -18652,13 +18652,74 @@ class Session:
         Overwrites the resume catch-up shim if one is installed, deliberately: a
         runtime that is leaving does not owe a catch-up of its own — the
         successor loads the same index and folds the same overdue wakes.
+
+        THE HOOK THIS REPLACES IS KEPT, so the overwrite is reversible: the one
+        give-up arm that ends up STILL SERVING (``process._abandon_move``)
+        releases this divert again through :meth:`resume_wakes_from_inbox`,
+        which puts back exactly what a fire would have used here before the
+        drain committed. Saved only while the current hook is not already the
+        spool, so a second retire cannot overwrite the pre-drain hook with the
+        spool itself.
         """
+        # ``getattr`` like ``_wake_rearms`` below: the cell harnesses bind these
+        # methods one at a time, so a host can reach here without the hook the
+        # real session owns in ``__init__`` — and ``None`` is the honest thing
+        # to save for it.
+        previous = getattr(self, "_wake_deliver_hook", None)
+        if previous != self._spool_wake_to_inbox:
+            self._wake_hook_before_drain: Callable[[DueWake], Awaitable[None]] | None = previous
         #: One-shot schedules this drain swallowed, written to the index by
         #: :meth:`hand_wakes_to_successor` at the exit. Owned here rather than in
         #: ``__init__`` because a session that never drains never has any, and
         #: the hook that fills it is installed on this same line.
         self._wake_rearms: list[WakeSchedule] = []
         self._wake_deliver_hook = self._spool_wake_to_inbox
+
+    def resume_wakes_from_inbox(self) -> bool:
+        """Undo :meth:`retire_wakes_to_inbox` — the departure was ABANDONED, not made.
+
+        The mirror of the retire, and it exists for one caller: ``end_drain``,
+        the give-up arm of a build handover (``process._abandon_move``, reached
+        from ``_drain_for`` when the drain cannot reach idle). The wake divert's
+        premise is that this runtime is leaving for a build whose files are
+        being replaced, and a fire that opens a turn in that window only loads
+        the departing tree — but an abandoned move KEEPS the build, so the
+        premise is gone and a runtime that serves again must DELIVER again.
+        Without this the spool hook stands for the rest of the process's life:
+        every fire is diverted to an inbox nobody drains until a successor
+        boots, and nothing on any surface says so (measured 2026-10-01/02: a
+        desk session lost ~14 h of fires while `lop wake list` showed a fresh
+        "last fired" and the supervisor saw a live runtime and skipped). The
+        same argument :meth:`resume_job_deliveries_to_turns` makes for settled
+        children, applied to the other harness-initiated arrival.
+
+        NO-CLOBBER: when the current hook is not the spool, some other path
+        owns the hook now (a resume catch-up, a test's sentinel) and this
+        returns False having touched nothing — undoing a drain that is not the
+        one in force would be a second, silent hook change on top of theirs.
+        Idempotent for the same reason: a second resume after a successful one
+        also finds a non-spool hook and returns False. Never raises — the
+        caller is releasing an exit latch and a failed undo must not block it.
+
+        The saved slot is CLEARED on the way out, so a later retire while
+        serving starts from the hook as it stands NOW rather than at whatever
+        it was before the previous drain.
+        """
+        try:
+            if self._wake_deliver_hook != self._spool_wake_to_inbox:
+                return False
+            restored = getattr(self, "_wake_hook_before_drain", None)
+            if restored is None:
+                # A host that never took the pre-drain hook (a fixture whose
+                # hook just isn't the session's own): the default delivery path
+                # is the only honest restore.
+                restored = self._deliver_wake
+            self._wake_deliver_hook = restored
+            self._wake_hook_before_drain = None
+            return True
+        except Exception:  # noqa: BLE001 — a failed undo must not block the abandon
+            logger.debug("could not restore wake delivery after an abandoned drain", exc_info=True)
+            return False
 
     async def _spool_wake_to_inbox(self, due: DueWake) -> None:
         """The draining hook: hand one fired wake to the successor. Never raises.
