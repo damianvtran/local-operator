@@ -598,11 +598,27 @@ def restore_root_logger() -> Iterator[None]:
     per-test is a fix that has to be remembered every time.
 
     Restores what the modules under test actually mutate: root handlers and
-    level, plus ``lastResort``, ``raiseExceptions`` and ``Logger.addHandler``,
-    which :mod:`local_operator.logger`'s silencing patches in place. This
+    level, every root handler's ``filters``, plus ``lastResort``,
+    ``raiseExceptions`` and ``Logger.addHandler``, which
+    :mod:`local_operator.logger`'s silencing patches in place. This
     replaces the identical fixtures that ``tests/unit/test_logger.py`` and
     ``tests/unit/tui/test_logger_silence.py`` each kept locally: they were
     right, they were just scoped to the two files that already knew.
+
+    HANDLER FILTERS are restored for the same reason, and they are the member
+    nothing else puts back. ``local_operator.mcp.redaction.attach`` puts a
+    record-MUTATING filter on every root handler the logger has at the moment an
+    MCP credential is registered, and pytest's capture handlers are process-wide
+    SINGLETONS — the plugin builds them once per worker and reuses them for every
+    test in it — so a filter attached while one test runs rewrites the records of
+    every later test that shares the worker. That filter moves the exception into
+    ``record.exc_text`` and sets ``record.exc_info = None``, so a later test
+    asserting the diagnostic arrived WITH ``exc_info`` fails on a record that did
+    arrive (``tests/unit/tui/test_projects_send.py``'s quick-send assertion is
+    the one that caught it, green alone and red in a shard). Restoring
+    ``root.handlers`` cannot undo it: the handler OBJECT survives the assignment,
+    and neither ``attach()`` nor ``unregister()`` ever detaches, so the filters
+    have to come off the handlers themselves.
     """
     root = logging.getLogger()
     saved_handlers = list(root.handlers)
@@ -610,12 +626,17 @@ def restore_root_logger() -> Iterator[None]:
     saved_last_resort = logging.lastResort
     saved_raise = logging.raiseExceptions
     saved_add_handler = logging.Logger.addHandler
+    saved_filters = [(handler, list(handler.filters)) for handler in saved_handlers]
     try:
         yield
     finally:
         logging.Logger.addHandler = saved_add_handler  # type: ignore[method-assign]
         logging.lastResort = saved_last_resort
         logging.raiseExceptions = saved_raise
+        # In place (``[:]``) rather than by rebinding: pytest's capture handler
+        # objects outlive this fixture, and a caller may hold the list object.
+        for handler, filters in saved_filters:
+            handler.filters[:] = filters
         root.handlers[:] = saved_handlers
         root.setLevel(saved_level)
 
