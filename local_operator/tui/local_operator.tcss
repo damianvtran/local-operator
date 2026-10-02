@@ -2396,7 +2396,17 @@ Screen.settings #input-dock #prompt-chevron {
     padding: 1 0 0 0;
 }
 
-/* The quick-send card (S6d parity P5a). It FLOATS, and that is the geometry
+/* The projects overlay card (S6d parity P5a quick-send; P5b's start-session
+ * picker shares this class and every rule below it — one card family, one
+ * ground, one geometry, and a second set of selectors is how the two would
+ * come to disagree about where a card sits). WHAT THE FAMILY SHARES IS THE
+ * FRAME — ground, elevation, inset, selection band, filter, legend and row
+ * grammar — and what a card puts BETWEEN its title and its rule is its own:
+ * the start card carries a subject line (`starts a turn · links to <project> ·
+ * you go there`, UX U2) and the send card goes title → rule. That is the
+ * D13 decision, stated rather than left to look like drift: the alternative
+ * was inventing a subject for the shipped send card, which is P5a's surface to
+ * change, not this PR's. It FLOATS, and that is the geometry
  * fix rather than decoration (design review round 1, D1/D2): as a flow child
  * the card competed with the canvas for rows and lost its own tail at 60x24,
  * and at 80x24 painted zero target rows while `enter` still picked one. The
@@ -2451,6 +2461,18 @@ Screen.settings #input-dock #prompt-chevron {
 
 .projects-send-card Input:focus {
     background: $lo-tint-select;
+}
+
+/* The placeholder is the card's only affordance LABEL, and it was the least
+ * legible text in the frame: the framework's default measured 3.38:1 on the
+ * focused input ground (design review round 1, D6) — under the 4.5:1 floor for
+ * normal text and well below every other ink in the card (rows 11.3:1, muted
+ * 6.51:1). `$lo-muted` on that same ground measures 6.72:1 and puts the hint
+ * in the card's own quiet voice, beside the section headers and the legend.
+ * Scoped to the FAMILY class on purpose: the quick-send picker's filter takes
+ * the same treatment, because it has the same placeholder on the same ground. */
+.projects-send-card .input--placeholder {
+    color: $lo-muted;
 }
 
 /* The caret and the selection band, the composer's pair (`Editor`): the

@@ -406,6 +406,7 @@ from local_operator.tui.widgets.projects_send import (
     refusal_notice,
     sent_line,
 )
+from local_operator.tui.widgets.projects_start import StartTarget, start_targets
 from local_operator.tui.widgets.projects_view import (
     ProjectsView,
     ProjectsViewAttachmentOpened,
@@ -416,6 +417,7 @@ from local_operator.tui.widgets.projects_view import (
     ProjectsViewMilestoneToggled,
     ProjectsViewRefreshRequested,
     ProjectsViewSendRequested,
+    ProjectsViewStartRequested,
 )
 from local_operator.tui.widgets.reasoning import DEFAULT_REASONING, ReasoningBlock
 from local_operator.tui.widgets.session_picker import (
@@ -33846,6 +33848,10 @@ class OperatorApp(App[None]):
             updated_at=_time.time(),
             own_session=self._own_session_id(),
         )
+        # The start picker's rows ride the same seed (P5b): the page never reads
+        # a registry, so the host hands them over while it is still building the
+        # first frame rather than on the keypress that opens the card.
+        page.set_start_rows(self._start_picker_rows())
 
     def _close_projects_view(self) -> bool:
         """Leave the projects mode and put the conversation back. True if open.
@@ -33943,6 +33949,41 @@ class OperatorApp(App[None]):
             updated_at=_time.time(),
             own_session=self._own_session_id(),
         )
+        view.set_start_rows(self._start_picker_rows())
+
+    def _start_picker_rows(self) -> list[StartTarget]:
+        """The start picker's rows, from the SAME catalogues the desktop pane reads.
+
+        ``team_catalogue``/``profile_catalogue`` are the desktop new-chat
+        picker's own two projections, so the TUI and the pane offer one list of
+        teams and agents rather than two that drift — and the names they carry
+        are the ADDRESSING keys ``validate_target`` resolves, which is what the
+        create body and the session's attachment sidecar both need.
+
+        Never raises: an unreadable registry degrades to an empty catalogue, and
+        the card then says so (`no teams registered`) with the plain row still
+        offered — the honest reading of an install that has none.
+        """
+        from local_operator.paths import config_dir
+
+        root = config_dir()
+        teams: list[Any] = []
+        agents: list[Any] = []
+        try:
+            from local_operator.server.utils.desktop_profiles import team_catalogue
+            from local_operator.teams import TeamRegistry
+
+            teams = team_catalogue(TeamRegistry(root))
+        except Exception:  # noqa: BLE001 — a picker is not a place to crash
+            logger.debug("projects: could not read the team catalogue", exc_info=True)
+        try:
+            from local_operator.agents import AgentRegistry
+            from local_operator.server.utils.desktop_profiles import profile_catalogue
+
+            agents = profile_catalogue(AgentRegistry(root))
+        except Exception:  # noqa: BLE001 — same
+            logger.debug("projects: could not read the agent catalogue", exc_info=True)
+        return start_targets(teams=teams, agents=agents)
 
     def on_projects_view_attachment_opened(self, message: ProjectsViewAttachmentOpened) -> None:
         """`↵` on an attachment row: hand the copied file to the OS (spec §7.4).
@@ -34103,6 +34144,250 @@ class OperatorApp(App[None]):
             editor.focus()
         except Exception:
             pass
+
+    def on_projects_view_start_requested(self, message: ProjectsViewStartRequested) -> None:
+        """`s` picked a row: boot a session for the project and hand off (P5b).
+
+        The whole flow runs in ONE worker, off the loop, because every step is
+        disk or process work: the create writes the session directory and its
+        attachment sidecar, the engage spawns a detached runtime, and the link
+        edits the project store. The card is told it is pending BEFORE the
+        worker's first await, so the surface says what is happening during the
+        seconds a runtime spawn takes.
+
+        FAILURE IS ANSWERED IN THE CARD, and the page never switches: a refusal
+        sentence with the rows still up leaves the reader exactly where they
+        asked, able to pick another row or close. Nothing about the page's
+        state changes on a failed start.
+        """
+        message.stop()
+        view = self._projects_view
+        if view is None:
+            return
+        view.start_pending()
+        # NOT exclusive: an exclusive worker cancels its group's other members,
+        # and the group here is the app's default one — an in-flight quick-send
+        # or engine worker is nobody's business to cancel. The card's own
+        # pending state is what refuses a second start (the sibling send
+        # handler's choice, one surface over).
+        self.run_worker(
+            self._start_project_session_worker(
+                view.start_refusal,
+                lambda: view.start_cancelled,
+                view.show_notice,
+                message.project_id,
+                message.target,
+            ),
+            exclusive=False,
+            exit_on_error=False,
+        )
+
+    async def _start_project_session_worker(
+        self,
+        refuse: Any,
+        view_cancelled: Any,
+        announce: Any,
+        project_id: str,
+        target: StartTarget,
+    ) -> None:
+        """Create → link → kick off → hand off, in that order and no other.
+
+        THE ORDER IS THE CONTRACT. The desktop create core writes the session
+        directory AND its attachment sidecar, so the team/agent the row names is
+        already in the facts the session LOADS before any runtime exists for it
+        — engaging first would boot a session that resolves its own default and
+        then belong to nobody in particular. The link follows the create because
+        it needs the id the create mints, and the appeal is made before the
+        hand-off so a refusal leaves the reader on the page they asked from.
+
+        ``announce`` is the PAGE's notice row (`show_notice`), the channel this
+        card's other outcomes already use: the transcript copy of the cancelled
+        receipt stays (it is the durable record), but the reader who just
+        escaped an impatient start is standing on the projects page, and a
+        sentence behind it is a sentence nobody reads (UX review round 2, U12).
+
+        The kickoff prompt is the spec's sentence plus the `@project:<name>`
+        reference (§7.6.3), expanded HERE through the app's own resolver: the
+        errand path bypasses the composer, so nothing downstream would expand it,
+        and the reference is what carries the project's title, status,
+        description, progress, milestones and todos into the new session as the
+        snapshot block rather than as a bare sentence.
+
+        ``view_cancelled`` answers whether the reader dismissed the card while
+        this ran; when they did, the session still stands and the hand-off does
+        not (agent review round 1, F5).
+        """
+        registry = self._project_registry()
+        project = None
+        if registry is not None:
+            try:
+                project = await asyncio.to_thread(registry.get_project, project_id)
+            except Exception:  # noqa: BLE001 — the page's own read failed
+                project = None
+        if project is None:
+            refuse("could not start a session: the project is no longer in the store")
+            return
+
+        # THE APP'S OWN ANSWER for "the directory this session works in"
+        # (agent review round 1, F7): identical to `os.getcwd()` for a local
+        # session and correct for an attached one, which is the case the fork
+        # path already opens a child in (app.py's `action_fork_aside`). It
+        # feeds BOTH the create's cwd and the `@project:` expansion, so the two
+        # cannot come from different directories.
+        cwd = self.session_cwd()
+        try:
+            session_id = await self._create_project_session(cwd, target)
+        except KeyError:
+            # The create core validates the target through the registries and
+            # answers an unknown name with a bare ``KeyError`` (its own
+            # contract, shared with the HTTP route). A bare `'ghost'` is not a
+            # sentence, so the row's own words are used instead.
+            refuse(f"could not start a session: no {target.kind} named '{target.name}'")
+            return
+        except Exception as error:  # noqa: BLE001 — every refusal is the reader's
+            refuse(f"could not start a session: {error}")
+            return
+
+        linked = True
+        link_reason = ""
+        try:
+            linked, link_reason = await asyncio.to_thread(
+                self._link_started_session, registry, project_id, session_id
+            )
+        except Exception as error:  # noqa: BLE001 — reported, never swallowed
+            linked, link_reason = False, str(error)
+
+        # ESC MEANS NO, AND THE READER'S ESC OUTRANKS EVERY REMAINING STEP
+        # (agent review round 1, F5 / UX: reproduced — `esc` on `starting
+        # session …` closed the card and the app switched into the new session
+        # anyway). The check sits BEFORE the kickoff as well as before the
+        # hand-off, because both are things done on the reader's behalf: the
+        # create is durable and the session stands — the link follows, since it
+        # costs nothing and makes the session useful — but a cancelled start
+        # sends no turn, takes nobody anywhere, and reports the id and the way
+        # in instead.
+        def cancelled() -> bool:
+            return bool(view_cancelled())
+
+        def receipt() -> None:
+            # THE PAGE GETS THE ACTION, THE TRANSCRIPT GETS THE STORY (QA round 3,
+            # Q5). The full sentence names the project as well, which makes it 81
+            # cells with a two-word name — and the page's footer is 56 cells at
+            # 60×24, where it was ellipsised mid-word (`…; /re…`): the reader who
+            # had just escaped an impatient start could see the id but not the
+            # command that opens it. So the page's copy is the ACTION, and it is
+            # short enough to survive the narrowest footer this card can be read
+            # on; the durable transcript copy keeps the project name.
+            announce(f"started {session_id} · /resume {session_id} opens it")
+            self._notice(
+                f"started {session_id} — it is linked to {project.name}; "
+                f"/resume {session_id} opens it",
+                "info",
+            )
+
+        if cancelled():
+            receipt()
+            return
+
+        try:
+            await self._kick_off_project_session(session_id, cwd, project)
+        except Exception as error:  # noqa: BLE001 — reported, never swallowed
+            # The session exists and is linked; only the first turn did not
+            # land. Say so, name the id, and do NOT switch: the reader can
+            # resume it themselves and nothing is half-created in the page.
+            refuse(
+                f"the session {session_id} was created and linked, but its first "
+                f"message did not send: {error} — /resume {session_id} opens it"
+            )
+            return
+
+        if not linked:
+            # The store's own cap/refusal, named with the route that fixes it.
+            # The session is real and engaged, so the hand-off still happens —
+            # refusing now would strand a working session the reader asked for.
+            self._notice(
+                f"started {session_id}, but it could not be linked to the project: "
+                f"{link_reason} — /project link adds it",
+                "warning",
+            )
+
+        if cancelled():
+            receipt()
+            return
+
+        # THE HAND-OFF IS THE APP'S OWN: `_resume_session` is exactly what
+        # `/resume` and the sidebar's pick use (the remote-owner guard, the
+        # attach, the full reboot) — one way to change sessions, never two. The
+        # page closes first, exactly as the `↵`-to-conversation jump does
+        # (`on_projects_view_jump_requested`): a mode that hides the transcript
+        # must be gone before the conversation it hid comes back.
+        self._close_projects_view()
+        self._resume_session(session_id, self._notice)
+
+    async def _create_project_session(self, cwd: str, target: StartTarget) -> str:
+        """Mint and materialise the session through the DESKTOP create core.
+
+        ``DesktopSessions.create`` is the callable behind
+        ``POST /v1/desktop/sessions`` — the same path the pane's new-chat uses —
+        and it is reached here rather than re-implemented because it is the code
+        that owns the invariants: the target validated through the registries,
+        the attachment sidecar written and read back before the marker is
+        published, and the directory created exclusively. A second writer of
+        those facts is how the TUI's new session and the pane's would come to
+        disagree about what "born as team X" means.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.server.utils.desktop_sessions import DesktopSessions
+
+        body: dict[str, str] | None = None
+        if target.kind in ("team", "agent") and target.name:
+            body = {"kind": target.kind, "name": target.name}
+        return await DesktopSessions(config_dir()).create(cwd, target=body)
+
+    def _link_started_session(
+        self, registry: Any, project_id: str, session_id: str
+    ) -> tuple[bool, str]:
+        """Auto-link the new session to the project as a WORKING link.
+
+        Working, never coordination. The CoS exemption P4 established marks a
+        session that FILED the project without working on it — the chief of
+        staff's own create-time filing — and it exists so a filing is not read
+        as work in progress. A session this picker started exists to work on
+        the project, so it is the link the exemption is the exception TO; the
+        role list has no third value and inventing one here would be the
+        second vocabulary the store's validator exists to forbid.
+
+        Returns ``(linked, reason)``: the store's cap refusal (64 links) is a
+        sentence to show, never an exception thrown at the reader.
+        """
+        try:
+            registry.link_session(project_id, session_id, role="work")
+        except ValueError as refusal:
+            return False, str(refusal)
+        return True, ""
+
+    async def _kick_off_project_session(self, session_id: str, cwd: str, project: Any) -> None:
+        """Deliver the kickoff prompt through the runtime engagement path."""
+        from local_operator.paths import config_dir
+        from local_operator.references import expand_references
+        from local_operator.session.runtime.launch import PromptErrand, engage_runtime
+
+        name = str(getattr(project, "name", "") or "")
+        text = f"review the project details and continue @project:{name}"
+
+        async def _decline(tool_name: str, description: str) -> bool:
+            # The project block is a store read, not a file read, so the gate is
+            # never consulted for it; declining is the honest policy for a
+            # surface with no interactive approval channel (the aside's rule).
+            return False
+
+        result = await expand_references(text, cwd, request_approval=_decline)
+        await engage_runtime(
+            session_id,
+            cwd,
+            PromptErrand(result.sent),
+            config_dir=config_dir(),
+        )
 
     def on_projects_view_send_requested(self, message: ProjectsViewSendRequested) -> None:
         """Deliver one quick-send off the loop (P5a, spec §7.5.3).
