@@ -406,6 +406,101 @@ async def test_switching_the_session_model_re_renders_the_tier_descriptions(tmp_
 
 
 @pytest.mark.asyncio
+async def test_the_label_names_the_model_the_child_runs_under_a_pinned_fallback(
+    tmp_path, monkeypatch
+):
+    """MINOR 1: the advertised name is the model the pin resolves to, fallback or not.
+
+    ``session_model_label`` used to be ``effective_model_label``, which under a
+    pinned provider fallback is the FALLBACK — while the launch resolves a
+    sentinel tier to ``self.model`` (the SELECTED spec) and pins the child's
+    routing to it. The disclosure therefore named a model the child would not
+    run on, in exactly the state where a delegating model is judging cost and
+    quality, and the inherit line named the fallback for a child that would run
+    the selected spec. PR #1861's cross-vendor fallback is the announced
+    pattern, so the disclosure has to name the route the child will serve on —
+    in fallback as in normal routing.
+    """
+    from local_operator.tools.builtin import _operator_choice_task_rejection
+    from local_operator.tools.registry import create_tools
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_model_choice_config(tmp_path / "config", {"hi": "default"})
+    session = make_session(tmp_path)
+    session._active_fallback = ModelSpec(
+        provider="anthropic",
+        model_id="claude-sonnet-5-5",
+        context_window=200_000,
+        max_output_tokens=8_192,
+    )
+    assert session.effective_model_label == "anthropic/claude-sonnet-5-5", "premise"
+
+    selected = f"{MODEL.provider}/{MODEL.model_id}"
+    context = session._build_tool_context()
+    assert context.session_model_label == selected
+
+    (task_tool,) = create_tools(context, enabled=["task"])
+    description = task_tool.parameters["properties"]["effort"]["description"]
+    assert f"hi → default (session model: {selected})" in description
+    assert "claude-sonnet-5-5" not in description
+
+    # The refusals read the SAME published label, so they name the same model.
+    refusal = _operator_choice_task_rejection("hi", context.session_model_label)
+    assert f"({selected})" in refusal
+    assert "claude-sonnet-5-5" not in refusal
+
+    # ...and that label is what the child really runs: the disclosure is not
+    # asserted against a second hand-rolled guess.
+    job = session.jobs.get(session._launch_subagent(label="r", prompt="p", effort="hi"))
+    assert job is not None
+    assert job.model_label == selected
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_rebuild_covers_the_reclaim_arm_and_spares_the_knob_arm(tmp_path, monkeypatch):
+    """MINOR 2: both halves of the M1 contract, pinned by CALL COUNT.
+
+    (a) the same-pair explicit reclaim re-renders — the branch easiest to lose
+        with a green suite, because it fires for a label that moved while the
+        pair did not;
+    (b) a same-pair KNOB change (``/effort``, the server's per-request sampling
+        overrides) does NOT — those run on every call and must not each pay a
+        full ``create_tools``.
+
+    A refactor that hoisted the rebuild to the top of ``set_model`` would fail
+    (b) while (a) stayed green, which is why both halves are asserted here.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    write_model_choice_config(tmp_path / "config", {"hi": "default"})
+    session = make_session(tmp_path)
+
+    calls = {"n": 0}
+    original = session._rebuild_effort_tier_tools
+
+    def spy() -> None:
+        calls["n"] += 1
+        original()
+
+    monkeypatch.setattr(session, "_rebuild_effort_tier_tools", spy)
+
+    # (b) same pair, not explicit: the /effort and sampling-override path.
+    session.set_model(MODEL)
+    assert calls["n"] == 0
+
+    # (a) same pair, explicit, with a fallback pinned: the reclaim.
+    session._active_fallback = ModelSpec(
+        provider="anthropic",
+        model_id="claude-sonnet-5-5",
+        context_window=200_000,
+        max_output_tokens=8_192,
+    )
+    session.set_model(MODEL, explicit=True)
+    assert calls["n"] == 1
+    await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_wrong_cased_sentinel_still_resolves_at_launch(tmp_path, monkeypatch):
     """Q2 from the launch side: ``DEFAULT`` is the sentinel, not an unset tier.
 

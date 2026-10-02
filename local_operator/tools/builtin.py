@@ -22824,6 +22824,12 @@ def _operator_choice_task_rejection(tier: str, session_model_label: str | None =
     a lead asserting a swap beside a clause denying one is exactly the
     misreading ("`effort: hi` buys a stronger reviewer") the tier vocabulary
     exists to prevent.
+
+    The closing sentence carries its OWN subject ("Who may pick a child's
+    model") rather than a back-reference: in the sentinel arm the claim ends on
+    "no model swap", so a "That switch" closer pointed at a switch the same
+    sentence had just denied (review round 2, NIT 2). One closer for all three
+    arms, so the card cannot drift between them.
     """
     selector = configured_effort_tiers().get(tier)
     runs_on = _tier_runs_on(tier, session_model_label)
@@ -22848,7 +22854,7 @@ def _operator_choice_task_rejection(tier: str, session_model_label: str | None =
             f"child's MODEL, not its reasoning level: '{tier}' would run it on {runs_on} "
             "instead of this session's model"
         )
-    return f"{claim}. That switch is subagents.model_choice."
+    return f"{claim}. Who may pick a child's model is subagents.model_choice."
 
 
 def _operator_choice_pin_rejection(tier: str, session_model_label: str | None = None) -> str:

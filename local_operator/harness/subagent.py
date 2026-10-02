@@ -565,9 +565,16 @@ def describe_effort_tiers(tiers: dict[str, str], *, session_model_label: str | N
     times. Grouping cannot hide a tier (every tier name is still listed) and it
     cannot drop the model (the group carries the one label they all resolve
     to), which is the constraint the per-tier form was introduced to satisfy.
-    The output for a config with NO sentinel tier — and for the common single
-    sentinel tier — is byte-identical to the previous shape, so the
-    prompt-cache stability of every existing config is untouched.
+
+    Which shapes are byte-identical to the previous form, exactly: the
+    no-sentinel shape, and a single sentinel tier that is ALREADY LAST. The
+    sentinel clause is emitted last, so a `{lo: default, hi: a/b}` config lists
+    `hi` first — the order moves, the text does not otherwise change (review
+    round 2, NIT 1; the earlier note claimed byte-identity for "the common
+    single sentinel tier", which is looser than what holds). That is still
+    enough for prompt-cache stability: a pre-delta config could not advertise a
+    sentinel tier at all — the reader dropped it — so the only configs whose
+    text can move are new-state ones this feature created.
     """
     parts: list[str] = []
     sentinel_tiers: list[str] = []

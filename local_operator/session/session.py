@@ -13183,7 +13183,18 @@ class Session:
             # "this child owns no model and inherits" is only sayable if the
             # caller can see what inheriting means. Re-read per turn, so a
             # ``/model`` switch is reflected on the next call.
-            session_model_label=self.effective_model_label,
+            #
+            # The SELECTED model, not ``effective_model_label``: every
+            # consumer of this label names what a child that owns no model
+            # will RUN, and that is ``self.model`` — the spec
+            # ``run_subagent`` builds an inherit child with, and the spec a
+            # sentinel tier resolves to. Under a pinned provider fallback the
+            # effective label is the FALLBACK, so the two disagreed exactly
+            # when a delegating model is deciding on cost: a `hi: default`
+            # tier was advertised as a model the child would not run on, and
+            # the inherit line named the fallback for a child that would run
+            # the selected spec (review round 2, MINOR 1).
+            session_model_label=self.model_label,
             agent_id=self._agent_id,
             # The delegated name, on a subagent only. Empty on every top-level
             # session, which is what keeps ``_browser_subagent_label``'s
