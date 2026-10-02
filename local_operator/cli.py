@@ -6319,7 +6319,7 @@ def _wake_rows() -> "list[dict[str, Any]]":
 
 
 def _spooled_wake_summary(root: Path) -> "dict[str, Any]":
-    """Wake rows spooled to session inboxes and not yet delivered, aggregated.
+    """Spooled wake FIRES awaiting delivery, aggregated per session.
 
     The held-delivery state this surface never had. A runtime leaving for a
     replaced build SPOOLS the wakes that fire meanwhile
@@ -6327,13 +6327,25 @@ def _spooled_wake_summary(root: Path) -> "dict[str, Any]":
     with the hook still installed, every later fire lands there too: measured
     2026-10-01/02, one desk session lost ~14 h of fires while ``wake list``
     showed a fresh "last fired" and every other line on this screen read as
-    healthy. The rows are counted per session against the wake INDEX's own
-    keys — a session with no wakes owes no spooled FIRE — and the oldest write
-    is tracked so the line can say how long the delivery has been dark.
+    healthy.
+
+    THE CANDIDATE SESSIONS ARE THE WAKE INDEX'S KEYS, a proxy with one named
+    gap (review round 1, R1). It covers the reported shape — a schedule that
+    keeps recurring keeps its index entry, which is why the desk session was
+    counted — and it costs what this screen already pays for the index
+    (milliseconds). The complete source is a scan of every
+    ``sessions/*/inbox.jsonl``; measured 2026-10-02 it finds 272 files across
+    16,718 session directories at ~1.5 s, which a status read declines to pay.
+    THE RESIDUAL, stated so the omission is a choice rather than a surprise: a
+    spooled row whose schedule has RETIRED and whose re-arm failed sits in the
+    inbox of a session with no index key, so it is not counted here; the
+    re-arm path is the designed cover for retired schedules, and the row still
+    runs at a successor boot either way.
 
     Never raises: a count is a status nicety, and one unreadable session
     directory must not take the whole screen down (``spooled_wake_fires``
-    itself already skips torn rows and missing files).
+    itself already counts fires-not-rows and skips torn rows and missing
+    files).
     """
     import time as _time
 
@@ -7135,16 +7147,27 @@ def wake_command(args: argparse.Namespace) -> int:
             )
         )
     if spooled["fires"]:
-        # SPOOLED FIRES, and only when there are any: the count and the age are
+        # SPOOLED WAKES, and only when there are any: the count and the age are
         # what separate "a drain just happened" from "delivery has been dark
         # for half a day" (the incident's shape — a fresh `last fired` and no
-        # line anywhere saying the fire never ran).
+        # line anywhere saying the fire never ran). The noun is the wake
+        # ITSELF rather than "fire(s)" (design round 1, D5: "5 fires" reads
+        # as pending alarms, not five occurrences that fired and were never
+        # run), and it pluralises for real — the singular store is the
+        # recovering case and `1 wake(s) in 1 session(s)` read as a glitch
+        # (design round 1, D1).
+        from local_operator.info.render import plural
+
         summary = (
-            f"{spooled['fires']} fire(s) in {spooled['sessions']} session(s) awaiting delivery"
+            f"{plural(spooled['fires'], 'wake')} in "
+            f"{plural(spooled['sessions'], 'session')} awaiting delivery"
         )
         if spooled["oldest_age_s"] is not None:
-            summary += (
-                f" (oldest {_format_duration(spooled['oldest_age_s'])} — "
+            # ONE TOKEN through `_wrap_status`: at 80 columns — its own default
+            # width — a break after the em-dash orphaned the session id onto
+            # the next line (design round 1, D2).
+            summary += " " + _one_token(
+                f"(oldest {_format_duration(spooled['oldest_age_s'])} — "
                 f"{spooled['oldest_session_id']})"
             )
         print(_wrap_status(summary, "spooled:"))
@@ -7684,6 +7707,12 @@ PEER_COLUMN_WIDTH = 18
 #: line that wraps at column 0 reads as a different block (round 2, D13).
 _STATUS_LABEL_W = 13
 
+#: The sentinel :func:`_wrap_status` swaps in for a protected span's spaces
+#: while it wraps, and swaps back afterwards. Single-quoted remedy commands
+#: are its one writer there; :func:`_one_token` names the same contract for a
+#: span a caller must keep whole WITHOUT printing quote characters.
+_WRAP_SENTINEL = "\x00"
+
 
 def _wrap_status(text: str, label: str = "") -> str:
     """One `wake status` line, folded at the surface's own hanging indent.
@@ -7712,7 +7741,7 @@ def _wrap_status(text: str, label: str = "") -> str:
     # a wrap inside one produces a line that looks like an instruction and is
     # not runnable. `textwrap` only breaks on whitespace, so the spaces inside
     # single quotes are hidden from it and restored afterwards.
-    nbsp = "\x00"
+    nbsp = _WRAP_SENTINEL
     protected = re.sub(r"'[^']*'", lambda m: m.group(0).replace(" ", nbsp), first)
     return "\n".join(
         textwrap.wrap(
@@ -7725,6 +7754,19 @@ def _wrap_status(text: str, label: str = "") -> str:
             break_on_hyphens=False,
         )
     ).replace(nbsp, " ")
+
+
+def _one_token(text: str) -> str:
+    """Hide ``text``'s spaces from :func:`_wrap_status`, so the span wraps WHOLE.
+
+    The discipline ``_wrap_status`` applies to single-quoted remedy commands,
+    named for callers whose span must stay one token without quote characters:
+    the spooled line's ``(oldest 13h — <id>)`` (design round 1, D2 — at 80
+    columns, the default width, the break landed after the em-dash and
+    orphaned the session id onto the next line). Call it on the SPAN itself;
+    the space that separates it from the sentence stays breakable.
+    """
+    return text.replace(" ", _WRAP_SENTINEL)
 
 
 def _json_dumps(value: Any) -> str:
