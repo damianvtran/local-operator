@@ -1961,23 +1961,37 @@ class ServingSessionHandle(SessionHandle):
 
         ``False`` when no drain was latched, so a caller need not check first.
 
-        WHAT IT DOES NOT UNDO, stated because the omission is deliberate: the wakes
-        already diverted to the inbox stay there. Undiverting would mean re-installing
-        the resume catch-up shim :meth:`Session.retire_wakes_to_inbox` replaced, and
-        the rows are not lost either way — ``process._keep_loaded_build`` drains that
-        same spool back IN as part of the abandon, which is the whole reason it runs
-        before this returns.
+        WHAT IT UNDOES, and why BOTH halves: the job-delivery divert and the wake
+        divert both come back with the latch, because the premise they were armed
+        on is gone — ``begin_drain`` diverts them for a build whose files are about
+        to be replaced, and a KEPT build is not being replaced. A runtime that
+        serves again must deliver again: a settled child reaches it, and a fire
+        that comes due after this release runs rather than spooling for a successor
+        that is not coming (``Session.resume_wakes_from_inbox``; without the
+        restore, every fire for the rest of the process's life landed in an inbox
+        nobody drained until a successor booted — measured at ~14 h of fires on
+        one desk session, invisible on every surface).
+
+        WHAT IT DOES NOT UNDO, and the omission is still deliberate: the wakes
+        already spooled during the drain stay in the inbox. Those rows are durable
+        and ``process._keep_loaded_build`` drains that same spool back IN as part
+        of the abandon, so the kept runtime receives them either way; the restore
+        above is about every fire after this release, which is the half a release
+        has to make true.
         """
         if not getattr(self, "_draining", False):
             return False
         self._draining = False
         self._retiring_cause = ""
         self._retiring_detail = ""
-        # ...and the DELIVERY divert goes with the latch, which the wake divert
-        # deliberately does not: a kept runtime is serving again, so a child that
-        # settles for the rest of its life must reach it without someone having
-        # to type something first. The rows already held need no undoing -- they
-        # are durable and ride the next turn either way.
+        # ...and BOTH diverts come back with the latch, because the premise they
+        # were armed on is gone: ``begin_drain`` diverts the job deliveries and
+        # the wakes for a build whose files are about to be replaced, and a kept
+        # build is not being replaced. A kept runtime is serving again, so a child
+        # that settles for the rest of its life must reach it without someone
+        # having to type something first — and so must a fire. The rows already
+        # held need no undoing -- they are durable and ride the next drain either
+        # way.
         session = getattr(self, "_session", None)
         resume = getattr(session, "resume_job_deliveries_to_turns", None)
         if callable(resume):
@@ -1985,6 +1999,17 @@ class ServingSessionHandle(SessionHandle):
                 resume()
             except Exception:  # noqa: BLE001 — a failed undo must not block the abandon
                 logger.debug("could not release the job-delivery divert", exc_info=True)
+        resume_wakes = getattr(session, "resume_wakes_from_inbox", None)
+        if callable(resume_wakes):
+            try:
+                # ``False`` is an answer, not a failure: no drain spool was in
+                # force (or another path owns the hook now), so there is nothing
+                # to undo and nothing is touched.
+                resume_wakes()
+            except Exception:  # noqa: BLE001 — a failed undo must not block the abandon
+                logger.debug(
+                    "could not restore wake delivery after an abandoned drain", exc_info=True
+                )
         return True
 
     def end_retire(self) -> bool:
