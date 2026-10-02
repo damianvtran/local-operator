@@ -137,11 +137,7 @@ class AgentParams(BaseModel):
     )
     label: str | None = Field(
         default=None,
-        description=(
-            "create/update: the display label (free text, spaces allowed). The "
-            "name stays the addressing key; an empty string resets the label to "
-            "its derived default."
-        ),
+        description="create/update: display label; '' resets it.",
     )
     query: str | None = Field(default=None, description="search: the task, in a sentence.")
     description: str | None = Field(

@@ -18,11 +18,15 @@ would later spell the same slug differently.
 
 Why teams keep their own :func:`~local_operator.teams.display_form`: teams
 shipped an EXACT comparison against the derived default, frozen by its own
-tests and remediation rounds. The agent side refines that ONE comparison to a
-casefold match (see :func:`display_form`), so the two functions are separate
-on purpose -- the shared half is everything that is genuinely identical
-(deriving, normalizing, validating, bounding), and each domain's composition
-lives in ONE function whose cases its tests freeze.
+tests and remediation rounds, and they test the casefold-to-name arm BEFORE
+the derived arm. The agent side differs in TWO ways, both deliberate and both
+documented on :func:`display_form` below: the derived comparison is a casefold
+match, and the derived arm comes FIRST -- a single-token slug's title-case is
+its human label, and discarding it would leave seven of the ten packaged
+starters reading as raw lowercase keys (design round 1, D1). The two functions
+are separate on purpose -- the shared half is everything that is genuinely
+identical (deriving, normalizing, validating, bounding), and each domain's
+composition lives in ONE function whose cases its tests freeze.
 """
 
 from __future__ import annotations
@@ -37,10 +41,13 @@ import unicodedata
 #: reads, and Title Case stays the rule.
 DEFAULT_LABEL_INITIALISMS = frozenset({"qa", "ai", "api", "tui", "ux", "ui"})
 
-#: Cap on a stored label, shared by teams and agents: it is free text shown in
-#: every listing, so the bound keeps one runaway paste from silencing the rows
-#: it rides in; both derived defaults are at most the name cap, so every shape
-#: fits the same surfaces.
+#: Default cap on a stored label, used by teams: it is free text shown in every
+#: listing, so the bound keeps one runaway paste from silencing the rows it
+#: rides in, and it sits above the 64-char team name cap so a derived default
+#: can never exceed it. AGENTS pass their own cap (``MAX_AGENT_NAME_CHARS``,
+#: 128) because the agent name cap is larger -- a label cap below the name cap
+#: would let a derived label be refused back by the validator that stores it
+#: (review round 1, R1-2).
 LABEL_MAX_CHARS = 80
 
 #: Cap on a LISTING row's composed display form (see :func:`bounded_form`).
@@ -80,27 +87,31 @@ def display_form(name: str, label: str) -> str:
 
     ONE shared rule, so the TUI listing, the picker, the settings pane, the
     status band, the org chart, the CLI, the agent tool and the routed runtime
-    cannot disagree. The four arms, frozen:
+    cannot disagree. The arms, frozen, in THIS order:
 
     * no label -> the raw name (a legacy row before its first write);
-    * the label casefolds to the NAME -> the raw name (``lopdev`` painted over
-      a stored ``Lopdev``; ``ops`` over ``OPS``: a difference only of case is
-      noise either way);
-    * the label casefolds to the DERIVED default (:func:`default_label`) ->
-      the label alone (``ux-reviewer`` / ``UX Reviewer``: the canonical
-      spelling the seed ships, and the space-vs-separator is information the
-      key cannot carry). This is the ONE refinement over the team rule, which
-      compares EXACTLY and would treat a case variant like ``Ux Reviewer`` as
-      a chosen label and parenthesise the key onto it;
+    * the label casefolds to the DERIVED default (:func:`default_label`) -> the
+      label alone. A canonical label is the SEED AUTHOR's spelling and it is
+      painted even when it differs from the key only in case: ``coder`` +
+      ``Coder`` paints ``Coder``, ``aida`` + ``Aida`` paints ``Aida``. Testing
+      this arm BEFORE the casefold-to-name arm is the agent side's SECOND
+      deliberate divergence from teams -- a single-token slug's title-case IS
+      its human label, and discarding it would leave seven of the ten packaged
+      starters reading as raw lowercase keys beside three that read as labels
+      (design round 1, D1). Teams keep the opposite order because their slug
+      set makes title-case genuinely noise;
+    * the label casefolds to the NAME -> the raw name, now covering a label that
+      is literally the raw key text (``ux-reviewer`` stored as ``ux-reviewer``)
+      -- a difference only of case is still noise;
     * any other (chosen) label -> ``label (name)``, because the key is the only
       string that ADDRESSES the agent.
     """
     if not label:
         return name
-    if label.casefold() == name.casefold():
-        return name
     if label.casefold() == default_label(name).casefold():
         return label
+    if label.casefold() == name.casefold():
+        return name
     return f"{label} ({name})"
 
 
@@ -151,11 +162,32 @@ def bounded_form(form: str, name: str, *, cap: int) -> str:
 def bounded_display_form(name: str, label: str, *, cap: int = AGENT_LISTING_CAP) -> str:
     """``display_form`` bounded for a LISTING row (see :func:`bounded_form`).
 
-    Deliberately a listing-only concern: the other sites bound themselves (the
-    band truncates, chart boxes clamp) and both sides of the listing family --
-    the local block and the wire's first slot -- must agree byte for byte.
+    Deliberately a listing-only concern: a listing row WRAPS, so keeping the
+    key on the line is enough, while the fixed-width cells (the band, the dock)
+    truncate and use :func:`capped_display_form` instead. Both sides of the
+    listing family -- the local block and the wire's first slot -- must agree
+    byte for byte.
     """
     return bounded_form(display_form(name, label), name, cap=cap)
+
+
+def capped_display_form(name: str, label: str, *, cap: int) -> str:
+    """``display_form`` for a FIXED-WIDTH cell that TRUNCATES (the band, the dock).
+
+    LISTING rows ellipsize the label and keep the key (``bounded_form``), but a
+    cell that truncates rather than wraps cannot: it would cut the label
+    mid-word and drop the addressable key with it. The key is short by
+    construction, so a form that does not fit the cap falls back to the RAW
+    NAME -- the one string that addresses the row -- rather than a maimed
+    version of both (design round 1, D2). A name that alone exceeds the cap is
+    returned as-is; there is nothing shorter to paint.
+    """
+    from rich.cells import cell_len
+
+    form = display_form(name, label)
+    if cell_len(form) <= cap:
+        return form
+    return name
 
 
 def normalize_label(value: str) -> str:
