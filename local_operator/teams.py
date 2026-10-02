@@ -502,10 +502,12 @@ def validate_team_name(name: str) -> str:
     ).name
 
 
-# ``_default_label`` and ``_render_label_token`` are the SHARED implementations
-# imported at the top of this module (``local_operator.display_labels``): ONE
-# derivation for both domains, because a second copy is how the team and agent
-# sides would later spell the same slug differently.
+# ``_default_label`` is the SHARED implementation imported at the top of this
+# module (``local_operator.display_labels.default_label``): ONE derivation for
+# both domains, because a second copy is how the team and agent sides would
+# later spell the same slug differently. (The shared spelling of the per-token
+# renderer is ``render_label_token``; this module imports only ``default_label``,
+# which already calls it.)
 
 
 def display_form(name: str, label: str) -> str:

@@ -1086,7 +1086,26 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: feature would still sit outside the old band. Review round 1 (R1-2) then
 #: widened the ``properties`` copy to name underscores: +13 chars, head
 #: re-read at 97,406 = ~35,038, still inside the band (50 left).
-BUDGET_BILLED_TOKENS = 35_088
+#:
+#: RAISED 35,088 -> 35,150 for the agent display label's ``AgentParams.label``
+#: (remediation round 1, Q4), with the arithmetic the guard exists to force.
+#: The base is THIS branch's base, ``origin/main`` c3b2500bf, measured with
+#: this same script on this machine: 97,406 chars = ~35,038 billed, i.e. the
+#: 50 tokens of headroom the paragraph above recorded. The added field costs
+#: 139 schema chars (39 of description, the rest the JSON scaffolding an
+#: optional ``str | None`` property carries), so the head reads 97,545 =
+#: ~35,088 — EXACTLY the old ceiling, 0 headroom, and therefore a CI failure:
+#: the ~25-token local-vs-CI gap the ``memory_mb`` raise below recorded applies
+#: here too (``tool_schemas`` is built from the real pydantic models and one is
+#: platform-shaped). The ceiling is set with CI as the binding reading, the
+#: same derivation that raise used: 62 above this machine's head, i.e. 37 above
+#: CI's — just under the 46-51 band the ``secret`` (49), ``web_read`` (71) and
+#: ``scratchpad://`` (51) raises chose. The field is the feature's floor, not a
+#: wording trade: ``agent create``/``update`` must be able to set a label the
+#: way ``team create``/``update`` already can, and with its description trimmed
+#: to the 39-char minimum the head still lands on the old ceiling. The tighten
+#: band (1,200) is nowhere near tripped.
+BUDGET_BILLED_TOKENS = 35_150
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

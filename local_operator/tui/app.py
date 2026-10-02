@@ -418,6 +418,7 @@ from local_operator.tui.widgets.settings_view import (
     SettingsView,
     SettingsViewDismissed,
 )
+from local_operator.tui.widgets.status_line import AGENT_PROFILE_CELLS
 from local_operator.tui.widgets.status_line import (
     FORK_PENDING_TEXT as _FORK_PENDING_TEXT,
 )
@@ -432,6 +433,7 @@ from local_operator.tui.widgets.status_line import (
     format_window,
 )
 from local_operator.tui.widgets.subagent_panel import (
+    ROLE_CEILING,
     Density,
     JobStats,
     SubagentPanel,
@@ -19870,9 +19872,12 @@ class OperatorApp(App[None]):
         """
         if not name:
             return ""
-        from local_operator.display_labels import display_form
+        from local_operator.display_labels import capped_display_form
 
-        return display_form(name, self._agent_label_for(name))
+        # The band's cell is FIXED (:data:`AGENT_PROFILE_CELLS`) and the band
+        # truncates rather than wraps, so a composed form past the cap falls
+        # back to the key it addresses by (design round 1, D2).
+        return capped_display_form(name, self._agent_label_for(name), cap=AGENT_PROFILE_CELLS)
 
     def _agent_role_display(self, role: str) -> str:
         """A subagent's role KEY as the display form a dock row may paint.
@@ -19886,9 +19891,12 @@ class OperatorApp(App[None]):
         """
         if not role:
             return role
-        from local_operator.display_labels import display_form
+        from local_operator.display_labels import capped_display_form
 
-        return display_form(role, self._agent_label_for(role))
+        # Same rule as the band, at the dock's narrower :data:`ROLE_CEILING`: a
+        # form that does not fit the cell falls back to the key rather than
+        # truncating the label mid-word and losing the addressable string.
+        return capped_display_form(role, self._agent_label_for(role), cap=ROLE_CEILING)
 
     def _agent_list_block(self, rows: list[tuple[str, str, str, str]]) -> RichBlock:
         """A structured profile list for bare ``/agent``.

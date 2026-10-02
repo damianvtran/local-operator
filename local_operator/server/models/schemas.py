@@ -147,12 +147,12 @@ class Agent(BaseModel):
 
     id: str = Field(..., description="Unique identifier for the agent")
     name: str = Field(..., description="Agent's name")
-    label: str = Field(
-        "",
-        description="The display label (free text, spaces allowed) that listings "
-        "paint through the shared display rule; 'name' remains the addressing "
-        "key. Empty derives from the name on the next write.",
-    )
+    #: See ``local_operator.agents.AgentData.label``: the display spelling a
+    #: listing paints while ``name`` stays the addressing key. A PLAIN default,
+    #: like the registry model's, so a construction site that does not care
+    #: about labels need not spell it (pyright reads a ``Field(...)``
+    #: assignment as a required parameter for these models).
+    label: str = ""
     created_date: datetime = Field(..., description="The date when the agent was created")
     version: str = Field(..., description="The version of the agent")
     security_prompt: str = Field(
@@ -306,11 +306,8 @@ class AgentCreate(BaseModel):
     """Data required to create a new agent."""
 
     name: str = Field(..., description="Agent's name")
-    label: str | None = Field(
-        None,
-        description="The display label (free text, spaces allowed); 'name' remains "
-        "the addressing key. Omitted (or '') derives from the name.",
-    )
+    #: See ``Agent.label``; a plain default for the same pyright reason.
+    label: str | None = None
     security_prompt: str | None = Field(
         None,
         description="The security prompt for the agent. Allows a user to explicitly "
@@ -388,11 +385,10 @@ class AgentUpdate(BaseModel):
     """Data for updating an existing agent."""
 
     name: str | None = Field(None, description="Agent's name")
-    label: str | None = Field(
-        None,
-        description="The display label (free text, spaces allowed); 'name' remains "
-        "the addressing key. Omit to leave it alone; '' resets to the derived default.",
-    )
+    #: See ``Agent.label``; a plain default for the same pyright reason. Omit to
+    #: leave the stored label alone; an empty string resets it to the derived
+    #: default.
+    label: str | None = None
     security_prompt: str | None = Field(
         None,
         description="The security prompt for the agent. Allows a user to explicitly "

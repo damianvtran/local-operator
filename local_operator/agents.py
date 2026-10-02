@@ -253,17 +253,20 @@ class AgentData(BaseModel):
     #: shared display rule (:func:`local_operator.display_labels.display_form`)
     #: while ``name`` stays the key every surface ADDRESSES by (``/agent
     #: <name>``, ``task(agent=...)``, ``--profile``, team rosters, ``--agent``).
-    #: Stored locally and mirrored over the mesh; deliberately absent from the
-    #: hub publish document (``instruction_set_fields``) and from every sync
-    #: baseline. An EMPTY value means "no stored label yet" -- the
-    #: derive-and-persist rule fills it from the name on the next write
-    #: (``save_agent``/``update_agent``), so a legacy row renders its raw name
-    #: until then.
-    label: str = Field(
-        "",
-        description="Display label (free text, spaces allowed).  Empty derives "
-        "from the name on the next write; never an addressing key.",
-    )
+    #: Stored locally; deliberately absent from the hub publish document
+    #: (``instruction_set_fields``) AND off the mesh wire (see
+    #: ``network.definitions`` -- a label is local display metadata, and putting
+    #: it on the wire would re-shape every mirror's recorded digest). An EMPTY
+    #: value means "no stored label yet" -- the derive-and-persist rule fills it
+    #: from the name on the next write (``save_agent``/``update_agent``), so a
+    #: legacy row renders its raw name until then.
+    #
+    # A PLAIN default (not ``Field("", ...)``) on purpose: pyright reads a
+    # ``Field(...)`` assignment as a required parameter for these models (see
+    # ``tests/unit/network/test_definitions.py::_edit_fields``), and an additive
+    # field that every existing construction site must spell would touch ~100
+    # call sites across the tree.
+    label: str = ""
     created_date: datetime = Field(..., description="The date when the agent was created")
     version: str = Field(..., description="The version of the agent")
     security_prompt: str = Field(
@@ -360,12 +363,10 @@ class AgentEditFields(BaseModel):
     # ``label`` follows the None-means-leave rule like every other field, with
     # ONE documented exception (teams' rule): an explicit "" is a RESET to the
     # derived default, not "no label" -- a row cannot represent "no display
-    # label" because the derived one always exists.
-    label: str | None = Field(
-        None,
-        description="The display label. ``None`` leaves the stored value alone; "
-        'an explicit "" resets it to the derived default.',
-    )
+    # label" because the derived one always exists. A PLAIN default for the same
+    # reason as ``AgentData.label``: pyright would otherwise require every
+    # construction site to spell it.
+    label: str | None = None
     security_prompt: str | None = Field(
         None,
         description="The security prompt for the agent.  Allows a user to explicitly "
@@ -466,6 +467,16 @@ def agent_name_key(name: str) -> str:
 #: the create and the mutation payloads). A name this side invents has to fit
 #: both, or a pull produces a row the user can never publish.
 MAX_AGENT_NAME_CHARS = 128
+
+#: The longest legal agent LABEL. Deliberately the NAME cap rather than the
+#: shared 80: a label is derived from the name (``save_agent`` fills the derived
+#: default when none is stored), so a cap below the name cap would let the
+#: derive path STORE a value its own validator then refuses -- a 100-char name
+#: would produce a 100-char label that ``update_agent`` (or the mesh create
+#: branch) rejected with a message about a label the operator never set
+#: (review round 1, R1-2). Equal caps make "derived is always valid" true by
+#: construction; the listing still bounds the PAINTED form.
+MAX_AGENT_LABEL_CHARS = MAX_AGENT_NAME_CHARS
 
 
 def _collision_free_name(name: str, suffix: int) -> str:
@@ -964,7 +975,11 @@ class AgentRegistry:
         # (teams' create boundary): raising early is what keeps a refused
         # value from leaving a half-created row. Empty is legal and means
         # "derive", which ``save_agent`` fills in.
-        label = validate_label(agent_edit_metadata.label or "", subject="an agent label")
+        label = validate_label(
+            agent_edit_metadata.label or "",
+            max_chars=MAX_AGENT_LABEL_CHARS,
+            subject="an agent label",
+        )
 
         agent_metadata = AgentData(
             id=str(uuid.uuid4()),
@@ -1099,7 +1114,11 @@ class AgentRegistry:
         # not transactional).
         proposed_label = prospective_changes.get("label")
         validated_label = (
-            validate_label(str(proposed_label), subject="an agent label")
+            validate_label(
+                str(proposed_label),
+                max_chars=MAX_AGENT_LABEL_CHARS,
+                subject="an agent label",
+            )
             if "label" in prospective_changes and proposed_label is not None
             else None
         )
