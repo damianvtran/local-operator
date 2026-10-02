@@ -859,6 +859,281 @@ def test_a_non_string_top_level_key_cannot_take_the_store_down(
     assert 2024 in document, sorted(map(repr, document))
 
 
+# --- #1920: which writes `set_config_value` accepts, and where they land -----
+
+
+def test_a_dotted_nested_key_is_refused_before_anything_is_mutated(tmp_path: Path) -> None:
+    """The reported defect: success reported, nothing a reader looks at changed.
+
+    ``Config.set_value`` is a plain ``dict.__setitem__``, so
+    ``set_config_value("subagents.models.hi", …)`` stored the whole dotted name as a
+    top-level key and returned normally — while ``read_effort_tier_selectors`` and
+    ``get_nested_value`` walk ``values.subagents.models`` and saw nothing. Both halves
+    are asserted here because only both together are the bug: not merely that the call
+    fails, but that it fails BEFORE the file or the manager is touched, so a caller
+    that catches the error cannot be left holding a half-applied write.
+    """
+    manager = ConfigManager(tmp_path)
+    manager.set_config_value("hosting", "seed")
+
+    config_file = manager.config_file
+    before_bytes = config_file.read_bytes()
+    before_values = dict(manager.get_config().values)
+
+    with pytest.raises(ValueError) as raised:
+        manager.set_config_value("subagents.models.hi", "openai/gpt-5-mini")
+
+    message = str(raised.value)
+    assert "subagents.models.hi" in message
+    # Actionable: it names the route that does work, not just the refusal.
+    assert "lop config edit subagents.models.hi" in message
+    assert "settings_io.write_setting" in message
+
+    assert config_file.read_bytes() == before_bytes
+    assert dict(manager.get_config().values) == before_values
+    assert "subagents.models.hi" not in manager.get_config().values
+    # And nothing appeared at the NESTED path either — the write never happened at
+    # all, rather than having been redirected to its correct home.
+    assert manager.get_nested_value(("subagents", "models", "hi")) is None
+
+
+def test_a_dotted_key_naming_nothing_is_refused_too(tmp_path: Path) -> None:
+    """Undeclared dotted keys are the same trap with no registry entry to name.
+
+    A near-miss spelling (``subagent.models.hi``) is exactly how this arises in
+    practice, and it is the case the registry cannot describe: there is no ``path``
+    to point at, so the refusal can only send the caller to ``lop config list``.
+    """
+    manager = ConfigManager(tmp_path)
+
+    with pytest.raises(ValueError) as raised:
+        manager.set_config_value("subagent.models.hi", "openai/gpt-5-mini")
+
+    message = str(raised.value)
+    assert "subagent.models.hi" in message
+    assert "lop config" in message
+    assert "subagent.models.hi" not in manager.get_config().values
+
+
+def test_every_flat_dotted_key_still_round_trips_as_a_literal_top_level_key(
+    tmp_path: Path,
+) -> None:
+    """The half that must NOT change: ``display.shimmer``'s dot is literal.
+
+    ``tui/settings.py`` reads ``values["display.shimmer"]`` verbatim, so the repair
+    for the defect above must not be "split every dotted key": that would write a
+    ``display:`` mapping nothing reads — one silent failure traded for another
+    (``settings_io``'s "THE ``display.*`` FLAT-KEY TRAP"). Driven off the REGISTRY
+    rather than a hard-coded list, so the sixth display flag is covered on the day it
+    is declared instead of the day someone remembers this test exists.
+    """
+    from local_operator import settings_io
+
+    keys = settings_io.flat_dotted_keys()
+    assert "display.shimmer" in keys and "keymap.new_session" in keys, keys
+
+    manager = ConfigManager(tmp_path)
+    for key in keys:
+        default = settings_io.BY_KEY[key].default
+        probe = (not default) if isinstance(default, bool) else "probe-value"
+        manager.set_config_value(key, probe)
+
+        # Through the VERBATIM top-level reader the consumers use — not the call's
+        # own return, and not a nested walk, which is the whole distinction.
+        got = ConfigManager(tmp_path).get_config_value(key, "<absent>")
+        assert got == probe, f"{key}: wrote {probe!r}, read back {got!r}"
+
+    document = yaml.safe_load((tmp_path / "config.yml").read_text(encoding="utf-8"))
+    stored = document["values"]
+    for key in keys:
+        assert key in stored, f"{key} is not a literal top-level key"
+        # And it was NOT split into a nesting level on the way out.
+        assert not isinstance(stored.get(key.split(".")[0]), dict), key
+
+
+def test_the_sanctioned_route_reaches_the_map_the_tier_reader_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``settings_io.write_setting`` → the file → ``read_effort_tier_selectors``.
+
+    The refusal above is only half a fix unless the route it names actually works, and
+    the reader is the harness's own (``harness/subagent.py``), which resolves its root
+    from ``config_dir()`` rather than taking a directory — so the env var is what makes
+    this read the file the write went to. Asserted against the READER's output rather
+    than the file's bytes: that is the difference between "the value is somewhere" and
+    "the runtime sees it".
+    """
+    from local_operator import settings_io
+    from local_operator.harness.subagent import read_effort_tier_selectors
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+
+    setting = settings_io.BY_KEY["subagents.models.hi"]
+    assert setting.path == ("subagents", "models", "hi")
+    assert not setting.is_flat_dotted
+
+    # Resolved by NAME, spelled exactly as the refusal message tells the caller to
+    # spell it (`settings_io.write_setting(manager, settings_io.resolve_key(key),
+    # value)`). Design round 1, D2: the message used to name a form that raises
+    # AttributeError when taken literally, so the named route is pinned here
+    # rather than assumed callable.
+    #
+    # `resolve_key` is typed `Setting | None` legitimately — it answers "not a
+    # declared key" with None, which is what the undeclared branch of the refusal
+    # relies on — so the narrow is an assert rather than a cast: it states the
+    # invariant this test depends on and fails loudly if the registry loses the key.
+    resolved = settings_io.resolve_key("subagents.models.hi")
+    assert resolved is not None
+    assert resolved == setting
+    settings_io.write_setting(ConfigManager(tmp_path), resolved, "openai/gpt-5-mini")
+
+    assert read_effort_tier_selectors() == {"hi": "openai/gpt-5-mini"}
+    assert ConfigManager(tmp_path).get_nested_value(("subagents", "models", "hi")) == (
+        "openai/gpt-5-mini"
+    )
+
+
+def test_a_stale_manager_cannot_revert_a_sibling_write(tmp_path: Path) -> None:
+    """The vanished-sibling half: the whole-snapshot re-dump.
+
+    ``set_config_value`` writes ``vars(self.config)`` — the WHOLE in-memory mapping,
+    not the one key. A manager constructed before another writer's change therefore
+    reverted it, which is how a field silently disappears between consecutive writes
+    (#1920's second half; ``settings_io._reload_before_write`` records the same
+    mechanism one layer up). Three consecutive writes through separate managers, with
+    the third holding the oldest snapshot, is the shape that reproduced it.
+    """
+    ConfigManager(tmp_path).set_config_value("hosting", "prime")
+
+    stale = ConfigManager(tmp_path)  # snapshot taken BEFORE the two writes below
+
+    ConfigManager(tmp_path).set_config_value("hosting", "write-1")
+    ConfigManager(tmp_path).set_config_value("web_search", {"enabled": False})
+
+    stale.set_config_value("model_name", "write-3")
+
+    after = ConfigManager(tmp_path).get_config().values
+    assert after["model_name"] == "write-3"
+    assert after["hosting"] == "write-1", "write 1 was reverted by the stale snapshot"
+    assert after["web_search"]["enabled"] is False, "write 2 was reverted by the stale snapshot"
+
+
+def test_update_config_refuses_a_dotted_key_before_anything_is_mutated(tmp_path: Path) -> None:
+    """The second whole-snapshot writer carried the same two halves (#1920).
+
+    ``update_config`` had ``set_config_value``'s old body: a plain ``set_value``
+    then a whole-file dump, so a dotted key was stored inertly and reported as a
+    success. Refused here for the same reason, and refused BEFORE the loop that
+    applies the updates — the mixed dict below is what makes that observable: a
+    guard placed after the first ``set_value`` would leave ``hosting`` mutated in
+    memory while the write never happened.
+    """
+    manager = ConfigManager(tmp_path)
+    manager.set_config_value("hosting", "seed")
+    before_bytes = manager.config_file.read_bytes()
+
+    with pytest.raises(ValueError) as raised:
+        manager.update_config({"session.cleanup.enabled": True, "hosting": "other"})
+
+    assert "session.cleanup.enabled" in str(raised.value)
+    assert manager.config_file.read_bytes() == before_bytes
+    assert manager.get_config_value("hosting") == "seed"
+    # The nested home is the shipped default, not the True that was asked for.
+    assert manager.get_nested_value(("session", "cleanup", "enabled")) is False
+
+
+def test_update_config_does_not_revert_a_sibling_write(tmp_path: Path) -> None:
+    """The same stale-snapshot revert as ``set_config_value``, on the writer the
+    server actually reaches: ``app.state.config_manager`` is built once at
+    startup and reused for every request, so one ``PATCH /v1/config`` used to
+    re-dump the whole startup snapshot over anything written since.
+    """
+    ConfigManager(tmp_path).set_config_value("hosting", "prime")
+
+    stale = ConfigManager(tmp_path)  # snapshot taken BEFORE the other write
+    ConfigManager(tmp_path).set_config_value("hosting", "write-1")
+
+    stale.update_config({"model_name": "write-2"})
+
+    after = ConfigManager(tmp_path).get_config().values
+    assert after["model_name"] == "write-2"
+    assert after["hosting"] == "write-1", "the concurrent write was reverted"
+
+
+def test_update_config_without_updates_is_a_flush_not_a_merge(tmp_path: Path) -> None:
+    """The exception that keeps ``reset_setting`` working, pinned rather than
+    left implicit in ``update_config``'s body.
+
+    ``settings_io._delete``'s top-level branch removes the key from the LIVE
+    mapping and then persists it with ``update_config({}, write=True)``. That call
+    must write the in-memory state as it stands; had the reload been applied to it
+    too, the delete would be read back off disk and written again, silently
+    undoing every ``reset_setting`` on a flat-dotted key.
+    """
+    manager = ConfigManager(tmp_path)
+    manager.set_config_value("display.shimmer", False)
+
+    del manager.get_config().values["display.shimmer"]  # the shape `_delete` uses
+    manager.update_config({}, write=True)
+
+    assert "display.shimmer" not in ConfigManager(tmp_path).get_config().values
+
+
+def test_a_non_string_key_is_not_a_dotted_key(tmp_path: Path) -> None:
+    """A non-``str`` key must not turn the guard into a ``TypeError``.
+
+    A top-level key the store does not model is a shape this repo meets on
+    purpose — an int key survives a load and is reported to the user by
+    ``_report_unmodelled_top_level``, which
+    ``test_a_non_string_top_level_key_cannot_take_the_store_down`` pins. A bare
+    ``"." not in key`` would raise ``TypeError: argument of type 'int' is not
+    iterable`` from a guard whose whole job is to explain a refusal, naming
+    neither the key nor the refusal.
+    """
+    manager = ConfigManager(tmp_path)
+    # Two DELIBERATE `arg-type` violations, and they are the point of the test:
+    # `key` is annotated `str` while the guard under test exists precisely because
+    # a Python caller can hand it something else. The repo's shape for a
+    # deliberate mismatch is the scoped ignore with the reason on it, as in
+    # `tests/unit/classification/support.py:63`.
+    manager.set_config_value(2024, "x")  # type: ignore[arg-type]  # the shape under test
+
+    assert ConfigManager(tmp_path).get_config().values[2024] == "x"  # type: ignore[arg-type]
+
+
+def test_a_config_that_goes_bad_under_a_live_manager_aborts_the_write(tmp_path: Path) -> None:
+    """The rule that makes the reload safe instead of destructive.
+
+    ``_load_config`` does not raise on a malformed file: it prints, renames the file
+    to ``.bad.<stamp>`` and returns fresh DEFAULTS. So reloading as the base of a write
+    would dump those defaults over the user's config, leaving only the broken two-line
+    edit recoverable from the backup — the last good config gone. ``settings_io``
+    refuses instead, and this asserts ``set_config_value`` inherits that rather than
+    re-deriving its own weaker version.
+
+    Constructed over a VALID file on purpose: constructing over a broken one already
+    renames it at load time, so the case worth pinning is a file that goes bad while
+    the manager is alive — a hand-edit in another window, a truncated write.
+    """
+    from local_operator.settings_io import ConfigUnreadableError
+
+    manager = ConfigManager(tmp_path)
+    manager.set_config_value("hosting", "openai")
+    config_file = manager.config_file
+
+    broken = "values:\n\thosting: anthropic\n"  # a tab, which YAML rejects
+    config_file.write_text(broken, encoding="utf-8")
+
+    with pytest.raises(ConfigUnreadableError):
+        manager.set_config_value("model_name", "gpt-5")
+
+    assert config_file.read_text(encoding="utf-8") == broken
+    # The write did not rename it either: the `.bad` backup is `_load_config`'s move,
+    # and taking it would already have destroyed the file the user is mid-edit on.
+    assert not list(tmp_path.glob("*.bad.*"))
+    assert manager.get_config_value("hosting", "<absent>") == "openai"
+
+
 def test_a_file_whose_only_stray_keys_are_unnameable_is_still_reported(
     tmp_path: Path, caplog: pytest.LogCaptureFixture, warned_fresh: None
 ) -> None:
