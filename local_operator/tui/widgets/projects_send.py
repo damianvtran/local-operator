@@ -153,15 +153,25 @@ def send_error_line(target: SendTarget, reason: str) -> str:
 
 #: How a row's state chip inks itself (design review round 1, D4): the page's
 #: own status vocabulary, so `[live]`, `[wedged]`, `[stale]`, `[stopped]` and
-#: `[missing]` are five different inks rather than one — `live` keeps the
+#: `[missing]` recede through five steps rather than one — `live` keeps the
 #: accent every running chip uses, `wedged`/`stale` warn, and `stopped`/
-#: `missing` recede a step each. An unknown state resolves to plain ink.
+#: `missing` recede. An unknown state resolves to plain ink.
+#:
+#: `missing` takes `muted` (agent review round 2, R2-1), NOT `status_archived`:
+#: the card's ground is `overlay`, where `dim` measures 3.43:1 (dark) and
+#: 2.72:1 (light) — under the 4.5:1 AA floor for normal text, and the exact
+#: number D5 moved the note ink off. `muted` clears it at 6.51:1 dark and
+#: 5.18:1 light (7.53 / 6.37 on the selected row's `tint-select` ground). The
+#: chip's WORD separates `[stopped]` from `[missing]` — the same
+#: shape-carries-the-pair contract `planning`/`done` take in the page's
+#: resolver — so sharing the ink costs no distinction the row does not already
+#: state. Pinned in tests/unit/tui/test_palette_contrast.py.
 _STATE_INK: dict[str, str] = {
     "live": "status_active",
     "wedged": "status_paused",
     "stale": "stale",
     "stopped": "status_done",
-    "missing": "status_archived",
+    "missing": "status_done",
 }
 
 

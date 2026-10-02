@@ -399,6 +399,7 @@ from local_operator.tui.widgets.org_chart_view import (
 from local_operator.tui.widgets.projects_send import (
     SendTarget,
     compose_band,
+    pending_line,
     refusal_line,
     send_error_line,
     sent_line,
@@ -33976,6 +33977,12 @@ class OperatorApp(App[None]):
         if view is None:
             return
         view.compose_pending(message.target)
+        # R2-2: the strip states THIS send. A second send must never leave the
+        # first one's receipt standing while the new one resolves, so the band
+        # is reset to the in-flight line before the worker's first await (the
+        # worker then replaces it with the outcome, or hands it back below).
+        if view.composing:
+            self._set_projects_strip(pending_line(message.target))
         self.run_worker(
             self._quick_send_worker(view, message.target, message.text),
             exclusive=False,
@@ -34011,8 +34018,7 @@ class OperatorApp(App[None]):
             sender = {"session_id": self._own_session_id()}
         body_error = peer_send.validate_peer_body(text)
         if body_error:
-            view.compose_receipt(body_error)
-            self._keep_quick_send_draft(text)
+            self._quick_send_settled(view, target, body_error, text)
             return
         try:
             record, _candidates, error = await asyncio.to_thread(
@@ -34031,18 +34037,20 @@ class OperatorApp(App[None]):
                 require_started=True,
             )
         except Exception as exc:  # noqa: BLE001 — the resolver owns its refusal
-            view.compose_receipt(send_error_line(target, str(exc)))
-            self._keep_quick_send_draft(text)
+            self._quick_send_settled(view, target, send_error_line(target, str(exc)), text)
             return
         if record is None:
-            view.compose_receipt(
-                send_error_line(target, error or "the session is no longer available")
+            self._quick_send_settled(
+                view,
+                target,
+                send_error_line(target, error or "the session is no longer available"),
+                text,
             )
-            self._keep_quick_send_draft(text)
             return
         if record.pid == os.getpid():
-            view.compose_receipt(send_error_line(target, "that target is this session"))
-            self._keep_quick_send_draft(text)
+            self._quick_send_settled(
+                view, target, send_error_line(target, "that target is this session"), text
+            )
             return
         try:
             outcome = await peer_send.deliver_peer_message_outcome(
@@ -34055,32 +34063,49 @@ class OperatorApp(App[None]):
             )
         except RuntimeError as exc:
             # A PRE-DELIVERY REFUSAL: the peer answered no, nothing was minted.
-            view.compose_receipt(send_error_line(target, str(exc)))
-            self._keep_quick_send_draft(text)
+            self._quick_send_settled(view, target, send_error_line(target, str(exc)), text)
             return
         except (ConnectionError, OSError, ValueError) as exc:
             # Unclassifiable transport fault: honest, and never the confident arm.
-            view.compose_receipt(
-                f"{sent_line(target, 'delivery unconfirmed')} — the send faulted ({exc})"
+            self._quick_send_settled(
+                view,
+                target,
+                f"{sent_line(target, 'delivery unconfirmed')} — the send faulted ({exc})",
+                text,
             )
-            self._keep_quick_send_draft(text)
             return
         if outcome.is_error:
             # NOT DELIVERED (design note A.1): a refusal, named the way the
             # band named the target, with the draft kept.
-            view.compose_receipt(refusal_line(target, outcome.detail))
-            self._keep_quick_send_draft(text)
+            self._quick_send_settled(view, target, refusal_line(target, outcome.detail), text)
             return
         sentence = sent_line(target, outcome.state_word)
         if outcome.partial:
             # Amber: honest but incomplete — the draft stays so the reader can
             # decide whether to resend, and the notice row carries the word.
-            view.compose_receipt(sentence)
-            self._keep_quick_send_draft(text)
+            self._quick_send_settled(view, target, sentence, text)
             return
         # DELIVERED: the band acknowledges (F4); the editor was cleared by the
         # submit, so the strip is visible and the reader is still in compose.
         self._paint_band_receipt(sentence)
+
+    def _quick_send_settled(
+        self, view: ProjectsView, target: SendTarget, sentence: str, text: str
+    ) -> None:
+        """A send that did NOT deliver: notice row, band, and the kept draft (R2-2).
+
+        One choke point for every non-delivered exit. Each speaks on the page's
+        notice row — the surface the reader is at — hands the strip back to the
+        compose band (the band names the recipient of the NEXT attempt, and a
+        stale `sent to … delivered` standing over a refusal says the wrong
+        thing about this one), and gives the draft back so a retry costs no
+        retyping (F4/Q5). ``view.composing`` guards the band: a reader who left
+        compose mid-flight has no strip to correct.
+        """
+        view.compose_receipt(sentence)
+        if view.composing:
+            self._set_projects_strip(compose_band(target))
+        self._keep_quick_send_draft(text)
 
     def _set_projects_strip(self, text: str | None) -> None:
         """Show (``text``) or hide (``None``) the projects compose strip (D6).
