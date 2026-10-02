@@ -3524,7 +3524,7 @@ def test_classify_an_unreleased_commit_falls_back_without_asking_pypi(tmp_path: 
 
     assert route.install_from_wheel is False
     assert route.reason == update_mod.FALLBACK_UNRELEASED
-    assert route.detail == f"no release tag points at {commit[:12]}"
+    assert route.detail == f"no release tag points at main @ {commit[:12]}"
     pypi.assert_not_called()
 
 
@@ -3555,7 +3555,7 @@ def test_classify_a_commit_merely_reachable_from_a_release_is_not_released(
         route = update_mod.classify_snapshot_install(snapshot, repo=repo)
 
     assert route.reason == update_mod.FALLBACK_UNRELEASED
-    assert route.detail == f"no release tag points at {tip[:12]}"
+    assert route.detail == f"no release tag points at main @ {tip[:12]}"
     pypi.assert_not_called()
 
 
@@ -3573,7 +3573,7 @@ def test_classify_a_tag_naming_another_version_falls_back(tmp_path: Path) -> Non
         route = update_mod.classify_snapshot_install(snapshot, repo=repo)
 
     assert route.reason == update_mod.FALLBACK_UNRELEASED
-    assert route.detail == (f"the release tags at {commit[:12]} (9.9.9) do not name version 1.2.3")
+    assert route.detail == f"main @ {commit[:12]} is tagged 9.9.9, not version 1.2.3"
     pypi.assert_not_called()
 
 
@@ -3613,7 +3613,10 @@ def test_classify_a_release_without_its_macos_wheel_falls_back(tmp_path: Path) -
 
     assert route.reason == update_mod.FALLBACK_WHEEL
     assert route.version == "1.2.3"
-    assert route.detail == "PyPI serves 1.2.3 without a macOS universal2 wheel"
+    assert route.detail == (
+        f"main @ {commit[:12]} (release 1.2.3) is release-tagged, but "
+        "PyPI serves no macOS universal2 wheel for it"
+    )
 
 
 def test_classify_a_yanked_macos_wheel_falls_back(tmp_path: Path) -> None:
@@ -3634,7 +3637,10 @@ def test_classify_a_yanked_macos_wheel_falls_back(tmp_path: Path) -> None:
         route = update_mod.classify_snapshot_install(snapshot, repo=repo)
 
     assert route.reason == update_mod.FALLBACK_WHEEL
-    assert route.detail == "the macOS universal2 wheel for 1.2.3 is yanked on PyPI"
+    assert route.detail == (
+        f"main @ {commit[:12]} (release 1.2.3) is release-tagged, but "
+        "its macOS universal2 wheel is yanked on PyPI"
+    )
 
 
 def test_classify_an_unreachable_pypi_falls_back_with_the_complaint(tmp_path: Path) -> None:
@@ -3648,13 +3654,16 @@ def test_classify_an_unreachable_pypi_falls_back_with_the_complaint(tmp_path: Pa
         patch.object(
             update_mod,
             "_pypi_release_document",
-            return_value=(None, "PyPI could not be reached to confirm 1.2.3"),
+            return_value=(None, "PyPI could not be reached to check it"),
         ),
     ):
         route = update_mod.classify_snapshot_install(snapshot, repo=repo)
 
     assert route.reason == update_mod.FALLBACK_WHEEL
-    assert route.detail == "PyPI could not be reached to confirm 1.2.3"
+    assert route.detail == (
+        f"main @ {commit[:12]} (release 1.2.3) is release-tagged, but "
+        "PyPI could not be reached to check it"
+    )
 
 
 def test_classify_never_touches_a_directory_snapshot(tmp_path: Path) -> None:
@@ -3724,13 +3733,13 @@ def test_pypi_release_document_separates_missing_from_unreachable() -> None:
         "1.2.3", client=_StubClient(_StubResponse(404))
     )
     assert missing is None
-    assert complaint == "PyPI does not serve version 1.2.3"
+    assert complaint == "PyPI does not serve it"
 
     dead, complaint = update_mod._pypi_release_document(
         "1.2.3", client=_StubClient(httpx.ConnectError("no route to host"))
     )
     assert dead is None
-    assert complaint == "PyPI could not be reached to confirm 1.2.3"
+    assert complaint == "PyPI could not be reached to check it"
 
 
 def test_pypi_release_document_refuses_a_document_that_is_not_this_release() -> None:
@@ -3742,7 +3751,7 @@ def test_pypi_release_document_refuses_a_document_that_is_not_this_release() -> 
         "1.2.3", client=_StubClient(_StubResponse(200, wrong))
     )
     assert found is None
-    assert complaint == "PyPI's answer for 1.2.3 was not this release's document"
+    assert complaint == "PyPI's answer did not match the release"
 
 
 def test_macos_universal2_wheel_ignores_any_wheels_yanked_files_and_other_names() -> None:
@@ -3767,10 +3776,12 @@ def test_macos_universal2_wheel_ignores_any_wheels_yanked_files_and_other_names(
 
 
 def test_route_lines_promise_presence_only_where_it_can_be_delivered() -> None:
-    """One owner for both texts: the wheel announcement may say the key agent
-    rides the wheel (that confirmation was just made), every macOS fallback
-    must say the build does NOT carry it, and the off-macOS text must not
-    promise — or lament — a capability this platform never had."""
+    """One owner for both texts, and the review-round-1 rule (design D2/D4):
+    a fallback NAMES the route and the reason and never a capability, while
+    the wheel announcement — the one route where presence is certain — may say
+    the key agent rides the wheel. The adversarial property is asserted, not
+    assumed: no fallback line may read as presence being present, likely or
+    restorable."""
     snapshot = SnapshotSource(
         path=Path("unused-snapshot"),
         commit="a" * 40,
@@ -3784,28 +3795,46 @@ def test_route_lines_promise_presence_only_where_it_can_be_delivered() -> None:
         artifact="local_operator-1.2.3-py3-none-macosx_11_0_universal2.whl",
     )
     wheel_lines = update_mod.snapshot_route_lines(snapshot, wheel_route)
-    assert "matches published release 1.2.3" in wheel_lines[0]
-    assert "carries the macOS key agent" in wheel_lines[1]
+    assert wheel_lines[0] == (
+        "lop-update: v1.2.3 matches published release 1.2.3; installing the "
+        "published macOS wheel instead of building this tree"
+    )
+    assert wheel_lines[1] == (
+        "lop-update: wheel: local_operator-1.2.3-py3-none-macosx_11_0_universal2.whl "
+        "— carries the macOS key agent (lop-keyagent.app)"
+    )
 
     fallback = update_mod.SnapshotRoute(
-        reason=update_mod.FALLBACK_UNRELEASED, detail="no release tag points at aaaaaaaaaaaa"
+        reason=update_mod.FALLBACK_UNRELEASED,
+        detail="no release tag points at v1.2.3 @ aaaaaaaaaaaa",
     )
     fallback_lines = update_mod.snapshot_route_lines(snapshot, fallback)
     assert fallback_lines[0] == (
-        "lop-update: building from source: no release tag points at aaaaaaaaaaaa"
+        "warning: building from source — no release tag points at v1.2.3 @ aaaaaaaaaaaa"
     )
-    assert "does not carry" in fallback_lines[1]
-    assert fallback_lines[1].endswith("only the published macOS wheel does")
+    assert fallback_lines[1] == (
+        "warning: this build does not carry the macOS key agent (lop-keyagent.app); "
+        "only the published macOS wheel does"
+    )
 
     platform = update_mod.SnapshotRoute(
         reason=update_mod.FALLBACK_PLATFORM, detail="this host is not macOS"
     )
     platform_lines = update_mod.snapshot_route_lines(snapshot, platform)
-    assert platform_lines[0].startswith("lop-update: building from source: this host is not macOS")
-    assert (
-        platform_lines[1] == "lop-update: operator-key presence is not available on this platform"
+    assert platform_lines[0] == (
+        "warning: building from source — this host is not macOS; the key agent "
+        "(lop-keyagent.app) exists only on macOS"
     )
+    assert platform_lines[1] == "warning: the macOS key agent is not available on this platform"
     assert "does not carry" not in platform_lines[1], "off macOS nothing is 'missing' to repair"
+
+    # The adversarial check: nothing in a fallback may be readable as "presence
+    # is fine here" or "presence will come back" — the only affirmative claim
+    # lives on the wheel route, which this loop deliberately excludes.
+    for lines in (fallback_lines, platform_lines):
+        joined = " ".join(lines)
+        assert "carries the macOS key agent" not in joined
+        assert "will" not in joined and "restore" not in joined
 
     assert update_mod.snapshot_route_lines(snapshot, update_mod.SnapshotRoute()) == ()
 
@@ -3850,8 +3879,9 @@ def test_from_snapshot_released_ref_installs_the_wheel_and_skips_the_bundle(
     assert not snapshot.exists(), "the wheel route must still reclaim the ref extract"
     out = capsys.readouterr().out
     assert "v1.2.3 matches published release 1.2.3" in out
-    assert "installing the macOS wheel" in out
+    assert "installing the published macOS wheel" in out
     assert "carries the macOS key agent" in out
+    assert "warning:" not in out, "the wheel route is progress, not a warning"
     tail.assert_called_once_with(0, services=True, install_version="1.2.3", target="1.2.3")
 
 
@@ -3889,6 +3919,12 @@ def test_from_snapshot_unreleased_ref_falls_back_loudly_and_records_the_reason(
     assert calls[0][0] == snapshot
     assert calls[0][1]["note"] == "unreleased-ref"
     assert not snapshot.exists(), "the fallback still reclaims the ref extract"
-    out = capsys.readouterr().out
-    assert f"building from source: no release tag points at {commit[:12]}" in out
-    assert "does not carry the macOS key agent" in out
+    captured = capsys.readouterr()
+    assert (
+        f"warning: building from source — no release tag points at main @ {commit[:12]}"
+        in captured.err
+    )
+    assert (
+        "warning: this build does not carry the macOS key agent (lop-keyagent.app)" in captured.err
+    )
+    assert "building from source" not in captured.out, "the fallback is a warning, not progress"

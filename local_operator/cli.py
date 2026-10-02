@@ -1667,10 +1667,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # Install a build that is already on this machine into its own generation:
     # a source directory, or a git ref of the repository this command runs in.
     # Named separately from the PyPI path because it answers a different
-    # question ("install THIS tree"); a ref that is exactly a published release
-    # routes through the published wheel instead (see
-    # ``update.classify_snapshot_install``), so this command may consult PyPI
-    # but never runs the version check the default update runs.
+    # question ("install THIS tree"); on macOS a ref that is exactly a published
+    # release routes through the published wheel instead (see
+    # ``update.classify_snapshot_install``); off macOS every ref builds from
+    # source. This command may consult PyPI, but it never runs the version
+    # check the default update runs.
     update_parser.add_argument(
         "--from-snapshot",
         dest="from_snapshot",
@@ -1678,9 +1679,9 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Install a local source tree (a directory, or a git ref of the current "
-            "repository) into its own install generation. A ref that is exactly a "
-            "published release installs the published wheel from PyPI — which "
-            "carries the macOS key agent — and every other ref is built from source"
+            "repository) into its own install generation. On macOS, a ref that is exactly a "
+            "published release installs the published wheel from PyPI — the only build "
+            "carrying the macOS key agent — and every other ref is built from source."
         ),
     )
     update_parser.add_argument(
