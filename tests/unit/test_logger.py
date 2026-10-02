@@ -658,3 +658,42 @@ def test_quiet_wire_clients_holds_regardless_of_the_console_level() -> None:
         for handler in saved_handlers:
             root.addHandler(handler)
         root.setLevel(saved_level)
+
+
+#: An INERT filter the pair below attaches on purpose: ``logging.Filter()`` with
+#: no name passes every record through, so a leaked one damages nothing by
+#: itself and the pin fails on its own assertion rather than by quietly dropping
+#: unrelated records. Object identity is the whole point — no string sentinel.
+_LEAK_PROBE_FILTER = logging.Filter()
+
+
+def test_a_filter_attached_to_every_root_handler_stays_for_this_test() -> None:
+    """The first half of an order-dependent pair; the second half says why."""
+    root = logging.getLogger()
+    assert root.handlers, "pytest's capture handlers are on the root logger during a test"
+    for handler in root.handlers:
+        handler.addFilter(_LEAK_PROBE_FILTER)
+    assert all(_LEAK_PROBE_FILTER in handler.filters for handler in root.handlers)
+
+
+def test_the_previous_tests_handler_filters_did_not_survive_it() -> None:
+    """``restore_root_logger`` takes handler FILTERS back, not just handlers.
+
+    A handler's filters are consulted for EVERY record that handler sees, and
+    pytest's capture handlers are process-wide SINGLETONS — built once per worker
+    and reused for every test in it — so a filter left behind rewrites the
+    records of every test that follows on that worker.
+    ``local_operator.mcp.redaction`` is the production caller: it attaches a
+    filter that moves the exception into ``record.exc_text`` and sets
+    ``record.exc_info = None``, so a later test asserting the diagnostic arrived
+    WITH ``exc_info`` fails on a record that did arrive. That is exactly how
+    ``tests/unit/tui/test_projects_send.py``'s quick-send assertion passed alone
+    and failed in shard 2. ``root.handlers`` is restored either way and the
+    handler object survives that assignment, so the filter has to come off the
+    handler itself — which is what this pair pins.
+    """
+    root = logging.getLogger()
+    assert root.handlers
+    assert not any(_LEAK_PROBE_FILTER in handler.filters for handler in root.handlers), [
+        handler.filters for handler in root.handlers
+    ]
