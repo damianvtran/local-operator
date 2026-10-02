@@ -99,6 +99,7 @@ from local_operator.harness.redaction import report_shape_hits
 from local_operator.harness.secret_sinks import refusal_text as _secret_sink_refusal
 from local_operator.harness.secret_sinks import scan_command as _scan_secret_sinks
 from local_operator.harness.subagent import (
+    INHERIT_TIER_SENTINEL,
     configured_effort_tiers,
     describe_effort_tiers,
     effort_tier_rejection,
@@ -22607,6 +22608,18 @@ ADVERTISED_EFFORT_KEY = "advertised_effort"
 #: the members it advertises.
 ADVERTISED_MODEL_CHOICE_KEY = "advertised_model_choice"
 
+#: Key carrying the ``provider/model`` label of the SESSION that built the tool.
+#:
+#: The third piece of build-time provenance, published beside the two above and
+#: for the same reason: a tier set to the inherit sentinel stores no model of
+#: its own, so a refusal or a schema description that wants to name what that
+#: tier RUNS has to be told, and only the build side was ever handed a
+#: ``ToolContext`` to read it from. Without it the surfaces would either say
+#: the bare word ``default`` (advertising a tier without saying what it runs,
+#: the gap PR #635 closed) or the wrong constant ``this session's model`` from
+#: a surface that could have named the model exactly.
+SESSION_MODEL_LABEL_KEY = "advertised_session_model"
+
 #: The one spelling that means "no tier" on both surfaces: on ``task`` it is a
 #: synonym for omitting the field, and on ``agent`` create/update it is the
 #: sentinel that CLEARS a role's pin. Named once because it is now shared policy
@@ -22662,9 +22675,23 @@ _ADVERTISED_MODEL_CHOICE: ContextVar[bool | None] = ContextVar(
     "advertised_model_choice", default=None
 )
 
+#: The ``provider/model`` of the session the tool was BUILT FOR, published beside
+#: the two records above and for the same reason: only the build side has the
+#: ``ToolContext``, and it is the build side that renders the schema description
+#: and the refusal copy naming what a sentinel tier resolves to. Unlike the
+#: other two this is not a fault-class input — nothing is billed on it — so it
+#: degrades to an empty string rather than to ``None``, and every reader treats
+#: empty as "cannot say" and falls back to a generic phrase rather than
+#: inventing a model.
+_ADVERTISED_SESSION_MODEL: ContextVar[str] = ContextVar("advertised_session_model", default="")
+
 
 def _with_advertised_effort(
-    executor: ToolExecutor, parameters: dict[str, Any], *, model_choice: bool
+    executor: ToolExecutor,
+    parameters: dict[str, Any],
+    *,
+    model_choice: bool,
+    session_model_label: str = "",
 ) -> ToolExecutor:
     """Publish what this build advertised for the duration of one call.
 
@@ -22677,7 +22704,10 @@ def _with_advertised_effort(
     ``model_choice`` is passed in rather than re-read here: it is the SAME value
     the accompanying schema was rendered from, and reading the config a second
     time inside the wrapper would let the two disagree if an edit landed between
-    the build and the call.
+    the build and the call. ``session_model_label`` rides with it for the same
+    reason — it is the label the schema description was rendered from, and the
+    refusal copy must name the SAME model the enum promised, not whatever the
+    session has become by the time a stale tool is invoked.
     """
     advertised = advertised_effort_members(parameters)
 
@@ -22690,11 +22720,13 @@ def _with_advertised_effort(
     ) -> ToolResult:
         token = _ADVERTISED_EFFORT.set(advertised)
         choice_token = _ADVERTISED_MODEL_CHOICE.set(model_choice)
+        label_token = _ADVERTISED_SESSION_MODEL.set(session_model_label)
         try:
             return await executor(tool_call_id, args, signal, on_update, context)
         finally:
             _ADVERTISED_EFFORT.reset(token)
             _ADVERTISED_MODEL_CHOICE.reset(choice_token)
+            _ADVERTISED_SESSION_MODEL.reset(label_token)
 
     wrapper.__name__ = getattr(executor, "__name__", "execute")
     wrapper.__qualname__ = wrapper.__name__
@@ -22706,7 +22738,17 @@ def effort_validation_context() -> dict[str, Any]:
     return {
         ADVERTISED_EFFORT_KEY: _ADVERTISED_EFFORT.get(),
         ADVERTISED_MODEL_CHOICE_KEY: _ADVERTISED_MODEL_CHOICE.get(),
+        SESSION_MODEL_LABEL_KEY: _ADVERTISED_SESSION_MODEL.get(),
     }
+
+
+def _advertised_session_model(info: ValidationInfo) -> str | None:
+    """The session model the build advertised, or ``None`` if unrecorded."""
+    context = info.context if isinstance(info.context, dict) else None
+    if not context:
+        return None
+    label = context.get(SESSION_MODEL_LABEL_KEY)
+    return label if isinstance(label, str) and label else None
 
 
 def _advertised_effort(info: ValidationInfo) -> frozenset[str] | None:
@@ -22727,7 +22769,26 @@ def _advertised_model_choice(info: ValidationInfo) -> bool | None:
     return choice if isinstance(choice, bool) else None
 
 
-def _operator_choice_task_rejection(tier: str) -> str:
+def _tier_runs_on(tier: str, session_model_label: str | None) -> str | None:
+    """What ``tier`` would run a child on, or ``None`` when it is unset.
+
+    The operator-choice refusals below exist to say that ``effort`` buys a
+    different MODEL, so they have to name one. A tier set to
+    :data:`INHERIT_TIER_SENTINEL` stores no model of its own — it follows the
+    launching session — so what it runs on is the SESSION's model, rendered
+    beside the sentinel rather than as a bare ``default``. ``None`` is the
+    unconfigured case: nothing resolves, and inventing a selector there would
+    be a lie.
+    """
+    selector = configured_effort_tiers().get(tier)
+    if not selector:
+        return None
+    if selector == INHERIT_TIER_SENTINEL:
+        return session_model_label or "this session's model"
+    return selector
+
+
+def _operator_choice_task_rejection(tier: str, session_model_label: str | None = None) -> str:
     """The ``task`` refusal for a tier the model may not choose.
 
     Names the tier's MODEL when it resolves, because the whole point of the
@@ -22755,9 +22816,16 @@ def _operator_choice_task_rejection(tier: str) -> str:
     inline cut the key mid-token.
     """
     selector = configured_effort_tiers().get(tier)
-    where = (
-        f": '{tier}' would run it on {selector} instead of this session's model" if selector else ""
-    )
+    runs_on = _tier_runs_on(tier, session_model_label)
+    if runs_on is None:
+        where = ""
+    elif selector == INHERIT_TIER_SENTINEL:
+        # No swap to announce when the tier tracks the session model, so the
+        # clause says what it resolves to instead of claiming a move it does
+        # not make.
+        where = f": '{tier}' = {INHERIT_TIER_SENTINEL}, i.e. it runs on {runs_on}"
+    else:
+        where = f": '{tier}' would run it on {runs_on} instead of this session's model"
     return (
         "Relaunch without 'effort': it is the operator's to choose, and it swaps the "
         f"child's MODEL, not its reasoning level{where}. That switch is "
@@ -22765,7 +22833,7 @@ def _operator_choice_task_rejection(tier: str) -> str:
     )
 
 
-def _operator_choice_pin_rejection(tier: str) -> str:
+def _operator_choice_pin_rejection(tier: str, session_model_label: str | None = None) -> str:
     """The ``agent`` create/update refusal for a tier the model may not pin.
 
     This one carries the OPERATOR's remedy as well as the model's, because
@@ -22790,7 +22858,13 @@ def _operator_choice_pin_rejection(tier: str) -> str:
     would have put the ellipsis inside it.
     """
     selector = configured_effort_tiers().get(tier)
-    where = f" ('{tier}' → {selector})" if selector else ""
+    runs_on = _tier_runs_on(tier, session_model_label)
+    if runs_on is None:
+        where = ""
+    elif selector == INHERIT_TIER_SENTINEL:
+        where = f" ('{tier}' = {INHERIT_TIER_SENTINEL}, i.e. {runs_on})"
+    else:
+        where = f" ('{tier}' → {runs_on})"
     return (
         "effort is the operator's; pin a role via subagents.model_choice. "
         f"Setting it to 'model' hands the choice over, and a role's own profile can "
@@ -22827,8 +22901,11 @@ def _model_choice_refusal(value: str, info: ValidationInfo, *, pin: bool) -> Exc
     advertised_choice = _advertised_model_choice(info)
     if advertised_choice is None:
         return None
+    label = _advertised_session_model(info)
     message = (
-        _operator_choice_pin_rejection(value) if pin else _operator_choice_task_rejection(value)
+        _operator_choice_pin_rejection(value, label)
+        if pin
+        else _operator_choice_task_rejection(value, label)
     )
     if advertised_choice and value in (_advertised_effort(info) or frozenset()):
         return EnvironmentDependentRejectionError(message)
@@ -22888,7 +22965,7 @@ def _validate_effort_tier(
     refusal = _model_choice_refusal(value, info, pin=pin)
     if refusal is not None:
         raise refusal
-    rejection = effort_tier_rejection(value)
+    rejection = effort_tier_rejection(value, session_model_label=_advertised_session_model(info))
     if rejection is None:
         return value
     advertised = _advertised_effort(info)
@@ -23017,7 +23094,7 @@ def advertised_effort_members(parameters: dict[str, Any] | None) -> frozenset[st
     return frozenset()
 
 
-def _effort_tier_field_description() -> str:
+def _effort_tier_field_description(session_model_label: str | None = None) -> str:
     """The ``task`` ``effort`` description for the MODEL-CHOICE arm.
 
     Only rendered when the model is allowed to choose and at least one tier
@@ -23027,10 +23104,15 @@ def _effort_tier_field_description() -> str:
     is a provider/model swap, and one word of the model's own prompt is the
     cheapest place to say so. Short on purpose: it is billed on every turn of
     every session that can delegate.
+
+    ``session_model_label`` is passed through so a tier on the inherit
+    sentinel can be advertised as the model it actually resolves to rather
+    than as the bare word ``default``.
     """
     tiers = configured_effort_tiers()
     return (
-        f"Swaps this child's MODEL (not its reasoning level): {describe_effort_tiers(tiers)}. "
+        "Swaps this child's MODEL (not its reasoning level): "
+        f"{describe_effort_tiers(tiers, session_model_label=session_model_label)}. "
         "Omit to inherit this session's model and reasoning effort."
     )
 
@@ -23919,7 +24001,7 @@ def build_task_tool(context: ToolContext) -> AgentTool | None:
     model_choice = model_may_choose_tier()
     parameters = _advertise_effort_tiers(
         TaskParams.model_json_schema(),
-        description=_effort_tier_field_description(),
+        description=_effort_tier_field_description(context.session_model_label),
         model_choice=model_choice,
     )
     return AgentTool(
@@ -23933,7 +24015,12 @@ def build_task_tool(context: ToolContext) -> AgentTool | None:
         approval_tier="write",
         concurrency="exclusive",
         interruptible=False,
-        execute=_with_advertised_effort(execute_task, parameters, model_choice=model_choice),
+        execute=_with_advertised_effort(
+            execute_task,
+            parameters,
+            model_choice=model_choice,
+            session_model_label=context.session_model_label,
+        ),
     )
 
 

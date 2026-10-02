@@ -209,6 +209,41 @@ class SubagentModelUnavailable(RuntimeError):
 #: to ``config.yml`` cannot move the enum.
 CANONICAL_EFFORT_TIERS: tuple[str, ...] = ("lo", "med", "hi")
 
+#: The one tier VALUE that means "this tier is CONFIGURED, and it runs on
+#: whatever model the launching session is on": ``subagents.models.hi: default``.
+#:
+#: Why a sentinel is needed at all, given the tier already had two spellings
+#: for "use the session's model": both of them were the ABSENCE of the tier.
+#: An absent key and an empty string are the same state to every consumer —
+#: :func:`read_effort_tier_selectors` keeps only a non-empty selector, so
+#: :func:`configured_effort_tiers` drops the tier and unadvertises it, the
+#: strict launch path (:class:`SubagentModelUnavailable`) REFUSES it, and a
+#: role pinned to that tier dies at launch rather than inheriting. So an
+#: operator could not say "hi means the session model" in a way anything would
+#: honour, assert, or show them: writing it looked exactly like deleting it.
+#: This sentinel is that third state, and it is the only one of the three that
+#: is a choice the operator made — which is what keeps PR #635's loud-failure
+#: rule intact. The other two still refuse a PINNED role, deliberately: the
+#: whole point of that rule is that an unconfigured tier must not silently
+#: collapse into self-review. This is an explicit opt-in to one model (the
+#: session's own), never an implicit fallback to whatever was left around.
+#:
+#: The SPELLING is ``default`` and not ``inherit`` on purpose. ``inherit`` is
+#: already taken in this codebase for the OPPOSITE operation: it is
+#: :data:`~local_operator.tools.builtin.INHERIT_EFFORT`, the value a delegating
+#: MODEL passes to mean "no tier" / "clear this role's pin". A config VALUE
+#: spelled the same would read as its own negation — the same word meaning
+#: "unset the tier" on one surface and "this tier is set" on the other — and
+#: an operator copying the token they saw in an ``agent`` tool result onto the
+#: config row would get the exact opposite of what they asked for. ``default``
+#: also matches the vocabulary the rest of the config already uses for "the
+#: model this session would otherwise run on" (``/model default``).
+#:
+#: The value stays a plain string under the existing key, so the config SHAPE
+#: and the live-rebuild prefix match (``Session._apply_config_change``, which
+#: fires on any ``subagents.models.`` key) are unchanged.
+INHERIT_TIER_SENTINEL = "default"
+
 
 def read_effort_tier_selectors() -> dict[str, Any]:
     """``values.subagents.models``, narrowed to the tiers the harness supports.
@@ -370,12 +405,13 @@ def model_may_choose_tier() -> bool:
 
 
 def configured_effort_tiers() -> dict[str, str]:
-    """``{tier: "provider/model"}`` for every tier a launch could honour.
+    """``{tier: selector}`` for every tier a launch could honour.
 
-    What the ``task`` and ``agent`` tool schemas advertise. Only a tier whose
-    selector is a non-empty ``provider/model`` string is included, because
-    those are exactly the tiers the strict launch path
-    (:class:`SubagentModelUnavailable`) accepts: the incident behind this was
+    What the ``task`` and ``agent`` tool schemas advertise. A tier is included
+    when its selector is a non-empty ``provider/model`` string OR the
+    :data:`INHERIT_TIER_SENTINEL`, because those are exactly the tiers the
+    strict launch path (:class:`SubagentModelUnavailable`) accepts: the
+    incident behind this was
     the schema hard-coding ``lo|med|hi`` while the operator had configured
     NONE, so the delegating model read the enum, picked ``hi``, and the launch
     refused it — the tool's own schema was steering the model into a
@@ -407,6 +443,17 @@ def configured_effort_tiers() -> dict[str, str]:
             # A non-string VALUE is kept by the read so the launch path can
             # name it; it is simply not a tier the schema may advertise.
             continue
+        if selector == INHERIT_TIER_SENTINEL:
+            # Advertised by its sentinel, NOT by the model it currently
+            # resolves to: the value is read at every build and every spawn,
+            # so a session that switches model mid-flight must not be shown a
+            # tier whose advertised model is the one it left. The schema
+            # description names the resolved model BESIDE the sentinel (see
+            # :func:`describe_effort_tiers`), which is the honest form of the
+            # same fact: the sentinel is what is stored, and the label says
+            # what it runs right now.
+            tiers[tier] = selector
+            continue
         provider, _, model_id = selector.partition("/")
         if not provider or not model_id:
             continue
@@ -414,7 +461,7 @@ def configured_effort_tiers() -> dict[str, str]:
     return tiers
 
 
-def effort_tier_rejection(tier: str) -> str | None:
+def effort_tier_rejection(tier: str, *, session_model_label: str | None = None) -> str | None:
     """Why ``tier`` cannot be asked for right now, or ``None`` when it can.
 
     The tool-argument counterpart of the strict launch check: the ``task``
@@ -452,19 +499,43 @@ def effort_tier_rejection(tier: str) -> str | None:
     )
     return (
         f"effort tier {tier!r} is unavailable: {why} "
-        f"(configured: {describe_effort_tiers(tiers)}); pick one of those or {inherit}"
+        f"(configured: {describe_effort_tiers(tiers, session_model_label=session_model_label)}); "
+        f"pick one of those or {inherit}"
     )
 
 
-def describe_effort_tiers(tiers: dict[str, str]) -> str:
+def describe_effort_tiers(tiers: dict[str, str], *, session_model_label: str | None = None) -> str:
     """One short clause naming what each tier resolves to, for a schema
     description: ``lo → openai/gpt-5-mini, hi → anthropic/claude-opus-5``.
 
     The model chooses on this, so it must carry the MODEL and not just the
     label — "hi" says nothing about cost, family, or capability — while
     staying short, because a schema description is billed on every turn.
+
+    A tier on the :data:`INHERIT_TIER_SENTINEL` is the one case where the
+    stored value is NOT a model, so naming the stored value alone would
+    advertise a tier without saying what it runs — the exact gap PR #635 was
+    written to close. It is therefore rendered as
+    ``hi → default (session model: anthropic/claude-sonnet-5-5)`` when the
+    caller knows the session's model, and ``hi → default (this session's
+    model)`` when it does not. Both forms keep the sentinel visible (that is
+    what a reader copies back into the config) and add what it resolves to on
+    this session; the bare word ``default`` never stands alone in a schema.
+
+    ``session_model_label`` is optional because the schema builders have a
+    ``ToolContext`` (which carries the label the session itself paints) while
+    pure callers — a launch refusal, a test — may not. Absence degrades to
+    the generic phrase, never to silence about the sentinel.
     """
-    return ", ".join(f"{tier} → {selector}" for tier, selector in tiers.items())
+
+    def render(tier: str, selector: str) -> str:
+        if selector != INHERIT_TIER_SENTINEL:
+            return f"{tier} → {selector}"
+        if session_model_label:
+            return f"{tier} → {INHERIT_TIER_SENTINEL} (session model: {session_model_label})"
+        return f"{tier} → {INHERIT_TIER_SENTINEL} (this session's model)"
+
+    return ", ".join(render(tier, selector) for tier, selector in tiers.items())
 
 
 if TYPE_CHECKING:

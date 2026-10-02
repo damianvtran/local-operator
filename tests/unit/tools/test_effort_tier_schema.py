@@ -308,6 +308,81 @@ def test_describe_names_the_model_behind_each_tier() -> None:
     assert describe_effort_tiers({"lo": "a/b", "hi": "c/d"}) == "lo → a/b, hi → c/d"
 
 
+def test_the_sentinel_is_advertised_as_a_configured_tier(config_dir) -> None:
+    """``default`` is a CONFIGURED tier, and empty is still not.
+
+    Before this, the only spellings for "run this tier on the session model"
+    were the two that REMOVE the tier: an absent key and an empty string both
+    fall out of the shared reader, so the schema stopped advertising them and
+    the strict launch path refused a role pinned to them. The sentinel is the
+    one spelling that is a decision the operator made, so every consumer has
+    to agree it is honourable — while the empty key keeps refusing, which is
+    the distinction the change is about.
+    """
+    from local_operator.harness.subagent import INHERIT_TIER_SENTINEL
+
+    write_tiers(config_dir, {"hi": INHERIT_TIER_SENTINEL})
+    assert read_effort_tier_selectors() == {"hi": INHERIT_TIER_SENTINEL}
+    assert configured_effort_tiers() == {"hi": INHERIT_TIER_SENTINEL}
+    # Usable, so the tool-argument boundary accepts it rather than drawing the
+    # "lacks provider/model" refusal this value used to attract.
+    assert effort_tier_rejection("hi") is None
+
+    write_tiers(config_dir, {"lo": "openai/gpt-5-mini", "hi": ""})
+    assert configured_effort_tiers() == {"lo": "openai/gpt-5-mini"}
+    message = str(effort_tier_rejection("hi"))
+    assert "not configured at subagents.models.hi" in message
+    assert "lacks provider/model" not in message
+
+
+def test_a_sentinel_tier_is_described_by_what_it_resolves_to() -> None:
+    """A schema must never advertise a tier without saying what it runs.
+
+    ``hi → default`` alone names no model, so the description carries the
+    session's model beside the sentinel: the sentinel stays visible (it is
+    what a reader copies back into the config) and what it resolves to on THIS
+    session is named. With no session label the phrase degrades to the generic
+    one, never to a bare ``default``.
+    """
+    from local_operator.harness.subagent import INHERIT_TIER_SENTINEL
+
+    tiers = {"hi": INHERIT_TIER_SENTINEL}
+    assert (
+        describe_effort_tiers(tiers, session_model_label="anthropic/claude-sonnet-5-5")
+        == "hi → default (session model: anthropic/claude-sonnet-5-5)"
+    )
+    assert describe_effort_tiers(tiers) == "hi → default (this session's model)"
+    # A resolved tier is untouched by the label.
+    assert describe_effort_tiers({"lo": "a/b"}, session_model_label="x/y") == "lo → a/b"
+
+
+def test_the_task_schema_names_the_session_model_behind_a_sentinel_tier(
+    config_dir, tmp_path
+) -> None:
+    """The model-facing description is where the sentinel has to be legible:
+    the enum member is ``hi``, and the sentence beside it must say that ``hi``
+    currently means the model this session is on — not the word ``default``.
+
+    Builds through the real ``create_tools`` path with the same
+    ``session_model_label`` the session injects, so the wiring from
+    ``ToolContext`` into the description is exercised and not just the
+    formatter.
+    """
+    write_tiers(config_dir, {"hi": "default"})
+    context = ToolContext(
+        cwd=str(tmp_path),
+        session_id="s",
+        subagent_launcher=_launcher,
+        agent_registry=AgentRegistry(tmp_path / "agents"),
+        session_model_label="anthropic/claude-sonnet-5-5",
+    )
+    task = next(t for t in create_tools(context, enabled=["task"]))
+    prop = _effort(task.parameters, "properties")
+    assert prop is not None
+    assert _enum(prop) == ["hi"]
+    assert "hi → default (session model: anthropic/claude-sonnet-5-5)" in prop["description"]
+
+
 def test_rejection_names_the_working_alternative(config_dir) -> None:
     assert effort_tier_rejection("hi") is not None
     assert "no tiers are configured" in str(effort_tier_rejection("hi"))

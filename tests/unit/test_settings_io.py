@@ -511,9 +511,9 @@ _NO_SINGLE_VALUE_CONSUMER: dict[str, str] = {
     "display.composer.cost": "tui/settings.py derives its defaults from this registry",
     "display.composer.duration": "tui/settings.py derives its defaults from this registry",
     "hub.merge_model": "free text; empty means 'use the default model', no constant",
-    "subagents.models.lo": "free text; empty means 'keep the parent's model', no constant",
-    "subagents.models.med": "free text; empty means 'keep the parent's model', no constant",
-    "subagents.models.hi": "free text; empty means 'keep the parent's model', no constant",
+    "subagents.models.lo": "free text; empty removes the tier; 'default' tracks it, no constant",
+    "subagents.models.med": "free text; empty removes the tier; 'default' tracks it, no constant",
+    "subagents.models.hi": "free text; empty removes the tier; 'default' tracks it, no constant",
     "classification.notice": (
         "retired: the row gates a render path that was deleted outright, so it has no "
         "reader to compare a default against"
@@ -2177,38 +2177,49 @@ class TestTheSubagentModelChoiceRow:
         assert cell_len(setting.help) <= 92
 
     @pytest.mark.parametrize("tier", ["lo", "med", "hi"])
-    def test_the_tier_rows_name_the_billing_and_the_picker(self, tier: str) -> None:
-        """The two facts the incident proved these rows were missing.
+    def test_the_tier_rows_name_the_billing_the_sentinel_and_what_empty_does(
+        self, tier: str
+    ) -> None:
+        """The three facts the incident and the sentinel proved these rows need.
 
-        A deliberate tier pin read as harmless: nothing said a child on it RUNS,
-        and is billed, at that model's rates, and nothing pointed at the row that
-        decides who may pick one. Both are pinned here because the sentence is
-        one string — a later edit that trims either half for width drops the
-        fact, not a word.
+        The sentence here used to say "empty inherits", which is the OPPOSITE of
+        what the code does: empty (and absent) REMOVE the tier, so the schema
+        stops advertising it and a role pinned to it is refused at launch
+        rather than quietly inheriting (#635). It also had no spelling for the
+        explicit opt-in, `default`, which resolves at launch to the session's
+        current model. The billing fact is the incident's own lesson: a
+        deliberate tier pin read as harmless because nothing said a child on it
+        RUNS, and is billed, at that model's rates. All three are pinned here
+        because the sentence is one string — a later edit that trims a clause
+        for width drops a fact, not a word.
         """
         setting = settings_io.resolve_key(f"subagents.models.{tier}")
         assert setting is not None
         assert "Bills at that model's rates" in setting.help
-        # "empty inherits" rather than "empty keeps the parent's": the shorter
-        # verb is the one the rest of this change uses ("inherits this session's
-        # model"), and it buys the 8 cells that let the KEY PATH stay on the line
-        # at 100 columns — the frame the evidence is captured on.
-        assert "empty inherits" in setting.help
-        # Names the row instead of its position: registry order is max_running,
-        # slim_child_knowledge, max_team_depth, model_choice, lo, med, hi, so "row above"
-        # points `med` at `lo` and `hi` at `med` — and `hi` is the row the incident ran through.
-        assert "See subagents.model_choice" in setting.help
-        # ...and they FIT beside the row's own key path at 100 columns, which is
-        # the width the /settings evidence frames are captured at. The detail
-        # line sheds the WHOLE help once it and the key no longer fit
+        # The explicit opt-in, named by the word the config stores.
+        assert "'default'=session" in setting.help
+        # The correction: empty removes the tier. The false sentence this
+        # replaced is asserted ABSENT so a future edit cannot restore it.
+        assert "empty removes the tier" in setting.help
+        assert "inherits" not in setting.help
+        # ...and all three FIT beside the row's own key path at 100 columns,
+        # which is the width the /settings evidence frames are captured at. The
+        # detail line sheds the WHOLE help once it and the key no longer fit
         # (``settings_view``'s shed ladder), so an edit that buys words here
-        # loses the billing fact in exactly the state the row is read in.
+        # loses a fact in exactly the state the row is read in.
         #
         # 72 is the frame-derived budget, not a round number: the row is 94
         # cells, `subagents.models.hi` is 19 and the separator 3, leaving 72 for
         # the help — and 73 is precisely the width the review caught shedding
         # the key path (95 cells against 94), so a bound of 74 would admit the
-        # string this assertion exists to prevent.
+        # string this assertion exists to prevent. The shipped string measures
+        # 70 and was re-measured on a rendered frame at 100 columns.
+        #
+        # The `See subagents.model_choice` cross-reference the previous wording
+        # carried is gone on purpose: three facts do not fit in 72 cells beside
+        # a 26-cell pointer, and this row's own contract is what each VALUE
+        # does. Its absence is not asserted (the row it named is two above and
+        # still labelled "Who picks a subagent's model").
         assert cell_len(setting.help) <= 72, setting.help
 
 
