@@ -33976,11 +33976,14 @@ class OperatorApp(App[None]):
         view = self._projects_view
         if view is None:
             return
-        view.compose_pending(message.target)
-        # R2-2: the strip states THIS send. A second send must never leave the
-        # first one's receipt standing while the new one resolves, so the band
-        # is reset to the in-flight line before the worker's first await (the
-        # worker then replaces it with the outcome, or hands it back below).
+        # N1 (UX round 2): ONE sentence, in the strip. Submit used to paint the
+        # in-flight line on the page's notice row AND in the strip, so the reader
+        # saw `sending to ◆ …` twice on two adjacent rows for the whole window.
+        # The strip is the composer's own surface and keeps it; the notice row is
+        # CLEARED instead — a previous send's verdict must never stand beside a
+        # new attempt (R2-2), and with nothing to say the footer falls back to
+        # the project detail.
+        view.show_notice("")
         if view.composing:
             self._set_projects_strip(pending_line(message.target))
         self.run_worker(
@@ -34036,8 +34039,19 @@ class OperatorApp(App[None]):
                 # (agent review round 1, F6).
                 require_started=True,
             )
-        except Exception as exc:  # noqa: BLE001 — the resolver owns its refusal
-            self._quick_send_settled(view, target, send_error_line(target, str(exc)), text)
+        except Exception:  # noqa: BLE001 — the resolver owns its refusal
+            # An UNEXPECTED fault on the resolve path is this end's problem, not
+            # the reader's: interpreter text in the notice row reads as a broken
+            # app (UX round 2, U3 — measured: "cannot unpack non-iterable
+            # coroutine object"). The sentence is human; the exception goes to
+            # the log.
+            logger.debug("quick-send resolve failed", exc_info=True)
+            self._quick_send_settled(
+                view,
+                target,
+                send_error_line(target, "something went wrong on this end — retry"),
+                text,
+            )
             return
         if record is None:
             self._quick_send_settled(
@@ -34065,12 +34079,19 @@ class OperatorApp(App[None]):
             # A PRE-DELIVERY REFUSAL: the peer answered no, nothing was minted.
             self._quick_send_settled(view, target, send_error_line(target, str(exc)), text)
             return
-        except (ConnectionError, OSError, ValueError) as exc:
-            # Unclassifiable transport fault: honest, and never the confident arm.
+        except (ConnectionError, OSError, ValueError):
+            # Unclassifiable transport fault: honest, never the confident arm —
+            # and the reader gets a sentence, not interpreter text (UX round 2,
+            # U3: the exception is logged, `str(exc)` never painted). The
+            # caution is the core's own for this state — the message may have
+            # landed, so sending again may deliver it twice (UX round 2, U2).
+            logger.debug("quick-send transport fault", exc_info=True)
             self._quick_send_settled(
                 view,
                 target,
-                f"{sent_line(target, 'delivery unconfirmed')} — the send faulted ({exc})",
+                f"{sent_line(target, 'delivery unconfirmed')} — the send faulted on "
+                "this end; check the target's transcript before resending, sending "
+                "again may deliver it twice",
                 text,
             )
             return
@@ -34081,9 +34102,16 @@ class OperatorApp(App[None]):
             return
         sentence = sent_line(target, outcome.state_word)
         if outcome.partial:
-            # Amber: honest but incomplete — the draft stays so the reader can
-            # decide whether to resend, and the notice row carries the word.
-            self._quick_send_settled(view, target, sentence, text)
+            # Amber: honest but incomplete. The core's own sentence for exactly
+            # these states warns against resending (`do not send it again` /
+            # `sending again may deliver it twice`), and the restored draft is
+            # the strongest available cue to press enter again — so the caution
+            # rides the notice too, in the core's words (UX round 2, U2;
+            # `advisory` is the half of the detail after its ` — ` separator).
+            caution = outcome.advisory
+            self._quick_send_settled(
+                view, target, f"{sentence} — {caution}" if caution else sentence, text
+            )
             return
         # DELIVERED: the band acknowledges (F4); the editor was cleared by the
         # submit, so the strip is visible and the reader is still in compose.

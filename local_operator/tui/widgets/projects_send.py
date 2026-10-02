@@ -49,12 +49,16 @@ from textual.widgets import Input, Static
 #: advice about what to do next, not a key this card implements — `s` belongs
 #: to the page, and a card that swallowed it would be a lie about its own keys.
 #: The card's empty state. It names the two things that DO work today —
-#: ``esc`` closes the card, and the project detail is where a link is made —
-#: rather than the spec's ``s starts a session``, which is P5b's binding and is
-#: not on this slice: a card pointing at a dead key is the one failure this
-#: footer exists to prevent (agent review round 1, U1). P5b rebinds it to the
+#: ``esc`` closes the card, and ``/project link`` makes a link — rather than the
+#: spec's ``s starts a session``, which is P5b's binding and is not on this
+#: slice: a card pointing at a dead key is the one failure this footer exists to
+#: prevent (agent review round 1, U1). The second half used to send the reader
+#: to the project detail, which has NO link affordance at all — no row on that
+#: page has an action (``selected_action_label()`` is None for every row) and no
+#: ``link_session`` call exists under ``local_operator/tui/`` — so it now names
+#: the route that works (`/project link`; UX round 2, U1). P5b rebinds it to the
 #: real start-session flow.
-NO_TARGET_FOOTER = "no targets — esc closes · link a session from the project detail"
+NO_TARGET_FOOTER = "no targets — esc closes · /project link adds one"
 
 #: The note when the FILTER matched nothing — a different nothing from
 #: :data:`NO_TARGET_FOOTER` (a mistyped filter is a keystroke to take back,
@@ -78,9 +82,6 @@ SEND_CARD_CHROME_ROWS = 7
 #: The most target rows painted at once; the window scrolls within this so the
 #: selected row is always on screen ("no unpainted selection", D1).
 SEND_CARD_ROW_CAP = 5
-
-#: The card's widest column count; narrower terminals get the page's width.
-SEND_CARD_MAX_WIDTH = 60
 
 
 def target_handle(target: SendTarget) -> str:
@@ -157,7 +158,15 @@ def send_error_line(target: SendTarget, reason: str) -> str:
 #: accent every running chip uses, `wedged`/`stale` warn, and `stopped`/
 #: `missing` recede. An unknown state resolves to plain ink.
 #:
-#: `missing` takes `muted` (agent review round 2, R2-1), NOT `status_archived`:
+#: `live` takes `chip_live` (design round 2, D8), NOT the page's
+#: `status_active`: the card's ground is `overlay`, where the light ramp's
+#: accent measures 3.49:1 (4.29:1 on the selected row's `tint-select`) — under
+#: the 4.5:1 floor, and no green or blue token in that ramp clears it (success
+#: 3.45, signal 3.54). The palette's `chip-live` token carries the per-ramp
+#: solve: accent on the dark ramp (6.59:1 / 7.62:1, which it clears) and the
+#: neutral ink on the light one (10.92:1 / 13.43:1). The chip's WORD states the
+#: state, so the hue is not the carrier. Pinned in
+#: tests/unit/tui/test_palette_contrast.py.
 #: the card's ground is `overlay`, where `dim` measures 3.43:1 (dark) and
 #: 2.72:1 (light) — under the 4.5:1 AA floor for normal text, and the exact
 #: number D5 moved the note ink off. `muted` clears it at 6.51:1 dark and
@@ -167,7 +176,7 @@ def send_error_line(target: SendTarget, reason: str) -> str:
 #: resolver — so sharing the ink costs no distinction the row does not already
 #: state. Pinned in tests/unit/tui/test_palette_contrast.py.
 _STATE_INK: dict[str, str] = {
-    "live": "status_active",
+    "live": "chip_live",
     "wedged": "status_paused",
     "stale": "stale",
     "stopped": "status_done",

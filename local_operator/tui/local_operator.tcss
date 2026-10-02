@@ -2409,8 +2409,16 @@ Screen.settings #input-dock #prompt-chevron {
  * title's own rule row, the app's separator vocabulary. */
 .projects-send-card {
     layer: toast;
+    /* FULL WIDTH, and the cap is gone deliberately (design round 2, D9). At
+     * `max-width: 60` an 80-cell terminal left 20 cells of page beside the card
+     * on its own rows — the frame painted the canvas fragment `essions` level
+     * with the card's last row, so two surfaces shared a row and the page's text
+     * read as part of the card's edge. The `/resume` family answers the same
+     * question by taking the width it can hold, and this card does the same: it
+     * fills the page's content box, so no page row is visible beside it at any
+     * width. Its height and its floating position are unchanged — the layer
+     * keeps it out of the layout, so the page still does not reflow (D2). */
     width: 1fr;
-    max-width: 60;
     height: auto;
     background: $lo-overlay;
     color: $lo-fg;

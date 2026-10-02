@@ -237,6 +237,35 @@ def test_warning_ink_clears_aa_on_the_card_ground() -> None:
         )
 
 
+@pytest.mark.parametrize("name", _ALL_THEMES)
+def test_the_live_chip_ink_clears_aa_on_the_card_ground(name: str) -> None:
+    """The quick-send card's ``[live]`` chip rides the card's ground — AA there (D8).
+
+    The pairing the palette could not inherit: a ramp's accent is solved against
+    ``bg``/``surface``, and the card's chips sit on ``overlay``, a step further
+    from the polarity's floor — where the brand light accent measures **3.49:1**
+    (4.29:1 on the selected row's ``tint-select``) and no green or blue token in
+    that ramp clears 4.5 (success 3.45, signal 3.54). The ``chip-live`` token is
+    DERIVED per ramp by measurement (``theme._fill_chip_live``): the accent when
+    it clears every ground the chip can sit on, the ramp's own neutral ink when
+    it does not — so this check holds for EVERY theme, the derived terminal ramp
+    included, rather than for the two brand ramps the other ground pins name.
+    """
+    from local_operator.tui.widgets.projects_send import state_ink_key
+
+    assert (
+        state_ink_key("live") == "chip_live"
+    ), "the card's [live] chip re-mapped — re-measure its ink on the card ground"
+    ink = theme.semantic_color("chip-live", name)
+    for ground_token in ("overlay", "tint-select"):
+        ground = theme.semantic_color(ground_token, name)
+        ratio = contrast(ink, ground)
+        assert ratio >= 4.5, (
+            f"{name}: the [live] chip reads {ratio:.2f}:1 ({ink} on {ground}) — "
+            "under AA on the card's own ground"
+        )
+
+
 def test_the_missing_chip_ink_clears_aa_on_the_card_ground() -> None:
     """The quick-send card's ``[missing]`` chip rides the card's ground — AA there (R2-1).
 
@@ -246,7 +275,9 @@ def test_the_missing_chip_ink_clears_aa_on_the_card_ground() -> None:
     (light) on ``overlay``, under the 4.5:1 floor for normal text and the exact
     number D5 moved the modal note ink off. It takes ``muted`` now; this pins
     the mapping AND the pair, with the ratio in the failure message. The BRAND
-    ramps only, like the pin above.
+    ramps only, like the ``warning`` pin above: ``muted`` is the ramp's own
+    secondary ink, and re-sourcing every curated palette's quiet chip for this
+    one ground is the design stream's call, not a coder's.
     """
     from local_operator.tui.widgets.projects_send import state_ink_key
 
