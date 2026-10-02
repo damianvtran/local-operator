@@ -3378,7 +3378,7 @@ class AskResponseBlock(WakeBlock):
             identity, _ = ask_response_notice(self._details)
         return identity, str(self._details.get("text") or "")
 
-    def _summary_ink(self) -> str:  # type: ignore[override]
+    def _summary_ink(self) -> str:
         """The timeout row keeps the notice's ``warning`` ink; a response stays dim.
 
         The two rows are NOT the same fact: one says the agent was answered, the
