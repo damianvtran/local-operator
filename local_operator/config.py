@@ -688,11 +688,25 @@ def _dotted_write_refusal(key: str) -> "str | None":
     ``tui/settings.py`` does not read — one silent failure traded for another,
     which is ``settings_io``'s "THE ``display.*`` FLAT-KEY TRAP".
 
+    An UNDECLARED literal flat key is refused too, and that is deliberate. The
+    allowance is for keys the registry declares, not for any string containing a
+    dot: a flat key that has been retired is exactly the shape a reader no
+    longer looks at, which is the defect this guard exists to catch.
+    ``session.reap_unused`` is the live example — the flat key the retired #576
+    reaper read, still written by its migration straight into ``values`` — and a
+    caller reaching for it through this writer is better told it is not a
+    setting any more than handed a silent no-op.
+
     ``settings_io`` is imported function-locally: it imports this module, so a
     module-level import here would be a cycle. ``read_effort_tier_selectors``
     in ``harness/subagent.py`` is the precedent for the same move.
     """
-    if "." not in key:
+    # A non-`str` key is not a dotted one — `"x" in 2024` would raise TypeError
+    # from a guard that exists to explain a refusal. The repo pins the shape
+    # (`test_a_non_string_top_level_key_cannot_take_the_store_down`): an int key
+    # is stored verbatim and later reported by `_report_unmodelled_top_level`,
+    # which is the surface that tells the user about it.
+    if not isinstance(key, str) or "." not in key:
         return None
 
     from local_operator import settings_io
@@ -702,20 +716,29 @@ def _dotted_write_refusal(key: str) -> "str | None":
         return None
 
     if setting is not None:
+        # Remedy first, mechanism last (design round 1, D1): this is public API
+        # text whose one-line hosts — the TUI's detail row, the CLI's `Error:`
+        # line — truncate at 34-98 cells, which sheds a trailing remedy entirely
+        # and leaves the caller told what went wrong but not what to do. The
+        # container is named rather than the root (D4): for
+        # `subagents.models.hi` the leaf lives in `subagents.models`, and that is
+        # the map a reader needs if they go to fix the YAML by hand.
+        container = ".".join(setting.path[:-1])
         return (
-            f"{key!r} is a nested setting, not a top-level key: its value lives "
-            f"inside the nested {setting.path[0]!r} mapping, so a literal write "
-            f"would store the dotted name as a separate top-level key that no "
-            f"reader looks at and report a success that changed nothing. Use "
-            f"`lop config edit {key} <value>` (or `settings_io.write_setting`), "
-            f"which merges into that mapping and tells the running app the value "
-            f"changed."
+            f"Use `lop config edit {key} <value>` — that key is a nested "
+            f"setting, not a top-level one, so nothing was written. In Python, "
+            f"`settings_io.write_setting(manager, "
+            f'settings_io.resolve_key("{key}"), value)` does the same. Both '
+            f"merge into the {container!r} mapping, which is where the runtime "
+            f"reads it; a literal write would store the dotted name as a "
+            f"top-level key that no reader looks at and report a success that "
+            f"changed nothing."
         )
     return (
-        f"{key!r} is not a declared setting, and a dotted key is stored literally "
-        f"at the top level — where no reader looks, so the write would be inert."
-        f" Run `lop config list` for the real name, then `lop config edit <key> "
-        f"<value>`."
+        f"Run `lop config list` for the real name, then `lop config edit <key> "
+        f"<value>` — {key!r} is not a declared setting, so nothing was written. "
+        f"A dotted key is stored literally at the top level, where no reader "
+        f"looks."
     )
 
 
@@ -778,7 +801,12 @@ class ConfigManager:
             print(
                 paint(
                     f"Moved the invalid file to {backup} and starting with defaults. "
-                    "Run `local-operator config create` to write a fresh one.",
+                    # `lop`, not `local-operator`: the launcher registered in
+                    # [project.scripts] and the spelling the TUI's own hints use.
+                    # The tree is split dead-even between the two (10/10 measured
+                    # in design round 1, D3) — this is the newer copy, so it takes
+                    # the correct side rather than propagating the older spelling.
+                    "Run `lop config create` to write a fresh one.",
                     WARNING,
                     stream=sys.stderr,
                 ),
@@ -995,9 +1023,55 @@ class ConfigManager:
     def update_config(self, updates: Dict[str, Any], write: bool = True) -> None:
         """Update configuration with new values.
 
+        The same two rules as :meth:`set_config_value`, for the same reasons: a
+        key must be one this writer can place, and a WRITE must merge into what
+        is on disk rather than over it. This is the second public whole-snapshot
+        writer (``_write_config(vars(self.config))``), so it reverted concurrent
+        edits in exactly the same way — and it is the one that made that
+        reachable over HTTP, because ``app.state.config_manager`` is built once
+        at startup and handed to every request unchanged, so a single
+        ``PATCH /v1/config`` could undo a ``lop config edit`` typed in another
+        terminal (#1920's vanished sibling; QA round 1's G1 reproduced that
+        against the real app, and ``providers/controller.py`` holds a manager the
+        same way).
+
+        The reload is skipped when ``updates`` is empty, and that exception is
+        load-bearing rather than an optimisation: an empty call is a FLUSH of the
+        in-memory state, not a merge of new values. ``settings_io._delete``'s
+        top-level branch deletes the key from the live mapping and then flushes
+        it through this exact call, so reloading there would read the key back
+        off disk and write it again — silently undoing every ``reset_setting``
+        on a flat-dotted key.
+
+        ``write=False`` still only mutates the in-memory copy, which is what
+        :meth:`update_config_from_args` relies on to layer one run's CLI
+        overrides over the file without persisting them.
+
         Args:
             updates (Dict[str, Any]): Dictionary of configuration updates
+            write (bool): Whether to write the updated config to the config file
+
+        Raises:
+            ValueError: a key is dotted and is not a declared flat-dotted
+                setting, so it could only be written inertly.
+            settings_io.ConfigUnreadableError: ``write=True`` and ``config.yml``
+                cannot be parsed, so no write may be based on it.
         """
+        # Every key, before any mutation: a raise must not leave the caller
+        # holding a half-applied update.
+        for key in updates:
+            refusal = _dotted_write_refusal(key)
+            if refusal is not None:
+                raise ValueError(refusal)
+
+        if write and updates:
+            # Function-local for the import-cycle reason `_dotted_write_refusal`
+            # documents, and imported rather than re-derived so that "never base
+            # a write on defaults" has exactly one implementation.
+            from local_operator import settings_io
+
+            settings_io._reload_before_write(self)
+
         # Update each field individually to work with Config class
         for key, value in updates.items():
             self.config.set_value(key, value)

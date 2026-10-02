@@ -972,7 +972,15 @@ def test_the_sanctioned_route_reaches_the_map_the_tier_reader_reads(
     assert setting.path == ("subagents", "models", "hi")
     assert not setting.is_flat_dotted
 
-    settings_io.write_setting(ConfigManager(tmp_path), setting, "openai/gpt-5-mini")
+    # Resolved by NAME, spelled exactly as the refusal message tells the caller to
+    # spell it (`settings_io.write_setting(manager, settings_io.resolve_key(key),
+    # value)`). Design round 1, D2: the message used to name a form that raises
+    # AttributeError when taken literally, so the named route is pinned here
+    # rather than assumed callable.
+    assert settings_io.resolve_key("subagents.models.hi") == setting
+    settings_io.write_setting(
+        ConfigManager(tmp_path), settings_io.resolve_key("subagents.models.hi"), "openai/gpt-5-mini"
+    )
 
     assert read_effort_tier_selectors() == {"hi": "openai/gpt-5-mini"}
     assert ConfigManager(tmp_path).get_nested_value(("subagents", "models", "hi")) == (
@@ -1003,6 +1011,84 @@ def test_a_stale_manager_cannot_revert_a_sibling_write(tmp_path: Path) -> None:
     assert after["model_name"] == "write-3"
     assert after["hosting"] == "write-1", "write 1 was reverted by the stale snapshot"
     assert after["web_search"]["enabled"] is False, "write 2 was reverted by the stale snapshot"
+
+
+def test_update_config_refuses_a_dotted_key_before_anything_is_mutated(tmp_path: Path) -> None:
+    """The second whole-snapshot writer carried the same two halves (#1920).
+
+    ``update_config`` had ``set_config_value``'s old body: a plain ``set_value``
+    then a whole-file dump, so a dotted key was stored inertly and reported as a
+    success. Refused here for the same reason, and refused BEFORE the loop that
+    applies the updates — the mixed dict below is what makes that observable: a
+    guard placed after the first ``set_value`` would leave ``hosting`` mutated in
+    memory while the write never happened.
+    """
+    manager = ConfigManager(tmp_path)
+    manager.set_config_value("hosting", "seed")
+    before_bytes = manager.config_file.read_bytes()
+
+    with pytest.raises(ValueError) as raised:
+        manager.update_config({"session.cleanup.enabled": True, "hosting": "other"})
+
+    assert "session.cleanup.enabled" in str(raised.value)
+    assert manager.config_file.read_bytes() == before_bytes
+    assert manager.get_config_value("hosting") == "seed"
+    # The nested home is the shipped default, not the True that was asked for.
+    assert manager.get_nested_value(("session", "cleanup", "enabled")) is False
+
+
+def test_update_config_does_not_revert_a_sibling_write(tmp_path: Path) -> None:
+    """The same stale-snapshot revert as ``set_config_value``, on the writer the
+    server actually reaches: ``app.state.config_manager`` is built once at
+    startup and reused for every request, so one ``PATCH /v1/config`` used to
+    re-dump the whole startup snapshot over anything written since.
+    """
+    ConfigManager(tmp_path).set_config_value("hosting", "prime")
+
+    stale = ConfigManager(tmp_path)  # snapshot taken BEFORE the other write
+    ConfigManager(tmp_path).set_config_value("hosting", "write-1")
+
+    stale.update_config({"model_name": "write-2"})
+
+    after = ConfigManager(tmp_path).get_config().values
+    assert after["model_name"] == "write-2"
+    assert after["hosting"] == "write-1", "the concurrent write was reverted"
+
+
+def test_update_config_without_updates_is_a_flush_not_a_merge(tmp_path: Path) -> None:
+    """The exception that keeps ``reset_setting`` working, pinned rather than
+    left implicit in ``update_config``'s body.
+
+    ``settings_io._delete``'s top-level branch removes the key from the LIVE
+    mapping and then persists it with ``update_config({}, write=True)``. That call
+    must write the in-memory state as it stands; had the reload been applied to it
+    too, the delete would be read back off disk and written again, silently
+    undoing every ``reset_setting`` on a flat-dotted key.
+    """
+    manager = ConfigManager(tmp_path)
+    manager.set_config_value("display.shimmer", False)
+
+    del manager.get_config().values["display.shimmer"]  # the shape `_delete` uses
+    manager.update_config({}, write=True)
+
+    assert "display.shimmer" not in ConfigManager(tmp_path).get_config().values
+
+
+def test_a_non_string_key_is_not_a_dotted_key(tmp_path: Path) -> None:
+    """A non-``str`` key must not turn the guard into a ``TypeError``.
+
+    A top-level key the store does not model is a shape this repo meets on
+    purpose — an int key survives a load and is reported to the user by
+    ``_report_unmodelled_top_level``, which
+    ``test_a_non_string_top_level_key_cannot_take_the_store_down`` pins. A bare
+    ``"." not in key`` would raise ``TypeError: argument of type 'int' is not
+    iterable`` from a guard whose whole job is to explain a refusal, naming
+    neither the key nor the refusal.
+    """
+    manager = ConfigManager(tmp_path)
+    manager.set_config_value(2024, "x")
+
+    assert ConfigManager(tmp_path).get_config().values[2024] == "x"
 
 
 def test_a_config_that_goes_bad_under_a_live_manager_aborts_the_write(tmp_path: Path) -> None:
