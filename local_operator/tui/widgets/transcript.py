@@ -39,6 +39,7 @@ from typing import (
     Iterable,
     Iterator,
     Literal,
+    Mapping,
     Protocol,
     Sequence,
     cast,
@@ -3296,6 +3297,168 @@ class PeerMessageBlock(ExpandableActionBlock):
     def spans_multiple_rows(self) -> bool:
         """Exact: the card already tracks its own height, collapsed or not."""
         return self._row_count > 1
+
+
+class AskResponseBlock(WakeBlock):
+    """The receipt for a queued ask settling — a tool-ledger card, expandable.
+
+    Design §5.1: the ``ask_response``/``ask_timeout`` rows render in the
+    tool-card visual family, collapsed to one line and expandable to the
+    questions and the answers that were given.
+
+    WHY IT IS A ``WakeBlock`` SUBCLASS rather than a fresh
+    ``ExpandableActionBlock``. The two rows are the same SHAPE — an agent-side
+    event with no user keystroke behind it, delivered into the transcript and
+    opened by Enter/click/Space — and inheriting buys the whole ledger
+    contract: the shared name column, the blank row of air above and below
+    (``SPACING_KIND``/``SPACING_AIRY``), hover/focus affordances, the width
+    guard, and the copy gutter. A parallel implementation is how one of those
+    silently drifts (the failure mode the base class's own docstring names).
+
+    What it OVERRIDES is the expansion and the name. The wake's expansion
+    re-dumps the delivered prompt; an ask's must show the Q&A the prompt was
+    answered with, because that is the fact the user came back to check — "what
+    did I tell it, and when?".
+
+    THE COLLAPSED LINE IS THE SHARED COPY, from ``harness/rows``: the same
+    string the phone's fold paints, for the reason that module exists (one row
+    decision, two surfaces). It is truncated to the row's budget by
+    :meth:`_build_row`; the expansion below carries the detail, so nothing the
+    one-liner drops is unreachable.
+
+    SECRET ANSWERS SHOW KEYS ONLY, and that is enforced upstream rather than
+    here: the wire's ``answers`` for a secret cell carry the credential's NAME
+    (``[<key>]``), never its value (design §4). This widget therefore has no
+    branch for the case and must never grow one — a surface that resolved a
+    secret to render it would be the leak the contract exists to prevent.
+    """
+
+    #: The INHERITED class, deliberately, and this is the one place the
+    #: ledger's naming convention is not followed: ``test_minimalism`` pins the
+    #: exact selector text that opts an expanding row out of the height-1 pin
+    #: (``ToolCard.tool-expanded, WakeBlock.wake-expanded, …``), so a row that
+    #: named its own class would have to edit that pinned list to stay off
+    #: ``auto`` — and editing a guard to admit new code is how a guard stops
+    #: being one. The type selector matches this subclass, so the pin and the
+    #: opt-out both reach it with the sheet untouched.
+    EXPANDED_CLASS = WakeBlock.EXPANDED_CLASS
+
+    #: The ledger's name column and icon: the ``ask`` tool's, so the receipt
+    #: lines up in a column with the ``ask`` call it answers (the tool card
+    #: registers the same name; see ``tool_card``'s ``row.name_meta``).
+    tool_name = "ask"
+
+    def __init__(
+        self,
+        details: Mapping[str, Any] | None,
+        *,
+        kind: str,
+        fold_width: int = 0,
+    ) -> None:
+        #: ``"response"`` or ``"timeout"``. A string rather than a bool because
+        #: both branches read it and a third (a late answer is a response) would
+        #: otherwise arrive as a second boolean.
+        self._kind = kind
+        self._details: dict[str, Any] = dict(details or {})
+        super().__init__(str(self._details.get("text") or ""), fold_width=fold_width)
+
+    def _summary(self) -> tuple[str, str]:  # type: ignore[override]
+        """``(identity, body)`` — the shared one-liner, and the envelope.
+
+        The body is the delivered text (``details['text']``), kept as the
+        fallback for an expansion this row cannot build from structured data:
+        a timeout carries no answers, and an older runtime's row may carry no
+        ``questions`` at all, so the card would otherwise expand to nothing.
+        """
+        from local_operator.harness.rows import ask_response_notice, ask_timeout_notice
+
+        if self._kind == "timeout":
+            identity, _ = ask_timeout_notice(self._details)
+        else:
+            identity, _ = ask_response_notice(self._details)
+        return identity, str(self._details.get("text") or "")
+
+    def _summary_ink(self) -> str:
+        """The timeout row keeps the notice's ``warning`` ink; a response stays dim.
+
+        The two rows are NOT the same fact: one says the agent was answered, the
+        other says its deadline fired with nothing given. The notice this row
+        replaced carried the warning ink and a ``!``, and the comment beside it
+        claimed that ink was "unchanged" while the shared row builder painted
+        both in ``dim`` (round 1, MINOR-3 / design D3). This is the ink the
+        comment was already promising.
+
+        It is ``_summary_ink`` and not a hook of this row's own: that is the
+        seam the shared row builder reads (``WakeBlock._summary_ink``, which
+        :class:`MonitorDeltaBlock` already overrides for the same reason), and
+        the fold onto ``main`` is where the branch's duplicate ``_summary_style``
+        was retired in its favour — one ink, one seam, and the icon takes it too.
+        """
+        if self._kind == "timeout":
+            return "warning"
+        return super()._summary_ink()
+
+    def _build_content(self, width: int) -> Text:  # type: ignore[override]
+        """The summary row, plus the Q&A when the row is opened."""
+        from local_operator.tui.widgets.tool_card import OUTPUT_INDENT, truncate_cells
+
+        row = self._build_row(width)
+        if not self._expanded:
+            return row
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        line_width = max(1, width - 2 - OUTPUT_INDENT)
+        indent = " " * OUTPUT_INDENT
+        for prefix, text, style in self._expansion_lines():
+            room = max(1, line_width - len(prefix))
+            for index, wrapped in enumerate(wrap_cells(text, room) or [""]):
+                row.append("\n" + indent + (prefix if index == 0 else " " * len(prefix)), style=dim)
+                row.append(truncate_cells(wrapped, room), style=style)
+        return row
+
+    def _expansion_lines(self) -> list[tuple[str, str, Style]]:
+        """The Q&A the user opened the row to read, or the envelope if there is none.
+
+        One ``(prefix, text, style)`` per line so the wrap above can hang a
+        continuation under its own prefix rather than under the row's indent —
+        the same continuation rule the wake's bullets follow.
+        """
+        questions = self._details.get("questions") or []
+        answers = self._details.get("answers") or {}
+        fg = Style(color=theme_mod.semantic_color("fg"))
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        lines: list[tuple[str, str, Style]] = []
+        for question in questions:
+            if not isinstance(question, Mapping):
+                continue
+            prompt = str(question.get("question") or "").strip()
+            if not prompt:
+                continue
+            lines.append(("Q: ", prompt, fg))
+            cell = answers.get(str(question.get("id") or ""))
+            chosen = [str(item) for item in (cell or ())]
+            if question.get("secret"):
+                # The KEY only. See the class docstring: the value is not here
+                # to render, and a fallback that printed the cell whole would be
+                # the leak the wire already refuses to make possible.
+                #
+                # The suffix is design round 1's D11: `[DEPLOY_KEY]` alone can be
+                # read as the value it is standing in for, and the picker that
+                # collected it labelled the same thing "key name". One word
+                # removes the ambiguity without putting the value anywhere near
+                # the frame.
+                keys = ", ".join(chosen) if chosen else ""
+                shown = f"{keys} (key name)" if keys else "not provided"
+            else:
+                shown = ", ".join(chosen) if chosen else "not answered"
+            lines.append(("A: ", shown, fg))
+        if not lines:
+            # No structured Q&A (a timeout, or a row from a runtime that sent
+            # none): the delivered envelope is the honest expansion, and it
+            # names the questions itself for a timeout.
+            envelope = str(self._details.get("text") or "")
+            if envelope:
+                lines.append(("", envelope, dim))
+        return lines
 
 
 class RichBlock(TranscriptBlock):

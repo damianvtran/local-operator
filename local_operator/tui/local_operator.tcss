@@ -605,6 +605,69 @@ ToolCard:focus, WakeBlock:focus, PeerMessageBlock:focus, .interactive-notice:foc
     height: auto;
 }
 
+/* The MINIMIZED queued-ask bar (design §5.0/R7): one line directly above the
+ * composer, built from the composer's own vocabulary so it reads as a chip and
+ * not as a modal, a toast or a banner. It lives INSIDE `#input-shell`, which
+ * puts it in the same fill and the same one-cell inset as the input row — the
+ * bar is part of the composer's panel, which is what "attention-calling but
+ * minimal" means here.
+ *
+ * `display: none` in the sheet and `display = True` from Python: the app owns
+ * the toggle (a zero-row dock row when there is no queue), and an inline
+ * `styles.display` set by the widget outranks this rule. Written this way so a
+ * bar that never got its first state cannot paint one row of empty chrome.
+ *
+ * NO ANIMATION, per §5.0: the accent on the glyph is a persistent colour. A
+ * pulse would be the focus-steal this design exists to avoid, expressed in
+ * colour instead of keys. */
+#ask-bar {
+    width: 1fr;
+    height: 1;
+    /* `$lo-surface` — the composer's OWN ground, and the ground the palette
+     * gate actually checks. The first cut sat on `$lo-raised`, one elevation
+     * step up, where the bar's message measured 3.81:1 dark / 3.09:1 LIGHT
+     * (under the gate's 3.4:1 dim floor) and the accent glyph 3.96:1 in light
+     * (under its 4.0 state-hue floor) — a new surface has to solve its own
+     * pairs, and the gate cannot do it for a ground it never measures (design
+     * round 1, D2). On `surface` every ink this row uses clears its floor:
+     * fg 13.76/13.86, muted 7.93/6.58, dim 4.18/3.46, accent 8.02/4.43. */
+    background: $lo-surface;
+    color: $lo-fg;
+    display: none;
+}
+
+/* Hover brightens the row to say it is clickable — it is a control, not a
+ * status line, and the transcript's expand affordances are the model. */
+#ask-bar:hover {
+    background: $lo-overlay;
+}
+
+/* The open-ask list (design §5.1), mounted in `#prompt-host` beside the picker
+ * and never at the same time as one. Same elevation step as the ask card, and
+ * the same `width: 1fr` — an auto-width list would resize as the questions
+ * changed length, the defect `AskPickerScreen` was already fixed for. */
+AskQueueList {
+    width: 1fr;
+    height: auto;
+    background: $lo-overlay;
+    color: $lo-fg;
+    padding: 1 1;
+    /* ONE PAINTED LINE PER ASK, enforced where the painting happens. Each row's
+     * `Text(no_wrap=True)` is a rich-side hint that Textual's widget painting
+     * does not read, so a question wider than the content box used to spend a
+     * SECOND painted line — and the pointer hit test, which counts one line per
+     * ask, then opened the wrong ask and left the last ones inert (review round
+     * 3: reproduced with 90-character questions, clicked through the real event
+     * path). `nowrap` is the lever that actually paints; it is a ONE-LINE
+     * guarantee only — the painter hard-crops a row that is still too wide and
+     * draws no glyph of its own, so the widget's `render` clips the QUESTION
+     * against the room its tail leaves and paints the `…` itself. The hit test is only valid while this holds, so
+     * the surface test asserts `virtual_size.height == header + rows` at three
+     * widths with long questions. */
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+
 #prompt-chevron {
     width: 2;
     height: auto;
