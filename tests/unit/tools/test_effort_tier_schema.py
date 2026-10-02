@@ -342,9 +342,11 @@ def test_sentinel_tiers_are_named_once_as_a_group() -> None:
     With all three tiers on the sentinel the per-tier form spent 176 cells
     naming the same model three times. Grouping cannot hide a tier (every name
     is still listed) and cannot drop the model (the group carries the one
-    label they all resolve to). The single-sentinel and no-sentinel forms are
-    byte-identical to the previous shape, so no existing config's schema text
-    moves — which is what keeps the prompt-cache prefix stable.
+    label they all resolve to). Byte-identity with the previous form holds for
+    the no-sentinel shape and for a sentinel that is already LAST — the clause
+    is emitted last, so `{lo: default, hi: a/b}` lists `hi` first (review
+    round 2, NIT 1). No existing config's schema text can move either way: a
+    pre-delta config could not advertise a sentinel tier at all.
     """
     grouped = describe_effort_tiers(
         {"lo": "default", "med": "default", "hi": "default"}, session_model_label="a/b"
