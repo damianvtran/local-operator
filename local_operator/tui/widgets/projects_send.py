@@ -471,8 +471,16 @@ class SendTargetCard(Container):
         states, five inks — see :data:`_STATE_INK`), the cursor marker wears
         the cursor ink, and the SELECTED row carries the app's selection band
         (``tint-select``) across its whole line, padded to the card's content
-        width so the band reads as a row and not as a run of text. The plain
-        text is exactly the old ``"{marker} {row_text}"`` lines.
+        width so the band reads as a row and not as a run of text.
+
+        ONE display line per target, cropped rather than wrapped: the block is
+        sized in logical rows (:meth:`_repaint` sets ``body.styles.height =
+        self._visible``), so a label long enough to wrap painted two lines for
+        one target and pushed the tail row out of the card — while
+        :meth:`painted_range` still advertised it and ``enter`` would send to
+        the invisible target (QA round 3, Q3-2). The LABEL absorbs the crop:
+        the short id and the state chip are the fields that tell two targets
+        apart, so they are never the part an ellipsis eats.
         """
         width = self.content_size.width
         lines: list[Text] = []
@@ -483,14 +491,28 @@ class SendTargetCard(Container):
                 "▸" if selected else " ", style=self._ink("cursor") if selected else Style()
             )
             line.append(" ")
-            line.append(row.label)
             short = row.session_id[:SHORT_ID_CELLS] if row.session_id else ""
+            tail = ""
+            if short and row.label != short:
+                tail += f"  · session {short}"
+            if row.state:
+                tail += f"  · [{row.state}]"
+            label = row.label
+            # The marker and its space are the two cells the tail does not cover.
+            budget = width - 2 - len(tail)
+            if width > 0 and len(label) > budget:
+                label = f"{label[: budget - 1]}…" if budget > 0 else ""
+            line.append(label)
             if short and row.label != short:
                 line.append("  · ")
                 line.append(f"session {short}")
             if row.state:
                 line.append("  · ")
                 line.append(f"[{row.state}]", style=self._ink(state_ink_key(row.state)))
+            # Backstop for a card with no room even for the tail: nothing this
+            # block paints may wrap, whatever the width does to the budget above.
+            if width > 0 and len(line) > width:
+                line.truncate(width, overflow="ellipsis")
             if selected:
                 if width > len(line):
                     line.pad_right(width - len(line))

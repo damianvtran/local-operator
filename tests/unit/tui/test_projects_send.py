@@ -13,6 +13,7 @@ from local_operator.tui.widgets.projects_send import (
     NO_TARGET_FOOTER,
     SEND_CARD_CHROME_ROWS,
     SEND_CARD_ROW_CAP,
+    SHORT_ID_CELLS,
     SendTarget,
     compose_band,
     filter_targets,
@@ -146,6 +147,7 @@ from local_operator.tui.widgets.projects_view import (  # noqa: E402
     ProjectsViewSendRequested,
 )
 from local_operator.tui.widgets.subagent_view import HintButton  # noqa: E402
+from tests.unit.tui.conftest import painted_rows  # noqa: E402
 from tests.unit.tui.test_projects_view import (  # noqa: E402
     _boot,
     _factory,
@@ -434,6 +436,61 @@ async def test_enter_cannot_pick_a_row_the_card_did_not_paint(tmp_path: Path) ->
         await pilot.pause()
         assert view._mode == "send"
         assert not view.composing
+
+
+@pytest.mark.asyncio
+async def test_a_long_label_cannot_wrap_a_row_out_of_the_frame(tmp_path: Path) -> None:
+    """QA round 3, Q3-2: at 60x24 a label wider than the card used to WRAP.
+
+    The block is sized in LOGICAL rows, so the wrapped row painted two lines,
+    the tail target was clipped out of the card — while `painted_range()` still
+    advertised it and `enter` sent to a target whose text and `▸` were nowhere
+    on screen. One display line per target is the invariant, so this pins the
+    frame the terminal was SENT (``painted_rows``, not the widget's own Text)
+    against `painted_range()`, walking the whole window at the narrow size.
+    """
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    from local_operator.tui.app import OperatorApp
+
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(60, 24)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        targets = [
+            SendTarget(
+                kind="session", session_id="ddee02ee33ff", label="parity spec review", state="stale"
+            ),
+            SendTarget(kind="session", session_id="aa11bb22cc33", label="work one", state="stale"),
+            SendTarget(kind="session", session_id="bb11cc22dd33", label="work two", state="stale"),
+            SendTarget(
+                kind="session", session_id="cc11dd22ee33", label="work three", state="stale"
+            ),
+        ]
+        view._send_targets = lambda: list(targets)  # type: ignore[method-assign]
+        await pilot.press("m")
+        await pilot.pause()
+        card = view._send_card
+        assert card is not None
+        body = card.query_one("#projects-send-rows", Static)
+        # The precondition for the old wrap: this row's text is WIDER than the
+        # card, so a wrapping block paints it as two lines and loses the tail.
+        long_row = next(row for row in targets if row.label == "parity spec review")
+        wide = f"  {long_row.label}  · session {long_row.session_id[:SHORT_ID_CELLS]}  · [stale]"
+        assert len(wide) > card.content_size.width, (len(wide), card.content_size.width)
+        for _ in range(len(targets)):
+            await pilot.press("down")
+            await pilot.pause()
+            painted = painted_rows(app, body)
+            assert len(painted) == card._visible, (card.index, painted)
+            assert card.index in card.painted_range()
+            chosen = card.selected()
+            assert chosen is not None
+            assert any(f"session {chosen.session_id[:SHORT_ID_CELLS]}" in line for line in painted)
+            assert sum(line.strip().startswith("▸") for line in painted) == 1
+        # The crop is an ellipsis, and it never eats the id/state tail.
+        first = painted_rows(app, body)[0]
+        assert "…" in first and first.endswith("[stale]")
 
 
 # -- receipts: the band and the draft (agent review F4 / UX U2-U3 / QA Q5) ---
