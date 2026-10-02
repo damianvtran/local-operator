@@ -38,6 +38,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+from rich.style import Style
 from rich.text import Text
 from textual.containers import Container
 from textual.message import Message
@@ -75,18 +76,35 @@ SEND_CARD_ROW_CAP = 5
 SEND_CARD_MAX_WIDTH = 60
 
 
+def target_handle(target: SendTarget) -> str:
+    """The name every send sentence uses for a target: ``◆ <short-id>``.
+
+    The same handle the card's rows carry and the spec draws on the band
+    (§7.5.2) — ``◆ ab12cd34ef56`` — so the strip, the receipt and the refusal
+    all name the thing that actually resolves (design review round 1, D6),
+    rather than a title the send never sees. It is what was ON SCREEN when the
+    reader picked the row, which is the part of U3's point that survives the
+    strip's own naming: the sentence never introduces an id the reader has not
+    seen. An empty id (never in practice) falls back to the label so the
+    sentence still names something.
+    """
+    if not target.session_id:
+        return target.label
+    return f"◆ {target.session_id[:SHORT_ID_CELLS]}"
+
+
 def compose_band(target: SendTarget) -> str:
     """The composer's recipient strip while the page is composing (spec §7.5.2).
 
     ONE function so the strip cannot be spelled two ways: the app paints it
-    when compose opens, and the receipt paths repaint the same surface. It
-    names the target and the ONE key that still reaches the page while the
-    composer holds the caret (``esc``); it does NOT advertise ``m target`` —
-    ``m`` types a letter into the message, and a hinted key that types your
-    sentence is the worst version of the hinted-key-that-does-nothing defect
-    (UX round 1, Q3/U5).
+    into the composer's strip when compose opens, and the receipt paths
+    repaint the same surface. It names the target and the ONE key that still
+    reaches the page while the composer holds the caret (``esc``); it does NOT
+    advertise ``m target`` — ``m`` types a letter into the message, and a
+    hinted key that types your sentence is the worst version of the
+    hinted-key-that-does-nothing defect (UX round 1, Q3/U5).
     """
-    return f"send to: {target.label} · esc cancel"
+    return f"send to: {target_handle(target)} · esc cancel"
 
 
 def pending_line(target: SendTarget) -> str:
@@ -96,7 +114,7 @@ def pending_line(target: SendTarget) -> str:
     Without it the draft vanished and the band kept inviting another send, so
     for the seconds a delivery takes the surface said nothing had happened.
     """
-    return f"sending to {target.label}…"
+    return f"sending to {target_handle(target)}…"
 
 
 def sent_line(target: SendTarget, state_word: str) -> str:
@@ -107,22 +125,42 @@ def sent_line(target: SendTarget, state_word: str) -> str:
     ``delivery unconfirmed``) — rather than the model-facing stdout sentence
     (``→ <id>: …`` with a raw message uuid) this surface used to echo.
     """
-    return f"sent to {target.label} · {state_word}"
+    return f"sent to {target_handle(target)} · {state_word}"
 
 
 def refusal_line(target: SendTarget, reason: str) -> str:
-    """A refusal that names the row the reader picked, never a lone hex id.
+    """A refusal that names the row the reader picked, in the strip's own words.
 
-    The band showed ``target.label``; the refusal repeats it (F4/U3: the old
-    sentence named only the session id, so the sentence the reader had to
-    recover from named neither the row nor the person).
+    The strip showed ``target_handle(target)``; the refusal repeats it (F4/U3:
+    the old sentence named only a bare session id, so the sentence the reader
+    had to recover from named neither the row nor the person) and never stands
+    as a lone id — it carries what went wrong.
     """
-    return f"could not deliver to {target.label}: {reason}"
+    return f"could not deliver to {target_handle(target)}: {reason}"
 
 
 def send_error_line(target: SendTarget, reason: str) -> str:
     """A send that never reached delivery: resolution or validation failed."""
-    return f"could not send to {target.label}: {reason}"
+    return f"could not send to {target_handle(target)}: {reason}"
+
+
+#: How a row's state chip inks itself (design review round 1, D4): the page's
+#: own status vocabulary, so `[live]`, `[wedged]`, `[stale]`, `[stopped]` and
+#: `[missing]` are five different inks rather than one — `live` keeps the
+#: accent every running chip uses, `wedged`/`stale` warn, and `stopped`/
+#: `missing` recede a step each. An unknown state resolves to plain ink.
+_STATE_INK: dict[str, str] = {
+    "live": "status_active",
+    "wedged": "status_paused",
+    "stale": "stale",
+    "stopped": "status_done",
+    "missing": "status_archived",
+}
+
+
+def state_ink_key(state: str) -> str:
+    """The style key a state chip takes; ``""`` means the page's plain ink."""
+    return _STATE_INK.get(state, "")
 
 
 @dataclass(frozen=True)
@@ -393,6 +431,45 @@ class SendTargetCard(Container):
             top = self._index - self._visible + 1
         self._top = max(0, top)
 
+    def rows_text(self) -> Text:
+        """The painted rows as one rich ``Text`` (design review round 1, D4).
+
+        Each row's state chip takes the page's own status vocabulary (five
+        states, five inks — see :data:`_STATE_INK`), the cursor marker wears
+        the cursor ink, and the SELECTED row carries the app's selection band
+        (``tint-select``) across its whole line, padded to the card's content
+        width so the band reads as a row and not as a run of text. The plain
+        text is exactly the old ``"{marker} {row_text}"`` lines.
+        """
+        width = self.content_size.width
+        lines: list[Text] = []
+        for position, row in enumerate(self.window_rows(), start=self._top):
+            selected = position == self._index
+            line = Text(no_wrap=True)
+            line.append(
+                "▸" if selected else " ", style=self._ink("cursor") if selected else Style()
+            )
+            line.append(" ")
+            line.append(row.label)
+            short = row.session_id[:SHORT_ID_CELLS] if row.session_id else ""
+            if short:
+                line.append("  · ")
+                line.append(f"session {short}")
+            if row.state:
+                line.append("  · ")
+                line.append(f"[{row.state}]", style=self._ink(state_ink_key(row.state)))
+            if selected:
+                if width > len(line):
+                    line.pad_right(width - len(line))
+                line.stylize(self._ink("row_selected"), 0, len(line))
+            lines.append(line)
+        combined = Text(no_wrap=True)
+        for index, line in enumerate(lines):
+            if index:
+                combined.append("\n")
+            combined.append_text(line)
+        return combined
+
     def _repaint(self) -> None:
         self._sync_window()
         body = self.query_one("#projects-send-rows", Static)
@@ -408,15 +485,12 @@ class SendTargetCard(Container):
             # targets says what to do about that, not "no results".
             note.update(Text(NO_TARGET_FOOTER, style=self._ink("muted")))
         else:
-            lines: list[str] = []
-            for position, row in enumerate(self.window_rows(), start=self._top):
-                marker = "▸" if position == self._index else " "
-                lines.append(f"{marker} {row.row_text}")
-            body.update(Text("\n".join(lines), no_wrap=True))
+            body.update(self.rows_text())
             # A window with rows off its edge says so, so a scrolled list never
-            # reads as the whole list.
+            # reads as the whole list. `muted`, not `dim`: on the card's own
+            # `$lo-overlay` ground `dim` measured 3.43:1, below AA (D5).
             hidden = len(self._rows) - self._visible
-            note.update(Text(f"+{hidden} more" if hidden > 0 else "", style=self._ink("dim")))
+            note.update(Text(f"+{hidden} more" if hidden > 0 else "", style=self._ink("muted")))
         # The rule is cut to the card's own measured width; before the first
         # layout there is no measurement and this paints nothing (the next
         # repaint cuts it — `on_resize` guarantees one).

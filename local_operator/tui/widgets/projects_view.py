@@ -191,6 +191,12 @@ def _style_resolver() -> Callable[[str], Style]:
         "status_qa": Style(color=color("accent")),
         "status_validation": Style(color=color("fg")),
         "cursor": Style(color=color("accent"), bold=True),
+        # The selected-row band on the quick-send card (P5a, design review
+        # round 1, D4): `tint-select` is the app's selection ground — the
+        # sidebar, the pickers, `ToolCard:focus` — and the card's selected row
+        # takes it verbatim, so "this is the row you are on" is said one way
+        # everywhere. Ground only; the row's own spans carry the foreground.
+        "row_selected": Style(bgcolor=color("tint-select")),
         # The session's own projects carry `◆` in the row's leading column
         # (S3b): the accent without the cursor's bold, so `▸` still owns the
         # glyph where both apply — the marker column costs no width either way.

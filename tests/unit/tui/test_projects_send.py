@@ -99,9 +99,9 @@ def test_filtering_is_a_subsequence_over_the_row_text() -> None:
 
 
 def test_the_band_names_the_target_and_the_way_out() -> None:
-    """Q3: `m target` is gone from the band — while composing, `m` types."""
+    """Q3/D6: `m target` is gone, and the strip names the id it resolves."""
     target = SendTarget(kind="session", session_id="s1", label="projects review", state="live")
-    assert compose_band(target) == "send to: projects review · esc cancel"
+    assert compose_band(target) == "send to: ◆ s1 · esc cancel"
     assert "esc closes" in NO_TARGET_FOOTER and " s " not in NO_TARGET_FOOTER
 
 
@@ -119,6 +119,7 @@ import pytest  # noqa: E402
 from textual.widgets import Input, Static  # noqa: E402
 
 from local_operator.mobile.peer_send import DeliveryOutcome  # noqa: E402
+from local_operator.tui import theme as theme_mod  # noqa: E402
 from local_operator.tui.widgets.projects_send import SendTargetCard  # noqa: E402
 from local_operator.tui.widgets.projects_view import (  # noqa: E402
     ProjectsViewComposeChanged,
@@ -238,6 +239,12 @@ async def _settle(pilot, predicate, passes: int = 80) -> bool:  # type: ignore[n
     return False
 
 
+def _strip(app) -> tuple[bool, str]:  # type: ignore[no-untyped-def]
+    """The projects compose strip's ``(shown, text)`` — D6's carrier."""
+    widget = app.query_one("#projects-compose-strip", Static)
+    return bool(widget.display), widget.render().plain
+
+
 @pytest.mark.parametrize("size", [(60, 24), (80, 24), (100, 30)])
 @pytest.mark.asyncio
 async def test_the_card_floats_without_reflowing_or_clipping(
@@ -337,6 +344,15 @@ async def test_the_window_follows_the_selection(tmp_path: Path) -> None:
             "session6",
             "session7",
         ]
+        # The windowed list says how much it is not showing, in `muted` ink
+        # (D5): `dim` measured 3.43:1 on the card's own overlay ground.
+        note = card.query_one("#projects-send-note", Static).render()
+        assert note.plain == "+6 more"
+        muted = theme_mod.semantic_color("muted").lower()
+        assert any(
+            span.style.foreground is not None and span.style.foreground.hex.lower() == muted
+            for span in note.spans
+        )
 
 
 @pytest.mark.asyncio
@@ -370,21 +386,23 @@ async def test_enter_cannot_pick_a_row_the_card_did_not_paint(tmp_path: Path) ->
 
 
 def test_receipts_speak_the_apps_human_vocabulary() -> None:
-    """F4/U3: `state_word` words, the label the band showed, no model stdout —
-    no `→` prefix and no raw message uuid standing in for an outcome."""
+    """F4/U3/D6: `state_word` words, the strip's `◆ <id>` handle, no model
+    stdout — no `→` prefix and no raw message uuid standing in for an outcome."""
     target = SendTarget(
         kind="session", session_id="dd44ee55ff66", label='"older review"', state="stale"
     )
-    assert pending_line(target) == 'sending to "older review"…'
-    assert sent_line(target, "delivered") == 'sent to "older review" · delivered'
-    assert sent_line(target, "wake unconfirmed") == 'sent to "older review" · wake unconfirmed'
+    assert pending_line(target) == "sending to ◆ dd44ee55ff66…"
+    assert sent_line(target, "delivered") == "sent to ◆ dd44ee55ff66 · delivered"
+    assert sent_line(target, "wake unconfirmed") == "sent to ◆ dd44ee55ff66 · wake unconfirmed"
     assert refusal_line(target, "the target said no") == (
-        'could not deliver to "older review": the target said no'
+        "could not deliver to ◆ dd44ee55ff66: the target said no"
     )
     assert send_error_line(target, "no session found") == (
-        'could not send to "older review": no session found'
+        "could not send to ◆ dd44ee55ff66: no session found"
     )
     assert "→" not in sent_line(target, "delivered")
+    # The handle is the thing the strip shows (D6) — not the title.
+    assert '"older review"' not in sent_line(target, "delivered")
 
 
 @pytest.mark.asyncio
@@ -414,7 +432,7 @@ async def test_a_refused_send_keeps_the_draft_and_names_the_row(
         assert view.composing
         # The in-flight statement (U2) before anything resolves.
         view.compose_pending(view.compose_target)
-        assert view._notice == 'sending to "older review"…'
+        assert view._notice == "sending to ◆ s1…"
 
         editor = app._editor()
         editor.load_text("retry me")
@@ -426,9 +444,7 @@ async def test_a_refused_send_keeps_the_draft_and_names_the_row(
         await pilot.press("enter")
         assert await _settle(pilot, lambda: view._notice.startswith("could not send"))
         assert editor.text == "retry me"
-        assert view._notice == (
-            'could not send to "older review": the session is no longer available'
-        )
+        assert view._notice == ("could not send to ◆ s1: the session is no longer available")
 
 
 @pytest.mark.asyncio
@@ -474,9 +490,7 @@ async def test_a_delivered_send_receipts_in_the_band_and_clears_the_draft(
         editor.load_text("hello there")
         await pilot.pause()
         await pilot.press("enter")
-        assert await _settle(
-            pilot, lambda: editor.placeholder == 'sent to "older review" · delivered'
-        )
+        assert await _settle(pilot, lambda: _strip(app) == (True, "sent to ◆ s1 · delivered"))
         assert editor.text == ""
 
 
@@ -530,9 +544,7 @@ async def test_an_amber_send_keeps_the_draft_and_uses_the_state_word(
         editor.load_text("keep me please")
         await pilot.pause()
         await pilot.press("enter")
-        assert await _settle(
-            pilot, lambda: view._notice == 'sent to "older review" · wake unconfirmed'
-        )
+        assert await _settle(pilot, lambda: view._notice == "sent to ◆ s1 · wake unconfirmed")
         assert editor.text == "keep me please"
 
 
@@ -611,7 +623,7 @@ async def test_composing_keeps_only_the_escape_key_advertised(tmp_path: Path) ->
         assert view.composing
         editor = app._editor()
         assert await _settle(
-            pilot, lambda: editor.placeholder == 'send to: "older review" · esc cancel'
+            pilot, lambda: _strip(app) == (True, "send to: ◆ s1 · esc cancel")
         )  # no `m target`
         editor.load_text("keep me")
         await pilot.pause()
@@ -662,3 +674,96 @@ async def test_esc_out_of_compose_returns_focus_and_the_page_still_answers(
         await pilot.press("m")
         await pilot.pause()
         assert view._mode == "send" and view._send_card is not None
+
+
+# -- the dressing (agent review round 1, D4/D5/D6) ---------------------------
+
+
+def _styles_at(text, needle: str):  # type: ignore[no-untyped-def]
+    """Every span style covering ``needle``'s first occurrence."""
+    start = text.plain.index(needle)
+    end = start + len(needle)
+    styles = []
+    for span in text.spans:
+        if span.start <= start and span.end >= end and span.style is not None:
+            styles.append(span.style)
+    return styles
+
+
+@pytest.mark.asyncio
+async def test_the_selected_row_bands_and_the_chips_take_state_inks(tmp_path: Path) -> None:
+    """D4: the `tint-select` band under the chosen row, the cursor ink on the
+    marker, and distinct chip inks — `[live]` and `[stopped]` must not paint
+    the same."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.widgets.projects_view import _style_resolver
+
+    resolver = _style_resolver()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        targets = [
+            SendTarget(
+                kind="session", session_id="live-one-123", label="work", state="live", live=True
+            ),
+            SendTarget(kind="session", session_id="dead-one-456", label="work", state="stopped"),
+        ]
+        view._send_targets = lambda: list(targets)  # type: ignore[method-assign]
+        await pilot.press("m")
+        await pilot.pause()
+        card = view._send_card
+        assert card is not None
+        text = card.rows_text()
+        # The selected row's line is padded to the card's content width, so the
+        # band is a ROW and not a run of text.
+        assert len(text.plain.split("\n")[0]) == card.content_size.width
+        assert any(
+            style.bgcolor == resolver("row_selected").bgcolor for style in _styles_at(text, "▸")
+        )
+        assert any(style.bold for style in _styles_at(text, "▸"))
+        assert any(
+            style.color == resolver("status_active").color for style in _styles_at(text, "[live]")
+        )
+        assert any(
+            style.color == resolver("status_done").color for style in _styles_at(text, "[stopped]")
+        )
+        assert resolver("status_active").color != resolver("status_done").color
+
+
+@pytest.mark.asyncio
+async def test_the_strip_persists_while_composing_and_names_the_id(tmp_path: Path) -> None:
+    """D6: the recipient strip is a real surface — it survives the first
+    keystroke (what the placeholder could not do) and names the id the send
+    resolves, not the conversation title."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    from local_operator.tui.app import OperatorApp
+
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        target = SendTarget(
+            kind="session", session_id="s1", label='"older review"', state="live", live=True
+        )
+        view._send_targets = lambda: [target]  # type: ignore[method-assign]
+        await pilot.press("m")
+        await pilot.pause()
+        card = view._send_card
+        assert card is not None
+        card.action_choose()
+        await pilot.pause()
+        assert await _settle(pilot, lambda: _strip(app) == (True, "send to: ◆ s1 · esc cancel"))
+        editor = app._editor()
+        editor.load_text("half a message")
+        await pilot.pause()
+        # STILL there while the reader types — the placeholder it replaced
+        # vanished on the first keystroke.
+        assert _strip(app) == (True, "send to: ◆ s1 · esc cancel")
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.pause()
+        assert not _strip(app)[0]
