@@ -9,6 +9,7 @@ through the real app in the same file once that wiring lands.
 from __future__ import annotations
 
 from local_operator.tui.widgets.projects_send import (
+    NO_MATCH_FOOTER,
     NO_TARGET_FOOTER,
     SEND_CARD_CHROME_ROWS,
     SEND_CARD_ROW_CAP,
@@ -86,6 +87,19 @@ def test_a_row_states_its_session_handle_and_state() -> None:
         kind="session", session_id="ab12cd34ef5609", label="projects review", state="live"
     )
     assert row.row_text == "projects review  · session ab12cd34ef56  · [live]"
+
+
+def test_a_title_less_row_prints_its_id_once() -> None:
+    """U4: a linked session with no title falls back to its short id as the
+    label — the row must not then print the id a second time."""
+    untitled = SendTarget(
+        kind="session", session_id="001122334455", label="001122334455", state="missing"
+    )
+    assert untitled.row_text == "001122334455  · [missing]"
+    titled = SendTarget(
+        kind="session", session_id="001122334455", label='"a conversation"', state="live"
+    )
+    assert titled.row_text == '"a conversation"  · session 001122334455  · [live]'
 
 
 def test_filtering_is_a_subsequence_over_the_row_text() -> None:
@@ -437,14 +451,25 @@ async def test_a_refused_send_keeps_the_draft_and_names_the_row(
         editor = app._editor()
         editor.load_text("retry me")
         await pilot.pause()
+        resolved: dict[str, object] = {}
+
+        def _resolve(**kwargs):  # type: ignore[no-untyped-def]
+            resolved.update(kwargs)
+            return None, [], None
+
         monkeypatch.setattr(
             "local_operator.mobile.peer_send.resolve_peer_target",
-            lambda **kwargs: (None, [], None),
+            _resolve,
         )
         await pilot.press("enter")
         assert await _settle(pilot, lambda: view._notice.startswith("could not send"))
         assert editor.text == "retry me"
         assert view._notice == ("could not send to ◆ s1: the session is no longer available")
+        # F6: the send path resolves like every other send — `include_wedged`
+        # is the KILL SWITCH's flag; the picker must not dial wedged targets
+        # hopefully.
+        assert not resolved.get("include_wedged")
+        assert resolved.get("require_started") is True
 
 
 @pytest.mark.asyncio
@@ -494,9 +519,16 @@ async def test_a_delivered_send_receipts_in_the_band_and_clears_the_draft(
         assert editor.text == ""
 
 
+@pytest.mark.parametrize(
+    "state,wake,word",
+    [
+        ("mailbox", "unconfirmed", "wake unconfirmed"),
+        ("unconfirmed", "unconfirmed", "delivery unconfirmed"),
+    ],
+)
 @pytest.mark.asyncio
 async def test_an_amber_send_keeps_the_draft_and_uses_the_state_word(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str, wake: str, word: str
 ) -> None:
     """F4: mailbox/unconfirmed are amber receipts on the notice row in the
     app's own words, and the draft survives so the reader decides what next."""
@@ -525,12 +557,12 @@ async def test_an_amber_send_keeps_the_draft_and_uses_the_state_word(
             lambda **kwargs: (record, [], None),
         )
 
-        async def _mailbox(*args, **kwargs):  # type: ignore[no-untyped-def]
+        async def _partial(*args, **kwargs):  # type: ignore[no-untyped-def]
             return DeliveryOutcome(
-                "mailbox",
+                state,
                 "delivered to its mailbox (id mid-2) — the wake was not acknowledged",
                 "mid-2",
-                "unconfirmed",
+                wake,
                 2,
                 "no_answer",
                 "live",
@@ -538,13 +570,13 @@ async def test_an_amber_send_keeps_the_draft_and_uses_the_state_word(
             )
 
         monkeypatch.setattr(
-            "local_operator.mobile.peer_send.deliver_peer_message_outcome", _mailbox
+            "local_operator.mobile.peer_send.deliver_peer_message_outcome", _partial
         )
         editor = app._editor()
         editor.load_text("keep me please")
         await pilot.pause()
         await pilot.press("enter")
-        assert await _settle(pilot, lambda: view._notice == "sent to ◆ s1 · wake unconfirmed")
+        assert await _settle(pilot, lambda: view._notice == f"sent to ◆ s1 · {word}")
         assert editor.text == "keep me please"
 
 
@@ -767,3 +799,139 @@ async def test_the_strip_persists_while_composing_and_names_the_id(tmp_path: Pat
         await pilot.pause()
         await pilot.pause()
         assert not _strip(app)[0]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_outcome_refuses_with_the_reason_and_keeps_the_draft(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F8(c): the `is_error` arm — a delivery that ends `failed` refuses in
+    the app's words, names the strip's handle, and leaves the draft up."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    from local_operator.tui.app import OperatorApp
+
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        target = SendTarget(kind="session", session_id="s1", label="work", state="live", live=True)
+        view._send_targets = lambda: [target]  # type: ignore[method-assign]
+        await pilot.press("m")
+        await pilot.pause()
+        card = view._send_card
+        assert card is not None
+        card.action_choose()
+        await pilot.pause()
+
+        record = SimpleNamespace(pid=os.getpid() + 1, session_id="s1")
+        monkeypatch.setattr(
+            "local_operator.mobile.peer_send.resolve_peer_target",
+            lambda **kwargs: (record, [], None),
+        )
+
+        async def _failed(*args, **kwargs):  # type: ignore[no-untyped-def]
+            return DeliveryOutcome(
+                "failed",
+                "the target said no",
+                "mid-3",
+                "unconfirmed",
+                1,
+                "peer_refused",
+                "live",
+                "s1",
+            )
+
+        monkeypatch.setattr("local_operator.mobile.peer_send.deliver_peer_message_outcome", _failed)
+        editor = app._editor()
+        editor.load_text("try me")
+        await pilot.pause()
+        await pilot.press("enter")
+        assert await _settle(
+            pilot, lambda: view._notice == "could not deliver to ◆ s1: the target said no"
+        )
+        assert editor.text == "try me"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_dial_and_a_faulted_send_keep_the_draft(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F8(c): the exception arms — `RuntimeError` is a pre-delivery refusal
+    (“could not send”), a transport fault is honestly unconfirmed, and both
+    leave the draft up."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    from local_operator.tui.app import OperatorApp
+
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        target = SendTarget(kind="session", session_id="s1", label="work", state="live", live=True)
+        view._send_targets = lambda: [target]  # type: ignore[method-assign]
+        await pilot.press("m")
+        await pilot.pause()
+        card = view._send_card
+        assert card is not None
+        card.action_choose()
+        await pilot.pause()
+
+        record = SimpleNamespace(pid=os.getpid() + 1, session_id="s1")
+        monkeypatch.setattr(
+            "local_operator.mobile.peer_send.resolve_peer_target",
+            lambda **kwargs: (record, [], None),
+        )
+
+        async def _refuse(*args, **kwargs):  # type: ignore[no-untyped-def]
+            raise RuntimeError("the peer refused the dial")
+
+        monkeypatch.setattr("local_operator.mobile.peer_send.deliver_peer_message_outcome", _refuse)
+        editor = app._editor()
+        editor.load_text("try me")
+        await pilot.pause()
+        await pilot.press("enter")
+        assert await _settle(
+            pilot, lambda: view._notice == "could not send to ◆ s1: the peer refused the dial"
+        )
+        assert editor.text == "try me"
+
+        async def _fault(*args, **kwargs):  # type: ignore[no-untyped-def]
+            raise OSError("connection reset")
+
+        monkeypatch.setattr("local_operator.mobile.peer_send.deliver_peer_message_outcome", _fault)
+        await pilot.press("enter")
+        assert await _settle(
+            pilot,
+            lambda: view._notice
+            == "sent to ◆ s1 · delivery unconfirmed — the send faulted (connection reset)",
+        )
+        assert editor.text == "try me"
+
+
+@pytest.mark.asyncio
+async def test_a_filter_that_matches_nothing_says_so(tmp_path: Path) -> None:
+    """UX round 1, N2: with Q2 fixed a mistyped filter can reach the empty
+    list; the note must offer the filter back, not tell the reader to link a
+    session — and clearing the filter brings the row back."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    from local_operator.tui.app import OperatorApp
+
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        target = SendTarget(kind="session", session_id="s1", label="work", state="live", live=True)
+        view._send_targets = lambda: [target]  # type: ignore[method-assign]
+        await pilot.press("m")
+        await pilot.pause()
+        card = view._send_card
+        assert card is not None
+        await pilot.press("z", "z", "z")
+        await pilot.pause()
+        note = card.query_one("#projects-send-note", Static).render().plain
+        assert note == NO_MATCH_FOOTER
+        await pilot.press("backspace", "backspace", "backspace")
+        await pilot.pause()
+        assert [row.session_id for row in card.rows] == ["s1"]

@@ -429,11 +429,10 @@ class ProjectsView(Vertical):
         self._updated_at: float | None = None
         #: The footer's one-sentence notice (refusals, pops) — UX round 1.
         self._notice: str | None = None
-        # Quick-send state (P5a): the open picker card, the target compose
-        # is addressed to, and the mode to return to when compose closes.
+        # Quick-send state (P5a): the open picker card and the target compose
+        # is addressed to.
         self._send_card: SendTargetCard | None = None
         self._send_target: SendTarget | None = None
-        self._compose_from = "canvas"
         # The manager row, when the host resolved one (P5a). Injected rather
         # than derived: only the app can read the registry, and a page that
         # guessed would paint a row nobody answers to.
@@ -2307,7 +2306,6 @@ class ProjectsView(Vertical):
         back and painting the recipient strip.
         """
         self._close_send_picker()
-        self._compose_from = self._mode
         self._send_target = target
         self._mode = "compose"
         self._notice = None

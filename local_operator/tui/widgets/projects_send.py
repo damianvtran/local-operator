@@ -56,6 +56,13 @@ from textual.widgets import Input, Static
 #: real start-session flow.
 NO_TARGET_FOOTER = "no targets — esc closes · link a session from the project detail"
 
+#: The note when the FILTER matched nothing — a different nothing from
+#: :data:`NO_TARGET_FOOTER` (a mistyped filter is a keystroke to take back,
+#: not a session to go link). Reachable the moment typing reached the filter
+#: at all (UX round 1, N2; the model picker draws the same line — "no
+#: matching models" vs "no models available").
+NO_MATCH_FOOTER = "no matching targets — backspace to widen"
+
 #: How many of a session id's characters name it in a row. The row also carries
 #: the conversation name when there is one, so this is only the fallback handle
 #: — long enough to be unique in practice, short enough to leave room for it.
@@ -182,10 +189,17 @@ class SendTarget:
 
     @property
     def row_text(self) -> str:
-        """The row as one line: ``manager  · session ab12 [live]``."""
+        """One line per target: ``"title" · session ab12cd34ef56 · [live]``.
+
+        A linked session with no title falls back to its short id AS the
+        label; the id must not then be printed twice (`aa11bb22cc33  · session
+        aa11bb22cc33 · [missing]` — UX round 1, U4): when the label already IS
+        the short id, the session part is dropped and the row reads
+        `aa11bb22cc33  · [missing]`.
+        """
         short = self.session_id[:SHORT_ID_CELLS] if self.session_id else ""
         parts = [self.label]
-        if short:
+        if short and self.label != short:
             parts.append(f"session {short}")
         if self.state:
             parts.append(f"[{self.state}]")
@@ -452,7 +466,7 @@ class SendTargetCard(Container):
             line.append(" ")
             line.append(row.label)
             short = row.session_id[:SHORT_ID_CELLS] if row.session_id else ""
-            if short:
+            if short and row.label != short:
                 line.append("  · ")
                 line.append(f"session {short}")
             if row.state:
@@ -482,8 +496,12 @@ class SendTargetCard(Container):
         if not self._rows:
             body.update(Text(""))
             # The empty state IS the footer line (spec §7.5.1): a card with no
-            # targets says what to do about that, not "no results".
-            note.update(Text(NO_TARGET_FOOTER, style=self._ink("muted")))
+            # targets says what to do about that, not "no results" — and a
+            # filter that matched nothing says THAT instead (N2).
+            query = self.query_one("#projects-send-filter", Input).value.strip()
+            note.update(
+                Text(NO_MATCH_FOOTER if query else NO_TARGET_FOOTER, style=self._ink("muted"))
+            )
         else:
             body.update(self.rows_text())
             # A window with rows off its edge says so, so a scrolled list never
