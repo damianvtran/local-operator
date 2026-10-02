@@ -977,10 +977,15 @@ def test_the_sanctioned_route_reaches_the_map_the_tier_reader_reads(
     # value)`). Design round 1, D2: the message used to name a form that raises
     # AttributeError when taken literally, so the named route is pinned here
     # rather than assumed callable.
-    assert settings_io.resolve_key("subagents.models.hi") == setting
-    settings_io.write_setting(
-        ConfigManager(tmp_path), settings_io.resolve_key("subagents.models.hi"), "openai/gpt-5-mini"
-    )
+    #
+    # `resolve_key` is typed `Setting | None` legitimately — it answers "not a
+    # declared key" with None, which is what the undeclared branch of the refusal
+    # relies on — so the narrow is an assert rather than a cast: it states the
+    # invariant this test depends on and fails loudly if the registry loses the key.
+    resolved = settings_io.resolve_key("subagents.models.hi")
+    assert resolved is not None
+    assert resolved == setting
+    settings_io.write_setting(ConfigManager(tmp_path), resolved, "openai/gpt-5-mini")
 
     assert read_effort_tier_selectors() == {"hi": "openai/gpt-5-mini"}
     assert ConfigManager(tmp_path).get_nested_value(("subagents", "models", "hi")) == (
@@ -1086,9 +1091,14 @@ def test_a_non_string_key_is_not_a_dotted_key(tmp_path: Path) -> None:
     neither the key nor the refusal.
     """
     manager = ConfigManager(tmp_path)
-    manager.set_config_value(2024, "x")
+    # Two DELIBERATE `arg-type` violations, and they are the point of the test:
+    # `key` is annotated `str` while the guard under test exists precisely because
+    # a Python caller can hand it something else. The repo's shape for a
+    # deliberate mismatch is the scoped ignore with the reason on it, as in
+    # `tests/unit/classification/support.py:63`.
+    manager.set_config_value(2024, "x")  # type: ignore[arg-type]  # the shape under test
 
-    assert ConfigManager(tmp_path).get_config().values[2024] == "x"
+    assert ConfigManager(tmp_path).get_config().values[2024] == "x"  # type: ignore[arg-type]
 
 
 def test_a_config_that_goes_bad_under_a_live_manager_aborts_the_write(tmp_path: Path) -> None:
