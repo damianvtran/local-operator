@@ -27,6 +27,7 @@ delivery guidance back on OpenAI, which honours it.
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -229,6 +230,15 @@ def descriptor_from_config(
     try:
         pace = float(pace_value)
     except (TypeError, ValueError):
+        pace = DEFAULT_PACE
+    # NON-FINITE FIRST, then the range. A hand-edited ``config.yml`` can carry
+    # ``.nan`` (valid YAML) and ``.inf``; both survive a min/max clamp — NaN
+    # compares false against everything — and ``to_wire`` then serialises a bare
+    # ``NaN``/``Infinity`` token, which is not JSON the hub's decoder accepts, so
+    # every spoken message becomes a 400 while the settings API is bypassed
+    # (voicing S2 security round 1, S-5). The settings validator rejects these;
+    # this is the belt for the file that never went through it.
+    if not math.isfinite(pace):
         pace = DEFAULT_PACE
     # Clamp here rather than relying on the hub: an out-of-window pace is a 400
     # there, and the settings validator should have caught it, but a hand-edited

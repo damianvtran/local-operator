@@ -42,7 +42,7 @@ the Python executor has to reproduce the new output exactly.
 
 ## Version guard
 
-`adaptive.VENDORED_VERSION` must equal the file's own `map_version`. The
+`adapters.VENDORED_VERSION` must equal the file's own `map_version`. The
 conformance test asserts it, so a half-vendored pair — new JSON, stale
 version constant — is a red test rather than a silent skew. The daemon also
 reports the version it mapped with (`X-Radient-Speech-Map` is the hub's; the

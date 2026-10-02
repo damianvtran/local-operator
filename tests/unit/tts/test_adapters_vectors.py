@@ -66,12 +66,14 @@ def test_the_vendored_pair_matches_its_own_version_constant() -> None:
     assert doc.descriptor_version == 1
 
 
-def test_the_vendored_pair_is_byte_identical_to_the_recorded_source() -> None:
-    """The vendored files are copies, not edits.
+def test_the_vendored_pair_is_internally_version_consistent() -> None:
+    """The pair names the same map version, and it is the one this code reports.
 
-    Provenance is recorded in ``VENDORED_FROM``; this pins that the pair is
-    internally consistent (the vectors name the map version they were derived
-    from) rather than asserting a hash we cannot recompute offline.
+    NOT a byte-identity check -- that is verified against the source commit
+    when the pair is vendored (see ``voicing_map/README.md``) and cannot be
+    recomputed offline from a single repo. What this pins is the failure that
+    WOULD be silent: a half-vendored pair (new JSON, stale constant) making the
+    reported mapping version a lie.
     """
     with MAP_PATH.open(encoding="utf-8") as handle:
         map_version = json.load(handle)["map_version"]

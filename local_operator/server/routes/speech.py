@@ -22,6 +22,7 @@ from local_operator.server.dependencies import (
 from local_operator.server.models.schemas import AgentSpeechRequest, SpeechRequest
 from local_operator.server.utils.operator import ServerExecutor
 from local_operator.server.utils.speech_utils import determine_voice
+from local_operator.tts import VoicePath
 from local_operator.tts.adapters import Legacy
 from local_operator.tts.cascade import (
     TtsUnavailable,
@@ -120,6 +121,29 @@ _SPEECH_REFUSAL_SENTENCES: Dict[int, str] = {
     503: "Speech is temporarily unavailable. Try again in a moment.",
 }
 
+#: The same refusals for a leg the USER's own vendor key serves, parameterised
+#: by the vendor's name (voicing S2 QA round 1, Q1 / security S-2). The Radient
+#: sentences above name a party that is not in the exchange at all on a
+#: BYO-only machine: telling someone their "Radient sign-in has stopped working"
+#: when their own ElevenLabs key was refused sends them to fix the wrong thing,
+#: and "Add credits in the Radient Console" sends them to a console they may
+#: never have opened. Statuses absent here (429, 503) keep the generic
+#: sentences, which already say nothing about who refused.
+_VENDOR_REFUSAL_SENTENCES: Dict[int, str] = {
+    401: "Your {vendor} API key was refused. Replace it in Settings.",
+    402: (
+        "Your {vendor} account has no speech credit left. " "Add credit with {vendor} to continue."
+    ),
+}
+
+#: How each rung's vendor is named in a customer-facing sentence. The Radient
+#: rung is deliberately absent: it keeps the sentences above, which are already
+#: written for it.
+_RUNG_VENDOR_LABELS: Dict[VoicePath, str] = {
+    VoicePath.PROVIDER_TTS_ELEVENLABS: "ElevenLabs",
+    VoicePath.PROVIDER_TTS_OPENAI: "OpenAI",
+}
+
 
 def _require_radient_credential(radient_client: RadientClient) -> None:
     """Refuse with the sign-in remedy when no Radient credential resolved.
@@ -134,19 +158,36 @@ def _require_radient_credential(radient_client: RadientClient) -> None:
     raise HTTPException(status_code=401, detail=SPEECH_NO_CREDENTIAL_SENTENCE)
 
 
-def _speech_refusal(exc: APIError) -> HTTPException:
+def _speech_refusal(exc: APIError, *, rung: Optional[VoicePath] = None) -> HTTPException:
     """Map an upstream speech failure onto this daemon's ``HTTPException``.
 
     The statuses in ``_SPEECH_REFUSAL_SENTENCES`` are refusals the user can act
     on; each passes through with its fixed sentence, and the upstream's body
     never reaches the response. Everything else -- other statuses, a transport
     failure, an error envelope inside a 200 -- keeps the 502 diagnostic path.
+
+    ``rung`` selects the VOCABULARY. The default (``None``, and the Radient rung)
+    keeps the Radient sentences the direct route has always used; a BYO rung gets
+    the vendor's own words, because on that leg there may be no Radient account
+    in the exchange at all (voicing S2 QA round 1, Q1 / security S-2).
     """
     status = exc.status_code
-    if status is not None:
+    if status is None:
+        return HTTPException(status_code=502, detail=_upstream_failure_detail(exc))
+    vendor = _RUNG_VENDOR_LABELS.get(rung) if rung is not None else None
+    if vendor is None:
         sentence = _SPEECH_REFUSAL_SENTENCES.get(status)
         if sentence is not None:
             return HTTPException(status_code=status, detail=sentence)
+        return HTTPException(status_code=502, detail=_upstream_failure_detail(exc))
+    template = _VENDOR_REFUSAL_SENTENCES.get(status)
+    if template is not None:
+        return HTTPException(status_code=status, detail=template.format(vendor=vendor))
+    # A status with no vendor-specific sentence keeps the GENERIC one (429/503),
+    # never the Radient one: those name a party that is not in this exchange.
+    generic = _SPEECH_REFUSAL_SENTENCES.get(status)
+    if status in (429, 503) and generic is not None:
+        return HTTPException(status_code=status, detail=generic)
     return HTTPException(status_code=502, detail=_upstream_failure_detail(exc))
 
 
@@ -236,6 +277,21 @@ async def create_agent_speech(
 ) -> Response:
     """
     Generates speech from an agent's last message.
+
+    THE CREDENTIAL POSTURE, stated because it is easy to "fix" by accident. In
+    the shipped desktop posture this route is gated twice -- the ``/v1/agents``
+    prefix gate and ``require_desktop`` through ``get_radient_client`` -- so an
+    anonymous cross-origin caller never reaches the spend. In the STANDALONE
+    posture (``lop server`` with no desktop plane) there is no such gate, and
+    the daemon admits ``*`` origins, so a page the operator visits can drive
+    this route. That class is pre-existing and identical for the Radient rung;
+    what this route must not do is make it UNBOUNDED, which is why
+    ``AgentSpeechRequest.input_text`` is capped at the hub's own 10,000
+    characters (voicing S2 security round 1, S-1): the request carries no
+    agent identity, so the cap is the whole bound on what one call can spend on
+    the operator's own vendor key. What this route deliberately does NOT do is
+    refuse a BYO-only machine until it also holds a Radient credential -- that
+    would defeat the rung the feature exists for.
     """
     try:
         try:
@@ -390,7 +446,7 @@ async def create_agent_speech(
         error = unavailable.error
         if isinstance(error, APIError):
             logger.warning("Speech cascade exhausted for agent %s: %s", agent_id, error)
-            raise _speech_refusal(error) from error
+            raise _speech_refusal(error, rung=unavailable.failed_path) from error
         if error is not None:
             logger.error(
                 "Failed to generate speech: %s", error, exc_info=error, extra={"agent_id": agent_id}
