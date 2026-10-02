@@ -41,6 +41,7 @@ from local_operator.agent_profiles import (
     marker_value,
     profile_from_agent,
 )
+from local_operator.display_labels import default_label, normalize_label, validate_label
 from local_operator.jsonl import read_jsonl, write_jsonl
 from local_operator.model.suggestion import ModelNotice, resolve_model_suggestion
 from local_operator.optional import missing_extra_error
@@ -248,6 +249,24 @@ class AgentData(BaseModel):
         return validate_agent_id_segment(value)
 
     name: str = Field(..., description="Agent's name")
+    #: The display LABEL: free text (spaces allowed), painted through the ONE
+    #: shared display rule (:func:`local_operator.display_labels.display_form`)
+    #: while ``name`` stays the key every surface ADDRESSES by (``/agent
+    #: <name>``, ``task(agent=...)``, ``--profile``, team rosters, ``--agent``).
+    #: Stored locally; deliberately absent from the hub publish document
+    #: (``instruction_set_fields``) AND off the mesh wire (see
+    #: ``network.definitions`` -- a label is local display metadata, and putting
+    #: it on the wire would re-shape every mirror's recorded digest). An EMPTY
+    #: value means "no stored label yet" -- the derive-and-persist rule fills it
+    #: from the name on the next write (``save_agent``/``update_agent``), so a
+    #: legacy row renders its raw name until then.
+    #
+    # A PLAIN default (not ``Field("", ...)``) on purpose: pyright reads a
+    # ``Field(...)`` assignment as a required parameter for these models (see
+    # ``tests/unit/network/test_definitions.py::_edit_fields``), and an additive
+    # field that every existing construction site must spell would touch ~100
+    # call sites across the tree.
+    label: str = ""
     created_date: datetime = Field(..., description="The date when the agent was created")
     version: str = Field(..., description="The version of the agent")
     security_prompt: str = Field(
@@ -341,6 +360,13 @@ class AgentEditFields(BaseModel):
     """
 
     name: str | None = Field(None, description="Agent's name")
+    # ``label`` follows the None-means-leave rule like every other field, with
+    # ONE documented exception (teams' rule): an explicit "" is a RESET to the
+    # derived default, not "no label" -- a row cannot represent "no display
+    # label" because the derived one always exists. A PLAIN default for the same
+    # reason as ``AgentData.label``: pyright would otherwise require every
+    # construction site to spell it.
+    label: str | None = None
     security_prompt: str | None = Field(
         None,
         description="The security prompt for the agent.  Allows a user to explicitly "
@@ -441,6 +467,16 @@ def agent_name_key(name: str) -> str:
 #: the create and the mutation payloads). A name this side invents has to fit
 #: both, or a pull produces a row the user can never publish.
 MAX_AGENT_NAME_CHARS = 128
+
+#: The longest legal agent LABEL. Deliberately the NAME cap rather than the
+#: shared 80: a label is derived from the name (``save_agent`` fills the derived
+#: default when none is stored), so a cap below the name cap would let the
+#: derive path STORE a value its own validator then refuses -- a 100-char name
+#: would produce a 100-char label that ``update_agent`` (or the mesh create
+#: branch) rejected with a message about a label the operator never set
+#: (review round 1, R1-2). Equal caps make "derived is always valid" true by
+#: construction; the listing still bounds the PAINTED form.
+MAX_AGENT_LABEL_CHARS = MAX_AGENT_NAME_CHARS
 
 
 def _collision_free_name(name: str, suffix: int) -> str:
@@ -935,11 +971,22 @@ class AgentRegistry:
             if agent.name == agent_edit_metadata.name:
                 raise ValueError(f"Agent with name {agent_edit_metadata.name} already exists")
 
+        # The caller's label is validated HERE, before anything is written
+        # (teams' create boundary): raising early is what keeps a refused
+        # value from leaving a half-created row. Empty is legal and means
+        # "derive", which ``save_agent`` fills in.
+        label = validate_label(
+            agent_edit_metadata.label or "",
+            max_chars=MAX_AGENT_LABEL_CHARS,
+            subject="an agent label",
+        )
+
         agent_metadata = AgentData(
             id=str(uuid.uuid4()),
             created_date=datetime.now(timezone.utc),
             version=version("local-operator"),
             name=agent_edit_metadata.name,
+            label=label,
             security_prompt=agent_edit_metadata.security_prompt or "",
             hosting=agent_edit_metadata.hosting or "",
             model=agent_edit_metadata.model or "",
@@ -988,6 +1035,19 @@ class AgentRegistry:
             validate_agent_id_segment(agent_metadata.id)
         else:
             validate_agent_id(agent_metadata.id)
+
+        # DERIVE-AND-PERSIST (the teams rule, mirrored): every write normalizes
+        # the label and fills the derived default when it is empty, so a create
+        # with no label -- or a legacy row's first edit -- becomes durable
+        # here. A hand-edited over-cap value is normalized, never refused, so
+        # it cannot brick an unrelated save; caller-supplied values are
+        # validated at their own boundaries (``create_agent``/``update_agent``/
+        # the agent tool). A mesh row from an OLDER peer simply arrives without
+        # this field (it reads as ""), and it re-derives HERE rather than
+        # failing -- which is also why the field is additive on the wire.
+        agent_metadata.label = normalize_label(agent_metadata.label or "") or default_label(
+            agent_metadata.name
+        )
 
         # Add to in-memory agents
         self._agents[agent_metadata.id] = agent_metadata
@@ -1049,10 +1109,40 @@ class AgentRegistry:
         prospective_changes = updated_metadata.model_dump(exclude_unset=True)
         new_cwd_explicitly_set = prospective_changes.get("current_working_directory")
 
+        # Incoming label validation runs BEFORE any mutation, so a refused
+        # value cannot leave the row half-updated (the setattr loop below is
+        # not transactional).
+        proposed_label = prospective_changes.get("label")
+        validated_label = (
+            validate_label(
+                str(proposed_label),
+                max_chars=MAX_AGENT_LABEL_CHARS,
+                subject="an agent label",
+            )
+            if "label" in prospective_changes and proposed_label is not None
+            else None
+        )
+
+        # D3b, the rename rule teams froze: a stored label that is only the OLD
+        # name's derived default follows the rename; a CHOSEN label is the
+        # operator's and stays. An explicit label in this same update wins over
+        # the re-derive (applied after the loop below).
+        new_name = prospective_changes.get("name")
+        if (
+            isinstance(new_name, str)
+            and new_name != current_metadata_obj.name
+            and current_metadata_obj.label == default_label(current_metadata_obj.name)
+        ):
+            current_metadata_obj.label = default_label(new_name)
+
         # Apply updates to current_metadata_obj
         for field, value in prospective_changes.items():
             if value is not None:  # Ensure we only process fields that were actually provided
                 setattr(current_metadata_obj, field, value)
+
+        if validated_label is not None:
+            # An explicit "" is a RESET to the derived default, not "no label".
+            current_metadata_obj.label = validated_label
 
         if updated_metadata.last_message is not None:
             current_metadata_obj.last_message_datetime = datetime.now(timezone.utc)
@@ -1061,6 +1151,14 @@ class AgentRegistry:
         agent_dir = self.agents_dir / agent_id
         if not agent_dir.exists():
             agent_dir.mkdir(parents=True, exist_ok=True)
+
+        # The same derive-and-persist rule ``save_agent`` applies, at the
+        # second writer (this path writes the file directly): normalize, and
+        # fill the derived default when empty, so both writers leave an
+        # identical row shape.
+        current_metadata_obj.label = normalize_label(
+            current_metadata_obj.label or ""
+        ) or default_label(current_metadata_obj.name)
 
         try:
             with (agent_dir / "agent.yml").open("w", encoding="utf-8") as f:
@@ -1206,6 +1304,17 @@ class AgentRegistry:
                 presence_penalty=original_agent.presence_penalty,
                 seed=original_agent.seed,
                 current_working_directory=original_agent.current_working_directory,
+                # A CHOSEN label is part of what a clone copies; a label that
+                # is only the source name's derived default re-derives for the
+                # clone's own name (the D3b rename rule, applied to the copy),
+                # and a legacy empty label derives too -- "" is the reset
+                # spelling.
+                label=(
+                    original_agent.label
+                    if original_agent.label
+                    and original_agent.label != default_label(original_agent.name)
+                    else ""
+                ),
             )
         )
 

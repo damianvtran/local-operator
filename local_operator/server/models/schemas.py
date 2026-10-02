@@ -8,7 +8,7 @@ in the Local Operator API.
 import re
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, Generic, List, Optional, TypeVar
+from typing import Annotated, Any, Dict, Generic, List, Optional, TypeVar
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
@@ -147,6 +147,23 @@ class Agent(BaseModel):
 
     id: str = Field(..., description="Unique identifier for the agent")
     name: str = Field(..., description="Agent's name")
+    #: See ``local_operator.agents.AgentData.label``: the display spelling a
+    #: listing paints while ``name`` stays the addressing key. The default AND
+    #: the description both matter here: the plain ``= ""`` is what keeps a
+    #: construction site out of pyright's way (a ``Field(...)`` assignment reads
+    #: as a REQUIRED parameter for these models), while the ``Annotated``
+    #: ``Field`` is what keeps the served OpenAPI documenting the field -- a
+    #: bare ``label: str = ""`` documents nothing, which the UI lane consumes.
+    label: Annotated[
+        str,
+        Field(
+            description=(
+                "The display label (free text, spaces allowed) that listings paint "
+                "through the shared display rule; 'name' remains the addressing key. "
+                "Empty derives from the name on the next write."
+            )
+        ),
+    ] = ""
     created_date: datetime = Field(..., description="The date when the agent was created")
     version: str = Field(..., description="The version of the agent")
     security_prompt: str = Field(
@@ -300,6 +317,17 @@ class AgentCreate(BaseModel):
     """Data required to create a new agent."""
 
     name: str = Field(..., description="Agent's name")
+    #: See ``Agent.label``: default AND description, for the two different
+    #: reasons documented there.
+    label: Annotated[
+        str | None,
+        Field(
+            description=(
+                "The display label (free text, spaces allowed); 'name' remains the "
+                "addressing key. Omitted (or '') derives from the name."
+            )
+        ),
+    ] = None
     security_prompt: str | None = Field(
         None,
         description="The security prompt for the agent. Allows a user to explicitly "
@@ -377,6 +405,18 @@ class AgentUpdate(BaseModel):
     """Data for updating an existing agent."""
 
     name: str | None = Field(None, description="Agent's name")
+    #: See ``Agent.label``: default AND description, for the two different
+    #: reasons documented there. Omit to leave the stored label alone; an empty
+    #: string resets it to the derived default.
+    label: Annotated[
+        str | None,
+        Field(
+            description=(
+                "The display label (free text, spaces allowed); 'name' remains the "
+                "addressing key. Omit to leave it alone; '' resets to the derived default."
+            )
+        ),
+    ] = None
     security_prompt: str | None = Field(
         None,
         description="The security prompt for the agent. Allows a user to explicitly "

@@ -148,6 +148,12 @@ def _entry(name: str) -> dict[str, Any]:
     instructions = profile.instructions
     return {
         "name": name,
+        # The canonical display label a seed declares (``label: UX Reviewer``):
+        # display-only, and deliberately absent from ``_SEED_FIELDS`` (a
+        # label-only edit is not divergence), so it rides here the same way
+        # ``description`` does -- as the packaged value a reader can compare
+        # against.
+        "label": profile.label,
         "description": profile.description,
         "when_to_use": profile.when_to_use,
         "version": _frontmatter_version(name, text),

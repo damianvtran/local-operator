@@ -1,5 +1,6 @@
 ---
 name: aida
+label: Aida
 version: 1.3.1
 # ``when_to_use`` is what `agent search` embeds, so it is written to match
 # DELEGATION and ORCHESTRATION requests specifically — an earlier wording

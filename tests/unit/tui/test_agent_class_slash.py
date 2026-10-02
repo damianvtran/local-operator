@@ -168,7 +168,7 @@ async def test_the_settings_pane_rows_state_each_profiles_class(tmp_path: Path) 
                 break
         rows = app._agent_profile_rows()
 
-    facts = {name: kind for name, kind, _summary in rows}
+    facts = {name: kind for name, _label, kind, _summary in rows}
     assert "proactive" in facts.get("steadier", ""), facts
     # The CLASS leads the optional facts, so the pane's 27-cell truncation
     # cannot cut it — and it must still be there after that truncation.
@@ -191,7 +191,7 @@ async def test_the_settings_pane_rows_state_each_profiles_class(tmp_path: Path) 
             if app2._session is not None:
                 break
         rows2 = app2._agent_profile_rows()
-    facts2 = {name: kind for name, kind, _summary in rows2}
+    facts2 = {name: kind for name, _label, kind, _summary in rows2}
     assert "plainrole" in facts2, facts2
     assert "proactive" not in facts2["plainrole"], facts2
 

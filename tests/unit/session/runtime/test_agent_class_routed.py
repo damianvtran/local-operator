@@ -232,7 +232,10 @@ async def test_the_routed_bare_agent_lists_the_roster_instead_of_going_silent(
     assert result["data"]["type"] == "agent_list"
     rows = result["data"]["items"]
     assert all(len(row) == 3 for row in rows), rows
-    assert "reviewer" in [row[0] for row in rows], rows
+    # The first slot is the COMPOSED display form the viewer paints verbatim
+    # (the shared bounded form), so a canonical label paints alone -- the same
+    # bytes the app-hosted listing block shows (design round 1, D1).
+    assert "Reviewer" in [row[0] for row in rows], rows
 
 
 @pytest.mark.asyncio
@@ -252,5 +255,6 @@ async def test_a_routed_bare_agent_lists_the_packaged_starters_too(tmp_path: Pat
     result = await handle.run_slash_authoritative("agent", "")
 
     assert result["kind"] == "block", result
+    # The seeds paint their canonical labels too, through the one shared rule.
     names = [row[0] for row in result["data"]["items"]]
-    assert "reviewer" in names, names
+    assert "Reviewer" in names, names

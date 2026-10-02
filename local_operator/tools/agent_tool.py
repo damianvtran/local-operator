@@ -135,6 +135,10 @@ class AgentParams(BaseModel):
             "as the /agent slash-command argument."
         ),
     )
+    label: str | None = Field(
+        default=None,
+        description="create/update: display label; '' resets it.",
+    )
     query: str | None = Field(default=None, description="search: the task, in a sentence.")
     description: str | None = Field(
         default=None,
@@ -317,7 +321,18 @@ def _profile_line(profile: AgentProfile, *, installed: bool, compact: bool = Fal
         # A role with no description is invisible to `search`, which matches on
         # exactly this text. Saying so is more useful than a dangling colon.
         summary = "(no description — not searchable; add one with op='update')"
-    row = f"- {profile.name}{suffix}: {summary}"
+    # The shared display rule's material, composed for ADDRESSING (D2). This
+    # row is the model's install/address menu -- it names the string a later
+    # ``install``/``update`` must pass as ``name`` -- so the KEY leads and the
+    # human label follows in parentheses. ``display_form`` alone cannot be used
+    # verbatim here: for a canonical label it paints the label WITHOUT the key
+    # (``UX Reviewer``), which is right on a human listing and wrong on the one
+    # surface where the reader has to reproduce the exact install name.
+    if profile.label and profile.label.casefold() != profile.name.casefold():
+        display = f"{profile.name} ({profile.label})"
+    else:
+        display = profile.name
+    row = f"- {display}{suffix}: {summary}"
     # Ellipsis when the cut fires: a bare slice ends mid-word, and the reader
     # cannot tell an author's fragment from text we dropped.
     cap = _STARTER_ROW_CAP if compact else _ROW_CAP
@@ -1304,6 +1319,7 @@ def write_profile(registry: Any, params: AgentParams, *, creating: bool) -> tupl
     def _fields(**overrides: Any) -> AgentEditFields:
         base: dict[str, Any] = dict(
             name=None,
+            label=None,
             description=None,
             tags=None,
             categories=None,
@@ -1331,13 +1347,21 @@ def write_profile(registry: Any, params: AgentParams, *, creating: bool) -> tupl
                 description=profile.description,
                 tags=tags,
                 categories=categories,
+                # An omitted label (None) means "derive" on the create path
+                # ("" is the reset spelling); a provided one is validated by
+                # ``create_agent`` against the shared rule.
+                label=params.label,
             )
         )
     else:
         agent = existing
         # An update carries only what changed: passing a None description here
         # would blank the routing text a previous create had set.
-        overrides: dict[str, Any] = {"tags": tags, "categories": categories}
+        overrides: dict[str, Any] = {
+            "tags": tags,
+            "categories": categories,
+            "label": params.label,
+        }
         if profile.description:
             overrides["description"] = profile.description
         registry.update_agent(agent.id, _fields(**overrides))
