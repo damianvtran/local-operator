@@ -170,15 +170,21 @@ def test_milestone_routes_report_derived_status_and_refuse_unknowns() -> None:
     client = _client()
     project_id = client.post("/api/projects", json={"name": "alpha"}).json()["project"]["id"]
 
+    # FAR-FUTURE, not a fixed near date: ``status`` is DERIVED from
+    # ``target_date`` against the local today, so a fixture pinned to a date
+    # that arrives rots — 2026-10-01 read "upcoming" only while it was today or
+    # later, then flipped to "overdue" the next day and reddened every PR. 2099
+    # keeps the upcoming arm (and the un-complete assertion far below) true
+    # forever; the "audit" row keeps the overdue arm honest.
     added = client.post(
         f"/api/projects/{project_id}/milestones",
-        json={"name": "beta cut", "target_date": "2026-10-01"},
+        json={"name": "beta cut", "target_date": "2099-01-01"},
     )
     assert added.status_code == 200
     (milestone,) = added.json()["project"]["milestones"]
     assert milestone == {
         "name": "beta cut",
-        "target_date": "2026-10-01",
+        "target_date": "2099-01-01",
         "completed_at": None,
         "status": "upcoming",
     }

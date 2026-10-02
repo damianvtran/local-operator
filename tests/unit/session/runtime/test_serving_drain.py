@@ -584,6 +584,7 @@ class WakeHost:
     """``Session``'s wake-handover methods over a stub transcript and scheduler."""
 
     retire_wakes_to_inbox = Session.retire_wakes_to_inbox
+    resume_wakes_from_inbox = Session.resume_wakes_from_inbox
     _spool_wake_to_inbox = Session._spool_wake_to_inbox
     _queue_wake_rearm = Session._queue_wake_rearm
     hand_wakes_to_successor = Session.hand_wakes_to_successor
@@ -678,6 +679,68 @@ async def test_a_wake_that_cannot_be_re_armed_is_still_spooled(tmp_path: Path) -
     rows = peek_inbox(tmp_path)
     assert len(rows) == 1 and rows[0].wake is True
     assert host._wake_rearms == [], "nothing to hand over, and nothing claimed"
+
+
+@pytest.mark.asyncio
+async def test_a_wake_resume_restores_delivery_and_stops_spooling(tmp_path: Path) -> None:
+    """``process._abandon_move``: the KEPT build is not being replaced, so the
+    fires it kept serving must go back to being DELIVERED.
+
+    The drain spools because the files under this runtime are about to change;
+    an abandoned move keeps the build, so that premise is gone. Left installed,
+    the spool hook stands for the rest of the process's life and every fire
+    lands in an inbox nothing drains until a successor boots (measured
+    2026-10-01/02: ~14 h of fires on one desk session, invisible everywhere).
+    """
+    host = WakeHost(tmp_path)
+    delivered: list[Any] = []
+
+    async def _deliver(due: Any) -> None:
+        delivered.append(due)
+
+    host._wake_deliver_hook = _deliver
+    host.retire_wakes_to_inbox()
+    assert host._wake_deliver_hook == host._spool_wake_to_inbox, "precondition"
+
+    await host._spool_wake_to_inbox(_due())
+    assert len(peek_inbox(tmp_path)) == 1, "the drain's own fire spools (pinned next door)"
+
+    assert host.resume_wakes_from_inbox() is True
+    assert host._wake_deliver_hook is _deliver, "the hook the drain replaced comes back"
+
+    await host._wake_deliver_hook(_due(text="a fire after the resume"))
+    assert [fire.schedule.message for fire in delivered] == ["a fire after the resume"]
+    assert len(peek_inbox(tmp_path)) == 1, "a fire after the resume must NOT spool again"
+
+
+def test_a_wake_resume_is_idempotent(tmp_path: Path) -> None:
+    """The release can run on every tick; a second call answers False, not a raise."""
+    host = WakeHost(tmp_path)
+
+    async def _deliver(due: Any) -> None:
+        return None
+
+    host._wake_deliver_hook = _deliver
+    host.retire_wakes_to_inbox()
+    assert host.resume_wakes_from_inbox() is True
+    assert host.resume_wakes_from_inbox() is False
+
+
+def test_a_wake_resume_never_clobbers_a_hook_another_path_installed(tmp_path: Path) -> None:
+    """Only the spool is undone: a hook some other path owns now is not ours."""
+    host = WakeHost(tmp_path)
+
+    async def _deliver(due: Any) -> None:
+        return None
+
+    async def _sentinel(due: Any) -> None:
+        return None
+
+    host._wake_deliver_hook = _deliver
+    host.retire_wakes_to_inbox()
+    host._wake_deliver_hook = _sentinel
+    assert host.resume_wakes_from_inbox() is False
+    assert host._wake_deliver_hook is _sentinel, "a resume must not stomp the hook in force"
 
 
 class PersistHost:
@@ -1391,6 +1454,31 @@ async def test_an_abandoned_drain_gives_deliveries_back(tmp_path: Path) -> None:
         await asyncio.sleep(0.01)
 
     assert len(stream.requests) == 1, "exactly one batched turn, as before the latch"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_drain_gives_wake_delivery_back(tmp_path: Path) -> None:
+    """The wake half of the abandon, at the same seam the job half next door uses.
+
+    ``process._abandon_move`` keeps the build this runtime loaded, so the drain's
+    premise — files about to be replaced — is gone and the runtime must fire its
+    own wakes again. Left armed, the spool hook stands for the rest of the
+    process's life: every fire spools into an inbox nobody drains until a
+    successor boots (measured 2026-10-01/02: ~14 h of fires on one desk session,
+    invisible on every surface — the alarm was fresh and the supervisor saw a
+    live runtime).
+    """
+    handle, session, stream = _delivery_host(tmp_path)
+    before = session._wake_deliver_hook
+    assert before != session._spool_wake_to_inbox, "precondition: not already spooling"
+    assert handle.begin_drain("runtime-retired") is True
+    assert (
+        session._wake_deliver_hook == session._spool_wake_to_inbox
+    ), "precondition: the drain armed the spool"
+    assert handle.end_drain() is True
+    assert session._wake_deliver_hook == before, "an abandoned move restores wake delivery"
+    assert session._wake_deliver_hook != session._spool_wake_to_inbox
     await session.dispose()
 
 

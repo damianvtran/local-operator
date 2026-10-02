@@ -70,6 +70,23 @@ its read-only status later (a settings change, a tool going away), the tick
 counts as a failure and after `maxConsecutiveFailures` the monitor disables
 itself with the reason — re-arm it once the call is monitorable again.
 
+The arguments you pass are checked against the tool's OWN schema at arm time,
+so a call that would fail on its first tick is refused when you arm it (a
+typo'd `glob({path: …})`, an argument the tool never declared) instead of
+quietly burning five checks and disabling itself.
+
+`kubectl` is allow-listed for `get`, `describe` and `logs` only, and the
+subcommand must come first. Anything that retargets the cluster or the
+identity is refused (`--kubeconfig`, `--context` as a global flag, `--token`,
+`--as*`, `--server`, `--cluster`, …), as is anything that never returns
+(`-w/--follow`) or reaches an arbitrary API path (`--raw`), `-o go-template`
+(template functions are an evaluator), and any operand naming a secret —
+secret data would be copied into the transcript and the provider request.
+**Use an explicit `--context <name>` after the subcommand** rather than
+relying on the ambient one: `kubectl config use-context` elsewhere silently
+retargets every armed watch, and a kubeconfig `exec` credential plugin runs
+unattended on every tick.
+
 ## The thread-watching pattern
 
 When the user asks you to **respond, post, or keep people updated** in a
@@ -109,6 +126,22 @@ firehose; held hits are counted and named in the next allowed delivery.
 
 Monitors tick only while the session is hosted (a terminal or runtime is open
 on it). If the session goes cold, monitors go dormant and resume with it.
+
+A tool that is momentarily **unreachable** (an MCP server reconnecting or
+asking for a re-auth) is not a failed check: the monitor waits on its backoff
+ladder without counting failures, and if that lasts longer than 30 minutes you
+are told once, with a matching "running again" when it recovers. Only a
+genuine failure walks the disable ladder, and the monitor's departure is
+always announced: a disable, a stall and a recovery each arrive as a message
+naming the monitor, the cause, its delivery count and how to reactivate it.
+Nothing stops silently.
+
+The list surfaces say what a row's counters alone cannot: `idle` (overdue
+because no session is hosting it), `never checked`, `N checks, 0 deliveries —
+nothing has changed`, and `tool unavailable since HH:MM — retrying`. The
+status band is a two-row glance surface, so it carries the STATE in the due
+slot (`disabled` / `stalled` / `idle`) and the state clause of a hint; the
+`lop monitor status` table and the expanded receipt carry each hint whole.
 
 ## No action needed is a first-class outcome
 

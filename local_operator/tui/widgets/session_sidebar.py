@@ -35,6 +35,7 @@ from local_operator.tui.animation import BLURRED_SPINNER_INTERVAL_S, animation_f
 from local_operator.tui.composer_focus import composer_may_take_focus, focus_is_claimed
 from local_operator.tui.session_catalog import CatalogEntry, rank_entries
 from local_operator.tui.terminal_title import SPINNER_FRAMES
+from local_operator.tui.widgets.ask_queue import ASK_MARKER
 from local_operator.tui.widgets.session_picker import (
     AIDA_MARKER,
     COMPLETION_MARKERS,
@@ -550,6 +551,11 @@ class SessionSidebar(Widget, can_focus=True):
         #: Startup default from `tui.sidebar_show_subagents`; flipped by
         #: `ctrl+a` for THIS session only, never written back to config.
         self.show_subagents: bool = False
+        #: ``(session_id, open_ask_count)`` for the session whose asks this
+        #: sidebar can actually count — the one the app is attached to. Empty
+        #: string means "no mark". See :meth:`set_asking` for why the count is
+        #: live-only rather than read out of the catalogue.
+        self._asking: tuple[str, int] = ("", 0)
         #: Hidden-population size for the footer chip, from `subagent_population`.
         self._subagent_total: int = 0
         #: Whether the pointer rests on that chip. The chip is a CONTROL (issue
@@ -762,6 +768,30 @@ class SessionSidebar(Widget, can_focus=True):
     @property
     def visible_entries(self) -> tuple[CatalogEntry, ...]:
         return self.entries[self._offset : self._offset + self.page_size]
+
+    def _asking_mark(self, entry: CatalogEntry) -> tuple[str, str] | None:
+        """``(glyph, ink)`` for a row the user OWES an answer on, else ``None``.
+
+        The queued-ask sibling of ``row_state_mark``'s needs-you rung, and it
+        sits directly below the GATE mark for a reason worth stating: a pending
+        gate is a turn that cannot proceed, while a queued ask is one the agent
+        has already walked past — both want the user, and the blocked one is
+        the louder fact, so ``!`` keeps the cell when both are true.
+
+        Above the spinner and the completion marks, because "you owe an answer"
+        outranks "this session is working" and "this session finished" — the
+        same urgency ordering ``row_state_mark`` uses, applied one rung lower.
+
+        Ink is the BAR's, not the gate's (``accent``, not ``warning``), so the
+        two marks cannot be read as one state in two colours; see
+        ``widgets/ask_queue`` for the glyph's own provenance.
+        """
+        session_id, count = self._asking
+        if not count or not session_id or entry.id != session_id:
+            return None
+        if entry.row.pending:
+            return None
+        return ASK_MARKER, "accent"
 
     def _special_mark(self, entry: CatalogEntry) -> tuple[str, str] | None:
         """``(glyph, ink)`` for a row whose mark is NOT its live state, else None.
@@ -1078,6 +1108,31 @@ class SessionSidebar(Widget, can_focus=True):
             )
             for name, _reason in self._silent_peers
         }
+
+    def set_asking(self, session_id: str, count: int) -> None:
+        """Mark a row as holding OPEN ASKS the user has not answered.
+
+        The sidebar's own state for the queued-ask feature (design §5.1):
+        distinct from ``pending``, which means a GATE — a turn that cannot
+        proceed until someone answers. A queued ask is the opposite kind of
+        fact: the agent already moved on, and the mark says the user still owes
+        it an answer rather than that anything is blocked. Two facts, two
+        marks, which is why this does not simply feed ``pending``.
+
+        Only the CURRENT session is marked, and the count is painted rather
+        than the sessions': a sidebar row's queue depth lives on that session's
+        own runtime, and the list is a durable catalogue that a cooled session
+        is read out of. Marking a row we have no live count for would be
+        inventing one.
+
+        Display only, and best-effort by contract — the caller passes "" for
+        "no session" and 0 for "nothing outstanding".
+        """
+        pair = (str(session_id or ""), int(count or 0))
+        if pair == self._asking:
+            return
+        self._asking = pair
+        self.refresh()
 
     def set_entries(self, entries: Sequence[CatalogEntry]) -> None:
         # The order the list presents — and scrolls in — not the bare ranking:
@@ -2322,10 +2377,16 @@ class SessionSidebar(Widget, can_focus=True):
                 line.append(" ")
             mark, ink = row_state_mark(entry.row, self._frame)
             special = self._special_mark(entry)
+            asking = self._asking_mark(entry)
             if special is not None:
                 # A subagent row has no live state to displace; see
                 # `_special_mark`.
                 mark, ink = special
+            elif asking is not None:
+                # An outstanding queued ask: the user owes an answer the agent
+                # has already stopped waiting for. See `_asking_mark` for where
+                # it sits in the urgency ladder.
+                mark, ink = asking
             elif requested and self._requested_spinning():
                 # Same ink a busy row's spinner uses (``row_state_mark``), so one
                 # spinner means one thing everywhere in the list.

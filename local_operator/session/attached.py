@@ -3365,17 +3365,96 @@ class AttachedSession:
         log (the first ``answered`` event wins), so a stale screen cannot settle
         a question twice.
         """
+        # ONE plumbing point (`_ask_client_method`) for both contracts this
+        # facade offers on the same wire op: the ROUTE wants a detail string and
+        # an exception it can map onto an HTTP error, the DOCK wants a verdict
+        # dict and no exception (`respond_ask`/`decline_ask`/`dismiss_ask`,
+        # below). Two contracts, one sender — a second copy of the bind and body
+        # shaping is how the two drift.
+        return await self._ask_client_method(
+            "ask_decline" if decline else "ask_respond", ask_id, answers, by="desktop"
+        )
+
+    async def respond_ask(
+        self,
+        ask_id: str,
+        answers: Mapping[str, Sequence[str]] | None = None,
+        *,
+        by: str = "unknown",
+    ) -> dict[str, Any]:
+        """Answer a queued ask, in the dict contract the TUI reads off an owner.
+
+        The three names here are the OWNER's (``Session.respond_ask`` and its two
+        siblings), because that is what the dock's call sites look up on
+        whichever session holds the ask — and a viewer that lacks them makes the
+        surface silently do nothing: the probe returns ``None``, the ``callable``
+        guard declines, and the row looks answered (QA round 4, Q1). They are
+        ``async`` because this side crosses the wire, and they return the same
+        ``{"ok": ..., "error": ...}`` verdict so the caller's copy is the same on
+        both kinds of holder.
+
+        The cold arm is the BIND, as :meth:`ask_respond` argues at length: an ask
+        outlives the runtime that queued it, so answering from a desktop may mean
+        starting the owner. Refusals are verdicts, not exceptions — the ask's own
+        sentence (expired, already answered, already declined) is what the user
+        needs, and it arrives as an error frame the client raises.
+        """
+        return await self._ask_verdict(
+            lambda: self._ask_client_method("ask_respond", ask_id, answers, by=by)
+        )
+
+    async def decline_ask(self, ask_id: str, *, by: str = "unknown") -> dict[str, Any]:
+        """Decline a queued ask: explicit "no answer, decide yourself"."""
+        return await self._ask_verdict(
+            lambda: self._ask_client_method("ask_decline", ask_id, None, by=by)
+        )
+
+    async def dismiss_ask(self, ask_id: str, *, by: str = "unknown") -> dict[str, Any]:
+        """Take a TIMED-OUT ask out of the view. Injects nothing, ever."""
+        return await self._ask_verdict(
+            lambda: self._ask_client_method("ask_dismiss", ask_id, None, by=by)
+        )
+
+    async def _ask_verdict(self, call: Callable[[], Awaitable[str]]) -> dict[str, Any]:
+        """Run one ask op for its VERDICT: ``{"ok": ...}``, never an exception.
+
+        The shape is the owner's, so the dock reports a refusal in the same words
+        on both paths. A refusal that crossed the wire arrives as a
+        ``RuntimeError`` (``attach_client._request``) and a lost owner as a
+        ``ConnectionError``; both are verdicts about the ask, not crashes.
+        """
+        try:
+            await call()
+        except (ValueError, RuntimeError, ConnectionError) as exc:
+            return {"ok": False, "error": str(exc) or "the ask was refused"}
+        # The OWNER's exact shape: ``{"ok": ...}`` and an ``"error"`` when it is
+        # False, with nothing else. The wire returns a detail string, but the
+        # dock reads only these two keys, and a third one here would be a
+        # second contract the caller has to know about (agent review round 5,
+        # NIT).
+        return {"ok": True}
+
+    async def _ask_client_method(
+        self,
+        name: str,
+        ask_id: str,
+        answers: Mapping[str, Sequence[str]] | None,
+        *,
+        by: str,
+    ) -> str:
+        """Bind an owner if needed, then send ONE ask op on the wire."""
         await self._ensure_bound()
         client = self._client
         if client is None or not client.connected:
             raise ConnectionError(self._unavailable_reason())
-        if decline:
-            return await client.ask_decline(ask_id, by="desktop")
-        body = {
-            str(key): [str(item) for item in (values or [])]
-            for key, values in (answers or {}).items()
-        }
-        return await client.ask_respond(ask_id, body, by="desktop")
+        method = getattr(client, name)
+        if name == "ask_respond":
+            body = {
+                str(key): [str(item) for item in (values or ())]
+                for key, values in (answers or {}).items()
+            }
+            return await method(ask_id, body, by=by)
+        return await method(ask_id, by=by)
 
     def move_will_wait(self) -> bool:
         """Whether :meth:`set_working_directory` is about to make the user wait.

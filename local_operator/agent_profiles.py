@@ -469,6 +469,89 @@ def profile_from_agent(registry: "AgentRegistry", agent: "AgentData") -> AgentPr
     )
 
 
+def agent_listing_rows(registry: Any | None) -> list[tuple[str, str, str]]:
+    """``(name, kind-facts, summary)`` per role/specialist, roles first.
+
+    ONE enumeration feeding the listing block, the argument picker AND the
+    detached runtime's routed ``/agent``, so no two surfaces can disagree about
+    which names ``/agent`` accepts or how a name reads. It lives here rather than
+    on ``OperatorApp`` because a session can be hosted by a process with no TUI
+    at all: the runtime used to answer a bare ``/agent`` with a ``noop`` whose
+    rows only the terminal's own resolver could draw, so the phone offered the
+    command in its sheet and painting the tap delivered nothing (review round 1,
+    R1-2/U2). A second assembly in ``serving.py`` would have been a second source
+    of truth for the same list, which is what the original split was avoiding.
+
+    Scope is deliberate: only rows tagged as delegation roles (``is_role``) or
+    explicitly authored specialists (``is_specialist``). A registry also holds
+    ordinary conversational and autosave agents; offering those would be noise at
+    best and a privacy leak at worst — the same boundary the ``agent`` tool's
+    listing draws. ``registry`` may be ``None`` (a session that never wired one):
+    the packaged seeds below still list, because ``resolve_profile`` falls through
+    to them, so ``/agent reviewer`` works on a fresh machine and the listing must
+    not deny a name the attach path accepts.
+    """
+    from local_operator.action_class import class_from_tags
+    from local_operator.action_class import normalize as normalize_action_class
+
+    rows: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    if registry is not None and hasattr(registry, "list_agents"):
+        try:
+            agents = list(registry.list_agents())
+        except Exception:
+            agents = []
+        roles: list[tuple[str, str, str]] = []
+        specialists: list[tuple[str, str, str]] = []
+        for agent in agents:
+            try:
+                if is_role(agent):
+                    profile = profile_from_agent(registry, agent)
+                    facts = "role"
+                    # The CLASS leads the optional facts (design round 1, D1):
+                    # the settings pane truncates this line to 27 cells, and a
+                    # marker appended after a configured role's model/effort was
+                    # the first thing cut — the surface §8.1.3 puts forward as
+                    # where the class is visible could not show it on exactly the
+                    # agents that carry config detail.
+                    if normalize_action_class(profile.action_class) == PROACTIVE_CLASS:
+                        facts += " · proactive"
+                    # Model/effort are facts a user picks a hat by; the rest of
+                    # the profile is what the attach applies.
+                    if profile.model:
+                        facts += f" · {profile.model}"
+                    if profile.effort:
+                        facts += f" · effort {profile.effort}"
+                    summary = (profile.when_to_use or profile.description or "").strip()
+                    roles.append((profile.name, facts, summary))
+                    seen.add(profile.name.lower())
+                elif is_specialist(agent):
+                    summary = str(agent.description or "").strip()
+                    class_fact = (
+                        " · proactive" if class_from_tags(agent.tags) == PROACTIVE_CLASS else ""
+                    )
+                    specialists.append((str(agent.name), f"specialist{class_fact}", summary))
+                    seen.add(str(agent.name).lower())
+            except Exception:
+                continue
+        rows.extend(sorted(roles, key=lambda row: row[0].lower()))
+        rows.extend(sorted(specialists, key=lambda row: row[0].lower()))
+    seeds: list[tuple[str, str, str]] = []
+    for seed_name in list_seeds():
+        if seed_name.lower() in seen:
+            continue
+        profile = load_seed(seed_name)
+        if profile is None:
+            continue
+        summary = (profile.when_to_use or profile.description or "").strip()
+        seed_facts = "role · packaged"
+        if normalize_action_class(profile.action_class) == PROACTIVE_CLASS:
+            seed_facts += " · proactive"
+        seeds.append((profile.name, seed_facts, summary))
+    rows.extend(sorted(seeds, key=lambda row: row[0].lower()))
+    return rows
+
+
 def resolve_profile(
     name: str | None,
     *,

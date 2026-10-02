@@ -1495,16 +1495,39 @@ def test_image_bytes_reads_attachment_from_transcript(tmp_path, monkeypatch) -> 
     assert _image_bytes(record, "nope", 0) is None
 
 
-def test_slash_catalogue_excludes_terminal_chrome() -> None:
+def test_the_slash_sheet_offers_only_what_the_routed_seam_runs() -> None:
+    """Issue #1869: the sheet must not promise a command the phone cannot execute.
+
+    The catalogue was the whole registry minus three names, and 35 of the 46
+    entries it offered were ``FRONTEND_LOCAL`` — commands whose effect belongs to
+    the terminal drawing the widgets, which a phone has no handler for. The set
+    the phone can run is the ``AUTHORITATIVE_SESSION`` one (the owner executes it,
+    so any attached surface can), and it is read from the same capability table
+    the terminal's follower routes by, so this asserts AGREEMENT with that table
+    rather than a second list that would be edited by the same hand that adds a
+    command.
+    """
+    from local_operator.session.frontend_state import CommandScope, _slash_capabilities
+    from local_operator.slash_commands import SLASH_COMMANDS
+
     daemon = MobileDaemon(port=0, password="pw123")
-    names = [c["name"] for c in daemon.slash_commands()]
-    assert "model" in names
-    assert "effort" in names
-    assert "resume" in names
-    # TUI chrome never leaves the terminal.
-    assert "exit" not in names
-    assert "quit" not in names
-    assert "clear" not in names
+    offered = {c["name"] for c in daemon.slash_commands()}
+    routed = {
+        cap.command
+        for cap in _slash_capabilities()
+        if cap.scope is CommandScope.AUTHORITATIVE_SESSION
+    }
+    assert offered == routed, (
+        f"sheet offers {sorted(offered - routed)} the route does not run and hides "
+        f"{sorted(routed - offered)} it does"
+    )
+    assert offered, "an empty sheet would pass the equality above for the wrong reason"
+    # The commands the issue named as already working must survive the filter...
+    assert {"goal", "compact", "mcp", "model", "approvals", "context"} <= offered
+    # ...and the terminal-only majority must be gone, chrome included.
+    for dead in ("exit", "clear", "resume", "new", "copy", "help", "theme", "usage"):
+        assert dead in {c.name for c in SLASH_COMMANDS}, f"{dead} left the registry"
+        assert dead not in offered, dead
 
 
 def test_oversized_control_frames_report_the_rate_not_each_frame(caplog, monkeypatch) -> None:
@@ -2442,3 +2465,214 @@ async def test_the_relay_presents_the_capability_for_a_runtime_it_started(
             dial.cancel()
     finally:
         registrant.close()
+
+
+def test_a_routed_slash_answer_carries_its_words_to_the_phone(tmp_path, monkeypatch) -> None:
+    """The ``slash_result`` ack the composer now depends on: text, rows, refusal.
+
+    ``detail`` was always ``""`` for this op (the runtime answers a typed outcome,
+    not an ack), so a command that ran said nothing. Driven through the real
+    ``/command`` route and the real ``daemon.request`` writer, with the runtime's
+    ``result`` frame stood in for the one thing a unit cannot own: the socket.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    daemon = MobileDaemon(port=0, password="pw123")
+    record = SessionRecord(
+        pid=4343,
+        kind="tui",
+        session_id="slash-answer",
+        conversation_name="x",
+        cwd="/tmp",
+        model_label="m",
+        control_port=1,
+        control_key="k",
+    )
+    entry = SessionEntry(record)
+    daemon.table.entries[record.pid] = entry
+    outcomes: list[dict[str, Any]] = []
+
+    class Writer:
+        def write(self, payload: bytes) -> None:
+            frame = json.loads(payload.decode())
+            daemon._pending_reqs[(record.pid, frame["req"])].set_result(
+                {"op": "result", "req": frame["req"], "data": outcomes.pop(0)}
+            )
+
+        async def drain(self) -> None:
+            return None
+
+    entry.writer = Writer()  # type: ignore[assignment]
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+
+    def run(command: str, args: str = "") -> Any:
+        return client.post(
+            "/api/sessions/slash-answer/command",
+            json={"op": "slash_result", "command": command, "args": args, "images": []},
+        )
+
+    # A completed mutation: the runtime NAMES it, so the receipt is a success.
+    outcomes.append(
+        {"kind": "notice", "text": "goal set", "style": "info", "data": {"type": "goal_set"}}
+    )
+    said = run("goal", "ship it")
+    assert said.status_code == 200
+    assert said.json() == {
+        "ok": True,
+        "detail": "goal set",
+        "tone": "success",
+        "refused": False,
+    }
+
+    # ``/context``: the two-slot shape. The rows are folded rather than dropped.
+    outcomes.append(
+        {"kind": "block", "text": "", "data": {"items": [["Messages", "~0"], ["Total", "~4k"]]}}
+    )
+    assert run("context").json()["detail"] == "Messages: ~0 · Total: ~4k"
+
+    # ``/team``: the THREE-slot shape the real producer emits
+    # (``serving.py``: ``(display, "Led by X · N members", description)``). This
+    # is the cell the old fixture could not catch: a two-slot-only fold answers
+    # ``ran /team`` here and drops the roster (review round 1, R1-1; QA Q1).
+    outcomes.append(
+        {
+            "kind": "block",
+            "text": "",
+            "data": {
+                "type": "team_list",
+                "items": [("Release", "Led by manager · 2 members", "ships the thing")],
+            },
+        }
+    )
+    team = run("team").json()
+    assert team["detail"] == "Release: Led by manager · 2 members", team
+    assert team["tone"] == "neutral"
+
+    # ``/mcp`` with servers: a block with NO items — the roster rides ``text``
+    # (the runtime composes it, because the terminal draws its own panel).
+    outcomes.append(
+        {"kind": "block", "text": "2 MCP servers: alpha, beta", "data": {"type": "mcp"}}
+    )
+    assert run("mcp").json()["detail"] == "2 MCP servers: alpha, beta"
+
+    # ``/agent``: the listing block the runtime now sends, same three-slot rows.
+    outcomes.append(
+        {
+            "kind": "block",
+            "text": "",
+            "data": {
+                "type": "agent_list",
+                "items": [("reviewer", "role · proactive", "reads a diff")],
+            },
+        }
+    )
+    assert run("agent").json()["detail"] == "reviewer: role · proactive"
+
+    # A noop (a listing the frontend owns) is not silent and claims nothing.
+    outcomes.append({"kind": "noop", "text": "", "data": {"type": "agent_list"}})
+    fallback = run("agent").json()
+    assert fallback["detail"] == "ran /agent" and fallback["tone"] == "neutral"
+
+    # A REFUSAL answers 200 with ``style="warning"``: the draft is kept and the
+    # line paints neutral, so it does not read as a success (design round 1, D1;
+    # UX round 1, U3).
+    outcomes.append(
+        {"kind": "notice", "text": "usage: /model <provider>/<model-id>", "style": "warning"}
+    )
+    refused_soft = run("model", "nope").json()
+    assert refused_soft["refused"] is True and refused_soft["tone"] == "neutral"
+
+    # A hard refusal travels as 422 carrying the typed code, like every other 422
+    # on this route (review round 1, R1-3).
+    outcomes.append(
+        {"kind": "error", "text": "A loop is already running", "data": {"code": "loop_busy"}}
+    )
+    refused = run("loop", "x")
+    assert refused.status_code == 422
+    assert refused.json() == {"error": "A loop is already running", "code": "loop_busy"}
+
+    # An error outcome with no code is still a 422 with the sentence.
+    outcomes.append({"kind": "error", "text": "command failed", "data": {}})
+    bare = run("loop", "x")
+    assert bare.status_code == 422 and bare.json() == {"error": "command failed"}
+
+    # A hundred-row roster is one bounded notice line, not a screen of text.
+    outcomes.append(
+        {
+            "kind": "block",
+            "text": "",
+            "data": {
+                "type": "team_list",
+                "items": [(f"team-{i}", "Led by m · 1 member") for i in range(200)],
+            },
+        }
+    )
+    long_line = run("team").json()["detail"]
+    assert len(long_line) <= 400 and long_line.endswith("\u2026")
+    assert long_line.startswith("team-0: Led by m · 1 member")
+
+
+def test_the_phone_catalogue_drops_terminal_only_vocabulary() -> None:
+    """The sheet's copy is read on a TOUCH device (UX round 1, U5).
+
+    The registry's descriptions are written for a terminal: ``/effort``'s
+    "(shift+tab cycles)" names a key chord a phone cannot send, and ``/rename``
+    teaches ``/title --refresh`` — a flag whose only reason to be spelled out is
+    the terminal help table. Both are rewritten for the phone; every other row
+    ships the registry's words unchanged, so this stays an exception list rather
+    than a second catalogue.
+    """
+    from local_operator.slash_commands import SLASH_COMMANDS
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    described = {row["name"]: row["description"] for row in daemon.slash_commands()}
+
+    assert "shift+tab" not in described["effort"]
+    assert "/title" not in described["rename"]
+    # Everything else is still the registry's own words — the pin that keeps this
+    # from quietly becoming a parallel copy.
+    registry = {cmd.name: cmd.description for cmd in SLASH_COMMANDS}
+    overridden = {"effort", "rename"}
+    for name, description in described.items():
+        expected = description if name in overridden else registry[name]
+        assert description == expected, name
+
+
+def test_the_two_viewport_meta_copies_agree_and_match_the_runtime_constant() -> None:
+    """Issue #1870: the viewport meta lives in TWO places that must move together.
+
+    ``web/index.html`` (the SPA shell) and the server-rendered login page in
+    ``daemon.py`` each carry a copy, and the wide-view toggle's runtime rewrite
+    (``web/src/lib/viewport.ts``) restores a THIRD spelling when it is switched
+    off. If any of the three differs, turning wide view off leaves a page whose
+    viewport is not the one the app shipped with, and a sign-in page that renders
+    at a different scale from the app it signs into. Compared as parsed text, not
+    as a substring of the whole page, so a reordered attribute is still the same
+    meta and a changed value is not.
+    """
+    import re
+    from pathlib import Path
+
+    from local_operator.mobile import daemon as daemon_module
+
+    web = Path(daemon_module.__file__).parent / "web"
+
+    def content_of(markup: str) -> str:
+        tag = re.search(r"<meta\b[^>]*name=\"viewport\"[^>]*>", markup, re.S)
+        assert tag is not None, "no viewport meta found"
+        value = re.search(r"content=\"([^\"]*)\"", tag.group(0))
+        assert value is not None, tag.group(0)
+        return value.group(1)
+
+    shell = content_of((web / "index.html").read_text())
+    login = content_of(daemon_module._LOGIN_HTML)
+    constant = re.search(
+        r"DEFAULT_VIEWPORT_CONTENT\s*=\s*\"([^\"]*)\"",
+        (web / "src" / "lib" / "viewport.ts").read_text(),
+    )
+    assert constant is not None, "DEFAULT_VIEWPORT_CONTENT not found in lib/viewport.ts"
+    assert shell == login == constant.group(1), (shell, login, constant.group(1))
+    # width=device-width is what makes iOS shrink the layout (not scroll it) when the
+    # keyboard opens, which the --lo-vvh pin depends on; initial-scale=1 keeps the
+    # default reading size. The wide mode is the only thing allowed to leave them.
+    assert "width=device-width" in shell and "initial-scale=1" in shell

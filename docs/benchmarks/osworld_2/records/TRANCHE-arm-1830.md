@@ -34,12 +34,14 @@ check (launch line, live runner argv `/venvs/1830/`+`/build-1830/`+`--engagement
 | 009 | 0 / 0 *(apparatus)* | 0 / 574,359 | no (r1 apparatus) | +574,359 | 1.68 | 2.41 |
 | 010 | **1** / 1,000,000 | **1** / 1,000,000 | no | 0 | 2.25 | 0.57 |
 | 013 | 0 / 0 | **1** / 1,000,000 | **YES ↑** | +1,000,000 | 0.56 | 0.44 |
-| 016 | 0 / 830,435 | *(blocked on disk floor)* | — | — | 6.10 | — |
-| 017 | 0 / 142,857 | *(blocked on disk floor)* | — | — | 0.76 | — |
+| 016 | 0 / 830,435 | 0 / 778,261 | no | −52,174 | 6.10 | **24.72** |
+| 017 | 0 / 142,857 | 0 / 142,857 | no (identical) | 0 | 0.76 | 0.70 |
 
+**All ten pairs complete.**
 **r1 (n=10): mean partial 415,676 · binary 2/10 · $35.26.**
-**r2 (n=8): mean partial 562,073 · binary 2/8 · $37.28.**
-**Paired (n=8): r1 397,933 (2/8) vs r2 562,073 (2/8) — 2 binary flips (001 ↓, 013 ↑).**
+**r2 (n=10): mean partial 541,770 · binary 2/10 · $62.70.**
+**2 binary flips in 10 pairs (001 ↓, 013 ↑).** Partial deltas: 013 +1,000,000, 009 +574,359,
+004 +183,200, 001 −222,222, 006 −222,223, 016 −52,174; stable: 003, 005, 010, 017 (017 byte-identical).
 
 ### The read
 
@@ -54,13 +56,15 @@ capability claim.
 
 ## Cost distribution (the sizing input)
 
-All 18 completed episodes, sorted: `0.44, 0.56, 0.57, 0.60, 0.76, 1.03, 1.47, 1.67, 1.68, 2.25, 2.41,
-4.31, 5.24, 5.33, 5.41, 6.10, 14.32, 18.40` → **median $2.25, p90 $14.32, max $18.40, total $72.54.**
+All 20 completed episodes, sorted: `0.44, 0.56, 0.57, 0.60, 0.70, 0.76, 1.03, 1.47, 1.67, 1.68, 2.25,
+2.41, 4.31, 5.24, 5.33, 5.41, 6.10, 14.32, 18.40, 24.72` → **median $2.25, max $24.72, total $97.96.**
 Note many runs are provider-priced on a subset of calls (e.g. 001 r1 on 62/144), so figures are
 lower bounds where noted.
 
-The tail is **prefix re-billing**, not output: 005 r1 = $1.03 → 005 r2 = $18.40 (cache_write 6.71M vs
-0.11M); 003 r1 = $14.32 (cache_write 5.02M). Full forensics in `COST-FORENSICS-1830-task_003.md`.
+The tail is **prefix re-billing**, not output: 005 r1 $1.03 → 005 r2 **$18.40** (cache_write 6.71M vs
+0.11M); 016 r1 $6.10 → 016 r2 **$24.72** (cache_write 9.00M); 003 r1 **$14.32** (cache_write 5.02M).
+The tail is the single largest cost term and is **episode-dependent, not task-dependent** — 005 and 016
+straddle it across their own two runs. Full forensics in `COST-FORENSICS-1830-task_003.md`.
 
 ## Fix-exercise status (what this arm did and did not measure)
 
@@ -115,7 +119,10 @@ binds first).
 
 ## Open items
 
-- **r2 for 016 and 017** — pending, blocked on the disk floor.
+- **All ten pairs are sealed, swept and closed**; audit `[]`, no launchd registrations or processes left.
+  Total provider spend for the 20 episodes ≈ **$97.96** (plus the probe and the disk-stop void wave).
 - **Fixed-build arm** (next): re-run the same ten on the build carrying #1891 (cache breakpoint), #1887
   (judge guard), #1894 (tab-shadow un-score) — expect the cost tail to compress (fit walk was ~49% of
-  spend) and 003/009 to stop being guaranteed zeros; if the tail does not move, that is the finding.
+  spend; this arm's tail is $14.32 / $18.40 / $24.72) and 003/009 to stop being guaranteed zeros. **A null
+  result is a real result**: if the tail does not move, that is the finding. Classify 003/009 zeros afresh;
+  do not assume the merges fixed them.

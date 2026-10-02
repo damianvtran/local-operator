@@ -317,16 +317,20 @@ function EffortSheet({
 
 const MAX_TEXTAREA_PX = 6 * 22; /* six lines at body line-height */
 const CONTINUATION_ERROR = "Couldn’t continue this conversation. Try again.";
-/* U15's other half (UX round 1, U20): on an ENDED session the generic line's
-   `Try again.` is not true advice — the runtime is gone and no retry of this
-   control can land — and it sat directly under a strip naming the one path that
-   does work. The honest sentence names it instead. (The composer is NOT
-   disabled for an ended session by this batch: a disabled composer would
-   change the draft, attachment and retained-envelope flows for a state whose
-   refusal the daemon already words, and the gate above removes the affordance
-   that motivated the finding.) */
+/* U15's other half (UX round 1, U20; reworded for issue #1875): on an ENDED
+   session the generic line's `Try again.` is not the whole story — the runtime
+   is gone — and the old sentence ("tap resume to continue") was WRONG about the
+   mechanism: a send to an ended session is itself resume-then-send (the daemon
+   wakes a host for a prompt with no live entry and the continuation carries the
+   text into it), so resume is never a prerequisite. A send that FAILED here means
+   that wake failed, and the honest remedies are the two that exist: send again
+   (the retained draft goes under the same envelope), or resume, which is the one
+   thing a send cannot do — reopen the session without composing. (The composer
+   is NOT disabled for an ended session: a disabled composer would change the
+   draft, attachment and retained-envelope flows, and sending is a real way back.) */
 const ENDED_CONTINUATION_ERROR =
-	"This session has ended — tap resume to continue.";
+	"This session has ended and couldn’t be woken just now. Tap “Retry earlier instruction” to send it again, or reopen it from the sessions list.";
+const SLASH_ERROR = "Couldn’t run that command. Try again.";
 const STEER_ERROR = "Couldn’t send this instruction. Try again.";
 /* U5: one vocabulary for the retained instruction across the alert, the retry
    button, and the delivered acknowledgement — "earlier" throughout, matching
@@ -407,6 +411,12 @@ export function Composer({
 	/* Success acknowledgement lives apart from `error` so it renders in the
 	   success token, not the danger alert (D11). */
 	const [notice, setNotice] = useState("");
+	/* WHICH CONTAINER the notice paints in (design round 1, D1). A receipt reports
+	   an OUTCOME, and the runtime leaves a completed write and a plain report at
+	   the same `style="info"` — so the daemon classifies and the tone travels on
+	   the reply. The success wash stays for a real acknowledgement (the delivered
+	   instruction above), which is what it was built for. */
+	const [noticeTone, setNoticeTone] = useState<"success" | "neutral">("success");
 	const [images, setImages] = useState<AttachedImage[]>([]);
 	const textRef = useRef(text);
 	const imagesRef = useRef(images);
@@ -782,16 +792,46 @@ export function Composer({
 		   permanently `null` at the catch. `null` on every other route: a slash
 		   command paints no row. */
 		const submitted: { echo: { commandId: string; text: string } | null } = { echo: null };
+		/* A refused COMMAND and a failed CONTINUATION need different words: the first
+		   carries the runtime's own refusal sentence, the second is the retry copy. */
+		const isSlash =
+			trimmed.startsWith("/") && !trimmed.includes("\n") && images.length === 0;
 		try {
 			/* Slash input routes to the slash op rather than prompt — and only
 			   when there is no attachment, since a "/…" caption with an image
 			   is a prompt, not a command. */
-			if (trimmed.startsWith("/") && !trimmed.includes("\n") && images.length === 0) {
+			if (isSlash) {
 				const space = trimmed.indexOf(" ");
 				const command =
 					space === -1 ? trimmed.slice(1) : trimmed.slice(1, space);
 				const args = space === -1 ? "" : trimmed.slice(space + 1);
-				await sendCommand(pid, { op: "slash", command, args });
+				/* THE ROUTED OP, not `slash`. `slash` is the owner's off-terminal subset
+				   (`/goal`, `/compact`) and refuses every other word with "terminal-only
+				   here"; `slash_result` is the seam the runtime's dispatcher answers for
+				   everything the sheet offers (the daemon builds that catalogue from the
+				   same scope table, so the two cannot disagree), and the one the gate
+				   sheet already uses. Plain `sendCommand`, not the proof variant: only
+				   `/approvals auto|off|yolo` is authority-increasing, and its signed path
+				   lives in the gate sheet — typed here it is REFUSED with the runtime's own
+				   sentence, which `humanizeGateError` carries to the alert below. */
+				const receipt = await sendCommand(pid, {
+					op: "slash_result",
+					command,
+					args,
+					images: [],
+				});
+				/* THE DRAFT IS KEPT WHEN THE RUNTIME REFUSED THE ARGUMENT (UX round 1,
+				   U3). `/model nonexistent` answers 200 with "usage: /model <provider>/
+				   <model-id>" — the command ran and declined — and clearing the field
+				   there cost the reader the whole line to fix one word, while the 422
+				   path keeps it. One rule, both paths: keep what the user typed until
+				   the command actually did something. */
+				if (!receipt.refused) clearDraft();
+				/* What the command DID, in the runtime's words — a run that says nothing
+				   reads as a dead tap. */
+				setNotice(receipt.detail);
+				setNoticeTone(receipt.tone === "success" ? "success" : "neutral");
+				return;
 			} else {
 				const chosen =
 					op ?? (projection.streaming ? "steer" : "prompt");
@@ -882,7 +922,18 @@ export function Composer({
 				return;
 			}
 			clearDraft();
-		} catch {
+		} catch (failure) {
+			if (isSlash) {
+				/* The runtime's refusal (a bad argument, `/approvals auto` without a
+				   signature) is the answer — the daemon sends it as a 422 whose message is its
+				   own sentence; anything else (a dropped connection) gets the one retry
+				   line, never the raw fetch string. The draft stays so it can be
+				   corrected. There is no envelope, echo or retry to unwind here. */
+				setError(
+					failure instanceof HttpError && failure.status === 422 ? failure.message : SLASH_ERROR,
+				);
+				return;
+			}
 			/* Previous conversations can fail at every layer between fetch and
 			   provider construction. Those mechanics are intentionally invisible:
 			   retain the exact draft, images, and command id for a safe retry while
@@ -1008,8 +1059,20 @@ export function Composer({
 
 			{notice ? (
 				/* D11: a delivered acknowledgement is a success — neutral/success
-				   token, never the danger container the failure alert uses. */
-				<div className="rounded-sm border border-success-border bg-success-wash px-3 py-2 text-body-sm text-success">
+				   token, never the danger container the failure alert uses. D1: a
+				   COMMAND RECEIPT is not a success — the runtime marks a refusal and
+				   a report the same way it marks a completed write, so a receipt
+				   paints in the neutral surface unless the daemon named it a real
+				   mutation. The distinction is then carried by the surface rather
+				   than by colour alone. */
+				<div
+					className={cn(
+						"rounded-sm border px-3 py-2 text-body-sm",
+						noticeTone === "success"
+							? "border-success-border bg-success-wash text-success"
+							: "border-control bg-elevated text-ink",
+					)}
+				>
 					<p role="status" aria-live="polite">{notice}</p>
 				</div>
 			) : null}

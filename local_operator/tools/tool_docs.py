@@ -216,6 +216,21 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ToolDocOp(op="type", blurb="Type text into a field."),
             ToolDocOp(op="scroll", blurb="Move the viewport."),
             ToolDocOp(op="logs", blurb="Console + errors."),
+            ToolDocOp(
+                op="styles",
+                blurb=(
+                    "Rect + computed styles for a selector's matches (max 5, "
+                    "rounded to 2dp); 'properties' names extras (max 20)."
+                ),
+            ),
+            ToolDocOp(
+                op="hit_test",
+                blurb="The element stack at viewport (x, y), topmost first (max 8).",
+            ),
+            ToolDocOp(
+                op="ancestors",
+                blurb="The chain from the element up to <html> (depth <= 16, default 12).",
+            ),
             ToolDocOp(op="tabs", blurb="List agent-driven tabs."),
             ToolDocOp(
                 op="request_access",
@@ -231,10 +246,20 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
         notes=(
             "Moved off the wire in the slimming wave (audit item 2):\n"
             "\n"
-            "- 'scroll', 'logs' and 'tabs' need a non-cmux host (cmux says so).\n"
+            "- 'scroll', 'logs', 'tabs' and the geometry reads "
+            "('styles'/'hit_test'/'ancestors') need a non-cmux host (cmux says "
+            "so).\n"
             "- On a non-cmux host, 'download' saves what the page offers into "
             "this session's private download directory, and 'upload' attaches "
             "local files to a page's file input.\n"
+            "- The geometry reads answer with numbers, not pictures, and are "
+            "bounded at the source: 'styles' reports up to 5 matches of a "
+            "selector (rect + computed styles + the element's inline `--*` "
+            "tokens); 'hit_test' the element stack at viewport (x, y) pixels, "
+            "topmost first; 'ancestors' the chain from an element up to and "
+            "including `<html>`, with the clip/layout style set. A selector "
+            "that matches nothing is the typed element-not-found, never an "
+            "empty success.\n"
             "- Tab ownership: 'tabs' lists every agent-driven tab including "
             "other sessions' (handles are redacted), and a redacted handle is "
             "not yours to drive.\n"

@@ -6318,6 +6318,61 @@ def _wake_rows() -> "list[dict[str, Any]]":
     return rows
 
 
+def _spooled_wake_summary(root: Path) -> "dict[str, Any]":
+    """Spooled wake FIRES awaiting delivery, aggregated per session.
+
+    The held-delivery state this surface never had. A runtime leaving for a
+    replaced build SPOOLS the wakes that fire meanwhile
+    (``Session.retire_wakes_to_inbox``), and if that move is then abandoned
+    with the hook still installed, every later fire lands there too: measured
+    2026-10-01/02, one desk session lost ~14 h of fires while ``wake list``
+    showed a fresh "last fired" and every other line on this screen read as
+    healthy.
+
+    THE CANDIDATE SESSIONS ARE THE WAKE INDEX'S KEYS, a proxy with one named
+    gap (review round 1, R1). It covers the reported shape — a schedule that
+    keeps recurring keeps its index entry, which is why the desk session was
+    counted — and it costs what this screen already pays for the index
+    (milliseconds). The complete source is a scan of every
+    ``sessions/*/inbox.jsonl``; measured 2026-10-02 it finds 272 files across
+    16,718 session directories at ~1.5 s, which a status read declines to pay.
+    THE RESIDUAL, stated so the omission is a choice rather than a surprise: a
+    spooled row whose schedule has RETIRED and whose re-arm failed sits in the
+    inbox of a session with no index key, so it is not counted here; the
+    re-arm path is the designed cover for retired schedules, and the row still
+    runs at a successor boot either way.
+
+    Never raises: a count is a status nicety, and one unreadable session
+    directory must not take the whole screen down (``spooled_wake_fires``
+    itself already counts fires-not-rows and skips torn rows and missing
+    files).
+    """
+    import time as _time
+
+    from local_operator.wakes.spooled import spooled_wake_fires
+    from local_operator.wakes.store import read_index
+
+    fires = 0
+    sessions = 0
+    oldest_at: float | None = None
+    oldest_session = ""
+    for session_id in read_index(root):
+        count, written = spooled_wake_fires(root / "sessions" / session_id)
+        if count <= 0:
+            continue
+        fires += count
+        sessions += 1
+        if written is not None and (oldest_at is None or written < oldest_at):
+            oldest_at = written
+            oldest_session = session_id
+    return {
+        "fires": fires,
+        "sessions": sessions,
+        "oldest_age_s": None if oldest_at is None else max(_time.time() - oldest_at, 0.0),
+        "oldest_session_id": oldest_session or None,
+    }
+
+
 def _supervisor_parentheticals() -> tuple[str, str]:
     """The two ``supervisor:`` parentheticals in THIS host's supervisor's words.
 
@@ -6805,6 +6860,15 @@ def wake_command(args: argparse.Namespace) -> int:
     stalled = _delivery_rows(STATE_UNDELIVERED)
     retrying = _delivery_rows(STATE_RETRYING)
 
+    # SPOOLED WAKES — the other held-delivery state, and until now the invisible
+    # one: a runtime that spools its wakes for a replaced build and then
+    # ABANDONS the move keeps the hook, so every fire for the rest of its life
+    # lands in a session inbox nothing drains until a successor boots (measured
+    # 2026-10-01/02: ~14 h of fires on one desk session, reported on no
+    # surface). Read per wake-carrying session — the INDEX's own keys — so a
+    # session with no wakes is never opened.
+    spooled = _spooled_wake_summary(config_dir())
+
     def _attempts_label(row: dict[str, Any]) -> str:
         """``"4 attempt(s) since <time>"`` for one owed fire.
 
@@ -6931,6 +6995,16 @@ def wake_command(args: argparse.Namespace) -> int:
             "total": len(owed),
             "retrying": len(retrying),
             "undelivered": len(stalled),
+        },
+        # THE SPOOLED FIRES, additive like the blocks above (a consumer that
+        # predates this block keeps parsing every key it knew). `fires` counts
+        # wake ROWS awaiting delivery; `oldest_age_s` is None when no counted
+        # row carried a usable `written_at`.
+        "spooled": {
+            "fires": spooled["fires"],
+            "sessions": spooled["sessions"],
+            "oldest_age_s": spooled["oldest_age_s"],
+            "oldest_session_id": spooled["oldest_session_id"],
         },
         "deliveries": [
             {
@@ -7072,6 +7146,31 @@ def wake_command(args: argparse.Namespace) -> int:
                 "retrying:",
             )
         )
+    if spooled["fires"]:
+        # SPOOLED WAKES, and only when there are any: the count and the age are
+        # what separate "a drain just happened" from "delivery has been dark
+        # for half a day" (the incident's shape — a fresh `last fired` and no
+        # line anywhere saying the fire never ran). The noun is the wake
+        # ITSELF rather than "fire(s)" (design round 1, D5: "5 fires" reads
+        # as pending alarms, not five occurrences that fired and were never
+        # run), and it pluralises for real — the singular store is the
+        # recovering case and `1 wake(s) in 1 session(s)` read as a glitch
+        # (design round 1, D1).
+        from local_operator.info.render import plural
+
+        summary = (
+            f"{plural(spooled['fires'], 'wake')} in "
+            f"{plural(spooled['sessions'], 'session')} awaiting delivery"
+        )
+        if spooled["oldest_age_s"] is not None:
+            # ONE TOKEN through `_wrap_status`: at 80 columns — its own default
+            # width — a break after the em-dash orphaned the session id onto
+            # the next line (design round 1, D2).
+            summary += " " + _one_token(
+                f"(oldest {_format_duration(spooled['oldest_age_s'])} — "
+                f"{spooled['oldest_session_id']})"
+            )
+        print(_wrap_status(summary, "spooled:"))
     if stale:
         print(
             _wrap_status(
@@ -7187,6 +7286,12 @@ def _monitor_rows() -> "list[dict[str, Any]]":
                     "consecutive_failures": raw.get("consecutive_failures") or 0,
                     "disabled": bool(raw.get("disabled")),
                     "disabled_reason": raw.get("disabled_reason") or "",
+                    # §D6's two health facts, carried onto the listing row so
+                    # the CLI reads the same shared hint the tool, the desktop
+                    # route and the TUI band read.
+                    "unavailable_since": raw.get("unavailable_since") or 0,
+                    "last_error": raw.get("last_error") or "",
+                    "created_at": raw.get("created_at") or 0,
                     "dormant": dormant,
                     "due_in_s": None if due is None else (due - now_ms) / 1000.0,
                     "last_check_age_s": None if not last else max((now_ms - last) / 1000.0, 0.0),
@@ -7212,6 +7317,9 @@ def _monitor_state_word(row: "dict[str, Any]") -> str:
     dormant monitor is one nothing is SUPPOSED to run, so a failure word would
     point the reader at the wrong remedy — reopening the session re-arms it.
     Disabled wins over the due time: a disabled monitor does not tick at all.
+    ``idle`` is the last word before a clock: a monitor whose session is not
+    open is overdue by hours, and "next due now" read as a stuck check rather
+    than as a watch nothing is hosting (§D6).
     """
     if row["dormant"]:
         return "dormant"
@@ -7219,29 +7327,72 @@ def _monitor_state_word(row: "dict[str, Any]") -> str:
         return "disabled"
     if row["due_in_s"] is None:
         return "waiting"
+    from local_operator.monitors import store as monitor_store
+
+    if monitor_store.is_idle(row, int(time.time() * 1000)):
+        return "idle"
     return _format_due(row["due_in_s"])
 
 
 def _monitor_detail(row: "dict[str, Any]") -> str:
-    """The monitor row's tail: interval, checks, last check, health, reason."""
+    """The monitor row's tail: health FIRST, then the interval and counters.
+
+    ORDER IS THE DEGRADATION POLICY (design review round 1, D6). The table is
+    clamped to the terminal, and a hint appended last was the first thing cut —
+    measured at ``COLUMNS=80``, every hint was truncated away while the counters
+    beside it survived. Leading with the health means a narrow row loses the
+    boilerplate instead, and the DUE column's state word (``idle``) carries the
+    short form of the same fact.
+    """
     from local_operator.harness.wake import format_duration
+    from local_operator.monitors import store as monitor_store
     from local_operator.wakes.display import format_age
 
+    now = int(time.time() * 1000)
+    # The hint is shared with the agent tool, the desktop route and the TUI band
+    # (§D6) so one monitor cannot read as healthy on one surface and stalled on
+    # another.
+    hint = monitor_store.health_hint(row, now)
+
     parts: list[str] = []
+    clause = ""
+    if row.get("disabled"):
+        # ``disabled_clause``, not the stored string: it folds the reason into
+        # one line (a live disable carries ``invalid arguments:\n- path: …``,
+        # which printed its continuation at column 0 and broke the table — UX
+        # round 1, U3) and prefers the counters' plain cause to a raw tool
+        # banner (U4). The row leads with it, so it has to be readable.
+        clause = monitor_store.disabled_clause(row)
+        if clause:
+            parts.append(clause)
+    if hint:
+        parts.append(hint)
+    if monitor_store.is_idle(row, now) and not (hint and hint.startswith("never checked")):
+        # "overdue by 2h — session not open" and "never checked — its session was
+        # not open since arming" are ONE fact said twice (D7): the idle detail
+        # is the tail the reader needs only when the hint is not already naming
+        # the unhosted session.
+        parts.append(monitor_store.idle_detail(row, now))
     if row.get("every_ms"):
         parts.append(f"every {format_duration(int(row['every_ms']))}")
     else:
         parts.append("once")
     if row.get("checks"):
-        parts.append(f"{int(row['checks'])} checks")
+        # The zero-deliveries hint OPENS with the same count ("12 checks, 0
+        # deliveries"), so the standalone counter would say it twice in one row
+        # — the D7 defect in its other form.
+        counter_clause = f"{int(row['checks'])} checks"
+        if not (hint and hint.startswith(counter_clause)):
+            parts.append(counter_clause)
     age = row.get("last_check_age_s")
     if age is not None:
         parts.append(f"last check {format_age(age)} ago")
     failures = int(row.get("consecutive_failures") or 0)
-    if failures:
+    if failures and not (clause and clause.startswith(f"{failures} ")):
+        # The disabled clause already carries the count when it was derived
+        # from it ("5 consecutive failed checks"), and a row that says both is
+        # the D7 duplication in another form.
         parts.append(f"{failures} failed")
-    if row.get("disabled") and row.get("disabled_reason"):
-        parts.append(str(row["disabled_reason"]))
     return " · ".join(parts)
 
 
@@ -7300,6 +7451,10 @@ def monitor_command(args: argparse.Namespace) -> int:
                 "same watch again to reactivate",
             )
         )
+    if any(_monitor_state_word(row) == "idle" for row in rows):
+        # One clause, because the row above already says "session not open"
+        # (D7): the legend's job is to say what to DO, not to restate the row.
+        legend.append(("idle", "no session is hosting it — reopen it to resume"))
     if legend:
         import textwrap
 
@@ -7552,6 +7707,12 @@ PEER_COLUMN_WIDTH = 18
 #: line that wraps at column 0 reads as a different block (round 2, D13).
 _STATUS_LABEL_W = 13
 
+#: The sentinel :func:`_wrap_status` swaps in for a protected span's spaces
+#: while it wraps, and swaps back afterwards. Single-quoted remedy commands
+#: are its one writer there; :func:`_one_token` names the same contract for a
+#: span a caller must keep whole WITHOUT printing quote characters.
+_WRAP_SENTINEL = "\x00"
+
 
 def _wrap_status(text: str, label: str = "") -> str:
     """One `wake status` line, folded at the surface's own hanging indent.
@@ -7580,7 +7741,7 @@ def _wrap_status(text: str, label: str = "") -> str:
     # a wrap inside one produces a line that looks like an instruction and is
     # not runnable. `textwrap` only breaks on whitespace, so the spaces inside
     # single quotes are hidden from it and restored afterwards.
-    nbsp = "\x00"
+    nbsp = _WRAP_SENTINEL
     protected = re.sub(r"'[^']*'", lambda m: m.group(0).replace(" ", nbsp), first)
     return "\n".join(
         textwrap.wrap(
@@ -7593,6 +7754,19 @@ def _wrap_status(text: str, label: str = "") -> str:
             break_on_hyphens=False,
         )
     ).replace(nbsp, " ")
+
+
+def _one_token(text: str) -> str:
+    """Hide ``text``'s spaces from :func:`_wrap_status`, so the span wraps WHOLE.
+
+    The discipline ``_wrap_status`` applies to single-quoted remedy commands,
+    named for callers whose span must stay one token without quote characters:
+    the spooled line's ``(oldest 13h — <id>)`` (design round 1, D2 — at 80
+    columns, the default width, the break landed after the em-dash and
+    orphaned the session id onto the next line). Call it on the SPAN itself;
+    the space that separates it from the sentence stays breakable.
+    """
+    return text.replace(" ", _WRAP_SENTINEL)
 
 
 def _json_dumps(value: Any) -> str:

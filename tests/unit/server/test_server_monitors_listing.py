@@ -366,3 +366,62 @@ async def test_the_route_requires_the_desktop_bearer(desktop) -> None:
     app.state.config_manager = ConfigManager(root)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://localhost") as bare:
         assert (await bare.get("/v1/desktop/monitors")).status_code in (401, 403)
+
+
+@pytest.mark.asyncio
+async def test_a_row_carries_the_health_hint_and_the_unavailable_since(desktop) -> None:
+    """§D6: the desktop page renders the shared hint rather than deriving its
+    own, so one monitor cannot read as healthy here and idle on the CLI.
+    """
+    client, root = desktop
+    _session(root, "mhchk1")
+    _entry(
+        root,
+        "mhchk1",
+        rows=[
+            _row(
+                "m1",
+                checks=9,
+                deliveries=0,
+                created_at=int(time.time() * 1000) - 7_200_000,
+            ),
+            _row(
+                "m2",
+                due=FUTURE,
+                # An unavailable episode, six minutes in.
+                unavailable_since=int(time.time() * 1000) - 360_000,
+                checks=4,
+                deliveries=1,
+                created_at=int(time.time() * 1000) - 7_200_000,
+            ),
+        ],
+    )
+
+    response = await client.get("/v1/desktop/monitors")
+    assert response.status_code == 200, response.text
+    payload = response.json()["result"]
+    rows = {row["id"]: row for entry in payload["entries"] for row in entry["monitors"]}
+    assert rows["m1"]["health"] == (
+        "9 checks, 0 deliveries — nothing has changed (confirm the call observes what you expect)"
+    )
+    assert rows["m2"]["health"] is not None and rows["m2"]["health"].startswith(
+        "tool unavailable since "
+    )
+    assert rows["m2"]["unavailable_since"] > 0
+    assert rows["m1"]["unavailable_since"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_row_carries_no_hint(desktop) -> None:
+    client, root = desktop
+    _session(root, "mhchk2")
+    _entry(
+        root,
+        "mhchk2",
+        rows=[_row("m1", checks=6, deliveries=2, created_at=int(time.time() * 1000) - 7_200_000)],
+    )
+
+    response = await client.get("/v1/desktop/monitors")
+    assert response.status_code == 200
+    row = response.json()["result"]["entries"][0]["monitors"][0]
+    assert row["health"] is None

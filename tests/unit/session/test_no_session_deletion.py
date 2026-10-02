@@ -2324,6 +2324,18 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.rmdir",
         "the <config>/monitors/state/<session_id> dir AFTER its own files",
     ),
+    (
+        "local_operator/monitors/state.py::_rmdir_if_empty",
+        "<path>.rmdir",
+        # The ONE rmdir helper both callers share: ``remove_monitor_state``
+        # (above) after a cancel, and ``prune_empty_state_dirs`` over the
+        # children of ``<config>/monitors/state/``. Its receiver is always that
+        # state directory or one of its per-session children — both under the
+        # CONFIG root, never under ``sessions/`` — and ``rmdir`` itself refuses
+        # any directory that still holds a file, so a sibling monitor's state
+        # cannot be taken with it.
+        "the <config>/monitors/state[/<session_id>] dir, only when EMPTY",
+    ),
     # -- evaluation record sink (the session-arm record's durability layer) --
     # Every path in these FOUR is built from the record root the caller hands
     # ``RecordSink``: ``<record root>/events.jsonl``, ``<record root>/seal.reserve``

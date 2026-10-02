@@ -1,6 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./app";
+import { initWideView } from "./lib/viewport";
 import { initTheme } from "./theme";
 import "./styles/index.css";
 
@@ -8,6 +9,9 @@ import "./styles/index.css";
    every --lo-* variable keys off, so a late set would flash the default
    ramp for users who picked another theme. */
 initTheme();
+/* The persisted wide view, for the same reason: the meta has to be right before the
+   first layout or the page paints once at the default width and reflows. */
+initWideView();
 
 /* Note: private-storage cleanup on sign-out is NOT wired here. The SPA never
    renders a logout control, and the login screen is a separate server-rendered

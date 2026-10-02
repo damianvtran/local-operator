@@ -285,6 +285,27 @@ _SKIP_LOG_BURST = 3
 #: log without flooding it (~24 lines/day/entry rather than 8,640).
 _SKIP_HEARTBEAT_S = 3600.0
 
+#: How overdue a LIVE-owned wake must be before the live skip escalates from
+#: INFO to WARNING.
+#:
+#: THIS BOUNDS ONE SHAPE, and the constant is justified by exactly it: a live
+#: record whose due clock RUNS AWAY — the runtime answers "live" on every
+#: pass while its own scheduler has stopped firing, so the same wake is found
+#: further overdue each sweep. Multi-hour live-overdue rows do occur on this
+#: fleet (measured 2026-10-02 05:33, ``wake-supervisor.log``: live skips at
+#: 190241.4 s for 835fbcafdc27, 37955.2 s for 0fa5d6f67b49, 21858.4 s for
+#: abd67a6355c1), and six hours is an order of magnitude beyond any legitimate
+#: lateness (the repo's measured silent steps top out around 45 minutes — one
+#: long turn), so a figure this large is a stopped scheduler, not a busy one.
+#:
+#: IT DOES NOT BOUND THE ADVANCING LEAK, and that sentence is load-bearing:
+#: when a spooling runtime keeps RE-ADVANCING and persisting each occurrence
+#: (the 2026-10-01/02 desk session), every skip stays small — its own worst
+#: was 3156.2 s — and the index row it leaves is the NEXT occurrence, not an
+#: overdue one. That shape's surface is the spooled-fires count in ``lop wake
+#: status``, not this bound.
+LIVE_STALL_WARN_S = 6 * 3600.0
+
 
 class _SkipLog:
     """Throttles a skip line that would otherwise repeat every slice forever.
@@ -888,7 +909,24 @@ async def _engage_one(
             # figure on a repeating "already running" line is what makes a
             # session that is up but not firing findable. Throttled, because
             # a long-lived session legitimately produces this every slice.
-            if _skip_log.should_log(session_id, "live"):
+            #
+            # PAST LIVE_STALL_WARN_S THE LINE ESCALATES, under its own throttle
+            # key: a live session fires its own wakes within seconds of due, so
+            # an overdue figure this old is not lateness — it is the runtime's
+            # scheduler having stopped firing while its record still answers
+            # "live" (the constant names the shape this does and does not
+            # cover).
+            if overdue_s >= LIVE_STALL_WARN_S:
+                if _skip_log.should_log(session_id, "live-stalled"):
+                    logger.warning(
+                        "live-stalled: %s — a live runtime owns its wake and has not "
+                        "fired it; the wake is %.1f h overdue. A healthy live session "
+                        "fires its own wakes within seconds of due, so check this "
+                        "session's runtime ('lop sessions')",
+                        session_id,
+                        overdue_s / 3600.0,
+                    )
+            elif _skip_log.should_log(session_id, "live"):
                 logger.info(
                     "live: skipping %s — its wake is %.1fs overdue but a live runtime "
                     "owns it (that session fires its own wakes)",
@@ -942,10 +980,11 @@ async def _engage_one(
             outcome("wedged")
             return False
         # Only the conditions we just cleared: reaching here means the session
-        # is no longer skipped for a live/ghost/wedged/stale reason. Whether
-        # the engage SUCCEEDS is decided below, and its own throttle key must
-        # survive this pass — see `_SkipLog.forget`.
-        _skip_log.forget(session_id, "live", "ghost", "wedged", "stale")
+        # is no longer skipped for a live/ghost/wedged/stale reason (nor
+        # live-stalled, the live skip's escalated form). Whether the engage
+        # SUCCEEDS is decided below, and its own throttle key must survive this
+        # pass — see `_SkipLog.forget`.
+        _skip_log.forget(session_id, "live", "live-stalled", "ghost", "wedged", "stale")
         logger.info(
             "engaging %s: wake due %d, %.1fs overdue (deadline %.0fs)",
             session_id,

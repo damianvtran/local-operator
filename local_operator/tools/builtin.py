@@ -12230,6 +12230,7 @@ def _monitor_row_text(row: dict[str, Any], now: int) -> str:
     receipts use (QA round-1 observation 1): two monitors of one tool are
     told apart by what they watch, not only by their names.
     """
+    from local_operator.monitors import store as monitor_store
     from local_operator.wakes.display import format_age
 
     mid = str(row.get("id") or "?")
@@ -12259,9 +12260,22 @@ def _monitor_row_text(row: dict[str, Any], now: int) -> str:
     if isinstance(due, int) and not isinstance(due, bool):
         if due > now:
             bits.append(f"next due in {format_age((due - now) / 1000)}")
+        elif monitor_store.is_idle(row, now):
+            # A monitor ticks only while its session is open, so a row that is
+            # hours overdue is not lateness — it is a dormant watch, and the
+            # reader (often the agent itself deciding whether to wait) has to
+            # see that rather than a bare "next due now".
+            bits.append(monitor_store.idle_detail(row, now))
         else:
             bits.append("next due now")
-    return f"{mid}: '{name}' {tool} {call}{every_txt} — " + ", ".join(bits) + "."
+    row_text = f"{mid}: '{name}' {tool} {call}{every_txt} — " + ", ".join(bits)
+    hint = monitor_store.health_hint(row, now)
+    if hint:
+        # The §D6 discoverability line: a monitor with 0 deliveries after many
+        # checks, one that never checked, or one stalled on an absent tool,
+        # otherwise reads exactly like a healthy watch.
+        row_text = f"{row_text} [{hint}]"
+    return row_text + "."
 
 
 async def _monitor_list(tool_call_id: str, scheduler: MonitorSchedulerProtocol) -> ToolResult:
@@ -12331,12 +12345,28 @@ async def _monitor_create(
 
     bound = f"until {format_wake_time(spec.until_at)}" if spec.until_at is not None else "durable"
     call = _monitor_call_repr(spec.tool, spec.arguments)
+    # §D8: the hosting caveat belongs on the RECEIPT, not only in the guide.
+    # The live store carried arms with ``checks=0`` — the operator armed a
+    # watch, closed the conversation and never learned that nothing would run
+    # until it was open again. The MCP clause is the other half of the same
+    # lesson: a server that reconnects must not read as a failing monitor.
+    #
+    # It goes in the FIRST clause, right after the identity, rather than at the
+    # end of the paragraph (design review round 1, D9): a receipt is one card
+    # whose collapsed row shows ~90 cells, and at the end of a 505-character
+    # paragraph the one condition that changes what the operator does was never
+    # in it. Two sentences, one line each, so the expansion stays readable.
+    caveat = "ticks run only while this session is open."
+    if spec.tool.startswith("mcp__"):
+        caveat += " If its server reconnects the monitor waits (no failed checks)."
     return _text(
         tool_call_id,
         "monitor",
-        f"Armed monitor '{spec.name}' ({spec.id}): {spec.tool} {call} every "
+        f"Armed monitor '{spec.name}' ({spec.id}) — {caveat} {spec.tool} {call} every "
         f"{format_duration(spec.every_ms)}, {bound}. First check in ~2s captures the "
-        "baseline; you'll be told only what changes.",
+        "baseline; you'll be told only what changes.\n"
+        "A closed session's monitors resume, with one consolidated delta, when it "
+        "reopens; a watch whose tool stays unreachable for 30 minutes says so.",
         details=facts,
     )
 
@@ -16296,6 +16326,16 @@ BROWSER_ACTIONS = (
     # schema, approval tier and dispatch as everything else.
     "scroll",
     "logs",
+    # The structured READ actions: page geometry and computed styles, served by
+    # both non-cmux hosts, cmux-degraded like scroll/logs (no page-script
+    # primitive, no styles access). `styles` reads up to 5 selector matches with
+    # their rects, computed styles and inline `--*` custom properties;
+    # `hit_test` the topmost-first element stack at viewport (x, y); `ancestors`
+    # an element's chain up to `document.documentElement`. They exist so an
+    # agent debugging layout reads NUMBERS instead of guessing at a picture.
+    "styles",
+    "hit_test",
+    "ancestors",
     # tabs lists every live agent-owned tab (all sessions', read-only
     # awareness) so parallel agents can see what is being driven and know which
     # handle to close. Non-cmux only, like scroll/logs: cmux keeps no
@@ -16340,7 +16380,8 @@ BROWSER_ACTIONS = (
 #: Actions that cmux cannot serve. It is NOT "the extension's actions any more:
 #: the desktop app's browser host serves every one of them, so the only host this
 #: set still describes is cmux (no console-log tap, no background-tab scroll
-#: primitive, no multi-surface registry, no permission model). The name used to be
+#: primitive, no page-script/style access, no multi-surface registry, no
+#: permission model). The name used to be
 #: `BRIDGE_ONLY_BROWSER_ACTIONS`, which on a three-host machine asserted that the
 #: EXTENSION was the only alternative — false, and the source of copy that sent
 #: users of the desktop app into `lop browser install`. Kept as a set beside
@@ -16356,6 +16397,12 @@ CMUX_UNSUPPORTED_BROWSER_ACTIONS = frozenset(
         "cancel_access",
         "download",
         "upload",
+        # The read actions need a page-script primitive cmux does not expose
+        # (the same reason scroll is here): the fixed driver functions cannot
+        # run, so the degrade is typed rather than a faked empty result.
+        "styles",
+        "hit_test",
+        "ancestors",
     }
 )
 
@@ -16372,6 +16419,22 @@ _SCROLL_DIRECTIONS = frozenset({"top", "bottom", "up", "down", "left", "right"})
 
 #: Console levels ``logs`` filters on. Mirrors the extension's LEVELS.
 _LOG_LEVELS = frozenset({"error", "warning", "info", "log", "all"})
+
+#: Style property names ``styles`` accepts as caller-requested extras. The
+#: charset is the CSS ident set that matters here: letters, digits, dashes and
+#: underscores — ``_`` is an ident character (``--brand_color`` is a legal
+#: custom property) and dots/brackets are not part of any property spelling,
+#: so those are refused. The page-side function only ever hands these to
+#: `getPropertyValue` (no interpolation, so nothing to inject), but a bad name
+#: would silently read as "" — refuse it here where the model can see why,
+#: rather than returning an empty value that looks like a page fact.
+_STYLE_PROPERTY_RE = re.compile(r"^[-_A-Za-z0-9]+$")
+
+#: Ceiling on caller-requested style extras. The page function caps the combined
+#: list at 30 (defaults + extras); this is the caller-facing bound so an absurd
+#: list is REFUSED with copy rather than silently clipped into a result that
+#: looks complete.
+_MAX_STYLE_PROPERTIES = 20
 
 #: The hosts an explicit ``backend`` hint on `open` may name, beside "" (the
 #: default availability order). Spellings are the COPY spellings: the paired
@@ -16512,11 +16575,12 @@ class BrowserParams(BaseModel):
     x: float | None = Field(
         default=None,
         description="'scroll': horizontal pixel delta (positive = right); "
-        "with 'y', a precise scrollBy.",
+        "with 'y', a precise scrollBy; for 'hit_test', the viewport x to probe.",
     )
     y: float | None = Field(
         default=None,
-        description="'scroll' vertical pixel delta (positive = down).",
+        description="'scroll': vertical pixel delta (positive = down); for "
+        "'hit_test', the viewport y to probe.",
     )
     direction: str = Field(
         default="",
@@ -16533,12 +16597,40 @@ class BrowserParams(BaseModel):
         description="'logs' max entries to return (most recent kept); 'scroll' "
         "ignores it. Omit for no cap.",
     )
+    # Read-action params (styles/hit_test/ancestors). Per-op semantics live in
+    # the tool:// doc's ops table; these two descriptions carry only what the
+    # caller must know to shape the value.
+    properties: list[str] = Field(
+        default_factory=list,
+        description="'styles': extra computed properties on top of the defaults "
+        "(max 20; letters, digits, dashes and underscores).",
+    )
+    depth: int | None = Field(
+        default=None,
+        description="'ancestors': how many levels to walk up (1..16, default 12).",
+    )
     timeout_s: float | None = Field(
         default=None,
         description="'await_access' max seconds to wait for the user's decision "
         "(default 120, max 240); 'download' max seconds to wait for one to start "
         "(default 120, max 600).",
     )
+
+    @field_validator("x", "y", mode="before")
+    @classmethod
+    def _refuse_boolean_coordinates(cls, value: Any) -> Any:
+        """Refuse a JSON ``true``/``false`` where a number belongs.
+
+        Pydantic's lax mode coerces ``True`` to 1.0 for a float field, so
+        without this a flag-shaped argument silently scrolls or probes to
+        (1, 1) instead of being refused — the same class of silent wrong action
+        the flag-shaped selector refusals exist for. It applies to every action
+        that reads x/y ('scroll' deltas and 'hit_test' coordinates alike): no
+        caller has a legitimate reason to pass a boolean as a number.
+        """
+        if isinstance(value, bool):
+            raise ValueError("must be a number, not a boolean")
+        return value
 
 
 def _cmux_binary() -> str | None:
@@ -17012,6 +17104,34 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
                 f"unknown logs level: {params.level!r} "
                 f"(expected one of {', '.join(sorted(_LOG_LEVELS))})"
             )
+        return ""
+    if action in ("styles", "ancestors"):
+        # Both name one element, so the selector is mandatory and the same
+        # refusal click/type use keeps the copy consistent. The flag-shaped
+        # check matters more here than anywhere: this selector is handed to a
+        # page script.
+        problem = _validate_selector(params.selector, action)
+        if problem:
+            return problem
+        if action == "styles":
+            if len(params.properties) > _MAX_STYLE_PROPERTIES:
+                return (
+                    f"'styles' takes at most {_MAX_STYLE_PROPERTIES} extra properties "
+                    f"(got {len(params.properties)})"
+                )
+            for name in params.properties:
+                if not _STYLE_PROPERTY_RE.match(name):
+                    return (
+                        f"invalid style property {name!r}: letters, digits, dashes and "
+                        "underscores only (e.g. 'background-color')"
+                    )
+        return ""
+    if action == "hit_test":
+        if params.x is None or params.y is None:
+            return "'hit_test' requires x and y (viewport pixel coordinates)"
+        # Booleans are already refused at the model boundary (a before-validator
+        # on x/y), because pydantic's lax coercion would otherwise turn a JSON
+        # `true` into 1.0 before any check here could see it.
         return ""
     return ""
 
@@ -18418,9 +18538,21 @@ async def _bridge_call(
         BridgeUnreachable,
         format_error,
     )
+    from local_operator.browser_bridge.protocol import CAPABILITY_GATED_METHODS
 
     selected = client if client is not None else BridgeClient()
     host = str(getattr(selected, "host", HOST_EXTENSION) or HOST_EXTENSION)
+    # The capability pre-check, driven off the SET so every gated method gets
+    # one: download/upload call `_capability_problem` inside their own flows
+    # (upstream of arming or reading anything), and the generic action path —
+    # which the three reads ride — gets the same typed refusal here. UI-review
+    # M1: without it, a pre-feature APP answered a bare `internal` for the
+    # reads, because the daemon-side gate only covers the extension leg. The
+    # check reads the record, never the socket, so a refusal costs no dial.
+    if action in CAPABILITY_GATED_METHODS:
+        problem = _capability_problem(tool_call_id, action, selected, surface=surface)
+        if problem is not None:
+            return None, problem
     try:
         return await selected.call(action, params), None
     except BridgeError as exc:
@@ -19113,6 +19245,150 @@ def _bridge_logs_result(
         "browser",
         f"{len(lines)} log entr{'y' if len(lines) == 1 else 'ies'} " f"(newest last):\n\n{body}",
         details={**details, "log_count": len(lines)},
+    )
+
+
+def _geometry_ident(entry: dict[str, Any]) -> str:
+    """`tag#id.classes` plus `(role=…)` — the identity a CSS selector would read."""
+    ident = str(entry.get("tag", "") or "?")
+    element_id = str(entry.get("id", "") or "")
+    if element_id:
+        ident += f"#{element_id}"
+    classes = str(entry.get("className", "") or "").split()
+    if classes:
+        ident += "." + ".".join(classes)
+    role = str(entry.get("role", "") or "")
+    if role:
+        ident += f" (role={role})"
+    return ident
+
+
+def _geometry_number(value: Any) -> str:
+    """Compact number for the text render: 120.0 -> `120`, 10.55 -> `10.55`."""
+    number = float(value) if isinstance(value, (int, float)) else 0.0
+    return f"{number:g}"
+
+
+def _geometry_rect_text(rect: Any) -> str:
+    """`rect x,y wxh` — position and size; all eight values stay in `details`."""
+    if not isinstance(rect, dict):
+        return ""
+    return (
+        f" rect {_geometry_number(rect.get('x'))},{_geometry_number(rect.get('y'))}"
+        f" {_geometry_number(rect.get('width'))}x{_geometry_number(rect.get('height'))}"
+    )
+
+
+def _geometry_styles_text(styles: Any) -> str:
+    """`name:value` pairs, empty values elided.
+
+    An empty string is a real answer (property unset) and stays present in
+    `details`; in the text it is noise, and the `inline:` line in particular is
+    only printed when something is there.
+    """
+    if not isinstance(styles, dict):
+        return ""
+    return " ".join(f"{name}:{value}" for name, value in styles.items() if str(value) != "")
+
+
+def _geometry_entries_text(entries: list[dict[str, Any]], *, inline: bool = False) -> str:
+    """One block per entry: identity + rect, then the style pairs, then (for
+    `styles`) the element's own inline custom properties when it has any."""
+    lines: list[str] = []
+    for index, entry in enumerate(entries, start=1):
+        lines.append(f"[{index}] {_geometry_ident(entry)}{_geometry_rect_text(entry.get('rect'))}")
+        style_text = _geometry_styles_text(entry.get("styles"))
+        if style_text:
+            lines.append(f"    {style_text}")
+        if inline:
+            inline_text = _geometry_styles_text(entry.get("inline"))
+            if inline_text:
+                lines.append(f"    inline: {inline_text}")
+    return "\n".join(lines)
+
+
+def _geometry_entry_list(result: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    """The one list-shape read every render shares, defensive about the wire."""
+    raw = result.get(key)
+    if not isinstance(raw, list):
+        return []
+    return [entry for entry in raw if isinstance(entry, dict)]
+
+
+def _bridge_geometry_result(
+    tool_call_id: str,
+    action: str,
+    params: BrowserParams,
+    result: dict[str, Any],
+    details: dict[str, Any],
+) -> ToolResult:
+    """Render the three structured read actions.
+
+    The host already caps every list (5 matches, 8 hit-test elements, a 16-deep
+    chain) and truncates class names and values, so `details` can carry the
+    structured result as-is — it is the payload for renderers and compaction,
+    never serialized to a provider. The TEXT still rides
+    BROWSER_TEXT_LIMIT_CHARS, because 30 style pairs across 5 elements is
+    comfortably more than a line and a call must not be able to spend the
+    context window. `count` is the number of entries the host RETURNED; for
+    `styles`, `truncated` means the page had more matches than the 5-entry cap,
+    and the header says to narrow the selector.
+    """
+    selector = params.selector.strip()
+    if action == "styles":
+        matches = _geometry_entry_list(result, "matches")
+        truncated = bool(result.get("truncated"))
+        details.update(
+            selector=selector,
+            count=result.get("count", len(matches)),
+            truncated=truncated,
+            matches=matches,
+        )
+        head = f"{len(matches)} match{'' if len(matches) == 1 else 'es'} for {selector!r}"
+        if truncated:
+            head += " — more exist on the page; narrow the selector to see the rest"
+        body = _geometry_entries_text(matches, inline=True)
+        return _text(
+            tool_call_id,
+            "browser",
+            f"{head}:\n\n{truncate_output(body, BROWSER_TEXT_LIMIT_CHARS)}",
+            details=details,
+        )
+    if action == "hit_test":
+        elements = _geometry_entry_list(result, "elements")
+        details.update(
+            count=result.get("count", len(elements)),
+            x=params.x,
+            y=params.y,
+            elements=elements,
+        )
+        head = (
+            f"{len(elements)} element{'' if len(elements) == 1 else 's'} at "
+            f"({_geometry_number(params.x)}, {_geometry_number(params.y)}), topmost first"
+        )
+        body = _geometry_entries_text(elements)
+        return _text(
+            tool_call_id,
+            "browser",
+            f"{head}:\n\n{truncate_output(body, BROWSER_TEXT_LIMIT_CHARS)}",
+            details=details,
+        )
+    chain = _geometry_entry_list(result, "chain")
+    details.update(
+        selector=selector,
+        count=result.get("count", len(chain)),
+        chain=chain,
+    )
+    head = (
+        f"Ancestor chain for {selector!r}: "
+        f"{len(chain)} entr{'y' if len(chain) == 1 else 'ies'}, element upward"
+    )
+    body = _geometry_entries_text(chain)
+    return _text(
+        tool_call_id,
+        "browser",
+        f"{head}:\n\n{truncate_output(body, BROWSER_TEXT_LIMIT_CHARS)}",
+        details=details,
     )
 
 
@@ -20169,6 +20445,26 @@ async def _bridge_action(
         wire["level"] = params.level.strip().lower() or "all"
         if params.limit is not None:
             wire["limit"] = params.limit
+    elif action == "styles":
+        wire["selector"] = params.selector.strip()
+        # Extras only when the caller asked for some: an empty list would be an
+        # argument the peer has to interpret rather than an absent one, and
+        # "absent" is the shape every other action uses for "defaults only".
+        if params.properties:
+            wire["properties"] = list(params.properties)
+    elif action == "hit_test":
+        # Non-None (and non-bool) is guaranteed by _validate_browser_args, which
+        # runs before any action body: a json `true` would otherwise arrive as
+        # 1.0 via pydantic's lax float coercion.
+        wire["x"] = params.x
+        wire["y"] = params.y
+    elif action == "ancestors":
+        wire["selector"] = params.selector.strip()
+        if params.depth is not None:
+            # Clamped here as well as in the page function (which also defaults
+            # 12): the wire value is already honest, and the page-side clamp is
+            # what bounds a peer whose own validation is older.
+            wire["depth"] = max(1, min(16, int(params.depth)))
     result, problem = await _bridge_call(tool_call_id, action, wire, surface=surface, client=client)
     if problem is not None:
         # A nonce-invalid or user-closed tab must be forgotten immediately;
@@ -20230,6 +20526,8 @@ async def _bridge_action(
         )
     if action == "logs":
         return _bridge_logs_result(tool_call_id, params, result, details, title, href)
+    if action in ("styles", "hit_test", "ancestors"):
+        return _bridge_geometry_result(tool_call_id, action, params, result, details)
     if action == "click":
         navigation = "" if result.get("navigated") else " (no navigation)"
         return _text(
@@ -20924,8 +21222,8 @@ async def _execute_browser(
             tool_call_id,
             "browser",
             f"'{action}' is not supported on the cmux backend — cmux has no console-log tap, "
-            "background-tab scroll primitive, multi-surface registry, site-permission "
-            "model, or file-transfer primitive. "
+            "background-tab scroll primitive, page-script/style access, multi-surface "
+            "registry, site-permission model, or file-transfer primitive. "
             + _non_cmux_host_hint(ui=ui_available, bridge=bridge_available)
             + demotion,
         )
@@ -21159,10 +21457,10 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
             # to `read tool://browser`.
             "Drive the user's REAL browser — the desktop app's tab by default, their "
             "paired extension, or a cmux panel ('backend' names a host for a fresh "
-            "'open'): open/goto, read, snapshot, click, type, scroll, logs, screenshot, "
-            "tabs, close. Cookies and logins persist across calls and sessions, and "
-            "the user can sign in by hand when you ask them to, so this reaches "
-            "authenticated pages a throwaway browser cannot. "
+            "'open'): open/goto, read, snapshot, click, type, scroll, logs, styles, "
+            "hit_test, ancestors, screenshot, tabs, close. Cookies and logins persist "
+            "across calls and sessions, and the user can sign in by hand when you ask "
+            "them to, so this reaches authenticated pages a throwaway browser cannot. "
             "A fresh 'open' creates one NEW tab owned by this session; reuse it because "
             "later opens navigate it. "
             "Before your final response, call 'close' unless the user needs it left "
