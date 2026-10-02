@@ -11135,6 +11135,27 @@ class OperatorApp(App[None]):
                         yield self._todo_panel
                     with ComposerDock(id="input-shell"):
                         yield Band(id="status-band")
+                        # The projects compose strip (P5a, D6): the recipient
+                        # band, and then the delivered receipt, as a REAL
+                        # one-row surface above the prompt. It replaced the
+                        # editor-placeholder incarnation, which vanished on the
+                        # first keystroke — exactly when a reader needs to see
+                        # who the message is addressed to. Hidden until the
+                        # projects page composes, so the dock keeps its height
+                        # in every other mode.
+                        #
+                        # Placed ABOVE the minimized ask bar (this branch's fold
+                        # onto a base that added it) so the bar keeps the
+                        # directly-above-the-composer seat its own note claims.
+                        # Both surfaces collapse to zero rows when unset, so the
+                        # order is visible only while a projects compose and a
+                        # queued ask are up at the same time.
+                        yield Static(
+                            "",
+                            id="projects-compose-strip",
+                            classes="projects-compose-strip",
+                            markup=False,
+                        )
                         # The MINIMIZED ask affordance, directly above the composer
                         # (design §5.0/R7). A child of the SHELL rather than of
                         # `#prompt-host`, and that placement is the whole reason it
@@ -33703,6 +33724,7 @@ class OperatorApp(App[None]):
         # still be mounted underneath this one.
         self._sync_boot_layout_class()
         self._sync_boot_layout()
+        self._set_projects_strip(None)
         self._set_composer_read_only(False)
         restore = self._projects_focus_restore
         self._projects_focus_restore = None
@@ -33920,6 +33942,7 @@ class OperatorApp(App[None]):
         message.stop()
         target = message.target
         if target is None:
+            self._set_projects_strip(None)
             self._set_composer_read_only(True)
             return
         self._set_composer_read_only(False)
@@ -33927,7 +33950,10 @@ class OperatorApp(App[None]):
             editor = self._editor()
         except Exception:
             return  # a stripped harness with no composer
-        editor.placeholder = compose_band(target)
+        # The recipient line lives on the STRIP, not the editor placeholder
+        # (D6): the placeholder vanishes the moment the reader types, which is
+        # exactly when the strip matters most.
+        self._set_projects_strip(compose_band(target))
         try:
             # Focus is what makes it a composer rather than a picture of one;
             # the caret is what the reader aims at.
@@ -34051,26 +34077,41 @@ class OperatorApp(App[None]):
         # submit, so the strip is visible and the reader is still in compose.
         self._paint_band_receipt(sentence)
 
-    def _paint_band_receipt(self, sentence: str) -> None:
-        """Paint a delivered receipt in the composer's band (agent review F4).
+    def _set_projects_strip(self, text: str | None) -> None:
+        """Show (``text``) or hide (``None``) the projects compose strip (D6).
 
-        The band IS the editor's placeholder while the composer is empty, and
-        an acknowledged send is exactly that state: the submit cleared the
-        buffer. A reader who already left compose gets the line on the page's
-        notice row instead — the composer is read-only again and its
-        placeholder is not this surface's to overwrite.
+        The strip is the band's real carrier — a one-row `Static` in the
+        composer shell — so the recipient line, and the delivered receipt that
+        replaces it, survive the first keystroke; the editor placeholder they
+        used to ride could not. Best-effort: a stripped harness has no dock,
+        and compose still works without it.
+        """
+        try:
+            strip = self.query_one("#projects-compose-strip", Static)
+        except Exception:  # noqa: BLE001 — a stripped harness has no dock
+            return
+        if text:
+            strip.update(text)
+            strip.display = True
+        else:
+            strip.display = False
+
+    def _paint_band_receipt(self, sentence: str) -> None:
+        """Paint a delivered receipt in the composer's strip (agent review F4).
+
+        The strip is the composer's own statement about the send (D6), and an
+        acknowledged send is the case it carries end to end: the band said
+        `send to: …` and now says the outcome. A reader who already left
+        compose gets the line on the page's notice row instead — the strip is
+        hidden then, and the composer is read-only again.
         """
         view = self._projects_view
         if view is not None and view.composing:
-            try:
-                editor = self._editor()
-            except Exception:  # noqa: BLE001 — a stripped harness has no composer
-                return
-            # The in-flight line on the notice row is replaced by the band
-            # statement: leaving `sending to …` up while the band already says
+            # The in-flight line on the notice row is replaced by the strip
+            # statement: leaving `sending to …` up while the strip already says
             # `sent to …` would contradict itself a row apart.
             view.show_notice("")
-            editor.placeholder = sentence
+            self._set_projects_strip(sentence)
             return
         if view is not None:
             view.compose_receipt(sentence)

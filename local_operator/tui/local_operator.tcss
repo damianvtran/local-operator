@@ -563,6 +563,21 @@ ToolCard:focus, WakeBlock:focus, PeerMessageBlock:focus, .interactive-notice:foc
     padding: 1 1 0 0;
 }
 
+/* The projects compose strip (P5a, design review round 1, D6): the recipient
+ * band — and then the delivered receipt — as a REAL one-row surface above the
+ * prompt. It replaced the editor-placeholder incarnation, which vanished on
+ * the first keystroke, exactly when the reader needs to see who the message is
+ * addressed to. `display: none` everywhere except while the projects page
+ * composes, so the dock keeps its height in every other mode; `$lo-dim` is
+ * the ink the placeholder it replaced used, so the strip is the same voice
+ * about the same composer. */
+.projects-compose-strip {
+    display: none;
+    width: 1fr;
+    height: 1;
+    color: $lo-dim;
+}
+
 /* Input panel: two widgets for one panel, and the split is load-bearing.
  *
  * `#input-dock` is a POSITIONER — docked to the bottom, full width, no fill of
@@ -2457,6 +2472,10 @@ Screen.settings #input-dock #prompt-chevron {
 .projects-send-hints {
     width: 1fr;
     height: 1;
+    /* The legend is a hint row, and every hint row in this sheet is `muted`
+     * (cf. `.projects-form-hint`): at card ink it competed with the rows it
+     * describes. */
+    color: $lo-muted;
 }
 
 /* The dock in projects mode: PRESENT and RECEDED, never removed — the exact
