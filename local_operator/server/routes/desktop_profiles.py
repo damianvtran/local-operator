@@ -78,10 +78,10 @@ class ProfileEdit(Input):
     #: Display metadata (see ``local_operator.agents.AgentData.label``): the
     #: label every listing paints while ``name`` stays the addressing key.
     #: Deliberately no ``max_length``: the registry validates the stored shape
-    #: (whitespace collapsed, 80 characters, no controls) and a route cap
-    #: stricter than the registry would refuse values the other write paths
-    #: accept. A label of "" resets to the derived default; ``None``/absent
-    #: leaves it alone.
+    #: (whitespace collapsed, up to :data:`local_operator.agents.MAX_AGENT_LABEL_CHARS`
+    #: characters, no controls) and a route cap stricter than the registry would
+    #: refuse values the other write paths accept. A label of "" resets to the
+    #: derived default; ``None``/absent leaves it alone.
     label: str | None = None
 
 
