@@ -7,6 +7,8 @@ and a style resolver); the page and state machine are driven through the real
 
 from __future__ import annotations
 
+import base64
+import io
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +31,11 @@ from local_operator.tui.projects_render import (
     detail_session_row_text,
     detail_todo_lines,
     format_short_date,
+)
+from local_operator.tui.widgets.image_block import ImageBlock
+from local_operator.tui.widgets.projects_detail import (
+    DetailAttachmentPreviewRow,
+    DetailAttachmentRow,
 )
 from local_operator.tui.widgets.subagent_view import HintButton
 from local_operator.tui.widgets.transcript import GAP_CLASS
@@ -1501,3 +1508,394 @@ async def test_a_deleted_project_pops_the_detail_back_to_the_canvas(
         await pilot.pause()
         assert view._mode == "canvas"
         assert view._body.display
+
+
+# ---------------------------------------------------------------------------
+# P6: the attachment row's own keys — `y` copy path, `space` preview (§7.4)
+# ---------------------------------------------------------------------------
+
+
+def _png_bytes(width: int, height: int) -> bytes:
+    """A real, decodable PNG — the feed's own fixture writes junk bytes.
+
+    ``_feed_registry`` fills its "image" with ``b"x" * 83904`` because every
+    row it feeds only ever shows TEXT. The preview decodes the file, so that
+    fixture would honestly answer ``could not be decoded`` rather than
+    exercise the surface under test.
+    """
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (width, height), (200, 60, 90)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _preview_registry(tmp_path: Path) -> ProjectRegistry:
+    """One project whose update carries a real image and a data file, plus a
+    second project to prove a preview never follows the reader across."""
+    registry = ProjectRegistry(tmp_path)
+    project = registry.create_project(ProjectEdit(name="parity-spec", title="TUI parity spec"))
+    shot = tmp_path / "board-60x20.png"
+    shot.write_bytes(_png_bytes(30, 12))
+    notes = tmp_path / "notes.md"
+    notes.write_text("# notes\n")
+    registry.update_project(
+        project.id,
+        ProjectEdit(progress="Cutover plan\n\nshipped the rows"),
+        reporter="operator",
+        attachments=[shot, notes],
+    )
+    registry.create_project(ProjectEdit(name="other"))
+    return registry
+
+
+async def _press_until_attachment(pilot: Any, page: Any, *, image: bool) -> dict[str, Any]:
+    """Walk the row cursor onto the first image/data attachment row.
+
+    The row's KIND is read from its record, not from ``can_preview()``: a
+    picture whose copy is gone is still the image row, and it is exactly the
+    row a test needs to reach.
+    """
+    for _ in range(20):
+        row: Any = page._selectables[page.selected_index]
+        getter: Any = getattr(row, "attachment", None)
+        if callable(getter):
+            record: Any = getter()
+            if isinstance(record, dict) and (str(record.get("kind") or "data") == "image") is image:
+                return record
+        await pilot.press("down")
+        await pilot.pause()
+    raise AssertionError(f"no {'image' if image else 'data'} attachment row reached")
+
+
+async def _open_detail(pilot: Any, app: OperatorApp, name: str = "parity-spec") -> Any:
+    view = await _open(pilot, app, name)
+    await pilot.press("d")
+    await pilot.pause()
+    await pilot.pause()
+    return view
+
+
+@pytest.mark.asyncio
+async def test_space_shows_an_image_attachment_inline_and_hides_it_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec §7.4's staged half: the pixels ride the shipped image stack.
+
+    The block owns kitty / half-cell / receipt, so this pins the PAGE's own
+    contract — the picture mounts under the path row it belongs to, it is a
+    real widget rather than a painted string, and the same key takes it away.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_IMAGES", "halfcell")
+    session = _ProjectSession()
+    session.project_registry = _preview_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open_detail(pilot, app)
+        page = view._detail_page
+        await _press_until_attachment(pilot, page, image=True)
+        assert isinstance(page._selectables[page.selected_index], DetailAttachmentRow)
+        before = page.painted_rows()
+        assert not any("▀" in row for row in before), "a preview was open before the key"
+
+        await pilot.press("space")
+        for _ in range(6):
+            await pilot.pause()
+        after = page.painted_rows()
+        assert len(after) == len(before) + 1
+        path_index = next(index for index, row in enumerate(after) if row.strip().startswith("→"))
+        # Directly under ITS OWN path line, and it is the block that painted.
+        assert "▀" in after[path_index + 1]
+        assert isinstance(page.children[path_index + 1], DetailAttachmentPreviewRow)
+        assert isinstance(page.children[path_index + 1].block(), ImageBlock)
+        # The reveal follows the PICTURE, not just its affordance row: measured
+        # at 100x30, the row-reveal left the picture one row BELOW the box, so
+        # the key looked like it had done nothing (caught in the P6 frames).
+        preview = page.children[path_index + 1]
+        assert page.region.y <= preview.region.y
+        assert (
+            preview.region.y + preview.region.height - 1 <= page.region.y + page.region.height - 1
+        )
+        # The in-flight receipt does not outlive the picture.
+        assert "reading" not in view.rendered_rows()[-1]
+
+        await pilot.press("space")
+        await pilot.pause()
+        assert len(page.painted_rows()) == len(before)
+
+
+@pytest.mark.asyncio
+async def test_space_on_a_data_file_says_why_and_shows_nothing(tmp_path: Path) -> None:
+    """A data file has no pixels — the press is answered, not swallowed."""
+    session = _ProjectSession()
+    session.project_registry = _preview_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open_detail(pilot, app)
+        page = view._detail_page
+        await _press_until_attachment(pilot, page, image=False)
+        await pilot.press("space")
+        for _ in range(3):
+            await pilot.pause()
+        assert "notes.md is not an image" in view.rendered_rows()[-1]
+        assert "opens it instead" in view.rendered_rows()[-1]
+        assert not any(isinstance(child, DetailAttachmentPreviewRow) for child in page.children)
+
+
+@pytest.mark.asyncio
+async def test_y_puts_the_stored_path_on_the_clipboard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`y` writes the COPY's path through the app's own clipboard core (§7.4)."""
+    copied: list[str] = []
+    monkeypatch.setattr(OperatorApp, "copy_to_clipboard", lambda self, text: copied.append(text))
+    session = _ProjectSession()
+    session.project_registry = _preview_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open_detail(pilot, app)
+        page = view._detail_page
+        attachment = await _press_until_attachment(pilot, page, image=True)
+        await pilot.press("y")
+        await pilot.pause()
+        assert copied == [attachment["path"]]
+        assert copied[0].endswith(".png") and "attachments" in copied[0]
+        assert "copied the path to board-60x20.png" in view.rendered_rows()[-1]
+
+
+@pytest.mark.asyncio
+async def test_a_gone_copy_keeps_its_path_copyable_but_previews_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The two keys answer the gone file differently, and both say why (§7.4).
+
+    The path is still the reader's handle on a file that moved — that is the
+    whole reason the path line is painted whether or not the copy is there —
+    while there are no bytes to read for a picture.
+    """
+    registry = _preview_registry(tmp_path)
+    project = registry.get_project_by_name("parity-spec")
+    assert project is not None
+    gone = next(a for a in project.updates[0].attachments if a.kind == "image")
+    Path(gone.path).unlink()
+    copied: list[str] = []
+    monkeypatch.setattr(OperatorApp, "copy_to_clipboard", lambda self, text: copied.append(text))
+    session = _ProjectSession()
+    session.project_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open_detail(pilot, app)
+        page = view._detail_page
+        await _press_until_attachment(pilot, page, image=True)
+        assert page.selected_can_preview() is False
+        assert page.selected_can_copy() is True
+        await pilot.press("space")
+        await pilot.pause()
+        assert "is missing on disk" in view.rendered_rows()[-1]
+        assert not any(isinstance(child, DetailAttachmentPreviewRow) for child in page.children)
+        await pilot.press("y")
+        await pilot.pause()
+        assert copied == [gone.path]
+
+
+@pytest.mark.asyncio
+async def test_a_preview_survives_a_refresh_and_never_follows_the_reader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The payload is page-local VIEW state: `r` keeps it, another row does not.
+
+    Both halves matter. `r` re-shows the page from the store, so a preview that
+    were not cached would vanish under a reader who pressed refresh; and the
+    cache is keyed by project, so the next project cannot paint its
+    predecessor's pixels under its own headings.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_IMAGES", "halfcell")
+    session = _ProjectSession()
+    session.project_registry = _preview_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open_detail(pilot, app)
+        page = view._detail_page
+        await _press_until_attachment(pilot, page, image=True)
+        await pilot.press("space")
+        for _ in range(6):
+            await pilot.pause()
+        assert any("▀" in row for row in page.painted_rows())
+
+        await pilot.press("r")
+        for _ in range(3):
+            await pilot.pause()
+        assert view._mode == "detail"
+        assert any("▀" in row for row in page.painted_rows()), "the refresh dropped the picture"
+
+        await pilot.press("esc")
+        await pilot.pause()
+        await _open_detail(pilot, app, "other")
+        assert not any("▀" in row for row in view._detail_page.painted_rows())
+
+
+@pytest.mark.asyncio
+async def test_a_pathless_attachment_answers_both_keys_honestly(tmp_path: Path) -> None:
+    """A hand-edited row with no path: both keys say so, neither speaks for it."""
+    session = _ProjectSession()
+    session.project_registry = _preview_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open_detail(pilot, app)
+        page = view._detail_page
+        # A composed view whose attachment has no path, exactly as the store
+        # reader degrades one (the same shape `attachment_path_text` names).
+        view._detail_page.show(
+            {
+                "project": {
+                    "id": "p1",
+                    "name": "parity-spec",
+                    "status": "active",
+                    "updates": [
+                        {
+                            "at": "2026-10-02T10:00:00",
+                            "text": "one line",
+                            "attachments": [{"name": "board.png", "kind": "image", "bytes": 12}],
+                        }
+                    ],
+                },
+                "progress_stale": False,
+                "sessions": [],
+            },
+            own_session=None,
+        )
+        await pilot.pause()
+        # The cursor lands on the attachment row itself: the keys are
+        # ROW-scoped, so a press with the stamp row selected is inert by design.
+        await _press_until_attachment(pilot, page, image=True)
+        assert page.selected_can_copy() is False
+        assert page.selected_can_preview() is False
+        await pilot.press("y")
+        await pilot.pause()
+        assert "has no stored path to copy" in view.rendered_rows()[-1]
+        await pilot.press("space")
+        await pilot.pause()
+        assert "has no stored path to preview" in view.rendered_rows()[-1]
+        assert not any(isinstance(child, DetailAttachmentPreviewRow) for child in page.children)
+
+
+def test_the_row_scoped_keys_displace_no_shipped_hint() -> None:
+    """The P5 variant rule, extended to `y`/`space` (spec §7.4).
+
+    A row-scoped key rides a one-extra-wider VARIANT of a shipped row, never an
+    extra element inside one, so the ladder's first-fit can only ADD it: no
+    shipped label is lost at any budget, every variant is strictly narrower than
+    the rung before it, and each key is carried on a PREFIX of the ladder — a
+    key that vanishes as the terminal WIDENS is the QA Q3 defect.
+    """
+    from local_operator.tui.widgets.projects_view import ProjectsView
+
+    class _Selection:
+        """Just the page surface ``_detail_hint_rungs`` reads.
+
+        The ladder is pure arithmetic over five accessors, so the sweep needs
+        those five and NOT a mounted widget tree: building a ``DetailRow``
+        detached needs a running app (``Static.update`` resolves styles through
+        it), and a live app cannot sweep 218 budgets one resize at a time.
+        """
+
+        def selected_action_label(self) -> str:
+            return "open"
+
+        def selected_action_verb(self) -> str:
+            return "open"
+
+        def selected_can_copy(self) -> bool:
+            return True
+
+        def selected_can_preview(self) -> bool:
+            return True
+
+        def selected_preview_open(self) -> bool:
+            return False
+
+    view = ProjectsView()
+    view._detail_page = _Selection()  # type: ignore[assignment]
+    rungs = view._detail_hint_rungs()
+    row_scoped = (view._copy_hint, view._preview_hint)
+
+    head = [(view._measure_hints(plan, esc), plan, esc) for plan, esc in rungs]
+    base = [
+        (view._measure_hints(plan, esc), plan, esc)
+        for plan, esc in rungs
+        if not any(hint in row_scoped for hint, _label, _lead in plan)
+    ]
+
+    # Every variant is strictly narrower than the rung before it.
+    previous: int | None = None
+    for width, plan, _esc in head:
+        if previous is not None and any(hint in row_scoped for hint, _l, _c in plan):
+            assert width < previous, f"a row-scoped variant at {width} is shadowed by {previous}"
+        previous = width
+
+    # No budget loses a label the shipped ladder would have painted.
+    for budget in range(3, 221):
+        chosen_head = next((plan for width, plan, _e in head if width <= budget), head[-1][1])
+        chosen_base = next((plan for width, plan, _e in base if width <= budget), base[-1][1])
+        labels_head = {label for _h, label, _l in chosen_head}
+        for _hint, label, _lead in chosen_base:
+            assert (
+                not label.strip() or label in labels_head
+            ), f"budget {budget}: `{label.strip()}` was displaced"
+
+    # Each key is carried on a prefix of the ladder, and it is the spec's word.
+    for hint in row_scoped:
+        seen_off = False
+        for plan, _esc in rungs:
+            carried = any(hint is button for button, _l, _c in plan)
+            if not carried:
+                seen_off = True
+            else:
+                assert not seen_off, "a row-scoped key returns after a rung without it"
+    labels = {label for plan, _esc in rungs for _hint, label, _lead in plan}
+    assert " copy" in labels
+    assert " preview" in labels
+
+
+@pytest.mark.asyncio
+async def test_the_preview_read_answers_a_payload_or_nothing_at_all(
+    tmp_path: Path,
+) -> None:
+    """The read half of the handshake: base64 + MIME, or one honest ``None``.
+
+    ``None`` covers gone, a directory and unreadable on purpose — the caller
+    states ONE sentence for all three rather than inventing a taxonomy of
+    failure the reader cannot act on. An unknown suffix still reads: the block
+    decodes the bytes itself, so a wrong MIME guess is a receipt rather than a
+    wrong picture.
+    """
+    from local_operator.tui.attachments import (
+        read_attachment_for_preview,
+        read_for_preview,
+    )
+
+    shot = tmp_path / "board.png"
+    shot.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 8)
+    payload = read_attachment_for_preview(str(shot))
+    assert payload is not None
+    data_b64, mime_type = payload
+    assert mime_type == "image/png"
+    assert base64.b64decode(data_b64).startswith(b"\x89PNG")
+
+    odd = tmp_path / "shot.pixels"
+    odd.write_bytes(b"whatever")
+    assert read_attachment_for_preview(str(odd)) == (
+        base64.b64encode(b"whatever").decode("ascii"),
+        "image/png",
+    )
+
+    assert read_attachment_for_preview(str(tmp_path / "gone.png")) is None
+    assert read_attachment_for_preview(str(tmp_path)) is None
+    assert await read_for_preview(str(shot)) == payload
+    assert await read_for_preview(str(tmp_path / "gone.png")) is None

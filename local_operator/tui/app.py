@@ -409,7 +409,9 @@ from local_operator.tui.widgets.projects_send import (
 from local_operator.tui.widgets.projects_start import StartTarget, start_targets
 from local_operator.tui.widgets.projects_view import (
     ProjectsView,
+    ProjectsViewAttachmentCopied,
     ProjectsViewAttachmentOpened,
+    ProjectsViewAttachmentPreviewRequested,
     ProjectsViewComposeChanged,
     ProjectsViewDismissed,
     ProjectsViewFormSubmitted,
@@ -34036,6 +34038,76 @@ class OperatorApp(App[None]):
             # The path is repeated because this is the failure a reader can act
             # on themselves — the rule the link-opener's receipt states.
             view.show_notice(f"could not open {name} — the path is {path}")
+
+    def on_projects_view_attachment_copied(self, message: ProjectsViewAttachmentCopied) -> None:
+        """`y` on an attachment row: put the stored path on the clipboard (§7.4).
+
+        The app's OWN clipboard core (``copy_to_clipboard``, the OSC 52 write the
+        `/copy` picker uses), so the page adds no second way to reach the
+        clipboard — and the receipt names the FILE rather than echoing the path,
+        because the path is the thing the reader has just put somewhere they can
+        see it. No clipboard at all is not a case to invent here: the write is
+        the same one every other copy affordance makes.
+        """
+        message.stop()
+        view = self._projects_view
+        if view is None:
+            return
+        if not message.path:
+            view.show_notice(f"'{message.name}' has no stored path to copy")
+            return
+        self.copy_to_clipboard(message.path)
+        view.show_notice(f"copied the path to {message.name}")
+
+    def on_projects_view_attachment_preview_requested(
+        self, message: ProjectsViewAttachmentPreviewRequested
+    ) -> None:
+        """`space` on an image attachment: read the copy, show the pixels (§7.4).
+
+        The page cannot read a file, so this is the host half of the handshake:
+        the bytes are read off the UI loop (a worker thread, bounded — a stored
+        copy is at most 5 MB, so only a stalled mount can be slow) and then
+        handed back through ``show_attachment_preview``. The in-flight line goes
+        up first because the read is a real await, and it is CLEARED on success
+        rather than replaced: the picture is its own receipt. A read that
+        answers ``None`` states that sentence and changes nothing else — the
+        row stays exactly as it was, which is the opener's own contract.
+        """
+        message.stop()
+        view = self._projects_view
+        if view is None:
+            return
+        path = message.path
+        if not path:
+            view.show_notice(f"'{message.name}' has no stored path to preview")
+            return
+        from pathlib import Path
+
+        if not Path(path).exists():
+            view.show_notice(
+                f"{message.name} is missing on disk — its stored copy was moved or deleted"
+            )
+            return
+        view.show_notice(f"reading {message.name}…")
+        self.run_worker(self._preview_attachment(message.name, path), group="preview-attachment")
+
+    async def _preview_attachment(self, name: str, path: str) -> None:
+        """The off-loop half of the preview read (spec §7.4, staged part)."""
+        from local_operator.tui.attachments import read_for_preview
+
+        payload = await read_for_preview(path)
+        view = self._projects_view
+        if view is None:
+            return
+        if payload is None:
+            # The path is repeated for the same reason the opener repeats it:
+            # this is the failure a reader can act on themselves.
+            view.show_notice(f"could not read {name} — the path is {path}")
+            return
+        data_b64, mime_type = payload
+        view.show_attachment_preview(path=path, data_b64=data_b64, mime_type=mime_type)
+        # The picture is the receipt; the in-flight line must not outlive it.
+        view.show_notice("")
 
     def on_projects_view_milestone_toggled(self, message: ProjectsViewMilestoneToggled) -> None:
         """`↵` on a milestone row: flip completion through the store, re-show.
