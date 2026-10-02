@@ -573,7 +573,11 @@ async def test_the_msg_hint_never_vanishes_while_create_is_advertised(
         # reader sees.
         await pilot.resize_terminal(100, 30)
         await pilot.pause()
-        painted = " ".join(hint.rendered() for hint in view._hints.children if hint.display)
+        painted = " ".join(
+            hint.rendered()
+            for hint in view._hints.children
+            if isinstance(hint, HintButton) and hint.display
+        )
         assert "message" in painted
 
 

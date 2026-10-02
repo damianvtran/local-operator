@@ -134,6 +134,8 @@ from pathlib import Path  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 
 import pytest  # noqa: E402
+from textual.content import Content  # noqa: E402
+from textual.style import Style as ContentStyle  # noqa: E402
 from textual.widgets import Input, Static  # noqa: E402
 
 from local_operator.mobile.peer_send import DeliveryOutcome  # noqa: E402
@@ -143,6 +145,7 @@ from local_operator.tui.widgets.projects_view import (  # noqa: E402
     ProjectsViewComposeChanged,
     ProjectsViewSendRequested,
 )
+from local_operator.tui.widgets.subagent_view import HintButton  # noqa: E402
 from tests.unit.tui.test_projects_view import (  # noqa: E402
     _boot,
     _factory,
@@ -263,6 +266,27 @@ def _strip(app) -> tuple[bool, str]:  # type: ignore[no-untyped-def]
     return bool(widget.display), widget.render().plain
 
 
+def _painted_content(widget: Static) -> Content:
+    """The ``Content`` a ``Static`` paints, narrowed by ASSERTION.
+
+    ``Static.render`` is declared over the broad ``RenderableType`` union, and
+    textual 8's ``Static`` paints a ``textual.content.Content``: ``.plain`` for
+    the text, and spans whose style is ``textual.style.Style`` — whose colour
+    field is ``foreground``, not rich's ``color``. The read narrows with
+    ``isinstance``, the shape ``test_composer_visibility`` and
+    ``test_boot_layout`` already use for this read, rather than a cast that
+    would claim rich ``Text`` for an object that is not one.
+    """
+    renderable = widget.render()
+    assert isinstance(renderable, Content), type(renderable).__name__
+    return renderable
+
+
+def _painted_text(widget: Static) -> str:
+    """The plain text a ``Static`` is painting."""
+    return _painted_content(widget).plain
+
+
 @pytest.mark.parametrize("size", [(60, 24), (80, 24), (100, 30)])
 @pytest.mark.asyncio
 async def test_the_card_floats_without_reflowing_or_clipping(
@@ -327,7 +351,7 @@ async def test_the_card_floats_without_reflowing_or_clipping(
             card.region.x + card.region.width >= body.region.x + body.region.width
         ), f"{size}: the page shows beside the card"
         assert 0 in card.painted_range()  # the selection is painted
-        painted = card.query_one("#projects-send-rows", Static).render().plain
+        painted = _painted_text(card.query_one("#projects-send-rows", Static))
         for row in card.window_rows():
             assert row.row_text in painted
         assert painted.count("▸") == 1  # exactly one marker: the selected row
@@ -371,11 +395,16 @@ async def test_the_window_follows_the_selection(tmp_path: Path) -> None:
         ]
         # The windowed list says how much it is not showing, in `muted` ink
         # (D5): `dim` measured 3.43:1 on the card's own overlay ground.
-        note = card.query_one("#projects-send-note", Static).render()
+        note = _painted_content(card.query_one("#projects-send-note", Static))
         assert note.plain == "+6 more"
         muted = theme_mod.semantic_color("muted").lower()
+        # The span's ink lives on textual's `Style.foreground` (a
+        # `textual.color.Color`), whose `.hex` is the `#rrggbb` the palette
+        # tokens are written in — the union member is narrowed first.
         assert any(
-            span.style.foreground is not None and span.style.foreground.hex.lower() == muted
+            isinstance(span.style, ContentStyle)
+            and span.style.foreground is not None
+            and span.style.foreground.hex.lower() == muted
             for span in note.spans
         )
 
@@ -474,7 +503,7 @@ async def test_a_refused_send_keeps_the_draft_and_names_the_row(
             _resolve,
         )
         await pilot.press("enter")
-        assert await _settle(pilot, lambda: view._notice.startswith("could not send"))
+        assert await _settle(pilot, lambda: (view._notice or "").startswith("could not send"))
         assert editor.text == "retry me"
         assert view._notice == ("could not send to ◆ s1: the session is no longer available")
         # F6: the send path resolves like every other send — `include_wedged`
@@ -791,12 +820,12 @@ async def test_the_selected_row_bands_and_the_chips_take_state_inks(tmp_path: Pa
         )
         assert any(style.bold for style in _styles_at(text, "▸"))
         assert any(
-            style.color == resolver("status_active").color for style in _styles_at(text, "[live]")
+            style.color == resolver("chip_live").color for style in _styles_at(text, "[live]")
         )
         assert any(
             style.color == resolver("status_done").color for style in _styles_at(text, "[stopped]")
         )
-        assert resolver("status_active").color != resolver("status_done").color
+        assert resolver("chip_live").color != resolver("status_done").color
 
 
 @pytest.mark.asyncio
@@ -1010,7 +1039,7 @@ async def test_a_filter_that_matches_nothing_says_so(tmp_path: Path) -> None:
         assert card is not None
         await pilot.press("z", "z", "z")
         await pilot.pause()
-        note = card.query_one("#projects-send-note", Static).render().plain
+        note = _painted_text(card.query_one("#projects-send-note", Static))
         assert note == NO_MATCH_FOOTER
         await pilot.press("backspace", "backspace", "backspace")
         await pilot.pause()
@@ -1154,7 +1183,11 @@ async def test_the_page_hint_row_stops_advertising_keys_the_card_consumes(
         # D10: the row is EMPTY while the card owns the keys. The card's own
         # legend carries the whole grammar one row above it, so painting
         # `esc close` here stated one instruction twice in two inks.
-        painted = " ".join(hint.rendered() for hint in view._hints.children if hint.display)
+        painted = " ".join(
+            hint.rendered()
+            for hint in view._hints.children
+            if isinstance(hint, HintButton) and hint.display
+        )
         assert painted == "", f"the page row still paints under the card: {painted!r}"
         # The repro behind the finding: a printable key lands in the filter,
         # which is exactly why the ladder was a lie while the card was up.
