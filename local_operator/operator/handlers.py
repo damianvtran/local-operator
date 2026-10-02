@@ -44,7 +44,12 @@ from local_operator.operator import (
     sign_challenge,
     staging_path,
 )
-from local_operator.operator.keychain import FILE_ONLY, SECURE_ENCLAVE, KeyBackendError
+from local_operator.operator.keychain import (
+    FILE_ONLY,
+    SECURE_ENCLAVE,
+    KeyBackendError,
+    KeyHandle,
+)
 from local_operator.operator.sign import anchor_for_handle, describe_level
 from local_operator.operator.verify import spki_fp
 from local_operator.paths import config_dir
@@ -275,8 +280,21 @@ def install_anchor_from(
     return install_anchor(root, print_only=print_only, sudo_secret=sudo_secret)
 
 
-def _existing_key(root: Path, preference: str) -> Any:
-    """The operator key already in this host's store, or ``None``.
+def _existing_key(root: Path, preference: str) -> KeyHandle | None:
+    """The operator key already in this host's store, as a handle, or ``None``.
+
+    A HANDLE, NOT A SIGNER — the contract its callers already read it under, and the
+    one this function's docstring claimed before it did. ``backend.load()`` returns a
+    ``Signer | None`` (the loaded private half, with the handle at ``signer.handle``),
+    while every consumer of this probe wants the public handle: ``_report_existing_key``
+    and ``_setup`` dereference ``.key_id`` / ``.spki`` and print a level, and
+    ``_setup`` uses the result as the ``anchor_for_handle`` input. Unwrapping and
+    closing HERE is what stopped the two halves of ``_setup`` disagreeing about the
+    type — the resume path (key present, anchor not installed) and the already-installed
+    short-circuit both died on ``'_KeyagentSigner' object has no attribute 'key_id'``.
+    Closing is safe: it is a no-op on the key-agent signer and only drops a reference on
+    the software signer, and the handle is inert public material while the key stays on
+    disk.
 
     BEST EFFORT, deliberately: a store that raises on a probe (a locked presence
     store, a platform whose load path is unimplemented) reports ``None`` here and
@@ -288,9 +306,14 @@ def _existing_key(root: Path, preference: str) -> Any:
 
     try:
         backend = choose_backend(preference, config_root=root)
-        return backend.load()
+        signer = backend.load()
     except (OSError, KeyBackendError):
         return None
+    if signer is None:
+        return None
+    handle = signer.handle
+    signer.close()
+    return handle
 
 
 def _print_failure(headline: str, exc: Exception) -> None:
@@ -312,7 +335,7 @@ def _print_failure(headline: str, exc: Exception) -> None:
         print(f"{headline}: {text}", file=sys.stderr)
 
 
-def _report_existing_key(root: Path, existing: Any, label: str) -> int:
+def _report_existing_key(root: Path, handle: KeyHandle, label: str) -> int:
     """Report the operator key already in this host's store, and complete what is missing.
 
     IDEMPOTENT RATHER THAN FATAL (R9-2/Q9-2). Measured: a second ``init`` on a file-only
@@ -325,9 +348,9 @@ def _report_existing_key(root: Path, existing: Any, label: str) -> int:
 
     Reached from two places, which is why it is a function: the probe at the top of
     ``_init``, and the create that came back ``reused`` — the race where a key appeared
-    between the probe and the create (agent review round 1, R1-5).
+    between the probe and the create (agent review round 1, R1-5). Both callers pass the
+    handle ``_existing_key`` / ``create_key`` returned, never a signer.
     """
-    handle = existing.handle
     staged = staging_path(root)
     loaded = load_anchor()
     staged_now = False
@@ -370,7 +393,6 @@ def _report_existing_key(root: Path, existing: Any, label: str) -> int:
         print("anchor invalidates every paired phone.")
     print("To lift a revocation instead:")
     print(f"  {AUTHORISE_COMMAND.format(device_id='<device id>')}")
-    existing.close()
     return 0
 
 
@@ -562,7 +584,6 @@ def _setup(args: argparse.Namespace) -> int:
         )
         receipt("installed", True, f"anchor already at {loaded.path} (root-owned)")
         receipt("verified", True, describe_level(existing, with_remedy=False))
-        existing.close()
         return finish(0, state="installed", anchor=str(loaded.path))
 
     sudo_secret = str(getattr(args, "sudo_secret", "") or "")
@@ -594,6 +615,9 @@ def _setup(args: argparse.Namespace) -> int:
     receipt("consent", admin_route != "unavailable", consent_line)
 
     try:
+        # A probed handle is used as-is rather than re-created: the key belongs to a
+        # previous run and stays on disk, and the staged statement below carries
+        # everything this verb needs — so there is nothing to release here.
         handle = (
             existing if existing is not None else create_key(config_root=root, preference="auto")
         )
@@ -607,10 +631,6 @@ def _setup(args: argparse.Namespace) -> int:
         True,
         f"operator key ready ({handle.key_id}); anchor statement staged at {staged}",
     )
-    if existing is not None:
-        # The handle was only probed; the key belongs to a previous run and the
-        # staged statement above already carries everything this verb needs.
-        existing.close()
 
     if admin_route == "unavailable":
         # D1: setup never shows the direct verb's by-hand block (it cannot be
