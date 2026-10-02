@@ -760,6 +760,21 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
 #: description the page renders: a facade write lands at the next evaluation
 #: pass, and a hand-edited ``config.yml`` at the next publish point (her
 #: reconcile).
+#: ``speech`` is host-owned in the ``hub`` shape: nothing is read off a
+#: ``Session`` attribute at all. The ``speech.voice.*`` keys are read PER REQUEST
+#: by the server route, through ``tts.descriptor.descriptor_from_config``, which
+#: calls ``ConfigManager.get_nested_value`` on the manager the route was handed —
+#: so a write from another process (a ``/settings`` page, ``lop config edit``,
+#: the desktop ``PATCH /v1/settings/{key}``) is picked up by the next spoken
+#: message with no relaunch. A probe here could watch nothing move, because no
+#: session holds these values. The live half is proven where it lives:
+#: ``tests/unit/tts/test_descriptor_config.py`` drives a settings-facade write
+#: (the shape every TUI/UI/CLI edit takes) and pins that the very next
+#: ``descriptor_from_config`` reads it, and
+#: ``tests/unit/server/test_server_speech.py`` pins the descriptor the route
+#: BUILDS from those keys on every request. The end-to-end half was measured on
+#: a running daemon: a write through ``settings_io.write_setting`` landed in the
+#: hub request body on the next call, with no restart (voicing S2 QA round 1).
 HOST_OWNED_LIVE_SECTIONS = {
     "hub",
     "appearance",
@@ -770,6 +785,7 @@ HOST_OWNED_LIVE_SECTIONS = {
     "memory_guard",
     "aida",
     "wakes",
+    "speech",
 }
 
 

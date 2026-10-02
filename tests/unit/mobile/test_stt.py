@@ -486,6 +486,26 @@ def test_a_quota_refusal_maps_to_402() -> None:
     assert status == 402
     assert "the ElevenLabs provider has run out of credits" in body["error"]
 
+    # The two vendor machine codes added with the desktop table (voicing S2).
+    # Their condition arrives on a status that says nothing about credit, so the
+    # body is the only place the classifier can read it from.
+    vendor_quota = APIError(
+        "boom",
+        status_code=401,
+        body='{"detail":{"status":"quota_exceeded","message":"You have insufficient '
+        'quota to complete the request."}}',
+    )
+    status, body = describe_stt_failure(vendor_quota, provider="ElevenLabs")
+    assert status == 402
+    assert "the ElevenLabs provider has run out of credits" in body["error"]
+
+    balance = APIError(
+        "boom", status_code=429, body='{"error":{"code":"credit_balance_exhausted"}}'
+    )
+    status, body = describe_stt_failure(balance, provider="openai")
+    assert status == 402
+    assert "the openai provider has run out of credits" in body["error"]
+
 
 def test_a_transport_failure_passes_the_clients_text_through() -> None:
     status, body = describe_stt_failure(APIError("Connection refused", status_code=None))

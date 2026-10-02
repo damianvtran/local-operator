@@ -43,6 +43,34 @@ def test_provider_quota_markers_still_map_to_402() -> None:
     )
 
 
+def test_the_s2_vendor_quota_codes_map_to_402_too() -> None:
+    """ElevenLabs' ``quota_exceeded`` (on a 401) and OpenAI's
+    ``credit_balance_exhausted`` (on a 429) name the vendor machine codes added
+    for the speech direction; both map to the provider-credit 402."""
+    assert _mapped(
+        401,
+        '{"detail":{"status":"quota_exceeded","message":"You have insufficient '
+        'quota to complete the request."}}',
+        provider="elevenlabs",
+    ) == (
+        402,
+        "Transcription is unavailable: the elevenlabs provider has run out of "
+        "credits. Switch to another provider, or add credits to your Radient "
+        'account. Upstream responded 401: {"detail":{"status":"quota_exceeded",'
+        '"message":"You have insufficient quota to complete the request."}}',
+    )
+    assert _mapped(
+        429,
+        '{"error":{"code":"credit_balance_exhausted"}}',
+        provider="openai",
+    ) == (
+        402,
+        "Transcription is unavailable: the openai provider has run out of "
+        "credits. Switch to another provider, or add credits to your Radient "
+        'account. Upstream responded 429: {"error":{"code":"credit_balance_exhausted"}}',
+    )
+
+
 def test_radient_edge_401_keeps_its_sentence() -> None:
     assert _mapped(401, '{"detail":"Invalid or expired token"}') == (
         502,
