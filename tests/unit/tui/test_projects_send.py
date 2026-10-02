@@ -117,6 +117,9 @@ def test_the_band_names_the_target_and_the_way_out() -> None:
     target = SendTarget(kind="session", session_id="s1", label="projects review", state="live")
     assert compose_band(target) == "send to: ◆ s1 · esc cancel"
     assert "esc closes" in NO_TARGET_FOOTER and " s " not in NO_TARGET_FOOTER
+    # U1: the second half names the route that exists — the detail page has no
+    # link affordance at all, `/project link` is the only way.
+    assert "/project link" in NO_TARGET_FOOTER
 
 
 # -- the flow, over the real page ------------------------------------------
@@ -316,6 +319,13 @@ async def test_the_card_floats_without_reflowing_or_clipping(
         )
         assert card.region.x >= body.region.x
         assert card.region.x + card.region.width <= body.region.x + body.region.width
+        # D9: the card takes the width it can hold — the page's whole content box
+        # — so no page row is painted BESIDE it (`max-width: 60` left 20 cells of
+        # canvas visible at 80x24, level with the card's own last row).
+        assert card.region.x <= body.region.x
+        assert (
+            card.region.x + card.region.width >= body.region.x + body.region.width
+        ), f"{size}: the page shows beside the card"
         assert 0 in card.painted_range()  # the selection is painted
         painted = card.query_one("#projects-send-rows", Static).render().plain
         for row in card.window_rows():
@@ -445,9 +455,10 @@ async def test_a_refused_send_keeps_the_draft_and_names_the_row(
         card.action_choose()
         await pilot.pause()
         assert view.composing
-        # The in-flight statement (U2) before anything resolves.
-        view.compose_pending(view.compose_target)
-        assert view._notice == "sending to ◆ s1…"
+        # N1: the in-flight sentence is the STRIP's alone. The notice row is
+        # cleared instead of painted — see `test_the_strip_states_the_send_in_flight`
+        # for the strip half of this pin.
+        assert view._notice is None
 
         editor = app._editor()
         editor.load_text("retry me")
@@ -524,18 +535,39 @@ async def test_a_delivered_send_receipts_in_the_band_and_clears_the_draft(
 
 
 @pytest.mark.parametrize(
-    "state,wake,word",
+    "state,wake,word,detail",
     [
-        ("mailbox", "unconfirmed", "wake unconfirmed"),
-        ("unconfirmed", "unconfirmed", "delivery unconfirmed"),
+        (
+            "mailbox",
+            "unconfirmed",
+            "wake unconfirmed",
+            "delivered to its mailbox (id mid-2) — the wake was not acknowledged "
+            "within 5s after 2 attempts. It will read the message on its next turn; "
+            "do not send it again.",
+        ),
+        (
+            "unconfirmed",
+            "unconfirmed",
+            "delivery unconfirmed",
+            "delivery unconfirmed (id mid-2) — no answer within 5s after 2 attempts "
+            "and it could not be confirmed in its transcript. It may still arrive "
+            "once its loop turns. Check the target's transcript before resending; "
+            "sending again may deliver it twice.",
+        ),
     ],
 )
 @pytest.mark.asyncio
 async def test_an_amber_send_keeps_the_draft_and_uses_the_state_word(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str, wake: str, word: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+    wake: str,
+    word: str,
+    detail: str,
 ) -> None:
-    """F4: mailbox/unconfirmed are amber receipts on the notice row in the
-    app's own words, and the draft survives so the reader decides what next."""
+    """F4/U2: mailbox/unconfirmed are amber receipts on the notice row in the
+    app's own words, carrying the core's caution for that state, and the draft
+    survives so the reader decides what next."""
     session = _ProjectSession()
     session.project_registry = _registry(tmp_path, "alpha")
     from local_operator.tui.app import OperatorApp
@@ -562,25 +594,23 @@ async def test_an_amber_send_keeps_the_draft_and_uses_the_state_word(
         )
 
         async def _partial(*args, **kwargs):  # type: ignore[no-untyped-def]
-            return DeliveryOutcome(
-                state,
-                "delivered to its mailbox (id mid-2) — the wake was not acknowledged",
-                "mid-2",
-                wake,
-                2,
-                "no_answer",
-                "live",
-                "s1",
-            )
+            return DeliveryOutcome(state, detail, "mid-2", wake, 2, "no_answer", "live", "s1")
 
         monkeypatch.setattr(
             "local_operator.mobile.peer_send.deliver_peer_message_outcome", _partial
         )
+        advisory = DeliveryOutcome(state, detail, "mid-2", wake, 2, "no_answer", "live", "s1")
+        caution = advisory.advisory
+        assert caution, "the parametrized detail must carry the core's caution half"
         editor = app._editor()
         editor.load_text("keep me please")
         await pilot.pause()
         await pilot.press("enter")
-        assert await _settle(pilot, lambda: view._notice == f"sent to ◆ s1 · {word}")
+        # U2: the notice carries the word AND the caution the core wrote for
+        # exactly this state — the restored draft is the strongest available cue
+        # to press enter again, so "do not send it again" must be on screen with
+        # it rather than dropped.
+        assert await _settle(pilot, lambda: view._notice == f"sent to ◆ s1 · {word} — {caution}")
         assert editor.text == "keep me please"
 
 
@@ -901,15 +931,61 @@ async def test_a_refused_dial_and_a_faulted_send_keep_the_draft(
         assert editor.text == "try me"
 
         async def _fault(*args, **kwargs):  # type: ignore[no-untyped-def]
-            raise OSError("connection reset")
+            raise OSError("connection reset by peer")
 
         monkeypatch.setattr("local_operator.mobile.peer_send.deliver_peer_message_outcome", _fault)
         await pilot.press("enter")
+        # U3: the notice is a SENTENCE, never interpreter text — the exception is
+        # logged, not painted. U2: and it carries the caution for a state that may
+        # already have landed.
         assert await _settle(
             pilot,
-            lambda: view._notice
-            == "sent to ◆ s1 · delivery unconfirmed — the send faulted (connection reset)",
+            lambda: (view._notice or "").startswith("sent to ◆ s1 · delivery unconfirmed"),
         )
+        assert view._notice is not None
+        assert "connection reset" not in view._notice
+        assert "sending again may deliver it twice" in view._notice
+        assert editor.text == "try me"
+
+
+@pytest.mark.asyncio
+async def test_an_internal_fault_reaches_the_reader_as_a_sentence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """U3: a fault on the RESOLVE path must not paint interpreter text.
+
+    Reproduced in the UX round as `cannot unpack non-iterable coroutine object`
+    — the reader gets a sentence, and the exception goes to the log.
+    """
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    from local_operator.tui.app import OperatorApp
+
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        target = SendTarget(kind="session", session_id="s1", label="work", state="live", live=True)
+        view._send_targets = lambda: [target]  # type: ignore[method-assign]
+        await pilot.press("m")
+        await pilot.pause()
+        card = view._send_card
+        assert card is not None
+        card.action_choose()
+        await pilot.pause()
+
+        def _explode(**kwargs):  # type: ignore[no-untyped-def]
+            raise AttributeError("cannot unpack non-iterable coroutine object")
+
+        monkeypatch.setattr("local_operator.mobile.peer_send.resolve_peer_target", _explode)
+        editor = app._editor()
+        editor.load_text("try me")
+        await pilot.pause()
+        await pilot.press("enter")
+        assert await _settle(pilot, lambda: view._notice is not None)
+        assert view._notice is not None
+        assert view._notice == ("could not send to ◆ s1: something went wrong on this end — retry")
+        assert "coroutine" not in view._notice and "AttributeError" not in view._notice
         assert editor.text == "try me"
 
 
@@ -988,6 +1064,9 @@ async def test_the_strip_states_the_send_in_flight(
         # …and the outcome replaces it, not the other way round.
         gate.set()
         assert await _settle(pilot, lambda: _strip(app) == (True, sent_line(target, "delivered")))
+        # N1: the notice row never carried the in-flight sentence — it is the
+        # strip's alone, and the footer falls back to the project detail.
+        assert view._notice is None
 
 
 @pytest.mark.asyncio
@@ -1072,10 +1151,11 @@ async def test_the_page_hint_row_stops_advertising_keys_the_card_consumes(
         await pilot.pause()
         card = view._send_card
         assert card is not None
+        # D10: the row is EMPTY while the card owns the keys. The card's own
+        # legend carries the whole grammar one row above it, so painting
+        # `esc close` here stated one instruction twice in two inks.
         painted = " ".join(hint.rendered() for hint in view._hints.children if hint.display)
-        assert "esc" in painted and "close" in painted
-        for word in ("list", "create", "message", "detail", "next", "back"):
-            assert word not in painted, f"the page row still advertises `{word}` under the card"
+        assert painted == "", f"the page row still paints under the card: {painted!r}"
         # The repro behind the finding: a printable key lands in the filter,
         # which is exactly why the ladder was a lie while the card was up.
         await pilot.press("c")

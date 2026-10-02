@@ -210,7 +210,65 @@ OPTIONAL_TOKENS: tuple[str, ...] = (
     "tool-mutate",
     "tool-exec",
     "tool-meta",
+    # The second family, and the first that is MEASURED rather than sourced:
+    # see :func:`_fill_chip_live`.
+    "chip-live",
 )
+
+#: The floor a derived ground ink must clear: AA for normal text, the number the
+#: palette gate's own pins use.
+_GROUND_INK_FLOOR = 4.5
+
+
+def _linear(channel: int) -> float:
+    """One sRGB channel on the linear ramp WCAG contrast is defined over."""
+    scaled = channel / 255
+    return scaled / 12.92 if scaled <= 0.04045 else ((scaled + 0.055) / 1.055) ** 2.4
+
+
+def _luminance(hex_color: str) -> float:
+    """Relative luminance of a ``#rrggbb`` colour."""
+    value = hex_color.lstrip("#")
+    red, green, blue = (int(value[index : index + 2], 16) for index in (0, 2, 4))
+    return 0.2126 * _linear(red) + 0.7152 * _linear(green) + 0.0722 * _linear(blue)
+
+
+def contrast(color_a: str, color_b: str) -> float:
+    """WCAG contrast ratio between two ``#rrggbb`` colours."""
+    lum_a, lum_b = _luminance(color_a), _luminance(color_b)
+    high, low = max(lum_a, lum_b), min(lum_a, lum_b)
+    return (high + 0.05) / (low + 0.05)
+
+
+def _fill_chip_live(tokens: dict[str, str]) -> None:
+    """Give a ramp a `live`-chip ink that clears AA on the CARD's ground (D8).
+
+    Mutates in place, and leaves an authored value alone. The quick-send card
+    is the one surface whose state chips sit on `overlay`; every ramp's
+    `accent` is solved against `bg`/`surface` instead, and on a LIGHT ramp
+    `overlay` is a step darker — which is where the brand light accent lands at
+    3.49:1 (4.29:1 on the selected row's `tint-select`), under the floor, with
+    no green or blue token in that ramp clearing it either (success 3.45,
+    signal 3.54).
+
+    MEASURED, not inferred from polarity: the accent is taken when it clears
+    every ground the chip can sit on, and the ramp's own neutral ink when it
+    does not. The neutral ink is the text colour the ramp already guarantees
+    against its grounds, so the fallback is a token with a contract rather than
+    a new hue. A curated palette that authors `chip-live` keeps its choice.
+    """
+    if "chip-live" in tokens:
+        return
+    accent = tokens.get("accent")
+    ink = tokens.get("fg") or tokens.get("muted")
+    if not accent or not ink:
+        return
+    grounds = [tokens[token] for token in ("overlay", "tint-select") if token in tokens]
+    if grounds and all(contrast(accent, ground) >= _GROUND_INK_FLOOR for ground in grounds):
+        tokens["chip-live"] = accent
+    else:
+        tokens["chip-live"] = ink
+
 
 #: Derivation sources for the tool-category family, in the ramp's own terms.
 #: Conservative on purpose — `read` and `meta` land on tokens whose existing
@@ -287,6 +345,7 @@ def _builtin_spec(name: str, label: str, description: str, dark: bool) -> ThemeS
         semantic: BRAND_TOKENS[name][raw] for semantic, raw in _SEMANTIC_ALIASES[name].items()
     }
     _fill_tool_categories(tokens)
+    _fill_chip_live(tokens)
     return ThemeSpec(name=name, label=label, description=description, dark=dark, tokens=tokens)
 
 
@@ -362,6 +421,7 @@ def register_theme(spec: ThemeSpec) -> None:
     if unknown:
         raise ValueError(f"theme {spec.name!r} has unknown tokens: {', '.join(unknown)}")
     _fill_tool_categories(spec.tokens)
+    _fill_chip_live(spec.tokens)
     malformed = [
         f"{token}={value!r}" for token, value in spec.tokens.items() if not _HEX_RE.fullmatch(value)
     ]

@@ -71,10 +71,8 @@ from local_operator.tui.projects_render import (
 from local_operator.tui.widgets.projects_detail import ProjectDetailPage
 from local_operator.tui.widgets.projects_form import FORM_FOOTER_HINT, ProjectsFormPage
 from local_operator.tui.widgets.projects_send import (
-    SEND_CARD_MAX_WIDTH,
     SendTarget,
     SendTargetCard,
-    pending_line,
     send_targets,
 )
 from local_operator.tui.widgets.subagent_view import READ_ONLY_NOTE, HintButton
@@ -190,6 +188,11 @@ def _style_resolver() -> Callable[[str], Style]:
         "status_planning": Style(color=color("muted")),
         "status_qa": Style(color=color("accent")),
         "status_validation": Style(color=color("fg")),
+        # The quick-send card's `live` chip (P5a, design review round 2, D8):
+        # the card's chips sit on `overlay`, a ground this ramp's accent was
+        # never solved against — see the `chip-live` token for the measurement
+        # and why only the light ramp needs the solve.
+        "chip_live": Style(color=color("chip-live")),
         "cursor": Style(color=color("accent"), bold=True),
         # The selected-row band on the quick-send card (P5a, design review
         # round 1, D4): `tint-select` is the app's selection ground — the
@@ -1144,25 +1147,18 @@ class ProjectsView(Vertical):
         return [rung([], "cancel")]
 
     def _send_hint_rungs(self) -> list[tuple[list[tuple[HintButton, str, bool]], str]]:
-        """The target picker's ONE rung: ``esc close``, and nothing else (R2-3).
+        """The target picker's rung: EMPTY — the card carries the whole grammar (D10).
 
-        The same defect the compose rung fixes, one mode over: while the card
-        is up it holds the keyboard, so every other key the canvas ladder
-        advertises — ``1 list``, ``c create``, ``m message``, ``d detail`` —
-        TYPES into the card's filter (reproduced: ``c`` -> filter "c"). The
-        card's own legend carries the picker's grammar; the page row must not
-        contradict it. ``esc`` is the one page key that still means something
-        here — it closes the card — so it keeps the row's only word.
+        Two rounds of the same defect, in opposite directions. The page row must
+        not advertise keys the card CONSUMES (R2-3): while the card is up it
+        holds the keyboard, so `1 list`, `c create`, `m message`, `d detail` type
+        into its filter. Nor may it repeat what the card already says: the legend
+        sits inside the card one row above this row, so painting `esc close` here
+        stated one instruction twice in two inks (design round 2, D10). An empty
+        rung hides every button — the row is blank while the card owns the keys,
+        and the canvas ladder returns when it closes.
         """
-
-        def rung(
-            leads: list[tuple[HintButton, str, bool]], esc_label: str
-        ) -> tuple[list[tuple[HintButton, str, bool]], str]:
-            row = list(leads)
-            row.append((self._exit_hint, esc_label, bool(row)))
-            return (row, esc_label)
-
-        return [rung([], "close")]
+        return [([], "")]
 
     def _sync_form_hints(self) -> None:
         """Arm the form's hints against what they would act on just now.
@@ -2303,10 +2299,14 @@ class ProjectsView(Vertical):
         # single row at 60x24 and 80x24 — still inside the page, still useless.
         ground = self.content_region.y + self.content_region.height - top
         card.set_available(ground)
-        card.styles.width = min(
-            SEND_CARD_MAX_WIDTH,
-            max(20, body.region.width - padding.left - padding.right),
-        )
+        # D9 (design round 2): the card takes the width it can hold — the body's
+        # whole content box. A 60-cell cap left 20 cells of page beside the card
+        # at 80x24, level with the card's own last row, so the canvas fragment
+        # `essions` read as part of its edge; a page row must never be visible
+        # beside the card while the card owns those rows. The tcss carries no cap
+        # either (a second one is how a width becomes invisible until a frame is
+        # inspected).
+        card.styles.width = max(20, body.region.width - padding.left - padding.right)
         content = self.content_region
         card.styles.offset = (
             body.region.x + padding.left - content.x,
@@ -2381,14 +2381,6 @@ class ProjectsView(Vertical):
             return True
         self.post_message(ProjectsViewSendRequested(target=self._send_target, text=body))
         return True
-
-    def compose_pending(self, target: SendTarget) -> None:
-        """The in-flight statement (UX U2): the submit's next visible fact.
-
-        Painted in the page's own notice line — the surface the reader is
-        looking at while the send resolves — and replaced by the receipt.
-        """
-        self.show_notice(pending_line(target))
 
     def compose_receipt(self, sentence: str) -> None:
         """Report a send's outcome in the surface the reader is looking at.
