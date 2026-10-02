@@ -347,9 +347,9 @@ def _report_existing_key(root: Path, handle: KeyHandle, label: str) -> int:
     missing.
 
     Reached from two places, which is why it is a function: the probe at the top of
-    ``_init``, and the create that came back ``reused`` — the race where a key appeared
-    between the probe and the create (agent review round 1, R1-5). Both callers pass the
-    handle ``_existing_key`` / ``create_key`` returned, never a signer.
+    ``_init``, and a second probe in the branch where the create came back ``reused``
+    — the race where a key appeared between the probe and the create (agent review
+    round 1, R1-5). Both call sites pass an ``_existing_key`` result, never a signer.
     """
     staged = staging_path(root)
     loaded = load_anchor()
