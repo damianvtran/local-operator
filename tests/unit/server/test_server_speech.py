@@ -234,6 +234,40 @@ async def test_an_explicit_provider_keeps_the_direct_pass_through(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_a_half_specified_legacy_request_is_forwarded_as_sent(tmp_path):
+    """M4: `model` alone / `voice` alone / `provider` alone keep the pass-through.
+
+    These three answered 422 while the pair was required, so nothing can regress
+    on this, and forwarding is the more useful half of the trade: naming only a
+    provider ("use ElevenLabs, your default voice") and naming only a model are
+    both coherent requests, and the hub owns provider and voice validation — so
+    refusing them here would be this route re-deciding a question that is not
+    its own. The absent fields travel as ``None``, which the hub's own
+    ``omitempty`` reads as "your default", never as an explicit pin.
+    """
+    for fields, expected in (
+        ({"model": "tts-1"}, {"model": "tts-1", "voice": None, "provider": "openai"}),
+        ({"voice": "alloy"}, {"model": None, "voice": "alloy", "provider": "openai"}),
+        (
+            {"provider": "elevenlabs"},
+            {"model": None, "voice": None, "provider": "elevenlabs"},
+        ),
+    ):
+        client = _credentialed_client()
+        response = await create_speech(
+            _agent_less_request(**fields),
+            client,
+            _speech_store(tmp_path),
+            _voiced_config(tmp_path),
+            _env_config(),
+        )
+        assert response.status_code == 200
+        sent = client.create_speech.call_args.kwargs
+        for name, value in expected.items():
+            assert sent[name] == value, f"{fields}: {name}"
+
+
+@pytest.mark.asyncio
 async def test_an_explicit_speed_pins_pace_on_the_descriptor_path(tmp_path):
     """``speed`` IS a legacy field the hub can pin, so the descriptor path keeps it.
 
@@ -635,6 +669,18 @@ async def test_a_byo_refusal_names_the_users_own_vendor(tmp_path, monkeypatch):
             credit_sentence,
         ),
         (429, '{"error":{"code":"rate_limit_exceeded"}}', 429, None),
+        # S-8: a bare 402 keeps the credit remedy on its STATUS. A gateway's
+        # prose, a localized message or an intermediary's HTML page carries no
+        # marker, and reading only the markers turned those into a 502 quoting
+        # the upstream body -- the opposite of the remedy, on the one status
+        # that names it.
+        (402, None, 402, credit_sentence),
+        (402, '{"error":"Payment required"}', 402, credit_sentence),
+        # S-9: the marker arm is fenced to the statuses a credit refusal
+        # arrives on, so a fault or a rejected request that merely ECHOES a
+        # marker is not presented as a top-up the user can act on.
+        (500, '{"error":"insufficient_quota"}', 502, None),
+        (400, '{"error":"credit_balance_exhausted"}', 502, None),
     ):
         _Refusing.status = status
         _Refusing.body = body
@@ -658,8 +704,9 @@ async def test_a_byo_refusal_names_the_users_own_vendor(tmp_path, monkeypatch):
                 )
         assert exc_info.value.status_code == expected_status
         if expected is None:
-            # A rate limit is not a credit condition: it keeps the sentence
-            # that names nobody, so it is not asserted as a vendor literal.
+            # A rate limit, a fault and a rejected request are not credit
+            # conditions: they keep the sentence that names nobody, so it is not
+            # asserted as a vendor literal.
             assert "ElevenLabs" not in exc_info.value.detail
         else:
             assert exc_info.value.detail == expected

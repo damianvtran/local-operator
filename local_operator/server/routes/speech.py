@@ -124,7 +124,6 @@ _SPEECH_REFUSAL_SENTENCES: Dict[int, str] = {
 
 #: The same refusals for a leg the USER's own vendor key serves, parameterised
 #: by the vendor's name (voicing S2 QA round 1, Q1 / security S-2). The Radient
-#: The same refusals for a leg the USER's own vendor key serves. The Radient
 #: sentences above name a party that is not in the exchange at all on a
 #: BYO-only machine: telling someone their "Radient sign-in has stopped working"
 #: when their own ElevenLabs key was refused sends them to fix the wrong thing,
@@ -140,6 +139,15 @@ _SPEECH_REFUSAL_SENTENCES: Dict[int, str] = {
 #: moment". The condition is therefore classified by the response BODY, with the
 #: same marker table the STT twin uses (:data:`PROVIDER_CREDIT_MARKERS`), and
 #: only the leftover 401 is a key refusal.
+#:
+#: The body check ADDS a detection; it must not REMOVE one. A bare 402 already
+#: meant "payment required" before any of this (security round 3, S-8): a
+#: gateway's ``{"error":"Payment required"}``, a localized or reworded message,
+#: or an HTML 402 page from an intermediary carries no marker, and reading only
+#: the markers turned those into a 502 quoting the upstream body — the opposite
+#: of the remedy, on the one status that names it. So the 402 arm is taken on the
+#: STATUS, ahead of the markers, which is also the ordering the STT twin has had
+#: all along.
 #:
 #: The remedy names the CREDENTIAL and no venue (C2): "Fix it in Settings" is
 #: true of the desktop app and false of ``/login <provider>`` and
@@ -169,6 +177,20 @@ _RUNG_VENDOR_LABELS: Dict[VoicePath, str] = {
 }
 
 
+#: The statuses a credit refusal realistically arrives on, which FENCES the body
+#: check (security round 3, S-9). Without the fence every status went through it,
+#: so an upstream fault (5xx) or a rejected request (400) whose body happened to
+#: carry a marker was relabelled 402 — a customer-actionable top-up prompt for a
+#: condition the user cannot fix by topping up. 402 is absent because the arm
+#: above answers it on the status alone, which is stronger than any marker.
+_CREDIT_MARKER_STATUSES = frozenset({401, 403, 429})
+
+
+def _is_credit_refusal_status(status: Optional[int]) -> bool:
+    """Whether this status is one a credit refusal can legitimately arrive on."""
+    return status is not None and status in _CREDIT_MARKER_STATUSES
+
+
 def _is_credit_refusal(exc: APIError) -> bool:
     """Whether a vendor refusal says "this account is out of credit".
 
@@ -181,6 +203,10 @@ def _is_credit_refusal(exc: APIError) -> bool:
 
     The body is the only input: a vendor's own words are what distinguishes an
     exhausted quota from a revoked key, and the status cannot do it.
+
+    Callers fence this by status (``_CREDIT_MARKER_STATUSES``); the predicate
+    itself stays a pure function of the body so the fence is visible at the one
+    call site rather than hidden in here.
     """
     body = (exc.body or "").lower()
     return any(marker in body for marker in PROVIDER_CREDIT_MARKERS)
@@ -219,6 +245,15 @@ def _speech_refusal(exc: APIError, *, rung: Optional[VoicePath] = None) -> HTTPE
     **402** — the codebase's own out-of-credit code, matching the STT twin — so a
     client branching on the status still reaches the top-up remedy.
 
+    A bare **402** is answered on the STATUS, ahead of the markers (security
+    round 3, S-8). The body check adds a detection; it must not remove one, and
+    before this delta a markerless 402 on a BYO rung fell through to the 502 arm,
+    handing the client the upstream body the fixed sentences exist to keep off
+    the screen. The marker check is in turn FENCED to the statuses a credit
+    refusal arrives on (security round 3, S-9), so an upstream fault or a
+    rejected request that merely echoes a marker is not presented as a top-up
+    prompt.
+
     ``detail`` is ALWAYS one of these fixed sentences, never an upstream code or
     body: the desktop app maps exact strings (``DESIGNED_SPEECH_SENTENCES``), so
     a machine-readable code may ride alongside but must not replace the sentence.
@@ -232,7 +267,16 @@ def _speech_refusal(exc: APIError, *, rung: Optional[VoicePath] = None) -> HTTPE
         if sentence is not None:
             return HTTPException(status_code=status, detail=sentence)
         return HTTPException(status_code=502, detail=_upstream_failure_detail(exc))
-    if _is_credit_refusal(exc):
+    if status == 402:
+        # The status that already meant exactly this keeps its remedy whatever
+        # the body says, and the body is not consulted: a payment answer is the
+        # user's to act on, whether it arrived as a designed JSON envelope or as
+        # a gateway's HTML page.
+        return HTTPException(
+            status_code=402,
+            detail=_VENDOR_REFUSAL_SENTENCES["credit"].format(vendor=vendor),
+        )
+    if _is_credit_refusal_status(status) and _is_credit_refusal(exc):
         # 402 whatever the vendor called it: the condition is the user's, the
         # remedy is rung-independent, and it must not look retryable.
         return HTTPException(
@@ -377,6 +421,17 @@ async def create_speech(
     additive rather than a behaviour change. An explicitly sent ``provider``
     is the exception: the descriptor has no field that could carry it, so a
     caller naming one is asking for the legacy pass-through and gets it.
+
+    A HALF-SPECIFIED legacy request -- ``model`` alone, ``voice`` alone, or
+    ``provider`` alone -- is forwarded as sent, with the absent fields omitted
+    (review round 3, M4, kept deliberately and pinned by
+    ``test_a_half_specified_legacy_request_is_forwarded_as_sent``). These
+    answered 422 while the pair was required, so no client can regress on this,
+    and forwarding is the MORE useful half of the trade: naming only a provider
+    ("use ElevenLabs, your default voice") and naming only a model are both
+    coherent requests the hub accepts, and the hub owns provider and voice
+    validation anyway, so refusing them here would be this route re-deciding a
+    question that is not its own.
     """
     try:
         if (
@@ -473,9 +528,11 @@ async def create_agent_speech(
 
     THE CREDENTIAL POSTURE, stated because it is easy to "fix" by accident. In
     the shipped desktop posture this route is gated twice -- the ``/v1/agents``
-    prefix gate and ``require_desktop`` (which arrives on
-    ``get_provider_auth_store``, not on ``get_radient_client`` -- review round 2,
-    N5) -- so an anonymous cross-origin caller never reaches the spend. In the
+    prefix gate and ``require_desktop``, which fires inside
+    ``get_provider_auth_store`` (``dependencies.py:63-64``) and therefore reaches
+    this route through BOTH declared credential dependencies (review round 3,
+    N6 corrected round 2's N5, which had the attribution backwards) -- so an
+    anonymous cross-origin caller never reaches the spend. In the
     STANDALONE posture (``lop server`` with no desktop plane) there is no such
     gate, and the daemon admits ``*`` origins, so a page the operator visits can
     drive this route. That class is pre-existing and identical for the Radient

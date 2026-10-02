@@ -417,6 +417,14 @@ PROVIDER_CREDIT_MARKERS = (
     "insufficient_quota",
     "insufficient quota",
     "exceeded your current quota",
+    # The two vendors' own machine codes, added with the desktop table (voicing
+    # S2): ElevenLabs reports an exhausted quota as ``status: "quota_exceeded"``
+    # and OpenAI reports one as ``code: "credit_balance_exhausted"``. They
+    # survive a translated or reworded message, which matters because the
+    # condition arrives on a status that says nothing about credit. Kept in the
+    # SAME ORDER as the desktop list so the two stay diff-identical.
+    "quota_exceeded",
+    "credit_balance_exhausted",
     "no credits remaining",
     "out of credits",
     "insufficient credits",

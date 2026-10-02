@@ -3,7 +3,7 @@
   "info": {
     "title": "Local Operator API",
     "description": "REST API interface for Local Operator agent",
-    "version": "0.64.10"
+    "version": "0.65.0"
   },
   "paths": {
     "/v1/capabilities": {
@@ -1753,6 +1753,28 @@
         }
       }
     },
+    "/v1/desktop/asks": {
+      "get": {
+        "tags": [
+          "Desktop sessions"
+        ],
+        "summary": "Asks",
+        "description": "Open and recently settled asks, from the DERIVED INDEX (design \u00a74).\n\nIndex-backed on purpose, and the reason is the feature's whole durability\nclaim: an ask outlives the runtime that queued it, so the cross-session view\ncannot be built from live sessions \u2014 it has to be answerable with nothing\nrunning, which is what ``<config_dir>/asks/<sid>.json`` exists for. This\nroute therefore reads no session, dials no owner and starts no runtime.\n\nThe read is a directory scan plus one small file per session with anything to\nshow, so it runs off the event loop like every other store walk. A machine\nwith no asks at all answers ``{\"asks\": []}``: absence of the directory is the\nordinary state (``read_index``) and not an error.",
+        "operationId": "asks_v1_desktop_asks_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_AskAggregate_"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/desktop/sessions/{session_id}/seen": {
       "post": {
         "tags": [
@@ -3361,6 +3383,196 @@
         }
       }
     },
+    "/v1/desktop/hub/updates": {
+      "get": {
+        "tags": [
+          "Desktop hub"
+        ],
+        "summary": "Updates",
+        "description": "The status store, as the sidebar polls it. No network.",
+        "operationId": "updates_v1_desktop_hub_updates_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/desktop/hub/updates/check": {
+      "post": {
+        "tags": [
+          "Desktop hub"
+        ],
+        "summary": "Check",
+        "description": "Check now. Applies nothing, even with auto on: the user asked to *check*.",
+        "operationId": "check_v1_desktop_hub_updates_check_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HubCheck"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/desktop/hub/updates/apply": {
+      "post": {
+        "tags": [
+          "Desktop hub"
+        ],
+        "summary": "Apply",
+        "description": "Apply ONE item (click-to-update). ``dry_run`` previews without writing.",
+        "operationId": "apply_v1_desktop_hub_updates_apply_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HubApply"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/desktop/hub/updates/apply-all": {
+      "post": {
+        "tags": [
+          "Desktop hub"
+        ],
+        "summary": "Apply All",
+        "description": "Apply every item currently ``available`` (B4.4): agents first, then teams.\n\nCannot carry a conflict decision: a ``needs-review`` item is skipped, never\nforced, so a batch can never discard anyone's work.",
+        "operationId": "apply_all_v1_desktop_hub_updates_apply_all_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HubApplyAll"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/desktop/hub/updates/retry": {
+      "post": {
+        "tags": [
+          "Desktop hub"
+        ],
+        "summary": "Retry",
+        "description": "Clear the backoff for one item, then check and (per the auto setting) apply it.",
+        "operationId": "retry_v1_desktop_hub_updates_retry_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HubRetry"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/desktop/projects": {
       "get": {
         "tags": [
@@ -3414,6 +3626,85 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/desktop/projects/search": {
+      "get": {
+        "tags": [
+          "Desktop projects"
+        ],
+        "summary": "Search",
+        "description": "Ranked soft matches over the rows \u2014 see :mod:`local_operator.projects_search`.\n\nThe tiers are the session-search contract (casefold + diacritic fold,\nprefix, bounded typo on 4+ char tokens, order-independent token-AND across\nfields) with the operator's field weights on top: title/name > description\n> tags > people > updates > progress. ``q`` is bounded at 256 characters\n(the sessions precedent) and ``limit`` at 200; the answer echoes the query\nso the client can apply only the answer whose echo equals the box.\n\nAn EMPTY ``q`` is not a search: the answer is the LISTING's own order\ntruncated to ``limit`` (the same truncation every answer carries), each row\nwith score 0 and no matched fields \u2014 mirroring ``search_store``'s empty\narm, so a caller can render this answer directly for an empty box without\nre-ranking anything.",
+        "operationId": "search_v1_desktop_projects_search_get",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "default": "",
+              "title": "Q"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/desktop/projects/timeline": {
+      "get": {
+        "tags": [
+          "Desktop projects"
+        ],
+        "summary": "Timeline",
+        "description": "The ONE timeline document: every row's milestones, statuses derived.\n\nReplaces the Timeline view's per-row fan-out (one ``projects.get`` per row,\neach of which runs a runtime scan plus per-linked-session reads) with a\nsingle read: this route touches no session file and dials no runtime \u2014 the\nmilestones are already on the rows the listing parses. Status is derived\nserver-side so the client stays a painter.",
+        "operationId": "timeline_v1_desktop_projects_timeline_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse"
                 }
               }
             }
@@ -3742,6 +4033,49 @@
             "schema": {
               "type": "string",
               "title": "Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/desktop/projects/{key}/request-update": {
+      "post": {
+        "tags": [
+          "Desktop projects"
+        ],
+        "summary": "Request Update",
+        "description": "Ask the project's LINKED sessions to post a progress update.\n\nOne check-in per linked session (``project.sessions`` only \u2014 never the\ncoordination half), delivered through the shared peer-send core as a\nmailbox drop with ``wake=True``, strictly sequentially, and awaited here so\nthe sends complete even if the UI closes (design freeze). Per-session\noutcomes are three-way (``delivered``/``unconfirmed``/``failed``); a batch\nnever fails whole. A 60 s per-project cooldown refuses a repeat, with the\nsame sentence the UI shows. See :mod:`local_operator.server.request_update`\nfor the loop, the frozen message and the outcome vocabulary.\n\n``message`` is the governing sentence for the state, so the response is\nbuilt here rather than through ``reply()``: its fixed session-flavoured\nline would replace a cooldown refusal the client must read character for\ncharacter.",
+        "operationId": "request_update_v1_desktop_projects__key__request_update_post",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Key"
             }
           }
         ],
@@ -5300,6 +5634,114 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/CRUDResponse_TransferReceipt_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/desktop/approvals": {
+      "get": {
+        "tags": [
+          "Desktop approvals"
+        ],
+        "summary": "Approvals",
+        "description": "The badge read: pending and recent approval records, oldest first.",
+        "operationId": "approvals_v1_desktop_approvals_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_ApprovalList_"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/desktop/approvals/{approval_id}/approve": {
+      "post": {
+        "tags": [
+          "Desktop approvals"
+        ],
+        "summary": "Approve Approval",
+        "description": "The operator's yes: the SAME signing call the CLI's ``approve`` verb runs.",
+        "operationId": "approve_approval_v1_desktop_approvals__approval_id__approve_post",
+        "parameters": [
+          {
+            "name": "approval_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Approval Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_ApprovalDecision_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/desktop/approvals/{approval_id}/deny": {
+      "post": {
+        "tags": [
+          "Desktop approvals"
+        ],
+        "summary": "Deny Approval",
+        "description": "The operator's no \u2014 ordinary, write-once, the safe direction (\u00a72.4).",
+        "operationId": "deny_approval_v1_desktop_approvals__approval_id__deny_post",
+        "parameters": [
+          {
+            "name": "approval_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Approval Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_ApprovalDecision_"
                 }
               }
             }
@@ -9446,6 +9888,28 @@
           }
         }
       }
+    },
+    "/v1/tts/paths": {
+      "get": {
+        "tags": [
+          "Tools"
+        ],
+        "summary": "Resolve the text-to-speech path",
+        "description": "Report the cascade's rungs for this daemon, and the chosen path.\n\nUnlike the STT twin there is no model to probe: every TTS rung synthesizes\nfrom text alone, so the report depends only on which credentials are\nstored.",
+        "operationId": "tts_paths_endpoint_v1_tts_paths_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_VoicePathResolution_"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -10248,6 +10712,7 @@
         "properties": {
           "input_text": {
             "type": "string",
+            "maxLength": 10000,
             "title": "Input Text",
             "description": "The text to generate speech from."
           },
@@ -10584,14 +11049,14 @@
           "epoch": {
             "type": "string",
             "maxLength": 128,
-            "minLength": 1,
-            "title": "Epoch"
+            "title": "Epoch",
+            "default": ""
           },
           "request_id": {
             "type": "string",
             "maxLength": 128,
-            "minLength": 1,
-            "title": "Request Id"
+            "title": "Request Id",
+            "default": ""
           },
           "value": {
             "anyOf": [
@@ -10627,15 +11092,52 @@
               }
             ],
             "title": "Question Index"
+          },
+          "ask_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ask Id"
+          },
+          "answers": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Answers"
+          },
+          "decline": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decline"
           }
         },
         "additionalProperties": false,
         "type": "object",
-        "required": [
-          "epoch",
-          "request_id"
-        ],
-        "title": "Answer"
+        "title": "Answer",
+        "description": "Answer a gate, or a QUEUED ask (design ``docs/design/ask-nonblocking.md`` \u00a74).\n\nThree shapes share one body, which is why the fields are all optional and the\n``one_answer`` validator is what decides which one was sent:\n\n* ``{epoch, request_id, approved}`` \u2014 an approval;\n* ``{epoch, request_id, value, question_index}`` \u2014 the live single-slot ask\n  picker (today's shape, unchanged);\n* ``{ask_id, answers}`` or ``{ask_id, decline}`` \u2014 a QUEUED ask, addressed by\n  its own id. ``epoch`` is IGNORED for this shape and it is not sloppiness:\n  an ask outlives the owner that queued it, so requiring an epoch would\n  refuse exactly the case the feature exists for \u2014 a cold session whose asks\n  are still open. The single-winner rule that replaces the epoch check lives\n  on the ask log (the first ``answered`` event wins), so a stale screen\n  cannot settle a question twice."
       },
       "AnswerReceipt": {
         "properties": {
@@ -10649,6 +11151,113 @@
           "detail"
         ],
         "title": "AnswerReceipt"
+      },
+      "ApprovalDecision": {
+        "properties": {
+          "approval_id": {
+            "type": "string",
+            "title": "Approval Id"
+          },
+          "state": {
+            "type": "string",
+            "title": "State"
+          },
+          "signature": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Signature"
+          }
+        },
+        "type": "object",
+        "required": [
+          "approval_id",
+          "state",
+          "signature"
+        ],
+        "title": "ApprovalDecision",
+        "description": "The answer to approve/deny: the frozen decision shape."
+      },
+      "ApprovalList": {
+        "properties": {
+          "approvals": {
+            "items": {
+              "$ref": "#/components/schemas/ApprovalRow"
+            },
+            "type": "array",
+            "title": "Approvals"
+          }
+        },
+        "type": "object",
+        "required": [
+          "approvals"
+        ],
+        "title": "ApprovalList"
+      },
+      "ApprovalRow": {
+        "properties": {
+          "approval_id": {
+            "type": "string",
+            "title": "Approval Id"
+          },
+          "state": {
+            "type": "string",
+            "title": "State"
+          },
+          "what": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "What"
+          },
+          "requested_by": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Requested By"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "device": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Device"
+          },
+          "machine": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Machine"
+          }
+        },
+        "type": "object",
+        "required": [
+          "approval_id",
+          "state",
+          "what",
+          "requested_by"
+        ],
+        "title": "ApprovalRow",
+        "description": "One record in the badge/list shape (frozen keys, \u00a73.5)."
       },
       "Archive": {
         "properties": {
@@ -10729,6 +11338,22 @@
           "text"
         ],
         "title": "AsideInput"
+      },
+      "AskAggregate": {
+        "properties": {
+          "asks": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Asks"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "AskAggregate",
+        "description": "Every open or recently settled queued ask, across the operator's sessions.\n\nA LIST OF DICTS rather than a modelled row ON PURPOSE: the rows ARE the\nfrozen wire shape (``PendingAsk``) that the frontend state and the phone\nprojection already publish, and re-declaring those fields here would be a\nthird copy to keep in step with \u00a74 \u2014 the single place a wire change is\nallowed to start. Each row carries two extra keys a cross-session view needs\n(``session_id``, ``cwd``) so the caller can name the conversation without\nopening it."
       },
       "AttentionState": {
         "properties": {
@@ -10897,7 +11522,7 @@
           },
           "rungs": {
             "items": {
-              "$ref": "#/components/schemas/RungAvailability"
+              "$ref": "#/components/schemas/local_operator__stt__RungAvailability"
             },
             "type": "array",
             "title": "Rungs"
@@ -11323,6 +11948,62 @@
         ],
         "title": "CRUDResponse[Any]"
       },
+      "CRUDResponse_ApprovalDecision_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApprovalDecision"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[ApprovalDecision]"
+      },
+      "CRUDResponse_ApprovalList_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApprovalList"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[ApprovalList]"
+      },
       "CRUDResponse_ArchiveState_": {
         "properties": {
           "status": {
@@ -11350,6 +12031,34 @@
           "message"
         ],
         "title": "CRUDResponse[ArchiveState]"
+      },
+      "CRUDResponse_AskAggregate_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AskAggregate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[AskAggregate]"
       },
       "CRUDResponse_AttentionState_": {
         "properties": {
@@ -12862,6 +13571,34 @@
           "message"
         ],
         "title": "CRUDResponse[UsageReports]"
+      },
+      "CRUDResponse_VoicePathResolution_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VoicePathResolution"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[VoicePathResolution]"
       },
       "CRUDResponse_WakeListing_": {
         "properties": {
@@ -15494,6 +16231,186 @@
         ],
         "title": "HistoryPage"
       },
+      "HubApply": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$",
+            "title": "Request Id"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "agent",
+              "team"
+            ],
+            "title": "Kind"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "prefer": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "local",
+                  "remote"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prefer"
+          },
+          "acknowledge_unknown_baseline": {
+            "type": "boolean",
+            "title": "Acknowledge Unknown Baseline",
+            "default": false
+          },
+          "replace": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "remote",
+                  "local"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replace"
+          },
+          "confirm_replace": {
+            "type": "boolean",
+            "title": "Confirm Replace",
+            "default": false
+          },
+          "dry_run": {
+            "type": "boolean",
+            "title": "Dry Run",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "request_id",
+          "kind",
+          "name"
+        ],
+        "title": "HubApply"
+      },
+      "HubApplyAll": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$",
+            "title": "Request Id"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "agent",
+                  "team"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kind"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "request_id"
+        ],
+        "title": "HubApplyAll"
+      },
+      "HubCheck": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$",
+            "title": "Request Id"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "agent",
+                  "team"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kind"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "request_id"
+        ],
+        "title": "HubCheck"
+      },
+      "HubRetry": {
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$",
+            "title": "Request Id"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "agent",
+              "team"
+            ],
+            "title": "Kind"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Name"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "request_id",
+          "kind",
+          "name"
+        ],
+        "title": "HubRetry"
+      },
       "Image": {
         "properties": {
           "data_b64": {
@@ -17247,6 +18164,22 @@
             "type": "string",
             "title": "State",
             "default": "armed"
+          },
+          "unavailable_since": {
+            "type": "integer",
+            "title": "Unavailable Since",
+            "default": 0
+          },
+          "health": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Health"
           }
         },
         "additionalProperties": true,
@@ -17338,6 +18271,16 @@
           "disabled_reason": {
             "type": "string",
             "title": "Disabled Reason",
+            "default": ""
+          },
+          "unavailable_since": {
+            "type": "integer",
+            "title": "Unavailable Since",
+            "default": 0
+          },
+          "last_error": {
+            "type": "string",
+            "title": "Last Error",
             "default": ""
           }
         },
@@ -17924,6 +18867,99 @@
         "title": "PeerRow",
         "description": "One OTHER device, collapsed across every network this device shares with it.\n\nONE ROW PER DEVICE (Addendum 2, A). The relay's peer table is one entry per\nnetwork MEMBERSHIP, so a device in two networks arrived twice and the sidebar\ndrew two sections holding the same chats. Membership-per-network is the\nNetworks tab's question (:class:`NetworkTopology`), not this one."
       },
+      "PendingAskState": {
+        "properties": {
+          "ask_id": {
+            "type": "string",
+            "title": "Ask Id"
+          },
+          "created_at": {
+            "type": "integer",
+            "title": "Created At",
+            "default": 0
+          },
+          "expires_at": {
+            "type": "integer",
+            "title": "Expires At",
+            "default": 0
+          },
+          "timeout_s": {
+            "type": "integer",
+            "title": "Timeout S",
+            "default": 0
+          },
+          "urgent": {
+            "type": "boolean",
+            "title": "Urgent",
+            "default": false
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "default": "open"
+          },
+          "delivered": {
+            "type": "boolean",
+            "title": "Delivered",
+            "default": false
+          },
+          "questions": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Questions"
+          },
+          "answers": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Answers"
+          },
+          "answered_by": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Answered By"
+          },
+          "answered_at": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Answered At"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "ask_id"
+        ],
+        "title": "PendingAskState",
+        "description": "One queued ask on the wire (design ``docs/design/ask-nonblocking.md`` \u00a74).\n\nThe FROZEN contract, shared by the frontend state, the mobile projection and\nthe aggregate index \u2014 one shape, three readers, so a surface cannot be told\nabout an ask in words only it understands.\n\n``questions`` stays a list of DICTS rather than a nested model on purpose:\nthe log stores plain dicts (``asks/store.py`` is stdlib-only) and the wire\ndeliberately carries the FULL question \u2014 options, ``multi``, ``secret``,\n``persist``, ``recommended`` \u2014 because a surface that can only see an id\ncannot draw a picker and would have to re-derive the ask from the model's\ntool call. ``extra=\"allow\"`` matches the sibling gate model: a newer writer\nadding a key must not be a validation error on an older reader.\n\n``answers`` holds SECRET ANSWERS AS KEYS ONLY (``[<key>]``): the value never\nleaves the session's memory store, so it can never ride this field."
+      },
       "PendingGateState": {
         "properties": {
           "request_id": {
@@ -18339,6 +19375,11 @@
             "type": "boolean",
             "title": "Force",
             "default": false
+          },
+          "confirm_replace": {
+            "type": "boolean",
+            "title": "Confirm Replace",
+            "default": false
           }
         },
         "additionalProperties": false,
@@ -18361,7 +19402,7 @@
             "anyOf": [
               {
                 "type": "string",
-                "maxLength": 240
+                "maxLength": 2000
               },
               {
                 "type": "null"
@@ -18448,7 +19489,7 @@
             "anyOf": [
               {
                 "type": "string",
-                "maxLength": 240
+                "maxLength": 2000
               },
               {
                 "type": "null"
@@ -19033,29 +20074,6 @@
           "data"
         ],
         "title": "Result"
-      },
-      "RungAvailability": {
-        "properties": {
-          "path": {
-            "$ref": "#/components/schemas/AudioPath"
-          },
-          "available": {
-            "type": "boolean",
-            "title": "Available"
-          },
-          "reason": {
-            "type": "string",
-            "title": "Reason"
-          }
-        },
-        "type": "object",
-        "required": [
-          "path",
-          "available",
-          "reason"
-        ],
-        "title": "RungAvailability",
-        "description": "One rung's availability, with the reason a user would be shown.\n\nAvailability answers \"is there a credential/model for this rung\", NOT \"will\nthe call succeed\" \u2014 see :func:`local_operator.stt.cascade.resolve_audio_path`."
       },
       "RuntimeEntry": {
         "properties": {
@@ -20494,12 +21512,26 @@
             "description": "Additional prompt with instructions for the speech generation."
           },
           "model": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Model",
             "description": "The model to use for generation."
           },
           "voice": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Voice",
             "description": "The voice to use for generation."
           },
@@ -20537,12 +21569,10 @@
         },
         "type": "object",
         "required": [
-          "input",
-          "model",
-          "voice"
+          "input"
         ],
         "title": "SpeechRequest",
-        "description": "Request body for speech generation endpoint.\n\nAttributes:\n    input: The text to generate speech from.\n    instructions: Additional prompt with instructions for the speech generation.\n    model: The model to use for generation.\n    voice: The voice to use for generation.\n    response_format: The format of the audio response. Default: \"mp3\".\n    speed: The speed of the speech. Default: 1.0.\n    provider: The provider to use for generation. Default: \"openai\".\n    language_code: Optional ISO 639-1 language code for the synthesis."
+        "description": "Request body for speech generation endpoint.\n\nAttributes:\n    input: The text to generate speech from.\n    instructions: Additional prompt with instructions for the speech generation.\n    model: The model to use for generation. OMITTED together with ``voice``\n        selects the descriptor-driven shape: the daemon derives the voice\n        from ``speech.voice.*`` and sends a ``voice_descriptor``, which is\n        what the desktop UI's agent-less fallback posts.\n    voice: The voice to use for generation. See ``model``.\n    response_format: The format of the audio response. Default: \"mp3\".\n    speed: The speed of the speech. Default: 1.0.\n    provider: The provider to use for generation. Default: \"openai\".\n    language_code: Optional ISO 639-1 language code for the synthesis."
       },
       "Stop": {
         "properties": {
@@ -20742,6 +21772,31 @@
             ],
             "title": "Members"
           },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "aliases": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Aliases"
+          },
           "instructions": {
             "anyOf": [
               {
@@ -20830,6 +21885,31 @@
               }
             ],
             "title": "Members"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "aliases": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Aliases"
           },
           "instructions": {
             "anyOf": [
@@ -21258,6 +22338,48 @@
         ],
         "title": "VariableUpdate",
         "description": "The mutable half of a variable; the key is the path segment."
+      },
+      "VoicePath": {
+        "type": "string",
+        "enum": [
+          "provider_tts_radient",
+          "provider_tts_elevenlabs",
+          "provider_tts_openai",
+          "none"
+        ],
+        "title": "VoicePath",
+        "description": "The closed vocabulary of text-to-speech paths.\n\nValues are the wire spellings: they travel in the resolver's payloads and\nin the ``X-Radient-Speech-Path`` header a served call returns, so they are\nthe contract a surface reads rather than an internal name."
+      },
+      "VoicePathResolution": {
+        "properties": {
+          "path": {
+            "$ref": "#/components/schemas/VoicePath"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "rungs": {
+            "items": {
+              "$ref": "#/components/schemas/local_operator__tts__RungAvailability"
+            },
+            "type": "array",
+            "title": "Rungs"
+          },
+          "servable": {
+            "type": "boolean",
+            "title": "Servable"
+          }
+        },
+        "type": "object",
+        "required": [
+          "path",
+          "reason",
+          "rungs",
+          "servable"
+        ],
+        "title": "VoicePathResolution",
+        "description": "The resolver's report: the chosen path, why, and every rung's state."
       },
       "WakeCreate": {
         "properties": {
@@ -21835,6 +22957,52 @@
           "lease_seconds"
         ],
         "title": "WatchReceipt"
+      },
+      "local_operator__stt__RungAvailability": {
+        "properties": {
+          "path": {
+            "$ref": "#/components/schemas/AudioPath"
+          },
+          "available": {
+            "type": "boolean",
+            "title": "Available"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "path",
+          "available",
+          "reason"
+        ],
+        "title": "RungAvailability",
+        "description": "One rung's availability, with the reason a user would be shown.\n\nAvailability answers \"is there a credential/model for this rung\", NOT \"will\nthe call succeed\" \u2014 see :func:`local_operator.stt.cascade.resolve_audio_path`."
+      },
+      "local_operator__tts__RungAvailability": {
+        "properties": {
+          "path": {
+            "$ref": "#/components/schemas/VoicePath"
+          },
+          "available": {
+            "type": "boolean",
+            "title": "Available"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "path",
+          "available",
+          "reason"
+        ],
+        "title": "RungAvailability",
+        "description": "One rung's availability, with the reason a user would be shown.\n\nAvailability answers \"is there a credential for this rung\", NOT \"will the\ncall succeed\" \u2014 see :func:`local_operator.tts.cascade.resolve_voice_path`."
       }
     }
   },
