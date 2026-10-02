@@ -719,6 +719,21 @@ SECTIONS: tuple[Section, ...] = (
         "defaults to, how it backs off across re-attempts, and when a cycle "
         "must end. Read at the moment a wait is armed or fires.",
     ),
+    # The speak-aloud voicing dials (design note §1). One section, LIVE: the
+    # descriptor is built per request, so an edit changes the next spoken
+    # message and nothing needs a relaunch or a /new. It is ONE section rather
+    # than keys scattered into ``model``/``providers`` because they are one
+    # object — the descriptor — and a user tuning how the assistant sounds is
+    # doing one thing.
+    Section(
+        "speech",
+        "Speech voicing",
+        Scope.LIVE,
+        "How the assistant sounds when it speaks aloud. The descriptor is sent "
+        "to the hub, which maps it onto whichever voice provider serves; "
+        "fields a provider cannot express degrade with a note rather than "
+        "failing. Read on the next spoken message.",
+    ),
     Section(
         "retired",
         "Retired",
@@ -4214,6 +4229,113 @@ SETTINGS: tuple[Setting, ...] = (
         minimum=0,
         maximum=16,
         help="How many hidden waits may be pending at once for one session.",
+    ),
+    # --- speech voicing -----------------------------------------------------
+    # Every default below is a LITERAL on purpose (``settings_io`` must stay off
+    # the tts package's import path), and ``test_settings_io``'s
+    # ``_consumer_defaults`` imports the real constants and asserts they match —
+    # the pair is what stops a page from advertising a default the synthesizer
+    # does not use.
+    Setting(
+        key="speech.voice.gender",
+        path=("speech", "voice", "gender"),
+        section="speech",
+        label="Voice gender",
+        kind=Kind.ENUM,
+        # ``auto`` is today's behaviour: the daemon classifies each agent and
+        # resolves the result before sending, because the hub refuses ``auto``
+        # (it has no agent context to classify with).
+        default="auto",
+        help="auto picks per agent; a fixed value overrides the classifier.",
+        choices=(
+            Choice(
+                "auto",
+                "auto",
+                "Classify per agent (recommended).",
+            ),
+            Choice("female", "female", "Always use a female voice."),
+            Choice("male", "male", "Always use a male voice."),
+        ),
+    ),
+    Setting(
+        key="speech.voice.tone",
+        path=("speech", "voice", "tone"),
+        section="speech",
+        label="Tone",
+        kind=Kind.ENUM,
+        default="warm",
+        help="Warmth of delivery. Honoured as a voice row or emulated in instructions.",
+        choices=(
+            Choice("warm", "warm", "Friendly and approachable."),
+            Choice("neutral", "neutral", "Even and unmarked."),
+            Choice("bright", "bright", "Upbeat and energetic."),
+            Choice("calm", "calm", "Unhurried and steady."),
+            Choice("authoritative", "authoritative", "Confident and assured."),
+        ),
+    ),
+    Setting(
+        key="speech.voice.expressiveness",
+        path=("speech", "voice", "expressiveness"),
+        section="speech",
+        label="Expressiveness",
+        kind=Kind.ENUM,
+        default="medium",
+        help="How animated the delivery is. Sets ElevenLabs stability; a phrase on OpenAI.",
+        choices=(
+            Choice("low", "low", "Restrained and plain."),
+            Choice("medium", "medium", "Today's constant."),
+            Choice("high", "high", "Lively and expressive."),
+        ),
+    ),
+    Setting(
+        key="speech.voice.pace",
+        path=("speech", "voice", "pace"),
+        section="speech",
+        label="Pace",
+        kind=Kind.FLOAT,
+        default=1.0,
+        minimum=0.5,
+        maximum=2.0,
+        help="Speaking rate, 1.0 being normal. A provider whose own range is narrower clamps.",
+    ),
+    Setting(
+        key="speech.voice.language",
+        path=("speech", "voice", "language"),
+        section="speech",
+        label="Language",
+        kind=Kind.TEXT,
+        default="auto",
+        # Cleared, the key is removed and the consumer's own ``auto`` applies.
+        empty_unsets=True,
+        help="auto lets the provider detect; a two-letter code (e.g. es) pins it.",
+    ),
+    Setting(
+        key="speech.voice.accent",
+        path=("speech", "voice", "accent"),
+        section="speech",
+        label="Accent",
+        kind=Kind.TEXT,
+        default="",
+        empty_unsets=True,
+        help="A region tag such as en-GB, or empty. Reaches the provider as instructions text.",
+    ),
+    Setting(
+        key="speech.voice.instructions",
+        path=("speech", "voice", "instructions"),
+        section="speech",
+        label="Delivery instructions",
+        kind=Kind.TEXT,
+        # The pre-#1835 native-dialect guidance. NOT ``empty_unsets``: an empty
+        # value is meaningful (send no instructions of our own) and is a
+        # DIFFERENT state from the key being absent (use this default).
+        default=(
+            "Speak aloud and pay attention to potentially multilingual inputs and make sure to "
+            "use native accents for all different parts of the text, especially those that are "
+            "not english. Strive for a casual and native-sounding conversational tone. Don't "
+            "over-enunciate, consider word combinations that should have silent and natural "
+            'transitions, like "raha hoon" -> "rahoon" or "je m\'appelle" -> "jm\'appelle".'
+        ),
+        help="Free text for how speech should sound (OpenAI only). Empty sends none of our own.",
     ),
 )
 
