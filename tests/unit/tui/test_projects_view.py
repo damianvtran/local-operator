@@ -568,6 +568,13 @@ async def test_the_msg_hint_never_vanishes_while_create_is_advertised(
                     view._msg_hint.display
                 ), f"width {width}: `c create` is advertised without `m message`"
         assert saw_create, "the sweep never saw a rung carrying `c create`"
+        # F8(b): at the acceptance width the PAINTED row itself carries the
+        # hint — the flags above say which rung was chosen, this says what a
+        # reader sees.
+        await pilot.resize_terminal(100, 30)
+        await pilot.pause()
+        painted = " ".join(hint.rendered() for hint in view._hints.children if hint.display)
+        assert "message" in painted
 
 
 # -- S3b: the selection's jump, in the view that owns the cursor --------------

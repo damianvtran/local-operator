@@ -34022,7 +34022,12 @@ class OperatorApp(App[None]):
                 session=target.session_id,
                 pid_hint="a pid",
                 session_hint="a session id",
-                include_wedged=True,
+                # NO `include_wedged`: that flag is the KILL SWITCH's (the
+                # resolver's own doc: "a send never wants that"), and every
+                # other send path resolves live-only. A wedged row stays
+                # visible and warned in the card, but picking it refuses with
+                # the resolver's own sentence rather than dialling hopefully
+                # (agent review round 1, F6).
                 require_started=True,
             )
         except Exception as exc:  # noqa: BLE001 — the resolver owns its refusal
