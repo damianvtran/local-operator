@@ -396,14 +396,26 @@ from local_operator.tui.widgets.org_chart_view import (
     OrgChartView,
     OrgChartViewDismissed,
 )
+from local_operator.tui.widgets.projects_send import (
+    SEND_FAULT_NOTICE,
+    SendTarget,
+    amber_notice,
+    compose_band,
+    error_notice,
+    pending_line,
+    refusal_notice,
+    sent_line,
+)
 from local_operator.tui.widgets.projects_view import (
     ProjectsView,
     ProjectsViewAttachmentOpened,
+    ProjectsViewComposeChanged,
     ProjectsViewDismissed,
     ProjectsViewFormSubmitted,
     ProjectsViewJumpRequested,
     ProjectsViewMilestoneToggled,
     ProjectsViewRefreshRequested,
+    ProjectsViewSendRequested,
 )
 from local_operator.tui.widgets.reasoning import DEFAULT_REASONING, ReasoningBlock
 from local_operator.tui.widgets.session_picker import (
@@ -11128,6 +11140,27 @@ class OperatorApp(App[None]):
                         yield self._todo_panel
                     with ComposerDock(id="input-shell"):
                         yield Band(id="status-band")
+                        # The projects compose strip (P5a, D6): the recipient
+                        # band, and then the delivered receipt, as a REAL
+                        # one-row surface above the prompt. It replaced the
+                        # editor-placeholder incarnation, which vanished on the
+                        # first keystroke — exactly when a reader needs to see
+                        # who the message is addressed to. Hidden until the
+                        # projects page composes, so the dock keeps its height
+                        # in every other mode.
+                        #
+                        # Placed ABOVE the minimized ask bar (this branch's fold
+                        # onto a base that added it) so the bar keeps the
+                        # directly-above-the-composer seat its own note claims.
+                        # Both surfaces collapse to zero rows when unset, so the
+                        # order is visible only while a projects compose and a
+                        # queued ask are up at the same time.
+                        yield Static(
+                            "",
+                            id="projects-compose-strip",
+                            classes="projects-compose-strip",
+                            markup=False,
+                        )
                         # The MINIMIZED ask affordance, directly above the composer
                         # (design §5.0/R7). A child of the SHELL rather than of
                         # `#prompt-host`, and that placement is the whole reason it
@@ -23312,6 +23345,14 @@ class OperatorApp(App[None]):
         a task yields the pump, and the aside/shell/slash branches would
         interleave with the next message.
         """
+        # Quick-send FIRST (P5a): while the projects page is composing, the
+        # text is a message to the chosen target, NOT a slash command — a body
+        # that happens to start with `/` is still something a person typed to
+        # send (spec §7.5.2), and running it as a verb would be the page
+        # executing the reader's message.
+        projects_view = self._projects_view
+        if projects_view is not None and projects_view.submit_compose(message.text):
+            return
         if self.composer_submission_blocked(message.text, shell=message.shell):
             # Enter is normally intercepted inside Editor before it clears. Keep
             # this second boundary for mouse/programmatic submits: the event may
@@ -24699,7 +24740,13 @@ class OperatorApp(App[None]):
         if self._close_settings_view():
             return
         # The projects page sits at the same precedence, and owns no ladder of
-        # its own: Esc on it means exactly one thing — leave the page.
+        # its own: Esc on it means exactly one thing — leave the page. Its
+        # quick-send surfaces are the exception (P5a): the composer holds the
+        # caret while composing, so the key arrives HERE rather than at the
+        # page's own binding, and closing the page instead would throw away a
+        # draft the band promises to keep (`esc cancel`).
+        if self._projects_view is not None and self._projects_view.escape_surface():
+            return
         if self._close_projects_view():
             return
         if not self._allow_source_command():
@@ -33772,6 +33819,10 @@ class OperatorApp(App[None]):
         # back, almost always the composer.
         self._projects_focus_restore = self.focused
         page = ProjectsView()
+        # The manager row is injected, never derived by the page (P5a): only
+        # the app can read the registry, and a page that guessed would offer a
+        # target nobody answers to.
+        page.set_manager_target(self._projects_manager_target())
         self._projects_view = page
         self._transcript_view().display = False
         self.screen.mount(page, before=self.query_one("#input-dock"))
@@ -33816,6 +33867,7 @@ class OperatorApp(App[None]):
         # still be mounted underneath this one.
         self._sync_boot_layout_class()
         self._sync_boot_layout()
+        self._set_projects_strip(None)
         self._set_composer_read_only(False)
         restore = self._projects_focus_restore
         self._projects_focus_restore = None
@@ -33986,6 +34038,307 @@ class OperatorApp(App[None]):
             updated_at=_time.time(),
             own_session=self._own_session_id(),
         )
+
+    def _projects_manager_target(self) -> SendTarget | None:
+        """This session's MANAGER, when it has one (P5a, spec §7.5.1).
+
+        Resolved the way peer-send resolves the parent: walk the process
+        ancestry (bounded by ``_ANCESTRY_MAX_HOPS``) and take the first hop
+        that IS a live session record. In a lop team the manager is the session
+        that spawned this one, so the first recorded ancestor is it; when
+        nothing resolves, the row is ABSENT rather than dead — a row nobody
+        answers to is worse than no row at all.
+        """
+        from local_operator.mobile import peer_send
+
+        pid = os.getpid()
+        for _ in range(peer_send._ANCESTRY_MAX_HOPS):
+            parent = peer_send._parent_pid(pid)
+            if not parent or parent <= 1:
+                return None
+            pid = parent
+            record = peer_send._record_for_pid(pid)
+            if record is None:
+                continue
+            session_id = str(getattr(record, "session_id", "") or "")
+            if not session_id or session_id == self._own_session_id():
+                continue
+            name = str(getattr(record, "conversation_name", "") or "") or "manager"
+            return SendTarget(
+                kind="manager",
+                session_id=session_id,
+                label=name,
+                state="live",
+                live=True,
+            )
+        return None
+
+    def on_projects_view_compose_changed(self, message: ProjectsViewComposeChanged) -> None:
+        """Give the composer to the page, or take it back (P5a, spec §7.5.2).
+
+        The dock belongs to the APP, so compose mode is entered and left here:
+        the page reports which target it is writing to and the app is the only
+        side that can reach the composer. The recipient strip REPLACES the
+        resting placeholder, so the dock keeps one voice about what the next
+        submit will do.
+        """
+        message.stop()
+        target = message.target
+        if target is None:
+            self._set_projects_strip(None)
+            self._set_composer_read_only(True)
+            return
+        self._set_composer_read_only(False)
+        try:
+            editor = self._editor()
+        except Exception:
+            return  # a stripped harness with no composer
+        # The recipient line lives on the STRIP, not the editor placeholder
+        # (D6): the placeholder vanishes the moment the reader types, which is
+        # exactly when the strip matters most.
+        self._set_projects_strip(compose_band(target))
+        try:
+            # Focus is what makes it a composer rather than a picture of one;
+            # the caret is what the reader aims at.
+            editor.focus()
+        except Exception:
+            pass
+
+    def on_projects_view_send_requested(self, message: ProjectsViewSendRequested) -> None:
+        """Deliver one quick-send off the loop (P5a, spec §7.5.3).
+
+        The SAME core the `send` tool uses — resolution, the body validator and
+        `deliver_peer_message_outcome` — and no second send path, which is what
+        keeps the two from disagreeing about what "sent" means. The in-flight
+        statement is painted HERE, before the worker's first await: the draft
+        vanished on submit, and without this the surface said nothing at all
+        while a delivery took its seconds (UX U2).
+        """
+        message.stop()
+        view = self._projects_view
+        if view is None:
+            return
+        # N1 (UX round 2): ONE sentence, in the strip. Submit used to paint the
+        # in-flight line on the page's notice row AND in the strip, so the reader
+        # saw `sending to ◆ …` twice on two adjacent rows for the whole window.
+        # The strip is the composer's own surface and keeps it; the notice row is
+        # CLEARED instead — a previous send's verdict must never stand beside a
+        # new attempt (R2-2), and with nothing to say the footer falls back to
+        # the project detail.
+        view.show_notice("")
+        if view.composing:
+            self._set_projects_strip(pending_line(message.target))
+        self.run_worker(
+            self._quick_send_worker(view, message.target, message.text),
+            exclusive=False,
+            exit_on_error=False,
+        )
+
+    async def _quick_send_worker(self, view: ProjectsView, target: SendTarget, text: str) -> None:
+        """Resolve, validate, deliver — and report the outcome as a VALUE.
+
+        `mailbox`/`unconfirmed` are honest amber states, not failures, so the
+        receipt is read off `DeliveryOutcome` rather than derived from an
+        exception type; only `RuntimeError` means the peer REFUSED before
+        anything was minted, and only `is_error` is painted as a refusal.
+
+        The receipt's ROUTE follows the outcome class (agent review F4): a
+        DELIVERED send acknowledges in the composer's band (the submit cleared
+        the editor, so the strip is what the reader is looking at), while every
+        other outcome — amber, refused, resolver failure — keeps the DRAFT and
+        speaks on the page's notice row, so the reader can fix and retry
+        without retyping (Q5). Sentences are built from the app's human words
+        (`state_word`) with the target named the way the band named it, never
+        a lone session id (U3).
+        """
+        from local_operator.mobile import peer_send
+
+        sender: dict[str, object] = {}
+        try:
+            sender = await peer_send.peer_sender_identity_async(os.getpid())
+        except Exception:  # noqa: BLE001 — identity is advisory, never blocks
+            sender = {}
+        if not sender:
+            # The reduced-host fallback: the card still has to name somebody.
+            sender = {"session_id": self._own_session_id()}
+        body_error = peer_send.validate_peer_body(text)
+        if body_error:
+            self._quick_send_settled(view, target, body_error, text)
+            return
+        try:
+            record, _candidates, error = await asyncio.to_thread(
+                peer_send.resolve_peer_target,
+                target=None,
+                pid=None,
+                session=target.session_id,
+                pid_hint="a pid",
+                session_hint="a session id",
+                # NO `include_wedged`: that flag is the KILL SWITCH's (the
+                # resolver's own doc: "a send never wants that"), and every
+                # other send path resolves live-only. A wedged row stays
+                # visible and warned in the card, but picking it refuses with
+                # the resolver's own sentence rather than dialling hopefully
+                # (agent review round 1, F6).
+                require_started=True,
+            )
+        except Exception:  # noqa: BLE001 — the resolver owns its refusal
+            # An UNEXPECTED fault on the resolve path is this end's problem, not
+            # the reader's: interpreter text in the notice row reads as a broken
+            # app (UX round 2, U3 — measured: "cannot unpack non-iterable
+            # coroutine object"). The sentence is human; the exception goes to
+            # the log.
+            logger.warning("quick-send resolve failed", exc_info=True)
+            self._quick_send_settled(
+                view,
+                target,
+                SEND_FAULT_NOTICE,
+                text,
+            )
+            return
+        if record is None:
+            self._quick_send_settled(
+                view,
+                target,
+                error_notice(error or "the session is no longer available"),
+                text,
+            )
+            return
+        if record.pid == os.getpid():
+            self._quick_send_settled(
+                view, target, error_notice("that target is this session"), text
+            )
+            return
+        try:
+            outcome = await peer_send.deliver_peer_message_outcome(
+                record,
+                session_id=str(getattr(record, "session_id", "") or target.session_id),
+                text=text,
+                mode="mailbox",
+                wake=True,
+                sender=sender,
+            )
+        except RuntimeError as exc:
+            # A PRE-DELIVERY REFUSAL: the peer answered no, nothing was minted.
+            self._quick_send_settled(view, target, error_notice(str(exc)), text)
+            return
+        except (ConnectionError, OSError, ValueError):
+            # Unclassifiable transport fault: honest, never the confident arm —
+            # and the reader gets a sentence, not interpreter text (UX round 2,
+            # U3: the exception is logged, `str(exc)` never painted). The
+            # notice is the amber state this ends in: `delivery unconfirmed`,
+            # whose caution is the core's own (the message may have landed, so
+            # check the transcript before resending). The 150-cell sentence
+            # that used to ride the one-row notice clipped its own caution at
+            # every size (UX round 3, U2).
+            logger.warning("quick-send transport fault", exc_info=True)
+            self._quick_send_settled(
+                view,
+                target,
+                amber_notice("delivery unconfirmed"),
+                text,
+            )
+            return
+        if outcome.is_error:
+            # NOT DELIVERED (design note A.1): a refusal, with the draft kept.
+            self._quick_send_settled(view, target, refusal_notice(outcome.detail), text)
+            return
+        sentence = sent_line(target, outcome.state_word)
+        if outcome.partial:
+            # Amber: honest but incomplete. The core's own sentence for exactly
+            # these states warns against resending (`do not send it again` /
+            # `sending again may deliver it twice`), and the restored draft is
+            # the strongest available cue to press enter again — so the notice
+            # leads with the caution in the core's own words (round 2, U2) and
+            # keeps it INSIDE the row (round 3, U2: the advisory is 125-217
+            # cells, so it cannot ride the one-line notice behind a receipt).
+            caution = outcome.advisory
+            self._quick_send_settled(view, target, amber_notice(outcome.state_word), text)
+            # Nothing is lost: the sentence the notice cannot hold is the log's,
+            # at the level this app's logger actually emits at (WARNING).
+            if caution:
+                logger.warning("quick-send amber (%s): %s", outcome.state_word, caution)
+            return
+        # DELIVERED: the band acknowledges (F4); the editor was cleared by the
+        # submit, so the strip is visible and the reader is still in compose.
+        self._paint_band_receipt(sentence)
+
+    def _quick_send_settled(
+        self, view: ProjectsView, target: SendTarget, sentence: str, text: str
+    ) -> None:
+        """A send that did NOT deliver: notice row, band, and the kept draft (R2-2).
+
+        One choke point for every non-delivered exit. Each speaks on the page's
+        notice row — the surface the reader is at — hands the strip back to the
+        compose band (the band names the recipient of the NEXT attempt, and a
+        stale `sent to … delivered` standing over a refusal says the wrong
+        thing about this one), and gives the draft back so a retry costs no
+        retyping (F4/Q5). ``view.composing`` guards the band: a reader who left
+        compose mid-flight has no strip to correct.
+        """
+        view.compose_receipt(sentence)
+        if view.composing:
+            self._set_projects_strip(compose_band(target))
+        self._keep_quick_send_draft(text)
+
+    def _set_projects_strip(self, text: str | None) -> None:
+        """Show (``text``) or hide (``None``) the projects compose strip (D6).
+
+        The strip is the band's real carrier — a one-row `Static` in the
+        composer shell — so the recipient line, and the delivered receipt that
+        replaces it, survive the first keystroke; the editor placeholder they
+        used to ride could not. Best-effort: a stripped harness has no dock,
+        and compose still works without it.
+        """
+        try:
+            strip = self.query_one("#projects-compose-strip", Static)
+        except Exception:  # noqa: BLE001 — a stripped harness has no dock
+            return
+        if text:
+            strip.update(text)
+            strip.display = True
+        else:
+            strip.display = False
+
+    def _paint_band_receipt(self, sentence: str) -> None:
+        """Paint a delivered receipt in the composer's strip (agent review F4).
+
+        The strip is the composer's own statement about the send (D6), and an
+        acknowledged send is the case it carries end to end: the band said
+        `send to: …` and now says the outcome. A reader who already left
+        compose gets the line on the page's notice row instead — the strip is
+        hidden then, and the composer is read-only again.
+        """
+        view = self._projects_view
+        if view is not None and view.composing:
+            # The in-flight line on the notice row is replaced by the strip
+            # statement: leaving `sending to …` up while the strip already says
+            # `sent to …` would contradict itself a row apart.
+            view.show_notice("")
+            self._set_projects_strip(sentence)
+            return
+        if view is not None:
+            view.compose_receipt(sentence)
+
+    def _keep_quick_send_draft(self, text: str) -> None:
+        """Give an unsent draft back to the composer (the F4 draft rule / Q5).
+
+        `Editor._submit` records the body into history and clears the buffer
+        before anything resolves, so an amber or refused outcome would leave
+        the reader with an empty composer and their message only in `↑`
+        recall. This mirrors the app's existing refused-submission shape: the
+        history entry is withdrawn (the submit did not leave as a prompt) and
+        the text is loaded back INTO the buffer — unless the reader has typed
+        new text there in the meantime, in which case their newer words win
+        and the draft stays recallable from history.
+        """
+        try:
+            editor = self._editor()
+        except Exception:  # noqa: BLE001 — a stripped harness has no composer
+            return
+        if editor.text:
+            return
+        editor.forget_last_prompt(text)
+        editor.load_text(text)
 
     def on_projects_view_form_submitted(self, message: ProjectsViewFormSubmitted) -> None:
         """`ctrl+s` on the create form: write through the SAME core the tool uses.

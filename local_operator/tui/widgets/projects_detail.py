@@ -438,6 +438,11 @@ class DetailSessionRow(DetailRow):
     def activate(self) -> None:
         self._on_action("session", self._row)
 
+    @property
+    def session_payload(self) -> dict[str, Any]:
+        """The row's payload, for the quick-send target (spec §7.5.1)."""
+        return self._row
+
 
 class DetailTodoRow(DetailRow):
     """One ``todos`` line (information only, like the spec says: no actions)."""
@@ -791,6 +796,17 @@ class ProjectDetailPage(VerticalScroll):
     def selected_index(self) -> int:
         """Where the cursor sits among selectables — the refresh anchor."""
         return self._selected
+
+    def selected_session(self) -> dict[str, Any] | None:
+        """The selected row's SESSION payload, when a session row has the cursor.
+
+        `m` sends straight to this row (spec §7.5.1) — one keystroke from the
+        row you are reading to a message to it — and ``None`` means the cursor
+        is somewhere else, so the page asks for a target instead of guessing.
+        """
+        row = self._current()
+        payload = getattr(row, "session_payload", None)
+        return payload if isinstance(payload, dict) else None
 
     def selected_action_label(self) -> str | None:
         row = self._current()

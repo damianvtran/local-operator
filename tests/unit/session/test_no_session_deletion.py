@@ -171,6 +171,11 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Textual TranscriptView.remove unmounts failed preparation; no filesystem path",
     ),
     (
+        "local_operator/tui/widgets/projects_view.py::ProjectsView._close_send_picker",
+        "<path>.remove",
+        "Textual SendTargetCard.remove unmounts the widget; no filesystem path",
+    ),
+    (
         "local_operator/tui/app.py::OperatorApp._on_steer_undeliverable",
         "<path>.remove",
         "THREE list removals on the app's own bookkeeping — `_held_steer_blocks`, "
