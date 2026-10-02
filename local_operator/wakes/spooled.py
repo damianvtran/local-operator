@@ -425,6 +425,80 @@ def spool_owes_turn(session_dir: Path) -> bool:
     return False
 
 
+def spooled_wake_fires(session_dir: Path) -> tuple[int, float | None]:
+    """How many spooled wake FIRES await delivery, and the oldest write.
+
+    The count ``lop wake status`` renders. A runtime that drains for a replaced
+    build SPOOLS the wakes that fire meanwhile (``Session.retire_wakes_to_inbox``)
+    and nothing reports them until a successor boots and drains — the
+    2026-10-01/02 incident read as a live, freshly-fired session on every
+    surface while ~14 h of fires sat here. This is the read that makes them
+    visible; :func:`spool_owes_turn` beside it answers the coarser question the
+    supervisor needs ("does anything here owe a turn?").
+
+    A ROW COUNTS WHEN ``wake`` IS TRUE AND ITS ``source`` IS NOT THE OWNER, and
+    both exclusions are load-bearing rather than fussy (review round 1, R2):
+
+    * ``serving._spool_for_successor`` spools the owner's own prompt and steer
+      with ``wake=True`` on the committed-arm paths so the successor RUNS
+      them — but a user row's receipt governs, and counting one here would
+      render the operator's own queued message as a fire;
+    * a coalesced row stands for several firings (``wake_fires`` — see
+      ``session.runtime.inbox.coalesce_wake_rows``), so it counts as its own
+      ``wake_fires`` when that is a positive int, and as ONE otherwise — zero
+      would hide the row, and ``True`` is an ``int`` in Python and must not
+      read as a count (review round 1, Q1).
+
+    Same read and same never-raises contract as the predicates above: the
+    oldest ``written_at`` (epoch seconds) is tracked among the COUNTED rows —
+    ``None`` when no counted row carries a usable one. A missing file is zero
+    fires; a torn or unparseable line is skipped, because the writer may be
+    appending while this reads and a status surface must render the rest of
+    the picture rather than die on the line being written.
+    """
+    path = Path(session_dir) / INBOX_NAME
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return (0, None)
+    fires = 0
+    oldest: float | None = None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict) or not row.get(WAKE_FIELD):
+            continue
+        if str(row.get(SOURCE_FIELD) or "") == SOURCE_USER:
+            continue
+        fires += _row_fires(row.get("wake_fires"))
+        written = row.get("written_at")
+        if isinstance(written, (int, float)) and not isinstance(written, bool):
+            value = float(written)
+            if oldest is None or value < oldest:
+                oldest = value
+    return (fires, oldest)
+
+
+def _row_fires(raw: Any) -> int:
+    """``wake_fires`` off a persisted row, for the status count.
+
+    Only a POSITIVE int counts as N; everything else reads as one, the
+    uncoalesced default. Deliberately not ``inbox._fire_count``'s
+    int-coercing form: that runs on rows a runtime will deliver and may take a
+    numeric string, while this runs on raw JSON for a status line and stays
+    strictly typed — and ``isinstance(True, int)`` is true in Python, so the
+    bool check is what keeps a flag from reading as a count.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        return 1
+    return raw
+
+
 def _write(config_dir: Path, session_id: str, record: Mapping[str, Any]) -> bool:
     """Stage and replace one record. Never raises.
 
