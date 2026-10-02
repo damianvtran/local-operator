@@ -213,9 +213,12 @@ def fork_session(
     take a torn row.
 
     The parameter is a filter and the caller owns its correctness: rows NOT in
-    the set are copied verbatim, including journal rows (compaction, prune,
-    custom) that sit after a cut point, which is what keeps the milestone
-    metadata a replay needs.
+    the set are copied verbatim. That is a rule about ROWS, not about kinds —
+    the caller decides which bookkeeping rows a child must not carry (a
+    compaction written after the cut that would take the child's replay back
+    past its own cut is excluded like any conversation row), and every row it
+    leaves in is preserved byte-for-byte, including the compaction, prune and
+    custom rows whose metadata a replay needs.
 
     Raises :class:`ForkError` when the clone cannot be made (a read-only volume,
     ENOSPC, a parent that does not exist). Nothing is created in that case.

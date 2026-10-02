@@ -10,7 +10,7 @@ import pytest
 
 from local_operator.harness.types import Message, MessageRole, TextContent, ToolCall
 from local_operator.session.session import _paired_prefix
-from local_operator.session.transcript import Transcript
+from local_operator.session.transcript import ENTRY_COMPACTION, Transcript
 from local_operator.spawn.policy import fork_mode, parse_fork_args
 
 
@@ -60,7 +60,7 @@ async def test_snapshot_omits_only_incomplete_suffix_and_preserves_raw_rows(tmp_
     await parent.append_messages([question, call, partial])
     journal = await parent.append_custom("note", {"message": "keep the journal"})
     before = parent.path.read_bytes()
-    fork_id, omitted = await parent.fork_snapshot(message="try another route")
+    fork_id, omitted, _ = await parent.fork_snapshot(message="try another route")
     assert omitted
     fork = Transcript(tmp_path / "sessions" / fork_id)
     assert [m.id for m in fork.build_llm_history()] == [question.id]
@@ -74,7 +74,7 @@ async def test_snapshot_omits_only_incomplete_suffix_and_preserves_raw_rows(tmp_
     assert parent.path.read_bytes() == before
     assert _paired_prefix([question, call, partial]) == [question]
     await parent.append_message(message("tool", "second finished", tool_call_id="b"))
-    complete_id, omitted = await parent.fork_snapshot()
+    complete_id, omitted, _ = await parent.fork_snapshot()
     assert not omitted
     assert (
         tmp_path / "sessions" / complete_id / "transcript.jsonl"
@@ -112,7 +112,7 @@ async def test_snapshot_refuses_removing_compaction_anchor(tmp_path: Path) -> No
     # Refusal is temporary, not a damaged-history dead end: the original's
     # missing result completes the same anchored batch without any repair.
     await parent.append_message(message("tool", "second finished", tool_call_id="b"))
-    fork_id, omitted = await parent.fork_snapshot()
+    fork_id, omitted, _ = await parent.fork_snapshot()
     assert not omitted
     fork = Transcript(parent.directory.parent / fork_id)
     assert fork.path.read_bytes() == parent.path.read_bytes()
@@ -148,7 +148,7 @@ async def test_cut_through_an_entry_truncates_the_child_and_leaves_the_parent(
     await parent.append_messages([asked, answered, cut_at, dropped])
     before = parent.path.read_bytes()
 
-    fork_id, omitted = await parent.fork_snapshot(through_entry_id=cut_at.id)
+    fork_id, omitted, _ = await parent.fork_snapshot(through_entry_id=cut_at.id)
 
     child = Transcript(parent.directory.parent / fork_id)
     assert [item.id for item in child.build_llm_history()] == [asked.id, answered.id, cut_at.id]
@@ -168,12 +168,12 @@ async def test_cut_at_the_last_entry_is_todays_whole_copy(tmp_path: Path) -> Non
     await parent.append_messages([first, second, third])
     before = parent.path.read_bytes()
 
-    whole_id, omitted = await parent.fork_snapshot()
+    whole_id, omitted, _ = await parent.fork_snapshot()
     whole = Transcript(parent.directory.parent / whole_id)
     assert not omitted
     assert whole.path.read_bytes() == before
 
-    cut_id, cut_omitted = await parent.fork_snapshot(through_entry_id=third.id)
+    cut_id, cut_omitted, _ = await parent.fork_snapshot(through_entry_id=third.id)
     at_last = Transcript(parent.directory.parent / cut_id)
     assert not cut_omitted
     assert at_last.path.read_bytes() == before
@@ -211,17 +211,20 @@ async def test_cut_never_lands_inside_an_unpaired_batch(tmp_path: Path) -> None:
     await parent.append_messages([asked, call, partial])
 
     for target in (call.id, partial.id):
-        fork_id, omitted = await parent.fork_snapshot(through_entry_id=target)
+        fork_id, omitted, landed = await parent.fork_snapshot(through_entry_id=target)
         child = Transcript(parent.directory.parent / fork_id)
         assert [item.id for item in child.build_llm_history()] == [asked.id]
         assert omitted
+        # The named row could not be honoured exactly, and the caller is told
+        # WHERE the copy stopped instead of having to diff the child.
+        assert landed == asked.id
 
     # The cut re-evaluates against the pairing committed NOW, not a cached one,
     # and it still honours "at-or-before": once the batch is complete, a cut on
     # its LAST result carries it, while a cut on its first result does not.
     second = message("tool", "second finished", tool_call_id="b")
     await parent.append_message(second)
-    fork_id, omitted = await parent.fork_snapshot(through_entry_id=second.id)
+    fork_id, omitted, _ = await parent.fork_snapshot(through_entry_id=second.id)
     child = Transcript(parent.directory.parent / fork_id)
     assert [item.id for item in child.build_llm_history()] == [
         asked.id,
@@ -231,7 +234,7 @@ async def test_cut_never_lands_inside_an_unpaired_batch(tmp_path: Path) -> None:
     ]
     assert not omitted
 
-    fork_id, _ = await parent.fork_snapshot(through_entry_id=partial.id)
+    fork_id, _, _ = await parent.fork_snapshot(through_entry_id=partial.id)
     child = Transcript(parent.directory.parent / fork_id)
     assert [item.id for item in child.build_llm_history()] == [asked.id]
 
@@ -258,7 +261,7 @@ async def test_cut_refuses_when_it_would_drop_the_compaction_anchor(tmp_path: Pa
 
     # Inside the summary's retained prefix the same transcript cuts cleanly: the
     # refusal is about the named POINT, not about the conversation.
-    fork_id, _ = await parent.fork_snapshot(through_entry_id=after.id)
+    fork_id, _, _ = await parent.fork_snapshot(through_entry_id=after.id)
     child = Transcript(parent.directory.parent / fork_id)
     kept = [item.id for item in child.build_llm_history()]
     # The compaction marker heads the child's replay, then the summary's
@@ -266,6 +269,84 @@ async def test_cut_refuses_when_it_would_drop_the_compaction_anchor(tmp_path: Pa
     assert kept[1:] == [anchor.id, after.id]
     assert summarized.id not in kept
     assert later.id.encode() not in child.path.read_bytes()
+
+
+@pytest.mark.asyncio
+async def test_cut_inside_the_kept_window_keeps_the_summary(tmp_path: Path) -> None:
+    """The ORDINARY cut on a compacted session: the child is the compacted view.
+
+    A compaction is written after the window it preserves, so a cut anywhere in
+    that window is *before* the marker's own row while its anchor is *before* the
+    cut. Retaining the marker is what stops the child replaying the rows the
+    summary replaced — the shape round 1 shipped, where the marker was dropped
+    and the summary with it.
+    """
+    parent = Transcript(tmp_path / "sessions" / "parent000001")
+    old = message("user", "OLD SUMMARIZED CONTENT")
+    old_answer = message("assistant", "old answer")
+    kept = message("user", "KEPT1")
+    kept_answer = message("assistant", "kept answer")
+    await parent.append_messages([old, old_answer, kept, kept_answer])
+    await parent.append_compaction(
+        summary="SUMMARY-X", first_kept_entry_id=kept.id, tokens_before=100
+    )
+    newer = message("user", "NEW1")
+    await parent.append_message(newer)
+    marker = next(row.id for row in parent.entries() if row.type == ENTRY_COMPACTION)
+    before = parent.path.read_bytes()
+
+    for target, expected in ((kept.id, [kept.id]), (kept_answer.id, [kept.id, kept_answer.id])):
+        fork_id, omitted, landed = await parent.fork_snapshot(through_entry_id=target)
+        child = Transcript(parent.directory.parent / fork_id)
+        replayed = [item.id for item in child.build_llm_history()]
+        assert replayed == [marker, *expected], replayed
+        assert "SUMMARY-X" in str(child.build_llm_history())
+        # The summarised rows stay as BYTES and are never replayed — the same
+        # shape the no-target fork leaves them in.
+        assert old.id not in replayed and old_answer.id not in replayed
+        assert landed == target
+        assert omitted
+        assert newer.id.encode() not in child.path.read_bytes()
+    assert parent.path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_cut_between_two_anchors_replays_the_older_summary(tmp_path: Path) -> None:
+    """A cut inside an EARLIER compaction's window is legal, and is not refused.
+
+    Round 1 tested the NEWEST anchor alone, so this cut was refused even though
+    the older compaction's marker and anchor are both entirely before it and the
+    child replays a coherent summarized prefix. The newer marker must be dropped:
+    replay reads the LAST marker it finds, and that one's anchor is after the cut.
+    """
+    parent = Transcript(tmp_path / "sessions" / "parent000001")
+    old = message("user", "OLD1")
+    first = message("assistant", "first kept")
+    await parent.append_messages([old, first])
+    await parent.append_compaction(
+        summary="SUMMARY-1", first_kept_entry_id=first.id, tokens_before=10
+    )
+    second = message("user", "SECOND")
+    await parent.append_messages([second, message("assistant", "second answer")])
+    await parent.append_compaction(
+        summary="SUMMARY-2", first_kept_entry_id=second.id, tokens_before=10
+    )
+    third = message("user", "THIRD")
+    await parent.append_message(third)
+    older_marker, newer_marker = [
+        row.id for row in parent.entries() if row.type == ENTRY_COMPACTION
+    ]
+    before = parent.path.read_bytes()
+
+    fork_id, _, landed = await parent.fork_snapshot(through_entry_id=first.id)
+
+    child = Transcript(parent.directory.parent / fork_id)
+    assert [item.id for item in child.build_llm_history()] == [older_marker, first.id]
+    assert "SUMMARY-1" in str(child.build_llm_history())
+    assert landed == first.id
+    assert older_marker in child.path.read_text()
+    assert newer_marker not in child.path.read_text()
+    assert parent.path.read_bytes() == before
 
 
 @pytest.mark.asyncio

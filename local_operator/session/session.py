@@ -7912,10 +7912,15 @@ class Session:
         committed, so it needs no turn boundary — which is why this method is
         also the correct one for a mid-turn fork, unlike the deferred
         :meth:`request_fork` below.
+
+        ``cut_entry_id`` in the result is the row the copy actually stopped at:
+        equal to ``through_entry_id`` unless the cut landed at-or-before an
+        unfinished tool batch, and ``None`` when nothing was retained (or when no
+        cut point was named).
         """
         busy = self._is_streaming or self._turn_lock.locked()
         await self._ensure_selected_model()
-        fork_id, omitted = await self._transcript.fork_snapshot(
+        fork_id, omitted, cut_entry_id = await self._transcript.fork_snapshot(
             message=message,
             is_compacting=lambda: self._compacting,
             through_entry_id=through_entry_id,
@@ -7925,6 +7930,7 @@ class Session:
             "parent_id": self.session_id,
             "busy": busy,
             "incomplete": busy or omitted,
+            "cut_entry_id": cut_entry_id,
         }
 
     def request_fork(

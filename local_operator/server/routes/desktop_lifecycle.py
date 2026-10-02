@@ -69,7 +69,8 @@ class Fork(Input):
     The two fields are validated together so an ``at_entry`` request can never
     arrive without its target: without that, ``at_entry`` would silently fall
     back to a whole-conversation fork, the one failure shape that hands the
-    caller MORE history than it asked for.
+    caller MORE history than it asked for. A blank (or whitespace-only) id is
+    treated exactly like an absent one, since it names nothing either.
     """
 
     request_id: RequestID
@@ -85,10 +86,21 @@ class Fork(Input):
     @model_validator(mode="after")
     def target_matches_boundary(self):
         if self.boundary == "at_entry":
-            if not self.entry_id:
+            # A BLANK id names nothing, so it is the same request as an absent
+            # one — and that must not silently become a whole-conversation fork,
+            # which is why it is a 422 here rather than a fallback (the internal
+            # decoder refuses it too, for the callers that skip this model).
+            if self.entry_id is None or not self.entry_id.strip():
                 raise ValueError("Choose the message to fork from")
             return self
-        if self.entry_id:
+        if self.entry_id is not None and not self.entry_id.strip():
+            # Normalised to ABSENT, so "a blank id names nothing" is true in one
+            # place: the payload this route builds, the receipt key and the
+            # runtime's decoder all then see the absent target they expect,
+            # rather than a blank the decoder would have to refuse.
+            self.entry_id = None
+            return self
+        if self.entry_id is not None:
             raise ValueError("Forking from a message needs boundary 'at_entry'")
         return self
 
@@ -464,6 +476,15 @@ async def fork(session_id: str, body: Fork, request: Request):
                 "parent_id": session_id,
                 "boundary": body.boundary,
             }
+            # Where the copy ACTUALLY stopped, present only for a cut: equal to
+            # the requested ``entry_id`` unless the safe cut landed at-or-before
+            # an unfinished tool batch, which is the one case the child's first
+            # request cannot start at the row the caller pointed at. Additive, so
+            # a client that does not read it is unaffected; the UI half can say
+            # "started one message earlier" rather than cut somewhere silently.
+            landed = result["data"].get("cut_entry_id")
+            if landed:
+                data["cut_entry_id"] = landed
             if body.message.strip():
                 async with host(request).session(child_id) as child:
                     assert child.remote is not None
