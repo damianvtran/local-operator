@@ -224,7 +224,20 @@ _FILTER = _Filter()
 
 
 def attach() -> None:
-    """Put the filter on every root handler. Idempotent; safe to call often."""
+    """Put the filter on every root handler. Idempotent; safe to call often.
+
+    It reaches into handlers this module does not own, and that is deliberate:
+    the app's own console/file handlers are installed by
+    :mod:`local_operator.logger`, and a credential must be scrub-able from
+    wherever a record is finally written. The consequence to know about is that
+    the filter is never removed, and that :meth:`_Filter.filter` rewrites the
+    record IN PLACE (it clears ``exc_info`` after rendering the traceback into
+    ``exc_text``) — so every handler that processes the same record afterwards,
+    filtered or not, sees the rewritten one. Under pytest that includes
+    ``_pytest.logging``'s session-lived capture handlers, which is why
+    ``tests/conftest.py``'s ``restore_root_logger`` restores each root handler's
+    FILTER LIST and not just the handler list.
+    """
     for handler in logging.getLogger().handlers:
         if _FILTER not in handler.filters:
             handler.addFilter(_FILTER)
