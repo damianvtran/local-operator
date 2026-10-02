@@ -34,6 +34,7 @@ from local_operator.browser_bridge.protocol import (
     Request,
     Response,
 )
+from local_operator.tools import builtin
 
 
 class _HttpRequest:
@@ -137,6 +138,120 @@ async def test_an_advertised_method_is_forwarded(tmp_path: Path) -> None:
     assert body["ok"] is True
     assert body["result"] == {"inputs": ["#f"], "accepted": []}
     assert sent and sent[0]["params"]["selector"] == "#f"
+
+
+@pytest.mark.asyncio
+async def test_the_read_actions_are_gated_so_an_old_build_gets_a_typed_refusal(
+    tmp_path: Path,
+) -> None:
+    """A build that predates the structured reads must answer with the TYPED
+    capability_unsupported, never a bare `internal`.
+
+    What the gate prevents, stated precisely: an old extension's dispatch table
+    has no handler for `styles`, so an ungated frame reaches it and comes back
+    `internal`, which the tool can only render as "the bridge broke" — a
+    diagnosis that sends the operator to the connection instead of to the
+    update. Gating makes the same peer produce the actionable refusal.
+    """
+    service = await _live(BridgeService(root=tmp_path))
+    sent: list[dict[str, Any]] = []
+
+    async def send(payload: dict[str, Any], wire: Any = None) -> None:
+        sent.append(payload)
+
+    service.link.send = send  # type: ignore[method-assign]
+    service.link.capabilities = ["read", "snapshot", "scroll", "logs"]  # a 0.1.20 build's shape
+
+    body = await _rpc(
+        service,
+        {"id": "r-9", "method": "styles", "params": {"tab": "bridge:1:n", "selector": ".card"}},
+    )
+    assert body["ok"] is False
+    assert body["error"]["code"] == ErrorCode.CAPABILITY_UNSUPPORTED.value
+    assert body["error"]["data"]["method"] == "styles"
+    assert sent == [], "an unadvertised read action must not reach the peer"
+
+
+@pytest.mark.asyncio
+async def test_an_advertised_read_action_reaches_the_peer_with_its_params(tmp_path: Path) -> None:
+    service = await _live(BridgeService(root=tmp_path))
+    sent: list[dict[str, Any]] = []
+
+    async def send(payload: dict[str, Any], wire: Any = None) -> None:
+        sent.append(payload)
+        request = Request.model_validate(payload)
+        future = service.link.pending.get(request.id)
+        if future and not future.done():
+            future.set_result(Response(id=request.id, ok=True, result={"count": 1, "elements": []}))
+
+    service.link.send = send  # type: ignore[method-assign]
+    service.link.capabilities = ["styles", "hit_test", "ancestors"]
+
+    body = await _rpc(
+        service,
+        {"id": "r-10", "method": "hit_test", "params": {"tab": "bridge:1:n", "x": 10, "y": 20}},
+    )
+    assert body["ok"] is True
+    assert body["result"] == {"count": 1, "elements": []}
+    assert sent and sent[0]["method"] == "hit_test"
+    assert sent[0]["params"]["x"] == 10
+
+
+@pytest.mark.asyncio
+async def test_a_pre_feature_app_gets_the_typed_refusal_for_a_gated_read() -> None:
+    """M1 (UI review round): the TOOL-side pre-check is driven off the SET.
+
+    The app leg has no daemon-side gate — the frame would travel to the app
+    host, whose pre-feature dispatch has no handler and answers a bare
+    `internal`. The typed refusal has to come from the tool's own record read,
+    BEFORE any socket work, for EVERY gated method — not for the
+    download/upload name list it used to be.
+    """
+    from local_operator.browser_bridge.backend import HostCapabilities
+
+    dialed: list[tuple[str, dict[str, Any]]] = []
+
+    class ScriptedApp:
+        host = "ui"
+
+        def __init__(self, methods: tuple[str, ...]) -> None:
+            self._methods = methods
+
+        def capabilities(self) -> HostCapabilities:
+            # A pre-feature app's record carries no advertisement at all, which
+            # reads as "told us nothing" — the refusal case; a current app's
+            # list is the other row below.
+            return HostCapabilities(methods=self._methods, version="0.0.0", capabilities_known=True)
+
+        async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            dialed.append((method, params))
+            return {}
+
+    pre_feature = ScriptedApp(())
+    for action in sorted(CAPABILITY_GATED_METHODS):
+        result, problem = await builtin._bridge_call(
+            "t",
+            action,
+            {"tab": "ui:7:nonce"},
+            surface="ui:7:nonce",
+            client=pre_feature,
+        )
+        assert result is None and problem is not None, action
+        assert (problem.details or {}).get("error_code") == ErrorCode.CAPABILITY_UNSUPPORTED.value
+        # The app-leg copy names the app and the method (not the extension's
+        # update-the-extension wording the remedy map holds for the bridge).
+        assert "desktop app's browser host does not provide" in problem.text
+        assert f"'{action}'" in problem.text
+    assert dialed == [], "the refusal must come from the record, not the wire"
+
+    # The inverse, so a gate that refused everything could not pass the row
+    # above: a current app's advertisement lets the call through.
+    current = ScriptedApp(tuple(sorted(CAPABILITY_GATED_METHODS)))
+    result, problem = await builtin._bridge_call(
+        "t", "hit_test", {"x": 1.0, "y": 2.0}, client=current
+    )
+    assert problem is None and result == {}
+    assert dialed == [("hit_test", {"x": 1.0, "y": 2.0})]
 
 
 @pytest.mark.asyncio

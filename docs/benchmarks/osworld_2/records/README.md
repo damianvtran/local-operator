@@ -18,7 +18,7 @@ below are the evidence, not a re-measurement.
 
 | Record | What it is |
 | --- | --- |
-| `TRANCHE-arm-1830.md` | The primary record. Arm identity and digests, the ten-pair r1/r2 table, the binary flip rate (2 of 8 paired tasks), the cost distribution (r1 $35.26 / r2 $37.28), per-fix exercise status, every zero classified, incidents, and the parity caveats. |
+| `TRANCHE-arm-1830.md` | The primary record. Arm identity and digests, the ten-pair r1/r2 table, the binary flip rate (2 of 10 paired tasks), the cost distribution (r1 $35.26 / r2 $62.70 across all 20 episodes), per-fix exercise status, every zero classified, incidents, and the parity caveats. |
 | `COST-FORENSICS-1830-task_003.md` | Records-only analysis of task_003 r1's $14.32: 86 calls, 53.6% cache-read, `cache_write` 5,022,937 tokens, 40 re-writes. Separates that from TTL expiry, retries/fallback and image churn, and names the arm-1796 counterpart (`1796-c1-004`). |
 | `EVAL-JUDGE-FINDING-1830-task_003.md` | Why task_003's `LLM` sub-check can never pass: the driver pins `OSWORLD_EVAL_MODEL_PROVIDER=openrouter`, the vendored registry has no such backend, so `create_backend()` raises before the call and the task's bare `except Exception: return False` turns it into a silent `LLM: False`. |
 | `ZERO-CLASSIFICATION-1830-009-013.md` | Classifies two r1 zeros: task_009's evaluator read a directory-listing tab instead of the app page (**apparatus**), task_013's comparison ran and was wrong (**capability**). Also answers the general "scored but silent" question. |
@@ -34,17 +34,18 @@ flattened, because a reader who takes a number without them will over-read it:
   own words: these are ten tasks of 108, OSWorld 2.0's leaderboard figures are
   full-suite, and "a domain-selected subset can outscore a full-suite average by
   drawing easier tasks". A ten-task arm cannot carry a capability claim — its
-  binary flip rate (2 of 8 paired tasks, in opposite directions on identical
+  binary flip rate (2 of 10 paired tasks, in opposite directions on identical
   build/route/budgets) is the number that matters.
 - **The arm does not validate a fix that never fired.** Three of the seven fixes
   under test were not exercised in any record; the signal scan covered the r1
   records and was explicitly "not an exhaustive pass over all 20 episodes".
 - **The cost figures are lower bounds where noted**, because the provider
   reported a price on only a subset of calls (e.g. 001 r1 on 62 of 144).
-- **The tranche is incomplete in two places**: r2 for task_016 and task_017 were
-  never run (blocked on the disk floor), and the first 005/006/009 attempt was
-  voided by a disk stop and excluded from every aggregate. 001 r1 scored through
-  an `ENOSPC` (`record_incomplete: true`, labelled).
+- **The tranche is complete at ten pairs; two cost/attempt caveats survive.**
+  All ten r1/r2 pairs are sealed and closed (task_016 r2 and task_017 r2 were
+  the last two to seal), but the first 005/006/009 attempt was voided by a disk
+  stop and excluded from every aggregate, and 001 r1 scored through an `ENOSPC`
+  (`record_incomplete: true`, labelled).
 - **task_009's exclusion rests on the wrong page, not on the model being right.**
   The record: it proves the zero came from the evaluator reading a directory
   listing, it does **not** prove the model's answers were correct — "not
@@ -83,13 +84,32 @@ Every file above is a **byte-identical copy** of the arm's record; nothing was
 edited to arrive here. sha256 of the copies as committed:
 
 ```
-76e878efc26d13130a8edeccc4b5935414396a309696a49a0e4fbaf25acb507e  TRANCHE-arm-1830.md
+38df976549b2b7ea35f5fc499ceaba816fc307f966a39e82452729597e17e2fd  TRANCHE-arm-1830.md
 593981b4c90d1665f54c06efd5dfce3251c3fe54b39b39b4ddb16846dcf4b708  COST-FORENSICS-1830-task_003.md
 53054d1f56ba06c185cb39dfabe94dde8e7ced42b47df287bea6298b14315870  EVAL-JUDGE-FINDING-1830-task_003.md
 5cc0766509b69fea30328cf6f41b3d3187dc5736ab85964a74bd868288ff1d95  ZERO-CLASSIFICATION-1830-009-013.md
 52ea010d1f538e1b7c19d1924a819359d18d21bae5e62f09617bcc62028d7cd3  PROBE-RULE4-README.md
 98f8295e97f13ca242dc2004edbecf8668ebe579aac01de5ddb5e0839853a916  probe_rule4.py.txt
 ```
+
+**`TRANCHE-arm-1830.md` was refreshed on 2026-10-02.** The copy first committed
+with these records was taken at 8 of the 10 pairs — the last two sealed
+*afterwards* — so it carried `*(blocked on disk floor)*` on task_016 and task_017,
+a paired n of 8, `r2 $37.28` and an 18-episode total of `$72.54`. The file now in
+the tree is the tranche lane's final write, byte-identical to
+`~/worktrees/osworld/scripts/logs/TRANCHE-arm-1830.md`: all ten pairs complete,
+`r2 (n=10) $62.70`, **$97.96 over the 20 episodes**, task_016 r2 at **$24.72**
+(the arm's worst cost point) and task_017 r2 an exact repeat of r1. Its sha256
+pin above is the refreshed one, and **only this file changed** — the other five
+are the same byte-identical copies whose pins above are unmoved.
+
+Two things about the refreshed copy are worth knowing before reading it, and
+neither was edited here (the copy stays byte-identical): the record's own
+`### The read` paragraph still says "two of eight paired tasks" and "flip rate
+(2/8)", stale wording from the 8-pair draft that its summary lines and table
+supersede; and its cost line reports `median $2.25, max $24.72, total $97.96`
+with **no `p90`** — the pre-refresh copy's `p90 $14.32` is not restated for the
+20-episode set.
 
 No credential, hostname, instance id or session id appears in any of them, so
 nothing needed scrubbing. One operator-home path does appear, and is harmless:

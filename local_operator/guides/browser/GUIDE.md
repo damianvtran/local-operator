@@ -405,6 +405,8 @@ Same `browser` tool. Actions:
 - `scroll` (by direction, pixel delta, or scroll an element into view)
 - `logs` (the tab's console output and uncaught exceptions since it opened —
   for debugging web apps)
+- `styles` / `hit_test` / `ancestors` (structured reads: rects + computed
+  styles, the element stack at a point, the ancestor chain — see below)
 - `tabs` (list every live extension-owned tab — see multi-tab below)
 - `request_access` / `await_access` / `cancel_access` (queued site approval — see above)
 - `download` (save what the page offers; see below)
@@ -460,7 +462,39 @@ upload selector=e7 paths=["/Users/me/Deck.pptx", "/Users/me/notes.pdf"]
 
 Prefer `snapshot` to discover click targets (it returns stable refs), `read`
 for content, `screenshot` for visual verification, `logs` when a page
-misbehaves. Capture before/after screenshots for any visual change.
+misbehaves, and `styles`/`hit_test`/`ancestors` when a layout question needs
+numbers instead of a picture. Capture before/after screenshots for any visual
+change.
+
+### Reading layout: rects and computed styles
+
+When a page looks wrong and you need numbers rather than a picture — is the
+element off screen, clipped, zero-sized, under something else — the geometry
+reads answer with facts from the rendering itself, not from a screenshot:
+
+```text
+styles selector=".checkout-button"                    # up to 5 matches: rect + computed styles
+styles selector="#modal" properties=["background-color", "font-size"]
+hit_test x=640 y=48                                   # what is actually on top at that point
+ancestors selector=".checkout-button" depth=6         # element -> html, with clip/layout styles
+```
+
+- `styles` returns up to 5 elements matching the selector, each with its
+  rect (rounded to 2 decimals), the default computed-style set, any
+  `properties` you add (at most 20; total capped at 30), and the element's own
+  inline `--*` custom properties. `truncated` means the page had more matches
+  — narrow the selector to see the rest.
+- `hit_test` takes viewport coordinates (`x`/`y` in CSS pixels — the same
+  space mouse events use, NOT scroll deltas) and lists the element stack at
+  that point, topmost first, capped at 8. Nothing there returns the typed
+  element-not-found, which usually means the coordinate is off-viewport.
+- `ancestors` walks from the matched element up to and including `<html>`
+  (at most 16 entries, default 12), reporting the properties that cause
+  clipping, scrolling, transforms, paint containment and stacking.
+- All three need a non-cmux host — on cmux they return the typed
+  not-supported error like `scroll`/`logs` — and a selector that matches
+  nothing is the same typed element-not-found `click` uses, never an empty
+  success.
 
 ### Multi-tab lifecycle: parallel sessions each own one tab
 
@@ -491,8 +525,8 @@ agents/sessions never fight over one surface:
 - A `tab_limit` error means close YOUR finished tab if one is marked `(yours)`.
   If none is yours, another session or the user must close one; redacted
   listings do not grant permission to close it yourself.
-- cmux backend: `tabs`, `request_access`, `await_access`, `cancel_access`, `scroll`, and
-  `logs` are extension-only; on cmux they return a typed not-supported error.
+- cmux backend: `tabs`, `request_access`, `await_access`, `cancel_access`, `scroll`,
+  `logs`, `styles`, `hit_test`, and `ancestors` need a non-cmux host; on cmux they return a typed not-supported error.
 
 Before the final answer, check:
 

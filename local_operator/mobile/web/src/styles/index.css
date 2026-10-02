@@ -207,6 +207,16 @@
 	}
 }
 
+/* WIDE VIEW (issue #1870, `lib/viewport.ts`): the screens' column is capped at
+   28rem (the old `max-w-md`) so a tablet or a landscape phone does not stretch a
+   chat line across the screen. When the reader opts into the wider layout
+   viewport the cap would otherwise clip the very width they asked for (512px
+   layout, 448px column), so it lifts to the layout width. Default: unset, which
+   every `max-w-[var(--lo-column-max,28rem)]` reads as the old 28rem. */
+html[data-view="wide"] {
+	--lo-column-max: 100%;
+}
+
 html :focus-visible {
 	outline-width: 2px;
 	outline-style: var(--tw-outline-style, solid);

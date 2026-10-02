@@ -19,16 +19,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Composer } from "./components/composer";
 import type { SessionProjection, SlashCommand } from "./types";
 
-//: `delete` is the argument-taking shape (a pick FILLS `/delete ` and waits);
-//: `copy` runs outright. The split itself is pinned in composer-slash-tap.
+//: `rename` is the argument-taking shape (a pick FILLS `/rename ` and waits);
+//: `compact` runs outright. The split itself is pinned in composer-slash-tap.
 const CATALOGUE: SlashCommand[] = [
 	{
-		name: "delete",
-		description: "Delete this conversation for good; asks to confirm",
+		name: "rename",
+		description: "Rename this conversation",
 		aliases: [],
 		arguments: "optional",
 	},
-	{ name: "copy", description: "Copy an agent message", aliases: [], arguments: "none" },
+	{ name: "compact", description: "Compact the conversation context", aliases: [], arguments: "none" },
 ];
 
 vi.mock("./api", () => ({
@@ -98,33 +98,33 @@ afterEach(() => {
 describe("the slash sheet's open lifecycle", () => {
 	it("closes on a pick and stays closed while the arguments are typed (U5)", async () => {
 		const field = renderComposer();
-		fireEvent.change(field, { target: { value: "/delete" } });
-		await waitFor(() => expect(screen.getByRole("button", { name: /\/delete/ })).toBeTruthy());
+		fireEvent.change(field, { target: { value: "/rename" } });
+		await waitFor(() => expect(screen.getByRole("button", { name: /\/rename/ })).toBeTruthy());
 
-		fireEvent.click(screen.getByRole("button", { name: /\/delete/ }));
+		fireEvent.click(screen.getByRole("button", { name: /\/rename/ }));
 
-		// The fill lands mid-edit ("/delete ") and the sheet is out of the way...
-		expect(field.value).toBe("/delete ");
+		// The fill lands mid-edit ("/rename ") and the sheet is out of the way...
+		expect(field.value).toBe("/rename ");
 		expect(screen.queryByRole("dialog")).toBeNull();
 
 		// ...and stays out of the way for every keystroke of the argument —
 		// the exact sequence the audit measured re-opening the sheet over.
-		fireEvent.change(field, { target: { value: "/delete x" } });
-		expect(field.value).toBe("/delete x");
+		fireEvent.change(field, { target: { value: "/rename x" } });
+		expect(field.value).toBe("/rename x");
 		expect(screen.queryByRole("dialog")).toBeNull();
 	});
 
 	it("closes on Escape for the current draft, and typing on does not reopen it (U5)", async () => {
 		const field = renderComposer();
-		fireEvent.change(field, { target: { value: "/de" } });
-		await waitFor(() => expect(screen.getByRole("button", { name: /\/delete/ })).toBeTruthy());
+		fireEvent.change(field, { target: { value: "/re" } });
+		await waitFor(() => expect(screen.getByRole("button", { name: /\/rename/ })).toBeTruthy());
 
 		fireEvent.keyDown(document.body, { key: "Escape" });
 		await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 
 		// Still the command TOKEN (no space yet) — the strict half of the rule:
 		// once closed for this draft, typing does not bring it back.
-		fireEvent.change(field, { target: { value: "/dele" } });
+		fireEvent.change(field, { target: { value: "/rena" } });
 		expect(screen.queryByRole("dialog")).toBeNull();
 
 		// A fresh draft re-arms the trigger: cleared, then `/` again.
@@ -145,14 +145,14 @@ describe("the slash sheet's open lifecycle", () => {
 
 	it("focuses the filter when it opens from typing, so type-ahead keeps filtering (U8)", async () => {
 		const field = renderComposer();
-		fireEvent.change(field, { target: { value: "/de" } });
+		fireEvent.change(field, { target: { value: "/re" } });
 		await waitFor(() => expect(screen.getByRole("dialog")).toBeTruthy());
 
 		const filter = screen.getByPlaceholderText("filter commands") as HTMLInputElement;
 		// Seeded with the token typed so far, and the caret is IN it — not on
 		// the ✕, which moved focus out of every text field (and closes the
 		// software keyboard on a device).
-		expect(filter.value).toBe("de");
+		expect(filter.value).toBe("re");
 		expect(document.activeElement).toBe(filter);
 	});
 
@@ -167,31 +167,31 @@ describe("the slash sheet's open lifecycle", () => {
 
 		// Continuous typing happens IN the filter (U8 moved the focus there):
 		const filter = screen.getByPlaceholderText("filter commands") as HTMLInputElement;
-		fireEvent.change(filter, { target: { value: "delete" } });
+		fireEvent.change(filter, { target: { value: "rename" } });
 		// The space is the hand-off. Before batch 2 the arguments stayed in the
 		// filter, matched nothing ("no matching commands") and were discarded
 		// on dismissal while the composer kept a bare `/`.
-		fireEvent.change(filter, { target: { value: "delete " } });
+		fireEvent.change(filter, { target: { value: "rename " } });
 
 		expect(screen.queryByRole("dialog")).toBeNull();
-		expect(field.value).toBe("/delete ");
+		expect(field.value).toBe("/rename ");
 		expect(document.activeElement).toBe(field);
 
 		// And the arguments keep composing in the field the reader now holds.
-		fireEvent.change(field, { target: { value: "/delete x" } });
+		fireEvent.change(field, { target: { value: "/rename x" } });
 		expect(screen.queryByRole("dialog")).toBeNull();
 	});
 
 	it("re-arms on a draft backspaced to a bare `/` after a dismissal (MINOR 2, batch 2)", async () => {
 		const field = renderComposer();
-		fireEvent.change(field, { target: { value: "/delete" } });
-		await waitFor(() => expect(screen.getByRole("button", { name: /\/delete/ })).toBeTruthy());
-		fireEvent.click(screen.getByRole("button", { name: /\/delete/ }));
-		expect(field.value).toBe("/delete ");
+		fireEvent.change(field, { target: { value: "/rename" } });
+		await waitFor(() => expect(screen.getByRole("button", { name: /\/rename/ })).toBeTruthy());
+		fireEvent.click(screen.getByRole("button", { name: /\/rename/ }));
+		expect(field.value).toBe("/rename ");
 		expect(screen.queryByRole("dialog")).toBeNull();
 
 		// The strict half stays: a mid-token draft keeps the dismissal.
-		fireEvent.change(field, { target: { value: "/delete" } });
+		fireEvent.change(field, { target: { value: "/rename" } });
 		expect(screen.queryByRole("dialog")).toBeNull();
 
 		// A bare `/` is a fresh query — the reader is starting over — so the

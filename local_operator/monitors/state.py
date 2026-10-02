@@ -122,7 +122,16 @@ def write_snapshot(
 
 
 def remove_monitor_state(config_dir: Path, session_id: str, monitor_id: str) -> None:
-    """Drop one monitor's two files (best-effort; a cancel is a user action)."""
+    """Drop one monitor's two files (best-effort; a cancel is a user action).
+
+    Then reclaim the session's state directory when this was its last monitor.
+    Without the ``rmdir`` a cancel left the empty directory behind forever —
+    the live store carried 16 of them, one per armed-then-cancelled session —
+    because nothing else sweeps it: the cleanup path and a network carry are
+    the only other callers, and neither runs for an ordinary cancel. ``rmdir``
+    refuses a non-empty directory, so a sibling monitor's files are never at
+    risk; a failure is the expected outcome then, and is swallowed.
+    """
     for path in (
         counters_path(config_dir, session_id, monitor_id),
         snapshot_path(config_dir, session_id, monitor_id),
@@ -133,6 +142,48 @@ def remove_monitor_state(config_dir: Path, session_id: str, monitor_id: str) -> 
             continue
         except OSError:
             logger.debug("monitor state: could not remove %s", path, exc_info=True)
+    _rmdir_if_empty(state_dir(config_dir, session_id))
+
+
+def prune_empty_state_dirs(config_dir: Path) -> int:
+    """Remove every EMPTY ``state/<session_id>/`` directory; returns the count.
+
+    The sweep half of the cancel-time ``rmdir`` above: directories left by an
+    older build (or by a cancel whose ``rmdir`` raced a concurrent write) are
+    reclaimed the next time a session opens. ``rmdir`` is the whole safety
+    argument — it fails on a directory that holds anything, so this can never
+    delete a monitor's state, only the container once its last file is gone.
+    """
+    root = Path(config_dir) / "monitors" / STATE_DIRNAME
+    try:
+        children = list(root.iterdir())
+    except FileNotFoundError:
+        return 0
+    except OSError:
+        logger.debug("monitor state: could not list %s", root, exc_info=True)
+        return 0
+    removed = 0
+    for child in children:
+        if not child.is_dir():
+            continue
+        if _rmdir_if_empty(child):
+            removed += 1
+    return removed
+
+
+def _rmdir_if_empty(directory: Path) -> bool:
+    """``rmdir`` one directory, treating a non-empty one as a no-op.
+
+    Returns whether it went. The failure is not logged above ``debug``: a
+    sibling monitor still holding files makes "directory not empty" the normal
+    answer, not a fault.
+    """
+    try:
+        directory.rmdir()
+        return True
+    except OSError:
+        logger.debug("monitor state: %s not removed (not empty, or gone)", directory)
+        return False
 
 
 def remove_session_state(config_dir: Path, session_id: str) -> None:
@@ -152,15 +203,34 @@ def remove_session_state(config_dir: Path, session_id: str) -> None:
         logger.debug("monitor state: could not remove %s", directory, exc_info=True)
 
 
+def _stage_json_file(directory: Path, name: str) -> tuple[int, str]:
+    """Ensure ``directory`` exists and stage a temp file inside it.
+
+    Split out of :func:`_atomic_write_json` so the caller can retry the pair
+    as one unit after a directory that vanished mid-cancel.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    return tempfile.mkstemp(dir=directory, prefix=f".{name}.", suffix=".tmp")
+
+
 def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> Path:
     """Staged write + ``os.replace``: a reader never sees a torn file.
 
     The temp name starts with ``.`` so the index scan (and anything else
     listing the state directory) skips it.
+
+    The ``mkdir`` is retried ONCE: ``remove_monitor_state`` now rmdirs the
+    session's directory when its last monitor goes, so a cancel racing a
+    sibling's write can delete the directory between the ``mkdir`` and the
+    ``mkstemp`` — a ``FileNotFoundError`` from a directory that existed a
+    microsecond earlier, which one retry closes. (A genuine mount failure
+    still raises on the retry.)
     """
     directory = path.parent
-    directory.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=directory, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        fd, tmp = _stage_json_file(directory, path.name)
+    except FileNotFoundError:
+        fd, tmp = _stage_json_file(directory, path.name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(dict(payload), handle, separators=(",", ":"), sort_keys=True)
