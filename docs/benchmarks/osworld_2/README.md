@@ -1206,10 +1206,11 @@ It produced #542 (the frame-id contract, plus the bytecode-proof digest) and
   caveat rode on a documented −46% arm-to-arm delta that the control repeat
   put inside within-build variance (`TRANCHE-arm-1796.md`). Arm 1830 — the
   campaign's own paired read, now in the repository — is the direct
-  measurement of this: of its ten tasks, eight were run twice (r1/r2) on
-  identical build, route and budgets, and two of those eight flipped their
-  binary outcome, in opposite directions (task_013 went 0 → a full solve;
-  task_001 went a full solve → 0/777,778). In the record's own words the
+  measurement of this: of its ten tasks, all ten were run twice (r1/r2) on
+  identical build, route and budgets, and two of the ten flipped their binary
+  outcome, in opposite directions (task_013 went 0 → a full solve; task_001
+  went a full solve → 0/777,778), while task_017 repeated its r1 result
+  byte-for-byte. In the record's own words the
   arm-level result is "indistinguishable given its own spread", any single-run
   comparison against another arm or a published baseline "has no power", and a
   ten-task arm "cannot carry a capability claim"
