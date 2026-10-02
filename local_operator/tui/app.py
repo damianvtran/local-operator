@@ -34174,6 +34174,7 @@ class OperatorApp(App[None]):
             self._start_project_session_worker(
                 view.start_refusal,
                 lambda: view.start_cancelled,
+                view.show_notice,
                 message.project_id,
                 message.target,
             ),
@@ -34185,6 +34186,7 @@ class OperatorApp(App[None]):
         self,
         refuse: Any,
         view_cancelled: Any,
+        announce: Any,
         project_id: str,
         target: StartTarget,
     ) -> None:
@@ -34197,6 +34199,12 @@ class OperatorApp(App[None]):
         then belong to nobody in particular. The link follows the create because
         it needs the id the create mints, and the appeal is made before the
         hand-off so a refusal leaves the reader on the page they asked from.
+
+        ``announce`` is the PAGE's notice row (`show_notice`), the channel this
+        card's other outcomes already use: the transcript copy of the cancelled
+        receipt stays (it is the durable record), but the reader who just
+        escaped an impatient start is standing on the projects page, and a
+        sentence behind it is a sentence nobody reads (UX review round 2, U12).
 
         The kickoff prompt is the spec's sentence plus the `@project:<name>`
         reference (§7.6.3), expanded HERE through the app's own resolver: the
@@ -34262,11 +34270,17 @@ class OperatorApp(App[None]):
             return bool(view_cancelled())
 
         def receipt() -> None:
-            self._notice(
+            sentence = (
                 f"started {session_id} — it is linked to {project.name}; "
-                f"/resume {session_id} opens it",
-                "info",
+                f"/resume {session_id} opens it"
             )
+            # BOTH CHANNELS, on purpose (UX review round 2, U12): the transcript
+            # keeps the durable record, and the page the reader is looking at
+            # gets the sentence that says the start they escaped did happen —
+            # otherwise the page is byte-identical to before and pressing `s`
+            # again is the reasonable next move.
+            announce(sentence)
+            self._notice(sentence, "info")
 
         if cancelled():
             receipt()

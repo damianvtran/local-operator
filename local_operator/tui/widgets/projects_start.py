@@ -113,6 +113,16 @@ START_CARD_ROW_CAP = 8
 #: all ellipsis and the row is better off as its bare name.
 _MIN_DETAIL_CELLS = 8
 
+#: The fewest LINES of ground the rows block keeps for itself before the subject
+#: line yields. Measured: the 24-row sizes in this repo's own matrix resolve a
+#: four-line block (60×20: zero lines, 60/70/80×24: four, 100×30: ten), and at
+#: four the card painted ONE real target — `no team`, the plain row, `teams` and
+#: a single team — where the same ground held three before the plain row led it
+#: (design review round 2, D12). The sentence is the card's least load-bearing
+#: line: the title, the legend and the rows themselves already say what the card
+#: is, so below this floor the list gets the line back.
+SUBJECT_MIN_LINES = 5
+
 
 @dataclass(frozen=True)
 class StartTarget:
@@ -296,25 +306,40 @@ def subject_line(project: str) -> str:
 
 
 def visible_match(needle: str, painted: str) -> list[tuple[int, int]]:
-    """The spans of the longest PREFIX of ``needle`` that ``painted`` carries.
+    """The ONE span a row's mark wears, derived from what is PAINTED.
 
-    The mark is what says WHY a row survived the filter, so it has to be derived
-    from what the reader can actually see: a crop that cuts the match leaves the
-    re-derived subsequence with nothing to find, and the row paints unmarked
-    (QA round 2, Q4 — 10 of 51 admitted rows at 144 cells, 25 of 51 at 92, 35 of
-    51 at 66). Matching the longest painted prefix keeps the mark honest about a
-    partial match: the cells that did survive are marked, the trailing ellipsis
-    already says the rest is cropped, and the caller's crop is what puts the
-    match's first cell on screen in the first place (:func:`_fit_detail`).
+    The mark is what says WHY a row survived the filter, so it has to come from
+    the text the reader can see — and it has to be a readable mark. The first
+    version re-derived the whole needle over the painted row, which produced six
+    isolated cells per row inside word shapes (`s t aff: o r chestr a tes`) and
+    marked the NAME of a row admitted for its description (`Archi t ec t` for
+    `trade`) — design review round 2, D11.
 
-    It still goes through :func:`match_spans`, so the admission and the mark
-    keep one matcher's rules — order, case-folding, merged runs — and the only
-    difference between them is the text they are handed.
+    The rule is now: the LONGEST run of the needle that appears literally in the
+    painted text (`trade` marks `trade`, not the `t` of `technical`), falling
+    back to the first cell of a painted subsequence match when no two characters
+    of the needle sit together — so a row admitted by a scattered subsequence
+    still shows one cell rather than none (QA round 2, Q4's invariant).
+
+    Both halves go through :func:`match_spans`, so the admission and the mark
+    keep one matcher's rules (order, case-folding, merged runs).
     """
     wanted = needle.strip().casefold()
     if not wanted:
         return []
     haystack = painted.casefold()
+    best: tuple[int, int] | None = None
+    for start in range(len(wanted)):
+        for end in range(start + 2, len(wanted) + 1):
+            found = haystack.find(wanted[start:end])
+            if found < 0:
+                break
+            if best is None or end - start > best[1] - best[0]:
+                best = (found, found + (end - start))
+    if best is not None:
+        return [best]
+    # No two characters together: the longest painted PREFIX of the needle, so
+    # the mark is the first matched cell the reader can actually see.
     position = 0
     kept = 0
     for character in wanted:
@@ -327,36 +352,46 @@ def visible_match(needle: str, painted: str) -> list[tuple[int, int]]:
 
 
 def _fit_detail(detail: str, room: int, match: tuple[int, int] | None) -> str:
-    """``detail`` cropped to ``room`` cells with the admitted match PAINTED.
+    """``detail`` cropped to ``room`` cells, with the ellipsis tracking the crop.
 
-    A plain left crop was design round 1's D2 complaint read literally, and the
-    slide it introduced looked only at the match's START — so a match that began
-    just inside the crop and ended past it was painted in half and marked not at
-    all (QA round 2, Q4: `trade-offs` on the Architect row painted
-    `…with trade-o…`, and `severity` on the Reviewer row painted nothing at
-    all). The rule reads the match's whole RUN now: a window that can hold it is
-    slid to COVER it, and one that cannot still paints its FIRST matched cell,
-    so a row the filter admitted never paints unmarked.
+    THREE rules, each one measured rather than decorative:
+
+    * a detail that FITS is returned whole. The marker is a fact about the crop,
+      so painting one on an uncropped line claims a truncation that did not
+      happen — and eats a cell doing it. Visible on the plainest unfiltered
+      frame as `manager · 2 roles…`, which round 1 did not have (design review
+      round 2 / UX U11).
+    * a detail that is CUT always ends in the marker. The assembled string is no
+      longer clamped to the room: the clamp was what dropped the marker on the
+      rows that needed it most (`…ents one bounded slice of work end to en`,
+      design review round 2 / D10's second direction).
+    * the match's whole RUN is covered when the window can hold it (D2/Q4), and
+      its first matched cell is painted when it cannot.
 
     ``match`` is that run in ``detail`` coordinates — ``(first, last)`` — or
-    ``None`` for a row admitted on its label alone, where the label is painted
-    whole and needs no slide.
+    ``None`` for a row admitted on its label alone.
     """
-    if room <= 1:
+    if room <= 0:
         return ""
-    if len(detail) <= room or match is None:
-        return detail[: room - 1] + "…"
-    first, last = match
-    # A window that can hold the whole run pays for the ellipsis on each side of
-    # it; one that cannot still has to carry the run's first cell.
-    covering = last - first + 2 <= room
-    body = room - 2 if covering else room - 1
-    start = max(0, min(first - 2, len(detail) - body))
-    if covering:
-        start = max(start, min(last - body, len(detail) - body))
-    head = "…" if start > 0 else ""
-    tail = "…" if start + body < len(detail) else ""
-    return (head + detail[start : start + body] + tail)[:room]
+    if len(detail) <= room:
+        return detail
+    if room == 1:
+        return "…"
+    if match is None:
+        start = 0
+    else:
+        first, last = match
+        start = max(0, min(first - 2, len(detail) - 1))
+        if last - first + 2 <= room:
+            # It fits with a marker on each side: slide to COVER it.
+            start = max(0, min(start, last - (room - 2), len(detail) - (room - 2)))
+    head = 1 if start > 0 else 0
+    body = min(room - head, len(detail) - start)
+    marker = start + body < len(detail)
+    if marker and head + body + 1 > room:
+        # The marker takes its cell out of the BODY, never out of itself.
+        body -= 1
+    return ("…" if head else "") + detail[start : start + body] + ("…" if marker else "")
 
 
 def fit_row(label: str, detail: str, width: int, *, query: str = "") -> tuple[str, str]:
@@ -670,6 +705,22 @@ class StartPickerCard(Container):
             return NO_AGENT_NOTE if not any(row.kind == "agent" for row in self._all) else ""
         return ""
 
+    def _chrome_rows(self) -> int:
+        """The card's chrome in rows — with the SUBJECT the first line to yield.
+
+        A short ground has to choose between the sentence that says what the card
+        will do and a line of the list it is offering. Measured: 60×20 resolves
+        no rows block at all, and 60×24 / 70×24 / 80×24 resolve FOUR lines — at
+        which the painted card offered one real target (`no team`, the plain row,
+        `teams` and a single team) where the same ground held three before the
+        plain row led it (design review round 2, D12). Below
+        :data:`SUBJECT_MIN_LINES` lines the list gets the line back, exactly as
+        the empty-registry notes yield out of the same budget.
+        """
+        if self._available - START_CARD_CHROME_ROWS >= SUBJECT_MIN_LINES:
+            return START_CARD_CHROME_ROWS
+        return START_CARD_CHROME_ROWS - 1
+
     def _query(self) -> str:
         """The filter's current needle.
 
@@ -742,7 +793,7 @@ class StartPickerCard(Container):
         version) let two notes starve the plain row off a short ground, which is
         the one row the feature cannot do without.
         """
-        room = max(0, self._available - START_CARD_CHROME_ROWS)
+        room = max(0, self._available - self._chrome_rows())
         if room <= 0 or not self._rows:
             return 0, 0
         count = min(len(self._rows), START_CARD_ROW_CAP)
@@ -835,20 +886,31 @@ class StartPickerCard(Container):
             text.pad_right(width - len(text))
         if selected:
             text.stylize(self._ink("row_selected") or Style(), 0, len(text))
-        # The mark is derived over what is PAINTED, and only as much of the
-        # needle as the paint actually carries: a highlight on a cell the crop
-        # removed would be a claim about something the reader cannot see, and
-        # re-deriving the FULL needle over a cropped row finds nothing at all
-        # (QA round 2, Q4). It is COMPOSED with the row's own style (`+` gives
-        # the left side precedence, and the two set different attributes), so a
-        # matched cell on the SELECTED row keeps the selection band under the
-        # mark rather than punching a hole in it.
+        # ONE mark, and the PROSE is asked before the NAME (design review round
+        # 2, D11). The mark used to be re-derived over the whole painted row, so
+        # a needle's letters landed scattered inside words
+        # (`s t aff: o r chestr a tes`) and the same letters marked the name of a
+        # row admitted for its description (`Archi t ec t` for `trade`). Now a
+        # row wears at most ONE span — the first matched RUN, or the first
+        # matched cell when the letters are scattered — and the name is the
+        # fallback, so an admitted row still shows a reason rather than none
+        # (QA round 2, Q4's invariant).
         query = self._query()
         if query:
             ink = self._ink("match") or Style()
             under = (self._ink("row_selected") or Style()) if selected else Style()
-            for start, end in visible_match(query, text.plain):
-                text.stylize(under + ink, start, end)
+            tail_start = marker + len(label)
+            mark: tuple[int, int] | None = None
+            for region_start, region in (
+                (tail_start, text.plain[tail_start:]),
+                (marker, text.plain[marker:tail_start]),
+            ):
+                spans = visible_match(query, region)
+                if spans:
+                    mark = (region_start + spans[0][0], region_start + spans[0][1])
+                    break
+            if mark is not None:
+                text.stylize(under + ink, mark[0], mark[1])
         return text
 
     def _repaint(self) -> None:
@@ -867,6 +929,15 @@ class StartPickerCard(Container):
         # geometry the page asserts against its ground).
         body.styles.height = self._visible_lines
         body.update(self.rows_text() if self._visible_lines else Text(""))
+        # THE SUBJECT YIELDS ON A SHORT GROUND (design review round 2, D12): the
+        # line is composed either way, so this only decides whether it is spent
+        # — and the card's height follows its children, so hiding it hands the
+        # row back without any geometry of its own.
+        try:
+            subject = self.query_one("#projects-start-subject", Static)
+            subject.display = self._chrome_rows() == START_CARD_CHROME_ROWS
+        except Exception:  # noqa: BLE001 — not composed yet; on_mount paints
+            pass
         note.update(self._note_text())
         width = self.content_size.width
         rule.update(Text("─" * width if width > 0 else "", style=self._ink("dim")))

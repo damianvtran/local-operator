@@ -285,9 +285,13 @@ def test_the_card_opens_on_the_plain_row() -> None:
 def test_the_geometry_the_card_reserves_is_the_block_it_paints() -> None:
     """Chrome + painted lines is the card's whole height (P5a's D1 property)."""
     card = StartPickerCard(start_targets(teams=[_team(f"t{i}") for i in range(6)], agents=[]))
+    # A ground this short has already spent the SUBJECT line (D12), so the
+    # budget is the chrome the card is actually carrying — asserted through the
+    # same accessor the painter uses rather than a constant the rule can drift
+    # away from.
     card.set_available(START_CARD_CHROME_ROWS + 3)
-    # Three rows plus the teams header is what fits in three lines' budget.
-    assert card._visible_lines <= 3
+    assert card._chrome_rows() == START_CARD_CHROME_ROWS - 1
+    assert card._visible_lines <= card._available - card._chrome_rows()
     assert card._visible <= START_CARD_ROW_CAP
     # A ground too short for even one line leaves nothing selectable, and
     # `enter` then refuses rather than answering with an unpainted row.
@@ -295,10 +299,38 @@ def test_the_geometry_the_card_reserves_is_the_block_it_paints() -> None:
     assert card.painted_range() == range(0, 0)
 
 
+def test_a_short_ground_spends_the_subject_line_before_the_list() -> None:
+    """Design review round 2, D12: one target where the ground held three.
+
+    Measured on the real app: 60×24, 70×24 and 80×24 all resolve a FOUR-line
+    rows block, and with the subject painted that block bought `no team`, the
+    plain row, `teams` and a single team — one real target, where the same
+    ground held three before the plain row led the card. The sentence yields
+    below five lines and the card is one row shorter in exchange.
+    """
+    card = StartPickerCard(
+        start_targets(
+            teams=[_team("core"), _team("lopdev")],
+            agents=[_agent("coder", "implements one bounded slice")],
+        )
+    )
+    # The measured 24-row ground.
+    card.set_available(12)
+    assert card._chrome_rows() == START_CARD_CHROME_ROWS - 1
+    assert len(card.painted_lines()) == 5
+    assert card._visible == 3, [(line.text, line.row) for line in card.painted_lines()]
+    # A comfortable ground keeps it: 100×30 hands the card 18 rows.
+    card.set_available(18)
+    assert card._chrome_rows() == START_CARD_CHROME_ROWS
+    # 60×20 resolves no block at all either way, and the note says why (U6).
+    card.set_available(8)
+    assert card.painted_range() == range(0, 0)
+
+
 def test_the_window_slides_to_keep_the_selection_painted() -> None:
     rows = start_targets(teams=[_team(f"t{i:02d}") for i in range(8)], agents=[])
     card = StartPickerCard(rows)
-    card.set_available(START_CARD_CHROME_ROWS + 3)
+    card.set_available(START_CARD_CHROME_ROWS + 7)
     for _ in range(3):
         card.action_move(-1)
     painted = set(card.painted_range())
@@ -524,6 +556,58 @@ def test_every_admitted_row_paints_a_mark() -> None:
     assert admitted > 100, f"the sweep stopped admitting rows ({admitted})"
 
 
+def test_the_ellipsis_tracks_the_crop_in_both_directions() -> None:
+    """Design review round 2 / UX U11: the marker is a fact about the CROP.
+
+    It appeared on rows that were not cropped at all (`manager · 2 roles…`) and
+    vanished from rows that were cut mid-word (`…one bounded slice of work end
+    to en`), because the fit branch always marked and the assembled string was
+    clamped after the fact.
+    """
+    from local_operator.tui.widgets.projects_start import _fit_detail
+
+    # FIT: returned whole — no marker, and no cell spent on one.
+    assert _fit_detail("manager · 1 role", 80, None) == "manager · 1 role"
+    _label, tail = fit_row("Core", "manager · 1 role", 90)
+    assert tail == "  · manager · 1 role"
+    # CUT: the marker is there, and the row ends in it rather than mid-word.
+    assert _fit_detail("x" * 100, 10, None) == "x" * 9 + "…"
+    coder = (
+        "Implements one bounded slice of work end to end with the full toolset, "
+        "then reports what changed and how it was verified."
+    )
+    out = _fit_detail(coder, 41, (8, 114))
+    assert len(out) == 41
+    assert out.endswith("…"), out
+    assert coder[8] in out, "the match's first cell is not painted"
+
+
+def test_a_row_wears_one_mark_and_the_prose_is_what_earned_it() -> None:
+    """Design review round 2, D11: scattered cells inside words, and on names.
+
+    The mark used to be re-derived over the whole painted row, so `trade` marked
+    `Archi t ec t` as well as the word that admitted the row — six isolated cells
+    that interrupted word shapes and stopped discriminating between rows.
+    """
+    architect = (
+        "Explores a codebase and produces a design or technical proposal with trade-offs; "
+        "may draft documents but never modifies existing source."
+    )
+    card = StartPickerCard(
+        start_targets(teams=[], agents=[_agent("architect", architect)]),
+        style_for=_style_resolver(),
+    )
+    _filter(card, "trade")
+    line = next(line for line in card.painted_lines() if line.row >= 0)
+    text = card._row_text(line, False, 144)
+    marked = [span for span in text.spans if isinstance(span.style, Style) and span.style.underline]
+    assert len(marked) == 1, [text.plain[span.start : span.end] for span in marked]
+    span = marked[0]
+    assert text.plain[span.start : span.end].casefold() == "trade"
+    # The NAME carries none of it: the label starts at index 2.
+    assert span.start >= 2 + len("Architect")
+
+
 def test_a_click_on_a_section_header_selects_nothing() -> None:
     """Agent review F6: `on_click` maps through PAINTED LINES, not row indices."""
     card = StartPickerCard(
@@ -658,7 +742,10 @@ async def test_the_card_floats_over_the_canvas_without_moving_the_page(
         card = view._start_card
         assert card is not None
         assert card._available >= START_CARD_CHROME_ROWS
-        assert card._visible_lines <= max(0, card._available - START_CARD_CHROME_ROWS)
+        # Against the chrome the card is ACTUALLY carrying: at this size that is
+        # the yielded chrome (D12), and a constant here would silently disagree
+        # with the rule the painter uses.
+        assert card._visible_lines <= max(0, card._available - card._chrome_rows())
         # The card lives inside the page's own content box and the SCREEN never
         # grows a scrollbar (the mode's shipped invariant).
         assert view.canvas_size == before
@@ -956,6 +1043,12 @@ async def test_esc_while_pending_cancels_the_handoff(
         assert app._projects_view is not None, "a cancelled start closed the page"
         receipt = " ".join(text for text, _kind in notes)
         assert STARTED_ID in receipt and "/resume" in receipt
+        # ...AND ON THE PAGE THE READER IS LOOKING AT (UX review round 2, U12):
+        # the transcript copy is the durable record, but the settled page used
+        # to be byte-identical to the pre-start frame, so `s` again was the
+        # reasonable next move. The page's own notice row carries it now.
+        assert view._notice is not None
+        assert STARTED_ID in view._notice and "/resume" in view._notice
 
     project = registry.get_project_by_name("alpha")
     assert project is not None and project.sessions == [STARTED_ID]

@@ -2399,7 +2399,14 @@ Screen.settings #input-dock #prompt-chevron {
 /* The projects overlay card (S6d parity P5a quick-send; P5b's start-session
  * picker shares this class and every rule below it — one card family, one
  * ground, one geometry, and a second set of selectors is how the two would
- * come to disagree about where a card sits). It FLOATS, and that is the geometry
+ * come to disagree about where a card sits). WHAT THE FAMILY SHARES IS THE
+ * FRAME — ground, elevation, inset, selection band, filter, legend and row
+ * grammar — and what a card puts BETWEEN its title and its rule is its own:
+ * the start card carries a subject line (`starts a turn · links to <project> ·
+ * you go there`, UX U2) and the send card goes title → rule. That is the
+ * D13 decision, stated rather than left to look like drift: the alternative
+ * was inventing a subject for the shipped send card, which is P5a's surface to
+ * change, not this PR's. It FLOATS, and that is the geometry
  * fix rather than decoration (design review round 1, D1/D2): as a flow child
  * the card competed with the canvas for rows and lost its own tail at 60x24,
  * and at 80x24 painted zero target rows while `enter` still picked one. The
