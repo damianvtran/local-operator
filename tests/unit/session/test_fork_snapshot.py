@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from local_operator.harness.types import Message, MessageRole, TextContent, ToolCall
+from local_operator.session.errors import ForkRefused
 from local_operator.session.session import _paired_prefix
 from local_operator.session.transcript import ENTRY_COMPACTION, Transcript
 from local_operator.spawn.policy import fork_mode, parse_fork_args
@@ -105,8 +106,12 @@ async def test_snapshot_refuses_removing_compaction_anchor(tmp_path: Path) -> No
         tokens_before=100,
     )
     before = parent.path.read_bytes()
-    with pytest.raises(ValueError, match="compaction boundary.*unfinished tool batch"):
+    with pytest.raises(ForkRefused, match="compaction boundary.*unfinished tool batch") as refused:
         await parent.fork_snapshot()
+    # The CAUSE, not only the words: the desktop route picks the sentence it
+    # renders from this token, so the right sentence with no reason would still
+    # mis-render on the wire.
+    assert refused.value.reason == "unfinished_batch"
     assert parent.path.read_bytes() == before
     assert len(list(parent.directory.parent.iterdir())) == 1
     # Refusal is temporary, not a damaged-history dead end: the original's
@@ -128,10 +133,36 @@ async def test_snapshot_refuses_malformed_interior_and_active_compaction(tmp_pat
             message("user", "interleaved input"),
         ]
     )
-    with pytest.raises(ValueError, match="incomplete tool calls before later"):
+    # THE STRICT PAIRING REFUSAL IS A FORK REFUSAL, deliberately re-pinned here:
+    # it comes from ``session._paired_prefix``'s strict arm, whose only caller is
+    # this snapshot. Left bare it crossed the attach transport with no state, so a
+    # malformed interior reached the operator as the 503 owner-outage sentence
+    # ("reconnect and reconcile") — advice that cannot change a broken pairing,
+    # under a status that claimed the owner was never reached. It is a
+    # ``ValueError`` subclass, so the previous assertion would still pass; pinning
+    # the type is what makes the classification the contract.
+    with pytest.raises(ForkRefused, match="incomplete tool calls before later") as malformed:
         await parent.fork_snapshot()
-    with pytest.raises(ValueError, match="history is being rewritten"):
+    assert malformed.value.reason == "incomplete_tool_calls"
+    with pytest.raises(ForkRefused, match="history is being rewritten") as refused:
         await parent.fork_snapshot(is_compacting=lambda: True)
+    assert refused.value.reason == "history_rewriting"
+    assert len(list((tmp_path / "sessions").iterdir())) == 1
+
+
+@pytest.mark.asyncio
+async def test_snapshot_refuses_an_unmatched_tool_result(tmp_path: Path) -> None:
+    """The pairing check's OTHER arm, and its own token and sentence.
+
+    A result with no call is the mirror of the arm above, so it must not be
+    folded into it: the two publish different sentences, and a surface that
+    showed the wrong one would describe the opposite fault.
+    """
+    parent = Transcript(tmp_path / "sessions" / "parent000001")
+    await parent.append_messages([message("tool", "orphan result", tool_call_id="ghost")])
+    with pytest.raises(ForkRefused, match="unmatched tool result") as refused:
+        await parent.fork_snapshot()
+    assert refused.value.reason == "unmatched_tool_result"
     assert len(list((tmp_path / "sessions").iterdir())) == 1
 
 
@@ -187,8 +218,9 @@ async def test_cut_refuses_an_entry_that_is_not_in_this_conversation(tmp_path: P
     await parent.append_message(message("user", "hello"))
     before = parent.path.read_bytes()
 
-    with pytest.raises(ValueError, match="not part of this conversation"):
+    with pytest.raises(ForkRefused, match="not part of this conversation") as refused:
         await parent.fork_snapshot(through_entry_id="ffffffffffffffff")
+    assert refused.value.reason == "entry_unknown"
 
     assert parent.path.read_bytes() == before
     assert len(list((tmp_path / "sessions").iterdir())) == 1
@@ -254,8 +286,9 @@ async def test_cut_refuses_when_it_would_drop_the_compaction_anchor(tmp_path: Pa
     await parent.append_messages([after, later])
     before = parent.path.read_bytes()
 
-    with pytest.raises(ValueError, match="before the conversation's last summary"):
+    with pytest.raises(ForkRefused, match="before the conversation's last summary") as refused:
         await parent.fork_snapshot(through_entry_id=summarized.id)
+    assert refused.value.reason == "before_anchor"
     assert parent.path.read_bytes() == before
     assert len(list((tmp_path / "sessions").iterdir())) == 1
 

@@ -6419,9 +6419,22 @@ class ServingSessionHandle(SessionHandle):
             )
         if command == "fork":
             from local_operator.fork import fork_session
+            from local_operator.session.errors import ForkRefused
 
             if getattr(session, "_compacting", False):
-                raise ValueError("Wait for compaction to finish before forking")
+                # A TYPED refusal, not a bare ``ValueError``: unclassified it left
+                # this process as an untagged error frame, which the attach client
+                # re-raises as a plain ``RuntimeError`` and the desktop route's
+                # ladder can only read as an unreachable owner — a 503 whose
+                # remedy is "reconnect and reconcile", for a request the owner
+                # answered promptly and deliberately (measured on PR #1917). The
+                # reason token is what lets that route show this sentence.
+                #
+                # ONE OF TWO COMPACTION GUARDS, and it keeps its own reason and
+                # its own sentence: it fires for BOTH fork arms and its copy is
+                # published today, while ``Transcript.fork_snapshot``'s inner
+                # ``is_compacting`` check has its own wording.
+                raise ForkRefused(reason="compaction_pending")
             through_entry_id = _fork_entry_target(args)
             if through_entry_id is not None:
                 # A NAMED cut point does NOT wait for a boundary, and that is a
@@ -6459,13 +6472,31 @@ class ServingSessionHandle(SessionHandle):
             store = _fork_store(session)
             if getattr(session, "is_streaming", False):
                 if session.has_pending_fork():
-                    raise ValueError("A fork is already waiting for a safe boundary")
+                    # A SECOND boundary fork during a turn is an ordinary gesture
+                    # (a double-click, or two windows), and its refusal used to
+                    # cross as a bare ``ValueError`` — arriving as the owner-outage
+                    # 503, which is exactly the wrong answer this seam exists to
+                    # stop giving. Its own sentence, unchanged.
+                    raise ForkRefused(reason="fork_pending")
                 settled: asyncio.Future[str] = self._loop.create_future()
 
                 def complete(fork_id: str, error: str) -> None:
                     if not settled.done():
                         if error:
-                            settled.set_exception(RuntimeError("The fork could not be created"))
+                            # THE CAUSE, not a fabricated constant. ``error`` is what
+                            # ``Session._drain_pending_fork`` handed back — a
+                            # ``ForkError``'s own sentence, or an unexpected
+                            # failure's — and replacing it with one vetted line
+                            # threw away the only diagnosis the operator had.
+                            # Still a ``RuntimeError`` rather than ``ForkRefused``:
+                            # a clone that FAILED is not a refusal of the gesture
+                            # (nothing about this conversation's state said no), so
+                            # it must not claim to be one; the route's owner-outage
+                            # answer is unchanged either way, because the ladder's
+                            # ``RuntimeError`` arm carries the vetted sentence.
+                            settled.set_exception(
+                                RuntimeError(f"The fork could not be created: {error}")
+                            )
                         else:
                             settled.set_result(fork_id)
 
