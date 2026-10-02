@@ -1978,6 +1978,17 @@ class ServingSessionHandle(SessionHandle):
         of the abandon, so the kept runtime receives them either way; the restore
         above is about every fire after this release, which is the half a release
         has to make true.
+
+        AND THE RETRIED DEPARTURE RE-ARMS NOTHING, which is ordinary-exit
+        behaviour rather than a gap (agent review round 1, finding 4): it exits
+        through ``_drain_for``'s success arm, which commits via ``begin_retire``
+        — a rung that never diverts wakes — so a fire in the window between
+        this release and that exit is handled as it is around any ordinary idle
+        exit: the pump persists the occurrence it advances, ``_deliver_wake``
+        runs it, and a final fire's re-arm rides ``_hand_wakes_to_successor``
+        at the exit. Spooling that window again would mean re-latching
+        ``begin_drain``, which ``_abandon_move`` records against: a second
+        retire discards the ``_wake_rearms`` the drain already swallowed.
         """
         if not getattr(self, "_draining", False):
             return False

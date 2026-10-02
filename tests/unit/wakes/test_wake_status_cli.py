@@ -493,13 +493,19 @@ def test_status_says_an_undelivered_fire_is_still_owed(
 def test_status_reports_spooled_wake_fires_awaiting_delivery(
     tmp_path: Path, running_supervisor, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The surface the spooled fires never had.
+    """The surface the spooled fires never had, counting FIRES the way a
+    successor runs them.
 
     A runtime that drains for a replaced build spools the wakes that fire
     meanwhile (``Session.retire_wakes_to_inbox``); if the move is then
     abandoned with the hook still installed, every later fire lands there too.
     Nothing reported it — measured 2026-10-01/02: ~14 h of fires on one desk
     session while every other line read as a healthy, freshly-fired wake.
+
+    The count is FIRES, not rows: the coalesced row below stands for four
+    (review round 1, Q1), and the owner's own queued prompt is not a fire at
+    all (review round 1, R2) — while a quiet note and a torn line stay
+    skipped.
     """
     from local_operator.cli import wake_command
     from local_operator.session.runtime.inbox import InboxLine, append_inbox
@@ -523,10 +529,30 @@ def test_status_reports_spooled_wake_fires_awaiting_delivery(
                 wake_id="w1",
             ),
         )
-    # A quiet note OLDER than every fire, and a torn line: neither is a spooled
-    # fire, so neither may be counted — the note asks for no turn ("read this
-    # on your next turn" is its whole contract), and the torn line is a writer
-    # mid-append, which a status read must skip rather than die on.
+    # One coalesced row standing for four firings: rows are not the unit.
+    assert append_inbox(
+        session,
+        InboxLine(
+            text="fire x4 (coalesced)",
+            sender={},
+            wake=True,
+            written_at=written + 10,
+            wake_id="w1",
+            wake_fires=4,
+        ),
+    )
+    # The OWNER's own queued prompt (``wake=True`` by design — the successor
+    # RUNS it) and an even older quiet note: neither is a spooled fire.
+    assert append_inbox(
+        session,
+        InboxLine(
+            text="typed while the runtime was leaving",
+            sender={},
+            wake=True,
+            source="user",
+            written_at=written - 20_000,
+        ),
+    )
     assert append_inbox(
         session, InboxLine(text="a quiet note", sender={}, written_at=written - 10_000)
     )
@@ -538,13 +564,13 @@ def test_status_reports_spooled_wake_fires_awaiting_delivery(
     out = capsys.readouterr().out
     assert "spooled:" in out, f"the spooled fires were not reported: {out}"
     line = _status_block(out, "spooled:")
-    assert "5 fire(s) in 1 session(s)" in line, line
+    assert "9 wakes in 1 session" in line, line
     assert "awaiting delivery" in line, line
     assert "(oldest 13h — statussess07)" in line, line
 
     assert wake_command(_args(json=True)) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["spooled"]["fires"] == 5
+    assert payload["spooled"]["fires"] == 9
     assert payload["spooled"]["sessions"] == 1
     assert payload["spooled"]["oldest_session_id"] == "statussess07"
     assert payload["spooled"]["oldest_age_s"] >= 13 * 3600
@@ -553,12 +579,13 @@ def test_status_reports_spooled_wake_fires_awaiting_delivery(
 def test_status_does_not_report_spooled_wakes_when_there_are_none(
     tmp_path: Path, running_supervisor, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Only wake rows count, and a missing inbox is none.
+    """Only counted wake rows count, and a missing inbox is none.
 
-    The clause is ABSENT rather than "0 fire(s)": this surface prints a line
+    The clause is ABSENT rather than "0 wakes": this surface prints a line
     only for a state that EXISTS, and a zero line is the reassurance shape that
     kept the incident invisible. The guard matters as much as the positive
-    test — "spooled:" appearing for a quiet note would page an operator about
+    test — "spooled:" appearing for a quiet note or for the owner's own queued
+    prompt (which carries ``wake=True`` by design) would page an operator about
     mail that is working as designed.
     """
     from local_operator.cli import wake_command
@@ -574,8 +601,18 @@ def test_status_does_not_report_spooled_wakes_when_there_are_none(
         tmp_path / "sessions" / "statussess08",
         InboxLine(text="a quiet note", sender={}, written_at=time.time()),
     )
+    assert append_inbox(
+        tmp_path / "sessions" / "statussess08",
+        InboxLine(
+            text="typed while the runtime was leaving",
+            sender={},
+            wake=True,
+            source="user",
+            written_at=time.time(),
+        ),
+    )
     # A second wake-carrying session with no inbox file at all: the missing
-    # file is zero rows, not an error.
+    # file is zero fires, not an error.
     _arm(
         tmp_path,
         "statussess09",
@@ -586,6 +623,90 @@ def test_status_does_not_report_spooled_wakes_when_there_are_none(
     assert wake_command(_args()) == 0
     out = capsys.readouterr().out
     assert "spooled:" not in out, out
+
+
+def test_status_renders_single_counts_in_the_singular(
+    tmp_path: Path, running_supervisor, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`1 wake in 1 session` — the recovering case, not `1 wake(s) in 1 session(s)`.
+
+    One session owing one fire is what a recovering install shows, and the
+    pseudo-plural read as a glitch (design round 1, D1). The shared
+    ``info.render.plural`` does the pluralising, like every other count on the
+    surface.
+    """
+    from local_operator.cli import wake_command
+    from local_operator.session.runtime.inbox import InboxLine, append_inbox
+
+    _arm(
+        tmp_path,
+        "statussess10",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "standup", "next_due_at": NOW_MS + 3_600_000}],
+    )
+    written = time.time() - (2 * 3600 + 600)
+    assert append_inbox(
+        tmp_path / "sessions" / "statussess10",
+        InboxLine(text="the one fire", sender={}, wake=True, written_at=written, wake_id="w1"),
+    )
+
+    assert wake_command(_args()) == 0
+
+    line = _status_block(capsys.readouterr().out, "spooled:")
+    assert "1 wake in 1 session" in line, line
+    assert "wakes" not in line, line
+    assert "sessions" not in line, line
+    assert "(oldest 2h — statussess10)" in line, line
+
+
+def test_the_spooled_parenthetical_wraps_whole(
+    tmp_path: Path, running_supervisor, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """D2: when the sentence wraps, the parenthetical must move to line 2 WHOLE.
+
+    Before the fix, the break landed after the em-dash and orphaned the session
+    id onto the next line, leaving an unfinished-seeming dash. Probed at 78
+    columns: with the fixed copy and a 12-character id the line fits 80 exactly,
+    so the wrap this pins is one width below — the property is the wrap POINT,
+    not a particular width. The fix rides ``_wrap_status``'s sentinel discipline
+    via ``_one_token``: the span is one token, while the space that separates it
+    from the sentence stays breakable.
+    """
+    import shutil
+
+    from local_operator.cli import wake_command
+    from local_operator.session.runtime.inbox import InboxLine, append_inbox
+
+    monkeypatch.setattr(
+        shutil, "get_terminal_size", lambda _default=None: os.terminal_size((78, 24))
+    )
+    _arm(
+        tmp_path,
+        "statussess11",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "standup", "next_due_at": NOW_MS + 3_600_000}],
+    )
+    session = tmp_path / "sessions" / "statussess11"
+    written = time.time() - (13 * 3600 + 600)
+    for index in range(5):
+        assert append_inbox(
+            session,
+            InboxLine(
+                text=f"fire {index}", sender={}, wake=True, written_at=written + index, wake_id="w1"
+            ),
+        )
+
+    assert wake_command(_args()) == 0
+
+    out = capsys.readouterr().out
+    physical = [line for line in out.splitlines() if "oldest" in line]
+    assert physical, out
+    assert "(oldest 13h — statussess11)" in physical[0], physical[0]
+    assert not physical[0].rstrip().endswith("—"), physical[0]
+    first = [line for line in out.splitlines() if line.startswith("spooled:")]
+    assert first and "oldest" not in first[0], first
+    for line in out.splitlines():
+        assert len(line) <= 78, f"line exceeds the terminal width ({len(line)}): {line!r}"
 
 
 def test_list_marks_an_owed_fire_as_retrying(

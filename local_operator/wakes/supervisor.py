@@ -288,15 +288,22 @@ _SKIP_HEARTBEAT_S = 3600.0
 #: How overdue a LIVE-owned wake must be before the live skip escalates from
 #: INFO to WARNING.
 #:
-#: A live runtime owns its session's wakes entirely — its own scheduler fires
-#: them within seconds of due — so the ordinary lateness that skip reports is
-#: small. Six hours is deliberately an order of magnitude beyond any legitimate
-#: lateness (the repo's measured silent steps top out around 45 minutes, one
-#: long turn), because a figure this large is not a busy session being late: it
-#: is a delivery path that has stopped delivering while the supervisor reports
-#: "a live runtime owns it" every slice. Measured 2026-10-01/02: a session
-#: whose drained wake spool was never restored lost ~14 h of fires, and this
-#: INFO line was the only trace.
+#: THIS BOUNDS ONE SHAPE, and the constant is justified by exactly it: a live
+#: record whose due clock RUNS AWAY — the runtime answers "live" on every
+#: pass while its own scheduler has stopped firing, so the same wake is found
+#: further overdue each sweep. Multi-hour live-overdue rows do occur on this
+#: fleet (measured 2026-10-02 05:33, ``wake-supervisor.log``: live skips at
+#: 190241.4 s for 835fbcafdc27, 37955.2 s for 0fa5d6f67b49, 21858.4 s for
+#: abd67a6355c1), and six hours is an order of magnitude beyond any legitimate
+#: lateness (the repo's measured silent steps top out around 45 minutes — one
+#: long turn), so a figure this large is a stopped scheduler, not a busy one.
+#:
+#: IT DOES NOT BOUND THE ADVANCING LEAK, and that sentence is load-bearing:
+#: when a spooling runtime keeps RE-ADVANCING and persisting each occurrence
+#: (the 2026-10-01/02 desk session), every skip stays small — its own worst
+#: was 3156.2 s — and the index row it leaves is the NEXT occurrence, not an
+#: overdue one. That shape's surface is the spooled-fires count in ``lop wake
+#: status``, not this bound.
 LIVE_STALL_WARN_S = 6 * 3600.0
 
 
@@ -905,9 +912,10 @@ async def _engage_one(
             #
             # PAST LIVE_STALL_WARN_S THE LINE ESCALATES, under its own throttle
             # key: a live session fires its own wakes within seconds of due, so
-            # an overdue figure this old is not lateness — it is the delivery
-            # path having stopped while every surface still reads "live" (see
-            # the constant).
+            # an overdue figure this old is not lateness — it is the runtime's
+            # scheduler having stopped firing while its record still answers
+            # "live" (the constant names the shape this does and does not
+            # cover).
             if overdue_s >= LIVE_STALL_WARN_S:
                 if _skip_log.should_log(session_id, "live-stalled"):
                     logger.warning(

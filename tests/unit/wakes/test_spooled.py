@@ -185,6 +185,80 @@ def test_a_malformed_spool_row_is_skipped_rather_than_fatal(tmp_path: Path) -> N
     assert spooled.spool_owes_turn(directory) is True
 
 
+# -- what the status count reports ----------------------------------------------
+
+
+def test_the_spooled_fire_count_sums_a_coalesced_row(tmp_path: Path) -> None:
+    """A row the deferral path merged STANDS FOR N firings, so it counts N.
+
+    ``inbox.coalesce_wake_rows`` folds repeated firings of one schedule into a
+    single row carrying ``wake_fires`` (the successor delivers it as ONE turn
+    for N firings). Counting rows left QA round 1's case reading two for
+    21 represented fires — one merged row of 20 beside one ordinary row.
+    """
+    config_dir = tmp_path / "store"
+    directory = _session(
+        config_dir,
+        "sess-fires",
+        rows=[
+            {**_wake_row(), "wake_id": "w1", "wake_fires": 20},
+            {**_wake_row(), "wake_id": "w1"},
+        ],
+    )
+    assert spooled.spooled_wake_fires(directory) == (21, 1.0)
+
+
+def test_an_owners_own_row_is_not_a_spooled_fire(tmp_path: Path) -> None:
+    """``wake=True`` on a ``source="user"`` row is a queued MESSAGE, not a fire.
+
+    ``serving._spool_for_successor`` stamps the owner's prompt and steer with
+    ``wake=True`` on the committed-arm paths, because the successor is their
+    runtime and will RUN them — but the receipt governs, and rendering the
+    operator's own queued message as a fire is review round 1, R2's case. The
+    oldest write follows the counted rows, so a user row older than every fire
+    cannot set the age either.
+    """
+    config_dir = tmp_path / "store"
+    directory = _session(
+        config_dir,
+        "sess-user",
+        rows=[
+            {
+                "text": "typed into the moving session",
+                "wake": True,
+                "source": "user",
+                "written_at": 0.5,
+            },
+            _wake_row(),
+        ],
+    )
+    assert spooled.spooled_wake_fires(directory) == (1, 1.0)
+
+
+def test_a_bad_fire_count_reads_as_one_fire(tmp_path: Path) -> None:
+    """``wake_fires`` is untrusted row input: only a positive int reads as N.
+
+    A zero would HIDE the row, and ``isinstance(True, int)`` is true in Python,
+    so a boolean flag must not read as a count either — every unusable value is
+    ONE fire, the uncoalesced default (review round 1, Q1).
+    """
+    config_dir = tmp_path / "store"
+    cases: dict[str, object] = {
+        "zero": 0,
+        "true": True,
+        "false": False,
+        "negative": -2,
+        "string": "7",
+        "absent": None,  # sentinel: no wake_fires key at all
+    }
+    for name, value in cases.items():
+        row = _wake_row()
+        if value is not None:
+            row["wake_fires"] = value
+        _session(config_dir, f"sess-{name}", rows=[row])
+        assert spooled.spooled_wake_fires(config_dir / "sessions" / f"sess-{name}") == (1, 1.0)
+
+
 # -- the supervisor's two halves ------------------------------------------------
 
 

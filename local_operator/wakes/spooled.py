@@ -426,7 +426,7 @@ def spool_owes_turn(session_dir: Path) -> bool:
 
 
 def spooled_wake_fires(session_dir: Path) -> tuple[int, float | None]:
-    """How many wake rows this spool holds undelivered, and the oldest write.
+    """How many spooled wake FIRES await delivery, and the oldest write.
 
     The count ``lop wake status`` renders. A runtime that drains for a replaced
     build SPOOLS the wakes that fire meanwhile (``Session.retire_wakes_to_inbox``)
@@ -436,13 +436,25 @@ def spooled_wake_fires(session_dir: Path) -> tuple[int, float | None]:
     visible; :func:`spool_owes_turn` beside it answers the coarser question the
     supervisor needs ("does anything here owe a turn?").
 
-    Same read and same never-raises contract as the predicates above: a row
-    counts when ``wake`` is true, and ``written_at`` (epoch seconds) is tracked
-    as the OLDEST among the counted rows — ``None`` when no counted row carries
-    a usable one. A missing file is zero rows; a torn or unparseable line is
-    skipped, because the writer may be appending while this reads and a status
-    surface must render the rest of the picture rather than die on the line
-    being written.
+    A ROW COUNTS WHEN ``wake`` IS TRUE AND ITS ``source`` IS NOT THE OWNER, and
+    both exclusions are load-bearing rather than fussy (review round 1, R2):
+
+    * ``serving._spool_for_successor`` spools the owner's own prompt and steer
+      with ``wake=True`` on the committed-arm paths so the successor RUNS
+      them — but a user row's receipt governs, and counting one here would
+      render the operator's own queued message as a fire;
+    * a coalesced row stands for several firings (``wake_fires`` — see
+      ``session.runtime.inbox.coalesce_wake_rows``), so it counts as its own
+      ``wake_fires`` when that is a positive int, and as ONE otherwise — zero
+      would hide the row, and ``True`` is an ``int`` in Python and must not
+      read as a count (review round 1, Q1).
+
+    Same read and same never-raises contract as the predicates above: the
+    oldest ``written_at`` (epoch seconds) is tracked among the COUNTED rows —
+    ``None`` when no counted row carries a usable one. A missing file is zero
+    fires; a torn or unparseable line is skipped, because the writer may be
+    appending while this reads and a status surface must render the rest of
+    the picture rather than die on the line being written.
     """
     path = Path(session_dir) / INBOX_NAME
     try:
@@ -461,13 +473,30 @@ def spooled_wake_fires(session_dir: Path) -> tuple[int, float | None]:
             continue
         if not isinstance(row, dict) or not row.get(WAKE_FIELD):
             continue
-        fires += 1
+        if str(row.get(SOURCE_FIELD) or "") == SOURCE_USER:
+            continue
+        fires += _row_fires(row.get("wake_fires"))
         written = row.get("written_at")
         if isinstance(written, (int, float)) and not isinstance(written, bool):
             value = float(written)
             if oldest is None or value < oldest:
                 oldest = value
     return (fires, oldest)
+
+
+def _row_fires(raw: Any) -> int:
+    """``wake_fires`` off a persisted row, for the status count.
+
+    Only a POSITIVE int counts as N; everything else reads as one, the
+    uncoalesced default. Deliberately not ``inbox._fire_count``'s
+    int-coercing form: that runs on rows a runtime will deliver and may take a
+    numeric string, while this runs on raw JSON for a status line and stays
+    strictly typed — and ``isinstance(True, int)`` is true in Python, so the
+    bool check is what keeps a flag from reading as a count.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        return 1
+    return raw
 
 
 def _write(config_dir: Path, session_id: str, record: Mapping[str, Any]) -> bool:
