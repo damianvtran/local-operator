@@ -866,7 +866,10 @@ async def test_a_fork_cut_through_a_named_entry(
     child's own transcript file — the thing a renderer's filter would still hide
     even if the copy were wrong.
 
-    The refusal's STATUS is deliberately not pinned: see the comment at it.
+    The refusal cells DO pin their status now: they read the classification the
+    control plane used to answer with an owner outage (see the comment at them),
+    and the last one closes the runtime to keep the genuine owner-outage answer
+    itself under test.
     """
     root = headless_tui_env
     token = secrets.token_hex(32)
@@ -948,15 +951,16 @@ async def test_a_fork_cut_through_a_named_entry(
                 f"{parent_ids[cut_index]}; parent byte-unchanged"
             )
 
-            # A point this conversation does not have REFUSES and creates nothing.
-            # Its STATUS is deliberately not pinned as a contract: the sentence is
-            # raised in the runtime, but an unrecognised error frame is re-raised
-            # as a plain RuntimeError by the attach client, which this route's
-            # ladder can only read as an unreachable owner — so it arrives as 503
-            # runtime_unreachable. The fork branch's PRE-EXISTING compaction refusal
-            # arrives identically (measured on the live plane), so pinning 503 here
-            # would freeze a defect as the contract; the fix belongs to the
-            # error-classification seam and is reported on the PR.
+            # A point this conversation does not have REFUSES, and the refusal is
+            # its OWN answer rather than an owner outage. This cell used to pin
+            # nothing: the runtime's sentence came back on an unrecognised error
+            # frame, the attach client re-raised it as a plain RuntimeError, and
+            # this route's ladder could only read that as an unreachable owner — so
+            # every fork refusal (the cut's own, and the pre-existing compaction
+            # one) arrived as 503 runtime_unreachable, "reconnect and reconcile",
+            # for a request the owner answered promptly and deliberately. The
+            # classification carries the CAUSE (PR #1917's review/QA rounds), so
+            # the status, the cause and the sentence are pinned here.
             before_refusal = sorted(p.name for p in (root / "sessions").iterdir())
             refused_fork = await client.post(
                 target + "/fork",
@@ -966,9 +970,20 @@ async def test_a_fork_cut_through_a_named_entry(
                     "entry_id": "ffffffffffffffffffffffffffffffff",
                 },
             )
-            assert refused_fork.status_code != 200, refused_fork.text
+            assert refused_fork.status_code == 409, refused_fork.text
+            refusal = refused_fork.json()["detail"]
+            assert refusal["code"] == "fork_refused", refusal
+            assert refusal["reason"] == "entry_unknown", refusal
+            assert refusal["message"] == (
+                "that message is not part of this conversation; "
+                "pick a message from this session to fork from"
+            ), refusal
             assert sorted(p.name for p in (root / "sessions").iterdir()) == before_refusal
             assert parent_transcript.read_bytes() == parent_bytes
+            print(
+                f"A foreign entry id: 409 {refusal['code']}/{refusal['reason']} — "
+                f"{refusal['message']}"
+            )
 
             # The ABSENT target is still the call this route has always made.
             whole_fork = await client.post(target + "/fork", json={"request_id": request_id()})
@@ -984,6 +999,52 @@ async def test_a_fork_cut_through_a_named_entry(
                 "No target: still boundary=next_safe, and the child is a byte-identical "
                 "copy of the parent; a foreign entry id refused without creating anything"
             )
+
+            # A CUT BEFORE THE NEWEST SUMMARY'S ANCHOR refuses too, in the runtime
+            # and with its OWN cause: the child's whole history would be rows the
+            # parent had summarized away, so the cut is refused rather than made
+            # from the resurrected context. Driven against the live session by
+            # recording a compaction whose anchor is the last row, then cutting at
+            # the first — nothing but the transcript's own API is faked.
+            await session._transcript.append_compaction(
+                summary="earlier context, summarized away",
+                first_kept_entry_id=parent_ids[-1],
+                tokens_before=500,
+            )
+            anchored_bytes = parent_transcript.read_bytes()
+            anchor_refusal = await client.post(
+                target + "/fork",
+                json={
+                    "request_id": request_id(),
+                    "boundary": "at_entry",
+                    "entry_id": parent_ids[0],
+                },
+            )
+            assert anchor_refusal.status_code == 409, anchor_refusal.text
+            anchor_detail = anchor_refusal.json()["detail"]
+            assert anchor_detail["code"] == "fork_refused", anchor_detail
+            assert anchor_detail["reason"] == "before_anchor", anchor_detail
+            assert anchor_detail["message"] == (
+                "that message sits before the conversation's last summary; "
+                "fork from a message after the summary instead"
+            ), anchor_detail
+            assert parent_transcript.read_bytes() == anchored_bytes
+            print(
+                f"A cut before the newest anchor: 409 {anchor_detail['code']}/"
+                f"{anchor_detail['reason']} — {anchor_detail['message']}"
+            )
+
+            # A GENUINELY UNREACHABLE OWNER STILL READS AS ONE, and this is the
+            # cell that says the classification did not swallow that answer: with
+            # the runtime closed the route sees a dead owner rather than an
+            # enumerated refusal, and answers the owner-outage 503 (retryable,
+            # "reconnect and reconcile") exactly as it did before this seam existed.
+            await runtime.aclose()
+            runtime = None  # the finally must not close it twice
+            orphaned = await client.post(target + "/fork", json={"request_id": request_id()})
+            assert orphaned.status_code == 503, orphaned.text
+            assert orphaned.json()["detail"]["code"] == "runtime_unreachable", orphaned.text
+            print("A closed runtime: 503 runtime_unreachable, not a fork refusal")
     finally:
         server.should_exit = True
         await asyncio.wait_for(serving, 30)

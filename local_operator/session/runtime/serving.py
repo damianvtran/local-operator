@@ -6419,9 +6419,22 @@ class ServingSessionHandle(SessionHandle):
             )
         if command == "fork":
             from local_operator.fork import fork_session
+            from local_operator.session.errors import ForkRefused
 
             if getattr(session, "_compacting", False):
-                raise ValueError("Wait for compaction to finish before forking")
+                # A TYPED refusal, not a bare ``ValueError``: unclassified it left
+                # this process as an untagged error frame, which the attach client
+                # re-raises as a plain ``RuntimeError`` and the desktop route's
+                # ladder can only read as an unreachable owner — a 503 whose
+                # remedy is "reconnect and reconcile", for a request the owner
+                # answered promptly and deliberately (measured on PR #1917). The
+                # reason token is what lets that route show this sentence.
+                #
+                # ONE OF TWO COMPACTION GUARDS, and it keeps its own reason and
+                # its own sentence: it fires for BOTH fork arms and its copy is
+                # published today, while ``Transcript.fork_snapshot``'s inner
+                # ``is_compacting`` check has its own wording.
+                raise ForkRefused(reason="compaction_pending")
             through_entry_id = _fork_entry_target(args)
             if through_entry_id is not None:
                 # A NAMED cut point does NOT wait for a boundary, and that is a
